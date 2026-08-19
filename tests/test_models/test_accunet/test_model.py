@@ -753,3 +753,35 @@ class TestDocumentedParameterCounts:
         assert "module docstring of\n`model.py`" in readme
         # No live claim survives in the scaling table.
         assert "| **32 (Default)** | Good balance" in readme
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestAccUNetGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    ``base_filters=8`` and a 32x32 input rather than this suite's usual 32/64:
+    the weight COUNT (442 tensors) is what this assertion ranges over and it is
+    unchanged by the width, while the tape step drops from tens of seconds to
+    single digits. AccUNet's HANC / ResPath / MLFC blocks are the target -- MLFC
+    in particular mixes every encoder level, so a level that is compiled and then
+    dropped from the mix is invisible to a shape test and visible here.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = create_acc_unet(
+            input_channels=3, num_classes=1, base_filters=8, input_shape=(32, 32)
+        )
+        x = np.random.default_rng(0).random((2, 32, 32, 3)).astype("float32")
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

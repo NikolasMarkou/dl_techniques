@@ -110,3 +110,32 @@ class TestTrainHebbianOnAnUnbuiltModel:
         model.train_hebbian(x, y, epochs=1, batch_size=4, verbose=0)
 
         assert model.readout is readout_before
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestMothNetGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    MothNet is bio-mimetic and its ONLY documented training entry point is
+    ``train_hebbian`` -- but ``call()`` is still a differentiable forward and the
+    readout is a plain Dense, so the standard gradient claim applies and is worth
+    making: a Hebbian-only update path is exactly the shape in which a
+    backprop-dead sublayer goes unnoticed.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = MothNet(num_classes=NUM_CLASSES)
+        x = _features()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

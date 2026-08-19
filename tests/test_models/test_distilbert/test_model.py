@@ -707,3 +707,34 @@ class TestPretrainedContract:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestDistilBERTGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    ``default_loss`` is a mean-of-squares over the FLOAT tensors of the output
+    dict, so it lands on ``last_hidden_state`` and skips the integer
+    ``attention_mask`` -- which is what we want: DistilBERT has no head here, and
+    a labelled loss would need one. The two documented traps are both avoided by
+    construction (no ``from_logits`` mismatch is possible without a softmax, and
+    the assertion is per weight rather than an aggregate norm).
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        keras.utils.set_random_seed(SEED)
+        model = _model()
+        x = _tokens()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

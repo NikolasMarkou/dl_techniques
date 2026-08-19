@@ -130,3 +130,31 @@ class TestMAE:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestMAEGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    Run under ``training=True`` (the oracle's default), which is the regime that
+    matters here: ``PatchMasking`` behaves differently in the two regimes, and a
+    decoder that only ever sees unmasked input would be a training-time defect
+    invisible to an inference-time forward test.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _model()
+        x = _images()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

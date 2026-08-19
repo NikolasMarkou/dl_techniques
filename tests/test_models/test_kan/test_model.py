@@ -806,3 +806,133 @@ class TestPretrainedContract:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import (
+    assert_gradients_reach_every_trainable_weight,
+    gradient_report,
+)
+
+GF_INPUT_FEATURES = 16
+GF_OUTPUT_FEATURES = 4
+
+
+def _gf_model():
+    return create_kan_model(
+        variant="small",
+        input_features=GF_INPUT_FEATURES,
+        output_features=GF_OUTPUT_FEATURES,
+    )
+
+
+def _gf_batch(rows: int = 4):
+    return np.random.default_rng(0).random((rows, GF_INPUT_FEATURES)).astype("float32")
+
+
+class TestKANGradientFlow:
+    """KAN trains only AFTER its knot grids are adapted -- pinned in both states.
+
+    The finding (GF-01 in the plan's
+    ``findings/gradient-flow-adoption-findings.md``) is that
+    ``create_kan_model`` at documented defaults returns a CONSTANT FUNCTION.
+    Measured on one instance across four input distributions -- ``U[0,1)``,
+    ``U[0,5)``, ``U[0,0.1)`` and ``N(0,1)`` -- the output is exactly ``0.25``
+    everywhere with ``std == 0.0`` over the batch, and all 12 of 12 trainable
+    weights receive an identically-zero gradient.
+
+    Mechanism, measured layer by layer: ``KANLinear`` sums over the input axis,
+    so activations grow ~30x per layer (0.5 -> 5 -> 3e2 -> 1e4 -> 1.6e5) and
+    leave ``grid_range=(-2.0, 2.0)`` after the first layer. The B-spline basis is
+    then identically zero, and since ``base_scaler`` is initialized to the
+    CONSTANT 1.0 every output unit computes the same value -- so the softmax head
+    (which ``from_variant`` appends whenever ``output_features > 1``) is exactly
+    uniform, and uniform softmax is an exact critical point of a
+    sum-of-squares loss. Hence *exactly* zero rather than merely small.
+
+    The two tests below are deliberately a pair. Neither alone is honest:
+    the xfail alone would look like a broken model with no working path, and the
+    green one alone would hide the fact that the default factory output is a
+    constant.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "GF-01: create_kan_model at documented defaults is a constant "
+            "function (output exactly 1/output_features for every input) and "
+            "all 12/12 weights get an identically-zero gradient, because the "
+            "activations leave grid_range after layer 0 and base_scaler carries "
+            "no symmetry breaking. strict=True: this goes RED the moment the "
+            "model is repaired, which is the point of pinning it."
+        ),
+    )
+    def test_gradients_reach_every_trainable_weight_without_a_grid_pass(self):
+        model = _gf_model()
+        x = _gf_batch()
+        model(x, training=False)
+
+        assert_gradients_reach_every_trainable_weight(model, x)
+
+    def test_the_default_forward_is_a_constant_function(self):
+        """The forward-side statement of GF-01, asserted rather than described.
+
+        This is NOT redundant with the xfail above: the xfail records that the
+        gradients are dead, this records WHY, and it is the assertion that a
+        would-be fixer can watch flip. It is written as an equality on the
+        measured constant, so it also fails if the model becomes a DIFFERENT
+        constant.
+        """
+        model = _gf_model()
+        out = keras.ops.convert_to_numpy(model(_gf_batch(), training=False))
+
+        np.testing.assert_allclose(out, 1.0 / GF_OUTPUT_FEATURES, atol=1e-6)
+        assert float(np.std(out)) == 0.0
+
+    def test_gradients_reach_every_trainable_weight_after_update_kan_grids(self):
+        """The documented path, and it works: 12/12 live gradients.
+
+        ``KAN.update_kan_grids``'s own docstring calls this "a critical step for
+        KAN training". This test is the executable form of that sentence -- and
+        it is a real regression guard, not a workaround, because it is the only
+        state in which this model can be trained at all.
+        """
+        model = _gf_model()
+        # A representative sample, per update_kan_grids' docstring ("100-1000
+        # samples"); the grid adaptation is a quantile match, so a 4-row batch
+        # would adapt to noise.
+        model.update_kan_grids(_gf_batch(rows=256))
+
+        x = _gf_batch()
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == 12, "the small variant's weight set changed shape"
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_the_grid_pass_is_what_makes_the_difference(self):
+        """Liveness control: the two states above differ, and by this much.
+
+        Without this, both tests could be passing for an unrelated reason (a
+        collection-order RNG draw, say). It compares the SAME construction in the
+        two states and requires the live-gradient count to move from 0 to 12.
+        """
+        before = _gf_model()
+        x = _gf_batch()
+        before(x, training=False)
+        n_live_before = sum(
+            1 for v in gradient_report(before, x).values()
+            if v is not None and v > 0.0
+        )
+
+        after = _gf_model()
+        after.update_kan_grids(_gf_batch(rows=256))
+        n_live_after = sum(
+            1 for v in gradient_report(after, x).values()
+            if v is not None and v > 0.0
+        )
+
+        assert n_live_before == 0, n_live_before
+        assert n_live_after == 12, n_live_after

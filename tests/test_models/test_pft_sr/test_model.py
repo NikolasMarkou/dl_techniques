@@ -157,3 +157,32 @@ class TestNearestUpsamplerScaleValidation:
             window_size=8,
         )
         assert model.scale == 3
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestPFTSRGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    232 trainable weights across permuted-attention blocks and a pixel-shuffle
+    upsampler. This is the size at which an AGGREGATE gradient-norm assertion
+    stops meaning anything -- one dead attention projection among 232 live
+    tensors moves a global norm by nothing measurable. The oracle asserts per
+    weight, keyed by ``Variable.path``.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _model()
+        x = _images()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

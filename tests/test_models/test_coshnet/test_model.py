@@ -159,3 +159,32 @@ class TestDocumentedParameterCounts:
         # The exact drifted estimates, plus the column header that hosted them.
         for stale in ("~15k", "~50k", "~800k", "~2.5M", "~3M", "Params (Est)"):
             assert stale not in text, f"{stale!r} is back in coshnet/README.md"
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestCoShNetGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    CoShNet's front end is a FIXED (non-learned) shearlet transform, so most of
+    the model's interesting machinery carries no weights at all. That makes the
+    per-weight claim narrow but sharp: whatever IS trainable here must train, and
+    the complex-valued layers are the plausible place for a gradient to go
+    missing.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = create_coshnet("base", NUM_CLASSES, INPUT_SHAPE)
+        x = _images()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

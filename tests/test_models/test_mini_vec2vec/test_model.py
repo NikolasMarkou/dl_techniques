@@ -57,3 +57,37 @@ class TestMiniVec2VecAligner:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestMiniVec2VecGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    The aligner has exactly ONE trainable weight (``W``), so an aggregate
+    gradient-norm check would be adequate here and the shared oracle buys
+    little -- except that "one weight" is itself the claim worth pinning: if a
+    future aligner grows a bias or a second projection, this test starts
+    covering it for free, and ``len(report) == len(trainable_weights)`` makes
+    the count explicit rather than assumed.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = create_mini_vec2vec_aligner(embedding_dim=DIM)
+        x = _emb()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        # Anti-vacuity: the assertion above is only meaningful over a non-empty
+        # weight set that covers the whole model.
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        # The loss actually reaches the model (the documented from-logits trap
+        # would show up as EVERY value being 0.0, which the oracle also catches).
+        assert max(v for v in report.values() if v is not None) > 0.0

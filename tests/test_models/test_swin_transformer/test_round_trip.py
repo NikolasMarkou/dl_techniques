@@ -69,3 +69,33 @@ class TestSwinRoundTrip:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestSwinGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    Run at 32x32 rather than this file's 224 default: the geometry note above
+    establishes that 32 is legal, and the smaller grid keeps the tape step cheap
+    (176 trainable weights either way). The interesting tensors here are the
+    per-block ``relative_position_bias_table`` entries and the shifted-window
+    attention projections -- a shift/roll implementation that dropped one of them
+    would keep every shape and every round-trip test green.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = create_swin_transformer("tiny", 10, input_shape=(32, 32, 3))
+        x = _images(s=32)
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

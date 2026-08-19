@@ -227,3 +227,91 @@ class TestCausality:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import (
+    assert_gradients_reach_every_trainable_weight,
+    gradient_report,
+)
+
+#: Every weight of the entropy sub-model. 54 of BLT's 254 trainable tensors.
+ENTROPY_SUBTREE = "entropy_model/"
+
+
+class TestBLTGradientFlow:
+    """BLT's entropy model is trained by nothing -- pinned, not waived.
+
+    GF-02 in the plan's ``findings/gradient-flow-adoption-findings.md``.
+    ``BLT.call`` DOES execute the entropy model, but its only consumer is the
+    patcher, which discretizes to integer patch lengths/ids -- so the backward
+    graph is severed there and 54 of 254 trainable weights (21% of the model)
+    receive no gradient at all. There is no ``stop_gradient`` anywhere in the
+    package; the cut is structural.
+
+    The design intent is defensible on its own terms -- the class docstring calls
+    the constructor argument "Optional **pre-trained** entropy model", and in the
+    BLT paper it is trained separately. But NOTHING in the code expresses that:
+    the 54 variables stay ``trainable=True``, so BLT's own ``fit()`` hands the
+    optimizer 54 ``None`` gradients and emits ``UserWarning: Gradients do not
+    exist for variables [...]`` (measured) while training the other 200. A user
+    therefore ships a model whose patch boundaries are chosen by a permanently
+    RANDOM sub-network, and the only signal is a warning that scrolls past.
+
+    That is why this is an ``xfail(strict=True)`` and not an ``expect_zero``
+    entry. ``expect_zero`` is for a zero the code ENFORCES; here nothing does.
+    Either fix -- marking the default entropy model non-trainable, or adding its
+    own LM loss -- turns this test RED, which is exactly the notification wanted.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "GF-02: 54 of 254 trainable weights (the whole entropy_model "
+            "subtree) are off the backward graph -- the patcher discretizes the "
+            "entropy to integer patch ids, and nothing marks those variables "
+            "non-trainable, so BLT's own fit() warns and trains 200/254. "
+            "strict=True: goes RED when the model is repaired."
+        ),
+    )
+    def test_gradients_reach_every_trainable_weight(
+        self, small_model, sample_tokens
+    ):
+        small_model(sample_tokens, training=False)
+        assert_gradients_reach_every_trainable_weight(small_model, sample_tokens)
+
+    def test_the_rest_of_the_model_does_receive_gradients(
+        self, small_model, sample_tokens
+    ):
+        """Anti-vacuity for the xfail above.
+
+        An xfail is satisfied by ANY failure, including a totally dead model --
+        so on its own it would also "pass" if BLT trained nothing at all. This
+        pins the complement: every weight OUTSIDE the entropy subtree is live,
+        and the dead set is exactly the entropy subtree, by name.
+        """
+        small_model(sample_tokens, training=False)
+        report = gradient_report(small_model, sample_tokens)
+
+        dead = {
+            path for path, value in report.items()
+            if value is None or value == 0.0
+        }
+        live = set(report) - dead
+
+        assert dead, "expected the entropy subtree to be dead (GF-02)"
+        assert live, "the whole model is dead -- this is a different defect"
+        assert all(ENTROPY_SUBTREE in path for path in dead), (
+            "a weight OUTSIDE the entropy model is also dead, which GF-02 does "
+            f"not cover: {sorted(p for p in dead if ENTROPY_SUBTREE not in p)}"
+        )
+        assert all(ENTROPY_SUBTREE not in path for path in live), (
+            "part of the entropy model now DOES train -- GF-02 may be fixed; "
+            "update the finding and remove the xfail above"
+        )
+        # The measured split, pinned so a silent change in either direction shows.
+        assert len(dead) == 54, len(dead)
+        assert len(live) == 200, len(live)

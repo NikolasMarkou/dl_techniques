@@ -365,3 +365,47 @@ class TestGemma3Integration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestGemma3GradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    The config below deliberately sets ``layer_types=['sliding_window',
+    'full_attention']`` -- one block of EACH kind. Gemma3's defining
+    architectural feature is that mixed attention, and a sliding-window
+    implementation whose weights fell off the tape (a mask built with the wrong
+    ops, a window path short-circuited) would be invisible to every shape test in
+    this file while being fatal to training. Asserting over one block of each
+    type is what makes the claim cover both branches.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = Gemma3(
+            vocab_size=1000,
+            hidden_size=64,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            ffn_hidden_size=128,
+            max_seq_len=256,
+            sliding_window_size=32,
+            layer_types=['sliding_window', 'full_attention'],
+            dropout_rate=0.1,
+            use_bias=False,
+            norm_eps=1e-5,
+            initializer_range=0.02,
+        )
+        x = np.random.default_rng(0).integers(0, 800, (2, 32)).astype("int32")
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

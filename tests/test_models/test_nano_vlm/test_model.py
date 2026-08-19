@@ -154,3 +154,78 @@ def test_shared_embedding_is_really_tied():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+#: The ONE weight in NanoVLM that legitimately receives no gradient.
+#:
+# DECISION plan-2026-08-19-a616f581/D-011
+# `shared_output_projection/kernel` is waived here BY DESIGN, not to make this
+# test pass. When `use_shared_embedding=True` (the default for
+# `text_component_type='decoder'`) the logits come from a CALL-TIME weight tie --
+# `ops.matmul(combined_features, ops.transpose(word_embeddings.embeddings))` in
+# `NanoVLM.call` -- and the Dense is created and built only because it is the
+# live path when tying is disabled and because a half-built layer breaks
+# serialization. That is stated in three places in the product code: the module
+# docstring ("it is simply unused when tying is on"), the
+# `# DECISION plan_2026-06-15_2a23a001/D-001` anchor at the branch in `call()`,
+# and the `plan_2026-06-15_39a31d4a/D-002` cascade note in `build()` explaining
+# why Keras 3 forbids the alternative (reassigning a built layer's `.kernel`
+# raises, and the embedding matrix is the TRANSPOSE of the Dense kernel).
+#
+# Do NOT "fix" this by deleting the layer: `use_shared_embedding=False` needs it.
+# Do NOT widen this waiver to the subtree; it names one tensor on purpose.
+# `expect_zero` is two-sided (D-010), so this stays honest in both directions --
+# if the Dense ever returns to the forward path the oracle raises "the waiver is
+# obsolete", and if it is renamed the oracle raises "stale waiver".
+# See GF-03 in plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md
+BY_DESIGN_UNTIED = ("shared_output_projection/kernel",)
+
+
+class TestNanoVLMGradientFlow:
+    """Every trainable weight is on the backward graph, except one by design."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _model()
+        x = _inputs()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(
+            model, x, expect_zero=BY_DESIGN_UNTIED
+        )
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_the_tied_embedding_is_what_carries_the_output_gradient(self):
+        """The positive half of the waiver above.
+
+        Waiving the Dense would be a lie about the model if NOTHING carried the
+        output-projection gradient. It is carried by the tied embedding matrix,
+        and this pins that: the weight the waiver points away from must be live.
+        """
+        model = _model()
+        x = _inputs()
+        model(x, training=False)
+
+        from ..gradient_flow_oracle import gradient_report
+
+        report = gradient_report(model, x)
+        embedding_paths = [
+            path for path in report
+            if "word_embeddings" in path and report[path] not in (None,)
+        ]
+        assert embedding_paths, (
+            "no word_embeddings weight found -- the call-time tie that justifies "
+            f"the {BY_DESIGN_UNTIED} waiver may have been removed"
+        )
+        assert any(report[path] > 0.0 for path in embedding_paths), (
+            "the tied embedding receives no gradient either, so the output "
+            "projection is dead at BOTH ends -- the waiver is no longer honest"
+        )
