@@ -10,6 +10,26 @@ ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10):
     rotation is not expressible without the raw ``tf.linalg`` ops. The raw-TF
     linear-algebra path is therefore an accepted, documented exception to the
     keras.ops-only (H10) rule for the forward pass.
+
+FLOAT32 ONLY -- this model does NOT run under ``mixed_float16``.
+    MEASURED (2026-08-19, TF 2.18 / Keras 3.8, RTX 4070 and CPU): a single
+    forward pass under ``keras.mixed_precision.set_global_policy(
+    "mixed_float16")`` raises, inside ``compute_rigid_transform``::
+
+        NotFoundError: Could not find device for node:
+        {{node Svd}} = Svd[T=DT_HALF, compute_uv=true, full_matrices=false]
+
+    This is NOT a dtype-plumbing bug in this package. TensorFlow registers NO
+    ``Svd`` kernel for ``DT_HALF`` on ``CPU`` or ``GPU`` -- the op's kernel list
+    is ``{CPU: float, double, complex64, complex128}`` and
+    ``{GPU: double, float}``; only the XLA JIT devices accept ``DT_HALF``. Half
+    precision is also the wrong arithmetic for this step on its own merits: the
+    weighted-Procrustes solve orthogonalizes a 3x3 cross-covariance and its
+    ``det``-based reflection correction switches on the SIGN of a quantity that
+    is near zero exactly when the rotation is near-degenerate.
+
+    Train and infer this model under the default ``float32`` policy. See
+    plan ``plan-2026-08-19T163559-499b6f0e`` decisions.md D-011.
 """
 
 import keras
@@ -558,6 +578,14 @@ def compute_rigid_transform(
     # H = u @ diag(s) @ v^T (v is NOT pre-transposed). The original unpack `U,_,Vt`
     # mis-bound s->U and v->Vt, crashing transpose on the rank-2 singular values.
     # Bind u, v correctly; R = V @ U^T. Minimal in-scope F-LGM-2 fix.
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+    # Do NOT try to make this model `mixed_float16`-capable by wrapping this
+    # call in a float32 cast island. TensorFlow has NO `Svd` kernel for
+    # `DT_HALF` on either CPU or GPU (measured: the raise lists
+    # `CPU: {float,double,complex64,complex128}`, `GPU: {double,float}`), and
+    # orthogonalizing a 3x3 cross-covariance whose `det` sign selects the
+    # reflection correction is not sound arithmetic in half precision anyway.
+    # This model is float32-only BY DESIGN -- see the module docstring.
     _s, U, V = tf.linalg.svd(H)
 
     R = keras.ops.matmul(V, keras.ops.transpose(U, (0, 2, 1)))  # V * U^T

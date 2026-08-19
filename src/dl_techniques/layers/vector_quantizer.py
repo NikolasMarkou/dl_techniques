@@ -209,11 +209,27 @@ class VectorQuantizer(keras.layers.Layer):
         # Create EMA variables if needed
         if self.use_ema:
             # Track cluster sizes for each embedding
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # EMA accumulators are STATE, not activations: they must stay in
+            # float32 and must NOT be autocast to `compute_dtype`. Two reasons,
+            # both measured at step 5.8:
+            #   (1) `cluster_size` counts assignments and half precision is
+            #       exact on integers only up to 2048 -- a batch*H*W larger than
+            #       that starts SILENTLY losing counts, and the counts are the
+            #       denominator of the codebook update.
+            #   (2) with autocast on, `self.ema_decay * self.ema_cluster_size`
+            #       (float16) + `(1 - decay) * cluster_size` (float32) raises
+            #       `InvalidArgumentError: cannot compute AddV2` under
+            #       `mixed_float16` -- how the sibling rotation-trick quantizer
+            #       died before this fix.
+            # `_update_ema` casts its arguments up to float32 to match.
             self.ema_cluster_size = self.add_weight(
                 name="ema_cluster_size",
                 shape=(self.num_embeddings,),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
             # Track sum of assigned encoder outputs for each embedding.
@@ -225,11 +241,14 @@ class VectorQuantizer(keras.layers.Layer):
             # with `initializer=self.initializer` here and the debias below,
             # `max|codebook|` after 5 epochs was 47283 (vs 4521 with neither
             # correction, and 0.264 with both). See decisions.md D-012.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.ema_embeddings = self.add_weight(
                 name="ema_embeddings",
                 shape=(self.num_embeddings, self.embedding_dim),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
             # DECISION plan-2026-08-18T140459-7991552f/D-012
@@ -259,11 +278,14 @@ class VectorQuantizer(keras.layers.Layer):
             # artifact exists under `results/` (checked), and any that did
             # would hold a codebook blown up by ~1e5 and be worthless.
             # See decisions.md D-012.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.ema_step = self.add_weight(
                 name="ema_step",
                 shape=(),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
         super().build(input_shape)
@@ -301,9 +323,20 @@ class VectorQuantizer(keras.layers.Layer):
         encoding_indices = keras.ops.argmin(distances, axis=1)
 
         # Convert indices to one-hot for gathering
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `dtype=self.compute_dtype` is load-bearing. `keras.ops.one_hot`
+        # defaults to `backend.floatx()` (float32); the `matmul` below then
+        # PROMOTES to float32 (measured: matmul(f32 one_hot, f16 codebook) ->
+        # f32, it does NOT raise), so `quantized` silently leaves this
+        # expression at float32 and the codebook/commitment `Sub` two blocks
+        # down raises `InvalidArgumentError: cannot compute Sub ... expected to
+        # be a half tensor but is a float tensor` under `mixed_float16`.
+        # Do NOT chase this at the `Sub`: the dtype is decided HERE, and a cast
+        # at the Sub would leave the matmul running in float32.
         encodings = keras.ops.one_hot(
             encoding_indices,
             self.num_embeddings,
+            dtype=self.compute_dtype,
         )
 
         # Quantize: z_q = e_k*
@@ -351,6 +384,15 @@ class VectorQuantizer(keras.layers.Layer):
             ``(batch*spatial, num_embeddings)``.
         :type encodings: keras.KerasTensor
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # Accumulate in float32 regardless of `compute_dtype`. Under
+        # `mixed_float16` `encodings`/`flat_inputs` arrive as float16; summing
+        # assignment counts in float16 is exact only to 2048, and the counts
+        # are the denominator of the codebook update. The EMA variables are
+        # declared `autocast=False, dtype="float32"` in `build()` to match.
+        encodings = keras.ops.cast(encodings, "float32")
+        flat_inputs = keras.ops.cast(flat_inputs, "float32")
+
         # Count how many vectors were assigned to each embedding in this batch
         cluster_size = keras.ops.sum(encodings, axis=0)  # (num_embeddings,)
 

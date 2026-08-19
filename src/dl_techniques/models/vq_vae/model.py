@@ -316,6 +316,16 @@ class VQVAEModel(keras.Model):
         with tf.GradientTape() as tape:
             x_recon = self(x, training=True)
 
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # Reduce the loss in float32. `x` arrives from the dataset at
+            # float32 while `x_recon` is `compute_dtype`; under
+            # `mixed_float16` the subtraction below raised
+            # `TypeError: Input 'y' of 'Sub' has type float16 ...` and no
+            # VQ-VAE could take a single mixed-precision step (step 5.8).
+            # Cast the PREDICTION UP, never the data down: a squared-error
+            # mean accumulated in float16 underflows for small residuals.
+            x_recon = ops.cast(x_recon, "float32")
+
             # Compute reconstruction loss (MSE)
             reconstruction_loss = ops.mean((x - x_recon) ** 2)
             reconstruction_loss = (
@@ -337,7 +347,14 @@ class VQVAEModel(keras.Model):
             # only the code disagreed. See decisions.md D-026.
             aux_losses = self.losses
             # Sum aux_losses if multiple (e.g. codebook + commitment + regularizers)
-            vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # `add_loss` terms carry `compute_dtype`; the reconstruction term
+            # is float32. Cast the AUX SUM UP so the objective is reduced in
+            # float32 (step 5.8).
+            vq_loss = (
+                ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
+                if aux_losses else 0.0
+            )
 
             total_loss = reconstruction_loss + vq_loss
 

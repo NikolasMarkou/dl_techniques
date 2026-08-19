@@ -436,6 +436,11 @@ class VQVAERotationTrick(keras.Model):
         x = data[0] if isinstance(data, tuple) else data
         with tf.GradientTape() as tape:
             x_recon = self(x, training=True)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # Reduce in float32; see the sibling `models/vq_vae`. `x` is
+            # float32 dataset data, `x_recon` is `compute_dtype`, and the
+            # subtraction raised under `mixed_float16`.
+            x_recon = ops.cast(x_recon, "float32")
             recon_loss = ops.mean(ops.square(x - x_recon))
             recon_loss = self.reconstruction_loss_weight * recon_loss
             # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
@@ -450,7 +455,11 @@ class VQVAERotationTrick(keras.Model):
             # `total_loss = recon(x, x_rec) + sum(layer.losses)`; only the code
             # disagreed. See decisions.md D-026.
             aux_losses = self.losses
-            vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `models/vq_vae`).
+            vq_loss = (
+                ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
+                if aux_losses else 0.0
+            )
             total = recon_loss + vq_loss
         grads = tape.gradient(total, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))

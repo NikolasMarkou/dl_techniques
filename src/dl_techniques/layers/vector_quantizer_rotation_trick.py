@@ -323,11 +323,24 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         )
 
         if self.use_ema:
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # EMA accumulators are STATE, not activations: float32 and NOT
+            # autocast. `cluster_size` counts assignments and float16 is exact
+            # on integers only to 2048, so a large N SILENTLY loses counts from
+            # the denominator of the codebook update; and with autocast on,
+            # `self.ema_decay * self.ema_cluster_size` (float16) +
+            # `(1 - decay) * cluster_size` (float32) raises
+            # `InvalidArgumentError: cannot compute AddV2` at line ~674 under
+            # `mixed_float16` (MEASURED, step 5.8 -- this is what made
+            # `vq_vae_rotation` unrunnable in its `use_ema=True` arm).
+            # `_update_ema` / `_update_dead_codes` cast up to float32 to match.
             self.ema_cluster_size = self.add_weight(
                 name="ema_cluster_size",
                 shape=(self.num_heads, self.num_embeddings),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
             # DECISION plan-2026-08-18T140459-7991552f/D-012
             # This accumulator MUST start at ZERO, not at `self.initializer`.
@@ -338,11 +351,14 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
             # `max|codebook|` after 5 epochs was 47283 with this initializer
             # kept and the debias added, versus 4521 with neither correction
             # and 0.264 with both. See decisions.md D-012.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.ema_embeddings = self.add_weight(
                 name="ema_embeddings",
                 shape=(self.num_heads, self.num_embeddings, self.head_dim),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
             # DECISION plan-2026-08-18T140459-7991552f/D-012
@@ -353,19 +369,25 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
             # .../ema_step ... from device GPU:0` inside the jit-compiled train
             # function (MEASURED on the sibling layer -- `fit()` died).
             # It changes the `use_ema=True` weight set from 3 to 4.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.ema_step = self.add_weight(
                 name="ema_step",
                 shape=(),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
         if self.dead_code_threshold > 0:
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.dead_code_unused = self.add_weight(
                 name="dead_code_unused",
                 shape=(self.num_heads, self.num_embeddings),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
         if self.kmeans_init:
@@ -515,7 +537,17 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
 
         # Gather quantized vectors per head.
         # one_hot indices to (N,H,K), then matmul against codebook (H,K,D)
-        encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `dtype=self.compute_dtype`: without it `one_hot` materialises at
+        # float32, the einsum below promotes, and the caller's commitment-loss
+        # `Sub` raises under `mixed_float16` (same shape as the sibling
+        # `vector_quantizer.py`). The EMA/dead-code copies of this line at
+        # `_update_ema` and `_update_dead_codes` deliberately do NOT take this
+        # argument -- those accumulate into float32 EMA state and float32 is
+        # the correct accumulation dtype there.
+        encodings = keras.ops.one_hot(
+            indices, self.num_embeddings, dtype=self.compute_dtype
+        )  # (N,H,K)
         # quantized = sum_k encodings * codebook[h,k] -> (N,H,D)
         quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, codebook)
 
@@ -654,6 +686,12 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         :param flat_heads: ``(N, H, head_dim)``.
         :param indices: ``(N, H)`` int.
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # This one_hot is DELIBERATELY left at the float32 default (unlike the
+        # one in `_lookup`): the EMA accumulators are float32 `autocast=False`
+        # state and float32 is the correct accumulation dtype for assignment
+        # counts. `flat_heads` is cast up for the same reason.
+        flat_heads = keras.ops.cast(flat_heads, "float32")
         encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
         # cluster_size: per (H,K) -> sum over N
         cluster_size = keras.ops.sum(encodings, axis=0)  # (H,K)
@@ -739,6 +777,14 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
             indices: keras.KerasTensor,
     ) -> None:
         """Track unused codes and re-init expired ones from current batch."""
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # Whole routine runs in float32: `dead_code_unused` is `autocast=False`
+        # float32 counter state, and every blend below mixes it with encoder
+        # activations that are float16 under `mixed_float16`. The casts are the
+        # cheapest place to make the two meet; do NOT instead drop the counter
+        # to `compute_dtype` (an fp16 integer counter stops incrementing
+        # exactly at 2048).
+        flat_heads = keras.ops.cast(flat_heads, "float32")
         encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
         used_this_call = keras.ops.cast(keras.ops.sum(encodings, axis=0) > 0, "float32")  # (H,K)
 
@@ -780,7 +826,9 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # Blend: new_codebook = dead_mask * replacements + (1 - dead_mask) * embeddings
         dead_mask_exp = keras.ops.expand_dims(dead_mask, axis=-1)  # (H,K,1)
         new_codebook = (
-                dead_mask_exp * replacements + (1.0 - dead_mask_exp) * self.embeddings
+                dead_mask_exp * replacements
+                + (1.0 - dead_mask_exp)
+                * keras.ops.cast(self.embeddings, "float32")
         )
         self.embeddings.assign(new_codebook)
 
@@ -993,7 +1041,10 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
             # Spatial shape is idx_shape[:-1] (the last axis is heads).
             spatial_shape_i32 = keras.ops.cast(idx_shape[:-1], "int32")
 
-        encodings = keras.ops.one_hot(flat_indices, self.num_embeddings)  # (N, H, K)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `_lookup`).
+        encodings = keras.ops.one_hot(
+            flat_indices, self.num_embeddings, dtype=self.compute_dtype
+        )  # (N, H, K)
         quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, self.embeddings)  # (N,H,D)
         flat_q = keras.ops.reshape(quantized, (-1, self.embedding_dim))  # (N, D)
 

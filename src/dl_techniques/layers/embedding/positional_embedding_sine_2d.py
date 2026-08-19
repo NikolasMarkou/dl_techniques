@@ -184,7 +184,18 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
         pos = ops.concatenate([pos_y, pos_x], axis=3)
         # Transpose to (batch, H, W, channels) -> (batch, channels, H, W)
         pos = ops.transpose(pos, [0, 3, 1, 2])
-        return pos
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # The sinusoid is deliberately COMPUTED in float32 above (`cumsum` over
+        # position indices and `temperature ** (2i/d)` both lose resolution in
+        # half precision), but a Keras layer must RETURN `compute_dtype`.
+        # Without this cast every consumer that writes `x + pos_embed(x)` under
+        # `mixed_float16` raises `InvalidArgumentError: cannot compute AddV2
+        # ... expected half, got float` -- that is exactly how `video_jepa`
+        # died at `encoder.py:189` (measured, step 5.8).
+        # Do NOT "simplify" by moving the float32 literals above to
+        # `self.compute_dtype`: the float32 COMPUTATION is the point; only the
+        # boundary is cast. Under the default float32 policy this is a no-op.
+        return ops.cast(pos, self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.

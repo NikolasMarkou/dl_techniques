@@ -492,7 +492,19 @@ class RoutingCapsule(keras.layers.Layer):
         u_hat = keras.ops.matmul(self.W, inputs_tiled)
 
         # Initialize routing logits (b) to zero
-        b = keras.ops.zeros([batch_size, self.num_input_capsules, self.num_capsules, 1, 1])
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `dtype=self.compute_dtype` is load-bearing. `keras.ops.zeros`
+        # defaults to `backend.floatx()`; `softmax(b)` keeps that dtype and
+        # `c * u_hat` in the routing loop then raises
+        # `InvalidArgumentError: cannot compute Mul ... expected to be a float
+        # tensor but is a half tensor` under `mixed_float16` -- CapsNet was
+        # unrunnable under mixed precision (measured, step 5.8).
+        # Do NOT cast `u_hat` to float32 instead: that would silently run the
+        # whole routing loop off the compute policy.
+        b = keras.ops.zeros(
+            [batch_size, self.num_input_capsules, self.num_capsules, 1, 1],
+            dtype=self.compute_dtype,
+        )
 
         # Perform iterative dynamic routing
         for i in range(self.routing_iterations):

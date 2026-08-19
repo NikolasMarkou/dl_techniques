@@ -534,11 +534,25 @@ class CapsNet(keras.Model):
             reconstruction_loss_value = ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
 
             if self.reconstruction and "reconstructed" in outputs:
-                reconstruction_loss_value = ops.mean(ops.square(x - outputs["reconstructed"]))
-                total_loss += self.reconstruction_weight * reconstruction_loss_value
+                # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+                # Reduce in float32. `x` is float32 dataset data while
+                # `outputs["reconstructed"]` carries `compute_dtype`; under
+                # `mixed_float16` this subtraction raised
+                # `TypeError: Input 'y' of 'Sub' ...` (step 5.8). Cast the
+                # PREDICTION UP -- never cast the data down, a squared-error
+                # mean accumulated in float16 underflows on small residuals.
+                reconstruction_loss_value = ops.mean(ops.square(
+                    x - ops.cast(outputs["reconstructed"], x.dtype)
+                ))
+                total_loss += ops.cast(
+                    self.reconstruction_weight * reconstruction_loss_value,
+                    total_loss.dtype,
+                )
 
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # `add_loss` terms carry `compute_dtype`; cast the AUX SUM UP.
             if self.losses:
-                total_loss += ops.sum(self.losses)
+                total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(total_loss, trainable_vars)

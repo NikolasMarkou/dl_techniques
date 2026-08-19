@@ -196,9 +196,22 @@ class Sampling(keras.layers.Layer):
 
         # Sample epsilon from standard normal distribution
         # Use the same shape as z_mean
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `dtype=self.compute_dtype` is load-bearing, not tidiness. Without it
+        # `keras.random.normal` materialises at `backend.floatx()` (float32)
+        # while `z_mean`/`z_log_var` arrive autocast to float16 under
+        # `mixed_float16`, and `std * epsilon` below raises
+        # `InvalidArgumentError: cannot compute Mul as input #1 ... was
+        # expected to be a half tensor but is a float tensor` -- i.e. every VAE
+        # in this repo was unrunnable under mixed precision (measured, step 5.8).
+        # Do NOT "fix" this instead by casting the RESULT of the multiply, and
+        # do NOT hard-code "float32": both re-introduce the mismatch under a
+        # non-default policy. Under the default float32 policy `compute_dtype`
+        # IS float32, so this line is bit-identical there.
         epsilon = keras.random.normal(
             shape=mean_shape,
-            seed=self.seed
+            seed=self.seed,
+            dtype=self.compute_dtype,
         )
 
         # Apply reparameterization trick: z = mean + std * epsilon

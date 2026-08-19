@@ -350,12 +350,23 @@ class VAE(keras.Model):
         # (cures vmf posterior collapse; D-007). Default == kl_loss_weight, so
         # with no callback attached behavior is identical to before. The python
         # float self.kl_loss_weight remains the get_config source of truth.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `autocast=False` is load-bearing. `dtype="float32"` alone does NOT
+        # keep a read in float32: Keras autocasts float variables to
+        # `compute_dtype` inside `call`/`train_step`, so under `mixed_float16`
+        # this scalar was read as float16 and
+        # `reconstruction_loss + self.kl_weight * kl_loss` raised
+        # `TypeError: Input 'y' of 'AddV2' ...` (MEASURED, step 5.8). It is a
+        # LOSS WEIGHT (schedule state), not an activation -- it belongs in the
+        # variable dtype. Do NOT drop the explicit `dtype="float32"` either;
+        # the two arguments do different jobs.
         self.kl_weight = self.add_weight(
             name="kl_weight",
             shape=(),
             initializer=keras.initializers.Constant(float(kl_loss_weight)),
             trainable=False,
             dtype="float32",
+            autocast=False,
         )
 
         # Create a reusable decoder model from the main graph. This allows
@@ -981,8 +992,12 @@ class VAE(keras.Model):
             total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
             # Add regularization losses
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # `add_loss` terms carry `compute_dtype` (float16 under
+            # `mixed_float16`) while the running total is float32. Cast the
+            # AUX SUM UP; never reduce the objective in half precision.
             if self.losses:
-                total_loss += ops.sum(self.losses)
+                total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
         # Compute and clip gradients
         trainable_weights = self.trainable_weights
@@ -1031,8 +1046,9 @@ class VAE(keras.Model):
         total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
         # Add regularization losses
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `train_step`).
         if self.losses:
-            total_loss += ops.sum(self.losses)
+            total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
         # Update metrics
         self.total_loss_tracker.update_state(total_loss)
@@ -1062,6 +1078,18 @@ class VAE(keras.Model):
             raise ValueError(
                 f"Shape mismatch: y_true {y_true.shape}, y_pred {y_pred.shape}"
             )
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # float32 is a NUMERICS requirement here, not plumbing. The clip below
+        # is the module's stated defence against `log(0)`, and in float16 it
+        # DOES NOT WORK in either direction: `1e-7` is far below the smallest
+        # normal float16 (6.10e-5) and `1.0 - 1e-7` rounds to exactly `1.0`, so
+        # the upper clamp is a no-op and `binary_crossentropy` reaches
+        # `log(0) = -inf`. Casting also removes the
+        # `AddV2 float16 vs float32` raise at `train_step`'s
+        # `reconstruction_loss + self.kl_weight * kl_loss` (step 5.8).
+        y_true = ops.cast(y_true, "float32")
+        y_pred = ops.cast(y_pred, "float32")
 
         # Flatten for loss computation
         y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
@@ -1122,6 +1150,22 @@ class VAE(keras.Model):
         # log-variance) -- do NOT clip/exp it or substitute the Gaussian/radius KL;
         # vmf_kl_divergence is the orchestrator-verified analytic vMF->uniform KL
         # (per-row >= 0). See decisions.md D-003.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # The whole KL runs in float32 regardless of `compute_dtype`, and that
+        # is a NUMERICS requirement, not plumbing tidiness. Every branch below
+        # clips its log-variance to [-20, 20] and then exponentiates:
+        # `exp(20) == 4.85e8`, which is finite in float32 and **+inf in
+        # float16** (max 65504). Under `mixed_float16` the inputs arrive as
+        # float16, so without this cast the clip's own stated safety margin is
+        # a lie and the KL can silently become `inf`/`nan`. It also removes the
+        # `AddV2 float32 vs float16` raise at `train_step`'s
+        # `reconstruction_loss + self.kl_weight * kl_loss` (the
+        # `binary_crossentropy` reconstruction term is already float32), which
+        # is what made every VAE unrunnable under mixed precision (step 5.8).
+        # Do NOT instead cast the reconstruction term DOWN to float16.
+        z_mean = ops.cast(z_mean, "float32")
+        z_log_var = ops.cast(z_log_var, "float32")
+
         if self.sampling_type == "vmf":
             kl_loss = ops.mean(vmf_kl_divergence(z_log_var, self.latent_dim))
             return kl_loss
