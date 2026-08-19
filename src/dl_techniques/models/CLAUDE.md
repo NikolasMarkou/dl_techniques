@@ -101,7 +101,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
   always said Module.
 - `fnet/` — FNet (Fourier)
 - `fftnet/` — FFTNet
-- `pw_fnet/` — Patchwise FNet
+- `pw_fnet/` — **PW-FNet, "Pyramid Wavelet-Fourier Network" for image restoration** (the package's own name: `pw_fnet/model.py:2`). It was listed here as "Patchwise FNet" until 2026-08-19 and is **not** patchwise and **not** FNet: it is a 2-level U-Net with FFT token mixing and multi-scale supervision, not FNet's token+feature-axis Fourier mixing. There is no wavelet transform either — the only spectral ops are `FFTLayer` / `IFFTLayer` (`grep -rn -i wavelet pw_fnet/` returns only the name itself), so two of the three words in the expanded name are unearned by the code
 - `power_mlp/` — Power MLP
 - `mothnet/` — MothNet (bio-inspired)
 - `coshnet/` — CoshNet
@@ -250,8 +250,14 @@ scope in `beit/model.py` (`SCALE_CONFIGS` and `MODEL_VARIANTS`):
 - `MODEL_VARIANTS` is the **public-name registry** — `'beit_tiny' -> {scale: 'tiny'}`,
   one row per name a caller may pass, resolving to a scale.
 
-`beit`, `vit`, `energy_transformer` and `fastvit` carry both, deliberately, and a
-`_resolve_scale`-style helper accepts either spelling. Unifying them would collapse a
+`beit`, `vit` and `energy_transformer` carry both, deliberately, and a
+`_resolve_scale`-style helper accepts either spelling. (`fastvit` was named here as a
+fourth until 2026-08-19 and carries NEITHER name in that role: its only table is the
+module-level `MCI_VARIANTS`, and it has no `SCALE_CONFIGS` at all. That is the
+single-table case, so the rule above applies to it and
+`FastVitImageEncoder.MODEL_VARIANTS` is now the class-level alias — added 2026-08-19,
+because tooling resolving `getattr(cls, "MODEL_VARIANTS")` raised `AttributeError`
+there while this file asserted the opposite.) Unifying them would collapse a
 name→scale indirection that exists so a variant can pin a patch size or an input
 resolution alongside its scale. Only where a package has a single table does the alias
 apply.
@@ -326,6 +332,28 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   that produced the original list was grep-based and wrong about several packages.)
 - **Multi-model families and nested packages** (`SAM/`, `time_series/`, `dino/`,
   `ideogram4/`, `sd3_mmdit/`) apply the shape per *inner architecture*, not per directory.
+
+## Consumer-less packages: CARRY (ruling, 2026-08-19)
+
+25 packages under `models/` (~19.3k LOC) have **no consumer outside their own package
+and tests** — no trainer under `src/train/`, no application under `src/applications/`,
+no import from another `models/` package:
+
+`cbam` `detr` `distilbert` `fastvlm` `fftnet` `fractalnet` `gemma`
+`latent_gmm_registration` `mamba` `memory_bank` `mini_vec2vec` `mothnet`
+`nano_vlm_world_model` `pft_sr` `pw_fnet` `qwen` `relgt` `scunet` `shgcn` `som`
+`squeezenet` `swin_transformer` `vit_hmlp` `vit_siglip` `vq_vae`
+
+**They are CARRIED. Do not propose deleting them as dead code.** All 25 have test
+suites, and a tested package with no trainer is *library surface*, not dead code: this
+repo distributes reusable layers and models, and "has a trainer" was never the shipping
+criterion. Deletion is not reversible for a downstream user who has pinned an import.
+
+This question was re-opened by two separate review rounds (2026-08-17, 2026-08-18) and
+ruled the same way both times. The ruling lives here rather than in a planning document
+because `plans/` is gitignored and does not ship. Re-derive the list before acting on
+it — it moves as trainers are added or packages are merged (e.g. `convunext`,
+`bfconvunext` and `bfcnn` all left this list when their trainers were consolidated).
 
 ## Testing
 

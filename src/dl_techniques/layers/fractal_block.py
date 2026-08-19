@@ -3,11 +3,13 @@ A recursive fractal block from the FractalNet architecture.
 
 This layer constructs a deep, self-similar network structure by recursively
 applying a simple expansion rule, providing an alternative to residual
-connections for training ultra-deep networks. A FractalBlock of depth k is
-defined as the composition of two parallel FractalBlock sub-modules of depth
-k-1, averaged together: F_k(x) = 0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x))),
-where DP is drop-path stochastic depth regularization. The base case F_1(x)
-is a standard computational unit such as a ConvBlock.
+connections for training ultra-deep networks. A FractalBlock of depth k
+joins a DEEP branch that COMPOSES two depth-(k-1) FractalBlocks with a SHALLOW
+branch that is a single base block applied to the same input --
+F_1(x) = block(x), F_k(x) = join(F_{k-1}(F_{k-1}(x)), block(x)) -- under local
+drop-path. Composition, not parallelism, is what makes the longest path
+2^(k-1) base blocks long while the shortest stays 1. The base case F_1(x) is a
+standard computational unit such as a ConvBlock.
 
 References:
     - Larsson, G., et al. (2017). FractalNet: Ultra-Deep Neural Networks
@@ -23,7 +25,6 @@ from typing import Tuple, Optional, Any, Dict
 
 from ..utils.logger import logger
 from .standard_blocks import ConvBlock
-from .stochastic_depth import StochasticDepth
 
 # ---------------------------------------------------------------------
 
@@ -32,13 +33,26 @@ class FractalBlock(keras.layers.Layer):
     """
     Recursive fractal block implementing the fractal expansion rule for FractalNet.
 
-    Implements the recursive fractal expansion where each level creates two
-    parallel paths through the same computational structure with different
-    parameter instances. The fractal rule is F_{k+1}(x) = 0.5 * (DP(F_k(x)) +
-    DP(F_k(x))) where DP represents drop-path (stochastic depth) regularization.
-    At depth 1 the block is a single base block; at depth k it creates 2^(k-1)
-    leaf nodes and an exponential number of distinct input-to-output paths,
-    forming an implicit ensemble of sub-networks. Uses configuration-based
+    Implements the paper's expansion rule f_{C+1}(z) = [f_C(f_C(z))] join
+    [conv(z)]: at depth k the DEEP branch COMPOSES two depth-(k-1)
+    ``FractalBlock``s (the second consumes the first's OUTPUT) and the SHALLOW
+    branch is a single base block applied to the same input; the two are joined
+    under local drop-path. Do NOT "restore consistency" by rewriting this as two
+    PARALLEL depth-(k-1) branches over the same input,
+    ``F_k(x) = 0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x)))`` -- that was this
+    layer's shipped defect until 2026-08-14, and because the recursion then
+    terminates with every leaf receiving the block's own input, every path
+    traversed exactly ONE convolution at any ``depth``. Parameter count, layer
+    count and output shape are IDENTICAL under both rules, so only the
+    RECEPTIVE FIELD detects it (pinned by
+    ``tests/test_layers/test_fractal_block.py::TestFractalExpansionRule``).
+
+    At depth 1 the block is a single base block. At depth k the structure holds
+    ``2^k - 1`` leaf base blocks -- the recurrence is ``L(1) = 1``,
+    ``L(k) = 2 * L(k-1) + 1``, counting both halves of the deep branch plus the
+    shallow one, NOT ``2^(k-1)`` -- with a longest path of ``2^(k-1)`` blocks, a
+    shortest path of 1, and an exponential number of distinct input-to-output
+    paths forming an implicit ensemble of sub-networks. Uses configuration-based
     design with serializable dictionaries for full model save/load capability.
 
     **Architecture Overview:**
@@ -49,21 +63,25 @@ class FractalBlock(keras.layers.Layer):
         │  Input [batch, height, width, channels]        │
         └──────────────────┬─────────────────────────────┘
              ┌─────────────┴─────────────┐
+             │ DEEP branch               │ SHALLOW branch
              ▼                           ▼
         ┌──────────────┐         ┌──────────────┐
-        │  Branch 1    │         │  Branch 2    │
-        │  FractalBlock│         │  FractalBlock│
-        │  depth = k-1 │         │  depth = k-1 │
+        │  deep_first  │         │  shallow     │
+        │  FractalBlock│         │  ONE base    │
+        │  depth = k-1 │         │  block       │
         └──────┬───────┘         └──────┬───────┘
-               ▼                        ▼
-        ┌──────────────┐         ┌──────────────┐
-        │  DropPath 1  │         │  DropPath 2  │
-        │  (stochastic)│         │  (stochastic)│
-        └──────┬───────┘         └──────┬───────┘
+               ▼                        │
+        ┌──────────────┐                │
+        │  deep_second │  COMPOSED:     │
+        │  FractalBlock│  consumes      │
+        │  depth = k-1 │  deep_first's  │
+        └──────┬───────┘  OUTPUT        │
                └─────────┬──────────────┘
                          ▼
         ┌────────────────────────────────────────────────┐
-        │  Mean Join: 0.5 * (Branch_1 + Branch_2)        │
+        │  Local drop-path join: mean over the SURVIVING │
+        │  branches. If both draws drop, one is revived  │
+        │  by a fair coin, so the join is never zero.    │
         └──────────────────┬─────────────────────────────┘
                            ▼
         ┌────────────────────────────────────────────────┐
@@ -75,8 +93,9 @@ class FractalBlock(keras.layers.Layer):
         (typically a ConvBlock).
     :type block_config: Dict[str, Any]
     :param depth: Depth of fractal expansion. Must be >= 1. At depth 1 a single
-        base block is used; at depth k the structure has 2^(k-1) leaf nodes.
-        Defaults to 1.
+        base block is used; at depth k the structure has ``2^k - 1`` leaf base
+        blocks (``L(1)=1``, ``L(k)=2*L(k-1)+1``) and a longest path of
+        ``2^(k-1)`` blocks. Defaults to 1.
     :type depth: int
     :param drop_path_rate: Probability of dropping each path during training
         for stochastic depth regularization. Defaults to 0.15.
@@ -133,6 +152,7 @@ class FractalBlock(keras.layers.Layer):
             self.shallow = None
             logger.debug("Created FractalBlock base case with depth=1")
         else:
+            # DECISION plan-2026-08-18T140459-7991552f/D-057
             # Paper's expansion rule, f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]:
             # the DEEP branch COMPOSES two depth-(C) fractals, and the SHALLOW
             # branch is a single base block applied to the same input. That
@@ -140,6 +160,18 @@ class FractalBlock(keras.layers.Layer):
             # while the shortest stays 1, which is the entire point of the
             # architecture -- the short path is what trains, the long path is
             # what the short path teaches.
+            #
+            # Do NOT rewrite this as two PARALLEL depth-(C) branches over the
+            # same input, F_k(x) = 0.5*(DP(F_{k-1}(x)) + DP(F_{k-1}(x))). That
+            # form shipped until 2026-08-14 and made every path traverse exactly
+            # ONE convolution at any depth, because the recursion then terminates
+            # with every leaf receiving the block's own input. Parameter count,
+            # layer count and output shape are IDENTICAL under both rules, so the
+            # suite stayed green for months; only the RECEPTIVE FIELD sees it
+            # (test_fractal_block.py::TestFractalExpansionRule). The docstrings
+            # above stated the parallel rule until 2026-08-19, which is why this
+            # note exists: a maintainer restoring doc/code consistency reverts
+            # the repair.
             self.block = None
             self.deep_first = FractalBlock(
                 block_config=self.block_config,
@@ -202,7 +234,9 @@ class FractalBlock(keras.layers.Layer):
 
         Implements the fractal expansion rule recursively. For the base case
         (depth=1), applies the block function directly. For recursive cases,
-        combines two branches using mean join after applying stochastic depth.
+        runs the COMPOSED deep branch (``deep_second(deep_first(x))``) and the
+        single-block shallow branch on the same input, then mean-joins the
+        surviving branches under local drop-path (see :meth:`_join`).
 
         :param inputs: Input tensor.
         :type inputs: keras.KerasTensor

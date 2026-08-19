@@ -35,7 +35,7 @@ The architecture is constructed from recursive `FractalBlock` layers, providing 
 
 ### What is FractalNet?
 
-**FractalNet** is a deep convolutional neural network that challenges the necessity of residual connections for training very deep models. Instead of adding identity shortcuts (like in ResNet), FractalNet builds depth using a **recursive, self-similar design**. A block of depth `B` is composed of two parallel blocks of depth `B-1`, whose outputs are averaged. This creates a fractal pattern with an immense number of distinct paths from input to output.
+**FractalNet** is a deep convolutional neural network that challenges the necessity of residual connections for training very deep models. Instead of adding identity shortcuts (like in ResNet), FractalNet builds depth using a **recursive, self-similar design**. A block of depth `B` joins a **deep** branch that *composes* two blocks of depth `B-1` (the second consuming the first's output) with a **shallow** branch that is a single base block on the same input. That composition is what makes the longest path `2^(B-1)` blocks long while the shortest stays 1, and it creates a fractal pattern with an immense number of distinct paths from input to output.
 
 ### Key Innovations
 
@@ -214,9 +214,9 @@ Final Feature Map
 -   **Purpose**: To implement the recursive fractal expansion rule, which is the heart of the architecture.
 -   **Architecture**:
     *   **Base Case (depth=1)**: The recursion terminates at a single, standard `ConvBlock` (Conv-Norm-Act). This is the fundamental unit of computation.
-    *   **Recursive Step (depth > 1)**: A `FractalBlock` of depth `k` creates two parallel `FractalBlock` branches, each of depth `k-1`. The inputs are passed through both branches.
-    *   **Drop-Path & Join**: The output of each branch is passed through a `StochasticDepth` (drop-path) layer. The final outputs of the two branches are then averaged together.
--   **Benefit**: This design creates `2^(k-1)` leaf `ConvBlock`s and an exponential number of paths. The parameters are shared at each level of the recursion but are independent between the two branches, providing architectural diversity.
+    *   **Recursive Step (depth > 1)**: A `FractalBlock` of depth `k` builds a **deep** branch of two *composed* depth-`k-1` `FractalBlock`s (`deep_second` consumes `deep_first`'s output) and a **shallow** branch that is a single base `ConvBlock` on the same input. **The two depth-`k-1` blocks are NOT parallel over the same input** — that form shipped until 2026-08-14 and made every path traverse exactly one convolution at any depth, invisibly to parameter count, layer count and output shape.
+    *   **Drop-Path & Join**: The join drops each of the two inputs by its own per-sample Bernoulli draw and averages only the **survivors**; when both draws drop, one is revived by a fair coin, so the join is never a zero map.
+-   **Benefit**: This design creates `2^k - 1` leaf `ConvBlock`s (`L(1)=1`, `L(k)=2*L(k-1)+1`) and an exponential number of paths, with a longest path of `2^(k-1)` blocks and a shortest of 1. No parameters are shared: every leaf is an independent instance.
 
 ### 4.2 `ConvBlock` (The Base Unit)
 
@@ -224,11 +224,11 @@ Final Feature Map
 -   **Implementation**: A standard sequence of `Conv2D` -> `Normalization` (e.g., `BatchNorm`) -> `Activation` (e.g., `ReLU`).
 -   **Functionality**: This implementation uses a highly configurable `ConvBlock` that allows for easy experimentation with different normalization and activation functions.
 
-### 4.3 `StochasticDepth` (Drop-Path)
+### 4.3 Local drop-path (inside `FractalBlock._join`)
 
 -   **Purpose**: To regularize the network during training by randomly dropping entire computational paths.
--   **Functionality**: During training, this layer randomly sets its entire input tensor to zero with a probability of `drop_path_rate`. During inference, it acts as an identity function.
--   **Benefit**: This is the critical component that makes FractalNet trainable. It prevents co-adaptation of parallel paths and forces the network to learn redundant features, making the final "ensembled" model at inference time much more robust.
+-   **Functionality**: `FractalBlock` does **not** use the `StochasticDepth` layer. Drop-path is implemented inline in `FractalBlock._join`: during training each of the join's two inputs is dropped by its own per-sample Bernoulli draw with probability `drop_path_rate`, and the join averages only the **survivors** — a mean over a varying number of paths, not a fixed `0.5` scaling. When both draws drop, one branch is revived by a fair coin, so the join is never a zero map. (An independent `StochasticDepth` per branch plus a fixed `0.5` was the previous implementation; it emitted exactly zero at rate `drop_path_rate ** 2`, about 2.3% of samples at the 0.15 default.) At inference the join is the plain mean of the two branches.
+-   **Benefit**: This is the critical component that makes FractalNet trainable. It prevents co-adaptation of paths and forces the network to learn redundant features, making the final "ensembled" model at inference time much more robust.
 
 ---
 
@@ -250,7 +250,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.fractal_net.model import create_fractal_net
+from dl_techniques.models.fractalnet.model import create_fractal_net
 
 # 1. Create a FractalNet-Small model for CIFAR-10 (32x32 images, 10 classes)
 # The create_fractal_net function also compiles the model.
@@ -287,8 +287,8 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`FractalNet`** | `...fractal_net.model.FractalNet` | The main Keras `Model` that assembles the fractal stages. |
-| **`create_fractal_net`** | `...fractal_net.model.create_fractal_net` | Recommended convenience function to create and compile `FractalNet` models. |
+| **`FractalNet`** | `...fractalnet.model.FractalNet` | The main Keras `Model` that assembles the fractal stages. |
+| **`create_fractal_net`** | `...fractalnet.model.create_fractal_net` | Recommended convenience function to create and compile `FractalNet` models. |
 
 ### 6.2 Core Building Blocks
 
@@ -296,7 +296,7 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 | :--- | :--- | :--- |
 | **`FractalBlock`** | `...layers.fractal_block.FractalBlock` | The core recursive block that defines the fractal structure. |
 | **`ConvBlock`** | `...layers.standard_blocks.ConvBlock` | The base-case convolutional unit used at the leaves of the fractal. |
-| **`StochasticDepth`**| `...layers.stochastic_depth.StochasticDepth` | Implements the drop-path regularization critical for training. |
+| *(local drop-path)* | `FractalBlock._join` | Drop-path is inline in the join, not a separate `StochasticDepth` layer. |
 
 ---
 
@@ -448,7 +448,7 @@ Simple tests can validate that all model variants are created correctly and that
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.fractal_net.model import FractalNet
+from dl_techniques.models.fractalnet.model import FractalNet
 
 def test_creation_all_variants():
     """Test model creation for all variants."""
@@ -489,13 +489,13 @@ if __name__ == '__main__':
 
 A: The core difference is the mechanism used to enable deep network training. **ResNet** uses explicit **identity skip connections** to create a direct path for gradients. **FractalNet** creates an **implicit ensemble** of many paths of varying lengths through its recursive structure and uses **drop-path** to ensure all paths are trained.
 
-**Q: What is the point of the two parallel branches in a `FractalBlock`?**
+**Q: What is the point of the two branches in a `FractalBlock`?**
 
-A: The two branches create path diversity. Although they share the same *architecture* (i.e., they are both `FractalBlock`s of depth `k-1`), they have **independent sets of weights**. This means they learn different features, and averaging their outputs acts like a mini-ensemble at each level of the fractal.
+A: The two branches create path *length* diversity, which is the whole point. The **deep** branch composes two depth-`k-1` `FractalBlock`s and the **shallow** branch is a single base block on the same input, so at each join a long path and a short path meet. All instances have **independent sets of weights**. Note that the two branches are of different depths — they are not two copies of the same sub-block run in parallel.
 
 **Q: Is FractalNet computationally expensive?**
 
-A: A `FractalBlock` of depth `k` contains `2^(k-1)` base `ConvBlock`s. This means the computational cost and parameter count grow exponentially with the fractal depth. However, the models are designed with reasonable depths (e.g., up to 5 per stage), making them comparable to other deep CNNs like ResNet.
+A: A `FractalBlock` of depth `k` contains `2^k - 1` base `ConvBlock`s. This means the computational cost and parameter count grow exponentially with the fractal depth. However, the models are designed with reasonable depths (e.g., up to 5 per stage), making them comparable to other deep CNNs like ResNet.
 
 ---
 
@@ -503,9 +503,10 @@ A: A `FractalBlock` of depth `k` contains `2^(k-1)` base `ConvBlock`s. This mean
 
 ### The Mathematics of Fractal Expansion and Drop-Path
 
-The architecture is defined by the recursive rule:
-`F_k(x) = 0.5 * (DP(f_1(x)) + DP(f_2(x)))`
-where `f_1` and `f_2` are two distinct instances of the block `F_{k-1}`, and `DP` is the drop-path operator.
+The architecture is defined by the paper's recursive rule `f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]`, i.e.
+`F_1(x) = block(x)`
+`F_k(x) = join(DP(F_{k-1}(F_{k-1}(x))), DP(block(x)))`
+where the two `F_{k-1}` instances are **composed** (the second consumes the first's output), `block` is a single base `ConvBlock` on the same input, and `DP` is the drop-path operator. The rule is **not** `0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x)))` — that parallel form shipped until 2026-08-14 and collapsed every path to a single convolution.
 
 **Drop-Path during Training**:
 The drop-path operator `DP` can be seen as multiplying the branch output by a Bernoulli random variable `b ~ Bernoulli(1 - p)`, where `p` is the `drop_path_rate`.
@@ -514,7 +515,7 @@ The drop-path operator `DP` can be seen as multiplying the branch output by a Be
 This means that during each forward pass, a random sub-graph of the full fractal network is sampled and trained. The deepest path is only active if no branches are dropped, while the shallowest paths are active much more frequently.
 
 **Inference as Ensemble Averaging**:
-At test time, the drop-path probability `p` is set to 0, so `DP(y) = y`. The final output is the deterministic average of all `2^(B-1)` paths in the network. This is analogous to averaging the predictions of a massive, jointly trained ensemble of neural networks, which is key to FractalNet's strong generalization performance.
+At test time, the drop-path probability `p` is set to 0, so `DP(y) = y`. The final output is the deterministic average over all paths in the network (`P(1)=1`, `P(k)=P(k-1)^2 + 1`: 1, 2, 5, 26, 677 — super-exponential in the depth). This is analogous to averaging the predictions of a massive, jointly trained ensemble of neural networks, which is key to FractalNet's strong generalization performance.
 
 ---
 

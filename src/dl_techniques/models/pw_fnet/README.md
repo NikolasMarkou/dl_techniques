@@ -270,7 +270,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Assuming model.py is in your project directory
-from model import PW_FNet
+from dl_techniques.models.pw_fnet.model import PW_FNet
 
 # 1. Generate dummy data
 def generate_data(num_samples, shape=(64, 64, 3)):

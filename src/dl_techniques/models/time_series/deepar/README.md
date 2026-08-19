@@ -206,7 +206,7 @@ pip install keras>=3.0 tensorflow>=2.16 numpy
 import keras
 import numpy as np
 import matplotlib.pyplot as plt
-from model import DeepAR
+from dl_techniques.models.time_series.deepar.model import DeepAR
 
 # 1. Generate synthetic data (Batch=32, Time=100, Dim=1)
 # Sine wave with noise

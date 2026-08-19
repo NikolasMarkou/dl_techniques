@@ -34,7 +34,7 @@ class SHGCNModel(keras.Model):
 
     **Architecture**:
     ```
-    Input: [Features [N, D_in], Adjacency [N, N] sparse]
+    Input: [Features [N, D_in], Adjacency [N, N] dense]
             ↓
     sHGCN Layer 1: [N, D_in] → [N, hidden_dims[0]]
             ↓
@@ -77,7 +77,10 @@ class SHGCNModel(keras.Model):
     Input:
         List of two tensors:
         - features: Dense tensor of shape (num_nodes, input_dim)
-        - adjacency: Sparse tensor of shape (num_nodes, num_nodes), normalized
+        - adjacency: Dense tensor of shape (num_nodes, num_nodes), normalized.
+          A leading batch axis is supported throughout: (B, N, D_in) with
+          (B, N, N). A tf.sparse.SparseTensor is also accepted, but only on the
+          TensorFlow backend -- see SHGCNLayer's aggregation step.
 
     Output:
         Dense tensor of shape (num_nodes, output_dim).
@@ -105,13 +108,12 @@ class SHGCNModel(keras.Model):
             metrics=['accuracy']
         )
 
-        # Train
-        model.fit(
-            x=[features, adj_sparse],
-            y=labels,
-            epochs=100,
-            validation_split=0.2
-        )
+        # Train -- FULL GRAPH, one step per epoch. Do NOT call
+        # model.fit(x=[features, adj], ...): Keras batches axis 0 of EVERY
+        # input, so it slices the [N, N] adjacency alongside the features and
+        # the run dies in the data pipeline. One graph is one sample.
+        for _ in range(100):
+            model.train_on_batch([features, adj], labels)
 
         # Link prediction model (embedding dimension 16)
         model = SHGCNModel(
@@ -122,10 +124,12 @@ class SHGCNModel(keras.Model):
         )
 
         # Get embeddings
-        embeddings = model([features, adj_sparse], training=False)
+        embeddings = model([features, adj], training=False)
 
         # Use with decoder
-        from fermi_dirac_decoder import FermiDiracDecoder
+        from dl_techniques.layers.graphs.fermi_diract_decoder import (
+            FermiDiracDecoder,
+        )
         decoder = FermiDiracDecoder()
 
         u_embed = tf.gather(embeddings, u_indices)
@@ -137,7 +141,8 @@ class SHGCNModel(keras.Model):
         - All hidden layers use 'relu' activation by default
         - Output layer activation is configurable for task flexibility
         - For link prediction, embeddings are in Euclidean space
-        - Model automatically handles sparse adjacency matrices
+        - Aggregation is a dense keras.ops.matmul; a tf.sparse.SparseTensor
+          adjacency also works on the TensorFlow backend only
         - Each layer can learn its own curvature if use_curvature=True
 
     References:
@@ -205,7 +210,7 @@ class SHGCNModel(keras.Model):
         Args:
             inputs: List of [features, adjacency].
                 - features: [num_nodes, input_dim]
-                - adjacency: [num_nodes, num_nodes] sparse
+                - adjacency: [num_nodes, num_nodes] dense
             training: Whether in training mode (affects dropout).
 
         Returns:
@@ -298,17 +303,17 @@ class SHGCNNodeClassifier(keras.Model):
             metrics=['accuracy']
         )
 
-        # Train
-        history = model.fit(
-            x=[features, adj_sparse],
-            y=train_labels,
-            epochs=200,
-            validation_data=([features, adj_sparse], val_labels),
-            verbose=1
-        )
+        # Train -- FULL GRAPH, one step per epoch. model.fit(x=[features, adj])
+        # does NOT work: Keras batches axis 0 of every input, so it slices the
+        # [N, N] adjacency alongside the features.
+        for _ in range(200):
+            model.train_on_batch([features, adj], train_labels)
+            val_metrics = model.test_on_batch([features, adj], val_labels)
 
-        # Predict
-        predictions = model.predict([features, adj_sparse])
+        # Predict -- predict_on_batch, NOT predict: predict batches axis 0 too,
+        # and it does so silently while N <= 32 (the default batch size), which
+        # is exactly how this example read as working.
+        predictions = model.predict_on_batch([features, adj])
         predicted_classes = ops.argmax(predictions, axis=-1)
         ```
     """
@@ -457,17 +462,15 @@ class SHGCNLinkPredictor(keras.Model):
         edge_pairs = np.vstack([pos_edges, neg_edges])
         labels = np.array([1, 1, 1, 0, 0, 0])  # 1=exists, 0=doesn't exist
 
-        # Train
-        model.fit(
-            x=[features, adj_sparse, edge_pairs],
-            y=labels,
-            epochs=100,
-            batch_size=32
-        )
+        # Train -- FULL GRAPH, one step per epoch. model.fit(...) does NOT
+        # work here either: `features` and `adj` are whole-graph inputs, so
+        # Keras' axis-0 batching would slice them along with `edge_pairs`.
+        for _ in range(100):
+            model.train_on_batch([features, adj, edge_pairs], labels)
 
         # Predict on new edge pairs
         test_pairs = np.array([[0, 2], [4, 6]])
-        probs = model.predict([features, adj_sparse, test_pairs])
+        probs = model.predict_on_batch([features, adj, test_pairs])
         print(probs)  # e.g., [0.85, 0.12] - first edge likely exists
         ```
 
@@ -520,7 +523,7 @@ class SHGCNLinkPredictor(keras.Model):
         Args:
             inputs: List of [features, adjacency, edge_pairs].
                 - features: [num_nodes, input_dim]
-                - adjacency: [num_nodes, num_nodes] sparse
+                - adjacency: [num_nodes, num_nodes] dense
                 - edge_pairs: [num_edges, 2] integer indices
             training: Whether in training mode.
 

@@ -158,7 +158,7 @@ Build a model for node classification with 5 distinct node types.
 
 ```python
 import keras
-from model import create_relgt_model
+from dl_techniques.models.relgt.model import create_relgt_model
 
 # 1. Create Model (Base configuration)
 model = create_relgt_model(
@@ -198,7 +198,7 @@ print(f"Output Shape: {output.shape}") # (2, 2)
 **Purpose**: The main Keras `Model` orchestrating the pipeline.
 
 ```python
-from model import RELGT
+from dl_techniques.models.relgt.model import RELGT
 
 model = RELGT(
     output_dim=10,
@@ -238,7 +238,7 @@ Predicting a property (float) for a molecule (graph).
 
 ```python
 import keras
-from model import create_relgt_model
+from dl_techniques.models.relgt.model import create_relgt_model
 
 # 1. Setup
 model = create_relgt_model(
@@ -364,7 +364,7 @@ print(loaded_model.get_config())
 
 ```python
 import keras
-from model import create_relgt_model
+from dl_techniques.models.relgt.model import create_relgt_model
 
 def test_relgt_forward():
     model = create_relgt_model(output_dim=1, model_size="small")

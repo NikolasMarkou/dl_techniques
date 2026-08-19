@@ -233,5 +233,104 @@ def test_keras_random_uniform_rejects_an_integer_dtype():
     assert tuple(int(d) for d in ids.shape) == (2, 4)
 
 
+# ---------------------------------------------------------------------
+# shgcn: the whole-graph invocation, and the batching trap that killed the
+# README's only runnable quickstart (step 19, F-72)
+# ---------------------------------------------------------------------
+
+class TestSHGCNWholeGraphInvocation:
+    """`shgcn`'s README instructed `model.fit([features, adj], labels)` until
+    2026-08-19. Keras batches axis 0 of EVERY input, so it slices the [N, N]
+    adjacency alongside the features and the run dies in the data pipeline.
+
+    The README ALSO said a `tf.sparse.SparseTensor` adjacency was mandatory and
+    that a dense one "will cause OOM errors". Measured: dense is the supported
+    form (`SHGCNLayer` aggregates with `keras.ops.matmul`), and sparse happens to
+    work too, but only on the TensorFlow backend. Both halves are pinned here.
+    """
+
+    @staticmethod
+    def _graph(n=40, f=8, c=3, seed=0):
+        rng = np.random.default_rng(seed)
+        x = rng.standard_normal((n, f)).astype("float32")
+        adj = np.eye(n, dtype="float32")
+        y = rng.integers(0, c, size=(n,))
+        return x, adj, y
+
+    def _model(self, c=3):
+        from dl_techniques.models.shgcn.model import SHGCNNodeClassifier
+
+        model = SHGCNNodeClassifier(num_classes=c, hidden_dims=[8], embedding_dim=8)
+        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+        return model
+
+    def test_train_on_batch_is_the_documented_full_graph_step(self):
+        x, adj, y = self._graph()
+        model = self._model()
+        model.train_on_batch([x, adj], y)
+        out = model.predict_on_batch([x, adj])
+        assert tuple(int(d) for d in out.shape) == (40, 3)
+
+    def test_fit_with_an_explicit_batch_axis_is_the_other_documented_route(self):
+        x, adj, y = self._graph()
+        model = self._model()
+        model.fit(
+            [x[None, ...], adj[None, ...]], y[None, ...],
+            epochs=1, batch_size=1, verbose=0,
+        )
+
+    def test_the_readme_form_that_was_removed_still_does_not_work(self):
+        """RED-proof for the correction: `fit` on unbatched whole-graph inputs
+        raises. If this ever starts passing, the README's warning is stale."""
+        x, adj, y = self._graph()
+        model = self._model()
+        with pytest.raises(Exception):
+            model.fit([x, adj], y, epochs=1, verbose=0)
+
+    def test_predict_batches_too_and_only_looks_right_while_n_is_small(self):
+        """The trap that made `model.predict([features, adj])` read as working:
+        at N <= the default batch size of 32 nothing is sliced."""
+        model = self._model()
+        x, adj, _ = self._graph(n=16)
+        assert tuple(int(d) for d in model.predict(
+            [x, adj], verbose=0).shape) == (16, 3)
+
+        x, adj, _ = self._graph(n=40)
+        with pytest.raises(Exception):
+            model.predict([x, adj], verbose=0)
+
+    def test_a_dense_adjacency_is_the_supported_form(self):
+        x, adj, _ = self._graph(n=12)
+        model = self._model()
+        assert tuple(int(d) for d in model([x, adj]).shape) == (12, 3)
+
+    def test_a_sparse_adjacency_also_works_on_the_tf_backend(self):
+        import tensorflow as tf
+
+        x, adj, _ = self._graph(n=12)
+        model = self._model()
+        out = model([x, tf.sparse.from_dense(adj)])
+        assert tuple(int(d) for d in out.shape) == (12, 3)
+
+
+# ---------------------------------------------------------------------
+# fastvit: the variant-registry alias models/CLAUDE.md asserted (step 19, F-30)
+# ---------------------------------------------------------------------
+
+def test_fastvit_exposes_the_canonical_model_variants_alias():
+    """`models/CLAUDE.md` claimed `fastvit` carried both `MODEL_VARIANTS` and
+    `SCALE_CONFIGS`; it carried neither, so `getattr(cls, "MODEL_VARIANTS")` --
+    the pattern `vit`, `vit_hmlp` and `distilbert` all support -- raised
+    `AttributeError`. The alias must be the SAME dict, not a copy.
+    """
+    from dl_techniques.models.fastvit.model import (
+        MCI_VARIANTS,
+        FastVitImageEncoder,
+    )
+
+    assert FastVitImageEncoder.MODEL_VARIANTS is MCI_VARIANTS
+    assert "mci0" in FastVitImageEncoder.MODEL_VARIANTS
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

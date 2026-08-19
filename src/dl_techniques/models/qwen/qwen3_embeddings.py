@@ -661,14 +661,15 @@ class Qwen3EmbeddingModel(keras.Model):
     """
     High-level Keras Model for Qwen3 Text Embedding.
 
-    This model provides a user-friendly interface for generating text embeddings
-    with support for different instruction types and document processing modes.
-    It wraps the `Qwen3EmbeddingLayer` and provides convenient methods for
-    processing queries and documents.
+    A thin `keras.Model` wrapper around `Qwen3EmbeddingLayer`. It defines
+    `__init__`, `call` and `get_config` and NOTHING ELSE: there are no
+    query/document helper methods, no instruction handling and no tokenizer.
+    Callers pass already-tokenized `input_ids`/`attention_mask` and prefix any
+    task instruction into the token ids themselves.
 
-    **Intent**: To offer a simple, `compile()`- and `fit()`-ready Keras Model
-    that abstracts tokenization details while providing flexible embedding
-    generation for various text types.
+    **Intent**: To offer a `compile()`- and `fit()`-ready Keras Model around the
+    embedding layer. It abstracts nothing about tokenization; that claim stood
+    in this docstring until 2026-08-19 and was never implemented.
 
     Args:
         vocab_size (int): Size of the vocabulary for token embeddings.
@@ -788,12 +789,15 @@ class Qwen3RerankerModel(keras.Model):
     """
     High-level Keras Model for Qwen3 Text Reranking.
 
-    This model provides a user-friendly interface for computing relevance scores
-    between query-document pairs. It wraps the `Qwen3RerankerLayer` and provides
-    methods for processing formatted reranking prompts.
+    A thin `keras.Model` wrapper around `Qwen3RerankerLayer`. It defines
+    `__init__`, `call` and `get_config` and NOTHING ELSE: there is no prompt
+    formatter and no method for processing query/document pairs. The caller is
+    responsible for building the "yes"/"no" prompt and tokenizing it, then
+    passing `input_ids`/`attention_mask`.
 
-    **Intent**: To offer a simple, end-to-end interface for reranking tasks
-    that can be easily integrated into retrieval and ranking pipelines.
+    **Intent**: To offer a `compile()`- and `fit()`-ready Keras Model around the
+    reranker layer. It is not an end-to-end reranking interface; that claim
+    stood in this docstring until 2026-08-19 and was never implemented.
 
     Args:
         vocab_size (int): Size of the vocabulary.

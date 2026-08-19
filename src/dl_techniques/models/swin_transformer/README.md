@@ -266,7 +266,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Local imports from your project structure
-# from model import SwinTransformer # Assuming model.py is in the same directory
+# from dl_techniques.models.swin_transformer.model import SwinTransformer
 
 # 1. Load and preprocess data
 (X_train, y_train), (X_test, y_test) = cifar10.load_data()
@@ -315,7 +315,7 @@ print(f"Test Accuracy: {acc*100:.2f}%")
 **Purpose**: The main Keras `Model` subclass that assembles the patch embedding, stages of Swin blocks, and the classification head.
 
 ```python
-from model import SwinTransformer
+from dl_techniques.models.swin_transformer.model import SwinTransformer
 
 # Create a base model for ImageNet
 model = SwinTransformer.from_variant(
@@ -461,7 +461,7 @@ print("Model loaded successfully")
 ```python
 import keras
 import numpy as np
-# from model import SwinTransformer
+# from dl_techniques.models.swin_transformer.model import SwinTransformer
 
 def test_model_creation_from_variant():
     """Test model creation from all variants."""

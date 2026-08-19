@@ -50,10 +50,17 @@ recurrence while keeping one full-attention layer per block. See **`QWEN3_next.m
 `qwen3_embeddings.py` is the one module in this package with no long-form document; its
 module docstring is the reference. Two ideas drive it:
 
-- **Embedding**: a causal transformer whose final embedding is the hidden state of the last
-  non-padding token (not a `[CLS]` token), optionally prefixed with a task instruction,
-  optionally truncated to a shorter dimension (Matryoshka representation learning), and
-  L2-normalized so cosine similarity is a dot product.
+- **Embedding**: a **bidirectional** transformer whose final embedding is the hidden state of
+  the last non-padding token (not a `[CLS]` token), optionally truncated to a shorter
+  dimension (Matryoshka representation learning), and L2-normalized so cosine similarity is a
+  dot product. The trunk is **not causal** and that is deliberate: `Qwen3EmbeddingLayer.call`
+  forwards the caller's 2D padding mask unchanged and never calls
+  `build_causal_attention_mask` (the sibling `Qwen3RerankerLayer` does, because it reads an LM
+  head and is a next-token prediction). Nothing is predicted from the pooled vector, so there
+  is no target to leak. Last-token pooling here is a convention carried over from the
+  decoder-only lineage, not evidence of causality; see the module docstring of
+  `qwen3_embeddings.py`. A task instruction, if used, is prefixed by the CALLER in the token
+  ids — no code in this package inserts one.
 - **Reranking**: relevance is scored *generatively*. The query, document and instruction are
   formatted into one prompt that asks the model to answer "yes" or "no", and the score is the
   softmax probability of the "yes" token over the two candidate logits.
@@ -77,7 +84,7 @@ direct `compile()` / `fit()` use.
 | **`create_qwen3_next_generation`** | `models.qwen.qwen3_next.create_qwen3_next_generation` | Autoregressive LM head. |
 | **`create_qwen3_next_classification`** | `models.qwen.qwen3_next.create_qwen3_next_classification` | Sequence classifier. |
 | **`Qwen3NextBlock`** | `models.qwen.components.Qwen3NextBlock` | One `3x GDN + 1x GA` block with per-layer norm, MoE and residual. |
-| **`Qwen3EmbeddingLayer`** | `models.qwen.qwen3_embeddings.Qwen3EmbeddingLayer` | Instruction-aware, last-token-pooled, L2-normalized embedding layer. |
+| **`Qwen3EmbeddingLayer`** | `models.qwen.qwen3_embeddings.Qwen3EmbeddingLayer` | Bidirectional, last-token-pooled, L2-normalized embedding layer. Takes `input_ids`/`attention_mask`; any instruction prefix is the caller's. |
 | **`Qwen3RerankerLayer`** | `models.qwen.qwen3_embeddings.Qwen3RerankerLayer` | Yes/no generative relevance scorer. |
 | **`Qwen3EmbeddingModel`** | `models.qwen.qwen3_embeddings.Qwen3EmbeddingModel` | `keras.Model` wrapper around the embedding layer. |
 | **`Qwen3RerankerModel`** | `models.qwen.qwen3_embeddings.Qwen3RerankerModel` | `keras.Model` wrapper around the reranker layer. |

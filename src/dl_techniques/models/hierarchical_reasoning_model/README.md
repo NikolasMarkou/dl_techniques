@@ -153,7 +153,7 @@ Create a "base" variant model for a vocabulary of 32k.
 
 ```python
 import keras
-from model import create_hierarchical_reasoning_model
+from dl_techniques.models.hierarchical_reasoning_model.model import create_hierarchical_reasoning_model
 
 # 1. Create Model
 # "base" variant matches the configuration from research papers

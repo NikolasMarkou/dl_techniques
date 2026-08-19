@@ -419,6 +419,13 @@ class FastVitImageEncoder(keras.Model):
         (1, 512)
     """
 
+    # `MCI_VARIANTS` is this package's only variant table, so the canonical
+    # `MODEL_VARIANTS` spelling is exposed as a class-level ALIAS to the same
+    # dict -- not a copy -- per models/CLAUDE.md. Tooling that resolves a
+    # variant registry via getattr(cls, 'MODEL_VARIANTS') got AttributeError
+    # here until 2026-08-19, while CLAUDE.md asserted fastvit carried it.
+    MODEL_VARIANTS = MCI_VARIANTS
+
     def __init__(
             self,
             variant: Optional[str] = None,

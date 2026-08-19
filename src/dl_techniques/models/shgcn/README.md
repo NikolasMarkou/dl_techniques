@@ -47,7 +47,7 @@ However, full Hyperbolic GCNs are computationally expensive and numerically unst
 1.  **Task-Specific Wrappers**: Includes pre-built `SHGCNNodeClassifier` and `SHGCNLinkPredictor` classes for immediate deployment.
 2.  **Learnable Curvature**: Each layer can learn its own curvature parameter $c$, adapting the geometry to the data automatically.
 3.  **Fermi-Dirac Decoding**: Implements the specialized decoder for link prediction in hyperbolic-like latent spaces.
-4.  **Keras 3 Native**: Built with modern Keras Functional API, supporting Sparse Tensors and backend-agnostic execution (JAX, TF, PyTorch).
+4.  **Keras 3 Native**: Built with modern Keras Functional API and backend-agnostic execution (JAX, TF, PyTorch) on a dense adjacency. A `tf.sparse.SparseTensor` adjacency is additionally accepted, but only on the TensorFlow backend (section 10).
 
 ### Why sHGCN Matters
 
@@ -151,7 +151,7 @@ Classify nodes in a graph (e.g., Cora/Citeseer).
 
 ```python
 import keras
-from model import SHGCNNodeClassifier
+from dl_techniques.models.shgcn.model import SHGCNNodeClassifier
 
 # 1. Create Model
 model = SHGCNNodeClassifier(
@@ -169,19 +169,40 @@ model.compile(
 )
 
 # 3. Dummy Data (100 nodes, 50 features)
-# Adjacency must be a SparseTensor
-import tensorflow as tf
+# The adjacency is a DENSE [N, N] tensor. A tf.sparse.SparseTensor also works on
+# the TensorFlow backend (Keras routes it to sparse_dense_matmul) but is not
+# required and is not portable to the JAX/Torch backends -- see section 10.
 import numpy as np
 
 features = keras.random.normal((100, 50))
-indices = [[0, 1], [1, 2], [2, 0]] # Simple triangle
-values = [1.0, 1.0, 1.0]
-adj = tf.sparse.SparseTensor(indices, values, dense_shape=(100, 100))
+adj = np.zeros((100, 100), dtype="float32")
+adj[0, 1] = adj[1, 2] = adj[2, 0] = 1.0   # simple triangle
 labels = keras.random.randint((100,), 0, 7)
 
-# 4. Train
-# Inputs are a list: [Features, Adjacency]
-model.fit([features, adj], labels, epochs=10)
+# 4. Train -- FULL-GRAPH, one step per epoch.
+# Inputs are a list: [Features, Adjacency].
+#
+# Do NOT write `model.fit([features, adj], labels, epochs=10)`. Keras treats
+# axis 0 of EVERY input as the sample axis, so it slices the [100, 100]
+# adjacency into 32-row minibatches alongside the features and the run dies
+# inside the data pipeline. This is a whole-graph model: one graph is one
+# sample. Two invocations work --
+#
+#   (a) train_on_batch, feeding the whole graph as a single step:
+for _ in range(10):
+    model.train_on_batch([features, adj], labels)
+
+#   (b) or add an explicit leading batch axis and use fit with batch_size=1:
+# model.fit(
+#     [features[None, ...], adj[None, ...]],
+#     labels[None, ...],
+#     epochs=10,
+#     batch_size=1,
+# )
+
+# 5. Inference: predict_on_batch, NOT predict -- predict batches axis 0 the same
+# way. It only LOOKS correct while N <= the default batch size of 32.
+logits = model.predict_on_batch([features, adj])
 ```
 
 ---
@@ -193,7 +214,7 @@ model.fit([features, adj], labels, epochs=10)
 **Purpose**: Flexible backbone for custom tasks.
 
 ```python
-from model import SHGCNModel
+from dl_techniques.models.shgcn.model import SHGCNModel
 
 model = SHGCNModel(
     hidden_dims=[64, 64],
@@ -208,7 +229,7 @@ model = SHGCNModel(
 **Purpose**: Calculates probability of edges based on node embeddings.
 
 ```python
-from model import FermiDiracDecoder
+from dl_techniques.layers.graphs.fermi_diract_decoder import FermiDiracDecoder
 
 decoder = FermiDiracDecoder()
 probs = decoder([node_embeddings_u, node_embeddings_v])
@@ -236,7 +257,7 @@ You can tune the model behavior via the constructor:
 Training a model to predict missing edges.
 
 ```python
-from model import SHGCNLinkPredictor
+from dl_techniques.models.shgcn.model import SHGCNLinkPredictor
 
 # 1. Setup
 model = SHGCNLinkPredictor(hidden_dims=[32], embedding_dim=16)
@@ -284,7 +305,8 @@ d = np.array(adj.sum(1))
 d_inv_sqrt = np.power(d, -0.5).flatten()
 d_mat = sp.diags(d_inv_sqrt)
 norm_adj = d_mat.dot(adj).dot(d_mat)
-# Convert norm_adj to SparseTensor for the model
+# Pass norm_adj to the model as a dense [N, N] array (or, on the TF backend
+# only, as a tf.sparse.SparseTensor -- see section 10).
 ```
 
 ### Pattern 2: Embedding Visualization
@@ -297,7 +319,9 @@ To visualize the learned hierarchy, project the output embeddings to the Poincar
 ## 10. Performance Optimization
 
 ### Sparse Tensor Support
-This implementation relies on `tf.sparse.sparse_dense_matmul` (via Keras ops). Ensure your adjacency matrix is passed as a **Sparse Tensor**. Passing a dense matrix for adjacency will cause OOM errors on large graphs ($N^2$ memory).
+`SHGCNLayer` aggregates with a plain `keras.ops.matmul(adj, h_tangent)` (see the `DECISION plan_2026-06-16_fa3ffc26/D-001` anchor in `layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py`), so a **dense** `[N, N]` (or batched `[B, N, N]`) adjacency is the supported, backend-portable form. It is not an error, and this README instructed the opposite until 2026-08-19.
+
+A `tf.sparse.SparseTensor` adjacency also works — Keras 3's TensorFlow backend dispatches a sparse operand of `ops.matmul` to `tf.sparse.sparse_dense_matmul` — and it is the right choice when the dense $N^2$ matrix does not fit in memory. Two caveats, both measured: it is **TensorFlow-backend only** (JAX and Torch have no such dispatch, so it contradicts the backend-agnostic claim in section 1), and it is an optimization, not a requirement.
 
 ### Numerical Stability
 Hyperbolic operations involve `exp` and `log`. The `SHGCNLayer` includes a `project` step to keep points away from the boundary of the Poincaré ball, preventing NaNs. If you encounter instability, try reducing the learning rate or increasing `eps` in `PoincareMath`.
@@ -332,17 +356,17 @@ loaded_model = keras.models.load_model("shgcn_cora.keras")
 ## 13. Testing & Validation
 
 ```python
+import numpy as np
+
 def test_shgcn_forward():
     model = SHGCNNodeClassifier(num_classes=2, hidden_dims=[16])
-    
-    # B=1 graph, N=10 nodes, F=5 features
+
+    # One graph, N=10 nodes, F=5 features
     x = keras.random.normal((10, 5))
-    
-    # Sparse Identity matrix as dummy adjacency
-    indices = [[i, i] for i in range(10)]
-    values = [1.0] * 10
-    adj = tf.sparse.SparseTensor(indices, values, dense_shape=(10, 10))
-    
+
+    # Dense identity matrix as dummy adjacency
+    adj = np.eye(10, dtype="float32")
+
     out = model([x, adj])
     assert out.shape == (10, 2)
     print("✓ Forward pass successful")
@@ -361,7 +385,7 @@ test_shgcn_forward()
 *   **A:** Standard HGCNs aggregate in hyperbolic space using the Fréchet mean, which is an iterative optimization problem inside every forward pass. sHGCN aggregates in Euclidean space (vector sum), which is a single matrix multiplication.
 
 **Q: Input shapes?**
-*   **A:** Features: `(N, F)`. Adjacency: `(N, N)` Sparse. Labels: `(N,)` for sparse categorical loss.
+*   **A:** Features: `(N, F)`. Adjacency: dense `(N, N)` (a TF `SparseTensor` is also accepted on the TF backend). Labels: `(N,)` for sparse categorical loss. A leading batch axis is supported throughout — `(B, N, F)` with `(B, N, N)` — and is what `fit(..., batch_size=1)` needs, because Keras batches axis 0 of every input.
 
 ---
 

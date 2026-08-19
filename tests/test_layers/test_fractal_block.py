@@ -131,6 +131,30 @@ class TestFractalExpansionRule:
             f"receptive field must grow with depth, measured {fields}"
         )
 
+    @pytest.mark.parametrize("depth,expected", [(1, 1), (2, 3), (3, 7), (4, 15)])
+    def test_leaf_count_is_two_to_the_k_minus_one(self, depth: int, expected: int):
+        """The docstrings claimed ``2^(k-1)`` leaves until 2026-08-19.
+
+        That is the count under the OLD parallel rule, where the shallow branch
+        does not exist. The composed rule's recurrence is ``L(1) = 1``,
+        ``L(k) = 2 * L(k-1) + 1`` -- both halves of the deep branch plus the
+        shallow one -- which is ``2^k - 1``. The wrong number is not detectable
+        from the receptive field, so it is pinned separately.
+        """
+        cfg = ConvBlock(filters=4, kernel_size=3, strides=1, padding="same",
+                        use_pooling=False).get_config()
+        block = FractalBlock(block_config=cfg, depth=depth, drop_path_rate=0.0)
+
+        def leaves(b: FractalBlock) -> int:
+            total = 0
+            for sub in (b.block, b.deep_first, b.deep_second, b.shallow):
+                if sub is None:
+                    continue
+                total += 1 if isinstance(sub, ConvBlock) else leaves(sub)
+            return total
+
+        assert leaves(block) == expected == 2 ** depth - 1
+
     def test_stride_inside_the_block_is_refused(self):
         """A strided base block cannot compose, so it must raise, not mis-build.
 
