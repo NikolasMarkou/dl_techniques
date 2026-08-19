@@ -2,7 +2,7 @@
 
 Complete model architectures organized as subdirectories. Each subdirectory is a self-contained model implementation.
 
-> **ALL model work MUST follow `research/2026_keras_custom_models_instructions.md`.** Read it before creating a new model directory *or authoring any new layer inside a model* — it is the canonical guide for Keras 3 custom authoring in this repo (serialization, `build`, `get_config`, factories, tests). This is non-negotiable for every model in this package, new or existing.
+> **ALL model work MUST follow `research/2026_keras_custom_models_instructions_v2.md`.** Read it before creating a new model directory *or authoring any new layer inside a model* — it is the canonical guide for Keras 3 custom authoring in this repo (serialization, `build`, `get_config`, factories, tests). This is non-negotiable for every model in this package, new or existing.
 
 ## Model Categories
 
@@ -156,7 +156,7 @@ Check in this precedence order; only proceed to the next step when nothing fits:
 
 2. **The broader `layers/` package** — if no factory covers your need, search `src/dl_techniques/layers/` (20+ subpackages of standalone layers) for an existing implementation before writing your own.
 
-3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions.md` (full serialization, `build`, `get_config`, tests). Prefer adding it to the appropriate `layers/` subpackage (and its factory registry, where one exists) over burying it inside the model directory, so the next author can reuse it too.
+3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions_v2.md` (full serialization, `build`, `get_config`, tests). Prefer adding it to the appropriate `layers/` subpackage (and its factory registry, where one exists) over burying it inside the model directory, so the next author can reuse it too.
 
 ## House Model Module Shape
 

@@ -80,6 +80,6 @@ MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
 - **Docstring style is not uniform, and "Google-style docstrings" is a preference for new code, not a description of the tree.** `layers/` is predominantly Sphinx/reST; `models/` is measurably mixed (no package-wide rule in either direction), and `models/bert/bert.py` — which is entirely Sphinx/reST — is the normative exemplar for a NEW model package. Match the file you are editing; never convert a file wholesale. The measured per-package counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style (the single home for these numbers).
 - Centralized logging via `dl_techniques.utils.logger` — no print statements
 
-When instructed to create a new model or layer, follow the guide in `research/2026_keras_custom_models_instructions.md`.
+When instructed to create a new model or layer, follow the guide in `research/2026_keras_custom_models_instructions_v2.md`.
 
 See `src/dl_techniques/CLAUDE.md` for detailed conventions, patterns, and how to add new components.

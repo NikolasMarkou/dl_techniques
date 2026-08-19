@@ -363,7 +363,7 @@ thing you will meet and should not be surprised by.
   each time reporting a factory as missing when it existed.
 
 **Before writing a new layer or model, read
-`research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
+`research/2026_keras_custom_models_instructions_v2.md`.** The root `CLAUDE.md` names
 it as mandatory and at 3105 lines it is among the longest documents in the repo.
 Four of its rules are load-bearing. **Nothing enforces them.** None fails at
 layer-definition time: you find out at `.keras` save/load, at shape inference,
@@ -444,7 +444,7 @@ the map's job is to route you to the right one, not to paraphrase it.
 
 | Your question | Read |
 |---|---|
-| How do I write a new layer or model? | `research/2026_keras_custom_models_instructions.md` (mandatory) |
+| How do I write a new layer or model? | `research/2026_keras_custom_models_instructions_v2.md` (mandatory) |
 | What are the library-wide conventions? | `src/dl_techniques/CLAUDE.md` |
 | What attention variants exist, and which do I pick? | `src/dl_techniques/layers/attention/README.md`, then `src/dl_techniques/layers/attention/GUIDE.md` |
 | What activations / sequence-pooling options exist? | `src/dl_techniques/layers/activations/GUIDE.md`, `src/dl_techniques/layers/sequence_pooling/GUIDE.md` |
@@ -551,7 +551,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1005 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 900 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 902 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -588,7 +588,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > re-deriving it forever.
 | Size of `data/` (local) | 2.6G | `LC_ALL=C du -sh data \| cut -f1` |
 | Files under `data/` tracked by git | 0 | `git ls-files data \| wc -l` |
-| Notes in `research/` | 124 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
+| Notes in `research/` | 125 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Lines in `README.md` | 544 | `wc -l < README.md` |
 | Dicts named `*_REGISTRY` under `src/dl_techniques/` | 9 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
@@ -625,6 +625,6 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Model packages BINDING a `create_` in their own package init (what a caller sees) | 69 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 71 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
-| Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
+| Lines in the mandatory authoring guide | 2277 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
 | Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |

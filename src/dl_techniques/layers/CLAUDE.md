@@ -2,7 +2,7 @@
 
 The largest package in the library — custom Keras 3 layers organized by domain. All layers follow Keras 3 conventions with full `get_config()` serialization support.
 
-> **New layers MUST follow `research/2026_keras_custom_models_instructions.md`.** Read it before creating a new layer — it is the canonical guide for Keras 3 custom layer authoring in this repo (`__init__`/`build`/`call`/`get_config`, serialization, factory registration, tests).
+> **New layers MUST follow `research/2026_keras_custom_models_instructions_v2.md`.** Read it before creating a new layer — it is the canonical guide for Keras 3 custom layer authoring in this repo (`__init__`/`build`/`call`/`get_config`, serialization, factory registration, tests).
 
 ## Structure
 
@@ -152,7 +152,7 @@ Check in this precedence order; only proceed to the next step when nothing fits:
 
 2. **An existing standalone layer** — if no factory covers your need, search the subpackages and the top-level Standalone Layers list above before writing your own. The reuse surface is broad; a close match often already exists.
 
-3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions.md` (full serialization, `build`, `get_config`, tests). Place it in the appropriate domain subpackage and, where that domain has a `factory.py`, register it there so the next author can reuse it via the factory too.
+3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions_v2.md` (full serialization, `build`, `get_config`, tests). Place it in the appropriate domain subpackage and, where that domain has a `factory.py`, register it there so the next author can reuse it via the factory too.
 
 ## Testing
 
