@@ -24,6 +24,7 @@ from dl_techniques.models.bert.bert import BERT, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 
 
 class TestBERTModelInitialization:
@@ -344,54 +345,47 @@ class TestBERTIntegration:
         )
 
     def test_gradient_flow_integration(self, classification_model):
-        """Test that gradients flow through the entire integrated model."""
+        """Test that gradients flow through the entire integrated model.
+
+        The per-weight assertions live in
+        ``tests/test_models/gradient_flow_oracle.py`` (this test's body was the
+        pattern they were extracted from; its own RED proofs are in
+        ``tests/test_models/test_gradient_flow_oracle.py``). What stays here is
+        the part that is BERT-specific: the real labelled loss.
+        """
         batch_size, seq_length = 2, 16
         inputs = {
             'input_ids': keras.ops.cast(keras.random.uniform((batch_size, seq_length), maxval=1000), 'int32'),
             'attention_mask': keras.ops.ones((batch_size, seq_length), 'int32'),
             'token_type_ids': keras.ops.zeros((batch_size, seq_length), 'int32'),
         }
+        targets = keras.ops.one_hot(keras.ops.array([0, 2]), 3)
 
-        with tf.GradientTape() as tape:
-            outputs = classification_model(inputs, training=True)
-            logits = outputs['logits']
-            targets = keras.ops.one_hot(keras.ops.array([0, 2]), 3)
-            # `from_logits=True` is REQUIRED here and was missing. With the
-            # default `False`, Keras treats these logits as probabilities:
-            # it renormalizes by their sum and CLIPS to [eps, 1-eps], and for
-            # some input draws every element lands in the clipped region, where
-            # the loss is constant and EVERY gradient is exactly 0.0. MEASURED
-            # 2026-08-18: 61 of 61 trainable weights had identically-zero
-            # gradients on one such draw, which is why this test was
-            # order-dependent -- importing a sibling test module shifts the RNG
-            # stream and changes the ids. The old `all(norm >= 0.0)` assertion
-            # reported green either way.
-            loss = keras.ops.mean(
+        # `from_logits=True` is REQUIRED here and was missing. With the
+        # default `False`, Keras treats these logits as probabilities:
+        # it renormalizes by their sum and CLIPS to [eps, 1-eps], and for
+        # some input draws every element lands in the clipped region, where
+        # the loss is constant and EVERY gradient is exactly 0.0. MEASURED
+        # 2026-08-18: 61 of 61 trainable weights had identically-zero
+        # gradients on one such draw, which is why this test was
+        # order-dependent -- importing a sibling test module shifts the RNG
+        # stream and changes the ids. The old `all(norm >= 0.0)` assertion
+        # reported green either way; the oracle below convicts it by name.
+        def loss_fn(outputs):
+            return keras.ops.mean(
                 keras.losses.categorical_crossentropy(
-                    targets, logits, from_logits=True
+                    targets, outputs['logits'], from_logits=True
                 )
             )
 
-        gradients = tape.gradient(loss, classification_model.trainable_weights)
-        non_none_grads = [g for g in gradients if g is not None]
-        assert len(non_none_grads) > 0
-        assert len(non_none_grads) == len(classification_model.trainable_weights)
-        # A Euclidean norm is never negative, so the previous
-        # `all(norm >= 0.0)` was true of an ALL-ZERO gradient -- i.e. of a model
-        # in which nothing trains. The instrument is a positive floor, applied
-        # per weight (an aggregate hides a single dead tensor among 40 live
-        # ones); shape copied from
-        # `test_beit/test_model.py::test_gradients_reach_every_trainable_weight`.
-        # NOT an absolute floor: `test_mamba_v1.py:726-733` records why (a
-        # correctly-initialized tensor can carry a legitimate ~1e-9 gradient),
-        # and the sibling tree_transformer guard measured 1.357e-09 on a live
-        # bias. "Identically zero" is the falsifiable claim.
-        for weight, grad in zip(classification_model.trainable_weights, gradients):
-            g = keras.ops.convert_to_numpy(grad)
-            assert np.isfinite(g).all(), f"non-finite gradient at {weight.path}"
-            assert float(np.max(np.abs(g))) > 0.0, (
-                f"gradient at {weight.path} is identically zero"
-            )
+        report = assert_gradients_reach_every_trainable_weight(
+            classification_model, inputs, loss_fn=loss_fn
+        )
+        # Anti-vacuity: the oracle raises on an empty weight set, but pin the
+        # count here too so a future refactor that hands it a sub-model instead
+        # of the full classification stack is visible.
+        assert len(report) == len(classification_model.trainable_weights)
+        assert len(report) > 0
 
     def test_training_integration(self, classification_model):
         """A 100-step loop on a fixed batch must drive the loss down.

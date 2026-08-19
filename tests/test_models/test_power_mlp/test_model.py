@@ -45,6 +45,7 @@ from dl_techniques.models.power_mlp.model import (
 from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 
 from ..knob_sensitivity_oracle import as_array, build_seeded
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 
 # ---------------------------------------------------------------------
 
@@ -464,20 +465,22 @@ class TestPowerMLPGradients:
         model: PowerMLP,
         sample_input: keras.KerasTensor
     ) -> None:
-        """Test that gradients flow through the model."""
-        with tf.GradientTape() as tape:
-            output = model(sample_input, training=True)
-            loss = ops.mean(ops.square(output))
+        """Test that gradients flow through the model.
 
-        gradients = tape.gradient(loss, model.trainable_variables)
+        The body used to be ``all(g is not None)`` plus a
+        ``grad.shape == var.shape`` loop. Neither can fail for a model whose
+        weights are on the graph but receive an identically-zero gradient --
+        the dead-component case -- and the shape equality is a property of
+        ``tape.gradient`` itself rather than of PowerMLP. Both checks are now
+        inside ``tests/test_models/gradient_flow_oracle.py`` (the shape check
+        is retained there and raises), alongside the nonzero and finiteness
+        floors this test never made.
+        """
+        model(sample_input)  # a subclassed model is unbuilt until first call
+        report = assert_gradients_reach_every_trainable_weight(model, sample_input)
 
-        # Check all gradients exist
-        assert all(g is not None for g in gradients)
-        assert len(gradients) > 0
-
-        # Check gradients have proper shapes
-        for var, grad in zip(model.trainable_variables, gradients):
-            assert grad.shape == var.shape
+        assert len(report) == len(model.trainable_variables)
+        assert len(report) > 0
 
     def test_gradients_with_regularization(self) -> None:
         """Test gradients with kernel regularization."""
