@@ -291,6 +291,23 @@ class TextDecoder(keras.layers.Layer):
         )
 
         # Create transformer decoder layers
+        # DECISION plan-2026-08-18T140459-7991552f/D-067
+        # `kernel_initializer` below is LOAD-BEARING and must not be dropped as
+        # redundant: before 2026-08-19 this construction passed no initializer at
+        # all, so `initializer_range` reached only the word/positional embeddings
+        # and every attention and FFN weight in all `depth` blocks silently fell
+        # back to `TransformerLayer`'s `glorot_uniform`. Measured at the time:
+        # a 25x change in `initializer_range` moved the block-kernel std by a
+        # factor of 1.00 (0.12245 in both arms). This is a four-line edit with a
+        # wide blast radius -- it changes the initial weight distribution of every
+        # block in `gpt2`, `qwen`, `nano_vlm` and `nano_vlm_world_model`. Post-fix
+        # the GPT-2 blocks' weights are ~1.8x smaller, which attenuated the
+        # two-block cross-position signal ~50x and required
+        # `test_gpt2.py::test_without_the_mask_the_same_tokens_do_leak` to be
+        # re-derived (its bar moved 1e-2 -> 1e-3, still 3900x above the 1e-6 it
+        # must dominate). If that control ever loses its remaining headroom,
+        # RE-DERIVE it against a measurement -- do not loosen the bar again.
+        # See decisions.md D-067.
         self.decoder_layers = []
         for i in range(self.depth):
             # Linearly increase drop rate per layer

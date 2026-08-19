@@ -355,6 +355,28 @@ because `plans/` is gitignored and does not ship. Re-derive the list before acti
 it — it moves as trainers are added or packages are merged (e.g. `convunext`,
 `bfconvunext` and `bfcnn` all left this list when their trainers were consolidated).
 
+## Checkpoint-affecting changes, 2026-08-19
+
+`plan-2026-08-18T140459-7991552f` changed the saved weight layout of four packages. Recorded here
+because `plans/` is gitignored — a note that lives only in a decision log does not ship.
+
+| Package | Change | What still works | What does not |
+|---|---|---|---|
+| `vq_vae`, `vq_vae_rotation` | `use_ema=True` gains a non-trainable `ema_step` scalar (3 -> 4 weights), and `ema_embeddings` is now zero-initialized | nothing | **both** `load_weights` and `keras.models.load_model()` on a pre-fix artifact raise `ValueError: A total of 1 objects could not be loaded` — measured, not assumed |
+| `gemma` | `use_bias=True` now really reaches the attention projections, so it ADDS bias tensors | `use_bias=False` (the default) is unaffected | by-name `load_weights` of a pre-fix `use_bias=True` artifact |
+| `fastvlm` | stage-3 default `attention_type` flips `'multi_head'` -> `'group_query'`; same Q/K/V shapes, different registered class and sublayer names | full `load_model()` — `attention_type` is serialized, so an old artifact rebuilds its old topology | a bare `load_weights` into a default-constructed model |
+| `tiny_recursive_model` | `attention_args` is now conditional on `attention_type` | `'group_query'` (the default) is byte-identical | a pre-2026-08-17 artifact carrying `'multi_head'` still fails to load — a remapping shim was deliberately REFUSED because it would rebuild a different weight tree than the file contains |
+
+No such checkpoint exists under `results/` on the author's machine (checked read-only). If you hold
+one elsewhere, re-train or convert rather than forcing a load.
+
+**D-002 ruling (2026-08-19): CARRY.** The 25 packages with no consumer outside their own tests —
+`cbam detr distilbert fastvlm fftnet fractalnet gemma latent_gmm_registration mamba memory_bank
+mini_vec2vec mothnet nano_vlm_world_model pft_sr pw_fnet qwen relgt scunet shgcn som squeezenet
+swin_transformer vit_hmlp vit_siglip vq_vae` — are kept. They all have tests; they are library
+surface without a trainer, not dead code. This closes a question that had been re-asked across
+three planning rounds.
+
 ## Testing
 
 Tests in `tests/test_models/` with one subdirectory per model — 81 test directories
