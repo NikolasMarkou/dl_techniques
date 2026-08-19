@@ -111,7 +111,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 
 ### Names that misattribute
 
-Five packages are named for something they are not. Each was corrected in place after measurement;
+Four packages are named for something they are not. Each was corrected in place after measurement;
 the entry is kept so the correction is not silently re-reverted.
 
 | Package | The name claims | What the code is | Evidence |
@@ -120,7 +120,6 @@ the entry is kept so the correction is not silently re-reverted.
 | `vit_siglip/` | SigLIP | a ViT with a two-stage conv patch-embedding stem. SigLIP is a sigmoid contrastive **loss**, and its own tower has a single-conv stem, no CLS token and a MAP head — none of which this package shares. There is no text tower and no loss here | `vit_siglip/model.py` module docstring |
 | `nam/` | (read as) Neural **Additive** Model | Neural Arithmetic **Module** — there is no per-feature additive model anywhere in the package | `nam/model.py`'s module docstring has always said Module; this catalogue said "Neural additive model" until 2026-08-15 |
 | `pw_fnet/` | "Pyramid **Wavelet**-Fourier Network" (the package's own name, `pw_fnet/model.py:2`), and it was listed here as "Patchwise FNet" until 2026-08-19 | neither patchwise nor FNet: a 2-level U-Net with FFT token mixing and multi-scale supervision, not FNet's token+feature-axis Fourier mixing. **No wavelet transform** — the only spectral ops are `FFTLayer` / `IFFTLayer` | `grep -rn -i wavelet pw_fnet/` returns only the name itself. Two of the three words in the expanded name are unearned |
-| `mobile_clip/` | one generation | **both**, in one package — see the Vision-Language entry | package `README` §17 |
 
 > A class or package sharing a name with a published architecture is not necessarily that
 > architecture. Check the composition rule, not the name.

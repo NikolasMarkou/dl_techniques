@@ -59,11 +59,11 @@ Each package has its own `CLAUDE.md` with detailed documentation.
 **Docstring style: two are in use. Match the package you are editing; never convert a file
 wholesale.** Docstrings carry mathematical formulations where relevant.
 
-| Package | Convention | Measured 2026-08-14 |
+| Package | Convention | Measured 2026-08-19 |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 255 of 294 modules |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 256 of 296 modules |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
-| `models/` | **NO package-wide style — measurably MIXED** | 102 Google-only, 67 Sphinx-only, 5 both, 93 neither, over 267 `.py` files |
+| `models/` | **NO package-wide style — measurably MIXED** | 99 Google-only, 68 Sphinx-only, 8 both, 92 neither, over 267 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 42 carry `Args:`, 7 carry `:param ` |
 | `metrics/` | Google majority | 12 of 15 / 2 |
 | `utils/` | Google majority | 22 of 39 / 9, 3 both |
@@ -76,7 +76,7 @@ contains Sphinx files. The `models/` "neither" bucket is mostly `__init__.py` an
 parameter docs at all.
 
 **For a NEW `models/` package follow `models/bert/bert.py`** — the normative exemplar, and entirely
-Sphinx/reST (0 `Args:` / 81 `:param `). That is why the recently added `models/gpt2/gpt2.py`
+Sphinx/reST (0 `Args:` / 78 `:param `). That is why the recently added `models/gpt2/gpt2.py`
 (0 / 26) and `models/wave_field/model.py` (31 `:param `, plus 1 stray `Args:` at :232) are Sphinx.
 
 > **Do not convert existing Google-style `models/` files toward Sphinx, or Sphinx toward Google.**
@@ -90,27 +90,26 @@ and the numbers invalidate themselves):
 ```bash
 find src/dl_techniques/models -name '*.py' | wc -l                                   # 267
 grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   # 107 = Google-only + both
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  72 = Sphinx-only + both
-# comm -12 of those two sorted file lists -> 5 (both);  neither = 267 - 102 - 67 - 5 = 93
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  76 = Sphinx-only + both
+# comm -12 of those two sorted file lists -> 8 (both);  neither = 267 - 99 - 68 - 8 = 92
 ```
 
-The `layers/` figure was "248 of 285" until 2026-08-14: correct when written on 2026-08-11, and
-falsified by the `layers/fastvit/` package landing. A derived number is a perishable good.
+**This table rots.** It said "248 of 285" for `layers/` until 2026-08-14 (correct on 2026-08-11,
+falsified by the `layers/fastvit/` package landing), and on 2026-08-19 six more figures had drifted:
+`layers/` 255/294 -> 256/296, `models/` Google-only 102 -> 99, Sphinx-only 67 -> 68, both 5 -> 8,
+neither 93 -> 92, and `bert.py` 81 -> 78 `:param `. **Re-run the block above before quoting any of
+it** — a derived number is a perishable good.
 
 ### Factory Pattern
 
 Subpackages with `factory.py` support config-driven construction. A factory takes a `type` string
 plus a config dict and returns a configured layer.
 
-| Registry | Types | Registry | Types |
-|---|---|---|---|
-| attention | 32 | norms | 18 |
-| activations | 22 | embedding | 13 |
-| ffn | 21 | logic | 4 |
-| mixtures | 3 | sequence_pooling | 3 |
-
-Re-derive with `len(<X>_REGISTRY)`, or `typing.get_args` for the norms `Literal`. `heads/`,
-`memory/` and `utils/masking/` expose constructor sets rather than a dict registry.
+**The per-domain registry sizes and entry points live in exactly one place:**
+`layers/CLAUDE.md` § Layer Reuse Policy. They are not restated here — two homes for one number is a
+hand-maintained lockstep invariant, i.e. a latent defect. Re-derive with `len(<X>_REGISTRY)`, or
+`typing.get_args` for the norms `Literal`. `heads/`, `memory/` and `utils/masking/` expose
+constructor sets rather than a dict registry.
 
 **Three rules, all load-bearing:**
 
@@ -160,13 +159,13 @@ hence scoping pytest to the modules you changed rather than running `make test` 
 
 Mirrors `src/` — `tests/test_models/test_mobilenet/`, `tests/test_layers/test_attention/`. Under
 `tests/test_models/` a directory is the norm; under `tests/test_layers/` a loose `test_<name>.py` is
-(78 loose modules against 21 subdirectories), so a missing directory there means nothing.
+(81 loose modules against 21 subdirectories, 2026-08-19), so a missing directory there means nothing.
 `REPO_MAP.md` § Tests lists the named exceptions.
 
 | File kind | Convention |
 |---|---|
 | Comprehensive suite | `class TestModelName`, pytest fixtures for configs and sample data |
-| **Single-claim guard** | sentence-named after the claim: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py` (9 such files) |
+| **Single-claim guard** | sentence-named after the claim: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py` (15 such files, 2026-08-19) |
 | **Meta-test** | prefixed `test_the_guard_…` / `test_the_probe_…` / `test_the_contract_…` |
 | **Shared instrument** | **no `test_` prefix**, so pytest does not collect it; each has a mirrored `test_<name>.py` RED proof |
 
@@ -213,7 +212,7 @@ In `tests/conftest.py` and `tests/test_layers/conftest.py`:
 ### Gate discipline
 
 - **A known-open defect is pinned with `@pytest.mark.xfail(strict=True, reason="<measured>: ...")`**
-  (16 sites), so it XPASSes loudly when someone fixes it. A plain `skip` is inert; a deleted test
+  (20 sites, 2026-08-19), so it XPASSes loudly when someone fixes it. A plain `skip` is inert; a deleted test
   leaves the gap unguarded.
 - **Never gate on `--collect-only`.** An all-skip module reads as a pass, and a suite whose
   collection errored can "pass" by running almost nothing — this once hid 12 real failures across 8
