@@ -115,7 +115,7 @@ References:
 """
 
 import keras
-from typing import Optional, List, Literal
+from typing import Any, Dict, Optional, List, Literal
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -182,6 +182,34 @@ class PFTSR(keras.Model):
         >>> model_light = PFTSR(scale=4, embed_dim=48, num_blocks=[4, 4, 4, 4])
         >>> sr_image_light = model_light(lr_image)
     """
+
+    #: Public-name registry of the three named PFT-SR sizes (models/CLAUDE.md
+    #: Axis 2). Hoisted verbatim out of ``create_pft_sr``'s body on 2026-08-19,
+    #: where it was a local ``configs`` dict that nothing outside the function
+    #: could enumerate. The remaining ``PFTSR(...)`` arguments the factory passes
+    #: (``window_size``, ``upsampler``, the dropout rates, ...) are IDENTICAL
+    #: across all three variants and stay in the factory rather than being
+    #: restated three times here.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        'light': {
+            'embed_dim': 48,
+            'num_blocks': [4, 4, 4, 4],
+            'num_heads': 6,
+            'mlp_ratio': 2.0,
+        },
+        'base': {
+            'embed_dim': 60,
+            'num_blocks': [4, 4, 4, 6, 6, 6],
+            'num_heads': 6,
+            'mlp_ratio': 2.0,
+        },
+        'large': {
+            'embed_dim': 80,
+            'num_blocks': [6, 6, 6, 8, 8, 8],
+            'num_heads': 8,
+            'mlp_ratio': 2.0,
+        }
+    }
 
     def __init__(
             self,
@@ -553,34 +581,13 @@ def create_pft_sr(
         >>> # Create large model for 4x SR
         >>> model_large = create_pft_sr(scale=4, variant='large')
     """
-    configs = {
-        'light': {
-            'embed_dim': 48,
-            'num_blocks': [4, 4, 4, 4],
-            'num_heads': 6,
-            'mlp_ratio': 2.0,
-        },
-        'base': {
-            'embed_dim': 60,
-            'num_blocks': [4, 4, 4, 6, 6, 6],
-            'num_heads': 6,
-            'mlp_ratio': 2.0,
-        },
-        'large': {
-            'embed_dim': 80,
-            'num_blocks': [6, 6, 6, 8, 8, 8],
-            'num_heads': 8,
-            'mlp_ratio': 2.0,
-        }
-    }
-
-    if variant not in configs:
+    if variant not in PFTSR.MODEL_VARIANTS:
         raise ValueError(
             f"Unknown variant: {variant}. "
-            f"Available variants: {list(configs.keys())}"
+            f"Available variants: {list(PFTSR.MODEL_VARIANTS.keys())}"
         )
 
-    config = configs[variant]
+    config = PFTSR.MODEL_VARIANTS[variant]
 
     return PFTSR(
         scale=scale,

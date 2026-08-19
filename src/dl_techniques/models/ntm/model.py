@@ -145,6 +145,13 @@ class NTMModel(keras.Model):
         }
     }
 
+    #: Canonical alias of ``NTM_VARIANTS`` (models/CLAUDE.md Axis 2: "where one
+    #: of those is the package's only variant table, add MODEL_VARIANTS as a
+    #: class-level alias to the same dict"). An ALIAS, never a rename -- the same
+    #: object under both names, so ``from_variant``, ``create_ntm_variant`` and
+    #: every existing reader stay on one table.
+    MODEL_VARIANTS = NTM_VARIANTS
+
     def __init__(
             self,
             input_shape: Tuple[Optional[int], int],

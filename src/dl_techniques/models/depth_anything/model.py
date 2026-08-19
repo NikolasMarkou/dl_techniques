@@ -155,6 +155,11 @@ from dl_techniques.models.vit.model import ViT
 from .components import DPTDecoder, REFERENCE_BN_EPSILON
 
 # Map depth_anything encoder_type slugs to ViT scale names.
+#
+# Kept as a module-level constant because it is also the SOURCE of
+# ``DepthAnything.MODEL_VARIANTS`` below: the three slugs are named in exactly
+# one place, so the encoder-type validation list can never drift from the
+# variant registry (it used to be a second hand-written literal in __init__).
 _VIT_SCALE_MAP: Dict[str, str] = {
     "vit_s": "small",
     "vit_b": "base",
@@ -241,6 +246,31 @@ class DepthAnything(keras.Model):
         (2, 384, 384, 1)
     """
 
+    # DECISION plan-2026-08-19-a616f581/D-009
+    # This table is DERIVED from `_VIT_SCALE_MAP`, not written out, and
+    # `supported_encoders` is read off it. WHAT NOT TO DO: do not re-inline the
+    # `['vit_s', 'vit_b', 'vit_l']` literal into __init__ (that is what was here
+    # before 2026-08-19 -- a second hand-written copy of the same three slugs,
+    # free to drift from the map that actually resolves them), and do not "align"
+    # this with the guard by renaming `encoder_type` to `variant` or adding a
+    # `from_variant`: the knob is serialized under `encoder_type` in every saved
+    # config, and renaming it would break `.keras` round-trips.
+    #
+    #: Public-name registry of the three published Depth Anything encoder sizes
+    #: (models/CLAUDE.md Axis 2). DERIVED from ``_VIT_SCALE_MAP`` -- no size is
+    #: invented here, and the ``supported_encoders`` validation list below is
+    #: read off this table rather than restated.
+    #:
+    #: This package is structurally INVISIBLE to the ``MODEL_VARIANTS`` guard in
+    #: ``tests/test_models/test_package_api_contract.py``: its variant knob is
+    #: spelled ``encoder_type``, not ``variant``, and it has no ``from_variant``,
+    #: so none of the guard's three predicates can fire on it. It is fixed here
+    #: because the gap is real, not because a test demanded it. See D-009.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        slug: {"encoder_type": slug, "vit_scale": scale}
+        for slug, scale in _VIT_SCALE_MAP.items()
+    }
+
     def __init__(
         self,
         encoder_type: str = 'vit_l',
@@ -271,7 +301,7 @@ class DepthAnything(keras.Model):
             image_shape = input_shape
 
         # Validate encoder type
-        self.supported_encoders = ['vit_s', 'vit_b', 'vit_l']
+        self.supported_encoders = list(self.MODEL_VARIANTS)
         if encoder_type not in self.supported_encoders:
             raise ValueError(
                 f"Unsupported encoder type: {encoder_type}. "

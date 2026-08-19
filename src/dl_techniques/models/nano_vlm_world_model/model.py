@@ -97,6 +97,7 @@ References:
       Diffusion Models. (https://arxiv.org/abs/2112.10752)
 """
 
+import copy
 import keras
 import numpy as np
 from keras import ops, layers
@@ -170,6 +171,57 @@ class ScoreBasedNanoVLM(keras.Model):
         generated_text = model.generate_from_image(image, num_steps=50)
         ```
     """
+
+    #: Public-name registry of the three named sizes (models/CLAUDE.md Axis 2).
+    #: Hoisted out of ``create_score_based_nanovlm``'s body on 2026-08-19, where
+    #: it was a local ``configs`` dict that nothing outside the function could
+    #: enumerate.
+    #:
+    #: ``text_config['vocab_size']`` is DELIBERATELY absent: it is a caller
+    #: argument, not a property of the variant. The factory injects it into a
+    #: ``copy.deepcopy`` of the selected entry -- deep-copied, never mutated in
+    #: place, so this class attribute cannot be corrupted by a call.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        'mini': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
+                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 384,
+                'depth': 6, 'num_heads': 6, 'max_seq_len': 512
+            },
+            'diffusion_config': {
+                'num_timesteps': 1000, 'beta_schedule': 'cosine'
+            }
+        },
+        'base': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
+                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 768,
+                'depth': 12, 'num_heads': 12, 'max_seq_len': 512
+            },
+            'diffusion_config': {
+                'num_timesteps': 1000, 'beta_schedule': 'cosine'
+            }
+        },
+        'large': {
+            'vision_config': {
+                'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
+                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 1024,
+                'depth': 24, 'num_heads': 16, 'max_seq_len': 1024
+            },
+            'diffusion_config': {
+                'num_timesteps': 1000, 'beta_schedule': 'cosine'
+            }
+        }
+    }
 
     def __init__(
             self,
@@ -723,49 +775,16 @@ def create_score_based_nanovlm(
     Returns:
         Configured ScoreBasedNanoVLM
     """
-    configs = {
-        'mini': {
-            'vision_config': {
-                'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
-                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 384,
-                'depth': 6, 'num_heads': 6, 'max_seq_len': 512
-            },
-            'diffusion_config': {
-                'num_timesteps': 1000, 'beta_schedule': 'cosine'
-            }
-        },
-        'base': {
-            'vision_config': {
-                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
-                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 768,
-                'depth': 12, 'num_heads': 12, 'max_seq_len': 512
-            },
-            'diffusion_config': {
-                'num_timesteps': 1000, 'beta_schedule': 'cosine'
-            }
-        },
-        'large': {
-            'vision_config': {
-                'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
-                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 1024,
-                'depth': 24, 'num_heads': 16, 'max_seq_len': 1024
-            },
-            'diffusion_config': {
-                'num_timesteps': 1000, 'beta_schedule': 'cosine'
-            }
-        }
-    }
+    if variant not in ScoreBasedNanoVLM.MODEL_VARIANTS:
+        raise ValueError(
+            f"Unknown variant '{variant}'. "
+            f"Available: {list(ScoreBasedNanoVLM.MODEL_VARIANTS.keys())}"
+        )
 
-    config = configs[variant]
+    # Deep-copied: `vocab_size` is a caller argument, and writing it into the
+    # class table itself would make every later call inherit this call's value.
+    config = copy.deepcopy(ScoreBasedNanoVLM.MODEL_VARIANTS[variant])
+    config['text_config']['vocab_size'] = vocab_size
 
     return ScoreBasedNanoVLM(
         vision_config=config['vision_config'],

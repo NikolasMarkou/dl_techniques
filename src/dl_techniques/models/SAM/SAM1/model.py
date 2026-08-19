@@ -239,6 +239,36 @@ class SAM(keras.Model):
         predictions with different prompts very efficient.
     """
 
+    #: Public-name registry of the three published SAM 1 checkpoint geometries
+    #: (models/CLAUDE.md Axis 2). Hoisted verbatim out of ``from_variant``'s body
+    #: on 2026-08-19: the table was a local ``configs`` dict, so nothing outside
+    #: the method could enumerate the variants -- ``getattr(SAM, "MODEL_VARIANTS")``
+    #: raised ``AttributeError``, the same failure mode ``fastvit`` had.
+    #:
+    #: Every value is a kwarg of :class:`ImageEncoderViT`; the prompt-encoder and
+    #: mask-decoder geometry is IDENTICAL across all three variants and therefore
+    #: stays in ``from_variant`` rather than being restated three times here.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        "vit_h": {
+            "encoder_embed_dim": 1280,
+            "encoder_depth": 32,
+            "encoder_num_heads": 16,
+            "encoder_global_attn_indexes": [7, 15, 23, 31],
+        },
+        "vit_l": {
+            "encoder_embed_dim": 1024,
+            "encoder_depth": 24,
+            "encoder_num_heads": 16,
+            "encoder_global_attn_indexes": [5, 11, 17, 23],
+        },
+        "vit_b": {
+            "encoder_embed_dim": 768,
+            "encoder_depth": 12,
+            "encoder_num_heads": 12,
+            "encoder_global_attn_indexes": [2, 5, 8, 11],
+        },
+    }
+
     def __init__(
         self,
         image_encoder: ImageEncoderViT,
@@ -642,35 +672,13 @@ class SAM(keras.Model):
             )
             ```
         """
-        if variant not in ["vit_b", "vit_l", "vit_h"]:
+        if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant: '{variant}'. "
-                f"Supported variants are: 'vit_b', 'vit_l', 'vit_h'"
+                f"Supported variants are: {sorted(cls.MODEL_VARIANTS)}"
             )
 
-        # Configuration for each variant
-        configs = {
-            "vit_h": {
-                "encoder_embed_dim": 1280,
-                "encoder_depth": 32,
-                "encoder_num_heads": 16,
-                "encoder_global_attn_indexes": [7, 15, 23, 31],
-            },
-            "vit_l": {
-                "encoder_embed_dim": 1024,
-                "encoder_depth": 24,
-                "encoder_num_heads": 16,
-                "encoder_global_attn_indexes": [5, 11, 17, 23],
-            },
-            "vit_b": {
-                "encoder_embed_dim": 768,
-                "encoder_depth": 12,
-                "encoder_num_heads": 12,
-                "encoder_global_attn_indexes": [2, 5, 8, 11],
-            },
-        }
-
-        config = configs[variant]
+        config = cls.MODEL_VARIANTS[variant]
 
         # Common configuration across all variants
         prompt_embed_dim = 256

@@ -97,6 +97,7 @@ References:
       Models. (https://arxiv.org/abs/1608.05859)
 """
 
+import copy
 import keras
 from keras import ops, layers, initializers, regularizers
 from typing import Dict, Optional, Tuple, Union, Any, Literal
@@ -235,6 +236,62 @@ class NanoVLM(keras.Model):
         "Complete Guide to Modern Keras 3 Custom Layers and Models" and demonstrates
         proper integration of existing framework components for production deployment.
     """
+
+    #: Public-name registry of the three named nanoVLM sizes (models/CLAUDE.md
+    #: Axis 2). Hoisted out of ``create_nanovlm``'s body on 2026-08-19, where it
+    #: was a local ``variants`` dict that nothing outside the function could
+    #: enumerate.
+    #:
+    #: Two keys the local table carried are DELIBERATELY absent here, because
+    #: they are caller arguments and not properties of the variant:
+    #: ``text_config['vocab_size']`` and ``fusion_config['fusion_strategy']``.
+    #: ``create_nanovlm`` injects both into a ``copy.deepcopy`` of the entry it
+    #: selects -- deep-copied, never mutated in place, so this class attribute
+    #: cannot be corrupted by a call (the shared-mutable-default failure mode).
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        'mini': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
+                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 384, 'depth': 6,
+                'num_heads': 6, 'max_seq_len': 512
+            },
+            'fusion_config': {
+                'dim': 384,
+                'attention_config': {'num_heads': 6}, 'num_fusion_layers': 3
+            }
+        },
+        'base': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
+                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 768, 'depth': 12,
+                'num_heads': 12, 'max_seq_len': 512
+            },
+            'fusion_config': {
+                'dim': 768,
+                'attention_config': {'num_heads': 12}, 'num_fusion_layers': 6
+            }
+        },
+        'large': {
+            'vision_config': {
+                'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
+                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 1024, 'depth': 24,
+                'num_heads': 16, 'max_seq_len': 1024
+            },
+            'fusion_config': {
+                'dim': 1024,
+                'attention_config': {'num_heads': 16}, 'num_fusion_layers': 8
+            }
+        }
+    }
 
     def __init__(
             self,
@@ -826,55 +883,18 @@ def create_nanovlm(
         TRAINED at matched lengths, but `generate()` accepts `'cross_attention'`
         alone and refuses the rest by name — see its own docstring.
     """
-    variants = {
-        'mini': {
-            'vision_config': {
-                'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
-                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 384, 'depth': 6,
-                'num_heads': 6, 'max_seq_len': 512
-            },
-            'fusion_config': {
-                'fusion_strategy': fusion_strategy, 'dim': 384,
-                'attention_config': {'num_heads': 6}, 'num_fusion_layers': 3
-            }
-        },
-        'base': {
-            'vision_config': {
-                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
-                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 768, 'depth': 12,
-                'num_heads': 12, 'max_seq_len': 512
-            },
-            'fusion_config': {
-                'fusion_strategy': fusion_strategy, 'dim': 768,
-                'attention_config': {'num_heads': 12}, 'num_fusion_layers': 6
-            }
-        },
-        'large': {
-            'vision_config': {
-                'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
-                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 1024, 'depth': 24,
-                'num_heads': 16, 'max_seq_len': 1024
-            },
-            'fusion_config': {
-                'fusion_strategy': fusion_strategy, 'dim': 1024,
-                'attention_config': {'num_heads': 16}, 'num_fusion_layers': 8
-            }
-        }
-    }
+    if variant not in NanoVLM.MODEL_VARIANTS:
+        raise ValueError(
+            f"Unknown variant '{variant}'. "
+            f"Available: {list(NanoVLM.MODEL_VARIANTS.keys())}"
+        )
 
-    if variant not in variants:
-        raise ValueError(f"Unknown variant '{variant}'. Available: {list(variants.keys())}")
-
-    config = variants[variant]
+    # Deep-copied: `vocab_size` and `fusion_strategy` are caller arguments, and
+    # writing them into the class table itself would make every later call
+    # inherit this call's values.
+    config = copy.deepcopy(NanoVLM.MODEL_VARIANTS[variant])
+    config['text_config']['vocab_size'] = vocab_size
+    config['fusion_config']['fusion_strategy'] = fusion_strategy
 
     return NanoVLM(
         vision_config=config['vision_config'],

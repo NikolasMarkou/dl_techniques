@@ -115,6 +115,15 @@ class KAN(keras.Model):
         "xlarge": {"hidden_features": [512, 256, 128, 64], "grid_size": 12, "spline_order": 3, "activation": "gelu"},
     }
 
+    #: Canonical alias of ``VARIANT_CONFIGS`` (models/CLAUDE.md Axis 2: "where one
+    #: of those is the package's only variant table, add MODEL_VARIANTS as a
+    #: class-level alias to the same dict"). An ALIAS, never a rename -- the same
+    #: object under both names, so ``from_variant`` and every existing reader stay
+    #: on one table. ``src/train/kan/`` and this package's own tests reference the
+    #: ``VARIANT_CONFIGS`` spelling, and the module docstring above explains why
+    #: that spelling stays; adding the alias is what the rule actually asks for.
+    MODEL_VARIANTS = VARIANT_CONFIGS
+
     def __init__(
         self,
         layer_configs: List[Dict[str, Any]],

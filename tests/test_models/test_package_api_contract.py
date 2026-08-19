@@ -1124,3 +1124,448 @@ class TestNormalizationKnobsAreForwarded:
                 UserWarning,
                 stacklevel=2,
             )
+
+
+# ---------------------------------------------------------------------------
+# MODEL_VARIANTS: the house rule's variant registry, previously unguarded.
+# ---------------------------------------------------------------------------
+
+#: Legacy spellings of the variant registry, per ``models/CLAUDE.md`` Axis 2:
+#: "Packages that predate this spec also use ``VARIANT_CONFIGS``, ``NAM_VARIANTS``,
+#: ``NTM_VARIANTS`` or ``MCI_VARIANTS`` for that same role; where one of those is
+#: the package's *only* variant table, add ``MODEL_VARIANTS`` as a class-level
+#: alias to the same dict."
+#:
+#: ``SCALE_CONFIGS`` is deliberately NOT here: the same section says in bold that
+#: it "is NOT a stale spelling of MODEL_VARIANTS, and the two must not be merged
+#: where both appear" -- it is the architecture table, MODEL_VARIANTS is the
+#: public-name registry, and ``beit``/``vit``/``energy_transformer`` carry both.
+_LEGACY_VARIANT_TABLE_RE = re.compile(r"^(?:[A-Z0-9]+_VARIANTS|VARIANT_CONFIGS)$")
+
+#: Deliberate exceptions, keyed by ``(relpath, symbol, kind)`` -- never by line
+#: number, for the reason ``_SCHEDULED_FIXES`` gives. Each carries the read that
+#: clears it, and ``test_waivers_still_match_a_real_site`` fails if one stops
+#: matching, so a waiver cannot outlive the thing it waives.
+_MODEL_VARIANTS_WAIVERS = {
+    # SD3VAE is not a keras.Model: it is a plain Python holder pairing an
+    # ideogram4 ``AutoEncoder`` with SD3's latent-norm helpers (its own docstring
+    # says so). Its ``from_variant`` delegates to ``create_sd3_vae`` ->
+    # ``config.get_sd3_config(variant)``, and the sd3_mmdit family's variant
+    # registry has ONE home there (``config.PRESETS``, shared by the transformer,
+    # the VAE and the pipeline). Restating it as ``SD3VAE.MODEL_VARIANTS`` would
+    # create the second home the house rule exists to prevent. models/CLAUDE.md
+    # § "When the shape does not apply": multi-model families apply the shape per
+    # inner architecture, and the inner architecture here is ``AutoEncoder``.
+    (
+        "models/sd3_mmdit/vae.py",
+        "SD3VAE",
+        "from_variant-without-table",
+    ),
+}
+
+
+def _module_level_names(tree: ast.Module) -> set:
+    """Names assigned at module scope (``Assign`` and ``AnnAssign`` alike)."""
+    names = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _class_body_names(cls: ast.ClassDef) -> set:
+    """Names assigned in a class BODY (class attributes), not in its methods."""
+    names = set()
+    for node in cls.body:
+        if isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _is_variant_table_literal(node: ast.expr) -> bool:
+    """A ``{'name': {...}, ...}`` literal: string keys, dict values, non-empty."""
+    if not isinstance(node, ast.Dict) or not node.keys:
+        return False
+    if not all(
+        isinstance(k, ast.Constant) and isinstance(k.value, str) for k in node.keys
+    ):
+        return False
+    return all(isinstance(v, ast.Dict) for v in node.values)
+
+
+def _iter_modules(roots, src_root):
+    """Yield ``(relpath, ast.Module)`` for every parseable file under ``roots``.
+
+    Contract: same arguments and same silent-skip-on-SyntaxError policy as
+    ``_iter_classes``; this one keeps the MODULE node because the MODEL_VARIANTS
+    rule is satisfiable at module scope (``beit``/``energy_transformer`` define
+    theirs there, deliberately) and because one of its three predicates walks
+    module-level FUNCTIONS, which ``_iter_classes`` cannot reach.
+    """
+    for root in roots:
+        for path in sorted(Path(root).rglob("*.py")):
+            rel = path.relative_to(src_root).as_posix()
+            try:
+                yield rel, ast.parse(path.read_text())
+            except SyntaxError:  # covered by the import tests
+                continue
+
+
+def _sweep_model_variants(roots=None, src_root=None):
+    """Find named-variant registries that are not reachable as ``MODEL_VARIANTS``.
+
+    Contract: returns ``(hits, counts)``.
+
+    * ``hits`` -- ``(relpath, lineno, symbol, kind, detail)`` where ``kind`` is one
+      of three predicates, each transcribed from a different sentence of
+      ``models/CLAUDE.md`` § Axis 2:
+
+      - ``"from_variant-without-table"``: *"``from_variant(cls, variant, ...)``
+        looks the name up in ``MODEL_VARIANTS``"*. A class defining
+        ``from_variant`` whose module and class body both lack ``MODEL_VARIANTS``
+        **and** whose ``from_variant`` body never reads the name at all. The last
+        clause is what clears ``DINOv2``, whose ``from_variant`` deliberately
+        reads ``DINOv2VisionTransformer.MODEL_VARIANTS`` -- one table, one home,
+        exactly what the rule wants.
+      - ``"legacy-table-without-alias"``: *"where one of those is the package's
+        only variant table, add ``MODEL_VARIANTS`` as a class-level alias"*.
+      - ``"function-local-table"``: a function taking a ``variant`` parameter that
+        builds its variant table as a LOCAL dict literal. Nothing external can
+        reach it -- ``getattr(cls, "MODEL_VARIANTS")`` raises, which is the exact
+        failure mode that got ``fastvit`` fixed on 2026-08-19.
+
+    * ``counts`` -- vacuity denominators: ``n_classes``, ``n_from_variant``,
+      ``n_legacy_tables``, ``n_variant_functions``.
+
+    ``roots``/``src_root`` default to the real tree; they exist so the predicates
+    can be pointed at a synthetic fixture and proven to fire, exactly as in
+    ``_sweep_transformer_layer_norm_args``.
+    """
+    roots = (MODELS_DIR,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    hits: List[tuple] = []
+    counts = dict(
+        n_classes=0, n_from_variant=0, n_legacy_tables=0, n_variant_functions=0
+    )
+
+    for rel, tree in _iter_modules(roots, src_root):
+        module_names = _module_level_names(tree)
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            counts["n_classes"] += 1
+            body_names = _class_body_names(cls)
+            has_alias = "MODEL_VARIANTS" in body_names or "MODEL_VARIANTS" in module_names
+            legacy = sorted(
+                n
+                for n in body_names
+                if _LEGACY_VARIANT_TABLE_RE.match(n) and n != "MODEL_VARIANTS"
+            )
+            from_variant = next(
+                (
+                    n
+                    for n in cls.body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and n.name == "from_variant"
+                ),
+                None,
+            )
+            if from_variant is not None:
+                counts["n_from_variant"] += 1
+                reads_table = any(
+                    (isinstance(n, ast.Attribute) and n.attr == "MODEL_VARIANTS")
+                    or (isinstance(n, ast.Name) and n.id == "MODEL_VARIANTS")
+                    for n in ast.walk(from_variant)
+                )
+                if not (has_alias or reads_table):
+                    hits.append(
+                        (
+                            rel,
+                            from_variant.lineno,
+                            cls.name,
+                            "from_variant-without-table",
+                            "from_variant resolves no MODEL_VARIANTS table",
+                        )
+                    )
+            if legacy:
+                counts["n_legacy_tables"] += 1
+                if "MODEL_VARIANTS" not in body_names:
+                    hits.append(
+                        (
+                            rel,
+                            cls.lineno,
+                            cls.name,
+                            "legacy-table-without-alias",
+                            f"only table is {'/'.join(legacy)}",
+                        )
+                    )
+
+        for fn in [
+            n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]:
+            args = fn.args
+            names = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+            if "variant" not in names:
+                continue
+            counts["n_variant_functions"] += 1
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign) and _is_variant_table_literal(node.value):
+                    local = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                    if not local:
+                        continue
+                    hits.append(
+                        (
+                            rel,
+                            node.lineno,
+                            fn.name,
+                            "function-local-table",
+                            f"local `{local[0]}` holds {len(node.value.keys)} named "
+                            "variants that nothing can introspect",
+                        )
+                    )
+    return hits, counts
+
+
+#: Synthetic package-shaped source, never imported -- only parsed. All three
+#: predicates must fire on it and be silent on its twin below.
+_INJECTED_VARIANTS_DEFECT_SRC = '''
+class InjectedFromVariantUser(keras.Model):
+    def __init__(self, width=8, **kwargs):
+        super().__init__(**kwargs)
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        if variant == "small":
+            return cls(width=8, **kwargs)
+        return cls(width=16, **kwargs)
+
+
+class InjectedLegacyTableUser(keras.Model):
+    NAM_VARIANTS = {"small": {"width": 8}, "large": {"width": 16}}
+
+    def __init__(self, width=8, **kwargs):
+        super().__init__(**kwargs)
+
+
+def create_injected(variant="small", **kwargs):
+    configs = {"small": {"width": 8}, "large": {"width": 16}}
+    return InjectedFromVariantUser(**configs[variant], **kwargs)
+'''
+
+#: The same three sites, repaired the way the house rule asks.
+_INJECTED_VARIANTS_FIXED_SRC = '''
+class InjectedFromVariantUser(keras.Model):
+    MODEL_VARIANTS = {"small": {"width": 8}, "large": {"width": 16}}
+
+    def __init__(self, width=8, **kwargs):
+        super().__init__(**kwargs)
+
+    @classmethod
+    def from_variant(cls, variant, **kwargs):
+        return cls(**cls.MODEL_VARIANTS[variant], **kwargs)
+
+
+class InjectedLegacyTableUser(keras.Model):
+    NAM_VARIANTS = {"small": {"width": 8}, "large": {"width": 16}}
+    MODEL_VARIANTS = NAM_VARIANTS
+
+    def __init__(self, width=8, **kwargs):
+        super().__init__(**kwargs)
+
+
+def create_injected(variant="small", **kwargs):
+    return InjectedFromVariantUser.from_variant(variant, **kwargs)
+'''
+
+
+class TestModelVariantsArePresent:
+    """Named variants must be reachable as ``MODEL_VARIANTS``, not just callable.
+
+    ``models/CLAUDE.md`` § Axis 2 makes ``MODEL_VARIANTS`` the canonical name for
+    the registry of publicly named variants, tells packages carrying a legacy
+    spelling to add it as a class-level alias, and defines ``from_variant`` as the
+    method that "looks the name up in ``MODEL_VARIANTS``". Until this class
+    shipped **nothing enforced any of that** -- the convention was documented and
+    unguarded, which is how ``fastvit`` reached 2026-08-19 with
+    ``getattr(FastVitImageEncoder, "MODEL_VARIANTS")`` raising ``AttributeError``
+    while this very file asserted the opposite in prose.
+
+    Narrowings, each a place this can miss a real defect:
+
+    * a package whose named sizes are exposed under a DIFFERENT parameter name is
+      invisible here. ``depth_anything`` takes ``encoder_type='vit_s'|'vit_b'|
+      'vit_l'`` -- three genuine published sizes -- and no predicate below fires
+      on it, because none of them can tell that knob apart from any other
+      validated string argument. It was given a ``MODEL_VARIANTS`` table anyway
+      (see decisions.md D-009); the guard simply cannot be what keeps it;
+    * the local-table predicate needs a ``variant``-named parameter AND a literal
+      ``{str: dict}`` assignment. A table built by a loop, a comprehension, or
+      ``dict(...)`` is not seen;
+    * ``SCALE_CONFIGS`` is out of scope by explicit instruction of the rule.
+    """
+
+    def test_every_from_variant_class_resolves_a_model_variants_table(self):
+        # DECISION plan-2026-08-19-a616f581/D-009
+        # The trigger for this guard is EVIDENCE OF NAMED VARIANTS (a
+        # `from_variant`, a legacy table, or a hidden local table) -- NOT "is a
+        # keras.Model". WHAT NOT TO DO: do not "strengthen" this into "every
+        # model class must declare MODEL_VARIANTS". models/CLAUDE.md
+        # § "When the shape does not apply" says in terms: "Do not invent a
+        # MODEL_VARIANTS table to satisfy the template" -- a package with no
+        # genuine named variants is compliant WITHOUT one, and the strengthened
+        # form would demand fabricated tables from ~20 packages. See D-009.
+        hits, _ = _sweep_model_variants()
+        offenders = [
+            f"{rel}:{line} {sym}: {detail}"
+            for rel, line, sym, kind, detail in hits
+            if kind == "from_variant-without-table"
+            and (rel, sym, kind) not in _MODEL_VARIANTS_WAIVERS
+        ]
+        assert not offenders, (
+            "a from_variant classmethod resolves no MODEL_VARIANTS table, so its "
+            "variants exist only inside its own body. Hoist them to a class-level "
+            "MODEL_VARIANTS dict (models/CLAUDE.md Axis 2). Found:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_every_legacy_variant_table_has_a_model_variants_alias(self):
+        hits, _ = _sweep_model_variants()
+        offenders = [
+            f"{rel}:{line} {sym}: {detail}"
+            for rel, line, sym, kind, detail in hits
+            if kind == "legacy-table-without-alias"
+            and (rel, sym, kind) not in _MODEL_VARIANTS_WAIVERS
+        ]
+        assert not offenders, (
+            "a class's only variant table uses a legacy spelling with no "
+            "MODEL_VARIANTS alias. Add `MODEL_VARIANTS = <existing name>` in the "
+            "class body -- an ALIAS, never a rename: src/train/ and the test "
+            "suites reference the old spelling. Found:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_no_variant_table_hides_inside_a_factory_body(self):
+        hits, _ = _sweep_model_variants()
+        offenders = [
+            f"{rel}:{line} {sym}(): {detail}"
+            for rel, line, sym, kind, detail in hits
+            if kind == "function-local-table"
+            and (rel, sym, kind) not in _MODEL_VARIANTS_WAIVERS
+        ]
+        assert not offenders, (
+            "a factory's variant table is a local variable, so no caller can "
+            "enumerate the variants it accepts. Hoist it to the model class as "
+            "MODEL_VARIANTS and read it from the factory. Found:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_sweep_found_variant_sites(self):
+        """The AST walk must not silently collapse to nothing.
+
+        Floors are set well under the 2026-08-19 measurement (252 classes, 64
+        ``from_variant`` classes, 2 legacy tables, 150 functions taking
+        ``variant``) so ordinary churn does not trip them. The legacy-table
+        denominator is deliberately NOT floored above 1: there are only two such
+        classes left in the tree, and fixing them by renaming is forbidden, so it
+        should stay at two.
+        """
+        _, counts = _sweep_model_variants()
+        assert counts["n_classes"] >= 150, counts
+        assert counts["n_from_variant"] >= 40, counts
+        assert counts["n_variant_functions"] >= 100, counts
+        assert counts["n_legacy_tables"] >= 2, counts
+
+    def test_predicate_fires_on_an_injected_defect(self, tmp_path):
+        """Dead-component probe: all three predicates must go RED on a real gap."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_VARIANTS_DEFECT_SRC)
+        hits, counts = _sweep_model_variants(roots, src_root)
+        assert counts["n_from_variant"] == 1 and counts["n_legacy_tables"] == 1
+        # 2, not 1: `from_variant(cls, variant, **kwargs)` takes a `variant`
+        # parameter too, so it is counted alongside `create_injected`.
+        assert counts["n_variant_functions"] == 2
+        by_kind = {kind: (sym, detail) for _, _, sym, kind, detail in hits}
+        assert set(by_kind) == {
+            "from_variant-without-table",
+            "legacy-table-without-alias",
+            "function-local-table",
+        }, hits
+        assert by_kind["from_variant-without-table"][0] == "InjectedFromVariantUser"
+        assert by_kind["legacy-table-without-alias"][0] == "InjectedLegacyTableUser"
+        assert by_kind["function-local-table"][0] == "create_injected"
+
+    def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
+        """...and must NOT fire once the same three sites are repaired."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_VARIANTS_FIXED_SRC)
+        hits, counts = _sweep_model_variants(roots, src_root)
+        assert counts["n_from_variant"] == 1, "the fixture must still be reached"
+        assert counts["n_legacy_tables"] == 1, "the fixture must still be reached"
+        assert counts["n_variant_functions"] == 2, "the fixture must still be reached"
+        assert hits == [], hits
+
+    @pytest.mark.parametrize(
+        "module_path,class_name,expected_keys",
+        [
+            ("dl_techniques.models.SAM.SAM1.model", "SAM", ["vit_b", "vit_h", "vit_l"]),
+            ("dl_techniques.models.kan.model", "KAN",
+             ["large", "medium", "micro", "small", "xlarge"]),
+            ("dl_techniques.models.ntm.model", "NTMModel", ["base", "large", "tiny"]),
+            ("dl_techniques.models.nano_vlm.model", "NanoVLM",
+             ["base", "large", "mini"]),
+            ("dl_techniques.models.nano_vlm_world_model.model", "ScoreBasedNanoVLM",
+             ["base", "large", "mini"]),
+            ("dl_techniques.models.pft_sr.model", "PFTSR",
+             ["base", "large", "light"]),
+            ("dl_techniques.models.depth_anything.model", "DepthAnything",
+             ["vit_b", "vit_l", "vit_s"]),
+        ],
+    )
+    def test_repaired_packages_expose_their_variants_at_runtime(
+        self, module_path, class_name, expected_keys
+    ):
+        """The seven classes repaired on 2026-08-19, pinned by RESOLVED value.
+
+        The three sweeps above are static: they prove a class BODY assigns the
+        name. This one proves ``getattr(cls, "MODEL_VARIANTS")`` actually
+        resolves on the imported class and enumerates the variants the package
+        already supported -- which is the property that was missing (the fastvit
+        report was an ``AttributeError`` at runtime, not an AST observation), and
+        the property an alias or a class-attribute hoist could get wrong.
+
+        The key lists are DERIVED, not chosen: every one of them is the key set
+        the package's own factory or ``from_variant`` already accepted before the
+        repair. No variant was invented.
+        """
+        cls = getattr(importlib.import_module(module_path), class_name)
+        table = getattr(cls, "MODEL_VARIANTS", None)
+        assert isinstance(table, dict), (
+            f"{class_name}.MODEL_VARIANTS must resolve to a dict, got {table!r}"
+        )
+        assert sorted(table) == sorted(expected_keys), (
+            f"{class_name}.MODEL_VARIANTS keys changed: {sorted(table)} != "
+            f"{sorted(expected_keys)}"
+        )
+        assert all(isinstance(v, dict) for v in table.values()), table
+
+    def test_legacy_aliases_are_the_same_object_not_a_copy(self):
+        """``MODEL_VARIANTS = <legacy>`` must ALIAS, so one edit reaches both.
+
+        A copy would satisfy every static predicate above and still let the two
+        spellings drift -- which is the whole reason the house rule says "alias to
+        the same dict" and "prefer an alias over renaming in place".
+        """
+        from dl_techniques.models.kan.model import KAN
+        from dl_techniques.models.ntm.model import NTMModel
+
+        assert KAN.MODEL_VARIANTS is KAN.VARIANT_CONFIGS
+        assert NTMModel.MODEL_VARIANTS is NTMModel.NTM_VARIANTS
+
+    def test_waivers_still_match_a_real_site(self):
+        """A waiver matching nothing is a waiver hiding nothing (see the siblings)."""
+        hits, _ = _sweep_model_variants()
+        live = {(rel, sym, kind) for rel, _, sym, kind, _ in hits}
+        stale = sorted(_MODEL_VARIANTS_WAIVERS - live)
+        assert not stale, (
+            "MODEL_VARIANTS waiver entries no longer match any site; delete them "
+            f"if the exception is gone, re-key them if the code moved: {stale}"
+        )
