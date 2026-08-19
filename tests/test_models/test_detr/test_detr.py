@@ -335,3 +335,50 @@ class TestDetrSerialization:
         for key in ("num_classes", "num_queries", "hidden_dim", "aux_loss",
                     "backbone", "transformer"):
             assert key in cfg, f"Missing key '{key}' in get_config()"
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at this file's own tiny geometry (HIDDEN_DIM=32,
+# 2 encoder + 2 decoder layers, 5 queries, 64x64 image, stub backbone):
+# 79 trainable weights, 0 dead, 0 non-finite. No waiver is needed and none is
+# given. DETR is a plausible home for a dead component -- ``aux_loss=True``
+# means the intermediate decoder layers are supposed to be supervised, and the
+# suite's existing tests assert only shapes and key presence, which a model
+# whose decoder never trains would satisfy exactly.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestDetrGradientFlow:
+    """Every trainable weight receives a finite, nonzero gradient."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _make_tiny_detr(aux_loss=True)
+        images, mask = _forward_inputs()
+        inputs = [images, mask]
+        model(inputs, training=False)  # subclassed model: unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, inputs)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_gradients_reach_every_trainable_weight_without_aux_loss(self):
+        """``aux_loss=False`` drops the intermediate outputs, not the weights.
+
+        The decoder layers still run; only their auxiliary heads' outputs are
+        withheld from the returned dict. If turning aux_loss off left any
+        decoder weight off the backward graph, that would be a real defect and
+        the two-arm comparison is what shows it.
+        """
+        model = _make_tiny_detr(aux_loss=False)
+        images, mask = _forward_inputs()
+        inputs = [images, mask]
+        model(inputs, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, inputs)
+        assert len(report) == len(model.trainable_weights)

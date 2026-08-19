@@ -738,3 +738,48 @@ class TestPadTokenIsRequiredEagerly:
         np.random.seed(0)
         _, info = s.mcmc_power_sample("abc")
         _assert_mcmc_actually_ran(info, what="mcmc_power_sample")
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11) -- NOT ADOPTABLE, on purpose
+# ---------------------------------------------------------------------
+#
+# This suite is one of the 29 under `tests/test_models/` that had no
+# gradient-flow test, and it is one of only TWO that cannot get one: there is no
+# model here to assert about. `dl_techniques.models.power_sampling` is an
+# INFERENCE-TIME sampler -- config + numpy ops + forward closures + the MCMC
+# dispatch -- and its own package docstring says so ("... subclasses
+# `keras.Model`, so there is nothing for a model factory to build"). A
+# `keras.Model` appears nowhere in the package, so there are no trainable
+# weights and a gradient-flow assertion would be vacuous rather than merely
+# absent.
+#
+# The claim is recorded as a TEST rather than a comment so the census cannot rot
+# into "someone forgot". If a trainable component is ever added here, this test
+# fails and the gradient-flow adoption becomes required.
+
+
+def test_this_package_ships_no_trainable_model():
+    """Why this suite has no gradient-flow test: there is nothing to train."""
+    import inspect
+    import pkgutil
+    import importlib
+
+    import dl_techniques.models.power_sampling as pkg
+
+    offenders = []
+    for module_info in pkgutil.iter_modules(pkg.__path__):
+        module = importlib.import_module(f"{pkg.__name__}.{module_info.name}")
+        for name, obj in vars(module).items():
+            if not inspect.isclass(obj) or obj.__module__ != module.__name__:
+                continue
+            bases = {base.__name__ for base in inspect.getmro(obj)}
+            if bases & {"Model", "Layer"}:
+                offenders.append(f"{module.__name__}.{name}")
+
+    assert not offenders, (
+        "power_sampling now ships a Keras component: "
+        f"{offenders}. It therefore has trainable weights, and this suite needs "
+        "the shared gradient-flow oracle "
+        "(tests/test_models/gradient_flow_oracle.py) like the other 27."
+    )

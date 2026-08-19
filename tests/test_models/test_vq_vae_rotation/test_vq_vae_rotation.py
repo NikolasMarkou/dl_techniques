@@ -484,3 +484,84 @@ class TestRotationAuxiliaryLossesReachTheObjective:
         model_sum = float(ops.convert_to_numpy(
             ops.sum(ops.stack(model.losses))))
         assert model_sum == pytest.approx(quantizer_sum, abs=1e-6)
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19: 35 trainable weights, 0 dead under the model's REAL
+# objective. One detail is load-bearing and is spelled out because getting it
+# wrong produces a convincing false finding:
+#
+#   loss_fn = default_loss (mean-of-squares over the OUTPUT only)
+#       -> `vector_quantizer_rotation_trick/embeddings` receives NO gradient.
+#   loss_fn = train_step's objective (recon + sum(self.losses))
+#       -> 0 of 35 dead.
+#
+# The codebook is not trained by the reconstruction path at all; it is trained
+# by the codebook/commitment terms the quantizer registers with `add_loss`, and
+# `VQVAERotationTrick.train_step` optimizes `recon + sum(self.losses)` (see the
+# `# DECISION plan-2026-08-18T140459-7991552f/D-026` anchor there, which is
+# about summing `self.losses` rather than `self.quantizer.losses`). So a
+# gradient-flow test that used the oracle's default loss here would report a
+# dead codebook in a perfectly healthy model. The rule the oracle's docstring
+# states -- pass `loss_fn=` when the model has a real objective -- is not
+# optional for a model whose objective lives in `add_loss`.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestVQVAERotationGradientFlow:
+    """Every trainable weight is on the backward graph of the REAL objective."""
+
+    def _model(self, gradient_mode="rotation"):
+        return VQVAERotationTrick(
+            num_embeddings=32, embedding_dim=16, input_shape=(32, 32, 3),
+            hidden_channels=32, downsample_factor=4, num_res_blocks=1,
+            norm_type="layer_norm", gradient_mode=gradient_mode,
+        )
+
+    @pytest.mark.parametrize("gradient_mode", ["rotation", "ste"])
+    def test_gradients_reach_every_trainable_weight(self, sample_images, gradient_mode):
+        model = self._model(gradient_mode)
+        model(sample_images, training=False)
+
+        def train_step_objective(outputs):
+            recon = ops.mean(ops.square(sample_images - outputs))
+            recon = model.reconstruction_loss_weight * recon
+            aux = model.losses
+            return recon + (ops.sum(ops.stack(aux)) if aux else 0.0)
+
+        report = assert_gradients_reach_every_trainable_weight(
+            model, sample_images, loss_fn=train_step_objective
+        )
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        codebook = [p for p in report if "embeddings" in p]
+        assert codebook, "no codebook weight found -- has the quantizer changed?"
+        assert all(report[p] is not None and report[p] > 0.0 for p in codebook)
+
+    def test_the_codebook_needs_the_add_loss_terms(self, sample_images):
+        """The comment above, made falsifiable.
+
+        If the codebook ever became reachable from the reconstruction path
+        alone, this test fails and the `loss_fn=` above is no longer required
+        -- which is a change worth being told about, not one to discover by
+        reading. It compares the SAME instance under the two objectives.
+        """
+        from ..gradient_flow_oracle import gradient_report
+
+        model = self._model()
+        model(sample_images, training=False)
+
+        output_only = gradient_report(model, sample_images)
+        codebook = [p for p in output_only if "embeddings" in p]
+        assert codebook
+        assert all(
+            output_only[p] is None or output_only[p] == 0.0 for p in codebook
+        ), (
+            "the codebook IS reachable from the reconstruction output now; the "
+            "loss_fn= in the test above is no longer load-bearing"
+        )

@@ -731,3 +731,86 @@ class TestOverfitControl:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+#: The ONE weight the classifier legitimately never trains.
+#:
+# DECISION plan-2026-08-19-a616f581/D-013
+# `mask_token/mask_token` is waived HERE (classifier only) BY DESIGN, and the
+# product code says so in as many words. `EnergyTransformerBackbone.build`
+# (`models/energy_transformer/model.py`) carries the literal comment
+# `# ALWAYS built - even in the classifier, which never calls it.` directly
+# above `self.mask_token.build([token_shape, mask_shape])`, and the build
+# docstring gives the reason: "The shapes come from the CONFIG, never from
+# `input_shape`'s optional mask entry, so `mask_token` is built identically
+# whether or not the caller ever passes a mask (I6). A lazily-built sub-layer
+# silently drops its weights on a `.keras` round-trip." `call` then applies it
+# under a TRACE-TIME `if input_mask is not None`, and the classifier passes an
+# image alone, so the token is never on the classifier's forward path.
+#
+# Do NOT widen this to the MIM head: `TestEnergyTransformerMIMGradientFlow`
+# below is the positive half of this waiver and requires the SAME tensor to be
+# live there (13 of 13, no waivers). Waiving a weight that is dead everywhere
+# would be indistinguishable from a defect; waiving one whose sibling head
+# trains it is a real claim about the architecture.
+# Do NOT "fix" this by building the token lazily -- that is the serialization
+# bug the docstring above names.
+# `expect_zero` is two-sided (D-010): if the classifier ever starts masking, the
+# oracle raises "the waiver is obsolete"; if the layer is renamed, "stale
+# waiver".
+# See GF-05 in
+# plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md
+CLASSIFIER_NEVER_MASKS = ("mask_token/mask_token",)
+
+
+class TestEnergyTransformerMIMGradientFlow:
+    """The MIM head: every trainable weight is on the backward graph.
+
+    Runs at the file's REALISTIC geometry (N = 196, T = 12, variant tiny) like
+    everything else here -- a toy N is banned in this suite, and a gradient
+    claim measured at a toy N would be the same kind of non-evidence.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _mim()
+        image, input_mask = _fixed_batch(batch=2)[:2]
+        inputs = [image, input_mask]
+        model(inputs, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, inputs)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        # The positive half of the classifier's waiver below: this head DOES
+        # train the mask token, so a dead token there is a statement about the
+        # classifier's forward path, not about the weight being useless.
+        mask_paths = [p for p in report if "mask_token" in p]
+        assert mask_paths, "no mask_token weight found -- has the backbone changed?"
+        assert all(report[p] is not None and report[p] > 0.0 for p in mask_paths), (
+            f"the MIM head does not train the mask token either: "
+            f"{ {p: report[p] for p in mask_paths} } -- the classifier waiver "
+            f"in CLASSIFIER_NEVER_MASKS is no longer honest"
+        )
+
+
+class TestEnergyTransformerClassifierGradientFlow:
+    """The classifier head: everything trains except the never-called mask token."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _classifier()
+        images = _images(batch=2)
+        model(images, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(
+            model, images, expect_zero=CLASSIFIER_NEVER_MASKS
+        )
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

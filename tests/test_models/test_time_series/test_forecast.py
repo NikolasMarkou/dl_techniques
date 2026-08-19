@@ -197,3 +197,42 @@ class TestForecastMixin:
         stub = _NonePointStub()
         with pytest.raises(ValueError, match="point=None"):
             stub.predict_forecast(np.zeros((B, H, F), dtype=np.float32))
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11) -- NOT ADOPTABLE, on purpose
+# ---------------------------------------------------------------------
+#
+# The second of the two suites among the 29 that cannot take a gradient-flow
+# test. `tests/test_models/test_time_series/` does not test a model: it tests
+# `models/time_series/forecast.py`, which contains exactly two classes -- the
+# `Forecast` dataclass and the `ForecastMixin` contract -- and no Keras
+# component of any kind. The actual time-series MODELS in that package
+# (`nbeats`, `deepar`, `tirex`, `xlstm`, `mdn`, `adaptive_ema`) each have their
+# own suite under `tests/test_models/`, and `models/time_series/prism` is
+# covered by `tests/test_models/test_prism/`, which DID adopt the oracle in this
+# step.
+#
+# Recorded as a test, not a comment, so the census cannot rot into "someone
+# forgot".
+
+
+def test_the_forecast_module_ships_no_trainable_model():
+    """Why this suite has no gradient-flow test: there is nothing to train."""
+    import inspect
+
+    from dl_techniques.models.time_series import forecast as forecast_module
+
+    offenders = []
+    for name, obj in vars(forecast_module).items():
+        if not inspect.isclass(obj) or obj.__module__ != forecast_module.__name__:
+            continue
+        bases = {base.__name__ for base in inspect.getmro(obj)}
+        if bases & {"Model", "Layer"}:
+            offenders.append(name)
+
+    assert not offenders, (
+        f"forecast.py now ships a Keras component: {offenders}. It therefore "
+        "has trainable weights, and this suite needs the shared gradient-flow "
+        "oracle (tests/test_models/gradient_flow_oracle.py)."
+    )

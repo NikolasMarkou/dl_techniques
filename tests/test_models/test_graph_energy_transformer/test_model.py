@@ -788,3 +788,102 @@ class TestVariantBClassWeightBites:
             f"(sum|dW| {move_cw:.3e} vs {move_none:.3e}, ratio {ratio:.2f}x <= {CW_MIN_RATIO}) — "
             "variant B's imbalance weighting has become a silent no-op (regression)"
         )
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# Both heads run at the file's own geometry (N = 96, a third of it PAD; DO NOT
+# SHRINK N). No waiver is given to either.
+#
+# ONE fixture choice is load-bearing and is stated here rather than left
+# implicit: the input dict includes ``node_replace_mask``. That key is listed in
+# the backbone's own input contract (``models/graph_energy_transformer/model.py``,
+# "node_replace_mask": (B, N) bool # optional -- masked-node pretext) and is
+# applied by ``GraphEnergyTransformerBackbone.embed`` under a trace-time
+# ``if "node_replace_mask" in inputs``. MEASURED 2026-08-19: omit the key and
+# ``graph_et_backbone/node_mask_token/mask_token`` receives NO gradient (it is
+# not on the backward graph at all) in BOTH heads -- 1 of 16 for variant B and
+# 1 of 30 for variant C. Supply it and both heads are 0 dead.
+#
+# That is not a model defect and not an `expect_zero` case: the weight is
+# reachable from a documented public input, so the honest fix is to exercise the
+# full input contract rather than to waive the weight. Nothing else in the tree
+# currently passes the key (`grep -rn node_replace_mask tests/ src/` -> the model
+# module only), which is exactly why an oracle called with a partial input dict
+# would have reported a false finding here.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+def _gf_inputs(with_pe: bool, seed: int = 5) -> dict:
+    """``_padded_graph_batch`` plus the optional masked-node pretext key."""
+    inputs = _padded_graph_batch(seed, with_pe)
+    rng = np.random.default_rng(seed + 1)
+    replace = (rng.random((BATCH, N)) < 0.3).astype("float32")
+    # Never mask a PAD node: the pretext replaces REAL nodes only.
+    inputs["node_replace_mask"] = replace * inputs["node_mask"]
+    return inputs
+
+
+class TestGraphEnergyTransformerGradientFlow:
+    """Every trainable weight of both shipped heads is on the backward graph."""
+
+    def test_variant_b_anomaly_detector(self):
+        model = _b_model()
+        inputs = _gf_inputs(with_pe=False)
+        model(inputs, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, inputs)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_variant_c_classifier(self):
+        model = _c_model()
+        inputs = _gf_inputs(with_pe=True)
+        model(inputs, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, inputs)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_the_mask_token_is_what_the_pretext_key_switches_on(self):
+        """The fixture choice above, made falsifiable.
+
+        Without this, ``node_replace_mask`` looks like an arbitrary extra key.
+        It is the difference between a live and a disconnected weight, and the
+        two states are compared here on the SAME construction.
+        """
+        from ..gradient_flow_oracle import gradient_report
+
+        without = _b_model()
+        bare = _padded_graph_batch(5, False)
+        without(bare, training=False)
+        report_without = gradient_report(without, bare)
+        dead_without = [
+            p for p, v in report_without.items()
+            if (v is None or v == 0.0) and "mask_token" in p
+        ]
+
+        with_key = _b_model()
+        full = _gf_inputs(with_pe=False)
+        with_key(full, training=False)
+        report_with = gradient_report(with_key, full)
+        dead_with = [
+            p for p, v in report_with.items()
+            if (v is None or v == 0.0) and "mask_token" in p
+        ]
+
+        assert dead_without, (
+            "the mask token is live even without node_replace_mask -- the "
+            "comment above this class is wrong and the extra key is pointless"
+        )
+        assert not dead_with, (
+            f"node_replace_mask did not bring the mask token onto the backward "
+            f"graph: {dead_with}"
+        )

@@ -1278,3 +1278,169 @@ class TestPRISMModelDifferentConfigurations:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at this file's own default config (context_len 96,
+# forecast_len 24, 7 features, hidden 64, 2 layers, tree_depth 2): 96 trainable
+# weights. 82 of them receive an ordinary live gradient. The other 14 -- every
+# `*_router_router_mlp/fc2/bias` -- are MATHEMATICALLY INERT.
+#
+# PRODUCT FINDING GF-07. `FrequencyBandRouter.call`
+# (`layers/time_series/prism_blocks.py`) applies the SAME `router_mlp` to every
+# band, concatenates the resulting scalar scores along the band axis, and takes
+# `softmax(scores / temperature, axis=-1)`. `fc2` has `output_dim=1`, so its
+# bias is ONE scalar added identically to every band's score -- and softmax is
+# shift-invariant along the axis it normalizes. The bias cannot change the
+# output at all.
+#
+# Measured, same instance:
+#
+#   +1000.0 added to ALL 14 router biases -> max|delta| in the model output
+#   is 3.81e-05, i.e. float32 rounding. A functional parameter moved by 1000
+#   would move the output by O(1000).
+#
+#   gradient magnitudes, 12 seeds x 14 biases = 168 samples:
+#     router fc2 biases : 1.164e-10 .. 5.588e-09, and EXACTLY 0.0 in 13 of 168
+#     every other bias  : 1.282e-03 .. 2.873e-01
+#
+# Five to nine orders of magnitude apart: the router-bias "gradient" is the
+# rounding residue of a sum that cancels analytically, and ~8% of the time it
+# cancels to exactly 0.0. That non-determinism is why this is NOT expressed the
+# usual two ways. `expect_zero` is two-sided (D-010) and would FAIL on the ~92%
+# of draws where the residue is nonzero; `xfail(strict=True)` would fail on
+# exactly those same draws, because the oracle passes then. A flaky pin is worse
+# than none. So the claim is split into the two DETERMINISTIC halves below: the
+# oracle's per-weight liveness over the 82 real parameters, and a direct
+# value-space proof that the other 14 are inert.
+#
+# See GF-07 in
+# plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md
+
+from ..gradient_flow_oracle import (
+    assert_gradients_reach_every_trainable_weight,
+    gradient_report,
+)
+
+#: Weights whose gradient is a rounding residue, not a signal (GF-07).
+GF07_INERT_SUFFIX = "router_mlp/fc2/bias"
+
+GF_N_WEIGHTS = 96
+GF_N_INERT = 14
+
+
+def _gf_model():
+    return PRISMModel(
+        context_len=96, forecast_len=24, num_features=7, hidden_dim=64,
+        num_layers=2, tree_depth=2, overlap_ratio=0.25,
+        num_wavelet_levels=3, router_hidden_dim=64, router_temperature=1.0,
+        dropout_rate=0.1, ffn_expansion=4,
+    )
+
+
+def _gf_batch():
+    return np.random.default_rng(0).standard_normal((4, 96, 7)).astype("float32")
+
+
+class TestPRISMGradientFlow:
+    """Gradient flow through PRISM, minus the 14 softmax-annihilated biases."""
+
+    def test_gradients_reach_every_real_trainable_weight(self):
+        """Per-weight liveness over the 82 parameters that can actually matter.
+
+        PRISM is a soft-routed tree: a router that saturated, or a tree level
+        whose nodes were built and never visited, would leave whole subtrees off
+        the backward graph while every shape, finiteness and round-trip test in
+        this file still passed.
+        """
+        # DECISION plan-2026-08-19-a616f581/D-014
+        # The 14 inert biases are EXCLUDED from the per-weight floor rather than
+        # waived with `expect_zero` or pinned with `xfail(strict=True)`. Both of
+        # those express "this weight is zero", and the measurement says it is
+        # zero only ~8% of the time -- the rest of the time it carries a ~1e-10
+        # rounding residue. Either form would therefore be FLAKY, which is the
+        # one failure mode that destroys an oracle's credibility faster than a
+        # false green. The inertness itself is not dropped: it is proven in
+        # value space, deterministically, by the test below.
+        # Do NOT "simplify" this to `assert_gradients_reach_every_trainable_weight(
+        # model, x)` -- it fails on roughly one run in twelve.
+        # See D-014 in plans/plan-2026-08-19T070627-a616f581/decisions.md
+        model = _gf_model()
+        x = _gf_batch()
+        model(x, training=False)  # subclassed model: unbuilt until first call
+
+        report = gradient_report(model, x)
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == GF_N_WEIGHTS, (
+            "PRISM's weight set changed shape; re-measure GF_N_INERT below"
+        )
+
+        real = {p: v for p, v in report.items() if not p.endswith(GF07_INERT_SUFFIX)}
+        assert len(report) - len(real) == GF_N_INERT, (
+            f"expected {GF_N_INERT} router biases, found {len(report) - len(real)}"
+        )
+
+        dead = sorted(p for p, v in real.items() if v is None or v == 0.0)
+        assert not dead, (
+            f"gradient flow is incomplete in PRISMModel: {len(dead)} of "
+            f"{len(real)} non-inert weights receive no live gradient:\n  "
+            + "\n  ".join(dead)
+        )
+        nonfinite = sorted(p for p, v in real.items() if v is not None and v != v)
+        assert not nonfinite, nonfinite
+
+        # Anti-vacuity: every tree level must be represented, including the
+        # deepest. A tree that stopped descending would still be "0 dead".
+        routers = [p for p in real if "router" in p]
+        assert routers, "no router weight in the report -- has the tree changed?"
+        assert any("level2" in p for p in routers), (
+            f"no depth-2 router weight found; router paths seen: {sorted(routers)[:5]}"
+        )
+
+    def test_the_router_output_bias_is_annihilated_by_the_band_softmax(self):
+        """GF-07, proven in VALUE space so it does not depend on a gradient draw.
+
+        This is the honest form of the exclusion above. It perturbs all 14
+        biases by +1000 -- six orders of magnitude larger than anything training
+        would produce -- and requires the model output not to move; and it
+        perturbs a CONTROL weight by the same amount and requires the output to
+        move a lot, so the test cannot pass by comparing a model against itself.
+        """
+        model = _gf_model()
+        x = _gf_batch()
+        before = keras.ops.convert_to_numpy(model(x, training=False))
+
+        inert = [w for w in model.trainable_weights
+                 if w.path.endswith(GF07_INERT_SUFFIX)]
+        assert len(inert) == GF_N_INERT, len(inert)
+        for w in inert:
+            w.assign(keras.ops.add(w.value, 1000.0))
+        after = keras.ops.convert_to_numpy(model(x, training=False))
+        delta_inert = float(np.max(np.abs(before - after)))
+        assert delta_inert < 1e-3, (
+            f"+1000 on all {GF_N_INERT} router output biases moved the forecast "
+            f"by {delta_inert:.3e} -- they are NOT inert any more, so the "
+            f"exclusion in the test above is no longer justified and GF-07 may "
+            f"have been fixed"
+        )
+
+        # The control: the same perturbation on a weight that IS on the forward
+        # path must move the output by orders of magnitude more. Without this,
+        # a model that ignored its input entirely would pass the assertion above.
+        control_model = _gf_model()
+        control_before = keras.ops.convert_to_numpy(control_model(x, training=False))
+        control = next(
+            w for w in control_model.trainable_weights
+            if w.path.endswith("/bias") and not w.path.endswith(GF07_INERT_SUFFIX)
+        )
+        control.assign(keras.ops.add(control.value, 1000.0))
+        control_after = keras.ops.convert_to_numpy(
+            control_model(x, training=False))
+        delta_control = float(np.max(np.abs(control_before - control_after)))
+        assert delta_control > 1.0, (
+            f"the control weight {control.path} moved the forecast by only "
+            f"{delta_control:.3e} under +1000 -- this model appears inert "
+            f"everywhere, so the inertness assertion above proves nothing"
+        )

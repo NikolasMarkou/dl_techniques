@@ -1227,3 +1227,54 @@ class TestViTPositionalDropoutHasAnEffect:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at scale="tiny", 64x64x3, patch 16 (a 4x4 = 16-patch grid
+# plus CLS): 152 trainable weights, 0 dead, 0 non-finite. No waiver needed and
+# none given. The geometry is the smallest one this file's own configs cover --
+# a gradient claim is per-weight, so it does not need 196 patches to be true,
+# and the suite already pins the 224/384 shapes elsewhere.
+#
+# A ViT is a plausible home for a silently-dead weight: the CLS token and
+# the positional embedding are bare `add_weight` tensors rather than
+# sub-layers, so a slicing or broadcast mistake can leave either off the
+# backward graph while every shape and round-trip test still passes.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestViTGradientFlow:
+    """Every trainable weight is on the backward graph."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = ViT(input_shape=(64, 64, 3), num_classes=10, scale="tiny", patch_size=16)
+        x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)  # subclassed model: unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == 152, (
+            "the tiny variant's weight set changed shape; re-measure before "
+            "editing this number"
+        )
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_gradients_reach_every_trainable_weight_without_top(self):
+        """``include_top=False`` removes the head, not the trunk's gradient path.
+
+        The pooled/no-head arm is the one a downstream user fine-tunes, and it
+        is a different forward path (no classifier Dense, a pooling reduction
+        instead). A trunk weight that only trains through the classification
+        head would be invisible to the arm above.
+        """
+        model = ViT(input_shape=(64, 64, 3), scale="tiny", patch_size=16, include_top=False, pooling="mean")
+        x = np.random.default_rng(1).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
