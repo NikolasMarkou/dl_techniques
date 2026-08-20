@@ -563,12 +563,19 @@ class KAN(keras.Model):
         logger.info("\n" + self.get_architecture_summary())
 
     def get_config(self) -> Dict[str, Any]:
-        # Functional model only needs construction args to be serializable
-        return {
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
+        # FIRST, then the model's own keys. Without it `trainable` (and the
+        # dtype policy) are dropped and silently restored to their DEFAULTS on
+        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
+        # with a literal dict again.
+        # `name` was already reported by hand here; `trainable` was not, and it
+        # is the one with the measured consequence.
+        config = super().get_config()
+        config.update({
             "layer_configs": self.layer_configs,
             "input_features": self.input_features,
-            "name": self.name,
-        }
+        })
+        return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "KAN":

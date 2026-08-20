@@ -958,7 +958,13 @@ class DINOv2VisionTransformer(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
-        return {
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
+        # FIRST, then the model's own keys. Without it `name` and
+        # `trainable` are dropped and silently restored to their DEFAULTS on
+        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
+        # with a literal dict again.
+        config = super().get_config()
+        config.update({
             'image_size': self.image_size,
             'patch_size': self.patch_size,
             'in_chans': self.in_chans,
@@ -979,7 +985,8 @@ class DINOv2VisionTransformer(keras.Model):
             'interpolate_antialias': self.interpolate_antialias,
             'interpolate_offset': self.interpolate_offset,
             'include_top': self.include_top,
-        }
+        })
+        return config
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
@@ -1078,6 +1085,18 @@ class DINOv2(keras.Model):
         if num_classes <= 0 and include_top:
             raise ValueError(f"num_classes must be positive when include_top=True, got {num_classes}")
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: the three Keras base
+        # keys are taken OUT of `**backbone_kwargs` before anything else. They
+        # arrive there because `from_config` calls `cls(**config)` and the
+        # config now (correctly) carries them -- and forwarding them to the
+        # BACKBONE raised `DINOv2VisionTransformer() got multiple values for
+        # keyword argument 'name'`, which is the same compounding shape a
+        # hard-coded `name=` produced in `coshnet` (D-066). Do NOT let them fall
+        # through into `backbone_kwargs`: `get_config` spreads that dict.
+        base_kwargs = {key: backbone_kwargs.pop(key)
+                       for key in ("name", "trainable", "dtype")
+                       if key in backbone_kwargs}
+
         # Store configuration
         self.image_size = image_size if isinstance(image_size, (tuple, list)) else (image_size, image_size)
         self.patch_size = patch_size if isinstance(patch_size, (tuple, list)) else (patch_size, patch_size)
@@ -1114,10 +1133,11 @@ class DINOv2(keras.Model):
         outputs = self._build_model(inputs, masks)
 
         # Initialize the Model
+        base_kwargs.setdefault("name", "dinov2_model")
         super().__init__(
             inputs=[inputs, masks],
             outputs=outputs,
-            name='dinov2_model'
+            **base_kwargs
         )
 
         logger.info(f"Created DINOv2 complete model with include_top={include_top}")
@@ -1216,13 +1236,20 @@ class DINOv2(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
-        return {
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
+        # FIRST, then the model's own keys. Without it `name` and
+        # `trainable` are dropped and silently restored to their DEFAULTS on
+        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
+        # with a literal dict again.
+        config = super().get_config()
+        config.update({
             'image_size': self.image_size,
             'patch_size': self.patch_size,
             'num_classes': self.num_classes,
             'include_top': self.include_top,
             **self.backbone_kwargs
-        }
+        })
+        return config
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""

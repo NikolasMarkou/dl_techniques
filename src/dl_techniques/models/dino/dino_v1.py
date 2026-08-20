@@ -903,7 +903,13 @@ class DINOv1(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        config = {
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
+        # FIRST, then the model's own keys. Without it `name` and
+        # `trainable` are dropped and silently restored to their DEFAULTS on
+        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
+        # with a literal dict again.
+        config = super().get_config()
+        config.update({
             "embed_dim": self.embed_dim,
             "depth": self.depth,
             "num_heads": self.num_heads,
@@ -927,7 +933,7 @@ class DINOv1(keras.Model):
             "dino_nlayers": self.dino_nlayers,
             "use_cls_token": self.use_cls_token,
             "input_shape": self._input_shape,
-        }
+        })
         return config
 
     @classmethod

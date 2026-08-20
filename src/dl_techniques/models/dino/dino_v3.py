@@ -315,7 +315,13 @@ class DINOv3(keras.Model):
         outputs = self._build_model(inputs)
 
         # Finalize the Model
-        super().__init__(inputs=inputs, outputs=outputs, name="DINOv3", **kwargs)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `name` is a DEFAULT
+        # here, not a literal. `get_config` now reports the base keys, so
+        # `from_config` passes `name` in `**kwargs` and a hard-coded `name=`
+        # beside it raises `got multiple values for keyword argument 'name'` --
+        # the same compounding shape `coshnet` had (D-066).
+        kwargs.setdefault("name", "DINOv3")
+        super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
             f"Created DINOv3 model with {depth} layers, {embed_dim} embedding dim for "
@@ -585,7 +591,13 @@ class DINOv3(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the model's configuration for serialization."""
-        config = {
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
+        # FIRST, then the model's own keys. Without it `name` and
+        # `trainable` are dropped and silently restored to their DEFAULTS on
+        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
+        # with a literal dict again.
+        config = super().get_config()
+        config.update({
             'image_size': self.image_size,
             'patch_size': self.patch_size,
             'num_classes': self.num_classes,
@@ -607,7 +619,7 @@ class DINOv3(keras.Model):
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
             'include_top': self.include_top,
-        }
+        })
         return config
 
     @classmethod

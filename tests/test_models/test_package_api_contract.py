@@ -4547,14 +4547,20 @@ def _sweep_get_config_chaining(roots=None, src_root=None):
 #: ``len(trainable_weights)`` went ``0 -> 18``. See decisions.md D-066 and
 #: ``tests/test_models/test_the_get_config_base_keys_survive_a_round_trip.py``.
 #:
-#: The five that remain are ``dino``'s four classes plus ``KAN``.
-_GET_CONFIG_CHAINING_WAIVERS = {
-    ("src/dl_techniques/models/dino/dino_v1.py", "DINOv1"),
-    ("src/dl_techniques/models/dino/dino_v2.py", "DINOv2"),
-    ("src/dl_techniques/models/dino/dino_v2.py", "DINOv2VisionTransformer"),
-    ("src/dl_techniques/models/dino/dino_v3.py", "DINOv3"),
-    ("src/dl_techniques/models/kan/model.py", "KAN"),
-}
+#: **Step 19.1 FIXED the last five** -- ``dino``'s four classes plus ``KAN`` --
+#: so the waiver set is now EMPTY and the genuine-omission count is 0. All five
+#: lost ``trainable`` across a config round trip; ``DINOv2`` and ``DINOv3``
+#: additionally carried the compounding ``coshnet`` shape (a hard-coded
+#: ``name=``, or base keys falling through ``**backbone_kwargs`` into a
+#: sub-model), so reporting ``name`` RAISED until that was fixed too. Seventeen
+#: tests in
+#: ``tests/test_models/test_the_get_config_base_keys_survive_a_round_trip.py``
+#: were verified RED at the pre-fix tree. See decisions.md D-082.
+#:
+#: An EMPTY set is not a dead waiver list: the sweep below asserts the genuine
+#: omission count equals its size, so the next omission fails immediately
+#: instead of being absorbed.
+_GET_CONFIG_CHAINING_WAIVERS = set()
 
 
 #: One class that never chains and one that chains backwards, plus a
@@ -4716,8 +4722,8 @@ class TestGetConfigChainsToItsBase:
             f"found {len(refuted)}: {refuted}"
         )
         assert counts["n_no_super_chaining"] == len(_GET_CONFIG_CHAINING_WAIVERS), (
-            "the genuine omission count moved away from the 5 waived here "
-            f"({counts})"
+            "the genuine omission count moved away from the "
+            f"{len(_GET_CONFIG_CHAINING_WAIVERS)} waived here ({counts})"
         )
 
     def test_keras_really_cannot_chain_from_those_bases(self):

@@ -76,6 +76,47 @@ def _fastvlm():
     return FastVLM(num_classes=4)
 
 
+# ---------------------------------------------------------------------------
+# Step 19.1 (D-082): the last five of the eleven genuine omissions
+# ---------------------------------------------------------------------------
+#
+# Four `dino` classes and `KAN`. `KAN` already reported `name` by hand and was
+# missing only `trainable` -- which is the key with the measured consequence.
+
+
+def _dino_v1():
+    from dl_techniques.models.dino.dino_v1 import DINOv1
+    return DINOv1(embed_dim=16, depth=1, num_heads=2, patch_size=14,
+                  image_size=28, num_classes=4)
+
+
+def _dino_v2_backbone():
+    from dl_techniques.models.dino.dino_v2 import DINOv2VisionTransformer
+    return DINOv2VisionTransformer(image_size=28, patch_size=14, embed_dim=16,
+                                   depth=1, num_heads=2, num_register_tokens=2)
+
+
+def _dino_v2():
+    from dl_techniques.models.dino.dino_v2 import DINOv2
+    return DINOv2(image_size=28, patch_size=14, num_classes=4,
+                  embed_dim=16, depth=1, num_heads=2)
+
+
+def _dino_v3():
+    from dl_techniques.models.dino.dino_v3 import DINOv3
+    return DINOv3(image_size=28, patch_size=14, num_classes=4, embed_dim=16,
+                  depth=1, num_heads=2)
+
+
+def _kan():
+    from dl_techniques.models.kan.model import KAN
+    return KAN(layer_configs=[{"features": 8, "grid_size": 5,
+                               "activation": "swish"},
+                              {"features": 4, "grid_size": 4,
+                               "activation": "linear"}],
+               input_features=6)
+
+
 #: ``name`` is asserted for every subject; ``trainable`` only where the class
 #: exposes it as a constructor keyword (all six do, via ``**kwargs``).
 BUILDERS = {
@@ -85,6 +126,11 @@ BUILDERS = {
     "vae": _vae,
     "swin_transformer": _swin,
     "fastvlm": _fastvlm,
+    "dino_v1": _dino_v1,
+    "dino_v2": _dino_v2,
+    "dino_v2_backbone": _dino_v2_backbone,
+    "dino_v3": _dino_v3,
+    "kan": _kan,
 }
 
 BASE_KEYS = ("name", "trainable")
@@ -146,3 +192,69 @@ def test_a_custom_name_survives_a_config_round_trip(package):
     restored = type(model).from_config(config)
     assert restored.name == f"custom_{package}_name", (
         f"{package}: name came back as {restored.name!r}")
+
+
+# ---------------------------------------------------------------------------
+# The dtype arm, and the half of it that is REFUTED
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("package", sorted(BUILDERS))
+def test_the_dtype_policy_key_is_reported(package):
+    """``dtype`` is the third base key, and it needs a different assertion.
+
+    MEASURED and recorded in decisions.md: under the DEFAULT policy the
+    consequence claimed for ``dtype`` is REFUTED -- a model reconstructed from a
+    config with no ``dtype`` key still reports ``float32`` for ``model.dtype``,
+    so a ``.dtype`` assertion passes against the defect and proves nothing. The
+    observable that does move is the POLICY, so this arm asserts
+    ``dtype_policy.name`` and the presence of the key, never ``.dtype``.
+    """
+    keras.utils.set_random_seed(0)
+    model = BUILDERS[package]()
+    config = model.get_config()
+    assert "dtype" in config, (
+        f"{package}.get_config() omits the dtype key")
+
+    keras.utils.set_random_seed(0)
+    restored = type(model).from_config(dict(config))
+    assert restored.dtype_policy.name == model.dtype_policy.name, (
+        f"{package}: dtype policy {model.dtype_policy.name!r} -> "
+        f"{restored.dtype_policy.name!r} across the round trip")
+
+
+#: The ONE subject of the eleven whose policy really is restored from the
+#: ``dtype`` key. See the test below: this is a per-class property, not a Keras
+#: guarantee, and asserting it for the other ten would convict them of a
+#: behaviour they never had.
+DTYPE_KEY_RESTORES_THE_POLICY = ("relgt",)
+
+
+@pytest.mark.parametrize("package", sorted(BUILDERS))
+def test_whether_the_dtype_key_restores_the_policy_is_a_per_class_property(package):
+    """CLOSED-as-refuted, with the measurement, for ten of the eleven.
+
+    The obvious assertion -- "a config carrying ``dtype='mixed_float16'``
+    restores a mixed_float16 model" -- was written first and MEASURED FALSE for
+    10 of these 11 classes. The reason is structural: all but ``relgt`` build
+    their sub-layers (or their whole functional graph) BEFORE the ``dtype``
+    kwarg ever reaches ``keras.Model.__init__``, so the layers took the GLOBAL
+    policy at construction time and the key changes nothing.
+
+    That is why the audit's ``dtype`` half of R-057 is not a defect these five
+    ``get_config`` fixes could have repaired, and why the arm above asserts
+    ``dtype_policy.name`` rather than ``model.dtype`` -- ``.dtype`` reports
+    ``float32`` for a correct AND for a broken model under the default policy,
+    so a ``.dtype`` assertion passes against the defect.
+    """
+    keras.utils.set_random_seed(0)
+    model = BUILDERS[package]()
+    config = dict(model.get_config())
+    config["dtype"] = "mixed_float16"
+
+    keras.utils.set_random_seed(0)
+    restored = type(model).from_config(dict(config))
+    restores = restored.dtype_policy.name == "mixed_float16"
+    assert restores == (package in DTYPE_KEY_RESTORES_THE_POLICY), (
+        f"{package}: the dtype key "
+        f"{'now restores' if restores else 'does not restore'} the policy, "
+        f"against the measured {package in DTYPE_KEY_RESTORES_THE_POLICY}")
