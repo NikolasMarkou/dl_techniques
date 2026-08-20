@@ -345,9 +345,27 @@ class ResNet(keras.Model):
         )
 
     def _build_stem(self) -> None:
-        """Build initial convolution stem."""
+        """Build initial convolution stem.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-041
+        The stem width FOLLOWS ``filters_per_stage[0]``; it is not the literal
+        64 it used to be. Do not put the constant back. A `basic` block's
+        stage-0 first block is given ``use_projection=False``
+        unconditionally -- correctly, because stage 0 does not stride -- so its
+        identity shortcut requires the stem to emit exactly
+        ``filters_per_stage[0]`` channels. With the stem pinned at 64,
+        ``ResNet(block_type='basic')`` could not run a forward pass for ANY
+        other stage-0 width: MEASURED 8, 16, 32 and 128 all raise while 64
+        works, `bottleneck` works at every width (its stage-0 block projects),
+        and `from_variant` works because every shipped variant uses 64. The
+        error surfaced two frames deep in `layers/standard_blocks.py` naming
+        neither `filters_per_stage` nor 64.
+        This is checkpoint-safe by construction: it changes the stem's weight
+        SHAPE only for configurations that previously RAISED.
+        See decisions.md D-041.
+        """
         self.stem_conv = keras.layers.Conv2D(
-            filters=64,
+            filters=self.filters_per_stage[0],
             kernel_size=7,
             strides=2,
             padding="same",
