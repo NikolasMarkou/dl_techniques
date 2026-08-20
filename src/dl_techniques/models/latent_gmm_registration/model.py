@@ -43,6 +43,22 @@ FLOAT32 ONLY -- this model does NOT run under ``mixed_float16``.
 
     Train and infer this model under the default ``float32`` policy. See
     plan ``plan-2026-08-19T163559-499b6f0e`` decisions.md D-011.
+
+References:
+    - Yuan et al., 2020. DeepGMR: Learning Latent Gaussian Mixture Models for
+      Registration. ECCV 2020. (https://arxiv.org/abs/2008.09088) -- the method
+      family this model follows: both clouds are mapped to a SHARED latent GMM
+      and the rigid transform is then solved in closed form.
+    - Myronenko and Song, 2010. Point Set Registration: Coherent Point Drift.
+      IEEE TPAMI 32(12). (https://arxiv.org/abs/0905.2635) -- the probabilistic
+      (GMM) view of registration this replaces the iterative form of.
+    - Umeyama, 1991. Least-Squares Estimation of Transformation Parameters
+      Between Two Point Patterns. IEEE TPAMI 13(4) -- the SVD/Procrustes
+      solution, including the ``det = -1`` reflection correction implemented in
+      ``compute_rigid_transform``.
+    - Qi et al., 2017. PointNet: Deep Learning on Point Sets for 3D
+      Classification and Segmentation. CVPR 2017.
+      (https://arxiv.org/abs/1612.00593) -- the per-point encoder shape.
 """
 
 import keras

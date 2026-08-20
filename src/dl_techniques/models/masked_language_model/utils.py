@@ -1,3 +1,31 @@
+"""
+Construction and inspection helpers for the masked language model.
+
+Two functions, and neither of them is the architecture:
+:func:`create_mlm_training_model` is the package's ``create_*`` factory -- it
+assembles a :class:`MaskedLanguageModel` around a caller-supplied encoder and
+compiles it for training -- and :func:`visualize_mlm_predictions` prints the
+top-k predictions at each masked position for a batch, which is how a
+checkpoint is eyeballed.
+
+The model itself, its masking strategy and its loss live in
+``dl_techniques.models.masked_language_model.mlm``, which carries the full
+architectural description. This module is deliberately thin: anything that
+decides what the model IS belongs there, not here.
+
+References:
+    - Devlin et al., 2019. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding. NAACL 2019.
+      (https://arxiv.org/abs/1810.04805) -- the masked-token objective, the
+      80/10/10 corruption split and the [MASK] convention this package
+      implements.
+    - Liu et al., 2019. RoBERTa: A Robustly Optimized BERT Pretraining
+      Approach. (https://arxiv.org/abs/1907.11692) -- dynamic masking, which is
+      what the masking strategy here does per batch rather than once.
+    - Press and Wolf, 2017. Using the Output Embedding to Improve Language
+      Models. EACL 2017. (https://arxiv.org/abs/1608.05859) -- the weight tying
+      between the embedding and the output head, already cited by ``mlm.py``.
+"""
 import keras
 import tensorflow as tf
 from typing import Dict, Any, Optional, List

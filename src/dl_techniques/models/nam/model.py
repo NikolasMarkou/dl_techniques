@@ -50,6 +50,23 @@ Architecture::
                                     └────────────────────────────────────────┘
                                               │
                                     Result Head → (scalar, validity)
+
+References:
+    - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
+      Self-Attention. EMNLP 2019. (https://arxiv.org/abs/1909.06639) -- the
+      GroupAttention that parses expression structure.
+    - Graves et al., 2014. Neural Turing Machines.
+      (https://arxiv.org/abs/1410.5401) -- the addressed external memory that
+      supplies the controller's context vector.
+    - Jolicoeur-Martineau, 2025. Less is More: Recursive Reasoning with Tiny
+      Networks. (https://arxiv.org/abs/2510.04871) -- the Tiny Recursive Model
+      whose ACT loop this re-scores expressions with.
+    - Graves, 2016. Adaptive Computation Time for Recurrent Neural Networks.
+      (https://arxiv.org/abs/1603.08983) -- the halting mechanism itself.
+    - Trask et al., 2018. Neural Arithmetic Logic Units.
+      (https://arxiv.org/abs/1808.00508) -- the prior line on learned
+      arithmetic; NAM differs by FIXING the operators and learning only
+      parsing, routing and halting.
 """
 
 import numpy as np

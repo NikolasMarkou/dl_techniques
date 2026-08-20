@@ -4,6 +4,25 @@ FastVLM Model Implementation
 This module provides the FastVLM (Fast Vision Language Model) architecture,
 a hybrid vision_heads model that efficiently combines convolutional and transformer-based
 components for high-performance image classification and feature extraction.
+
+References:
+    - Vasu et al., 2023. FastViT: A Fast Hybrid Vision Transformer using
+      Structural Reparameterization. ICCV 2023.
+      (https://arxiv.org/abs/2303.14189) -- the token-mixing idea this model's
+      convolutional stages follow.
+    - Vasu et al., 2023. MobileOne: An Improved One Millisecond Mobile Backbone.
+      CVPR 2023. (https://arxiv.org/abs/2206.04040) -- the reparameterizable
+      mobile block family.
+    - Dosovitskiy et al., 2021. An Image is Worth 16x16 Words (ViT).
+      (https://arxiv.org/abs/2010.11929) -- the transformer stage.
+
+    PROVENANCE, stated because the name invites the wrong reading: this is a
+    hybrid conv+transformer classifier assembled from this repo's own blocks and
+    NOT a weight-compatible port of any published FastViT/FastVLM checkpoint.
+    In particular ``dl_techniques.layers.repmixer_block.RepMixerBlock`` shares a
+    NAME with FastViT's RepMixer and is a different construction; the faithful
+    FastViT port lives in ``dl_techniques.layers.fastvit``. No pretrained
+    weights are distributed for this package.
 """
 
 import keras

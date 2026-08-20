@@ -63,7 +63,7 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 |---|---|---|
 | `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 256 of 296 modules |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
-| `models/` | **NO package-wide style — measurably MIXED** | 99 Google-only, 68 Sphinx-only, 8 both, 92 neither, over 267 `.py` files |
+| `models/` | **NO package-wide style — measurably MIXED** | 98 Google-only, 68 Sphinx-only, 9 both, 92 neither, over 267 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 42 carry `Args:`, 7 carry `:param ` |
 | `metrics/` | Google majority | 12 of 15 / 2 |
 | `utils/` | Google majority | 22 of 39 / 9, 3 both |
@@ -90,14 +90,16 @@ and the numbers invalidate themselves):
 ```bash
 find src/dl_techniques/models -name '*.py' | wc -l                                   # 267
 grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   # 107 = Google-only + both
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  76 = Sphinx-only + both
-# comm -12 of those two sorted file lists -> 8 (both);  neither = 267 - 99 - 68 - 8 = 92
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  77 = Sphinx-only + both
+# comm -12 of those two sorted file lists -> 9 (both);  neither = 267 - 98 - 68 - 9 = 92
 ```
 
 **This table rots.** It said "248 of 285" for `layers/` until 2026-08-14 (correct on 2026-08-11,
 falsified by the `layers/fastvit/` package landing), and on 2026-08-19 six more figures had drifted:
 `layers/` 255/294 -> 256/296, `models/` Google-only 102 -> 99, Sphinx-only 67 -> 68, both 5 -> 8,
-neither 93 -> 92, and `bert.py` 81 -> 78 `:param `. **Re-run the block above before quoting any of
+neither 93 -> 92, and `bert.py` 81 -> 78 `:param `. Re-derived again on 2026-08-21 (step
+19.1): Google-only 99 -> 98, both 8 -> 9, the `:param ` total 76 -> 77 — a drift that predates that
+step's own two new module docstrings, both of which moved neither count. **Re-run the block above before quoting any of
 it** — a derived number is a perishable good.
 
 ### Factory Pattern

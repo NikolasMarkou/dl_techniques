@@ -65,6 +65,26 @@ Based on ConvNeXt innovations from "A ConvNet for the 2020s" (Liu et al., CVPR
 2022) and "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked
 Autoencoders" (Woo et al., CVPR 2023). The Laplacian-pyramid split follows Burt &
 Adelson, "The Laplacian Pyramid as a Compact Image Code" (1983).
+
+References:
+    - Ronneberger et al., 2015. U-Net: Convolutional Networks for Biomedical
+      Image Segmentation. (https://arxiv.org/abs/1505.04597) -- the
+      encoder/decoder-with-skips shape.
+    - Liu et al., 2022. A ConvNet for the 2020s (ConvNeXt V1).
+      (https://arxiv.org/abs/2201.03545) -- the depthwise 7x7 + inverted
+      bottleneck + LayerScale block.
+    - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
+      Masked Autoencoders. (https://arxiv.org/abs/2301.00808) -- Global
+      Response Normalization, used by the V2 blocks.
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382) -- the optional drop-path schedule.
+    - Lee et al., 2015. Deeply-Supervised Nets. AISTATS 2015.
+      (https://arxiv.org/abs/1409.5185) -- the deep-supervision heads.
+    - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
+      Bias-Free Convolutional Neural Networks. ICLR 2020.
+      (https://arxiv.org/abs/1906.05478) -- the ``use_bias=False`` arm.
+    - Burt and Adelson, 1983. The Laplacian Pyramid as a Compact Image Code.
+      IEEE Trans. Communications 31(4) -- the optional high-frequency skip band.
 """
 
 import keras

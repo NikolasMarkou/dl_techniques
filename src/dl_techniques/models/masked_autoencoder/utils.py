@@ -1,3 +1,26 @@
+"""
+Construction and inspection helpers for the masked autoencoder.
+
+Two functions, and neither of them is the architecture: :func:`create_mae_model`
+is the package's ``create_*`` factory -- it wires a caller-supplied encoder to
+the convolutional decoder and returns a built :class:`MAE` -- and
+:func:`visualize_reconstruction` plots an image, its masked view and the
+reconstruction side by side for eyeballing a checkpoint.
+
+The model itself, its masking policy and its loss live in
+``dl_techniques.models.masked_autoencoder.mae``, which carries the full
+architectural description. This module is deliberately thin: anything that
+decides what the model IS belongs there, not here.
+
+References:
+    - He et al., 2022. Masked Autoencoders Are Scalable Vision Learners.
+      CVPR 2022. (https://arxiv.org/abs/2111.06377) -- the mask-a-high-fraction-
+      of-patches-and-reconstruct-pixels recipe this package implements.
+    - Xie et al., 2022. SimMIM: A Simple Framework for Masked Image Modeling.
+      CVPR 2022. (https://arxiv.org/abs/2111.09886) -- the lightweight-decoder
+      variant this package's convolutional decoder is closer to than to MAE's
+      transformer decoder.
+"""
 import keras
 import numpy as np
 from typing import Optional, Tuple, List, Any

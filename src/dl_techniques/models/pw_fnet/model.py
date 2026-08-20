@@ -12,6 +12,18 @@ deraining, deblurring, and dehazing.
 - Downsample & Upsample: Spatial resolution scaling layers
 - PW_FNet: Complete model with multi-scale supervision
 
+References:
+    - Jiang et al., 2024. Global Modeling Matters: A Fast, Lightweight and
+      Effective Baseline for Efficient Image Restoration (PW-FNet).
+      (https://arxiv.org/abs/2407.13663) -- the architecture this implements.
+    - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms.
+      (https://arxiv.org/abs/2105.03824) -- the replace-attention-with-a-
+      Fourier-transform idea the token mixer rests on.
+    - Chen et al., 2022. Simple Baselines for Image Restoration (NAFNet).
+      ECCV 2022. (https://arxiv.org/abs/2204.04676) -- the multi-scale
+      restoration baseline and the hierarchical-supervision setup.
+    - Ronneberger et al., 2015. U-Net.
+      (https://arxiv.org/abs/1505.04597) -- the encoder/decoder skeleton.
 """
 
 import keras

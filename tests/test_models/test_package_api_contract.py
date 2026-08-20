@@ -2986,19 +2986,25 @@ def _references_section_state(doc) -> str:
 #: that clears them, keyed by ``relpath`` and carrying their routing.
 #:
 #: Measured 2026-08-20: 108 main modules resolve across 72 of the 73 packages;
-#: **88 carry a non-empty ``References`` section, 18 carry no heading at all, and
-#: 2 carry no module docstring at all.** Zero carry an EMPTY section -- so the
-#: vacuous form of this predicate (``"References:" in doc``) would have agreed
-#: with the strict one today, and the empty-body arm is proven only by injection.
+#: **88 carried a non-empty ``References`` section, 18 carried no heading at all,
+#: and 2 carried no module docstring at all.** Zero carried an EMPTY section --
+#: so the vacuous form of this predicate (``"References:" in doc``) would have
+#: agreed with the strict one, and the empty-body arm is proven only by
+#: injection.
 #:
-#: Two of the twenty are genuine EXEMPTIONS (a composition module over siblings
-#: that carry the citation). The other eighteen are real defects; they are waived
-#: so the guard can ship GREEN over the rest of the tree and are routed to
-#: **step 19** (R-039 is graded MEDIUM in findings/guide-v2-rubric.md). They are
-#: NOT fixed here: step 7 ships the guard, step 19 ships the docstrings.
+#: **Step 19.1 (D-086) closed all twenty ROUTED rows**: 16 modules gained a
+#: ``References`` section and 2 (``masked_autoencoder/utils.py``,
+#: ``masked_language_model/utils.py``) gained a module docstring outright. The
+#: waiver set is down to the TWO genuine exemptions -- composition modules whose
+#: citations live on the siblings they compose. Step 7 shipped the guard; step
+#: 19.1 shipped the docstrings, and this list shrank by eighteen in the same
+#: commit because the staleness test below demanded it.
 _MAIN_DOC_REFERENCES_WAIVERS = {
     # --- EXEMPT: composition/integration modules whose citations live on the
-    # sibling main modules they compose, both of which pass this guard.
+    # sibling main modules they compose, both of which pass this guard. These
+    # two are the ONLY entries left; the eighteen ROUTED ones were fixed in
+    # step 19.1 (D-086) and deleted here in the same commit, each because this
+    # class's own staleness test went red.
     "models/dino/training.py": (
         "EXEMPT -- DINOTrainingModel is the `fit()` harness around the DINO "
         "backbones, not an architecture; the Caron et al. citation lives on "
@@ -3009,29 +3015,6 @@ _MAIN_DOC_REFERENCES_WAIVERS = {
         "separately-tested pieces'; the SD3 citation lives on "
         "models/sd3_mmdit/transformer.py, which passes this guard"
     ),
-    # --- ROUTED to step 19: no `References` heading. Each is a real
-    # architecture with a real paper behind it.
-    "models/bias_free_denoisers/bfcnn.py": "ROUTE step 19 -- bias-free CNN denoiser, no References section",
-    "models/bias_free_denoisers/bfconvunext.py": "ROUTE step 19 -- bias-free arm of ConvUNext, no References section",
-    "models/convunext/model.py": "ROUTE step 19 -- ConvNeXt-derived U-Net, no References section",
-    "models/fastvlm/model.py": "ROUTE step 19 -- FastVLM, no References section",
-    "models/ideogram4/vae.py": "ROUTE step 19 -- names the Flux2 reference in prose but has no References section",
-    "models/latent_gmm_registration/model.py": "ROUTE step 19 -- no References section",
-    "models/lewm/model.py": "ROUTE step 19 -- 'Keras 3 port' with no References section naming the source",
-    "models/memory_bank/wave_field_memory_llm.py": "ROUTE step 19 -- no References section",
-    "models/nam/model.py": "ROUTE step 19 -- 'merges three architectures', none of them cited",
-    "models/pw_fnet/model.py": "ROUTE step 19 -- no References section",
-    "models/sd3_mmdit/text_encoders.py": "ROUTE step 19 -- CLIP/OpenCLIP/T5 towers, none cited",
-    "models/sd3_mmdit/vae.py": "ROUTE step 19 -- reuse wrapper; its reuse target (ideogram4/vae.py) is also an offender",
-    "models/shgcn/model.py": "ROUTE step 19 -- no References section",
-    "models/video_jepa/model.py": "ROUTE step 19 -- no References section",
-    "models/yolo12/feature_extractor.py": "ROUTE step 19 -- no References section",
-    "models/yolo12/multitask.py": "ROUTE step 19 -- 76-line docstring, no References section",
-    # --- ROUTED to step 19: NO module docstring at all. Both are reached by the
-    # `create_*` arm of the main-module resolver; each package's architecture
-    # module (mae.py / mlm.py) passes this guard.
-    "models/masked_autoencoder/utils.py": "ROUTE step 19 -- module has no docstring at all",
-    "models/masked_language_model/utils.py": "ROUTE step 19 -- module has no docstring at all",
 }
 
 #: The one package for which NO main module resolves, with the read that clears

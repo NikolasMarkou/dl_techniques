@@ -34,6 +34,25 @@ Streaming inference (D-007)
 The streaming path reuses the predictor on a growing (then rolling)
 ``(B, t, H_p, W_p, D)`` tensor with ``t ≤ K``; predictor accepts arbitrary
 ``T`` ≤ ``num_frames_max``.
+
+References:
+    - Assran et al., 2023. Self-Supervised Learning from Images with a Joint-
+      Embedding Predictive Architecture (I-JEPA). CVPR 2023.
+      (https://arxiv.org/abs/2301.08243) -- predict in EMBEDDING space, which
+      is what makes the pixel decoder unnecessary here.
+    - Bardes et al., 2024. Revisiting Feature Prediction for Learning Visual
+      Representations from Video (V-JEPA).
+      (https://arxiv.org/abs/2404.08471) -- the video form: temporal prediction
+      over frame embeddings.
+    - LeCun, 2022. A Path Towards Autonomous Machine Intelligence.
+      (OpenReview: BZ5a1r-kVsf) -- the JEPA framing.
+    - Hestenes and Sobczyk, 1984. Clifford Algebra to Geometric Calculus --
+      the geometric-algebra machinery behind the Clifford encoder
+      (``dl_techniques.layers.clifford``), which is what the "-Clifford" in the
+      name refers to.
+    - Grill et al., 2020. Bootstrap Your Own Latent (BYOL). NeurIPS 2020.
+      (https://arxiv.org/abs/2006.07733) -- the collapse problem SIGReg is here
+      to solve, and the EMA-target alternative this model does NOT take.
 """
 
 from __future__ import annotations

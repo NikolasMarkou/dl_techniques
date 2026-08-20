@@ -25,6 +25,21 @@ autoregressive rollout. See method docstring for shape details.
 See `/tmp/lewm_source/jepa.py` for the PyTorch reference; see decisions.md
 entries D-001 (live target encoder, no EMA) and D-002 (MLPProjector uses
 LayerNorm, matching upstream default).
+
+References:
+    - Sobal et al., 2024. Learning the World with Minimal Supervision (LeWM) --
+      the upstream PyTorch reference this module ports; see this package's
+      README section 14 for the citation as recorded with the port.
+    - Assran et al., 2023. Self-Supervised Learning from Images with a Joint-
+      Embedding Predictive Architecture (I-JEPA). CVPR 2023.
+      (https://arxiv.org/abs/2301.08243) -- the predict-in-EMBEDDING-space
+      principle that makes a pixel decoder unnecessary.
+    - LeCun, 2022. A Path Towards Autonomous Machine Intelligence.
+      (OpenReview: BZ5a1r-kVsf) -- the JEPA world-model framing.
+    - Skean et al., 2025. SIGReg / hyperspherical-energy anti-collapse
+      regularization, as implemented in
+      ``dl_techniques.layers.sigreg`` -- the collapse control this port keeps
+      instead of an EMA target encoder (D-001).
 """
 
 import keras

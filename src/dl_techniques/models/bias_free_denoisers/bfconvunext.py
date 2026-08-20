@@ -20,6 +20,22 @@ alpha, the output is scaled by alpha, which is what lets one denoiser generalize
 across noise levels and enables the Miyasawa/Tweedie residual-as-score reading.
 ``create_convunext``'s docstring names the exceptions that survive on purpose (the
 non-homogeneous default activations, two hardcoded bias-free sites, GRN's ``beta``).
+
+References:
+    - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
+      Bias-Free Convolutional Neural Networks. ICLR 2020.
+      (https://arxiv.org/abs/1906.05478) -- why ``use_bias=False`` is the whole
+      point of this arm.
+    - Liu et al., 2022. A ConvNet for the 2020s (ConvNeXt).
+      (https://arxiv.org/abs/2201.03545)
+    - Ronneberger et al., 2015. U-Net: Convolutional Networks for Biomedical
+      Image Segmentation. (https://arxiv.org/abs/1505.04597)
+    - Miyasawa, 1961 / Robbins, 1956. The empirical-Bayes identity behind the
+      residual-as-score reading named above.
+
+    The architecture itself is documented once, on
+    ``dl_techniques.models.convunext.model``; this module is wrappers and the
+    Keras registrar.
 """
 
 import keras

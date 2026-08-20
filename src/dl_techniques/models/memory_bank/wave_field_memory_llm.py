@@ -34,6 +34,24 @@ Key implementation notes (per F-002, F-004, LESSONS):
   keeping the memory optimizer as a model attribute.
 - :meth:`warmup_memory_keys` runs offline ``MiniBatchKMeans`` on hidden
   states at the read tap and seeds ``K_lt``.
+
+References:
+    - Graves et al., 2014. Neural Turing Machines.
+      (https://arxiv.org/abs/1410.5401) -- external read/write memory addressed
+      by content, which is what the write and read controllers here are.
+    - Graves et al., 2016. Hybrid computing using a neural network with dynamic
+      external memory (DNC). Nature 538 -- the differentiable-memory line this
+      follows.
+    - Wu et al., 2022. Memorizing Transformers. ICLR 2022.
+      (https://arxiv.org/abs/2203.08913) -- top-k retrieval from a
+      non-differentiable memory bank injected back into a decoder stack.
+    - Jang et al., 2017 / Maddison et al., 2017. Categorical
+      Reparameterization with Gumbel-Softmax (https://arxiv.org/abs/1611.01144)
+      and The Concrete Distribution (https://arxiv.org/abs/1611.00712) -- the
+      straight-through estimator used by the top-K retrieval.
+    - The backbone this wraps VERBATIM is documented at
+      ``dl_techniques.models.wave_field.model``, which carries its own
+      References section (GPT-2, Transformer, S4, Hyena).
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union

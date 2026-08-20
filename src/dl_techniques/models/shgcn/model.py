@@ -8,6 +8,24 @@ for different graph learning tasks:
 
 The model stacks multiple SHGCNLayer instances and provides appropriate output
 layers based on the task.
+
+References:
+    - Arevalo et al., 2024. Simplified Hyperbolic Graph Convolutional Neural
+      Networks. (https://arxiv.org/abs/2411.15266) -- the sHGCN formulation
+      this model stacks; the package README section 16 records the citation as
+      it was taken.
+    - Chami et al., 2019. Hyperbolic Graph Convolutional Neural Networks.
+      NeurIPS 2019. (https://arxiv.org/abs/1910.12933) -- HGCN, the model sHGCN
+      simplifies: hyperbolic feature transform, aggregation and activation.
+    - Wu et al., 2019. Simplifying Graph Convolutional Networks (SGC). ICML
+      2019. (https://arxiv.org/abs/1902.07153) -- the "collapse the nonlinear
+      layers" argument, transplanted to the hyperbolic setting.
+    - Nickel and Kiela, 2017. Poincare Embeddings for Learning Hierarchical
+      Representations. NeurIPS 2017. (https://arxiv.org/abs/1705.08039) -- the
+      Poincare-ball geometry the exp/log maps in
+      ``dl_techniques.utils.geometry.poincare_math`` implement.
+    - Kipf and Welling, 2017. Semi-Supervised Classification with Graph
+      Convolutional Networks. ICLR 2017. (https://arxiv.org/abs/1609.02907)
 """
 
 import keras

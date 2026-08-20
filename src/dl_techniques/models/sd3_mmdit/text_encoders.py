@@ -42,6 +42,26 @@ PyTorch references (faithfully ported, structure only):
 ``openai/CLIP`` ``model.py`` (``Transformer`` / ``ResidualAttentionBlock``),
 ``open_clip`` ``transformer.py``, HuggingFace ``transformers`` ``T5Stack`` /
 ``T5Attention`` / ``T5LayerFF`` (gated-GELU ``T5DenseGatedActDense``).
+
+References:
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision (CLIP). ICML 2021.
+      (https://arxiv.org/abs/2103.00020) -- the ViT-L/14 text tower, its causal
+      mask, QuickGELU MLPs and pooled-EOS projection.
+    - Cherti et al., 2023. Reproducible Scaling Laws for Contrastive
+      Language-Image Learning (OpenCLIP). CVPR 2023.
+      (https://arxiv.org/abs/2212.07143) -- the ViT-bigG text tower this
+      subclasses CLIP for.
+    - Raffel et al., 2020. Exploring the Limits of Transfer Learning with a
+      Unified Text-to-Text Transformer (T5). JMLR 21(140).
+      (https://arxiv.org/abs/1910.10683) -- the T5-v1.1 XXL encoder, its
+      RMSNorm, gated-GELU FFN and relative-position buckets.
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202) -- the gated-GELU FFN.
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis (SD3). ICML 2024.
+      (https://arxiv.org/abs/2403.03206) -- why these three towers, and how
+      their outputs are combined.
 """
 
 import keras

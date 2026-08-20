@@ -8,6 +8,24 @@ computational requirements and performance targets.
 
 Based on "Robust and Interpretable Blind Image Denoising via Bias-Free
 Convolutional Neural Networks" (Mohan et al., ICLR 2020).
+
+References:
+    - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
+      Bias-Free Convolutional Neural Networks. ICLR 2020.
+      (https://arxiv.org/abs/1906.05478) -- the bias-free result this model IS:
+      removing every additive constant makes the network exactly homogeneous of
+      degree 1, so a denoiser trained at one noise level generalizes across
+      levels rather than memorizing one.
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385) -- the residual block layout the
+      variants stack.
+    - Zhang et al., 2017. Beyond a Gaussian Denoiser: Residual Learning of Deep
+      CNN for Image Denoising (DnCNN). (https://arxiv.org/abs/1608.03981) --
+      the residual (noise-predicting) denoiser this is the bias-free form of.
+    - Miyasawa, 1961. An empirical Bayes estimator of the mean of a normal
+      population. Bull. Inst. Internat. Statist. 38, 181-188 -- with Robbins
+      (1956), the identity that makes the residual of a bias-free denoiser a
+      scaled score estimate.
 """
 
 import keras

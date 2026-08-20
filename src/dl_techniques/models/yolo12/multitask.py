@@ -76,6 +76,23 @@ Tasks can be specified in multiple flexible ways:
 - TaskConfiguration objects for advanced configuration
 - Predefined CommonTaskConfigurations for common combinations
 
+References:
+    - Tian et al., 2025. YOLOv12: Attention-Centric Real-Time Object Detectors.
+      (https://arxiv.org/abs/2502.12524) -- the detector this multi-task model
+      shares a backbone with.
+    - Bolya et al., 2019. YOLACT: Real-time Instance Segmentation. ICCV 2019.
+      (https://arxiv.org/abs/1904.02689) -- the prototype-mask + per-instance
+      coefficient formulation the segmentation head follows.
+    - Caruana, 1997. Multitask Learning. Machine Learning 28(1) -- the shared-
+      trunk argument this model is an instance of.
+    - Kendall et al., 2018. Multi-Task Learning Using Uncertainty to Weigh
+      Losses for Scene Geometry and Semantics. CVPR 2018.
+      (https://arxiv.org/abs/1705.07115) -- the task-weighting problem the
+      per-task loss weights here expose.
+    - Lin et al., 2017. Focal Loss for Dense Object Detection. ICCV 2017.
+      (https://arxiv.org/abs/1708.02002) and Milletari et al., 2016. V-Net
+      (Dice loss). (https://arxiv.org/abs/1606.04797) -- the two terms of
+      ``DiceFocalSegmentationLoss``.
 """
 
 import keras

@@ -27,6 +27,21 @@ GroupNorm must be divisible by 32; the config invariant (config.py
 ctor also asserts it defensively.
 
 swish(x) = x * sigmoid(x) is ``keras.activations.silu``.
+
+References:
+    - Kingma and Welling, 2014. Auto-Encoding Variational Bayes.
+      (https://arxiv.org/abs/1312.6114) -- the KL/reparameterization the
+      ``Sampling`` layer implements.
+    - Esser et al., 2021. Taming Transformers for High-Resolution Image
+      Synthesis (VQGAN). (https://arxiv.org/abs/2012.09841) -- the
+      ResnetBlock/AttnBlock encoder-decoder this stack is shaped after.
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. CVPR 2022. (https://arxiv.org/abs/2112.10752) -- the
+      KL-regularized first-stage autoencoder whose layout (GroupNorm32 + swish,
+      attention only at the bottleneck) this reproduces.
+    - Black Forest Labs, 2024. FLUX. (https://github.com/black-forest-labs/flux)
+      -- the ``autoencoder.py`` reference this port follows, channels-FIRST
+      there and channels-LAST here.
 """
 
 from __future__ import annotations

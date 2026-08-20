@@ -7,6 +7,19 @@ models for object detection, segmentation, classification, etc.
 
 The feature extractor outputs multiscale feature maps that can be consumed by
 various task-specific heads.
+
+References:
+    - Tian et al., 2025. YOLOv12: Attention-Centric Real-Time Object Detectors.
+      (https://arxiv.org/abs/2502.12524) -- the backbone/neck this extracts.
+    - Lin et al., 2017. Feature Pyramid Networks for Object Detection. CVPR
+      2017. (https://arxiv.org/abs/1612.03144) -- the multi-scale P3/P4/P5
+      pyramid the neck produces.
+    - Liu et al., 2018. Path Aggregation Network for Instance Segmentation.
+      CVPR 2018. (https://arxiv.org/abs/1803.01534) -- the bottom-up path the
+      neck adds on top of FPN.
+    - Wang et al., 2020. CSPNet: A New Backbone that can Enhance Learning
+      Capability of CNN. (https://arxiv.org/abs/1911.11929) -- the cross-stage
+      partial blocks the backbone stacks.
 """
 
 import keras

@@ -26,6 +26,19 @@ API of the reused AutoEncoder (verified against ``ideogram4/vae.py``):
 For the SD3 tiny preset (``ch=32, ch_mult=(1, 2)``) the VAE downsamples by
 ``2 ** (len(ch_mult) - 1) = 2``: a ``(B, 32, 32, 3)`` image encodes to a
 ``(B, 16, 16, 16)`` latent.
+
+References:
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis (SD3). ICML 2024.
+      (https://arxiv.org/abs/2403.03206) -- the 16-channel latent space and the
+      SCALAR shift/scale convention this module supplies.
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. CVPR 2022. (https://arxiv.org/abs/2112.10752) -- the
+      KL-regularized first-stage autoencoder being reused.
+
+    The encoder/decoder ARCHITECTURE is not defined here. It is
+    ``dl_techniques.models.ideogram4.vae.AutoEncoder``, which carries the full
+    References section for it.
 """
 
 from __future__ import annotations
