@@ -542,9 +542,35 @@ class BERT(keras.Model):
                 training=training
             )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-032
+        # The echoed mask is RESOLVED HERE, at the return, and nowhere else.
+        # This is the fourth and last member of the F-87 family; `fnet` and
+        # `modern_bert` were repaired under D-031 and `distilbert` under D-062,
+        # and `bert` -- the family's namesake -- was MISSED by both. Echoing a
+        # possibly-`None` `attention_mask` makes the output STRUCTURE depend on
+        # the INPUT, so `BERT.predict({"input_ids": ids})` raised
+        # `ValueError: Structures don't have the same nested structure` (Keras
+        # concatenates per-batch outputs and a `None` slot has no structure).
+        # `model(inputs)` always worked, which is why no test caught it.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT drop the "attention_mask" key when it is None -- that is
+        #     the same input-dependent output structure wearing different
+        #     clothes, and downstream heads read the key unconditionally.
+        #   * Do NOT resolve the mask BEFORE the encoder loop. For BERT it is
+        #     an exact no-op (MEASURED max|delta| = 0.000000e+00 over the whole
+        #     output, 2 layers, seq 12, against max|out| = 3.027470e+00), but
+        #     the SAME edit in `modern_bert/model.py` measured 6.415714e-01,
+        #     because `WindowAttention._call_grid` zero-pads a rank-2 mask up to
+        #     its synthetic grid. All four siblings resolve at the RETURN only,
+        #     so no shipped checkpoint's numerics move and the rule is uniform
+        #     rather than per-model. See decisions.md D-032.
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": attention_mask
+            "attention_mask": (
+                attention_mask if attention_mask is not None
+                else keras.ops.ones_like(input_ids)
+            )
         }
 
     def load_pretrained_weights(
