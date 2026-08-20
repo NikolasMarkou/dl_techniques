@@ -22,8 +22,17 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import ops
-from typing import Union
+from typing import Any, Union
+
+# ---------------------------------------------------------------------
+
+# How many units-in-the-last-place of the compute dtype the boundary margin must
+# span. Four is the smallest value that keeps `arctanh` finite in float16 for
+# every representable radius while costing float32 nothing (in float32 the fixed
+# `boundary_eps` is ~839x larger than 4 ULP and therefore still wins).
+_BOUNDARY_ULP_SAFETY = 4.0
 
 # ---------------------------------------------------------------------
 
@@ -139,6 +148,74 @@ class PoincareMath:
         norm = ops.norm(x, axis=axis, keepdims=keepdims)
         return norm, ops.maximum(norm, self.eps)
 
+    @staticmethod
+    def _as_compute_dtype(
+            c: Union[float, keras.KerasTensor],
+            reference: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Return the curvature in the dtype of the tensor it will be combined with.
+
+        A Python float or a float32 curvature tensor combined with a float16
+        activation PROMOTES the whole expression to float32, which then meets a
+        float16 tensor two statements later and raises ``cannot compute Mul as
+        input #1 was expected to be a half tensor``. Casting `c` at entry keeps
+        every derived quantity -- ``sqrt_c``, the ball radius and the boundary
+        margin -- in the compute dtype.
+
+        Args:
+            c: Curvature parameter (c > 0), scalar or tensor.
+            reference: The activation tensor whose dtype the result must match.
+
+        Returns:
+            `c` as a tensor of ``reference``'s dtype.
+        """
+        return ops.cast(c, reference.dtype)
+
+    def boundary_margin(
+            self,
+            dtype: Any,
+            radius: Union[float, keras.KerasTensor]
+    ) -> Union[float, keras.KerasTensor]:
+        """Safety margin from the ball boundary, in units the dtype can represent.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-027
+        The margin is ``max(boundary_eps, 4 ULP(radius))`` and NOT the fixed
+        ``self.boundary_eps``. Do NOT simplify this back to a constant, and do
+        NOT "fix" a boundary problem by merely enlarging that constant: the
+        defect this replaces was not that 1e-4 was too small in absolute terms,
+        it was that 1e-4 is SMALLER THAN ONE ULP of the dtype. float16's ULP at
+        1.0 is 9.765625e-04, **9.77x larger than the margin**, so
+        ``(1/sqrt(c)) - 1e-4`` rounds back to exactly ``1/sqrt(c)``, the clamp in
+        `log_map_0` becomes an identity and ``arctanh(1.0) = inf`` propagates as
+        NaN through every downstream op. MEASURED before this fix: all three
+        shipped `models/shgcn` classes returned **100% NaN** under
+        ``mixed_float16`` -- 96/96, 36/36 and 5/5 elements -- while float32 was
+        green with ``arctanh`` reading 4.9521313 at the boundary. Any constant
+        chosen without reference to the dtype is one precision change away from
+        being void again. See decisions.md D-027.
+
+        Args:
+            dtype: The compute dtype the margin will be used in.
+            radius: The ball radius ``1/sqrt(c)`` the margin is subtracted from.
+
+        Returns:
+            The margin, as a Python float when `radius` is a Python float and as
+            a tensor otherwise.
+        """
+        standardized = keras.backend.standardize_dtype(dtype)
+        try:
+            ulp_at_one = float(np.finfo(standardized).eps)
+        except (TypeError, ValueError):
+            ulp_at_one = float(np.finfo("float32").eps)
+
+        # `np.finfo().eps` is the spacing at 1.0; the spacing at `radius` scales
+        # with the magnitude, so a curvature far from 1.0 is covered too.
+        spacing = ulp_at_one * ops.maximum(ops.abs(radius), 1.0)
+        return ops.maximum(
+            ops.cast(self.boundary_eps, standardized),
+            ops.cast(_BOUNDARY_ULP_SAFETY * spacing, standardized),
+        )
+
     def project(
             self,
             x: keras.KerasTensor,
@@ -170,7 +247,8 @@ class PoincareMath:
             where max_radius = (1/sqrt(c)) - boundary_eps
         """
         norm_x = self.safe_norm(x, axis=-1, keepdims=True)
-        max_r = (1.0 / ops.sqrt(c)) - self.boundary_eps
+        radius = 1.0 / ops.sqrt(self._as_compute_dtype(c, x))
+        max_r = radius - self.boundary_margin(x.dtype, radius)
 
         cond = norm_x >= max_r
         projected = x * (max_r / norm_x)
@@ -208,7 +286,7 @@ class PoincareMath:
         Note:
             This operation is differentiable and preserves the origin: exp_0(0) = 0.
         """
-        sqrt_c = ops.sqrt(c)
+        sqrt_c = ops.sqrt(self._as_compute_dtype(c, v))
         # The branch test uses the RAW norm; the division uses the floored one.
         # See the D-056 anchor on `norm_and_floored_norm`.
         raw_norm_v, norm_v = self.norm_and_floored_norm(v, axis=-1, keepdims=True)
@@ -250,12 +328,13 @@ class PoincareMath:
             Input points are clamped to stay within valid ball radius to prevent
             atanh(1) = infinity. This operation inverts exp_map_0: log_0(exp_0(v)) = v.
         """
-        sqrt_c = ops.sqrt(c)
+        sqrt_c = ops.sqrt(self._as_compute_dtype(c, y))
         # The branch test uses the RAW norm; the division uses the floored one.
         # See the D-056 anchor on `norm_and_floored_norm`.
         raw_norm_y, norm_y = self.norm_and_floored_norm(y, axis=-1, keepdims=True)
 
-        max_r = (1.0 / sqrt_c) - self.boundary_eps
+        radius = 1.0 / sqrt_c
+        max_r = radius - self.boundary_margin(y.dtype, radius)
         norm_y = ops.minimum(norm_y, max_r)
 
         scale = ops.arctanh(sqrt_c * norm_y) / (sqrt_c * norm_y)
@@ -300,6 +379,8 @@ class PoincareMath:
             - Identity: x ⊕ 0 = x
             - Preserves the ball: if x,y in D^n_c, then x ⊕ y in D^n_c
         """
+        c = self._as_compute_dtype(c, x)
+
         xy = ops.sum(x * y, axis=-1, keepdims=True)
         x2 = ops.sum(ops.square(x), axis=-1, keepdims=True)
         y2 = ops.sum(ops.square(y), axis=-1, keepdims=True)

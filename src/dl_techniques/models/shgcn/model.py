@@ -11,7 +11,7 @@ layers based on the task.
 """
 
 import keras
-from typing import List, Optional, Union, Any
+from typing import List, Optional, Tuple, Union, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -199,6 +199,31 @@ class SHGCNModel(keras.Model):
             name='shgcn_output'
         )
 
+    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+        """Materialise every sHGCN layer from ``[features, adjacency]`` shapes.
+
+        Args:
+            input_shape: List of ``[features_shape, adjacency_shape]``.
+        """
+        feat_shape, adj_shape = input_shape
+
+        current_shape = tuple(feat_shape)
+        for layer in self.hidden_layers:
+            layer.build([current_shape, adj_shape])
+            current_shape = layer.compute_output_shape([current_shape, adj_shape])
+
+        self.output_layer.build([current_shape, adj_shape])
+
+        super().build(input_shape)
+
+    def compute_output_shape(
+            self,
+            input_shape: List[Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Return ``(..., num_nodes, output_dim)``."""
+        feat_shape = input_shape[0]
+        return tuple(feat_shape[:-1]) + (self.output_dim,)
+
     def call(
             self,
             inputs: List[keras.KerasTensor],
@@ -358,6 +383,24 @@ class SHGCNNodeClassifier(keras.Model):
             name='classifier'
         )
 
+    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+        """Materialise backbone and classification head.
+
+        Args:
+            input_shape: List of ``[features_shape, adjacency_shape]``.
+        """
+        self.backbone.build(input_shape)
+        self.classifier.build(self.backbone.compute_output_shape(input_shape))
+        super().build(input_shape)
+
+    def compute_output_shape(
+            self,
+            input_shape: List[Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Return ``(..., num_nodes, num_classes)``."""
+        feat_shape = input_shape[0]
+        return tuple(feat_shape[:-1]) + (self.num_classes,)
+
     def call(
             self,
             inputs: List[keras.KerasTensor],
@@ -511,6 +554,45 @@ class SHGCNLinkPredictor(keras.Model):
         )
 
         self.decoder = FermiDiracDecoder(name='fermi_dirac_decoder')
+
+    def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
+        """Materialise the backbone AND the Fermi-Dirac decoder.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-029
+        This method exists for SERIALIZATION, not for eager convenience -- do not
+        delete it on the grounds that the model already runs without it. Keras
+        restores a sub-layer's variables only if that sub-layer is BUILT at load
+        time. With no `build()` here, `FermiDiracDecoder` was unbuilt when the
+        archive was read, its `load_own_variables` was skipped, and the reloaded
+        model silently fell back to the class defaults r=2.0 / t=1.0. MEASURED:
+        the archive was COMPLETE (8 of 8 datasets, both scalars stored at the
+        perturbed 3.75) and the RELOAD was lossy -- 6 of 8 tensors identical, a
+        forward delta of 1.497385e-01 against an output range of 7.310586e-01,
+        and NO warning of any kind. An archive-content check alone cannot see
+        this; the guard must compare reloaded VALUES. See decisions.md D-029.
+
+        Args:
+            input_shape: List of ``[features_shape, adjacency_shape,
+                edge_pairs_shape]``.
+        """
+        feat_shape, adj_shape, edge_shape = input_shape
+
+        self.backbone.build([feat_shape, adj_shape])
+        embedding_shape = self.backbone.compute_output_shape(
+            [feat_shape, adj_shape])
+
+        # `take` along axis 0 replaces the node axis with the edge axis.
+        gathered_shape = (edge_shape[0],) + tuple(embedding_shape[1:])
+        self.decoder.build([gathered_shape, gathered_shape])
+
+        super().build(input_shape)
+
+    def compute_output_shape(
+            self,
+            input_shape: List[Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Return ``(num_edges,)``."""
+        return (input_shape[2][0],)
 
     def call(
             self,
