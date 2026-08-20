@@ -49,6 +49,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 from .common import apply_attention_mask, compute_attention_scale, validate_head_divisibility
 from ..activations import ProbabilityOutput
@@ -266,10 +267,25 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-068
+        # Each projection gets its OWN initializer via `clone_initializer`.
+        # Handing the SAME `Initializer` INSTANCE to several `Dense` layers
+        # makes every same-shaped kernel bit-identical (Keras 3 behaviour --
+        # a seedless instance self-assigns a fixed seed at construction and
+        # replays it), and `w_q`, `w_k`, `w_v` and `w_o` are four DIFFERENT
+        # architectural roles. MEASURED in `FastVLM` before this change:
+        # `w_q/kernel == w_k/kernel == w_v/kernel == w_o/kernel` bit-for-bit in
+        # every one of the 6 `stage3` attention blocks, i.e. an attention layer
+        # whose query and key projections are the same function, so the initial
+        # score matrix is exactly symmetric. `self.kernel_initializer` is left
+        # untouched so `get_config` still reports what the caller passed, and a
+        # SEEDED initializer still reproduces (two clones of
+        # `GlorotUniform(seed=7)` are deliberately identical). See D-057 for the
+        # per-site ruling and decisions.md D-068.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -279,7 +295,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.w_k = keras.layers.Dense(
             self.num_kv_heads * self.head_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -289,7 +305,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.w_v = keras.layers.Dense(
             self.num_kv_heads * self.head_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -299,7 +315,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.w_o = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,

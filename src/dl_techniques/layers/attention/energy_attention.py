@@ -70,6 +70,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # DECISION plan-2026-07-27T130643-38c5646a/D-007
@@ -407,10 +408,19 @@ class EnergyAttention(keras.layers.Layer):
             trainable=True,
             dtype=self.dtype,
         )
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-068
+        # `clone_initializer`, because handing the SAME instance to both
+        # `add_weight` calls made `w_key` and `w_query` bit-identical -- so the
+        # initial attention score matrix `K^T Q` was EXACTLY SYMMETRIC in all
+        # six `energy_transformer` / `graph_energy_transformer` classes. Key and
+        # query are different architectural roles; this is the D-057 defect
+        # case, not the harmless one. `self.kernel_initializer` is untouched so
+        # `get_config` still reports the caller's argument, and a SEEDED
+        # initializer still reproduces. See decisions.md D-068.
         self.w_query = self.add_weight(
             name="w_query",
             shape=w_shape,
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             trainable=True,
             dtype=self.dtype,
         )

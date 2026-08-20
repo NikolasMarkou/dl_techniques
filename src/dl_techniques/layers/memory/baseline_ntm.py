@@ -23,6 +23,7 @@ from keras import layers
 from keras import initializers
 from typing import Any, Literal
 
+from dl_techniques.initializers import clone_initializer
 from .ntm_interface import (
     AddressingMode,
     BaseMemory,
@@ -287,14 +288,25 @@ class NTMReadHead(BaseHead):
         # Create sub-layers in __init__ (Golden Rule)
         self.key_dense = layers.Dense(
             memory_dim,
-            kernel_initializer=self.kernel_initializer,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-068
+            # EVERY consumer clones. Handing the SAME initializer instance to
+            # all of a head's projections made them bit-identical: MEASURED
+            # before this change, `read_head_0/key == write_head_0/key ==
+            # write_head_0/erase == write_head_0/add` and all six of
+            # `{read,write}_head_0/{beta,gate,gamma}` -- 22 identical pairs of
+            # 17 non-constant tensors. `erase` and `add` are OPPOSITE
+            # operations on memory and the two heads address it independently,
+            # so this is the D-057 defect case. `self.kernel_initializer` is
+            # untouched, so `get_config` still reports the caller's argument.
+            # See decisions.md D-068.
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
         self.beta_dense = layers.Dense(
             1,
             activation="softplus",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
@@ -312,7 +324,7 @@ class NTMReadHead(BaseHead):
             self.gate_dense = layers.Dense(
                 1,
                 activation="sigmoid",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="gate",
@@ -320,7 +332,7 @@ class NTMReadHead(BaseHead):
             self.shift_dense = layers.Dense(
                 shift_range,
                 activation="softmax",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="shift",
@@ -328,7 +340,7 @@ class NTMReadHead(BaseHead):
             self.gamma_dense = layers.Dense(
                 1,
                 activation="softplus",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="gamma",
@@ -551,14 +563,14 @@ class NTMWriteHead(BaseHead):
         # Addressing parameters
         self.key_dense = layers.Dense(
             memory_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
         self.beta_dense = layers.Dense(
             1,
             activation="softplus",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
@@ -570,7 +582,7 @@ class NTMWriteHead(BaseHead):
             self.gate_dense = layers.Dense(
                 1,
                 activation="sigmoid",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="gate",
@@ -578,7 +590,7 @@ class NTMWriteHead(BaseHead):
             self.shift_dense = layers.Dense(
                 shift_range,
                 activation="softmax",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="shift",
@@ -586,7 +598,7 @@ class NTMWriteHead(BaseHead):
             self.gamma_dense = layers.Dense(
                 1,
                 activation="softplus",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="gamma",
@@ -600,7 +612,7 @@ class NTMWriteHead(BaseHead):
         self.erase_dense = layers.Dense(
             memory_dim,
             activation="sigmoid",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="erase",
@@ -608,7 +620,7 @@ class NTMWriteHead(BaseHead):
         self.add_dense = layers.Dense(
             memory_dim,
             activation="tanh",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="add",
@@ -802,7 +814,7 @@ class NTMController(BaseController):
         if self.controller_type == "lstm":
             self.core = layers.LSTMCell(
                 self.controller_dim,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_cell",
@@ -810,7 +822,7 @@ class NTMController(BaseController):
         elif self.controller_type == "gru":
             self.core = layers.GRUCell(
                 self.controller_dim,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_cell",
@@ -819,7 +831,7 @@ class NTMController(BaseController):
             self.core = layers.Dense(
                 self.controller_dim,
                 activation="relu",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_dense",
@@ -994,7 +1006,7 @@ class NTMCell(keras.layers.Layer):
         self.controller = NTMController(
             self.config.controller_dim,
             self.config.controller_type,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="controller",
@@ -1006,7 +1018,7 @@ class NTMCell(keras.layers.Layer):
                 self.config.memory_dim,
                 self.config.addressing_mode,
                 self.config.shift_range,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 epsilon=self.config.epsilon,
@@ -1021,7 +1033,7 @@ class NTMCell(keras.layers.Layer):
                 self.config.memory_dim,
                 self.config.addressing_mode,
                 self.config.shift_range,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 epsilon=self.config.epsilon,
@@ -1394,7 +1406,7 @@ class NeuralTuringMachine(BaseNTM):
 
         self.ntm_cell = NTMCell(
             self.config,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="ntm_cell",
@@ -1409,7 +1421,7 @@ class NeuralTuringMachine(BaseNTM):
 
         self.output_projection = layers.Dense(
             output_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="output_projection",
