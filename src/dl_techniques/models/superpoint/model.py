@@ -91,6 +91,7 @@ References:
 
 """
 
+import numpy as np
 import keras
 from typing import List, Optional, Union, Tuple, Dict, Any
 
@@ -320,7 +321,16 @@ class SuperPoint(keras.Model):
         )
 
         # L2-normalize along the channel axis at every spatial location.
-        desc = desc / (keras.ops.norm(desc, axis=-1, keepdims=True) + 1e-12)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-050
+        # The L2-normalisation floor is `max(1e-12, finfo(dtype).tiny)`.
+        # `np.float16(1e-12)` is EXACTLY 0.0, so under `mixed_float16` this guard
+        # did not exist and a zero descriptor vector gave 0/0 = NaN — MEASURED
+        # 16 NaN of 16 at HEAD with the float32 control green. Do NOT replace it
+        # with a larger literal: the defect is that the constant is smaller than
+        # the dtype can represent, not that it is small. The float32 path is
+        # INERT (`max(1e-12, 1.18e-38) == 1e-12`). See decisions.md D-050.
+        norm_eps = max(1e-12, float(np.finfo(self.compute_dtype).tiny))
+        desc = desc / (keras.ops.norm(desc, axis=-1, keepdims=True) + norm_eps)
 
         return {"keypoints": keypoints, "descriptors": desc}
 

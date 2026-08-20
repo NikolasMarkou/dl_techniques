@@ -23,6 +23,7 @@ decimals lose their point (``"1.5 + 2"`` -> ``(15, 2)``). See the ``NAM`` module
 docstring and ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
 """
 
+import numpy as np
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
@@ -598,7 +599,12 @@ class NAMCell(keras.layers.Layer):
 
         # --- 13. Halt decision ---
         halt_input = ops.sum(hidden * ops.expand_dims(token_mask_float, -1), axis=1)
-        halt_input = halt_input / (ops.sum(token_mask_float, axis=-1, keepdims=True) + 1e-9)
+        # Dtype-aware floor, same ruling as `NAM.call`'s pooled mean:
+        # `np.float16(1e-9)` is exactly 0.0. See decisions.md D-050.
+        halt_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
+        halt_input = halt_input / (
+            ops.sum(token_mask_float, axis=-1, keepdims=True) + halt_eps
+        )
         halt_logits = self.halt_head(halt_input)  # (B, 2)
         q_halt = halt_logits[..., 0]  # (B,)
         q_continue = halt_logits[..., 1]  # (B,)

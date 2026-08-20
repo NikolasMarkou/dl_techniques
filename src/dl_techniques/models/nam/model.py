@@ -52,6 +52,7 @@ Architecture::
                                     Result Head → (scalar, validity)
 """
 
+import numpy as np
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -418,7 +419,20 @@ class NAM(keras.Model):
             cell_outputs["hidden"] * ops.expand_dims(token_mask_float, -1),
             axis=1,
         )
-        pooled = pooled / (ops.sum(token_mask_float, axis=-1, keepdims=True) + 1e-9)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-050
+        # The masked-mean denominator floor is `max(1e-9, finfo(dtype).tiny)`,
+        # not the bare literal. `np.float16(1e-9)` is EXACTLY 0.0, so under
+        # `mixed_float16` this guard did not exist at all and an all-padding row
+        # gave 0/0 = NaN — MEASURED 8 NaN of 8 at HEAD, with the float32 control
+        # green. Do NOT "just make the constant bigger": a literal chosen without
+        # reference to the dtype is one precision change away from being void
+        # again, which is exactly how this one became void. The float32 path is
+        # INERT by construction — `max(1e-9, 1.18e-38) == 1e-9`.
+        # Same instrument as D-027. See decisions.md D-050.
+        mean_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
+        pooled = pooled / (
+            ops.sum(token_mask_float, axis=-1, keepdims=True) + mean_eps
+        )
 
         # Concatenate the cell's intermediate arithmetic result as a hint
         # so the result head can refine it rather than compute from scratch.
