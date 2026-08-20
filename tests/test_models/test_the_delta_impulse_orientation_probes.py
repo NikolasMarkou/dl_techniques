@@ -242,8 +242,9 @@ class TestSamStridePaths:
         )
         with pytest.raises(ValueError, match=r"divisible by patch width"):
             encoder(np.zeros((1, 64, 40, 3), dtype="float32"), training=False)
-        with pytest.raises(Exception, match=r"Incompatible shapes"):
+        with pytest.raises(Exception) as excinfo:
             encoder(np.zeros((1, 64, 48, 3), dtype="float32"), training=False)
+        _assert_positional_add_shape_error(str(excinfo.value))
 
 
 # ---------------------------------------------------------------------------
@@ -410,3 +411,57 @@ class TestTheProbeRefusesASquareGrid:
         assert energy.shape == (32, 20)
         assert energy[5, 7] == 1.0
         assert energy.sum() == 1.0
+
+
+# ---------------------------------------------------------------------------
+# The `ImageEncoderViT` non-square refusal is matched on the OP, not the prose
+# ---------------------------------------------------------------------------
+
+#: TF's shape-mismatch wording is DEVICE-DEPENDENT for the same failure, so a
+#: literal match on either phrase is a test that passes on one machine and
+#: fails on the next. MEASURED for the identical call
+#: (`ImageEncoderViT(img_size=64, patch_size=16, ...)` fed `(1, 64, 48, 3)`):
+#:
+#:   CPU  "Incompatible shapes: [1,4,3,32] vs. [1,4,4,32] [Op:AddV2]"
+#:   GPU  "required broadcastable shapes [Op:AddV2]"
+#:
+#: The first form was pinned at step 19 and was RED on a GPU run. What is
+#: invariant -- and what the docstring above actually claims -- is that the
+#: refusal happens inside the ABSOLUTE-POSITION ADD, whose op is `AddV2`. That
+#: is the substantive assertion; the prose is decoration. Both phrasings are
+#: accepted so a wrong-op or non-shape failure is still rejected.
+_SHAPE_ERROR_PHRASES = ("Incompatible shapes", "required broadcastable shapes")
+
+
+def _assert_positional_add_shape_error(message: str) -> None:
+    """Reject anything that is not a shape mismatch in an `AddV2`."""
+    assert "[Op:AddV2]" in message, (
+        f"expected the non-square refusal to come from the absolute-position "
+        f"add (`[Op:AddV2]`); got: {message!r}"
+    )
+    assert any(p in message for p in _SHAPE_ERROR_PHRASES), (
+        f"expected a shape-mismatch message in one of the two device-dependent "
+        f"phrasings {_SHAPE_ERROR_PHRASES}; got: {message!r}"
+    )
+
+
+def test_the_positional_add_matcher_rejects_the_wrong_failure():
+    """RED proof for the matcher itself, both halves.
+
+    Without this the matcher could be weakened to `assert message` and nothing
+    would notice.
+    """
+    for good in (
+        "Incompatible shapes: [1,4,3,32] vs. [1,4,4,32] [Op:AddV2] name:",
+        "required broadcastable shapes [Op:AddV2] name:",
+    ):
+        _assert_positional_add_shape_error(good)
+
+    with pytest.raises(AssertionError, match=r"absolute-position add"):
+        # right words, WRONG op -- a shape error somewhere else entirely
+        _assert_positional_add_shape_error(
+            "Incompatible shapes: [1,4,3,32] vs. [1,4,4,32] [Op:MatMul]"
+        )
+    with pytest.raises(AssertionError, match=r"shape-mismatch message"):
+        # right op, but not a shape failure
+        _assert_positional_add_shape_error("Could not find device [Op:AddV2]")
