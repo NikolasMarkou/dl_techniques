@@ -27,6 +27,7 @@ Algorithm (per F-004 §3-§4)::
 import math
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import keras
 from keras import ops
 
@@ -388,14 +389,21 @@ class MemoryReadController(keras.layers.Layer):
         # ops.top_k returns (values, indices). We take the indices.
         top_vals, top_idx = ops.top_k(sim_clipped, k=self.top_k)
         # top_idx shape: (B, T, H, top_k).
+        # `ops.one_hot` with no `dtype=` returns float32 regardless of the active
+        # mixed-precision policy; the float32 mask then met the float16 `soft_w`
+        # one statement below. See decisions.md D-045.
         hard_one_hot = ops.one_hot(
-            top_idx, num_classes=self.M_static,
+            top_idx, num_classes=self.M_static, dtype=self.compute_dtype,
         )  # (B, T, H, top_k, M_static)
         hard_mask = ops.sum(hard_one_hot, axis=-2)  # (B, T, H, M_static)
         # Re-normalize the soft weights restricted to the top-K positions.
+        # The `1e-9` floor is VOID in float16 — `np.float16(1e-9)` is exactly
+        # 0.0 — so it is raised to the dtype's smallest normal when the compute
+        # dtype cannot represent it. See decisions.md D-045.
+        renorm_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
         masked_soft = soft_w * hard_mask
         hard_w = masked_soft / (
-            ops.sum(masked_soft, axis=-1, keepdims=True) + 1e-9
+            ops.sum(masked_soft, axis=-1, keepdims=True) + renorm_eps
         )
 
         # STE: forward = hard_w, backward = soft_w.
@@ -661,7 +669,25 @@ class MemoryReadController(keras.layers.Layer):
 
         Output shape ``(B, T, max_seq_len)``: ``0`` on allowed positions,
         ``-inf`` on disallowed (causal-violating OR padded).
+
+        The mask is materialised in the layer's ``compute_dtype`` with a
+        sentinel clamped to that dtype's representable range — see the
+        ``DECISION`` anchor below.
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-045
+        # The additive mask is built in `compute_dtype`, and its sentinel is
+        # `max(_NEG_INF, finfo(dtype).min / 2)`. Two separate defects are closed
+        # here and BOTH must stay closed:
+        #   1. the mask was hard-coded `dtype="float32"` and was added to a
+        #      float16 `sim` under `mixed_float16`, which RAISED;
+        #   2. `-1.0e9` is NOT representable in float16 — it overflows to `-inf`,
+        #      and an `-inf` entering `softmax` is the fully-masked-row NaN shape.
+        # Do NOT "simplify" this back to a single literal: in float32 the clamp is
+        # inert by construction (`max(-1e9, -1.7e38) == -1e9` exactly), so the
+        # dtype-aware spelling costs float32 nothing.
+        # See decisions.md D-045.
+        mask_dtype = self.compute_dtype
+        neg_inf = max(_NEG_INF, float(np.finfo(mask_dtype).min) / 2.0)
         # Causal portion: position `i` (in WM, 0..max_seq_len-1) is
         # allowed for query at time t' iff i <= t'. We want a tensor
         # M_caus[b, t', i] = -inf if i > t' else 0.
@@ -671,8 +697,8 @@ class MemoryReadController(keras.layers.Layer):
         causal_bool = ops.expand_dims(wm_idx, axis=0) <= ops.expand_dims(q_idx, axis=1)
         causal_add = ops.where(
             causal_bool,
-            ops.zeros_like(causal_bool, dtype="float32"),
-            ops.full(ops.shape(causal_bool), _NEG_INF, dtype="float32"),
+            ops.zeros_like(causal_bool, dtype=mask_dtype),
+            ops.full(ops.shape(causal_bool), neg_inf, dtype=mask_dtype),
         )
         # Expand to (1, T, max_seq_len) -> broadcast against batch.
         causal_add = ops.expand_dims(causal_add, axis=0)
@@ -680,8 +706,8 @@ class MemoryReadController(keras.layers.Layer):
         # Padding mask: 1.0 -> 0.0 add, 0.0 -> -inf add.
         pad_add = ops.where(
             wm_padding_mask > 0.5,
-            ops.zeros_like(wm_padding_mask),
-            ops.full(ops.shape(wm_padding_mask), _NEG_INF, dtype="float32"),
+            ops.zeros_like(wm_padding_mask, dtype=mask_dtype),
+            ops.full(ops.shape(wm_padding_mask), neg_inf, dtype=mask_dtype),
         )  # (B, max_seq_len)
         pad_add = ops.expand_dims(pad_add, axis=1)  # (B, 1, max_seq_len)
 

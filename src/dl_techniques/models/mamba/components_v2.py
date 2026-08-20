@@ -241,6 +241,23 @@ class Mamba2Layer(keras.layers.Layer):
         """Performs the selective scan recurrence."""
         batch_size, seq_len, nheads, headdim = keras.ops.shape(x)
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-044
+        # The recurrent scan runs in the VARIABLE dtype (float32 under
+        # `mixed_float16`), never in the compute dtype. `call()` already casts
+        # `A_log` to float32 on purpose, and `keras.ops.einsum` PROMOTES rather
+        # than raising, so `deltaA` came out float32 while `h` was materialised at
+        # `compute_dtype` — the exception then landed on `h_A_part + h_B_part`
+        # inside `body`, away from its cause. Do NOT "fix" this by casting `A`
+        # down to float16: this is a sequential accumulation over `seq_len` steps
+        # and half-precision state is exactly where it drifts.
+        # See decisions.md D-044.
+        scan_dtype = self.variable_dtype
+        x = keras.ops.cast(x, scan_dtype)
+        dt = keras.ops.cast(dt, scan_dtype)
+        A = keras.ops.cast(A, scan_dtype)
+        B = keras.ops.cast(B, scan_dtype)
+        C = keras.ops.cast(C, scan_dtype)
+
         # DECISION plan-2026-08-18T140459-7991552f/D-042: BROADCAST B/C from
         # their group to the heads that group serves -- do NOT sum over `g`.
         # This body used to do `einsum("bh,bgn->bhgn")` then
@@ -263,12 +280,14 @@ class Mamba2Layer(keras.layers.Layer):
             C = keras.ops.repeat(C, heads_per_group, axis=2)  # (B, L, H, N)
 
         # Discretize A: A_bar = exp(Δ * A)
-        delta = keras.ops.softplus(dt + self.dt_bias)  # (B, L, H)
+        delta = keras.ops.softplus(
+            dt + keras.ops.cast(self.dt_bias, scan_dtype)
+        )  # (B, L, H)
         deltaA = keras.ops.exp(keras.ops.einsum("blh,h->blh", delta, A))  # (B, L, H)
 
         # Recurrent scan
-        h = keras.ops.zeros((batch_size, nheads, headdim, self.d_state), dtype=self.compute_dtype)
-        ys = keras.ops.zeros((seq_len, batch_size, nheads, headdim), dtype=self.compute_dtype)
+        h = keras.ops.zeros((batch_size, nheads, headdim, self.d_state), dtype=scan_dtype)
+        ys = keras.ops.zeros((seq_len, batch_size, nheads, headdim), dtype=scan_dtype)
 
         t = keras.ops.convert_to_tensor(0, dtype="int32")
 
@@ -307,7 +326,9 @@ class Mamba2Layer(keras.layers.Layer):
             loop_vars=(t, h, ys),
             maximum_iterations=seq_len
         )
-        return keras.ops.transpose(final_ys, (1, 0, 2, 3))  # (B, L, H, P)
+        return keras.ops.cast(
+            keras.ops.transpose(final_ys, (1, 0, 2, 3)), self.compute_dtype
+        )  # (B, L, H, P)
 
     def call(
             self,

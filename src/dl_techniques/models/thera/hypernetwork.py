@@ -403,12 +403,18 @@ class TheraHypernetwork(keras.layers.Layer):
         interp_coords = interpolate_grid(coords, source_coords, order=0)
 
         # Relative coord (query - nearest-source), scaled to source pixel units.
-        rel = coords - interp_coords  # (B, Hq, Wq, 2)
+        # The whole of this arithmetic is COORDINATE math and stays in float32 —
+        # `_source_grid` and `interpolate_grid` both work in float32 — and only
+        # the result is brought down to the layer's compute dtype. Under
+        # `mixed_float16` `coords` arrives as float16 and the subtraction raised.
+        # See decisions.md D-046.
+        rel = ops.cast(coords, "float32") - ops.cast(interp_coords, "float32")
         hs_f = ops.cast(ops.shape(encoding)[1], "float32")
         ws_f = ops.cast(ops.shape(encoding)[2], "float32")
         rel_h = rel[..., 0] * hs_f  # (B, Hq, Wq)
         rel_w = rel[..., 1] * ws_f
         rel = ops.stack([rel_h, rel_w], axis=-1)  # (B, Hq, Wq, 2)
+        rel = ops.cast(rel, self.compute_dtype)
         return rel, phi_phase, phi_kernel
 
     def decode(

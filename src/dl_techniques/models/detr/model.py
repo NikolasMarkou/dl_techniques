@@ -289,7 +289,14 @@ class DetrTransformer(layers.Layer):
             keras.ops.expand_dims(query_embed, axis=0),
             [batch_size, 1, 1]
         )
-        tgt = keras.ops.zeros((batch_size, num_queries, self.hidden_dim))
+        # Materialise the decoder's zero query slot in the layer's COMPUTE dtype.
+        # `keras.ops.zeros` with no `dtype=` returns float32 regardless of the
+        # active mixed-precision policy, and the resulting float32 tensor meets a
+        # float16 `query_embed_expanded` two statements below, so the raise landed
+        # on the addition rather than here.
+        tgt = keras.ops.zeros(
+            (batch_size, num_queries, self.hidden_dim), dtype=self.compute_dtype
+        )
 
         decoder_outputs = []
         for decoder_layer in self.decoder_layers:

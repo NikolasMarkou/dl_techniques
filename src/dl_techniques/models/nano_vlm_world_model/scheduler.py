@@ -387,7 +387,7 @@ class DiffusionScheduler:
         # 3. Add noise for stochastic sampling (not needed at t=0)
         if t > 0:
             variance = self._get_variance(t)
-            noise = keras.random.normal(ops.shape(sample))
+            noise = keras.random.normal(ops.shape(sample), dtype=sample.dtype)
             pred_prev_sample = pred_prev_sample + ops.sqrt(variance) * noise
 
         return pred_prev_sample, pred_original_sample
@@ -441,5 +441,17 @@ class DiffusionScheduler:
         # Reshape for broadcasting: [batch, 1, 1, ...]
         while len(ops.shape(res)) < len(ops.shape(broadcast_shape)):
             res = ops.expand_dims(res, -1)
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-047
+        # The gather runs in float32 — the schedule tables are float32 constants
+        # and their tail values are small enough that float16 rounding matters —
+        # but the coefficient is RETURNED in the dtype of the tensor it is about
+        # to be multiplied with. Every caller writes `coef * sample`, so a
+        # hard-coded float32 return raised under `mixed_float16` at the caller's
+        # multiply, not here. Do NOT instead cast `arr` down before the gather.
+        # See decisions.md D-047.
+        target_dtype = getattr(broadcast_shape, "dtype", None)
+        if target_dtype is not None:
+            res = ops.cast(res, getattr(target_dtype, "name", target_dtype))
 
         return res

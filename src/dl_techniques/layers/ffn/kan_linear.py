@@ -281,6 +281,19 @@ class KANLinear(keras.layers.Layer):
             ),
             trainable=False,
             dtype=self.dtype,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-043
+            # The knot sequence is a COORDINATE TABLE, not an activation. Keras 3
+            # autocasts float variables on read, so under `mixed_float16` the grid
+            # would arrive as float16 inside `_compute_bspline_basis` and the whole
+            # Cox-de Boor recursion — including the `+ self.epsilon` guard, whose
+            # 1e-7 default is SUBNORMAL in float16 (1.192093e-07, below
+            # `finfo('float16').tiny`, ~19% relative error) — would run at half
+            # precision.
+            # Do NOT drop `autocast=False` on the grounds that the grid "is just a
+            # weight": the recursion divides by knot differences, and it is the one
+            # place in this layer where float16 rounding is not tolerable.
+            # See decisions.md D-043.
+            autocast=False,
         )
 
         super().build(input_shape)
@@ -360,6 +373,13 @@ class KANLinear(keras.layers.Layer):
         :return: Basis function values of shape ``(..., input_features, num_basis_fns)``.
         :rtype: keras.KerasTensor
         """
+        # The Cox-de Boor recursion runs in the VARIABLE dtype (float32 under
+        # `mixed_float16`), never in the compute dtype: `self.grid` is held
+        # `autocast=False` and the input is lifted to match it. The basis is
+        # returned at the layer boundary in `compute_dtype`.
+        compute_dtype = self.compute_dtype
+        x = keras.ops.cast(x, self.dtype)
+
         # Add dimension for broadcasting with grid: (..., input_features, 1)
         x = keras.ops.expand_dims(x, axis=-1)
 
@@ -400,7 +420,7 @@ class KANLinear(keras.layers.Layer):
             # Combine terms
             basis = term1 + term2
 
-        return basis
+        return keras.ops.cast(basis, compute_dtype)
 
     def call(
             self, inputs: keras.KerasTensor, training: Optional[bool] = None

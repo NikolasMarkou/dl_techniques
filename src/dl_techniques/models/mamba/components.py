@@ -429,6 +429,27 @@ class MambaLayer(keras.layers.Layer):
         """
         batch_size, d_inner, seq_len = keras.ops.shape(u)
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-044
+        # The recurrent scan runs in the VARIABLE dtype (float32 under
+        # `mixed_float16`), never in the compute dtype. `call()` already casts
+        # `A_log` to float32 on purpose, and `keras.ops.einsum` PROMOTES rather
+        # than raising, so `deltaA` came out float32 while `h` was materialised at
+        # `compute_dtype` — the exception then landed on `deltaA[:, :, t] * h`
+        # inside `body`, two statements away from its cause. Do NOT "fix" this by
+        # casting `A` down to float16: this is a sequential accumulation over
+        # `seq_len` steps and half-precision state is exactly where it drifts.
+        # See decisions.md D-044.
+        scan_dtype = self.variable_dtype
+        u = keras.ops.cast(u, scan_dtype)
+        delta = keras.ops.cast(delta, scan_dtype)
+        A = keras.ops.cast(A, scan_dtype)
+        B = keras.ops.cast(B, scan_dtype)
+        C = keras.ops.cast(C, scan_dtype)
+        D = keras.ops.cast(D, scan_dtype)
+        # `z` is deliberately NOT lifted: the SiLU gate is a `keras.layers.Activation`,
+        # which runs at `compute_dtype`, so the gating is applied AFTER the result
+        # comes back down (see the return statement).
+
         # Discretize continuous parameters A and B
         # A_bar = exp(Δ * A)
         deltaA = keras.ops.exp(
@@ -443,13 +464,13 @@ class MambaLayer(keras.layers.Layer):
         # Initialize hidden state
         h = keras.ops.zeros(
             (batch_size, d_inner, self.d_state),
-            dtype=self.compute_dtype
+            dtype=scan_dtype
         )
 
         # Storage for outputs
         ys = keras.ops.zeros(
             (seq_len, batch_size, d_inner),
-            dtype=self.compute_dtype
+            dtype=scan_dtype
         )
 
         # Time step counter
@@ -500,7 +521,8 @@ class MambaLayer(keras.layers.Layer):
         # Add skip connection: y = y + D * u
         y = y + keras.ops.expand_dims(keras.ops.expand_dims(D, 0), -1) * u
 
-        # Apply gating: y = y * silu(z)
+        # Apply gating: y = y * silu(z), at the layer's compute dtype.
+        y = keras.ops.cast(y, self.compute_dtype)
         return y * self.activation(z)
 
     def call(

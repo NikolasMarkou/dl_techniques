@@ -106,7 +106,14 @@ class TimestepEmbedding(layers.Layer):
         # Concatenate
         embedding = ops.concatenate([embedding_sin, embedding_cos], axis=-1)
 
-        return embedding
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-047
+        # The sinusoid is COMPUTED in float32 (`timesteps` runs to 1000 and the
+        # frequency table spans 1e-4, neither of which float16 resolves) and
+        # RETURNED at the layer's compute dtype. Returning float32 unconditionally
+        # is what raised under `mixed_float16`: the embedding is added to a
+        # float16 projection in every denoiser. Same shape as the step-5.8
+        # `PositionEmbeddingSine2D` fix. See decisions.md D-047.
+        return ops.cast(embedding, self.compute_dtype)
 
     def compute_output_shape(self, input_shape):
         """Output shape: (batch,) -> (batch, embedding_dim)."""

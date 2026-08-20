@@ -420,7 +420,15 @@ class ScoreBasedNanoVLM(keras.Model):
         # Add noise and denoise based on mode
         if self.generation_mode in ['text_to_image', 'joint']:
             # Text-to-Image: Denoise vision conditioned on text
-            noise_vision = keras.random.normal(ops.shape(vision_features))
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-047
+            # `keras.random.normal` with no `dtype=` returns float32 whatever the
+            # active policy, and the float32 noise then met a float16 schedule
+            # coefficient inside `scheduler.add_noise`. Every diffusion noise draw
+            # in this file carries `dtype=` for that reason — do NOT drop it on the
+            # grounds that "the caller casts anyway". See decisions.md D-047.
+            noise_vision = keras.random.normal(
+                ops.shape(vision_features), dtype=vision_features.dtype
+            )
             noisy_vision = self.scheduler.add_noise(vision_features, noise_vision, timesteps)
 
             denoised_vision = self.vision_denoiser(
@@ -441,7 +449,9 @@ class ScoreBasedNanoVLM(keras.Model):
 
         if self.generation_mode in ['image_to_text', 'joint']:
             # Image-to-Text: Denoise text embeddings conditioned on vision
-            noise_text = keras.random.normal(ops.shape(text_features))
+            noise_text = keras.random.normal(
+                ops.shape(text_features), dtype=text_features.dtype
+            )
             noisy_text = self.scheduler.add_noise(text_features, noise_text, timesteps)
 
             denoised_text = self.text_denoiser(
@@ -454,8 +464,12 @@ class ScoreBasedNanoVLM(keras.Model):
 
         if self.generation_mode == 'joint':
             # Joint: Denoise both simultaneously
-            noise_v = keras.random.normal(ops.shape(vision_features))
-            noise_t = keras.random.normal(ops.shape(text_features))
+            noise_v = keras.random.normal(
+                ops.shape(vision_features), dtype=vision_features.dtype
+            )
+            noise_t = keras.random.normal(
+                ops.shape(text_features), dtype=text_features.dtype
+            )
             noisy_v = self.scheduler.add_noise(vision_features, noise_v, timesteps)
             noisy_t = self.scheduler.add_noise(text_features, noise_t, timesteps)
 
@@ -502,13 +516,15 @@ class ScoreBasedNanoVLM(keras.Model):
         # configured img_size: the encoder's positional table is sized from it, so a
         # hardcoded 224 dies inside PositionalEmbedding at every other resolution.
         img_size = self.vision_config.get('img_size', 224)
-        dummy_img = keras.random.normal((1, img_size, img_size, 3))
+        dummy_img = keras.random.normal(
+            (1, img_size, img_size, 3), dtype=self.compute_dtype
+        )
         vision_feat_shape = ops.shape(self.vision_encoder(dummy_img, training=False))
         seq_len, feat_dim = vision_feat_shape[1], vision_feat_shape[2]
 
         # Start from pure noise
         latent_shape = (batch_size, seq_len, feat_dim)
-        latents = keras.random.normal(latent_shape)
+        latents = keras.random.normal(latent_shape, dtype=self.compute_dtype)
 
         # Timestep schedule for inference
         timesteps = np.linspace(
@@ -588,7 +604,9 @@ class ScoreBasedNanoVLM(keras.Model):
         text_dim = self.text_config['embed_dim']
 
         # Start from noise in text embedding space
-        latents = keras.random.normal((batch_size, max_length, text_dim))
+        latents = keras.random.normal(
+            (batch_size, max_length, text_dim), dtype=self.compute_dtype
+        )
 
         # Inference timestep schedule
         timesteps = np.linspace(
