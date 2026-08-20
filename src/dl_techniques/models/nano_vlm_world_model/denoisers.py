@@ -13,12 +13,35 @@ References:
 
 import keras
 from keras import ops, layers
-from typing import Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
+
+def _principal_shape(input_shape: Any) -> Tuple[Optional[int], ...]:
+    """Return the FIRST shape when handed a list of shapes, else the shape.
+
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-040
+    The distinguishing test is whether the first ELEMENT is itself a sequence,
+    NOT `isinstance(input_shape, (list, tuple))` -- a plain shape IS a tuple, so
+    that test is true for both cases and returns the batch dimension. MEASURED
+    on the three sites this replaces: `compute_output_shape((None, 4, 16))`
+    returned **None** and `compute_output_shape((2, 4, 16))` returned **2**,
+    while the two sites that were already correct (`TimestepEmbedding` and
+    `JointDenoiser`) were untouched by this bug and are untouched by this fix.
+
+    Interface contract (3 callers by design):
+        :param input_shape: A single shape tuple, or a sequence of them.
+        :returns: The single shape, or the first of the sequence.
+        :raises: Nothing; an empty sequence returns itself.
+    """
+    if (isinstance(input_shape, (list, tuple)) and input_shape
+            and isinstance(input_shape[0], (list, tuple))):
+        return input_shape[0]
+    return input_shape
+
 class TimestepEmbedding(layers.Layer):
     """
     Sinusoidal timestep embedding for diffusion models.
@@ -153,27 +176,59 @@ class ConditionalDenoiser(layers.Layer):
         self.data_proj = layers.Dense(hidden_dim, name='data_proj')
         self.condition_proj = layers.Dense(hidden_dim, name='condition_proj')
 
-        # Processing blocks
-        self.blocks = []
-        for i in range(num_layers):
-            block_layers = {
-                'norm1': layers.LayerNormalization(name=f'block_{i}_norm1'),
-                'dense1': layers.Dense(hidden_dim * 4, activation='gelu', name=f'block_{i}_dense1'),
-                'dropout1': layers.Dropout(dropout_rate, name=f'block_{i}_dropout1'),
-                'dense2': layers.Dense(hidden_dim, name=f'block_{i}_dense2'),
-                'dropout2': layers.Dropout(dropout_rate, name=f'block_{i}_dropout2'),
-            }
+        # Processing blocks.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-039
+        # SEVEN FLAT, PARALLEL LISTS -- one per role, indexed by block -- and
+        # NOT `self.blocks = [{'norm1': ..., 'dense1': ...}, ...]`. Do NOT
+        # "tidy" them back into a list of dicts: Keras 3.8 does not write a
+        # layer container nested two or more levels deep to
+        # `model.weights.h5` when its owner is a `keras.layers.Layer`. It DOES
+        # write the identical container when the owner is a `keras.Model`,
+        # which is why the same shape is harmless in `models/accunet` and
+        # `models/cliffordnet`.
+        # MEASURED on this exact class before the change: a 44-weight
+        # `ConditionalDenoiser` put 12 of 44 tensors and 2,848 of 9,408
+        # parameters into the archive, 12 of 44 survived a
+        # perturb / save / reload comparison, and the forward output moved by
+        # 9.118214e-03 against a range of 2.552134e+00. At full model scale
+        # that is 464 of 1,305 weight tensors never written. Note the
+        # `build()` below already materialises every one of these layers, so
+        # "overrides build()" does NOT protect against this -- the container
+        # SHAPE is the property that matters.
+        # Same family as the `ConvDecoder` fix in D-026.
+        # See decisions.md D-039 and REF-9 in findings/audit-batch-6.md.
+        self.block_norm1: List[layers.Layer] = []
+        self.block_dense1: List[layers.Layer] = []
+        self.block_dropout1: List[layers.Layer] = []
+        self.block_dense2: List[layers.Layer] = []
+        self.block_dropout2: List[layers.Layer] = []
+        self.block_norm_attn: List[layers.Layer] = []
+        self.block_attention: List[layers.Layer] = []
 
+        for i in range(num_layers):
+            self.block_norm1.append(
+                layers.LayerNormalization(name=f'block_{i}_norm1'))
+            self.block_dense1.append(layers.Dense(
+                hidden_dim * 4, activation='gelu', name=f'block_{i}_dense1'))
+            self.block_dropout1.append(
+                layers.Dropout(dropout_rate, name=f'block_{i}_dropout1'))
+            self.block_dense2.append(
+                layers.Dense(hidden_dim, name=f'block_{i}_dense2'))
+            self.block_dropout2.append(
+                layers.Dropout(dropout_rate, name=f'block_{i}_dropout2'))
+
+            # The two attention lists stay EMPTY when self-attention is off, so
+            # no `None` ever enters a tracked container.
             if use_self_attention:
-                block_layers['norm_attn'] = layers.LayerNormalization(name=f'block_{i}_norm_attn')
-                block_layers['attention'] = layers.MultiHeadAttention(
+                self.block_norm_attn.append(
+                    layers.LayerNormalization(name=f'block_{i}_norm_attn'))
+                self.block_attention.append(layers.MultiHeadAttention(
                     num_heads=num_attention_heads,
                     key_dim=hidden_dim // num_attention_heads,
                     dropout=dropout_rate,
                     name=f'block_{i}_attention'
-                )
-
-            self.blocks.append(block_layers)
+                ))
 
         # Output projection to data space
         self.output_proj = keras.Sequential([
@@ -209,13 +264,13 @@ class ConditionalDenoiser(layers.Layer):
         self.condition_proj.build((None, None, self.condition_dim))
         # Residual blocks all operate on hidden_dim sequences.
         block_shape = (None, None, hd)
-        for block in self.blocks:
-            block['norm1'].build(block_shape)
-            block['dense1'].build(block_shape)
-            block['dense2'].build((None, None, hd * 4))
+        for i in range(self.num_layers):
+            self.block_norm1[i].build(block_shape)
+            self.block_dense1[i].build(block_shape)
+            self.block_dense2[i].build((None, None, hd * 4))
             if self.use_self_attention:
-                block['norm_attn'].build(block_shape)
-                block['attention'].build(
+                self.block_norm_attn[i].build(block_shape)
+                self.block_attention[i].build(
                     query_shape=block_shape, value_shape=block_shape
                 )
         self.output_proj.build(block_shape)
@@ -257,21 +312,21 @@ class ConditionalDenoiser(layers.Layer):
 
         # Process through residual blocks
         h = combined
-        for block in self.blocks:
+        for i in range(self.num_layers):
             # Residual MLP block
             residual = h
-            h = block['norm1'](h)
-            h = block['dense1'](h)
-            h = block['dropout1'](h, training=training)
-            h = block['dense2'](h)
-            h = block['dropout2'](h, training=training)
+            h = self.block_norm1[i](h)
+            h = self.block_dense1[i](h)
+            h = self.block_dropout1[i](h, training=training)
+            h = self.block_dense2[i](h)
+            h = self.block_dropout2[i](h, training=training)
             h = h + residual
 
             # Optional self-attention
             if self.use_self_attention:
                 residual = h
-                h = block['norm_attn'](h)
-                h = block['attention'](h, h, training=training)
+                h = self.block_norm_attn[i](h)
+                h = self.block_attention[i](h, h, training=training)
                 h = h + residual
 
         # Extract only the data portion (not condition)
@@ -288,7 +343,7 @@ class ConditionalDenoiser(layers.Layer):
 
     def compute_output_shape(self, input_shape):
         """Output shape matches noisy_data input shape."""
-        return input_shape[0] if isinstance(input_shape, (list, tuple)) else input_shape
+        return _principal_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -377,7 +432,7 @@ class VisionDenoiser(layers.Layer):
 
     def compute_output_shape(self, input_shape):
         """Output shape matches noisy_vision input shape."""
-        return input_shape[0] if isinstance(input_shape, (list, tuple)) else input_shape
+        return _principal_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -460,7 +515,7 @@ class TextDenoiser(layers.Layer):
 
     def compute_output_shape(self, input_shape):
         """Output shape matches noisy_text input shape."""
-        return input_shape[0] if isinstance(input_shape, (list, tuple)) else input_shape
+        return _principal_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -514,41 +569,65 @@ class JointDenoiser(layers.Layer):
         self.vision_proj = layers.Dense(hidden_dim, name='vision_proj')
         self.text_proj = layers.Dense(hidden_dim, name='text_proj')
 
-        # Joint processing blocks with cross-attention
-        self.joint_blocks = []
+        # Joint processing blocks with cross-attention.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-039
+        # TEN FLAT, PARALLEL LISTS, one per role. Same ruling and same reason as
+        # `ConditionalDenoiser` above: a layer container nested >=2 deep owned
+        # by a `keras.layers.Layer` is NOT written to `model.weights.h5`. Do not
+        # restore the list-of-dicts. `build()` below materialises every one of
+        # these layers and that does NOT help -- the container SHAPE is what
+        # matters, not whether the layers are built.
+        # See decisions.md D-039.
+        self.block_vision_self_attn: List[layers.Layer] = []
+        self.block_text_self_attn: List[layers.Layer] = []
+        self.block_vision_cross_attn: List[layers.Layer] = []
+        self.block_text_cross_attn: List[layers.Layer] = []
+        self.block_vision_norm1: List[layers.Layer] = []
+        self.block_vision_norm2: List[layers.Layer] = []
+        self.block_vision_norm3: List[layers.Layer] = []
+        self.block_text_norm1: List[layers.Layer] = []
+        self.block_text_norm2: List[layers.Layer] = []
+        self.block_text_norm3: List[layers.Layer] = []
+        self.block_vision_mlp: List[layers.Layer] = []
+        self.block_text_mlp: List[layers.Layer] = []
+
         for i in range(num_layers):
-            block = {
-                # Self-attention for each modality
-                'vision_self_attn': layers.MultiHeadAttention(
-                    num_heads=8, key_dim=hidden_dim // 8, name=f'block_{i}_vision_self_attn'
-                ),
-                'text_self_attn': layers.MultiHeadAttention(
-                    num_heads=8, key_dim=hidden_dim // 8, name=f'block_{i}_text_self_attn'
-                ),
-                # Cross-attention between modalities
-                'vision_cross_attn': layers.MultiHeadAttention(
-                    num_heads=8, key_dim=hidden_dim // 8, name=f'block_{i}_vision_cross_attn'
-                ),
-                'text_cross_attn': layers.MultiHeadAttention(
-                    num_heads=8, key_dim=hidden_dim // 8, name=f'block_{i}_text_cross_attn'
-                ),
-                # Norms and MLPs
-                'vision_norm1': layers.LayerNormalization(name=f'block_{i}_vision_norm1'),
-                'vision_norm2': layers.LayerNormalization(name=f'block_{i}_vision_norm2'),
-                'vision_norm3': layers.LayerNormalization(name=f'block_{i}_vision_norm3'),
-                'text_norm1': layers.LayerNormalization(name=f'block_{i}_text_norm1'),
-                'text_norm2': layers.LayerNormalization(name=f'block_{i}_text_norm2'),
-                'text_norm3': layers.LayerNormalization(name=f'block_{i}_text_norm3'),
-                'vision_mlp': keras.Sequential([
-                    layers.Dense(hidden_dim * 4, activation='gelu'),
-                    layers.Dense(hidden_dim)
-                ], name=f'block_{i}_vision_mlp'),
-                'text_mlp': keras.Sequential([
-                    layers.Dense(hidden_dim * 4, activation='gelu'),
-                    layers.Dense(hidden_dim)
-                ], name=f'block_{i}_text_mlp'),
-            }
-            self.joint_blocks.append(block)
+            # Self-attention for each modality
+            self.block_vision_self_attn.append(layers.MultiHeadAttention(
+                num_heads=8, key_dim=hidden_dim // 8,
+                name=f'block_{i}_vision_self_attn'))
+            self.block_text_self_attn.append(layers.MultiHeadAttention(
+                num_heads=8, key_dim=hidden_dim // 8,
+                name=f'block_{i}_text_self_attn'))
+            # Cross-attention between modalities
+            self.block_vision_cross_attn.append(layers.MultiHeadAttention(
+                num_heads=8, key_dim=hidden_dim // 8,
+                name=f'block_{i}_vision_cross_attn'))
+            self.block_text_cross_attn.append(layers.MultiHeadAttention(
+                num_heads=8, key_dim=hidden_dim // 8,
+                name=f'block_{i}_text_cross_attn'))
+            # Norms and MLPs
+            self.block_vision_norm1.append(
+                layers.LayerNormalization(name=f'block_{i}_vision_norm1'))
+            self.block_vision_norm2.append(
+                layers.LayerNormalization(name=f'block_{i}_vision_norm2'))
+            self.block_vision_norm3.append(
+                layers.LayerNormalization(name=f'block_{i}_vision_norm3'))
+            self.block_text_norm1.append(
+                layers.LayerNormalization(name=f'block_{i}_text_norm1'))
+            self.block_text_norm2.append(
+                layers.LayerNormalization(name=f'block_{i}_text_norm2'))
+            self.block_text_norm3.append(
+                layers.LayerNormalization(name=f'block_{i}_text_norm3'))
+            self.block_vision_mlp.append(keras.Sequential([
+                layers.Dense(hidden_dim * 4, activation='gelu'),
+                layers.Dense(hidden_dim)
+            ], name=f'block_{i}_vision_mlp'))
+            self.block_text_mlp.append(keras.Sequential([
+                layers.Dense(hidden_dim * 4, activation='gelu'),
+                layers.Dense(hidden_dim)
+            ], name=f'block_{i}_text_mlp'))
 
         # Output projections
         self.vision_out = layers.Dense(vision_dim, kernel_initializer='zeros', name='vision_out')
@@ -572,21 +651,22 @@ class JointDenoiser(layers.Layer):
         self.vision_proj.build((None, None, self.vision_dim))
         self.text_proj.build((None, None, self.text_dim))
         block_shape = (None, None, hd)
-        for block in self.joint_blocks:
-            for attn_key in (
-                'vision_self_attn', 'text_self_attn',
-                'vision_cross_attn', 'text_cross_attn',
+        for i in range(self.num_layers):
+            for attention in (
+                self.block_vision_self_attn[i], self.block_text_self_attn[i],
+                self.block_vision_cross_attn[i], self.block_text_cross_attn[i],
             ):
-                block[attn_key].build(
+                attention.build(
                     query_shape=block_shape, value_shape=block_shape
                 )
-            for norm_key in (
-                'vision_norm1', 'vision_norm2', 'vision_norm3',
-                'text_norm1', 'text_norm2', 'text_norm3',
+            for norm in (
+                self.block_vision_norm1[i], self.block_vision_norm2[i],
+                self.block_vision_norm3[i], self.block_text_norm1[i],
+                self.block_text_norm2[i], self.block_text_norm3[i],
             ):
-                block[norm_key].build(block_shape)
-            block['vision_mlp'].build(block_shape)
-            block['text_mlp'].build(block_shape)
+                norm.build(block_shape)
+            self.block_vision_mlp[i].build(block_shape)
+            self.block_text_mlp[i].build(block_shape)
         self.vision_out.build(block_shape)
         self.text_out.build(block_shape)
         super().build(input_shape)
@@ -619,38 +699,38 @@ class JointDenoiser(layers.Layer):
         h_text = self.text_proj(noisy_text) + t_emb
 
         # Process through joint blocks
-        for block in self.joint_blocks:
+        for i in range(self.num_layers):
             # Self-attention within each modality
             v_res = h_vision
-            h_vision = block['vision_norm1'](h_vision)
-            h_vision = block['vision_self_attn'](h_vision, h_vision, training=training)
+            h_vision = self.block_vision_norm1[i](h_vision)
+            h_vision = self.block_vision_self_attn[i](h_vision, h_vision, training=training)
             h_vision = h_vision + v_res
 
             t_res = h_text
-            h_text = block['text_norm1'](h_text)
-            h_text = block['text_self_attn'](h_text, h_text, training=training)
+            h_text = self.block_text_norm1[i](h_text)
+            h_text = self.block_text_self_attn[i](h_text, h_text, training=training)
             h_text = h_text + t_res
 
             # Cross-attention between modalities
             v_res = h_vision
-            h_vision = block['vision_norm2'](h_vision)
-            h_vision = block['vision_cross_attn'](h_vision, h_text, training=training)
+            h_vision = self.block_vision_norm2[i](h_vision)
+            h_vision = self.block_vision_cross_attn[i](h_vision, h_text, training=training)
             h_vision = h_vision + v_res
 
             t_res = h_text
-            h_text = block['text_norm2'](h_text)
-            h_text = block['text_cross_attn'](h_text, h_vision, training=training)
+            h_text = self.block_text_norm2[i](h_text)
+            h_text = self.block_text_cross_attn[i](h_text, h_vision, training=training)
             h_text = h_text + t_res
 
             # MLPs
             v_res = h_vision
-            h_vision = block['vision_norm3'](h_vision)
-            h_vision = block['vision_mlp'](h_vision, training=training)
+            h_vision = self.block_vision_norm3[i](h_vision)
+            h_vision = self.block_vision_mlp[i](h_vision, training=training)
             h_vision = h_vision + v_res
 
             t_res = h_text
-            h_text = block['text_norm3'](h_text)
-            h_text = block['text_mlp'](h_text, training=training)
+            h_text = self.block_text_norm3[i](h_text)
+            h_text = self.block_text_mlp[i](h_text, training=training)
             h_text = h_text + t_res
 
         # Project back to original dimensions with residual

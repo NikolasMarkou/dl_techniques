@@ -159,13 +159,9 @@ class TiRexExtended(TiRexCore):
             **kwargs
         )
 
-        # Learnable query tokens for the prediction horizon
-        self.query_tokens = self.add_weight(
-            shape=(1, prediction_length, embed_dim),
-            initializer="glorot_uniform",
-            trainable=True,
-            name="query_tokens"
-        )
+        # NOTE: the learnable query tokens are created in `build()`, not here.
+        # See the D-037 anchor there.
+        self.query_tokens = None
 
         # Quantile prediction head
         self.quantile_head = QuantileSequenceHead(
@@ -203,6 +199,30 @@ class TiRexExtended(TiRexCore):
             )
 
         batch_size, seq_len, features = input_shape[0], input_shape[1], input_shape[2]
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-037
+        # Learnable query tokens for the prediction horizon. CREATED HERE, not
+        # in `__init__` -- do not move it back. `add_weight` in `__init__` was
+        # the only R-001 violation in `models/` and the guide grades it
+        # CRITICAL, because a weight created before `build()` is created
+        # outside whatever scope Keras has arranged for it.
+        # HONESTY NOTE, because it changes what this edit claims: the predicted
+        # CONSEQUENCES did NOT reproduce here. MEASURED before the move -- a
+        # `.keras` round trip with `query_tokens` perturbed to 0.375 restored
+        # 0.375 with a forward delta of exactly 0.000000e+00 against an output
+        # range of 2.604545e+00, and constructing the model inside a
+        # `StatelessScope` did NOT leave the tokens at zero. So this is
+        # compliance with a house rule whose failure mode is latent here, not
+        # the repair of a measured defect; the move is made because the rule
+        # exists and the move is free, and it is recorded as such.
+        # See decisions.md D-037.
+        if self.query_tokens is None:
+            self.query_tokens = self.add_weight(
+                shape=(1, self.prediction_length, self.embed_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+                name="query_tokens"
+            )
 
         # call() concatenates the NaN mask onto the feature axis -> 2 * features.
         masked_features = None if features is None else features * 2
