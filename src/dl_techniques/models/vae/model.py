@@ -1196,7 +1196,8 @@ class VAE(keras.Model):
         Returns:
             Configuration dictionary
         """
-        config = {
+        config = super().get_config()
+        config.update({
             "latent_dim": self.latent_dim,
             "input_shape": self._input_shape,
             "depths": self.depths,
@@ -1213,7 +1214,7 @@ class VAE(keras.Model):
             "dropout_rate": self.dropout_rate,
             "activation": self.activation,
             "final_activation": self.final_activation,
-        }
+        })
         return config
 
     @classmethod

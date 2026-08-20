@@ -306,7 +306,8 @@ class RELGT(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        return {
+        config = super().get_config()
+        config.update({
             "output_dim": self.output_dim,
             "problem_type": self.problem_type,
             "embedding_dim": self.embedding_dim,
@@ -321,7 +322,8 @@ class RELGT(keras.Model):
             "dropout_rate": self.dropout_rate,
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
-        }
+        })
+        return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'RELGT':

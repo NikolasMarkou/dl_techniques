@@ -342,7 +342,15 @@ class CoShNet(keras.Model):
         outputs = self._build_model(inputs)
 
         # Initialize the Model
-        super().__init__(inputs=inputs, outputs=outputs, name="coshnet", **kwargs)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-066
+        # `name` is a DEFAULT here, not a constant. Hard-coding it made two
+        # things impossible at once: `CoShNet(name="x")` raised `TypeError: got
+        # multiple values for keyword argument 'name'`, and -- now that
+        # `get_config` calls `super().get_config()` -- a round trip would feed
+        # the restored `name` straight back into this call and raise. Do NOT
+        # restore the literal. See decisions.md D-066.
+        kwargs.setdefault("name", "coshnet")
+        super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
             f"Created CoShNet model for input {input_shape} "
@@ -610,7 +618,8 @@ class CoShNet(keras.Model):
         Returns:
             Configuration dictionary containing all model parameters
         """
-        config = {
+        config = super().get_config()
+        config.update({
             # Core configuration
             "num_classes": self.num_classes,
             "input_shape": self._input_shape,
@@ -632,7 +641,7 @@ class CoShNet(keras.Model):
             # Advanced options
             "include_top": self.include_top,
             "epsilon": self.epsilon,
-        }
+        })
         return config
 
     @classmethod

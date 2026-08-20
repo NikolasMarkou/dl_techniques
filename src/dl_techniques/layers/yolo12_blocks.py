@@ -150,6 +150,19 @@ class ConvBlock(keras.layers.Layer):
             name="conv"
         )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-067
+        # These two values are the Ultralytics YOLO port, not Keras defaults
+        # that nobody looked at, and they are load-bearing TOGETHER. PyTorch
+        # `nn.BatchNorm2d` and Keras `BatchNormalization` define `momentum`
+        # with OPPOSITE senses, so Ultralytics' `momentum=0.03` is Keras'
+        # `momentum=0.97`; `eps=1e-3` is Ultralytics' own value and is NOT the
+        # 1e-5 that most transformer-family references use. Do NOT "correct"
+        # the epsilon to 1e-5 in the belief that it is an unreviewed Keras
+        # default -- it agrees with Keras' default by coincidence. MEASURED:
+        # all 134 norm sites of `create_yolov12_multitask(scale="n")` are at
+        # 1e-03, pinned in
+        # `tests/test_models/test_the_norm_epsilon_provenance_is_stated.py`.
+        # See decisions.md D-067.
         self.bn = keras.layers.BatchNormalization(
             epsilon=1e-3,
             momentum=0.97,

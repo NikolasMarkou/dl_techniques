@@ -647,7 +647,8 @@ class SwinTransformer(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
-        config = {
+        config = super().get_config()
+        config.update({
             # ALL __init__ parameters must be included
             "num_classes": self.num_classes,
             "embed_dim": self.embed_dim,
@@ -667,7 +668,7 @@ class SwinTransformer(keras.Model):
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
             "include_top": self.include_top,
             "input_shape": self._input_shape,
-        }
+        })
         return config
 
     @classmethod

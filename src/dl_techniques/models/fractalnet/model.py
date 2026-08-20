@@ -408,7 +408,8 @@ class FractalNet(keras.Model):
         Returns:
             Configuration dictionary
         """
-        config = {
+        config = super().get_config()
+        config.update({
             "num_classes": self.num_classes,
             "depths": self.depths,
             "filters": self.filters,
@@ -425,7 +426,7 @@ class FractalNet(keras.Model):
             "classifier_dropout": self.classifier_dropout,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
-        }
+        })
         return config
 
     @classmethod

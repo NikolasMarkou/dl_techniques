@@ -576,7 +576,8 @@ class FastVLM(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        config = {
+        config = super().get_config()
+        config.update({
             'num_classes': self.num_classes,
             'embed_dims': self.embed_dims,
             'depths': self.depths,
@@ -596,7 +597,7 @@ class FastVLM(keras.Model):
             ),
             'include_top': self.include_top,
             'input_shape': self._input_shape,
-        }
+        })
         return config
 
     @classmethod

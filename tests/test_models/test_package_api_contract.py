@@ -4528,26 +4528,29 @@ def _sweep_get_config_chaining(roots=None, src_root=None):
     return rows, counts
 
 
-#: The 11 GENUINE ``super().get_config()`` omissions -- every one a
-#: ``keras.Model`` subclass, across 8 packages -- waived by name and routed to
-#: step 19. Keyed by ``(relpath, class)``.
+#: The REMAINING genuine ``super().get_config()`` omissions -- every one a
+#: ``keras.Model`` subclass -- waived by name and routed to step 19. Keyed by
+#: ``(relpath, class)``.
 #:
-#: Re-derived 2026-08-20: the 31/11 split is exact, and so is the reviewer's
+#: Re-derived 2026-08-20: the 31/11 split was exact, and so is the reviewer's
 #: correction to the non-genuine 20 (6 ``Regularizer``, 5 ``Callback``, 5
-#: plain-or-no-base, 3 ``Initializer``, 1 ``LearningRateSchedule``). The
-#: carried "9 packages" is **8**: dino contributes 4 of the 11 classes.
+#: plain-or-no-base, 3 ``Initializer``, 1 ``LearningRateSchedule``).
+#:
+#: **Step 18.1 FIXED six of the eleven** -- ``CoShNet``, ``FastVLM``,
+#: ``FractalNet``, ``RELGT``, ``SwinTransformer``, ``VAE`` -- so they are
+#: removed from this list rather than left as permanently-stale waivers. Two of
+#: the six had the consequence measured: ``coshnet``'s ``trainable`` went
+#: ``False -> True`` across a round trip and ``fractalnet``'s
+#: ``len(trainable_weights)`` went ``0 -> 18``. See decisions.md D-066 and
+#: ``tests/test_models/test_the_get_config_base_keys_survive_a_round_trip.py``.
+#:
+#: The five that remain are ``dino``'s four classes plus ``KAN``.
 _GET_CONFIG_CHAINING_WAIVERS = {
-    ("src/dl_techniques/models/coshnet/model.py", "CoShNet"),
     ("src/dl_techniques/models/dino/dino_v1.py", "DINOv1"),
     ("src/dl_techniques/models/dino/dino_v2.py", "DINOv2"),
     ("src/dl_techniques/models/dino/dino_v2.py", "DINOv2VisionTransformer"),
     ("src/dl_techniques/models/dino/dino_v3.py", "DINOv3"),
-    ("src/dl_techniques/models/fastvlm/model.py", "FastVLM"),
-    ("src/dl_techniques/models/fractalnet/model.py", "FractalNet"),
     ("src/dl_techniques/models/kan/model.py", "KAN"),
-    ("src/dl_techniques/models/relgt/model.py", "RELGT"),
-    ("src/dl_techniques/models/swin_transformer/model.py", "SwinTransformer"),
-    ("src/dl_techniques/models/vae/model.py", "VAE"),
 }
 
 
@@ -4696,7 +4699,7 @@ class TestGetConfigChainsToItsBase:
 
         This is the liveness test for the SCOPE ruling. If the base-class
         condition is ever dropped, the waiver list above stays green (it only
-        covers the 11) while this test fails -- which is the point.
+        covers the remaining 5) while this test fails -- which is the point.
         """
         rows, counts = _sweep_get_config_chaining()
         refuted = [
@@ -4710,7 +4713,7 @@ class TestGetConfigChainsToItsBase:
             f"found {len(refuted)}: {refuted}"
         )
         assert counts["n_no_super_chaining"] == len(_GET_CONFIG_CHAINING_WAIVERS), (
-            "the genuine omission count moved away from the 11 waived here "
+            "the genuine omission count moved away from the 5 waived here "
             f"({counts})"
         )
 
