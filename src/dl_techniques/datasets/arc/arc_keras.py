@@ -50,7 +50,7 @@ domain-specific data handling complexity.
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Sequence
 
 import keras
 from keras import ops
@@ -524,7 +524,7 @@ class ARCAccuracyMetric(keras.metrics.Metric):
     """
 
     def __init__(self,
-                 ignore_tokens: List[int] = [0, 1],  # PAD and EOS tokens
+                 ignore_tokens: Sequence[int] = (0, 1),  # PAD and EOS tokens
                  sequence_level: bool = False,
                  name: str = "arc_accuracy",
                  **kwargs):
@@ -538,7 +538,12 @@ class ARCAccuracyMetric(keras.metrics.Metric):
             **kwargs: Additional keyword arguments for Metric
         """
         super().__init__(name=name, **kwargs)
-        self.ignore_tokens = ignore_tokens
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.ignore_tokens = list(ignore_tokens)
         self.sequence_level = sequence_level
 
         # State variables

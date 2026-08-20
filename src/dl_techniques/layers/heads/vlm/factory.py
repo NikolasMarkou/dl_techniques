@@ -10,7 +10,7 @@ import inspect
 
 import keras
 from keras import layers, ops
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any, Sequence
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -1099,7 +1099,7 @@ class VQAHead(keras.layers.Layer):
         task_config: VLMTaskConfig,
         vision_dim: int = 768,
         text_dim: int = 768,
-        hidden_dims: List[int] = [512, 256],
+        hidden_dims: Sequence[int] = (512, 256),
         pooling_strategy: str = "attention",
         **kwargs: Any,
     ) -> None:
@@ -1114,7 +1114,12 @@ class VQAHead(keras.layers.Layer):
         self.task_config = task_config
         self.vision_dim = vision_dim
         self.text_dim = text_dim
-        self.hidden_dims = hidden_dims
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.hidden_dims = list(hidden_dims)
         self.pooling_strategy = pooling_strategy
         # D-014: dead fallback removed (see BaseVLMHead.__init__).
         self.embed_dim = self.task_config.hidden_size

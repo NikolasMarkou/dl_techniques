@@ -93,7 +93,7 @@ References:
 
 import numpy as np
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any
+from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -182,8 +182,8 @@ class SuperPoint(keras.Model):
 
     def __init__(
             self,
-            depths: List[int] = [3, 3, 9],
-            dims: List[int] = [96, 192, 384],
+            depths: Sequence[int] = (3, 3, 9),
+            dims: Sequence[int] = (96, 192, 384),
             input_shape: Tuple[int, int, int] = (256, 256, 1),
             descriptor_dim: int = 256,
             drop_path_rate: float = 0.0,

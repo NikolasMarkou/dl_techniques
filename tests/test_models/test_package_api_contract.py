@@ -4905,7 +4905,10 @@ def _sweep_mutable_defaults(roots=None, src_root=None):
     ``create_tirex_by_variant``) handing the shared list straight out.
 
     Measured 2026-08-20 over ``src/dl_techniques/``: **46 sites by the rule --
-    34 S1, 6 S2, 6 S3** -- and **0 LIVE HAZARD** (no site mutates its default).
+    34 S1, 6 S2, 6 S3** -- and **0 LIVE HAZARD** (no site mutated its default).
+    After steps 19 and 19.1 the sweep finds **0 / 0 / 0**; the counts below are
+    the population the rule was written against, kept because they are what the
+    predicate's shape argument rests on.
     The carried figure of 42 counted only the 2 ``DEFAULT_QUANTILES`` aliases as
     S3; the sweep finds 4 more of exactly the same shape (three
     ``datasets/time_series`` ``CONFIGS`` aliases and ``FastVitImageEncoder.
@@ -4975,81 +4978,30 @@ def _sweep_mutable_defaults(roots=None, src_root=None):
     return rows, counts
 
 
-#: The 46 live mutable-default sites, waived BY NAME and routed to step 19.
-#: Keyed by ``(relpath, scope, name, shape)`` -- never by line. Zero of them is a
-#: LIVE HAZARD today (no site mutates its default), which is exactly why they are
-#: waived rather than fixed here and why the freeze matters: the next one added
-#: is the one that will mutate.
-_MUTABLE_DEFAULT_WAIVERS = {
-    ("src/dl_techniques/datasets/arc/arc_keras.py",
-     "__init__", "ignore_tokens", "S1"),
-    ("src/dl_techniques/layers/heads/vlm/factory.py",
-     "__init__", "hidden_dims", "S1"),
-    ("src/dl_techniques/layers/yolo12_heads.py",
-     "__init__", "hidden_dims", "S1"),
-    ("src/dl_techniques/layers/yolo12_heads.py",
-     "__init__", "intermediate_filters", "S1"),
-    ("src/dl_techniques/layers/yolo12_heads.py",
-     "__init__", "pooling_types", "S1"),
-    ("src/dl_techniques/models/SAM/SAM1/model.py",
-     "__init__", "pixel_mean", "S1"),
-    ("src/dl_techniques/models/SAM/SAM1/model.py",
-     "__init__", "pixel_std", "S1"),
-    ("src/dl_techniques/models/capsnet/model.py",
-     "__init__", "conv_filters", "S1"),
-    ("src/dl_techniques/models/capsnet/model.py",
-     "__init__", "decoder_architecture", "S1"),
-    ("src/dl_techniques/models/fractalnet/model.py",
-     "__init__", "depths", "S1"),
-    ("src/dl_techniques/models/fractalnet/model.py",
-     "__init__", "filters", "S1"),
-    ("src/dl_techniques/models/fractalnet/model.py",
-     "__init__", "strides", "S1"),
-    ("src/dl_techniques/models/masked_autoencoder/conv_decoder.py",
-     "__init__", "decoder_dims", "S1"),
-    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
-     "__init__", "attention_stages", "S1"),
-    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
-     "__init__", "block_types", "S1"),
-    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
-     "__init__", "depths", "S1"),
-    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
-     "__init__", "dims", "S1"),
-    ("src/dl_techniques/models/mobilenet/mobilenet_v4.py",
-     "__init__", "strides", "S1"),
-    ("src/dl_techniques/models/superpoint/model.py",
-     "__init__", "depths", "S1"),
-    ("src/dl_techniques/models/superpoint/model.py",
-     "__init__", "dims", "S1"),
-    ("src/dl_techniques/models/swin_transformer/model.py",
-     "__init__", "depths", "S1"),
-    ("src/dl_techniques/models/swin_transformer/model.py",
-     "__init__", "num_heads", "S1"),
-    ("src/dl_techniques/models/tabm/model.py",
-     "create_tabm_ensemble", "hidden_dims", "S1"),
-    ("src/dl_techniques/models/tabm/model.py",
-     "create_tabm_for_dataset", "hidden_dims", "S1"),
-    ("src/dl_techniques/models/tabm/model.py",
-     "create_tabm_mini", "hidden_dims", "S1"),
-    ("src/dl_techniques/models/tabm/model.py",
-     "create_tabm_model", "hidden_dims", "S1"),
-    ("src/dl_techniques/models/tabm/model.py",
-     "create_tabm_plain", "hidden_dims", "S1"),
-    ("src/dl_techniques/models/time_series/nbeats/nbeats.py",
-     "__init__", "stack_types", "S1"),
-    ("src/dl_techniques/models/time_series/nbeats/nbeats.py",
-     "__init__", "thetas_dim", "S1"),
-    ("src/dl_techniques/models/time_series/nbeats/nbeats.py",
-     "create_nbeats_model", "stack_types", "S1"),
-    ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
-     "__init__", "stack_types", "S1"),
-    ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
-     "__init__", "thetas_dim", "S1"),
-    ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
-     "create_nbeatsx_model", "stack_types", "S1"),
-    ("src/dl_techniques/visualization/classification.py",
-     "create_visualization", "metrics", "S1"),
-}
+#: The live mutable-default sites, waived BY NAME and keyed by
+#: ``(relpath, scope, name, shape)`` -- never by line.
+#:
+#: **The set is now EMPTY: the family is CLOSED.** Phase 2 measured 46 sites in
+#: three shapes (34 ``S1`` literal defaults, 6 ``S2`` aliases of a module
+#: mutable, 6 ``S3`` class attributes that ARE that mutable) and recorded the
+#: remedy asymmetry that decided both halves: **a tuple covers all three shapes;
+#: copying in ``__init__`` covers neither alias.** Step 19 (D-079) converted the
+#: two list constants to tuples and the four dict constants to
+#: ``MappingProxyType`` views, extinguishing ``S2`` and taking ``S3`` to 4; step
+#: 19.1 (D-085) tuplified the remaining 34 ``S1`` defaults and the last four
+#: ``S3`` rows went with them.
+#:
+#: The rule the 34 conversions follow, and it is what made them invisible: **the
+#: DEFAULT becomes a tuple, the STORED attribute stays a list** (``list(...)``,
+#: not ``.copy()`` -- a tuple has no ``.copy()``). ``get_config`` therefore
+#: still emits the JSON type it always did, and every ``== [...]`` assertion in
+#: the suites is unchanged. Five tests found the sites where that rule had NOT
+#: been applied: ``capsnet`` and ``tabm`` called ``.copy()``, and ``SAM``,
+#: ``fractalnet`` and ``yolo12_heads`` compared a stored default against a list.
+#:
+#: An empty set is not a dead waiver list: the sweep asserts the live count
+#: equals its size, so the next mutable default fails immediately.
+_MUTABLE_DEFAULT_WAIVERS = set()
 
 
 #: All three shapes at once, including the aliasing shape a parameter-default
@@ -5085,7 +5037,8 @@ class TestNoMutableDefaults:
 
     Measured at the start of step 19: **46 sites -- 34 S1 / 6 S2 / 6 S3** under
     ``src/dl_techniques/``, **0 of them a LIVE HAZARD** (no site mutated its
-    default), all 46 waived by name.
+    default), all 46 waived by name. **Measured now: 0 / 0 / 0, and the waiver
+    set is EMPTY.**
 
     **Step 19 (D-079) closed the two ALIAS shapes outright.** Re-derived after
     that commit: **38 sites -- 34 S1 / 0 S2 / 4 S3**, and the 4 remaining S3 are
@@ -5101,9 +5054,12 @@ class TestNoMutableDefaults:
       are tuples; the 4 dict-valued ones (three ``CONFIGS`` tables and
       ``FastVitImageEncoder.MODEL_VARIANTS``) cannot be tuples and are read-only
       views instead. The proxy freezes the OUTER level only.
-    * ``S1`` (a literal ``[]``/``{}``/``set()`` parameter default): **34 sites
-      still open**, routed onward. These are the shape a per-call copy DOES fix,
-      so they are the least dangerous of the three.
+    * ``S1`` (a literal ``[]``/``{}``/``set()`` parameter default): **all 34
+      converted to tuples in step 19.1 (D-085)**, in 14 files. The rule that
+      made it invisible: the DEFAULT becomes a tuple, the STORED attribute stays
+      a list via ``list(...)`` -- never ``.copy()``, which a tuple does not
+      have. Five suite tests found the sites where that rule was missed, and
+      the annotations moved from ``List[...]`` to ``Sequence[...]`` with them.
 
     The shapes and the remedy asymmetry are documented on
     ``_sweep_mutable_defaults``; read that before touching the predicate.

@@ -87,7 +87,7 @@ References:
 
 import keras
 from keras import layers, initializers, regularizers
-from typing import List, Optional, Union, Tuple, Dict, Any
+from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -286,8 +286,8 @@ class SwinTransformer(keras.Model):
             self,
             num_classes: int = 1000,
             embed_dim: int = 96,
-            depths: List[int] = [2, 2, 6, 2],
-            num_heads: List[int] = [3, 6, 12, 24],
+            depths: Sequence[int] = (2, 2, 6, 2),
+            num_heads: Sequence[int] = (3, 6, 12, 24),
             window_size: int = 7,
             mlp_ratio: float = 4.0,
             qkv_bias: bool = True,
@@ -388,8 +388,13 @@ class SwinTransformer(keras.Model):
         # Store ALL configuration parameters for serialization
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        self.depths = depths
-        self.num_heads = num_heads
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.depths = list(depths)
+        self.num_heads = list(num_heads)
         self.window_size = window_size
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias

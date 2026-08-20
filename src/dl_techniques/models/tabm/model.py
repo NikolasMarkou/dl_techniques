@@ -99,7 +99,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Dict, List, Literal, Optional, Tuple, Union, Any
+from typing import Dict, List, Literal, Optional, Tuple, Union, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -382,7 +382,11 @@ class TabMModel(keras.Model):
         self.n_num_features = n_num_features
         self.cat_cardinalities = cat_cardinalities.copy() if cat_cardinalities else []
         self.n_classes = n_classes
-        self.hidden_dims = hidden_dims.copy()
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: `list(...)`, not
+        # `.copy()`. The default is now a TUPLE (R-009 S1), and a tuple has no
+        # `.copy()`; `list()` accepts both and keeps the stored attribute -- and
+        # therefore `get_config`'s JSON type -- exactly what it always was.
+        self.hidden_dims = list(hidden_dims)
         self.arch_type = arch_type
         self.k = k
         self.activation = activation
@@ -836,7 +840,7 @@ def create_tabm_model(
         n_num_features: int,
         cat_cardinalities: List[int],
         n_classes: Optional[int],
-        hidden_dims: List[int] = [256, 256],
+        hidden_dims: Sequence[int] = (256, 256),
         arch_type: Literal[
             'plain', 'tabm', 'tabm-mini', 'tabm-packed',
             'tabm-normal', 'tabm-mini-normal'
@@ -914,7 +918,7 @@ def create_tabm_plain(
         n_num_features: int,
         cat_cardinalities: List[int],
         n_classes: Optional[int],
-        hidden_dims: List[int] = [256, 256],
+        hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
     """Create a plain MLP baseline without ensembling.
@@ -946,7 +950,7 @@ def create_tabm_ensemble(
         cat_cardinalities: List[int],
         n_classes: Optional[int],
         k: int = 8,
-        hidden_dims: List[int] = [256, 256],
+        hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
     """Create a TabM model with full efficient ensemble.
@@ -979,7 +983,7 @@ def create_tabm_mini(
         cat_cardinalities: List[int],
         n_classes: Optional[int],
         k: int = 8,
-        hidden_dims: List[int] = [256, 256],
+        hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
     """Create a TabM-mini model with minimal ensemble adapter.
@@ -1064,7 +1068,7 @@ def create_tabm_for_dataset(
         categorical_cardinalities: Optional[List[int]] = None,
         arch_type: str = 'tabm',
         k: int = 8,
-        hidden_dims: List[int] = [256, 256],
+        hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
     """Create a TabM model automatically configured for a specific dataset.

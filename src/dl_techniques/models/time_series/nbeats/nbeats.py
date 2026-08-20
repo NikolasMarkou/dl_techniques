@@ -95,7 +95,7 @@ References:
 import keras
 import numpy as np
 from keras import ops, initializers, regularizers
-from typing import List, Tuple, Optional, Union, Any, Dict, Callable
+from typing import List, Tuple, Optional, Union, Any, Dict, Callable, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -230,9 +230,9 @@ class NBeatsNet(keras.Model, ForecastMixin):
             self,
             backcast_length: int,
             forecast_length: int,
-            stack_types: List[str] = ['trend', 'seasonality', 'generic'],
+            stack_types: Sequence[str] = ('trend', 'seasonality', 'generic'),
             nb_blocks_per_stack: int = 3,
-            thetas_dim: List[int] = [4, 8, 16],
+            thetas_dim: Sequence[int] = (4, 8, 16),
             hidden_layer_units: int = 256,
             share_weights_in_stack: bool = False,
             use_normalization: bool = True,
@@ -696,7 +696,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
 def create_nbeats_model(
         backcast_length: int = 96,
         forecast_length: int = 24,
-        stack_types: List[str] = ['trend', 'seasonality', 'generic'],
+        stack_types: Sequence[str] = ('trend', 'seasonality', 'generic'),
         nb_blocks_per_stack: int = 3,
         thetas_dim: Optional[List[int]] = None,
         hidden_layer_units: int = 256,

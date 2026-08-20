@@ -52,7 +52,7 @@ Notes:
 
 import keras
 from keras import ops
-from typing import Optional, Tuple, Dict, Any, List, Union
+from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 
 # ---------------------------------------------------------------------
 # Local imports - assumed to exist as per instructions
@@ -431,7 +431,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     def __init__(
         self,
         num_classes: int = 1,
-        intermediate_filters: List[int] = [128, 64, 32, 16],
+        intermediate_filters: Sequence[int] = (128, 64, 32, 16),
         target_size: Optional[Tuple[int, int]] = None,
         use_attention: bool = True,
         dropout_rate: float = 0.1,
@@ -456,7 +456,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
-        self.intermediate_filters = intermediate_filters
+        self.intermediate_filters = list(intermediate_filters)
         self.target_size = target_size
         self.use_attention = use_attention
         self.dropout_rate = dropout_rate
@@ -863,8 +863,8 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     def __init__(
         self,
         num_classes: int = 1,
-        hidden_dims: List[int] = [512, 256],
-        pooling_types: List[str] = ["avg", "max"],
+        hidden_dims: Sequence[int] = (512, 256),
+        pooling_types: Sequence[str] = ("avg", "max"),
         use_attention: bool = True,
         dropout_rate: float = 0.3,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
@@ -893,8 +893,13 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
 
         # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
-        self.hidden_dims = hidden_dims
-        self.pooling_types = pooling_types
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.hidden_dims = list(hidden_dims)
+        self.pooling_types = list(pooling_types)
         self.use_attention = use_attention
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)

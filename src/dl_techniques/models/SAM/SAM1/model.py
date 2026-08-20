@@ -98,7 +98,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Tuple, List, Any, Dict, Optional, Literal
+from typing import Tuple, List, Any, Dict, Optional, Literal, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -274,8 +274,8 @@ class SAM(keras.Model):
         image_encoder: ImageEncoderViT,
         prompt_encoder: PromptEncoder,
         mask_decoder: MaskDecoder,
-        pixel_mean: List[float] = [123.675, 116.28, 103.53],
-        pixel_std: List[float] = [58.395, 57.12, 57.375],
+        pixel_mean: Sequence[float] = (123.675, 116.28, 103.53),
+        pixel_std: Sequence[float] = (58.395, 57.12, 57.375),
         mask_threshold: float = 0.0,
         image_format: str = "RGB",
         binarize_masks: bool = True,
@@ -315,8 +315,13 @@ class SAM(keras.Model):
         self.pixel_std = ops.array(pixel_std, dtype="float32")
 
         # Store as Python lists for serialization
-        self._pixel_mean_list = pixel_mean
-        self._pixel_std_list = pixel_std
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self._pixel_mean_list = list(pixel_mean)
+        self._pixel_std_list = list(pixel_std)
 
     def build(self, input_shape: Optional[Any] = None) -> None:
         """

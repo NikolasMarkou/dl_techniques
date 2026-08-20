@@ -95,7 +95,7 @@ References:
 
 import keras
 from keras import layers, regularizers
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -213,13 +213,13 @@ class MobileNetV4(keras.Model):
     def __init__(
         self,
         num_classes: int = 1000,
-        depths: List[int] = [1, 2, 3, 4, 3, 3, 1],
-        dims: List[int] = [16, 24, 40, 80, 112, 192, 320],
-        block_types: List[str] = ["IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"],
-        strides: List[int] = [1, 2, 2, 2, 1, 2, 1],
+        depths: Sequence[int] = (1, 2, 3, 4, 3, 3, 1),
+        dims: Sequence[int] = (16, 24, 40, 80, 112, 192, 320),
+        block_types: Sequence[str] = ("IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"),
+        strides: Sequence[int] = (1, 2, 2, 2, 1, 2, 1),
         width_multiplier: float = 1.0,
         use_attention: bool = False,
-        attention_stages: List[int] = [5, 6],
+        attention_stages: Sequence[int] = (5, 6),
         dropout_rate: float = 0.2,
         weight_decay: float = 1e-5,
         kernel_initializer: str = "he_normal",
@@ -270,13 +270,18 @@ class MobileNetV4(keras.Model):
 
         # Store configuration
         self.num_classes = num_classes
-        self.depths = depths
-        self.dims = dims
-        self.block_types = block_types
-        self.strides = strides
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.depths = list(depths)
+        self.dims = list(dims)
+        self.block_types = list(block_types)
+        self.strides = list(strides)
         self.width_multiplier = width_multiplier
         self.use_attention = use_attention
-        self.attention_stages = attention_stages
+        self.attention_stages = list(attention_stages)
         self.dropout_rate = dropout_rate
         self.weight_decay = weight_decay
         self.kernel_initializer = kernel_initializer

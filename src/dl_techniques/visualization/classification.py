@@ -12,7 +12,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Sequence
 from dataclasses import dataclass
 from sklearn.metrics import (
     confusion_matrix, classification_report, roc_curve, auc,
@@ -376,7 +376,7 @@ class ClassificationReportVisualization(VisualizationPlugin):
             self,
             data: Union[ClassificationResults, MultiModelClassification],
             ax: Optional[plt.Axes] = None,
-            metrics: List[str] = ['precision', 'recall', 'f1-score'],
+            metrics: Sequence[str] = ('precision', 'recall', 'f1-score'),
             **kwargs
     ) -> plt.Figure:
         """Create classification report visualization."""

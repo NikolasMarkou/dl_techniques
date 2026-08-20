@@ -19,7 +19,7 @@ import os
 import keras
 from keras import ops
 import tensorflow as tf
-from typing import Optional, Tuple, Union, Dict, Any, List
+from typing import Optional, Tuple, Union, Dict, Any, List, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -69,13 +69,13 @@ class CapsNet(keras.Model):
         self,
         num_classes: int,
         routing_iterations: int = 3,
-        conv_filters: List[int] = [256, 256],
+        conv_filters: Sequence[int] = (256, 256),
         primary_capsules: int = 32,
         primary_capsule_dim: int = 8,
         digit_capsule_dim: int = 16,
         reconstruction: bool = True,
         input_shape: Optional[Tuple[int, int, int]] = None,
-        decoder_architecture: List[int] = [512, 1024],
+        decoder_architecture: Sequence[int] = (512, 1024),
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_batch_norm: bool = True,
@@ -95,13 +95,17 @@ class CapsNet(keras.Model):
 
         self.num_classes = num_classes
         self.routing_iterations = routing_iterations
-        self.conv_filters = conv_filters.copy()
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: `list(...)`, not
+        # `.copy()`. The default is now a TUPLE (R-009 S1), and a tuple has no
+        # `.copy()`; `list()` accepts both and keeps the stored attribute -- and
+        # therefore `get_config`'s JSON type -- exactly what it always was.
+        self.conv_filters = list(conv_filters)
         self.primary_capsules = primary_capsules
         self.primary_capsule_dim = primary_capsule_dim
         self.digit_capsule_dim = digit_capsule_dim
         self.reconstruction = reconstruction
         self._input_shape = input_shape
-        self.decoder_architecture = decoder_architecture.copy()
+        self.decoder_architecture = list(decoder_architecture)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = self._process_regularizer(kernel_regularizer)
         self.use_batch_norm = use_batch_norm

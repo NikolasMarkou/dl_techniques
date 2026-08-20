@@ -14,7 +14,7 @@ Architecture:
 """
 
 import keras
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 
@@ -53,7 +53,7 @@ class ConvDecoder(keras.layers.Layer):
 
     def __init__(
         self,
-        decoder_dims: List[int] = [512, 256, 128, 64],
+        decoder_dims: Sequence[int] = (512, 256, 128, 64),
         output_channels: int = 3,
         kernel_size: int = 3,
         activation: str = "gelu",
@@ -72,7 +72,12 @@ class ConvDecoder(keras.layers.Layer):
             raise ValueError(f"output_channels must be positive, got {output_channels}")
 
         # Store configuration
-        self.decoder_dims = decoder_dims
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.decoder_dims = list(decoder_dims)
         self.output_channels = output_channels
         self.kernel_size = kernel_size
         self.activation = activation

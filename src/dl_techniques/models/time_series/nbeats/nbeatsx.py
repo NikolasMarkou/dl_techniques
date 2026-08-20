@@ -81,7 +81,7 @@ References:
 """
 
 import keras
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Sequence
 from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
@@ -188,9 +188,9 @@ class NBeatsXNet(keras.Model):
             backcast_length: int,
             forecast_length: int,
             exogenous_dim: int,
-            stack_types: List[str] = ['trend', 'seasonality', 'exogenous'],
+            stack_types: Sequence[str] = ('trend', 'seasonality', 'exogenous'),
             nb_blocks_per_stack: int = 3,
-            thetas_dim: List[int] = [4, 8, 16],
+            thetas_dim: Sequence[int] = (4, 8, 16),
             hidden_layer_units: int = 256,
             share_weights_in_stack: bool = False,
             use_normalization: bool = True,
@@ -484,7 +484,7 @@ def create_nbeatsx_model(
         backcast_length: int = 168,
         forecast_length: int = 24,
         exogenous_dim: int = 2,
-        stack_types: List[str] = ['trend', 'seasonality', 'exogenous'],
+        stack_types: Sequence[str] = ('trend', 'seasonality', 'exogenous'),
         **kwargs
 ) -> NBeatsXNet:
     """Factory for NBEATSx Model."""

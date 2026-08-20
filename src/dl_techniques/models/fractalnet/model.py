@@ -79,7 +79,7 @@ References:
 """
 
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any
+from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -162,9 +162,9 @@ class FractalNet(keras.Model):
     def __init__(
         self,
         num_classes: int = 10,
-        depths: List[int] = [2, 3, 3],
-        filters: List[int] = [32, 64, 128],
-        strides: List[int] = [2, 2, 2],
+        depths: Sequence[int] = (2, 3, 3),
+        filters: Sequence[int] = (32, 64, 128),
+        strides: Sequence[int] = (2, 2, 2),
         drop_path_rate: float = 0.15,
         dropout_rate: float = 0.1,
         normalization_type: str = "batch_norm",
@@ -196,9 +196,14 @@ class FractalNet(keras.Model):
 
         # Store configuration
         self.num_classes = num_classes
-        self.depths = depths
-        self.filters = filters
-        self.strides = strides
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.depths = list(depths)
+        self.filters = list(filters)
+        self.strides = list(strides)
         self.drop_path_rate = drop_path_rate
         self.dropout_rate = dropout_rate
         self.normalization_type = normalization_type
