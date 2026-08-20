@@ -156,7 +156,11 @@ class FNetEncoderBlock(keras.layers.Layer):
         self.supports_masking = True
 
         # Create Fourier transform layer
-        self.fourier_transform = FNetFourierTransform(**self.fourier_config)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit and
+        # is the auto-name of the first instance in a process, so the paths do
+        # not move; a caller-supplied `name` in `fourier_config` still wins.
+        self.fourier_transform = FNetFourierTransform(
+            **{"name": "f_net_fourier_transform", **self.fourier_config})
 
         # Stochastic depth (drop-path) layers, one per residual branch.
         #

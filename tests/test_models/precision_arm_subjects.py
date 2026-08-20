@@ -44,7 +44,9 @@ import numpy as np
 
 __all__ = ["CHARGED_PACKAGES", "SUBJECTS", "subject_names",
            "XLA_OVERRIDES", "xla_subject",
-           "FLOAT64_CHARGED", "FLOAT64_OVERRIDES", "float64_subject"]
+           "FLOAT64_CHARGED", "FLOAT64_OVERRIDES", "float64_subject",
+           "EXTRA_SUBJECTS", "ROUNDTRIP_NA", "roundtrip_charged",
+           "roundtrip_subject", "NO_HEAD_SIBLINGS"]
 
 
 #: Every package the audit charged with R-088 / R-141 and that step 18 left
@@ -482,14 +484,17 @@ def _tiny_conv_codec(latent: int = 8):
     import keras
     encoder = keras.Sequential([
         keras.layers.Input((32, 32, 1)),
-        keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu"),
-        keras.layers.Conv2D(latent, 3, strides=2, padding="same"),
+        keras.layers.Conv2D(16, 3, strides=2, padding="same",
+                            activation="relu", name="enc_conv_1"),
+        keras.layers.Conv2D(latent, 3, strides=2, padding="same",
+                            name="enc_conv_2"),
     ], name="tiny_encoder")
     decoder = keras.Sequential([
         keras.layers.Input((8, 8, latent)),
         keras.layers.Conv2DTranspose(16, 3, strides=2, padding="same",
-                                     activation="relu"),
-        keras.layers.Conv2DTranspose(1, 3, strides=2, padding="same"),
+                                     activation="relu", name="dec_deconv_1"),
+        keras.layers.Conv2DTranspose(1, 3, strides=2, padding="same",
+                                     name="dec_deconv_2"),
     ], name="tiny_decoder")
     return encoder, decoder
 
@@ -527,8 +532,10 @@ def _b_masked_autoencoder():
     # two stride-2 convs against two ``decoder_dims`` entries is the smallest
     # pair the factory's own scale check accepts.
     inp = keras.Input((32, 32, 3))
-    x = keras.layers.Conv2D(16, 3, strides=2, padding="same")(inp)
-    x = keras.layers.Conv2D(16, 3, strides=2, padding="same")(x)
+    x = keras.layers.Conv2D(16, 3, strides=2, padding="same",
+                            name="tiny_enc_conv_1")(inp)
+    x = keras.layers.Conv2D(16, 3, strides=2, padding="same",
+                            name="tiny_enc_conv_2")(x)
     encoder = keras.Model(inp, x, name="tiny_encoder")
     return create_mae_model(encoder=encoder, patch_size=16,
                             input_shape=(32, 32, 3), decoder_dims=[16, 16])
@@ -968,3 +975,461 @@ def float64_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], Di
     make_inputs = override.pop("make_inputs", make_inputs)
     resolved.update(override)
     return build, make_inputs, resolved
+
+
+# ===========================================================================
+# R-063 / R-072 / R-073 / R-135 -- the round-trip instrument family
+# ===========================================================================
+#
+# The instrument family (``test_roundtrip_instrument_family.py``) is charged
+# against ALL 73 ``models/`` packages, not just the 53 the precision arm
+# covers. The 20 packages below are exactly the difference. They live here
+# rather than in a second registry so that a package has ONE build/input pair
+# in the tree: ``roundtrip_subject`` resolves ``SUBJECTS`` first and falls back
+# to :data:`EXTRA_SUBJECTS`.
+#
+# Four of the twenty (``coshnet``, ``darkir``, ``fftnet``, ``pw_fnet``) are
+# deliberately absent from :data:`CHARGED_PACKAGES` -- step 18 gave each its own
+# ``test_precision_arm.py`` -- so their builders are transcribed from those
+# files rather than duplicated logic.
+
+EXTRA_SUBJECTS: Dict[str, Tuple[Callable[[], Any], Callable[[], Any], Dict[str, Any]]] = {}
+
+
+def _extra(name: str, build, make_inputs, **kwargs: Any) -> None:
+    EXTRA_SUBJECTS[name] = (build, make_inputs, kwargs)
+
+
+def _b_coshnet():
+    from dl_techniques.models.coshnet.model import create_coshnet
+    return create_coshnet("tiny", num_classes=4, input_shape=(32, 32, 3))
+
+
+_extra("coshnet", _b_coshnet, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_darkir():
+    from dl_techniques.models.darkir.model import create_darkir_model
+    return create_darkir_model(
+        width=8, middle_blk_num_enc=1, middle_blk_num_dec=1,
+        enc_blk_nums=[1, 1], dec_blk_nums=[1, 1], dilations=[1, 2],
+    )
+
+
+_extra("darkir", _b_darkir, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_fftnet():
+    from dl_techniques.models.fftnet.model import create_fftnet
+    return create_fftnet("tiny", image_size=32, patch_size=16)
+
+
+_extra("fftnet", _b_fftnet, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_pw_fnet():
+    from dl_techniques.models.pw_fnet.model import create_pw_fnet
+    return create_pw_fnet(width=8, middle_blk_num=1,
+                          enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
+
+
+_extra("pw_fnet", _b_pw_fnet, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_clip():
+    from dl_techniques.models.clip.model import CLIP
+    return CLIP(image_size=32, patch_size=16, vision_layers=1, vision_width=32,
+                vision_heads=2, vision_kv_heads=1, vocab_size=64,
+                context_length=8, text_layers=1, text_width=32, text_heads=2,
+                text_kv_heads=1, embed_dim=16)
+
+
+def _clip_inputs():
+    return {"image": _f32(1, 32, 32, 3), "text": _ids(64, 1, 8)}
+
+
+_extra("clip", _b_clip, _clip_inputs)
+
+
+def _b_detr():
+    import keras
+    from dl_techniques.models.detr.model import DETR, DetrTransformer
+    backbone = keras.Sequential([
+        keras.layers.Conv2D(32, 3, strides=2, padding="same",
+                            activation="relu", name="stub_conv_1"),
+        keras.layers.Conv2D(32, 3, strides=2, padding="same",
+                            activation="relu", name="stub_conv_2"),
+    ], name="stub_backbone")
+    transformer = DetrTransformer(hidden_dim=32, num_heads=2,
+                                  num_encoder_layers=1, num_decoder_layers=1,
+                                  ffn_dim=32, dropout=0.0,
+                                  name="detr_transformer_subject")
+    return DETR(num_classes=4, num_queries=5, backbone=backbone,
+                transformer=transformer, hidden_dim=32, aux_loss=False)
+
+
+def _detr_inputs():
+    return [_f32(1, 32, 32, 3), np.zeros((1, 32, 32), dtype="bool")]
+
+
+_extra("detr", _b_detr, _detr_inputs)
+
+
+def _b_dino():
+    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    return create_dino_v2("tiny", image_size=28, patch_size=14, num_classes=4,
+                          num_register_tokens=2)
+
+
+# The backbone's input contract is a 2-element list ``[images, masks]`` -- its
+# own module docstring states it -- with ``masks`` the (B, num_patches) iBOT
+# mask. 28/14 gives 2x2 = 4 patches.
+_extra("dino", _b_dino,
+       lambda: [_f32(1, 28, 28, 3), np.zeros((1, 4), dtype="bool")])
+
+
+def _b_distilbert():
+    from dl_techniques.models.distilbert.model import DistilBERT
+    return DistilBERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
+                      intermediate_size=64, max_position_embeddings=16)
+
+
+_extra("distilbert", _b_distilbert, lambda: {"input_ids": _ids(64, 1, 8)})
+
+
+def _b_energy_transformer():
+    from dl_techniques.models.energy_transformer.model import (
+        create_energy_transformer_classifier,
+    )
+    return create_energy_transformer_classifier(
+        variant="tiny", input_shape=(32, 32, 3), patch_size=16, num_classes=4)
+
+
+_extra("energy_transformer", _b_energy_transformer, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_fastvlm():
+    from dl_techniques.models.fastvlm.model import FastVLM
+    # Three stages: ``embed_dims must have 3 elements`` (measured, its own
+    # constructor guard).
+    return FastVLM(num_classes=4, embed_dims=[16, 32, 64], depths=[1, 1, 1],
+                   num_heads=[1, 2, 4], mlp_ratio=2.0, dropout_rate=0.0,
+                   drop_path_rate=0.0, include_top=True,
+                   input_shape=(32, 32, 3))
+
+
+_extra("fastvlm", _b_fastvlm, lambda: _f32(1, 32, 32, 3))
+
+
+def _b_graph_energy_transformer():
+    from dl_techniques.models.graph_energy_transformer.model import (
+        create_graph_classifier,
+    )
+    return create_graph_classifier(node_feature_dim=8, num_classes=4,
+                                   embed_dim=16, num_heads=2, head_dim=8,
+                                   hopfield_dim=32, num_blocks=1, pe_dim=4)
+
+
+def _get_inputs():
+    n = 8
+    return {
+        "node_features": _f32(1, n, 8),
+        "adjacency": np.ones((1, n, n), dtype="float32"),
+        # The dict keys are ``pe`` / ``node_mask``, per the backbone's own
+        # documented call signature -- not ``positional_encoding`` / ``mask``.
+        "pe": _f32(1, n, 4, seed=1),
+        "node_mask": np.ones((1, n), dtype="float32"),
+    }
+
+
+_extra("graph_energy_transformer", _b_graph_energy_transformer, _get_inputs)
+
+
+def _b_kan():
+    from dl_techniques.models.kan.model import KAN
+    return KAN(layer_configs=[{"features": 8, "grid_size": 5,
+                               "activation": "swish"},
+                              {"features": 4, "grid_size": 4,
+                               "activation": "linear"}],
+               input_features=6)
+
+
+_extra("kan", _b_kan, lambda: _f32(2, 6))
+
+
+def _b_latent_gmm():
+    from dl_techniques.models.latent_gmm_registration.model import (
+        LatentGMMRegistration,
+    )
+    return LatentGMMRegistration(num_gaussians=4, k_neighbors=8)
+
+
+_extra("latent_gmm_registration", _b_latent_gmm,
+       lambda: (_f32(1, 16, 3), _f32(1, 16, 3, seed=1)))
+
+
+def _b_mamba():
+    from dl_techniques.models.mamba.mamba_v1 import Mamba
+    return Mamba(vocab_size=64, d_model=32, num_layers=1, d_state=8, d_conv=4,
+                 expand=2)
+
+
+_extra("mamba", _b_mamba, lambda: _ids(64, 1, 8))
+
+
+def _b_mobile_clip():
+    from dl_techniques.models.mobile_clip.mobile_clip_v2 import (
+        create_mobile_clip_v2,
+    )
+    return create_mobile_clip_v2("mobileclip2_s0")
+
+
+def _mobile_clip_inputs():
+    return {"image": _f32(1, 256, 256, 3), "text": _ids(100, 1, 77)}
+
+
+_extra("mobile_clip", _b_mobile_clip, _mobile_clip_inputs)
+
+
+def _b_nam():
+    from dl_techniques.models.nam.model import NAM, NAMConfig
+    return NAM(config=NAMConfig(hidden_size=32, num_heads=4,
+                                num_tree_layers=1, intermediate_size=64,
+                                memory_size=8, num_read_heads=2,
+                                max_expression_len=16, halt_max_steps=2,
+                                hidden_dropout_rate=0.0,
+                                attention_dropout_rate=0.0))
+
+
+def _nam_call(model, inputs, training):
+    """``NAM.call(carry, batch, training)`` -- one ACT step, not ``model(x)``.
+
+    Same three-positional contract as :func:`_trm_call` above. The carry is
+    derived from the batch by the model's own ``initial_carry``, so the call
+    stays deterministic for a given batch.
+    """
+    carry = model.initial_carry(inputs)
+    _carry, outputs = model(carry, inputs, training=training)
+    return outputs
+
+
+_extra("nam", _b_nam, lambda: {"input_ids": _ids(16, 2, 16)},
+       call_fn=_nam_call)
+
+
+def _b_nano_vlm_world_model():
+    from dl_techniques.models.nano_vlm_world_model.model import (
+        create_score_based_nanovlm,
+    )
+    return create_score_based_nanovlm(variant="mini", vocab_size=256)
+
+
+def _nvwm_inputs():
+    return {"images": _f32(1, 224, 224, 3), "text": _ids(256, 1, 8)}
+
+
+_extra("nano_vlm_world_model", _b_nano_vlm_world_model, _nvwm_inputs)
+
+
+def _b_thera():
+    from dl_techniques.models.thera.model import Thera
+    from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
+    from dl_techniques.models.thera.tails import build_thera_tail
+    backbone = EDSRBackbone(num_feats=16, num_blocks=1,
+                            name="edsr_backbone_subject")
+    feat_ch = backbone.compute_output_shape((None, None, None, 3))[-1]
+    return Thera(hidden_dim=8, out_dim=3, backbone=backbone,
+                 tail=build_thera_tail("air", in_channels=feat_ch))
+
+
+def _thera_inputs():
+    import keras
+    from dl_techniques.layers.grid_sample import make_grid
+    grid = np.asarray(keras.ops.convert_to_numpy(
+        keras.ops.convert_to_tensor(make_grid((12, 12)))))
+    coords = np.broadcast_to(grid[None, ...], (1, 12, 12, 2)).astype("float32")
+    return (_f32(1, 8, 8, 3), coords, np.ones((1, 1), dtype="float32"))
+
+
+_extra("thera", _b_thera, _thera_inputs)
+
+
+def _b_tree_transformer():
+    from dl_techniques.models.tree_transformer.model import TreeTransformer
+    # ``max_len``, not ``max_position_embeddings``: the constructor rejects the
+    # BERT spelling outright rather than ignoring it.
+    return TreeTransformer(vocab_size=64, hidden_size=32, num_layers=1,
+                           num_heads=2, intermediate_size=64, max_len=16)
+
+
+_extra("tree_transformer", _b_tree_transformer,
+       lambda: {"input_ids": _ids(64, 1, 8)})
+
+
+#: The one ``models/`` package with NO round-trip subject, and why. Its own
+#: ``__init__.py`` states it: "nothing subclasses ``keras.Model``, so there is
+#: nothing for a model factory to build". ``PowerSampler`` is a sampling
+#: procedure over a caller-supplied logits function; there is no archive, no
+#: weight and therefore no round trip to instrument.
+ROUNDTRIP_NA: Dict[str, str] = {
+    "power_sampling": (
+        "no keras.Model subclass in the package (stated in its own "
+        "__init__.py); PowerSampler holds no weights, so R-063/R-072/R-073 "
+        "have no subject here"
+    ),
+}
+
+
+def roundtrip_charged() -> Tuple[str, ...]:
+    """Every ``models/`` package that owns a round-trip subject, sorted.
+
+    Interface contract (2 call sites, ``test_roundtrip_instrument_family.py``):
+    returns the union of :data:`SUBJECTS` and :data:`EXTRA_SUBJECTS` keys. The
+    completeness test asserts this union plus :data:`ROUNDTRIP_NA` is set-equal
+    to the on-disk package list, so a package cannot leave the family silently.
+    """
+    return tuple(sorted(set(SUBJECTS) | set(EXTRA_SUBJECTS)))
+
+
+def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], Dict[str, Any]]:
+    """Resolve one subject for the round-trip instrument family.
+
+    Interface contract (3 call sites, all in
+    ``test_roundtrip_instrument_family.py``): returns
+    ``(build, make_inputs, kwargs)`` where ``kwargs`` carries only the two keys
+    the round-trip oracle understands -- ``call_fn`` and ``training`` -- so a
+    precision-arm-only kwarg (``rtol_against_float32``, ``check_backward``)
+    cannot leak into a round-trip assertion and silently do nothing.
+
+    :raises KeyError: if ``name`` has no subject (including the
+        :data:`ROUNDTRIP_NA` packages, which have none by ruling).
+    """
+    build, make_inputs, kwargs = (
+        SUBJECTS[name] if name in SUBJECTS else EXTRA_SUBJECTS[name]
+    )
+    resolved: Dict[str, Any] = {}
+    if kwargs.get("call_fn") is not None:
+        resolved["call_fn"] = kwargs["call_fn"]
+    if kwargs.get("forward_training"):
+        resolved["training"] = True
+    return build, make_inputs, resolved
+
+
+# ---------------------------------------------------------------------------
+# R-072(b) -- the no-sub-layer-config siblings
+# ---------------------------------------------------------------------------
+#
+# Build parity (R-072(a)) is blind to OVER-building: it passes when both paths
+# build everything. The sibling arm is the other half -- a component is turned
+# OFF and its weights must be ABSENT.
+#
+# The subject set is not chosen by taste. It is every package whose model class
+# accepts ``include_top``, derived mechanically by
+# ``inspect.signature(type(model).__init__)`` -- 13 of the 72 -- and
+# ``test_the_no_head_sibling_set_is_the_include_top_set`` re-derives it, so a
+# package that GAINS the knob cannot stay out of the arm.
+
+NO_HEAD_SIBLINGS: Dict[str, Callable[[], Any]] = {}
+
+
+def _no_head(name: str):
+    def register(fn):
+        NO_HEAD_SIBLINGS[name] = fn
+        return fn
+    return register
+
+
+@_no_head("cbam")
+def _b_cbam_no_head():
+    from dl_techniques.models.cbam import create_cbam_net
+    return create_cbam_net("tiny", num_classes=4, input_shape=(32, 32, 3),
+                           include_top=False)
+
+
+@_no_head("convnext")
+def _b_convnext_no_head():
+    from dl_techniques.models.convnext import ConvNeXtV1
+    return ConvNeXtV1(num_classes=4, depths=[1, 1], dims=[8, 16],
+                      include_top=False)
+
+
+@_no_head("coshnet")
+def _b_coshnet_no_head():
+    from dl_techniques.models.coshnet.model import create_coshnet
+    return create_coshnet("tiny", num_classes=4, input_shape=(32, 32, 3),
+                          include_top=False)
+
+
+@_no_head("dino")
+def _b_dino_no_head():
+    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    return create_dino_v2("tiny", image_size=28, patch_size=14, num_classes=4,
+                          num_register_tokens=2, include_top=False)
+
+
+@_no_head("fastvlm")
+def _b_fastvlm_no_head():
+    from dl_techniques.models.fastvlm.model import FastVLM
+    return FastVLM(num_classes=4, embed_dims=[16, 32, 64], depths=[1, 1, 1],
+                   num_heads=[1, 2, 4], mlp_ratio=2.0, dropout_rate=0.0,
+                   drop_path_rate=0.0, include_top=False,
+                   input_shape=(32, 32, 3))
+
+
+@_no_head("fractalnet")
+def _b_fractalnet_no_head():
+    from dl_techniques.models.fractalnet import create_fractal_net
+    return create_fractal_net(variant="micro", num_classes=4,
+                              input_shape=(32, 32, 3), include_top=False)
+
+
+@_no_head("mobilenet")
+def _b_mobilenet_no_head():
+    from dl_techniques.models.mobilenet import create_mobilenetv2
+    return create_mobilenetv2(variant="small", num_classes=4,
+                              input_shape=(32, 32, 3), include_top=False)
+
+
+@_no_head("resnet")
+def _b_resnet_no_head():
+    from dl_techniques.models.resnet import ResNet
+    return ResNet(num_classes=4, blocks_per_stage=[1, 1],
+                  filters_per_stage=[8, 16], block_type="basic",
+                  include_top=False)
+
+
+@_no_head("squeezenet")
+def _b_squeezenet_no_head():
+    from dl_techniques.models.squeezenet import create_squeezenet_v1
+    return create_squeezenet_v1("1.0", num_classes=4, input_shape=(64, 64, 3),
+                                include_top=False)
+
+
+@_no_head("swin_transformer")
+def _b_swin_no_head():
+    from dl_techniques.models.swin_transformer import create_swin_transformer
+    return create_swin_transformer("tiny", 4, input_shape=(32, 32, 3),
+                                   include_top=False)
+
+
+@_no_head("vit")
+def _b_vit_no_head():
+    from dl_techniques.models.vit import create_vit
+    return create_vit(variant="vit_tiny", num_classes=4,
+                      input_shape=(32, 32, 3), patch_size=16,
+                      include_top=False)
+
+
+@_no_head("vit_hmlp")
+def _b_vit_hmlp_no_head():
+    from dl_techniques.models.vit_hmlp import create_vit_hmlp
+    return create_vit_hmlp(input_shape=(32, 32, 3), num_classes=4,
+                           scale="tiny", patch_size=16, include_top=False)
+
+
+@_no_head("vit_siglip")
+def _b_vit_siglip_no_head():
+    from dl_techniques.models.vit_siglip import create_siglip_vision_transformer
+    return create_siglip_vision_transformer(
+        input_shape=(32, 32, 3), num_classes=4, scale="tiny", patch_size=16,
+        include_top=False)

@@ -290,6 +290,10 @@ class SOMModel(keras.Model):
         self._is_built = False
 
         # Create the SOM layer - instantiated in __init__, built in build()
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit and
+        # is the auto-name of the first instance in a process, so the weight
+        # paths do not move; what it removes is the per-process counter that
+        # made two instances of this model disagree by path.
         self.som_layer = SOM2dLayer(
             map_size=map_size,
             input_dim=input_dim,
@@ -297,7 +301,8 @@ class SOMModel(keras.Model):
             sigma=sigma,
             neighborhood_function=neighborhood_function,
             weights_initializer=weights_initializer,
-            regularizer=regularizer
+            regularizer=regularizer,
+            name="som2d_layer"
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

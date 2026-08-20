@@ -441,6 +441,24 @@ class WindowAttention(keras.layers.Layer):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-081: the name is
+            # EXPLICIT, and it is spelled as the auto-name Keras would have
+            # produced for the first instance in a process. Without it the
+            # global `auto_name` counter numbers this sub-layer per process, so
+            # two instances of the SAME builder disagree by weight path
+            # (`single_window_attention` vs `single_window_attention_12`) and
+            # R-072 build parity cannot be asserted for any consumer.
+            #
+            # MEASURED consequence, and it is not free: a model holding MORE
+            # than one window-attention layer had them numbered
+            # (`single_window_attention_1`, `_12`, `_19`); they now all read
+            # `single_window_attention` and are distinguished by their parent,
+            # so the weight PATHS move for `swin_transformer`, `scunet` and
+            # `modern_bert`. A `.keras` archive is positional and round-trips
+            # unaffected -- CPU-eager forward delta measured EXACTLY 0.0 for all
+            # three -- but a by-NAME load against a checkpoint written before
+            # this line will not find these tensors.
+            name="single_window_attention",
         )
 
         # Attributes for zigzag mode, computed in build()
