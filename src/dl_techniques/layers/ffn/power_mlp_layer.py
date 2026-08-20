@@ -84,6 +84,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from ..activations.relu_k import ReLUK
 from ..activations.basis_function import BasisFunction
@@ -241,10 +242,24 @@ class PowerMLPLayer(keras.layers.Layer):
         self.basis_function = BasisFunction(name="basis_function")
 
         # Basis branch dense layer (no bias by design)
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-057
+        # ``clone_initializer`` here is load-bearing. Handing BOTH branches the
+        # same ``self.kernel_initializer`` INSTANCE made them start bit-identical
+        # -- ``main_dense/kernel == basis_dense/kernel``, max|delta| exactly
+        # 0.000000e+00, at (6,4) and at (6,12), i.e. shape-independently. A
+        # seedless Keras 3 initializer instance self-assigns a seed and replays
+        # it at every draw, so the two branches whose DIFFERENCE is the PowerMLP
+        # architecture began as the same function. Do NOT "simplify" this back to
+        # ``self.kernel_initializer``, and do NOT push the clone up into the
+        # ``keras.initializers.get`` call in ``__init__`` -- ``main_dense`` and
+        # ``get_config`` must keep reporting the initializer the caller passed.
+        # A SEEDED initializer still yields identical branches, deliberately:
+        # that is the caller's stated intent. See decisions.md D-057.
         self.basis_dense = keras.layers.Dense(
             units=self.units,
             use_bias=False,  # Basis branch doesn't use bias
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="basis_dense"
         )
