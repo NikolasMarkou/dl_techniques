@@ -1062,41 +1062,19 @@ def create_vit(
         )
         ```
     """
-    # Validate basic parameters before model creation
-    if num_classes <= 0:
-        raise ValueError(f"num_classes must be positive, got {num_classes}")
-
-    if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
-        raise ValueError(f"input_shape must be a 3-element tuple/list, got {input_shape}")
-
-    if any(dim <= 0 for dim in input_shape):
-        raise ValueError(f"All input_shape dimensions must be positive, got {input_shape}")
-
-    # Validate patch_size and ensure compatibility with input_shape
-    if isinstance(patch_size, int):
-        if patch_size <= 0:
-            raise ValueError(f"patch_size must be positive, got {patch_size}")
-        patch_h = patch_w = patch_size
-    else:
-        if not isinstance(patch_size, (tuple, list)) or len(patch_size) != 2:
-            raise ValueError(f"patch_size must be int or 2-element tuple/list, got {patch_size}")
-        patch_h, patch_w = patch_size
-        if patch_h <= 0 or patch_w <= 0:
-            raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
-
-    img_h, img_w = input_shape[:2]
-    if img_h % patch_h != 0:
-        raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
-    if img_w % patch_w != 0:
-        raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
-
-    # Calculate and validate number of patches
-    num_patches = (img_h // patch_h) * (img_w // patch_w)
-    if num_patches <= 0:
-        raise ValueError(f"Number of patches must be positive, got {num_patches}")
-    if num_patches > 10000:  # Reasonable upper limit
-        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
-
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory validates
+    # NOTHING. It used to carry eight `raise ValueError` branches -- num_classes
+    # sign, input_shape arity, input_shape sign, patch_size sign, patch_size
+    # type, patch_size element sign, and the two divisibility checks -- and
+    # `ViT.__init__` was MEASURED to raise its own `ValueError` for every one of
+    # the eight, with a near-identical message. They were dead duplication and
+    # the exact shape R-051 names. Do NOT re-add a check here "for a clearer
+    # message": two copies of a rule drift, and the copy the caller hits is the
+    # one that is NOT next to the code it constrains. Add it to `ViT.__init__`.
+    #
+    # `num_patches <= 0` was additionally UNREACHABLE: it followed the positive
+    # -dimension and divisibility checks, so the product was already >= 1.
+    #
     # Delegate to from_variant for unified pretrained-weights handling.
     model = ViT.from_variant(
         variant=variant,
@@ -1123,6 +1101,16 @@ def create_vit(
         activation=activation,
         **kwargs,
     )
+
+    # Reporting only -- derived AFTER construction, so an invalid `patch_size`
+    # has already been rejected by `ViT.__init__` and never reaches this line.
+    patch_h, patch_w = (
+        (patch_size, patch_size) if isinstance(patch_size, int) else patch_size
+    )
+    img_h, img_w = input_shape[:2]
+    num_patches = (img_h // patch_h) * (img_w // patch_w)
+    if num_patches > 10000:  # Reasonable upper limit
+        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
 
     logger.info(f"ViT variant '{variant}' created successfully")
     logger.info(f"Configuration: {num_patches} patches ({img_h // patch_h}x{img_w // patch_w}), {num_classes} classes")

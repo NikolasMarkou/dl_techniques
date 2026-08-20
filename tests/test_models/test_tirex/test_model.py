@@ -888,3 +888,53 @@ class TestTiRexUnderTheStrictAttentionFactory:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestTheFactoriesBuildWithoutRunning:
+    """R-051 / D-078: both TiRex factories materialize with ``build()``, not a forward pass.
+
+    ``create_tirex_model`` and ``create_tirex_by_variant`` used to call
+    ``model(np.zeros((1, input_length, 1)))``. ``build()`` was measured to be a
+    byte-identical substitute at the same seed -- the same 47 weight paths,
+    ``max|weight delta| == 0.0`` and ``max|forward delta| == 0.0`` -- so the
+    forward pass went and ``build()`` stayed. It could NOT simply be deleted:
+    ``input_length`` exists only to size this call, and an unbuilt subclassed
+    model can lose lazily-created sublayer weights on a ``.keras`` round trip.
+
+    These are the RED proofs for that edit. Delete the ``build()`` line and
+    ``test_the_returned_model_is_built`` goes red; restore the forward pass and
+    ``test_no_forward_pass_is_run`` goes red.
+    """
+
+    @pytest.mark.parametrize("factory", ["by_variant", "direct"])
+    def test_the_returned_model_is_built(self, factory):
+        if factory == "by_variant":
+            model = create_tirex_by_variant("tiny", input_length=64, prediction_length=8)
+        else:
+            model = create_tirex_model(input_length=64, prediction_length=8, embed_dim=32,
+                                 num_blocks=1, num_heads=2, patch_size=8)
+        assert model.built, f"{factory} returned an UNBUILT model"
+        assert len(model.weights) > 0
+
+    @pytest.mark.parametrize("factory", ["by_variant", "direct"])
+    def test_no_forward_pass_is_run(self, factory):
+        calls = []
+        original_call = TiRexCore.call
+
+        def counting_call(self, *args, **kwargs):
+            calls.append(1)
+            return original_call(self, *args, **kwargs)
+
+        TiRexCore.call = counting_call
+        try:
+            if factory == "by_variant":
+                create_tirex_by_variant("tiny", input_length=64, prediction_length=8)
+            else:
+                create_tirex_model(input_length=64, prediction_length=8, embed_dim=32,
+                             num_blocks=1, num_heads=2, patch_size=8)
+        finally:
+            TiRexCore.call = original_call
+
+        assert calls == [], (
+            f"the {factory} factory invoked the model {len(calls)} time(s); it "
+            "should materialize with build() alone."
+        )

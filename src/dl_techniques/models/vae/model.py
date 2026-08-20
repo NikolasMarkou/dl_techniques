@@ -1323,29 +1323,23 @@ def create_vae(
     jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
     model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
 
-    # Validate the model works
-    test_input = keras.random.uniform((2,) + input_shape)
-    test_output = model(test_input, training=False)
-
-    # Validate outputs
-    assert (
-        test_output["reconstruction"].shape == test_input.shape
-    ), "Reconstruction shape mismatch"
-    assert test_output["z_mean"].shape == (
-        2,
-        latent_dim,
-    ), "z_mean shape mismatch"
-    # hypersphere emits a single scalar radius log-variance [B, 1] and vmf a
-    # single scalar concentration kappa [B, 1]; gaussian keeps the full
-    # [B, latent_dim] log_var.
-    expected_log_var_dim = (
-        1 if model.sampling_type in ("hypersphere", "vmf") else latent_dim
-    )
-    assert test_output["z_log_var"].shape == (
-        2,
-        expected_log_var_dim,
-    ), "z_log_var shape mismatch"
-
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory does NOT
+    # self-test. It used to run `keras.random.uniform((2,) + input_shape)`
+    # through the model and `assert` on three output shapes. Three reasons that
+    # was wrong, and do NOT restore it:
+    #   1. `assert` is stripped by `python -O`, so the "validation" was already
+    #      absent in exactly the deployment that most needs it.
+    #   2. It ran a full forward pass on every construction -- cost paid by
+    #      every caller, including the ones that only want the compiled shell.
+    #      (It ALSO drew from the global seed stream via `keras.random.uniform`,
+    #      but do not reach for that as the test: weight initialization draws
+    #      from the same stream, so a seed-stream comparison cannot isolate the
+    #      factory's own draw. That confound killed the first version of the
+    #      test below; the shipped one counts `VAE.call` invocations instead.)
+    #   3. It is a test. It now lives in
+    #      `tests/test_models/test_vae/test_model.py::TestCreateVaeOutputShapes`,
+    #      where it runs over all three sampling types instead of whichever one
+    #      the caller happened to ask for.
     logger.info(f"Created VAE-{variant.upper()} for input shape {input_shape}")
     logger.info(f"Latent dim: {latent_dim}, Parameters: {model.count_params():,}")
 

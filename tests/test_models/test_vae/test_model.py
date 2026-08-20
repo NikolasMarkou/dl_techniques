@@ -639,9 +639,12 @@ class TestCreateVAEFactory:
         samples = vae.sample(num_samples=3)
         assert samples.shape == (3, 32, 32, 1)
 
-    def test_create_vae_validation_passes(self):
-        """Test that create_vae's internal validation works."""
-        # This should not raise any errors
+    def test_create_vae_returns_a_compiled_model(self):
+        """``create_vae``'s remaining contract: it compiles. It no longer self-tests.
+
+        The self-test it used to run lives at
+        ``TestVAESamplingTypes::test_create_vae_output_shapes``.
+        """
         vae = create_vae(
             input_shape=(64, 64, 3),
             latent_dim=128,
@@ -1021,8 +1024,20 @@ class TestVAESamplingTypes:
         assert samples.shape == (3,) + self.INPUT_SHAPE
 
     @pytest.mark.parametrize("mode", SAMPLING_MODES)
-    def test_create_vae_factory_assertion_branch(self, mode):
-        """create_vae's internal validation passes for every mode."""
+    def test_create_vae_output_shapes(self, mode):
+        """The shape contract ``create_vae`` used to ``assert`` on, as a real test.
+
+        Until step 19 the factory ran a random forward pass and ``assert``-ed on
+        these three shapes ITSELF (audit rule R-051, routed SEVERE). That was
+        void under ``python -O``, and the ``keras.random.uniform`` draw shifted
+        the global seed stream for every later caller. The check moved here, and
+        it got stronger on the way: it now runs for all three sampling types
+        rather than for whichever one the caller happened to request.
+
+        ``hypersphere`` emits a single scalar radius log-variance ``[B, 1]`` and
+        ``vmf`` a single scalar concentration kappa ``[B, 1]``; ``gaussian``
+        keeps the full ``[B, latent_dim]`` log-variance.
+        """
         vae = create_vae(
             input_shape=self.INPUT_SHAPE,
             latent_dim=self.LATENT_DIM,
@@ -1030,6 +1045,49 @@ class TestVAESamplingTypes:
             sampling_type=mode,
         )
         assert vae.sampling_type == mode
+
+        batch = keras.random.uniform((2,) + self.INPUT_SHAPE)
+        out = vae(batch, training=False)
+        assert tuple(out["reconstruction"].shape) == (2,) + self.INPUT_SHAPE
+        assert tuple(out["z_mean"].shape) == (2, self.LATENT_DIM)
+        expected_log_var_dim = 1 if mode in ("hypersphere", "vmf") else self.LATENT_DIM
+        assert tuple(out["z_log_var"].shape) == (2, expected_log_var_dim)
+
+    def test_create_vae_runs_no_forward_pass(self):
+        """The factory must BUILD a model, never RUN one.
+
+        This is the RED proof for the removal: restore the self-test forward
+        pass in ``create_vae`` and the counter below reads 1 instead of 0.
+
+        A first draft of this test tried to prove the point via the global seed
+        stream -- seed, build, draw, and compare against the same sequence
+        without the factory's ``keras.random.uniform`` call. It FAILED, and the
+        instrument was the reason: weight initialization draws from that same
+        global stream, so BOTH arms shift it and the comparison could never
+        isolate the factory's own draw. Counting invocations is unconfounded.
+        """
+        calls = []
+        original_call = VAE.call
+
+        def counting_call(self, *args, **kwargs):
+            calls.append(1)
+            return original_call(self, *args, **kwargs)
+
+        VAE.call = counting_call
+        try:
+            create_vae(
+                input_shape=self.INPUT_SHAPE,
+                latent_dim=self.LATENT_DIM,
+                variant="micro",
+            )
+        finally:
+            VAE.call = original_call
+
+        assert calls == [], (
+            f"create_vae invoked the model {len(calls)} time(s). The factory "
+            "builds and compiles; it does not run. Its old self-test forward "
+            "pass moved to test_create_vae_output_shapes."
+        )
 
     def test_legacy_hypersphere_faithful_alias_maps_to_hypersphere(self):
         """Back-compat: the deprecated 'hypersphere_faithful' value constructs

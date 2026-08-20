@@ -556,20 +556,38 @@ class TestViTFactoryFunctions:
         assert model.scale == "base"
         assert model.num_classes == 1000
 
-    def test_factory_function_validation(self):
-        """Test validation in factory functions."""
-        # Invalid parameters should raise errors
-        with pytest.raises(ValueError, match="num_classes must be positive"):
-            create_vit(variant="vit_base", num_classes=-1)
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            (dict(num_classes=-1), "num_classes must be positive"),
+            (dict(input_shape=(224, 224)), "input_shape must be a 3-tuple"),
+            (dict(input_shape=(-224, 224, 3)), "dimensions must be positive"),
+            (dict(patch_size=-16), "patch_size must be positive"),
+            (dict(patch_size=(16, 16, 16)), "patch_size must be int or tuple"),
+            (dict(patch_size=(-16, 16)), "patch_size dimensions must be positive"),
+            (
+                dict(input_shape=(225, 224, 3), patch_size=16),
+                "Image height .* must be divisible",
+            ),
+            (
+                dict(input_shape=(224, 225, 3), patch_size=16),
+                "Image width .* must be divisible",
+            ),
+        ],
+    )
+    def test_factory_function_validation(self, overrides, message):
+        """Every one of these guards lives in ``ViT.__init__``, not in ``create_vit``.
 
-        with pytest.raises(ValueError, match="input_shape must be a 3-element"):
-            create_vit(variant="vit_base", input_shape=(224, 224))
-
-        with pytest.raises(ValueError, match="patch_size must be positive"):
-            create_vit(variant="vit_base", patch_size=-16)
-
-        with pytest.raises(ValueError, match="Image height .* must be divisible"):
-            create_vit(variant="vit_base", input_shape=(225, 224, 3), patch_size=16)
+        ``create_vit`` used to carry its own copy of all eight (audit rule
+        R-051, routed to step 19 as SEVERE). Each copy was measured redundant --
+        the constructor raises ``ValueError`` with a near-identical message for
+        every case below -- so the copies were deleted and this test now pins
+        the SURVIVING guard. If a guard is ever removed from ``ViT.__init__``,
+        this goes red; that is the point of asserting through the factory rather
+        than around it.
+        """
+        with pytest.raises(ValueError, match=message):
+            create_vit(variant="vit_base", **overrides)
 
     def test_factory_function_with_advanced_options(self):
         """Test factory functions with advanced configuration options."""

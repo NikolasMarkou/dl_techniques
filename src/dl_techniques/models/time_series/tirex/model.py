@@ -859,9 +859,9 @@ def create_tirex_model(
         **kwargs
     )
 
-    # Build the model with a dummy input to initialize weights and shapes
-    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
-    _ = model(dummy_input)
+    # See the D-078 note on `create_tirex_by_variant`: `build()` replaces a
+    # dummy forward pass and is byte-identical at the same seed.
+    model.build((None, input_length, 1))
 
     logger.info(
         f"Created TiRex model: input_length={input_length}, "
@@ -905,9 +905,16 @@ def create_tirex_by_variant(
         **kwargs
     )
 
-    # Build the model with a dummy input
-    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
-    _ = model(dummy_input)
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: materialize with
+    # `build()`, not with a dummy forward pass. This used to be
+    # `model(np.zeros((1, input_length, 1)))`, which R-051 charges as logic in a
+    # factory. It is NOT dead code -- `input_length` exists only to size this
+    # call, and dropping it outright would make the parameter a silent no-op and
+    # hand back a lazily-built model whose sublayers can lose weights on a
+    # `.keras` round trip. `build()` is the byte-identical substitute, measured
+    # at the same seed: the SAME 47 weight paths, `max|weight delta| == 0.0`,
+    # and `max|forward delta| == 0.0`.
+    model.build((None, input_length, 1))
 
     logger.info(
         f"Created TiRex-{variant.upper()}: input_length={input_length}, "

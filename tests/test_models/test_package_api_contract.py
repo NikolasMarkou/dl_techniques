@@ -3748,12 +3748,15 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",
     ("models/sd3_mmdit/vae.py", "create_sd3_vae"): "ROUTE step 19 -- resolves PRESETS itself and constructs AutoEncoder(...) directly",
     ("models/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
-    # (f) SEVERE -- the factory compiles, runs, or asserts. More than R-051
-    # describes; called out so step 19 does not treat them as cosmetic.
-    ("models/fractalnet/model.py", "create_fractal_net"): "ROUTE step 19 (SEVERE) -- builds an optimizer and CALLS model.compile() inside the factory",
-    ("models/vae/model.py", "create_vae"): "ROUTE step 19 (SEVERE) -- compiles, runs a forward pass on random input, and asserts on the output shapes",
-    ("models/vit/model.py", "create_vit"): "ROUTE step 19 (SEVERE) -- 10 validation branches duplicating checks the constructor already owns",
-    ("models/time_series/tirex/model.py", "create_tirex_by_variant"): "ROUTE step 19 (SEVERE) -- runs a dummy numpy forward pass to force a build",
+    # (f) SEVERE -- the factory compiled, ran, or asserted. DISPOSED at step 19
+    # (D-078). Three were repaired and one is refuted; all four still trip the
+    # predicate because a compile call, a `build()` call and a derived log line
+    # are all "not delegation", which is why they stay waived rather than
+    # dropped. The reason text now records the RULING, not the charge.
+    ("models/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract ('create and compile', returns a compiled model); the from_logits=True loss default is a load-bearing anti-mistrain guard. No duplicated callee logic remains to remove",
+    ("models/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its three `assert`s are gone (void under -O); they now run over all 3 sampling types at TestVAESamplingTypes::test_create_vae_output_shapes. The compile stays: documented contract",
+    ("models/vit/model.py", "create_vit"): "step 19 REPAIRED (D-078) -- all 8 duplicated `raise ValueError` branches deleted; ViT.__init__ was MEASURED to raise for every one. Only a derived log line remains",
+    ("models/time_series/tirex/model.py", "create_tirex_by_variant"): "step 19 REPAIRED (D-078) -- the dummy numpy forward pass is now `model.build(...)`, measured byte-identical (same 47 weight paths, weight delta 0.0, forward delta 0.0). Both sites in the module",
 }
 
 
