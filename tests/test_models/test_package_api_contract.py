@@ -3956,10 +3956,12 @@ class TestCreateFactoriesDelegateToFromVariant:
 #
 # The subject set of the two call-purity guards is the ONE-LEVEL INTRA-MODULE
 # CALLEE CLOSURE of every ``call()``, not a lexical scan of ``call()`` itself.
-# Measured 2026-08-20 (see the sweep docstring): the lexical scan finds 17
-# ``logger.*`` sites, the closure finds 24. The 7 it adds are not hypothetical --
+# Measured 2026-08-20 (see the sweep docstring): the lexical scan found 17
+# ``logger.*`` sites, the closure 24. The 7 it added were not hypothetical --
 # one of them, ``DeepAR._training_mode``, is inside ``models/`` and would have
-# made this guard's own headline number wrong.
+# made this guard's own headline number wrong. Step 19.1 removed 16 of the 24;
+# the population is now 8 sites / 7 keys (lexical 6), and the closure still
+# sees more than the lexical scan.
 # ---------------------------------------------------------------------------
 
 _LIB_ROOT = REPO_ROOT / "src" / "dl_techniques"
@@ -4085,12 +4087,13 @@ def _sweep_call_closure_hygiene(roots=None, src_root=None):
 
     Default roots: the whole of ``src/dl_techniques/`` -- NOT ``models/``.
     Scope reasoning: step 19 owns all 17 lexical sites library-wide, and 11 of
-    the 15 offending keys are in ``layers/`` and ``losses/``, where the same rule
-    holds and the same fix is planned. A ``models/``-only guard would freeze 4
-    keys and leave 11 unguarded.
+    the offending keys are in ``layers/`` and ``losses/``, where the same rule
+    holds and the same ruling applies. A ``models/``-only guard would have
+    frozen 4 keys of the original 15 and left 11 unguarded.
 
-    Measured 2026-08-20 over ``src/dl_techniques/``: 651 ``call`` methods, 1010
-    closure bodies, **24 logger sites across 15 keys** (lexical: 17 sites),
+    Measured 2026-08-20 AFTER step 19.1 over ``src/dl_techniques/``: 650
+    ``call`` methods, 1004 closure bodies, **8 logger sites across 7 keys**
+    (lexical: 6 sites) -- down from 24 / 15 / 17 before the removals --
     **0 numpy** and **0 tril/triu** -- the latter two are freeze-forward and can
     only be validated by injection.
     """
@@ -4130,43 +4133,38 @@ def _sweep_call_closure_hygiene(roots=None, src_root=None):
     return hits, counts
 
 
-#: The 15 LIVE ``logger.*``-on-a-forward-path keys, waived BY NAME and routed to
-#: step 19, which fixes all of them (the 4 ``models/`` ones first). Keyed by
+#: The LIVE ``logger.*``-on-a-forward-path keys, waived BY NAME. Keyed by
 #: ``(relpath, class, body)`` -- never by line -- so line drift cannot silence a
-#: waiver and a move fails loudly. 24 call sites across these 15 keys.
+#: waiver and a move fails loudly.
+#:
+#: **Step 19.1 ruled the family PER SITE, and the split is exact: every one of
+#: the 16 removed sites was a ``logger.debug``, and every one of the 8 that
+#: remain is a ``logger.warning`` on a PYTHON-level condition** -- an unknown
+#: op-type string, a statically-known non-square shape, a `None` config value.
+#: Those run at trace time because that is when the condition is knowable, and
+#: they warn about a MISCONFIGURATION the caller can still fix. The removed 16
+#: logged per-forward tensor values and shapes: `EntityGraphRefinement` (11,
+#: three of which computed a reduction FOR THE LOG LINE ONLY),
+#: `NanoVLM.call` (4 `ops.shape` lines) and `ResidualACFLayer.call` (1, which
+#: interpolated a symbolic loss tensor). See decisions.md D-084.
 #:
 #: Re-derived 2026-08-20. The carried figure was "17 library-wide, 4 in
 #: ``models/``"; that is the LEXICAL count and it is exactly right as such. By
-#: the closure predicate this step actually ships it is **24 sites / 15 keys
-#: library-wide, 5 sites / 2 keys in ``models/``** -- ``DeepAR._training_mode``
-#: is a ``models/`` site no lexical sweep sees.
+#: the closure predicate it was **24 sites / 15 keys library-wide** before this
+#: step and is **8 sites / 7 keys** after -- ``DeepAR._training_mode`` is a
+#: ``models/`` site no lexical sweep sees, and it is one of the 8 that stay.
 _CALL_LOGGER_WAIVERS = {
     ("src/dl_techniques/layers/attention/wave_field_attention.py",
      "WaveFieldAttention", "call"),
-    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
-     "EntityGraphRefinement", "_apply_masks"),
-    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
-     "EntityGraphRefinement", "_apply_sparsification"),
-    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
-     "EntityGraphRefinement", "_extract_entities"),
-    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
-     "EntityGraphRefinement", "_initialize_dense_graph"),
-    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
-     "EntityGraphRefinement", "_refine_graph"),
-    ("src/dl_techniques/layers/graphs/entity_graph_refinement.py",
-     "EntityGraphRefinement", "call"),
     ("src/dl_techniques/layers/logic/arithmetic_operators.py",
      "LearnableArithmeticOperator", "call"),
     ("src/dl_techniques/layers/logic/logic_operators.py",
      "LearnableLogicOperator", "call"),
-    ("src/dl_techniques/layers/statistics/residual_acf.py",
-     "ResidualACFLayer", "call"),
     ("src/dl_techniques/losses/clip_contrastive_loss.py",
      "CLIPContrastiveLoss", "_validate_logits"),
     ("src/dl_techniques/losses/nano_vlm_loss.py", "NanoVLMLoss", "call"),
     ("src/dl_techniques/losses/yolo12_multitask_loss.py",
      "DiceFocalSegmentationLoss", "call"),
-    ("src/dl_techniques/models/nano_vlm/model.py", "NanoVLM", "call"),
     ("src/dl_techniques/models/time_series/deepar/model.py",
      "DeepAR", "_training_mode"),
 }
@@ -4209,9 +4207,10 @@ class TestCallClosureIsPure:
 
     The three families ship at different maturities and the guard says so:
 
-    * ``logger`` -- **24 live sites across 15 keys** (measured 2026-08-20),
-      every one waived BY NAME in ``_CALL_LOGGER_WAIVERS`` with a liveness test,
-      and routed to step 19. The predicate is NOT narrowed to make them go away;
+    * ``logger`` -- **8 live sites across 7 keys** (measured 2026-08-20 after
+      step 19.1 removed 16), every one waived BY NAME in
+      ``_CALL_LOGGER_WAIVERS`` with a liveness test. The predicate is NOT
+      narrowed to make them go away;
     * ``numpy`` (``.numpy()``/``convert_to_numpy``) -- **0**, CLOSED-as-refuted
       at step 5 (all 4 known sites are eager: ``generate``, two ``Callback``
       hooks, one warm-up helper, none of them in a ``call`` closure). Ships as a
@@ -4242,7 +4241,11 @@ class TestCallClosureIsPure:
         )
 
     def test_logger_waivers_still_match_a_real_site(self):
-        """Step 19 deletes these sites; each fix must delete its waiver too."""
+        """A repair must delete its waiver in the same commit.
+
+        Step 19.1 removed 16 of the 24 sites and this test fired on all eight
+        keys that lost their last site; the entries went with the removals.
+        """
         hits, _ = _sweep_call_closure_hygiene()
         offending = {(h[0], h[1], h[2]) for h in hits if h[6] == "logger"}
         stale = sorted(_CALL_LOGGER_WAIVERS - offending)
@@ -4304,11 +4307,12 @@ class TestCallClosureIsPure:
     def test_the_closure_sees_more_than_a_lexical_call_scan(self):
         """The correction this step exists for, asserted rather than asserted-about.
 
-        Measured 2026-08-20: 17 ``logger.*`` sites lexically inside ``call()``,
-        **24** in the one-level closure. The 7 extra are all real, and one of
-        them -- ``DeepAR._training_mode``, reached from ``DeepAR.call`` --
-        is inside ``models/``, so the carried "4 in models/" figure was the
-        lexical count, not the population.
+        Measured 2026-08-20, before step 19.1: 17 ``logger.*`` sites lexically
+        inside ``call()``, **24** in the one-level closure. After it: **6**
+        lexical, **8** in the closure. The gap is what matters, not the level:
+        ``DeepAR._training_mode``, reached from ``DeepAR.call``, is inside
+        ``models/`` and no lexical sweep sees it, so the carried "4 in models/"
+        figure was the lexical count, not the population.
         """
         hits, counts = _sweep_call_closure_hygiene()
         assert counts["n_logger"] > counts["n_logger_lexical"], (

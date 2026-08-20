@@ -420,12 +420,13 @@ class EntityGraphRefinement(keras.layers.Layer):
             dtype='float32'
         )
 
-        # Log entity extraction statistics for monitoring
-        if training:
-            avg_active_entities = ops.mean(ops.sum(entity_mask, axis=1))
-            # FIX: Removed unsupported formatting for symbolic tensor
-            logger.debug(f"Entity extraction: average active entities (tensor): {avg_active_entities}")
-
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-084: no logging on the
+        # forward path (R-033/R-041). The `logger.debug` that stood here also
+        # computed `ops.mean(ops.sum(entity_mask, axis=1))` FOR THE LOG LINE
+        # ONLY -- a reduction on every forward whose result was interpolated
+        # into an f-string, i.e. printed once at trace time as a symbolic
+        # tensor and never again. Do not re-add it: a per-batch statistic
+        # belongs in a metric or a callback, not in `call`.
         return extracted_entities, entity_mask
 
     def _initialize_dense_graph(self, batch_size: int) -> keras.KerasTensor:
@@ -444,9 +445,6 @@ class EntityGraphRefinement(keras.layers.Layer):
             minval=-self.initial_density,
             maxval=self.initial_density
         )
-
-        logger.debug(f"Initialized dense graph with shape {graph_shape}, "
-                    f"density range ±{self.initial_density}")
 
         return initial_graph
 
@@ -506,7 +504,6 @@ class EntityGraphRefinement(keras.layers.Layer):
             (batch_size, self.max_entities, self.max_entities)
         )
 
-        logger.debug("Completed graph refinement step")
         return refined_graph
 
     def _apply_sparsification(
@@ -546,14 +543,10 @@ class EntityGraphRefinement(keras.layers.Layer):
         # Apply gates to graph (element-wise multiplication)
         sparsified_graph = graph * gates
 
-        if training:
-            # Log sparsification statistics for monitoring
-            avg_gate_value = ops.mean(gates)
-            sparsity_ratio = ops.mean(ops.cast(gates < 0.1, 'float32'))
-            # FIX: Removed unsupported formatting for symbolic tensors
-            logger.debug(f"Sparsification: avg gate value (tensor): {avg_gate_value}, "
-                        f"sparsity ratio (tensor): {sparsity_ratio}")
-
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-084: the `if training:`
+        # branch that stood here computed `ops.mean(gates)` and a sparsity ratio
+        # FOR A LOG LINE ONLY, and logged them as symbolic tensors. Both the log
+        # and the reductions feeding it are gone; nothing else read them.
         return sparsified_graph
 
     def _apply_masks(
@@ -581,7 +574,6 @@ class EntityGraphRefinement(keras.layers.Layer):
         # Apply both masks to final graph
         final_graph = graph * connection_mask * diagonal_mask
 
-        logger.debug("Applied entity and diagonal masks to graph")
         return final_graph
 
     def call(
@@ -601,8 +593,6 @@ class EntityGraphRefinement(keras.layers.Layer):
         """
         batch_size = ops.shape(embeddings)[0]
 
-        logger.debug(f"Processing batch of size {batch_size} through EntityGraphRefinement")
-
         # Keep reference to original embeddings for context computation
         input_embeddings = embeddings
 
@@ -617,7 +607,6 @@ class EntityGraphRefinement(keras.layers.Layer):
 
             # Add positional embeddings to input
             embeddings = embeddings + self.positional_encoder(clipped_positions)
-            logger.debug(f"Applied positional encoding to sequence length {seq_length}")
 
         # Extract entities using attention mechanism
         entities, entity_mask = self._extract_entities(embeddings, training)
@@ -629,13 +618,9 @@ class EntityGraphRefinement(keras.layers.Layer):
         # Simple mean pooling provides effective global representation
         context_vector = ops.mean(input_embeddings, axis=1, keepdims=False)  # [B, D]
 
-        logger.debug(f"Starting {self.num_refinement_steps} graph refinement steps")
-
         # Iteratively refine the relationship graph
         for step in range(self.num_refinement_steps):
             graph = self._refine_graph(graph, entities, context_vector, training)
-            if training and step % 2 == 0:  # Log every other step to avoid spam
-                logger.debug(f"Completed refinement step {step + 1}/{self.num_refinement_steps}")
 
         # Apply learned sparsification to focus on important relationships
         graph = self._apply_sparsification(graph, entities, training)
@@ -656,11 +641,6 @@ class EntityGraphRefinement(keras.layers.Layer):
             )
             self.add_loss(activity_loss)
 
-            # FIX: Removed unsupported formatting for symbolic tensors
-            logger.debug(f"Added regularization losses: sparsity (tensor)={sparsity_loss}, "
-                        f"activity (tensor)={activity_loss}")
-
-        logger.debug("EntityGraphRefinement forward pass completed")
         return entities, final_graph, entity_mask
 
     def compute_output_shape(

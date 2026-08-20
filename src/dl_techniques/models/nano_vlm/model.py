@@ -567,8 +567,12 @@ class NanoVLM(keras.Model):
             token_type_ids = None
 
         # 1. Process images through vision_heads encoder
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-084: no logging on the
+        # forward path (R-033/R-041). The four `logger.debug` shape lines that
+        # stood in this `call` each ran `ops.shape(...)` for the log line only;
+        # under `tf.function` they emit a symbolic tensor once at trace time and
+        # never again. Print shapes from a test or `model.summary()`, not here.
         vision_features = self.vision_encoder(images, training=training)
-        logger.debug(f"Vision features shape: {ops.shape(vision_features)}")
 
         # 2. Process text through text component
         if self.text_component_type == 'decoder':
@@ -581,14 +585,10 @@ class NanoVLM(keras.Model):
                        'token_type_ids': token_type_ids},
                 training=training
             )
-        logger.debug(f"Text features shape: {ops.shape(text_features)}")
-
         # 3. Fuse modalities using MultiModalFusion
         fused_features = self.fusion_layer(
             [vision_features, text_features], training=training
         )
-        logger.debug(f"Fused features shape: {ops.shape(fused_features) if not isinstance(fused_features, tuple) else [ops.shape(f) for f in fused_features]}")
-
         # 4. Handle fusion strategy outputs
         if isinstance(fused_features, tuple):
             # Cross-attention returns separate outputs - concatenate them
@@ -615,8 +615,6 @@ class NanoVLM(keras.Model):
             )
         else:
             logits = self.output_projection(combined_features)
-        logger.debug(f"Output logits shape: {ops.shape(logits)}")
-
         return logits
 
     def generate(
