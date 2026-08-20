@@ -1076,6 +1076,22 @@ def create_hierarchical_reasoning_model(
     else:
         logger.info("Created Hierarchical Reasoning Model (uncompiled)")
 
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-051
+    # The factory BUILDS the model before returning it. `HierarchicalReasoningModel`
+    # has a correct `build()` (it materialises the reasoning core's `h_init`/
+    # `l_init` before any `reset_carry`), but nothing CALLED it, so this factory
+    # handed back `built == False` and every public method that reads a
+    # build-created quantity raised — measured: `src/train/hrm/train_hrm.py:61`
+    # `self.model.count_params()` inside `HRMTrainer.__init__` died with
+    # "count_params ... isn't built", i.e. the trainer module could not start.
+    # `build()` here takes no shape (the model derives everything from
+    # `seq_len` / `vocab_size` in its config), so this is safe for every caller.
+    # Do NOT replace it with a dummy forward pass: a forward pass also advances
+    # the ACT carry and, under a `StatelessScope`, would not persist the
+    # variables it creates. See decisions.md D-051.
+    if not model.built:
+        model.build()
+
     return model
 
 # ---------------------------------------------------------------------

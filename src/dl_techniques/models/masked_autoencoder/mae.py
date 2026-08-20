@@ -267,6 +267,42 @@ class MaskedAutoencoder(keras.Model):
             name="conv_decoder"
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Materialise every sub-layer from the input shape alone.
+
+        Args:
+            input_shape: Shape tuple ``(batch, height, width, channels)``.
+        """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-048
+        # This model had NO `build()` at all, so `.build(shape)` reached only the
+        # encoder that the CONSTRUCTOR happens to build eagerly: 8 of 51 tensors
+        # and 1,976 of 203,643 parameters, with Keras' own
+        # "`build()` was called ... however the layer does not have a `build()`
+        # method implemented" warning as the only symptom. Do NOT rely on the
+        # constructor's `self.encoder.build(...)` as the model's build contract —
+        # it is there to READ the encoder's output shape, it does not run for a
+        # caller-supplied already-built encoder, and it reaches neither
+        # `PatchMasking` nor `ConvDecoder`. See decisions.md D-048.
+        if self.built:
+            return
+
+        resolved = tuple(input_shape)
+        if len(resolved) == 4 and any(d is None for d in resolved[1:]):
+            resolved = (resolved[0],) + self.input_shape_config
+
+        self.masking.build(resolved)
+
+        if not self.encoder.built:
+            self.encoder.build(resolved)
+
+        encoder_output_shape = self.encoder.compute_output_shape(resolved)
+        if isinstance(encoder_output_shape, list):
+            encoder_output_shape = encoder_output_shape[0]
+
+        self.decoder.build(encoder_output_shape)
+
+        super().build(input_shape)
+
     def compute_output_shape(
         self,
         input_shape: Tuple[Optional[int], ...]

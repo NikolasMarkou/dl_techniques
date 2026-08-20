@@ -486,6 +486,76 @@ class BERT(keras.Model):
             )
             self.encoder_layers.append(transformer_layer)
 
+    def build(self, input_shape: Any) -> None:
+        """Materialise the embeddings and every encoder layer.
+
+        :param input_shape: Shape of ``input_ids`` — ``(batch, seq_len)`` — or a
+            mapping/sequence of shapes whose ``input_ids`` entry has that shape.
+        :type input_shape: Any
+        """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-049
+        # `BERT` had NO `build()`. Keras therefore marked it built with ZERO
+        # variables, and every consumer that inspects a backbone's variables
+        # BEFORE calling it saw an empty model. That is not a cosmetic contract
+        # gap: `CausalLanguageModel.build` locates the embedding matrix by shape
+        # over `backbone.variables`, so weight tying — ON BY DEFAULT — silently
+        # fell back to an untied `Dense`, AND the save/load halves took different
+        # branches, which is why the `.keras` round trip raised
+        # "expected 2 variables, but received 0".
+        # Do NOT replace this with a dummy forward pass: a forward pass under a
+        # `StatelessScope` (which is where Keras rebuilds a model on load) does
+        # not persist the variables it creates. See decisions.md D-049.
+        if self.built:
+            return
+
+        ids_shape = input_shape
+        if isinstance(ids_shape, dict):
+            ids_shape = ids_shape.get("input_ids", ids_shape)
+        if (
+            isinstance(ids_shape, (list, tuple))
+            and ids_shape
+            and isinstance(ids_shape[0], (list, tuple))
+        ):
+            ids_shape = ids_shape[0]
+        ids_shape = tuple(ids_shape)
+
+        if len(ids_shape) != 2:
+            raise ValueError(
+                "BERT.build expects the shape of `input_ids`, i.e. "
+                f"(batch_size, seq_length); got {ids_shape}"
+            )
+
+        self.embeddings.build(ids_shape)
+
+        hidden_shape = (ids_shape[0], ids_shape[1], self.hidden_size)
+        for encoder_layer in self.encoder_layers:
+            encoder_layer.build(hidden_shape)
+
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape: Any) -> Dict[str, Any]:
+        """Compute the output shapes of the two returned tensors.
+
+        :param input_shape: Shape of ``input_ids`` — ``(batch, seq_len)``.
+        :type input_shape: Any
+        :return: Mapping with ``last_hidden_state`` and ``attention_mask``.
+        :rtype: Dict[str, Any]
+        """
+        ids_shape = input_shape
+        if isinstance(ids_shape, dict):
+            ids_shape = ids_shape.get("input_ids", ids_shape)
+        if (
+            isinstance(ids_shape, (list, tuple))
+            and ids_shape
+            and isinstance(ids_shape[0], (list, tuple))
+        ):
+            ids_shape = ids_shape[0]
+        ids_shape = tuple(ids_shape)
+        return {
+            "last_hidden_state": (ids_shape[0], ids_shape[1], self.hidden_size),
+            "attention_mask": (ids_shape[0], ids_shape[1]),
+        }
+
     def call(
         self,
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],

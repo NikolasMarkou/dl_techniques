@@ -74,18 +74,29 @@ def test_the_embedding_matrix_is_located_with_the_right_shape(model):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="`BERT` implements no `build()`, so it is marked built with ZERO "
-           "variables and the locator runs before anything exists to find. "
-           "Weight tying is ON BY DEFAULT and silently falls back to an untied "
-           "Dense. MEASURED: embedding_weights None / use_weight_tying False "
-           "after a full forward pass, while `_locate_embedding_weights()` at "
-           "that same moment RETURNS the matrix. Closing this needs "
-           "`BERT.build` -- the R-002 family routed to step 18 of "
-           "plan-2026-08-19T163559-499b6f0e. See decisions.md D-035.",
-)
 def test_weight_tying_is_actually_active(model):
+    """UN-PINNED at step 17.1 of plan-2026-08-19T163559-499b6f0e.
+
+    This carried `xfail(strict=True)` with the reason "`BERT` implements no
+    `build()`, so it is marked built with ZERO variables and the locator runs
+    before anything exists to find". `BERT.build` now exists (decisions.md
+    D-049) and the pin's own stated closing condition is met.
+
+    MEASURED across the change, on the module fixture above:
+
+    ==================================== ========== =========
+    quantity                             BEFORE     AFTER
+    ==================================== ========== =========
+    `BERT.build((None, 12))` tensors      0          17
+    `BERT.build((None, 12))` params       0          12,768
+    `embedding_weights`                   None       FOUND
+    `use_weight_tying`                    False      True
+    `CausalLanguageModel` variable count  19         18
+    ==================================== ========== =========
+
+    The variable count DROPS by one because the untied fallback was creating a
+    whole `Dense(vocab_size)`; tying replaces it with a single `output_bias`.
+    """
     assert model.embedding_weights is not None
     assert model.use_weight_tying is True
 

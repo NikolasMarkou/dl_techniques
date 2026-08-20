@@ -257,13 +257,30 @@ class CausalLanguageModel(keras.Model):
 
     def build(self, input_shape):
         """Builds the model and initializes the output head/weight tying."""
-        # 1. Ensure backbone is built to access its variables
+        # 1. Ensure backbone is built to access its variables.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-049
+        # This step is LOAD-BEARING for determinism, not a convenience. The
+        # weight-tying branch below is chosen by whether
+        # `_locate_embedding_weights` finds anything, and that answer must be the
+        # SAME when the model is saved and when it is rebuilt on load. At HEAD a
+        # save happened after a `__call__` (backbone built, matrix found, one
+        # `output_bias` created) while the load called `build()` on an unbuilt
+        # backbone (nothing found, an untied `Dense` created instead) — hence
+        # `expected 2 variables, but received 0`. Do NOT restore the bare
+        # `except Exception: pass`: it made the branch depend on an unreported
+        # failure. See decisions.md D-049.
         if not self.backbone.built:
             try:
                 self.backbone.build(input_shape)
-            except Exception:
-                # Proceed even if strict build fails (common with complex inputs)
-                pass
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                logger.warning(
+                    "Could not build the backbone from input_shape "
+                    f"{input_shape} ({type(exc).__name__}: {exc}). Weight "
+                    "tying will be resolved against whatever variables the "
+                    "backbone already has, which may differ between save and "
+                    "load."
+                )
 
         # 2. Attempt Weight Tying logic if requested
         if self.tie_weights:
@@ -300,7 +317,6 @@ class CausalLanguageModel(keras.Model):
         if self.output_layer is not None and not self.output_layer.built:
              self.output_layer.build((None, self.hidden_size))
 
-        self.built = True
         super().build(input_shape)
 
         # 4. Refuse a backbone that leaks the future (see module docstring).
