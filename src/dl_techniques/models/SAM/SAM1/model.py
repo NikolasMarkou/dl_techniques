@@ -567,9 +567,22 @@ class SAM(keras.Model):
                         f"prompt coordinates by the same factor."
                     )
 
-        # Normalize using ImageNet statistics
+        # Normalize using ImageNet statistics.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-063
+        # `pixel_mean` / `pixel_std` are built once in `__init__` as HARD
+        # float32 constants (`ops.array(..., dtype="float32")`), so they must
+        # be cast to the tensor's dtype at every use. Without the cast, the
+        # line immediately below raised `InvalidArgumentError: cannot compute
+        # Sub as input #1 was expected to be a half tensor but is a float
+        # tensor` on ANY `mixed_float16` forward -- MEASURED at HEAD on the
+        # reduced fixture, with the float32 control green. Do NOT fix this by
+        # making `__init__` build the constants in the compute dtype: the
+        # policy can change after construction, and a float16 `123.675` is not
+        # exactly `123.675`. See decisions.md D-063.
         x = ops.cast(x, self.compute_dtype)
-        x = (x - self.pixel_mean) / self.pixel_std
+        x = (x - ops.cast(self.pixel_mean, x.dtype)) / ops.cast(
+            self.pixel_std, x.dtype)
 
         # Pad to encoder size
         h, w = ops.shape(x)[1], ops.shape(x)[2]

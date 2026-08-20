@@ -314,11 +314,25 @@ class SuperPoint(keras.Model):
         desc_coarse = self.descriptor_head(neck, training=training)  # (B, H/8, W/8, descriptor_dim)
 
         # Upsample to full (static) resolution; static target keeps this graph-safe.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-060
+        # The resize runs in float32 and is cast back, even under
+        # `mixed_float16`. TensorFlow registers NO gradient for `ResizeBicubic`
+        # at float16: it returns `None` SILENTLY rather than raising, so the
+        # whole descriptor head received no update under mixed precision while
+        # every forward assertion stayed green. MEASURED on GPU 1: gradients
+        # `None` for `descriptor_head/kernel` and `.../bias` under
+        # `mixed_float16` and present under `float32`; probing `ops.image.resize`
+        # alone gives grad=None for `bicubic`+float16 and grad=OK for
+        # `bilinear`/`nearest`+float16 and for every interpolation at float32.
+        # Do NOT "fix" this by switching to bilinear -- the 8x8-cell descriptor
+        # field is bicubic by SuperPoint's definition. See decisions.md D-060.
         desc = keras.ops.image.resize(
-            desc_coarse,
+            keras.ops.cast(desc_coarse, "float32"),
             size=(self.input_height, self.input_width),
             interpolation="bicubic",
         )
+        desc = keras.ops.cast(desc, self.compute_dtype)
 
         # L2-normalize along the channel axis at every spatial location.
         # DECISION plan-2026-08-19T163559-499b6f0e/D-050

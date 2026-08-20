@@ -295,7 +295,25 @@ class PoincareMath:
         # See the D-056 anchor on `norm_and_floored_norm`.
         raw_norm_v, norm_v = self.norm_and_floored_norm(v, axis=-1, keepdims=True)
 
-        scale = ops.tanh(sqrt_c * norm_v) / (sqrt_c * norm_v)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-061
+        # The DOUBLE `where`. `ops.where` evaluates BOTH branches in the
+        # backward pass, so a non-finite gradient in the branch that is NOT
+        # selected still poisons the result via `0 * nan = nan`. At the origin
+        # the floored norm is `eps = 1e-5`, which is SUBNORMAL in float16 (min
+        # normal 6.10e-5); the derivative of `tanh(u)/u` carries a `1/u**2`
+        # whose `u**2 ~ 1e-10` underflows to EXACTLY zero in half precision.
+        # MEASURED on a zero bias vector: `d/d_theta` is `nan` under float16
+        # and exactly `0.0` under float32, with the FORWARD finite in both --
+        # `SHGCNNodeClassifier` produced 2 non-finite gradient norms of 8 under
+        # `mixed_float16` (`curvature_theta` in both layers) while its float32
+        # control was clean. Feeding a SAFE `1.0` into the discarded branch
+        # makes the unselected gradient finite. The forward is unchanged
+        # bit-for-bit: when `raw >= eps` this selects `norm_v` itself.
+        # Do NOT collapse this back to a single `where`. See decisions.md D-061.
+        safe_norm_v = ops.where(
+            raw_norm_v < self.eps, ops.ones_like(norm_v), norm_v
+        )
+        scale = ops.tanh(sqrt_c * safe_norm_v) / (sqrt_c * safe_norm_v)
 
         return ops.where(raw_norm_v < self.eps, v, v * scale)
 
@@ -341,7 +359,13 @@ class PoincareMath:
         max_r = radius - self.boundary_margin(y.dtype, radius)
         norm_y = ops.minimum(norm_y, max_r)
 
-        scale = ops.arctanh(sqrt_c * norm_y) / (sqrt_c * norm_y)
+        # The same double-`where` as `exp_map_0`; the argument is identical and
+        # `arctanh(u)/u` carries the same `1/u**2` in its derivative. See the
+        # D-061 anchor above and decisions.md D-061.
+        safe_norm_y = ops.where(
+            raw_norm_y < self.eps, ops.ones_like(norm_y), norm_y
+        )
+        scale = ops.arctanh(sqrt_c * safe_norm_y) / (sqrt_c * safe_norm_y)
         return ops.where(raw_norm_y < self.eps, y, y * scale)
 
     def mobius_add(

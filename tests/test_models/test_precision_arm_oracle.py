@@ -267,3 +267,192 @@ def test_flatten_tensors_handles_dicts_lists_and_none_values():
     assert len(flatten_tensors(x)) == 1
     assert len(flatten_tensors([x, x])) == 2
     assert len(flatten_tensors({"a": x, "b": None, "c": x})) == 2
+
+
+# ---------------------------------------------------------------------------
+# RED proofs for the step-18.1 additions (D-058, D-059, D-065 and `call_fn`).
+#
+# Each addition RELAXED or REDIRECTED an assertion, which is exactly the kind
+# of change that quietly turns an instrument into a rubber stamp. Every one of
+# them is therefore proved to still reject the defect it was carved around.
+# ---------------------------------------------------------------------------
+class _IntAndFloatModel(keras.Model):
+    """Returns a float activation AND an integer mask -- the ``BERT`` shape."""
+
+    def __init__(self):
+        super().__init__()
+        self.dense = keras.layers.Dense(3)
+
+    def call(self, x, training=None):
+        return {"logits": self.dense(x), "mask": ops.cast(x[:, :1] > 0, "int32")}
+
+
+class _IntOnlyModel(keras.Model):
+    """Returns ONLY integers -- part 2 must call itself vacuous, not pass."""
+
+    def __init__(self):
+        super().__init__()
+        self.dense = keras.layers.Dense(3)
+
+    def call(self, x, training=None):
+        return ops.cast(self.dense(x) > 0, "int32")
+
+
+class _IntAndLeakingFloatModel(keras.Model):
+    """An integer mask beside a float32 LEAK -- the exemption must not hide it."""
+
+    def __init__(self):
+        super().__init__()
+        self.dense = keras.layers.Dense(3)
+
+    def call(self, x, training=None):
+        return {
+            "leak": ops.cast(self.dense(x), "float32"),
+            "mask": ops.cast(x[:, :1] > 0, "int32"),
+        }
+
+
+class _UniformSoftmaxModel(keras.Model):
+    """A zero-initialised softmax head: uniform output, the D-059 saddle."""
+
+    def __init__(self):
+        super().__init__()
+        self.dense = keras.layers.Dense(
+            4, kernel_initializer="zeros", bias_initializer="zeros",
+            activation="softmax",
+        )
+
+    def call(self, x, training=None):
+        return self.dense(x)
+
+
+class _TwoArgumentModel(keras.Model):
+    """``call(a, b, training)`` -- the ``TRM`` shape ``default_call`` cannot invoke."""
+
+    def __init__(self):
+        super().__init__()
+        self.dense = keras.layers.Dense(3)
+
+    def call(self, a, b, training=None):
+        return self.dense(a) + self.dense(b)
+
+
+class _TrainingModeOnlyFiniteModel(keras.Model):
+    """Finite in training mode, overflowing at inference -- the ``yolo12`` shape."""
+
+    def __init__(self):
+        super().__init__()
+        self.bn1 = keras.layers.BatchNormalization()
+        self.bn2 = keras.layers.BatchNormalization()
+
+    def call(self, x, training=None):
+        # Two x300 amplifications with a BatchNorm after each -- the yolo12
+        # shape in miniature. At INFERENCE an untrained BN is a near-identity,
+        # so the product reaches 300 * 300 = 9e4 and overflows float16 (max
+        # 65504) while float32 stays finite. In TRAINING mode each BN divides
+        # by the BATCH statistics, so nothing ever exceeds O(1) in either
+        # dtype. No single step overflows on its own; the compounding does.
+        h = self.bn1(x * 300.0, training=training)
+        return self.bn2(h * 300.0, training=training)
+
+
+def test_part2_accepts_an_integer_output_beside_a_float16_one():
+    """D-058: an int32 mask is not a failed compute dtype."""
+    reports = assert_precision_arm(
+        build=_IntAndFloatModel, make_inputs=_inputs, check_backward=True)
+    assert reports["mixed_float16"]["dtypes"] == ["float16", "int32"]
+
+
+def test_part2_still_rejects_a_float32_leak_beside_an_integer_output():
+    """D-058 must not become "skip part 2 whenever an int is present"."""
+    with pytest.raises(AssertionError, match="opted its consumer out"):
+        assert_precision_arm(build=_IntAndLeakingFloatModel,
+                             make_inputs=_inputs)
+
+
+def test_part2_calls_itself_vacuous_on_an_all_integer_output():
+    """The float-only rule must not degenerate into ``all([]) is True``."""
+    with pytest.raises(AssertionError, match="no floating-point tensor"):
+        assert_precision_arm(build=_IntOnlyModel, make_inputs=_inputs,
+                             check_backward=False)
+
+
+def test_the_dtype_exemption_is_scoped_to_the_named_index():
+    """``dtype_exempt_outputs`` must exempt output 0 only when asked for 0."""
+    # Index 0 is the leak; exempting it leaves nothing to judge -> vacuous.
+    with pytest.raises(AssertionError, match="no floating-point tensor"):
+        assert_precision_arm(build=_IntAndLeakingFloatModel,
+                             make_inputs=_inputs, dtype_exempt_outputs=[0])
+    # Exempting the WRONG index (the int mask) leaves the leak convicted.
+    with pytest.raises(AssertionError, match="opted its consumer out"):
+        assert_precision_arm(build=_IntAndLeakingFloatModel,
+                             make_inputs=_inputs, dtype_exempt_outputs=[1])
+
+
+def test_the_ramp_loss_is_what_makes_the_uniform_softmax_arm_non_vacuous():
+    """D-059: the RED proof for the loss, not for a model.
+
+    With a plain ``mean(square(.))`` the gradient of this model is EXACTLY
+    zero by symmetry -- which is what made ``mobilenet`` and ``squeezenet``
+    look dead. With the ramp it is not. Both halves are asserted so a revert
+    to the symmetric loss fails here rather than silently returning the plan
+    to a false finding.
+    """
+    import tensorflow as tf
+    from .precision_arm_oracle import _asymmetric_loss
+
+    with precision_policy("mixed_float16"):
+        keras.utils.set_random_seed(0)
+        model = _UniformSoftmaxModel()
+        x = _inputs()
+        norms = {}
+        for label, lossfn in (
+            ("symmetric", lambda t: ops.mean(ops.square(ops.cast(t, "float32")))),
+            ("ramp", _asymmetric_loss),
+        ):
+            with tf.GradientTape() as tape:
+                out = model(x, training=True)
+                loss = lossfn(out)
+            grads = tape.gradient(loss, model.trainable_variables)
+            norms[label] = sum(
+                float(ops.convert_to_numpy(
+                    ops.sqrt(ops.sum(ops.square(ops.cast(g, "float32"))))))
+                for g in grads if g is not None
+            )
+    assert norms["symmetric"] == 0.0, (
+        "the symmetric loss no longer sits on the saddle this control pins; "
+        f"measured {norms['symmetric']!r}"
+    )
+    assert norms["ramp"] > 0.0, (
+        "the ramp loss reaches no variable -- D-059's fix is dead")
+
+    # And the full arm passes on this model only because of the ramp.
+    assert_precision_arm(build=_UniformSoftmaxModel, make_inputs=_inputs)
+
+
+def test_call_fn_invokes_a_model_that_default_call_cannot():
+    """The ``TRM`` shape: two positional arguments."""
+    with pytest.raises(TypeError):
+        assert_precision_arm(build=_TwoArgumentModel, make_inputs=_inputs)
+
+    def two_arg_call(model, inputs, training):
+        return model(inputs, inputs, training=training)
+
+    reports = assert_precision_arm(build=_TwoArgumentModel,
+                                   make_inputs=_inputs, call_fn=two_arg_call)
+    assert reports["mixed_float16"]["dtypes"] == ["float16"]
+
+
+def test_forward_training_moves_the_arm_off_the_untrained_inference_path():
+    """D-065: ``forward_training`` must fix the yolo12 shape and nothing else."""
+    with pytest.raises(AssertionError, match="forward produced (NaN|Inf)"):
+        assert_precision_arm(build=_TrainingModeOnlyFiniteModel,
+                             make_inputs=_inputs, check_backward=False)
+    assert_precision_arm(build=_TrainingModeOnlyFiniteModel,
+                         make_inputs=_inputs, check_backward=False,
+                         forward_training=True)
+    # It must NOT rescue a real dtype defect: the float32 control runs in the
+    # same mode, so `_Float32LeakModel` is still convicted at `True`.
+    with pytest.raises(AssertionError, match="opted its consumer out"):
+        assert_precision_arm(build=_Float32LeakModel, make_inputs=_inputs,
+                             forward_training=True)

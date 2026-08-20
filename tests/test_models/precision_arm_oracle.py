@@ -81,6 +81,7 @@ from keras import ops
 
 __all__ = [
     "precision_policy",
+    "default_call",
     "flatten_tensors",
     "PrecisionArmReport",
     "run_forward",
@@ -140,12 +141,69 @@ class PrecisionArmReport(dict):
             raise AttributeError(item) from exc
 
 
+def default_call(model: Any, inputs: Any, training: bool) -> Any:
+    """Invoke ``model(inputs, training=training)`` -- the Keras convention.
+
+    Contract for a replacement passed as ``call_fn``: same three positional
+    parameters, returns whatever the model returns. It exists because a few
+    models in this tree do NOT take a single ``inputs`` argument -- ``TRM.call``
+    is ``call(carry, batch, training)`` -- and wrapping such a model in a
+    functional adapter would measure the ADAPTER's dtype behaviour, not the
+    model's. The replacement must call the real model exactly once.
+
+    :param model: The model under test.
+    :param inputs: Whatever ``make_inputs`` returned.
+    :param training: Forwarded verbatim.
+    :return: The model output.
+    """
+    return model(inputs, training=training)
+
+
+def _asymmetric_loss(tensor: Any) -> Any:
+    """
+    A scalar loss whose gradient is not annihilated by output symmetry.
+
+    DECISION plan-2026-08-19T163559-499b6f0e/D-059
+    The obvious ``mean(square(t))`` is WRONG here and was measured wrong: an
+    untrained classifier's softmax head emits a uniform distribution, and the
+    gradient of a symmetric function of a uniform softmax is EXACTLY zero by
+    that symmetry. ``mobilenet`` measured ``grad_norm_sum`` of exactly
+    ``0.000000e+00`` under BOTH ``mixed_float16`` AND ``float32`` (loss
+    ``0.0625 == 1/16``, i.e. four classes each at ``0.25``), and ``squeezenet``
+    measured ``0.000000e+00`` fp16 against ``1.165148e-05`` float32. Neither is
+    a model defect; both are this loss meeting a saddle point. A "the backward
+    pass reached no variable" assertion that fires on healthy models is an
+    instrument that cannot be trusted when it fires on a sick one.
+
+    The fix is to break the symmetry with a FIXED, deterministic ramp over the
+    flattened tensor, so no permutation of the outputs leaves the loss
+    invariant. Do NOT replace this with ``mean(square(t))``; do NOT make the
+    ramp random -- the fp16 and float32 arms must see the same loss surface.
+    See decisions.md D-059.
+
+    The reduction is accumulated in float32 on purpose: a float16 reduction
+    over a large tensor is itself an overflow hazard, and this oracle exists to
+    judge the MODEL, not the loss it was handed.
+
+    :param tensor: One model output tensor.
+    :return: A float32 scalar.
+    """
+    x = ops.cast(tensor, "float32")
+    tail = tuple(int(d) for d in x.shape[1:])
+    n = int(np.prod(tail)) if tail else 1
+    ramp = ops.reshape(
+        ops.cast(ops.arange(n), "float32") / float(n) + 0.5, (1,) + tail
+    )
+    return ops.mean(ops.square(x) * ramp)
+
+
 def run_forward(
         build: Callable[[], Any],
         make_inputs: Callable[[], Any],
         policy: str,
         training: bool = False,
         seed: Optional[int] = 0,
+        call_fn: Optional[Callable[[Any, Any, bool], Any]] = None,
 ) -> PrecisionArmReport:
     """
     Build a model and run one forward pass, entirely inside ``policy``.
@@ -170,7 +228,8 @@ def run_forward(
         if seed is not None:
             keras.utils.set_random_seed(seed)
         model = build()
-        tensors = flatten_tensors(model(make_inputs(), training=training))
+        call = call_fn or default_call
+        tensors = flatten_tensors(call(model, make_inputs(), training))
         arrays = [np.asarray(ops.convert_to_numpy(t)) for t in tensors]
         finite = [a[np.isfinite(a)] for a in arrays]
         return PrecisionArmReport(
@@ -191,13 +250,14 @@ def run_backward(
         make_inputs: Callable[[], Any],
         policy: str,
         seed: Optional[int] = 0,
+        call_fn: Optional[Callable[[Any, Any, bool], Any]] = None,
 ) -> PrecisionArmReport:
     """
-    Build a model and take one gradient of a sum-of-squares loss, under ``policy``.
+    Build a model and take one gradient of :func:`_asymmetric_loss`, under ``policy``.
 
-    The loss is accumulated in float32 on purpose: a float16 reduction over a
-    large tensor is itself an overflow hazard, and this oracle exists to judge
-    the MODEL, not the loss it was handed.
+    The loss is a RAMP-WEIGHTED sum of squares, not a plain one, and float32
+    throughout; both properties are load-bearing and are argued at
+    :func:`_asymmetric_loss`.
 
     :return: A report with ``loss``, ``n_vars``, ``n_none``, ``n_nonfinite``
         and ``grad_norm_sum``.
@@ -210,11 +270,10 @@ def run_backward(
             keras.utils.set_random_seed(seed)
         model = build()
         inputs = make_inputs()
+        call = call_fn or default_call
         with tf.GradientTape() as tape:
-            tensors = flatten_tensors(model(inputs, training=True))
-            loss = sum(
-                ops.mean(ops.square(ops.cast(t, "float32"))) for t in tensors
-            )
+            tensors = flatten_tensors(call(model, inputs, True))
+            loss = sum(_asymmetric_loss(t) for t in tensors)
         grads = tape.gradient(loss, model.trainable_variables)
         norms = [
             float(ops.convert_to_numpy(
@@ -238,7 +297,10 @@ def assert_precision_arm(
         expected_compute_dtype: str = "float16",
         check_backward: bool = True,
         allowed_none_grads: int = 0,
+        dtype_exempt_outputs: Sequence[int] = (),
         rtol_against_float32: Optional[float] = None,
+        call_fn: Optional[Callable[[Any, Any, bool], Any]] = None,
+        forward_training: bool = False,
 ) -> Dict[str, PrecisionArmReport]:
     """
     Assert all four parts of a ``mixed_float16`` arm, with a float32 control.
@@ -246,24 +308,57 @@ def assert_precision_arm(
     :param build: Zero-argument model factory, invoked inside each policy.
     :param make_inputs: Zero-argument input factory. Must be deterministic if
         ``rtol_against_float32`` is used.
-    :param expected_compute_dtype: The dtype every returned tensor must carry
-        under ``mixed_float16``. Pass ``None`` to skip that part, but only with
-        a recorded reason -- part 2 of the arm is the one most often dropped.
+    :param expected_compute_dtype: The dtype every returned FLOATING-POINT
+        tensor must carry under ``mixed_float16``. Integer outputs (masks,
+        BMU indices, token ids) are exempt -- see D-058 -- but at least one
+        float output must exist or the check is vacuous. Pass ``None`` to skip
+        that part, but only with a recorded reason: part 2 of the arm is the
+        one most often dropped.
     :param check_backward: Run part 4. Only turn this off for a model with no
         trainable variables.
     :param allowed_none_grads: Number of ``None`` gradients that are expected
         AND are equally ``None`` under float32. Must be justified at the call
         site; the default of 0 is the correct value for a healthy model.
+    :param dtype_exempt_outputs: Indices into the flattened output that part 2
+        skips. Reserved for a tensor that is NOT an activation -- a binary
+        patch mask, an index map. Every entry must carry a stated reason at
+        the call site, because this is the escape hatch that turns part 2 off.
     :param rtol_against_float32: If given, the fp16 and float32 arms' ``absmax``
         per tensor must agree to this relative tolerance. ``1e-2`` is a
         realistic value for half precision.
+    :param forward_training: ``training`` for parts 1-3. The default ``False``
+        judges the inference path, which is right for almost every model.
+
+        DECISION plan-2026-08-19T163559-499b6f0e/D-065
+        Pass ``True`` for a model whose UNTRAINED BatchNorms make the inference
+        path meaningless. At initialization ``moving_mean = 0`` and
+        ``moving_variance = 1``, so at inference every BN is a near-identity
+        and nothing bounds the activation scale; in TRAINING mode BN divides by
+        the BATCH statistics and the same graph stays O(1). MEASURED on
+        ``yolo12`` scale ``n`` at 64x64: float32 inference ``absmax``
+        2.997772e+08 at init (falling to 3.332934e+02 only after 200
+        ``training=True`` passes), and the fp16 arm reported NaN in 5712 of
+        5712 outputs purely because 1e8 exceeds float16's 65504 ceiling. At
+        ``forward_training=True`` the SAME model measures ``absmax`` 4.703125
+        fp16 against 4.644949 float32, both NaN-free. This is a statement
+        about an untrained model, not about float16 -- the same false reading
+        step 16 and step 17 hit. A 200-step warm-up was implemented, measured
+        at 106.8s per arm against 7.3s for this, and REJECTED. Do NOT set this
+        ``True`` to silence an fp16 finding: the float32 control runs in the
+        same mode, so a real dtype defect still fails. See decisions.md D-065.
+    :param call_fn: Replacement for :func:`default_call`, for a model whose
+        ``call`` does not take a single ``inputs`` argument. Must invoke the
+        REAL model -- never a functional adapter, which would measure the
+        adapter's dtypes instead.
     :return: ``{"mixed_float16": ..., "float32": ..., "backward_mixed_float16":
         ...}``, plus ``"float32_control"`` and ``"float32_build_spread"`` when
         ``rtol_against_float32`` was requested.
     :raises AssertionError: on any failed part.
     """
-    fp16 = run_forward(build, make_inputs, "mixed_float16")
-    f32 = run_forward(build, make_inputs, "float32")
+    fp16 = run_forward(build, make_inputs, "mixed_float16", call_fn=call_fn,
+                       training=forward_training)
+    f32 = run_forward(build, make_inputs, "float32", call_fn=call_fn,
+                      training=forward_training)
 
     # Vacuity control: the arm must actually have run under the policy it names.
     assert fp16["policy_seen"] == "mixed_float16", (
@@ -285,11 +380,31 @@ def assert_precision_arm(
     )
 
     # Part 2 -- the compute dtype really reached the output.
+    #
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-058
+    # The rule is applied to the FLOATING-POINT outputs only. Several models
+    # here legitimately return an integer tensor beside their float one --
+    # ``BERT`` returns an int32 ``attention_mask``, ``SOMModel`` returns int32
+    # BMU indices -- and there is no such thing as a float16 index. Do NOT
+    # "fix" this by passing ``expected_compute_dtype=None`` at those call
+    # sites: that deletes part 2 of the arm entirely, which is the part most
+    # often dropped. The float-only rule keeps it live AND is guarded from
+    # becoming vacuous by the assertion below that at least one float output
+    # exists -- without that, a model returning nothing but integers would
+    # satisfy an ``all()`` over an empty list. See decisions.md D-058.
     if expected_compute_dtype is not None:
-        assert all(d == expected_compute_dtype for d in fp16["dtypes"]), (
-            f"under mixed_float16 the outputs are {fp16['dtypes']}, expected "
-            f"every one to be {expected_compute_dtype!r}; a float32 output means "
-            "the model silently opted its consumer out of mixed precision"
+        float_dtypes = [d for i, d in enumerate(fp16["dtypes"])
+                        if i not in set(dtype_exempt_outputs)
+                        and (d.startswith("float") or d.startswith("bfloat"))]
+        assert float_dtypes, (
+            f"the model returned no floating-point tensor ({fp16['dtypes']}), "
+            "so the compute-dtype arm would be vacuous"
+        )
+        assert all(d == expected_compute_dtype for d in float_dtypes), (
+            f"under mixed_float16 the float outputs are {float_dtypes} (all "
+            f"outputs {fp16['dtypes']}), expected every float one to be "
+            f"{expected_compute_dtype!r}; a float32 output means the model "
+            "silently opted its consumer out of mixed precision"
         )
 
     # Part 3 -- finiteness, in BOTH arms (an fp16 NaN is only a finding if the
@@ -327,7 +442,8 @@ def assert_precision_arm(
         # spread is 0.0 and the check is the flat ``rtol`` it looks like; for a
         # non-reproducible one it degrades honestly instead of lying.
         # Do NOT replace this with a fixed larger rtol. See decisions.md D-055.
-        f32_again = run_forward(build, make_inputs, "float32")
+        f32_again = run_forward(build, make_inputs, "float32",
+                                call_fn=call_fn, training=forward_training)
         reports["float32_control"] = f32_again
         spread = [
             abs(a - b) for a, b in zip(f32["absmax"], f32_again["absmax"])
@@ -344,7 +460,7 @@ def assert_precision_arm(
 
     # Part 4 -- the backward pass.
     if check_backward:
-        bwd = run_backward(build, make_inputs, "mixed_float16")
+        bwd = run_backward(build, make_inputs, "mixed_float16", call_fn=call_fn)
         reports["backward_mixed_float16"] = bwd
         assert bwd["n_vars"] > 0, "the model has no trainable variables"
         assert bwd["n_none"] <= allowed_none_grads, (

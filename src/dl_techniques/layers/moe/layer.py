@@ -317,9 +317,25 @@ class MixtureOfExperts(keras.layers.Layer):
         for expert_id in range(self.num_experts):
             expert_output = self.experts[expert_id](inputs_flat, training=training)
 
-            # Weight and mask this expert's output
-            expert_weight = weights_flat[:, expert_id:expert_id + 1]
-            expert_mask = expert_assignment[:, expert_id:expert_id + 1]
+            # Weight and mask this expert's output.
+            #
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-064
+            # Both factors are cast to the EXPERT OUTPUT's dtype. `ops.one_hot`
+            # returns float32 regardless of the active policy, so
+            # `expert_assignment` is float32 while the expert output under
+            # `mixed_float16` is float16, and the product raised
+            # `InvalidArgumentError: cannot compute Mul as input #1 was
+            # expected to be a half tensor but is a float tensor` on ANY
+            # mixed-precision forward through a hard-routed MoE -- MEASURED at
+            # HEAD via `Qwen3Next`, whose float32 control was green. Casting
+            # the gate rather than the expert output is deliberate: the routing
+            # weights are a convex combination in [0, 1], so half precision
+            # costs nothing there. See decisions.md D-064.
+            expert_weight = ops.cast(
+                weights_flat[:, expert_id:expert_id + 1], expert_output.dtype)
+            expert_mask = ops.cast(
+                expert_assignment[:, expert_id:expert_id + 1],
+                expert_output.dtype)
             weighted_output = expert_output * expert_weight * expert_mask
             expert_outputs.append(weighted_output)
 

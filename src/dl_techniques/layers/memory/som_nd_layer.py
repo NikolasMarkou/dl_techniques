@@ -423,12 +423,33 @@ class SOMLayer(keras.layers.Layer):
         # was already clamped here and the learning rate was not; that asymmetry
         # is what let a unit mismatch between the layer and SOMModel.train turn
         # into silent divergence rather than a visible error.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-062
+        # Every quantity in this competitive update is forced to float32,
+        # including `inputs` and the weight map read below. Kohonen's rule is
+        # NOT a gradient step -- it is a statistical update applied by
+        # `assign_add` to a float32 variable -- and the grid geometry beside it
+        # is ALREADY hard float32 (`bmu_coords`, and the `bubble` cast). Under
+        # `mixed_float16` Keras AUTOCASTS a float32 variable to the compute
+        # dtype when it is read inside `call`, so `self.iterations` and
+        # `self.max_iterations` came back float16 while `self.grid_positions`
+        # -- a plain tensor, not a variable, and therefore not autocast --
+        # stayed float32. MEASURED at HEAD: `SOM2dLayer.call(training=True)`
+        # raised `TypeError: x and y must have the same dtype, got tf.float32
+        # != tf.float16` at the gaussian neighbourhood, on any mixed-precision
+        # training step; the inference path was green, which is why no test saw
+        # it. Do NOT "fix" this by casting the grid to float16 instead: a
+        # float16 neighbourhood underflows to zero for distant neurons.
+        # See decisions.md D-062.
+        geom_dtype = "float32"
+        inputs = ops.cast(inputs, geom_dtype)
         current_learning_rate = self.decay_function(self.iterations, self.max_iterations)
-        current_learning_rate = ops.maximum(current_learning_rate, 0.0)
+        current_learning_rate = ops.cast(
+            ops.maximum(current_learning_rate, 0.0), geom_dtype)
         current_sigma = self.sigma * (1.0 - self.iterations / self.max_iterations)
-        current_sigma = ops.maximum(current_sigma, 1e-4)  # Prevent division by zero
+        # Prevent division by zero.
+        current_sigma = ops.cast(ops.maximum(current_sigma, 1e-4), geom_dtype)
 
-        bmu_coords = ops.cast(bmu_indices, dtype="float32")
+        bmu_coords = ops.cast(bmu_indices, dtype=geom_dtype)
 
         # Expand dimensions for broadcasting
         bmu_coords_expanded = ops.reshape(
@@ -445,14 +466,16 @@ class SOMLayer(keras.layers.Layer):
             neighborhood = ops.exp(-squared_dist_to_bmus / (2 * ops.square(current_sigma)))
         else:  # 'bubble'
             dist_to_bmus = ops.sqrt(squared_dist_to_bmus)
-            neighborhood = ops.cast(dist_to_bmus <= current_sigma, "float32")
+            neighborhood = ops.cast(dist_to_bmus <= current_sigma, geom_dtype)
 
         # Compute the weight update delta for each input
         neighborhood_expanded = ops.expand_dims(neighborhood, axis=-1)
         inputs_expanded = ops.reshape(
             inputs, [ops.shape(inputs)[0]] + [1] * self.grid_dim + [self.input_dim]
         )
-        delta_per_input = neighborhood_expanded * (inputs_expanded - ops.expand_dims(self.weights_map, 0))
+        weights_map = ops.cast(self.weights_map, geom_dtype)
+        delta_per_input = neighborhood_expanded * (
+            inputs_expanded - ops.expand_dims(weights_map, 0))
 
         # AVERAGE the deltas over the batch, then apply the learning rate.
         #
