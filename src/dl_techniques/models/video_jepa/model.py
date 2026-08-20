@@ -652,9 +652,24 @@ class VideoJEPA(keras.Model):
                     loss = loss + ops.cast(extra, "float32")
             else:
                 loss = ops.convert_to_tensor(0.0, dtype="float32")
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 1.433110e+04 vs fp16 1.204127e-02, ratio 1.190e+06.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_loss = self.optimizer.scale_loss(loss)
         # trainable_variables excludes target_encoder weights because
         # ``target_encoder.trainable = False`` in __init__.
-        grads = tape.gradient(loss, self.trainable_variables)
+        grads = tape.gradient(scaled_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         # EMA update AFTER optimizer step — target now tracks the
         # **post-update** encoder weights (V-JEPA / BYOL convention).

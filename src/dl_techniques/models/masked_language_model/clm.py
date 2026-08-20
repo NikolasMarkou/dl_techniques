@@ -194,20 +194,21 @@ class CausalLanguageModel(keras.Model):
         layer of any provenance and degrades to `None` (weight tying disabled)
         instead of crashing.
 
-        WHAT THIS DOES NOT FIX, stated so nobody reads the row as closed: with a
-        `BERT` backbone the locator still finds nothing when `build()` calls it,
-        because `BERT` implements no ``build()`` at all and is therefore marked
-        built while creating ZERO variables (Keras says so in a
-        ``UserWarning``). Weight tying -- which is ON BY DEFAULT -- still falls
-        back to an untied ``Dense``. MEASURED: after a full forward pass
-        ``embedding_weights`` is None and ``use_weight_tying`` is False, while
-        calling ``_locate_embedding_weights()`` at that same moment RETURNS the
-        matrix. The locator was never wrong; it is called before anything exists
-        to find. Closing that needs ``BERT.build``, which is the R-002 family
-        routed to step 18, not a change here. It is pinned by an
+        HISTORICAL, and CLOSED -- kept because the closing condition is the
+        interesting part. This locator was once blind on a ``BERT`` backbone:
+        ``BERT`` implemented no ``build()``, so Keras marked it built while it
+        held ZERO variables, and the locator ran before anything existed to
+        find. ``embedding_weights`` was None and ``use_weight_tying`` was False
+        after a full forward pass, while calling
+        ``_locate_embedding_weights()`` at that same moment RETURNED the
+        matrix -- the locator was never wrong. ``BERT.build`` now exists
+        (decisions.md D-049) and tying is active and substantive: MEASURED,
+        ``BERT.build((None, 12))`` yields 17 tensors / 12,768 params against 0
+        and 0 before, and the pin that recorded the blindness -- an
         ``xfail(strict=True)`` in
-        ``tests/test_models/test_masked_language_model/test_the_embedding_locator_finds_a_keras_embedding.py``.
-        See decisions.md D-035.
+        ``tests/test_models/test_masked_language_model/test_the_embedding_locator_finds_a_keras_embedding.py``
+        -- was UN-PINNED at step 17.1 and is a plain passing assertion today.
+        Do NOT re-add the pin. See decisions.md D-035 and D-049.
 
         Interface contract (2 callers by design):
             :param layer: Any object that may own the token-embedding variable.

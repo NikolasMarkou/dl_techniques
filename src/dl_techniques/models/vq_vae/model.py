@@ -358,8 +358,24 @@ class VQVAEModel(keras.Model):
 
             total_loss = reconstruction_loss + vq_loss
 
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 1.380558e+00 vs fp16 4.532856e-05, ratio 3.046e+04.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_loss = self.optimizer.scale_loss(total_loss)
+
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(total_loss, trainable_vars)
+        gradients = tape.gradient(scaled_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         self.total_loss_tracker.update_state(total_loss)

@@ -993,11 +993,41 @@ class VAE(keras.Model):
             if self.losses:
                 total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 9.680747e+01 vs fp16 1.549095e-03, ratio 6.249e+04.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_loss = self.optimizer.scale_loss(total_loss)
+
         # Compute and clip gradients
         trainable_weights = self.trainable_weights
-        gradients = tape.gradient(total_loss, trainable_weights)
+        gradients = tape.gradient(scaled_loss, trainable_weights)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+        # The elementwise clip must be expressed IN THE SCALED DOMAIN, because
+        # `gradients` above are gradients of the SCALED loss and the optimizer
+        # divides them by the same factor afterwards. Do NOT write a bare
+        # `ops.clip(grad, -1.0, 1.0)` here: with a `LossScaleOptimizer` in play
+        # that saturates EVERY gradient component at 1.0 and the subsequent
+        # unscale turns the whole update into lr/32768 -- MEASURED, the
+        # per-element |dW| collapsed to exactly 3.051758e-06 == 0.1 * 2**-15 and
+        # the fp16/float32 ratio read 64.8 with the `scale_loss` call already
+        # in place. `Optimizer.scale_loss(1.0)` returns the CURRENT loss scale,
+        # and returns exactly 1.0 for a plain optimizer, so this restores the
+        # documented "clip the true gradient at 1.0" semantics in both regimes
+        # using only the same public API the scaling itself uses.
+        clip_limit = self.optimizer.scale_loss(1.0)
         gradients = [
-            ops.clip(grad, -1.0, 1.0) if grad is not None else None
+            ops.clip(grad, -clip_limit, clip_limit) if grad is not None else None
             for grad in gradients
         ]
 
