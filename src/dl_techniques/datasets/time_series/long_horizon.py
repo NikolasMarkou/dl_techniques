@@ -19,7 +19,8 @@ Example:
 """
 
 import pandas as pd
-from typing import Dict, Optional, Tuple
+from types import MappingProxyType
+from typing import Dict, Optional, Tuple, Mapping
 
 # ---------------------------------------------------------------------
 # local imports
@@ -33,7 +34,16 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 # Dataset configurations for long-horizon benchmarks
-LONG_HORIZON_CONFIGS: Dict[str, TimeSeriesConfig] = {
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: read-only VIEW, not a plain
+# dict. `LongHorizonDataset.CONFIGS` is an ALIAS of this object, so the two names shared one
+# mutable mapping and a caller who wrote through either changed the table for
+# every later caller in the process (R-009 shape S3). A dict cannot become a
+# tuple, so the remedy here is `MappingProxyType`, and copying in `__init__`
+# would again repair nothing -- it leaves both aliases on the same object.
+# The proxy freezes the OUTER level only; the values are still mutable, which is
+# why `every read below is a lookup, never a write`.
+LONG_HORIZON_CONFIGS: Mapping[str, TimeSeriesConfig] = MappingProxyType(
+{
     'ETTh1': TimeSeriesConfig(
         name='ETTh1',
         freq='H',
@@ -134,6 +144,7 @@ LONG_HORIZON_CONFIGS: Dict[str, TimeSeriesConfig] = {
         n_features=8
     )
 }
+)
 
 
 class LongHorizonDataset(BaseTimeSeriesDataset):

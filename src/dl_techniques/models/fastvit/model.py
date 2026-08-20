@@ -112,7 +112,8 @@ import keras
 # (the reference's name for the per-stage depths), and `keras.Model` also owns a
 # `.layers` property. Sub-layers are always spelled `keras.layers.X`.
 from keras import initializers, regularizers, activations
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from types import MappingProxyType
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Mapping
 
 # ---------------------------------------------------------------------
 # local imports
@@ -203,7 +204,16 @@ _REFERENCE_POS_EMB_SPATIAL_SHAPE = (7, 7)
 #
 # `pos_embs` entries are the RepCPE spatial shape (7, 7) or None. A stage gets a
 # RepConditionalPosEnc iff its entry is not None.
-MCI_VARIANTS: Dict[str, Dict[str, Any]] = {
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: read-only VIEW, not a plain
+# dict. `FastVitImageEncoder.MODEL_VARIANTS` is an ALIAS of this object, so the two names shared one
+# mutable mapping and a caller who wrote through either changed the table for
+# every later caller in the process (R-009 shape S3). A dict cannot become a
+# tuple, so the remedy here is `MappingProxyType`, and copying in `__init__`
+# would again repair nothing -- it leaves both aliases on the same object.
+# The proxy freezes the OUTER level only; the values are still mutable, which is
+# why ``_mci_variant_config` still returns `dict(MCI_VARIANTS[key])`, a copy`.
+MCI_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+{
     'mci0': {
         'layers': (2, 6, 10, 2),
         'embed_dims': (64, 128, 256, 512),
@@ -267,6 +277,7 @@ MCI_VARIANTS: Dict[str, Dict[str, Any]] = {
         'lkc_use_act': True,
     },
 }
+)
 
 #: The per-variant fields that must all agree in length (one entry per stage).
 _PER_STAGE_FIELDS = (

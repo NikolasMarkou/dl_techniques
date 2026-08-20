@@ -111,7 +111,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Union, List, Any, Tuple, Dict, Literal
+from typing import Optional, Union, List, Any, Sequence, Tuple, Dict, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -135,7 +135,16 @@ BlockType = Literal['lstm', 'transformer', 'mixed']
 # Canonical source list; also exposed as the class attr `TiRexCore.DEFAULT_QUANTILES`
 # (which references this list). Kept module-level for backward-compat: external
 # modules (e.g. model_extended.py) import this name directly.
-DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: this is a TUPLE, and it must
+# stay one. It was a `List[float]`, aliased by the class attribute below, so the
+# module constant and `TiRexCore.DEFAULT_QUANTILES` were ONE object under two
+# names -- and a caller who took the parameter default and mutated it in place
+# silently changed the default for every later caller in the process. Do NOT
+# "fix" that by copying in `__init__`: a copy in the constructor leaves the two
+# ALIASES pointing at the same mutable object and repairs nothing. A tuple kills
+# the parameter default (R-009 S1), the `ast.Name` default (S2) and the class
+# alias (S3) together, which is why the remedy is the type and not the copy.
+DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 # ---------------------------------------------------------------------
 
@@ -222,7 +231,7 @@ class TiRexCore(keras.Model, ForecastMixin):
     # References the single module-level source list (defined above the class)
     # so the value lives in exactly one place; model_extended.py imports the
     # module-level name, which remains a backward-compat alias for the same list.
-    DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES
+    DEFAULT_QUANTILES: Tuple[float, ...] = DEFAULT_QUANTILES
 
     # Model variant configurations following ConvNeXt V2 pattern
     MODEL_VARIANTS = {
@@ -265,7 +274,7 @@ class TiRexCore(keras.Model, ForecastMixin):
         lstm_units: Optional[int] = None,
         ff_dim: Optional[int] = None,
         block_types: Optional[List[BlockType]] = None,
-        quantile_levels: List[float] = DEFAULT_QUANTILES,
+        quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         prediction_length: int = 32,
         dropout_rate: float = 0.1,
         use_layer_norm: bool = True,
@@ -297,7 +306,11 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.lstm_units = lstm_units if lstm_units is not None else embed_dim
         self.ff_dim = ff_dim if ff_dim is not None else embed_dim * 4
         self.block_types = block_types if block_types is not None else ['mixed'] * num_blocks
-        self.quantile_levels = quantile_levels
+        # Materialize as a LIST: the default is now an immutable tuple (D-079),
+        # and `get_config()` must keep round-tripping the same JSON type it
+        # always has. Every consumer below uses `.index()` / `len()` / `in`,
+        # which both types answer identically.
+        self.quantile_levels = list(quantile_levels)
         self.prediction_length = prediction_length
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
@@ -746,7 +759,7 @@ class TiRexCore(keras.Model, ForecastMixin):
         cls,
         variant: str,
         prediction_length: int = 32,
-        quantile_levels: List[float] = DEFAULT_QUANTILES,
+        quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         **kwargs
     ) -> "TiRexCore":
         """
@@ -827,7 +840,7 @@ def create_tirex_model(
     embed_dim: int = 256,
     num_blocks: int = 6,
     num_heads: int = 8,
-    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     block_types: Optional[List[str]] = None,
     **kwargs
 ) -> TiRexCore:
@@ -875,7 +888,7 @@ def create_tirex_by_variant(
     variant: str = "medium",
     input_length: int = 128,
     prediction_length: int = 32,
-    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     **kwargs
 ) -> TiRexCore:
     """

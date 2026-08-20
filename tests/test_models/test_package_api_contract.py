@@ -4973,12 +4973,6 @@ def _sweep_mutable_defaults(roots=None, src_root=None):
 _MUTABLE_DEFAULT_WAIVERS = {
     ("src/dl_techniques/datasets/arc/arc_keras.py",
      "__init__", "ignore_tokens", "S1"),
-    ("src/dl_techniques/datasets/time_series/favorita.py",
-     "FavoritaDataset", "CONFIGS", "S3"),
-    ("src/dl_techniques/datasets/time_series/long_horizon.py",
-     "LongHorizonDataset", "CONFIGS", "S3"),
-    ("src/dl_techniques/datasets/time_series/m4.py",
-     "M4Dataset", "CONFIGS", "S3"),
     ("src/dl_techniques/layers/heads/vlm/factory.py",
      "__init__", "hidden_dims", "S1"),
     ("src/dl_techniques/layers/yolo12_heads.py",
@@ -4995,8 +4989,6 @@ _MUTABLE_DEFAULT_WAIVERS = {
      "__init__", "conv_filters", "S1"),
     ("src/dl_techniques/models/capsnet/model.py",
      "__init__", "decoder_architecture", "S1"),
-    ("src/dl_techniques/models/fastvit/model.py",
-     "FastVitImageEncoder", "MODEL_VARIANTS", "S3"),
     ("src/dl_techniques/models/fractalnet/model.py",
      "__init__", "depths", "S1"),
     ("src/dl_techniques/models/fractalnet/model.py",
@@ -5045,22 +5037,6 @@ _MUTABLE_DEFAULT_WAIVERS = {
      "__init__", "thetas_dim", "S1"),
     ("src/dl_techniques/models/time_series/nbeats/nbeatsx.py",
      "create_nbeatsx_model", "stack_types", "S1"),
-    ("src/dl_techniques/models/time_series/tirex/model.py",
-     "TiRexCore", "DEFAULT_QUANTILES", "S3"),
-    ("src/dl_techniques/models/time_series/tirex/model.py",
-     "__init__", "quantile_levels", "S2"),
-    ("src/dl_techniques/models/time_series/tirex/model.py",
-     "create_tirex_by_variant", "quantile_levels", "S2"),
-    ("src/dl_techniques/models/time_series/tirex/model.py",
-     "create_tirex_model", "quantile_levels", "S2"),
-    ("src/dl_techniques/models/time_series/tirex/model.py",
-     "from_variant", "quantile_levels", "S2"),
-    ("src/dl_techniques/models/time_series/xlstm/forecaster.py",
-     "__init__", "quantile_levels", "S2"),
-    ("src/dl_techniques/models/time_series/xlstm/forecaster.py",
-     "create_xlstm_forecaster", "quantile_levels", "S2"),
-    ("src/dl_techniques/models/time_series/xlstm/forecaster.py",
-     "xLSTMForecaster", "DEFAULT_QUANTILES", "S3"),
     ("src/dl_techniques/visualization/classification.py",
      "create_visualization", "metrics", "S1"),
 }
@@ -5097,11 +5073,30 @@ class Injected(keras.Model):
 class TestNoMutableDefaults:
     """R-009, in all three shapes it actually takes in this tree.
 
-    Measured 2026-08-20: **46 sites -- 34 S1 / 6 S2 / 6 S3** under
-    ``src/dl_techniques/``, **0 of them a LIVE HAZARD** (no site mutates its
-    default). All 46 are waived by name and routed to step 19. The shapes and
-    the remedy asymmetry are documented on ``_sweep_mutable_defaults``; read
-    that before touching the predicate.
+    Measured at the start of step 19: **46 sites -- 34 S1 / 6 S2 / 6 S3** under
+    ``src/dl_techniques/``, **0 of them a LIVE HAZARD** (no site mutated its
+    default), all 46 waived by name.
+
+    **Step 19 (D-079) closed the two ALIAS shapes outright.** Re-derived after
+    that commit: **38 sites -- 34 S1 / 0 S2 / 4 S3**, and the 4 remaining S3 are
+    themselves now ``MappingProxyType`` views rather than plain dicts, so the
+    predicate's ``S3`` row records an alias that can no longer be written
+    through. Twelve waivers were deleted in the two commits that did it, each
+    because this class's own staleness test went red -- which is the guard
+    working, not a nuisance.
+
+    * ``S2`` (``ast.Name`` default resolving to a module mutable): **extinct**.
+      Both ``DEFAULT_QUANTILES`` constants are tuples.
+    * ``S3`` (class attribute aliasing a module mutable): the 2 list-valued ones
+      are tuples; the 4 dict-valued ones (three ``CONFIGS`` tables and
+      ``FastVitImageEncoder.MODEL_VARIANTS``) cannot be tuples and are read-only
+      views instead. The proxy freezes the OUTER level only.
+    * ``S1`` (a literal ``[]``/``{}``/``set()`` parameter default): **34 sites
+      still open**, routed onward. These are the shape a per-call copy DOES fix,
+      so they are the least dangerous of the three.
+
+    The shapes and the remedy asymmetry are documented on
+    ``_sweep_mutable_defaults``; read that before touching the predicate.
     """
 
     def test_no_mutable_default_anywhere(self):
@@ -5135,13 +5130,20 @@ class TestNoMutableDefaults:
             f"them or re-key them: {stale}"
         )
 
-    def test_the_alias_shape_is_actually_live(self):
+    def test_the_alias_shape_is_dead_at_both_default_quantiles_sites(self):
         """The two ``DEFAULT_QUANTILES`` aliases, asserted at RUNTIME.
 
-        Not an AST claim: this imports both modules and asserts the class
-        attribute and the module constant are the SAME OBJECT. That identity is
-        the contamination mechanism, and it is what makes "copy in
-        ``TiRexCore.__init__``" an insufficient remedy.
+        Step 19 (D-079) made both constants TUPLES and removed their eight
+        waivers -- 2 ``S3`` class aliases and 6 ``S2`` ``ast.Name`` parameter
+        defaults -- so this test flipped from proving the hazard is live to
+        proving it is dead.
+
+        The alias itself is deliberately KEPT: the class attribute is still the
+        same object as the module constant, because ``model_extended.py`` and
+        external callers import the module-level name and the value must live in
+        exactly one place. What changed is that the shared object is no longer
+        mutable, which is the whole remedy. A copy in ``__init__`` would NOT
+        have been one -- it leaves the two aliases pointing at the same list.
         """
         import importlib
 
@@ -5153,13 +5155,17 @@ class TestNoMutableDefaults:
             cls = getattr(module, class_name)
             assert cls.DEFAULT_QUANTILES is module.DEFAULT_QUANTILES, (
                 f"{class_name}.DEFAULT_QUANTILES is no longer the module "
-                "constant -- if step 19 made them tuples, delete this test's "
-                "entry along with the S3 waiver"
+                "constant. The single-source alias is intentional; keep it."
             )
-            assert isinstance(module.DEFAULT_QUANTILES, list), (
-                f"{module_name}.DEFAULT_QUANTILES is no longer mutable; the "
-                "waiver for it should have gone in the same commit"
+            assert isinstance(module.DEFAULT_QUANTILES, tuple), (
+                f"{module_name}.DEFAULT_QUANTILES is a "
+                f"{type(module.DEFAULT_QUANTILES).__name__} again, not a tuple. "
+                "That re-arms R-009 in all three shapes at once (S1/S2/S3) and "
+                "eight waivers would have to come back with it. See D-079."
             )
+            assert list(module.DEFAULT_QUANTILES) == [
+                0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9
+            ], "the tuple conversion must not have changed the VALUE"
 
     def test_the_mutable_default_sweep_walked_the_tree(self):
         """Anti-vacuity floors, DERIVED at landing time.

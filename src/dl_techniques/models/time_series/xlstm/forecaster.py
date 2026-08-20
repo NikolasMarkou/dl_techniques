@@ -100,7 +100,7 @@ References:
 import keras
 import numpy as np
 from keras import ops, initializers
-from typing import Optional, Union, List, Any, Dict, Tuple, Literal
+from typing import Optional, Union, List, Any, Dict, Sequence, Tuple, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -120,7 +120,16 @@ from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 # Module-level alias retained for the constructor / factory signature defaults
 # (and any external importers); the canonical home is
 # ``xLSTMForecaster.DEFAULT_QUANTILES`` (assigned on the class below).
-DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: this is a TUPLE, and it must
+# stay one. It was a `List[float]`, aliased by the class attribute below, so the
+# module constant and `xLSTMForecaster.DEFAULT_QUANTILES` were ONE object under two
+# names -- and a caller who took the parameter default and mutated it in place
+# silently changed the default for every later caller in the process. Do NOT
+# "fix" that by copying in `__init__`: a copy in the constructor leaves the two
+# ALIASES pointing at the same mutable object and repairs nothing. A tuple kills
+# the parameter default (R-009 S1), the `ast.Name` default (S2) and the class
+# alias (S3) together, which is why the remedy is the type and not the copy.
+DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 # ---------------------------------------------------------------------
 
@@ -222,7 +231,7 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
 
     # Canonical default quantile levels (class attribute; the module-level
     # ``DEFAULT_QUANTILES`` is a backward-compatible alias of this value).
-    DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES
+    DEFAULT_QUANTILES: Tuple[float, ...] = DEFAULT_QUANTILES
 
     # Model variant configurations (small / tiny for quick experiments).
     MODEL_VARIANTS = {
@@ -259,7 +268,7 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         dropout_rate: float = 0.0,
         use_quantile_head: bool = True,
-        quantile_levels: List[float] = DEFAULT_QUANTILES,
+        quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         enforce_monotonicity: bool = True,
         use_normalization: bool = True,
         kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
@@ -774,7 +783,7 @@ def create_xlstm_forecaster(
     mlstm_ratio: float = 0.5,
     mlstm_num_heads: int = 4,
     use_quantile_head: bool = True,
-    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     **kwargs: Any
 ) -> xLSTMForecaster:
     """
