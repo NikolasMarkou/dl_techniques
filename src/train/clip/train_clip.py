@@ -269,6 +269,17 @@ class CLIPTrainer:
             keras.mixed_precision.set_global_policy(
                 keras.mixed_precision.Policy('mixed_float16')
             )
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-092
+            # The optimizer is wrapped HERE because this trainer never calls
+            # `Model.compile`, which is the only place Keras wraps it for you.
+            # Without the wrap `scale_loss` is a no-op and no gradient division
+            # happens either -- self-consistent, but the fp16 underflow this
+            # flag exists to avoid is not avoided. Do NOT drop the isinstance
+            # check: double-wrapping squares the loss scale.
+            if not isinstance(optimizer,
+                              keras.mixed_precision.LossScaleOptimizer):
+                self.optimizer = keras.mixed_precision.LossScaleOptimizer(
+                    optimizer)
             logger.info("Mixed precision training enabled")
 
         logger.info(
@@ -289,15 +300,32 @@ class CLIPTrainer:
             loss = self.loss_fn.reduced_loss(outputs)
             if self.model.losses:
                 loss += tf.add_n(self.model.losses)
-            if self.mixed_precision:
-                loss = self.optimizer.get_scaled_loss(loss)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-092
+            # `optimizer.scale_loss`, NOT `get_scaled_loss`/
+            # `get_unscaled_gradients`. Those two are the Keras 2 / tf.keras
+            # spelling and DO NOT EXIST on Keras 3.8's `LossScaleOptimizer` --
+            # MEASURED, `hasattr` is False for both and True for `scale_loss`,
+            # and this trainer raised
+            # `AttributeError: 'Adam' object has no attribute 'get_scaled_loss'`
+            # at this line for every `mixed_precision=True` run. In Keras 3 the
+            # UNSCALING is the optimizer's job inside `apply`, so there is no
+            # unscale call here and adding one would divide twice.
+            scaled_loss = self.optimizer.scale_loss(loss)
 
-        gradients = tape.gradient(loss, self.model.trainable_variables)
+        gradients = tape.gradient(scaled_loss, self.model.trainable_variables)
 
-        if self.mixed_precision:
-            gradients = self.optimizer.get_unscaled_gradients(gradients)
         if self.gradient_clip_norm is not None:
-            gradients, _ = tf.clip_by_global_norm(gradients, self.gradient_clip_norm)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-092
+            # `gradients` are in the SCALED domain and `apply` divides them
+            # afterwards, so the clip bound must be scaled too. Do NOT write a
+            # bare `self.gradient_clip_norm` here: with a loss scale of 2**15
+            # that clips the TRUE global norm at `clip / 32768` and the whole
+            # update collapses -- the same trap measured in `models/vae` under
+            # D-089. `scale_loss(x)` returns `x` unchanged without a loss
+            # scale, so the float32 path is byte-identical.
+            gradients, _ = tf.clip_by_global_norm(
+                gradients, self.optimizer.scale_loss(self.gradient_clip_norm)
+            )
 
         self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
 

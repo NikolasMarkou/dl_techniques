@@ -21,7 +21,14 @@ Asserting "does not raise" is a weak oracle, so the tests also pin the loss
 VALUE: for uniform (all-zero) logits the symmetric contrastive loss is exactly
 ``log(batch_size)``, an arithmetic fact independent of any weight.
 
-See decisions.md D-030 (plan-2026-08-19T163559-499b6f0e).
+Step 19.2 added the `mixed_precision=True` arm this file was missing. The
+flag's own branch called `optimizer.get_scaled_loss` / `get_unscaled_gradients`
+-- the Keras 2 spelling, ABSENT on Keras 3.8 -- so every mixed-precision run
+raised `AttributeError: 'Adam' object has no attribute 'get_scaled_loss'` at
+`train_clip.py:293`, on the first step, always. The float32 tests above could
+not see it because they never set the flag.
+
+See decisions.md D-030 and D-092 (plan-2026-08-19T163559-499b6f0e).
 """
 
 import math
@@ -110,3 +117,103 @@ def test_val_step_completes_and_returns_a_finite_loss(trainer, batch):
     result = trainer.val_step(batch)
     loss = float(np.array(result["val_loss"]))
     assert np.isfinite(loss), f"val_step returned a non-finite loss: {loss!r}"
+
+
+# ---------------------------------------------------------------------
+# The `mixed_precision=True` arm -- the branch the float32 tests cannot reach
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def restore_global_policy():
+    """`CLIPTrainer(mixed_precision=True)` mutates the GLOBAL dtype policy.
+
+    Leaking `mixed_float16` into the rest of the session would silently change
+    every later test in the process, so the policy is restored unconditionally.
+    """
+    previous = keras.mixed_precision.global_policy()
+    try:
+        yield
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
+def _tiny_clip():
+    keras.utils.set_random_seed(0)
+    return create_clip_model(
+        image_size=IMAGE_SIZE, patch_size=16, vision_layers=1, vision_width=32,
+        vision_heads=2, vision_kv_heads=2, vocab_size=VOCAB,
+        context_length=CONTEXT, text_layers=1, text_width=32, text_heads=2,
+        text_kv_heads=2, embed_dim=16, ffn_multiple_of=8,
+    )
+
+
+def test_the_keras2_loss_scaling_api_is_absent_on_keras3(restore_global_policy):
+    """Isolating arm: the reason the old spelling could never have worked.
+
+    Pinned so that "it was just a typo" is not a possible reading. If a future
+    Keras restores these names this test says so, loudly, before anyone
+    concludes the trainer was fine all along.
+    """
+    lso = keras.mixed_precision.LossScaleOptimizer(keras.optimizers.Adam())
+    assert not hasattr(lso, "get_scaled_loss")
+    assert not hasattr(lso, "get_unscaled_gradients")
+    assert hasattr(lso, "scale_loss")
+
+
+def test_train_step_completes_under_mixed_precision(restore_global_policy, batch):
+    """End-to-end arm: this raised `AttributeError` at HEAD."""
+    trainer = CLIPTrainer(
+        model=_tiny_clip(), loss_fn=CLIPContrastiveLoss(),
+        optimizer=keras.optimizers.Adam(1e-4),
+        gradient_clip_norm=1.0, mixed_precision=True,
+    )
+    loss = float(np.array(trainer.train_step(batch)["loss"]))
+    assert np.isfinite(loss), f"non-finite loss under mixed_float16: {loss!r}"
+
+
+def test_the_optimizer_is_wrapped_so_scaling_is_not_a_no_op(
+        restore_global_policy):
+    """Without the wrap `scale_loss` returns its argument and the flag is inert.
+
+    Pinned separately from the smoke arm because a trainer that RUNS under
+    `mixed_precision=True` while scaling nothing looks exactly like a working
+    one.
+    """
+    trainer = CLIPTrainer(
+        model=_tiny_clip(), loss_fn=CLIPContrastiveLoss(),
+        optimizer=keras.optimizers.Adam(1e-4), mixed_precision=True,
+    )
+    assert isinstance(trainer.optimizer,
+                      keras.mixed_precision.LossScaleOptimizer)
+    assert float(np.array(trainer.optimizer.scale_loss(1.0))) > 1.0
+
+
+def test_wrapping_is_idempotent(restore_global_policy):
+    """Double-wrapping would SQUARE the loss scale."""
+    inner = keras.mixed_precision.LossScaleOptimizer(
+        keras.optimizers.Adam(1e-4))
+    trainer = CLIPTrainer(
+        model=_tiny_clip(), loss_fn=CLIPContrastiveLoss(),
+        optimizer=inner, mixed_precision=True,
+    )
+    assert trainer.optimizer is inner
+    assert not isinstance(trainer.optimizer.inner_optimizer,
+                          keras.mixed_precision.LossScaleOptimizer)
+
+
+def test_the_gradient_clip_bound_is_expressed_in_the_scaled_domain():
+    """The second half of the repair, pinned as arithmetic.
+
+    `tf.clip_by_global_norm` is applied to gradients of the SCALED loss, so a
+    bare `gradient_clip_norm` would bound the TRUE norm at `clip / scale`.
+    """
+    lso = keras.mixed_precision.LossScaleOptimizer(keras.optimizers.Adam())
+    scale = float(np.array(lso.scale_loss(1.0)))
+    assert float(np.array(lso.scale_loss(1.0))) == scale
+    assert float(np.array(lso.scale_loss(2.5))) == pytest.approx(2.5 * scale)
+    plain = keras.optimizers.Adam()
+    assert float(np.array(plain.scale_loss(2.5))) == pytest.approx(2.5), (
+        "without a loss scale the bound must be unchanged, or the float32 "
+        "path is not byte-identical"
+    )
