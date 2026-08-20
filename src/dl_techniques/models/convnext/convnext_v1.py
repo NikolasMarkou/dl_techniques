@@ -639,6 +639,53 @@ class ConvNeXtV1(keras.Model):
 
         return model
 
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the model.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-069
+        # This method exists because its SIBLING has it. ``ConvNeXtV2`` in the
+        # same package implements ``compute_output_shape`` and returns
+        # ``(None, 4)`` for a 4-class head; ``ConvNeXtV1`` raised
+        # ``NotImplementedError: Layer ConvNeXtV1 does not have a
+        # compute_output_shape method implemented`` for the SAME call on the
+        # SAME geometry -- MEASURED, with both real forwards at ``(1, 4)``.
+        # Two siblings in one package disagreeing about a Keras contract is
+        # the shape a per-package test cannot see, because each package's
+        # tests only ever exercise the sibling they were written for. The body
+        # mirrors ``convnext_v2.py`` deliberately: the two architectures share
+        # a stem/downsample/head skeleton, and diverging implementations of
+        # one shape function would reintroduce the asymmetry in a subtler
+        # form. See decisions.md D-069.
+
+        Args:
+            input_shape: Tuple representing the input shape, channels-last.
+
+        Returns:
+            Tuple representing the output shape.
+        """
+        current_shape = input_shape
+
+        # 1. Stem.
+        current_shape = self.stem_conv.compute_output_shape(current_shape)
+        current_shape = self.stem_norm.compute_output_shape(current_shape)
+
+        # 2. Stages. The blocks inside a stage are shape-preserving, so only
+        # the inter-stage downsamples move the spatial dims.
+        for i in range(len(self.depths)):
+            if i > 0:
+                norm_layer, conv_layer = self.downsample_layers_list[i - 1]
+                current_shape = norm_layer.compute_output_shape(current_shape)
+                current_shape = conv_layer.compute_output_shape(current_shape)
+
+        # 3. Head.
+        if self.include_top:
+            current_shape = self.gap.compute_output_shape(current_shape)
+            current_shape = self.head_norm.compute_output_shape(current_shape)
+            if self.classifier is not None:
+                current_shape = self.classifier.compute_output_shape(current_shape)
+
+        return current_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
 
