@@ -829,21 +829,48 @@ class DynamicPatcher(keras.layers.Layer):
 
     def compute_patch_ids(
             self,
-            patch_lengths: keras.KerasTensor
+            patch_lengths: keras.KerasTensor,
+            seq_len: Optional[int] = None
     ) -> keras.KerasTensor:
         """
         Convert patch lengths to patch IDs for each position.
 
             :param patch_lengths: Patch lengths tensor of shape (batch_size, max_patches).
+            :param seq_len: The sequence length to expand to. PASS THIS from the
+                caller's own byte tensor whenever it is known -- see the
+                D-034 anchor below. When ``None``, it is recovered from the data
+                as ``max(sum(patch_lengths))``, which makes the layer's OUTPUT
+                SHAPE data-dependent and therefore XLA-incompatible.
 
             :return: Patch IDs tensor of shape (batch_size, seq_len).
         """
-        batch_size = ops.shape(patch_lengths)[0]
         max_patches = ops.shape(patch_lengths)[1]
 
-        # Calculate total sequence length
-        total_lengths = ops.sum(patch_lengths, axis=1)
-        max_seq_len = ops.max(total_lengths)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-034
+        # PASS `seq_len` IN. Do NOT delete this parameter and go back to
+        # `ops.max(ops.sum(patch_lengths, axis=1))` unconditionally: that value
+        # is a TENSOR whose contents are only known at run time, it feeds
+        # `ops.arange` below, and so THIS LAYER'S OUTPUT SHAPE DEPENDS ON ITS
+        # INPUT DATA. XLA rejects that outright --
+        #   `InvalidArgumentError: Input 1 to node .../range with op Range must
+        #    be a compile-time constant. XLA compilation requires that operator
+        #    arguments that represent shapes ... be evaluated to concrete
+        #    values`
+        # -- so `model.fit()` could not run on GPU at Keras' default
+        # `jit_compile="auto"`, i.e. the shipped `src/train/blt/` pipeline was
+        # broken. The `arange` is merely where XLA notices FIRST; the defect is
+        # the data-dependent shape, which is why the remedy supplies the length
+        # rather than rewriting the `arange`.
+        # The value is not a guess: `PatchingLayer` builds patch lengths as
+        # OCCUPANCY COUNTS of a per-byte assignment, so the row sum is exactly
+        # `seq_len` STRUCTURALLY, for any threshold, including the degenerate
+        # ends (see the anchor in `call`). The caller's byte tensor already
+        # carries that number as a static dimension.
+        # See decisions.md D-034.
+        if seq_len is None:
+            max_seq_len = ops.max(ops.sum(patch_lengths, axis=1))
+        else:
+            max_seq_len = seq_len
 
         # Vectorized patch ID computation using cumulative sums
         # cumulative_lengths[b, p] = sum of patch_lengths[b, :p+1]

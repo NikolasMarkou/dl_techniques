@@ -493,7 +493,10 @@ class ByteLatentTransformer(keras.Model):
 
             # Create dynamic patches
             patch_lengths = self.patcher(entropy, training=training)
-            patch_ids = self.patcher.compute_patch_ids(patch_lengths)
+            # Pass the STATIC sequence length; see the D-034 anchor on
+            # `PatchingLayer.compute_patch_ids`.
+            patch_ids = self.patcher.compute_patch_ids(
+                patch_lengths, seq_len=ops.shape(byte_tokens)[1])
 
         # Encode bytes to patch representations
         patch_representations = self.local_encoder(

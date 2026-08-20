@@ -585,7 +585,10 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         # Step 2: Create dynamic patches based on entropy
         patch_lengths = self.patcher(entropy, training=training)
-        patch_ids = self.patcher.compute_patch_ids(patch_lengths)
+        # Pass the STATIC sequence length; see the D-034 anchor on
+        # `PatchingLayer.compute_patch_ids`.
+        patch_ids = self.patcher.compute_patch_ids(
+            patch_lengths, seq_len=keras.ops.shape(byte_tokens)[1])
 
         # Step 3: Encode bytes to patch representations (local processing)
         patch_representations = self.local_encoder(

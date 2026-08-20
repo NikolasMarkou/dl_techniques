@@ -400,6 +400,23 @@ class BLTTrainer:
         model_config['entropy_model'] = self.entropy_model
 
         self.blt_model = create_blt_model(**model_config)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-034
+        # `jit_compile` is DELIBERATELY LEFT AT KERAS' DEFAULT ("auto", i.e. XLA
+        # on GPU) -- and that default was BROKEN here until the model-side fix in
+        # the same commit as this comment. `fit()` raised
+        # `InvalidArgumentError: ... op Range must be a compile-time constant`
+        # from `PatchingLayer.compute_patch_ids`, so this shipped pipeline could
+        # not train on GPU at all.
+        # This file deliberately does NOT follow the five in-repo precedents
+        # (`superpoint`, `sam2`, `sam3`, `lewm`, `deepar`) that pin
+        # `jit_compile=False` under their own anchors. Those models are
+        # genuinely dynamic (a dynamic rollout, a sparse descriptor head);
+        # BLT's dynamic shape was RECOVERABLE, because the patch lengths sum to
+        # the sequence length structurally, so the correct fix was to make the
+        # model XLA-compatible rather than to switch XLA off for everyone.
+        # Validated by running `fit()` end to end under an EXPLICIT
+        # `jit_compile=True` on GPU 1 (loss 6.102067), not by deleting the
+        # `arange`. See decisions.md D-034.
         self.blt_model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=self.config.learning_rate),
             loss='sparse_categorical_crossentropy',
