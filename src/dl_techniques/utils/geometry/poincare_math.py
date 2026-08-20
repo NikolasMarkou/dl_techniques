@@ -202,7 +202,11 @@ class PoincareMath:
             The margin, as a Python float when `radius` is a Python float and as
             a tensor otherwise.
         """
-        standardized = keras.backend.standardize_dtype(dtype)
+        # `getattr(dtype, "name", dtype)` rather than
+        # `keras.backend.standardize_dtype`: the repo-wide Keras-2-residue guard
+        # forbids `keras.backend.*` calls, and a backend tensor's dtype already
+        # carries its own `.name`.
+        standardized = getattr(dtype, "name", dtype)
         try:
             ulp_at_one = float(np.finfo(standardized).eps)
         except (TypeError, ValueError):
