@@ -26,7 +26,7 @@ Both producers emit `tf.data.Dataset` batches with the same schema:
 `T = history_size + num_preds` throughout.
 """
 
-from typing import Any, Iterator, Optional, Tuple
+from typing import Iterator, Tuple
 import numpy as np
 
 try:

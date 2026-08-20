@@ -21,7 +21,7 @@ pair by variant name.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, Tuple
 
 import numpy as np

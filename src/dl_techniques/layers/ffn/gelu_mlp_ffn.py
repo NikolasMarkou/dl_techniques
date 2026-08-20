@@ -41,7 +41,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Optional, Union, Any, Dict, Tuple
+from typing import Optional, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
 # local imports

@@ -321,12 +321,12 @@ Every command is in the Numbers table at the foot of this file.
 |---|---|
 | `@keras.saving.register_keras_serializable()` on custom classes | 478 |
 | A `get_config()` for round-trip serialization | 479 |
-| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 357 |
+| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 340 |
 
 Three honest exceptions. None of them is a defect to go fix on sight; each is a
 thing you will meet and should not be surprised by.
 
-- **Raw TensorFlow has not been fully migrated.** 62 files under
+- **Raw TensorFlow has not been fully migrated.** 61 files under
   `src/dl_techniques/` still import `tensorflow` directly despite `keras.ops`
   being the stated backend-agnostic surface. The standing repo preference is to
   *migrate* such a site rather than document it as an accepted exception, unless
@@ -611,8 +611,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | …of those, under `src/train/` | 31 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
 | Files using `@keras.saving.register_keras_serializable` | 478 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 479 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
-| Files using the central logger | 357 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
-| Files importing raw `tensorflow` | 62 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
+| Files using the central logger | 340 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
+| Files importing raw `tensorflow` | 61 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 256 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |

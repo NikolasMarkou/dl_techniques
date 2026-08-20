@@ -6,7 +6,6 @@ from typing import Optional, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

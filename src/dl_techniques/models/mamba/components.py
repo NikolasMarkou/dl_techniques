@@ -7,7 +7,6 @@ from typing import Optional, Union, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------

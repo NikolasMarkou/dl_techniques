@@ -103,7 +103,6 @@ from dl_techniques.layers.time_series.deepar_blocks import (
     ScaleLayer,
     GaussianLikelihoodHead,
     NegativeBinomialLikelihoodHead,
-    DeepARCell
 )
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 

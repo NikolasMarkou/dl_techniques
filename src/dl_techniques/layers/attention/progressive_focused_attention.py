@@ -70,7 +70,6 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # Type definitions

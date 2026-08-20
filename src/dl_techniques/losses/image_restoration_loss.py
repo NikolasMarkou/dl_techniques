@@ -102,7 +102,6 @@ Notes
 """
 
 import keras
-from typing import Tuple
 import tensorflow as tf
 
 # ---------------------------------------------------------------------

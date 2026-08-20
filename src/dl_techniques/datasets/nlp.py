@@ -7,7 +7,7 @@ the CLM/MLM preprocessing in ``train.common.nlp``.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import datasets
 import tensorflow as tf

@@ -32,7 +32,6 @@ from typing import Optional, Tuple, Union
 import numpy as np
 import tensorflow as tf
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # SuperPoint-like default magnitude ranges

@@ -42,13 +42,12 @@ PyTorch reference (faithfully ported)::
 
 import keras
 import numpy as np
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

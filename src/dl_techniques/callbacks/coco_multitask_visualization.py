@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import numpy as np

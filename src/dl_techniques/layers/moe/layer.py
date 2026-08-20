@@ -7,7 +7,6 @@ Refined to use the simplified FFN-only expert system and follow modern Keras 3 p
 """
 
 import keras
-import numpy as np
 from keras import ops
 from typing import Optional, Tuple, Any, Dict, List
 

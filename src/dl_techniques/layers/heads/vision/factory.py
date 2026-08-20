@@ -23,7 +23,7 @@ from ...attention.factory import (
     assemble_attention_config,
 )
 from ...norms import create_normalization_layer, NormalizationType
-from .task_types import VisionTaskType, TaskConfiguration, CommonTaskConfigurations
+from .task_types import VisionTaskType, TaskConfiguration
 
 # ---------------------------------------------------------------------
 # Base Head Class

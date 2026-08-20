@@ -93,7 +93,7 @@ References:
 import keras
 from keras import layers, ops
 from keras.saving import serialize_keras_object, deserialize_keras_object
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports

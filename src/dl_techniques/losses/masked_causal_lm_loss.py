@@ -39,7 +39,6 @@ References
 
 import keras
 from keras import ops
-from typing import Optional
 
 # ---------------------------------------------------------------------
 

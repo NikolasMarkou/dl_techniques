@@ -122,13 +122,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.sampling import (
-    Sampling,
-    HypersphereSampling,
-    VMFSampling,
-    create_sampling_layer,
-    vmf_kl_divergence,
-)
+from dl_techniques.layers.sampling import create_sampling_layer, vmf_kl_divergence
 
 # ---------------------------------------------------------------------
 # Supported VAE sampling modes

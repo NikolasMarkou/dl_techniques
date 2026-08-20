@@ -111,7 +111,7 @@ References:
 """
 
 import keras
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports

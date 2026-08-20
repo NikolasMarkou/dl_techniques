@@ -100,7 +100,7 @@ import copy
 import math
 import keras
 from keras import ops, initializers
-from typing import Optional, Union, Tuple, Dict, Any, List
+from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports

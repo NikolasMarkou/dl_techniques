@@ -15,7 +15,7 @@ RGB tensor and outputs a single-channel depth map.
 
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import keras
 import numpy as np

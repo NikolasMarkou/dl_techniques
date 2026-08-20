@@ -14,7 +14,6 @@ from typing import List, Optional, Tuple
 # local imports
 # -----------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

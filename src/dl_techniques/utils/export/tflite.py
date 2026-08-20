@@ -5,7 +5,6 @@ import numpy as np
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import tensorflow as tf
-import keras
 
 from dl_techniques.utils.logger import logger
 from model import TiRexCore  # Assuming your file is named model.py

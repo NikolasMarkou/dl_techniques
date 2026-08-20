@@ -94,7 +94,7 @@ References:
 
 import keras
 import numpy as np
-from keras import ops, layers, initializers, regularizers
+from keras import ops, initializers, regularizers
 from typing import List, Tuple, Optional, Union, Any, Dict, Callable
 
 # ---------------------------------------------------------------------

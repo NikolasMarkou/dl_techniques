@@ -31,7 +31,7 @@ For the SD3 tiny preset (``ch=32, ch_mult=(1, 2)``) the VAE downsamples by
 from __future__ import annotations
 
 import keras
-from typing import Any, Optional, Tuple
+from typing import Optional
 
 # ---------------------------------------------------------------------
 # local imports

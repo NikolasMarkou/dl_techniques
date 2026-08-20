@@ -59,7 +59,6 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

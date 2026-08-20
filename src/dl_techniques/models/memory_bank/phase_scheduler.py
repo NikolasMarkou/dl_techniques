@@ -53,7 +53,6 @@ sets directly.
 from typing import Any, Dict, Optional
 
 import keras
-import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
 

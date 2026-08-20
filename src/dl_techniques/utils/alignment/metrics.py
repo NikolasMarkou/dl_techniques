@@ -15,7 +15,7 @@ References:
 import keras
 import tensorflow as tf
 import numpy as np
-from typing import Union, Tuple, Optional, Callable
+from typing import Union, Optional
 from sklearn.cross_decomposition import CCA
 
 

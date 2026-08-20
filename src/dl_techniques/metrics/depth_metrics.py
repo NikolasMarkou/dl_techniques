@@ -27,7 +27,7 @@ References
    *NeurIPS*.
 """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import keras
 from keras import ops

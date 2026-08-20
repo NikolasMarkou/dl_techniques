@@ -296,7 +296,7 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # K-means availability check (deferred to first use)
         if self.kmeans_init:
             try:
-                import sklearn.cluster  # noqa: F401
+                import sklearn.cluster
             except ImportError as exc:
                 raise RuntimeError(
                     "kmeans_init=True requires scikit-learn. Install scikit-learn "

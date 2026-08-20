@@ -770,7 +770,7 @@ class ResNet(keras.Model):
 # imports `create_resnet` and `get_model_output_info` in one statement. The
 # import sits here rather than at the top because it is an API re-export, not a
 # dependency of the class above.
-from dl_techniques.utils.deep_supervision import (  # noqa: E402
+from dl_techniques.utils.deep_supervision import (  # noqa: E402,F401
     get_model_output_info,
     create_inference_model_from_training_model,
 )

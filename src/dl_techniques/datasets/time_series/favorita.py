@@ -8,7 +8,7 @@ optimizations for handling the massive dataset size via chunked loading.
 
 import pandas as pd
 from types import MappingProxyType
-from typing import Dict, Optional, Tuple, Mapping
+from typing import Tuple, Mapping
 
 # ---------------------------------------------------------------------
 # Local Imports

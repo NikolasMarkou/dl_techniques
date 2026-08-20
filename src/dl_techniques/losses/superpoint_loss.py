@@ -25,7 +25,7 @@ All ops are ``keras.ops``-only and graph-safe (no raw ``tf.*``, no ``.numpy()``)
 
 import keras
 from keras import ops
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports

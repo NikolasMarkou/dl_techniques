@@ -64,7 +64,7 @@ scalar / NumPy on the CPU (built in step 8). Random noise is drawn via
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple
 
 import keras
 import numpy as np

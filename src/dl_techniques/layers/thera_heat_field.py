@@ -57,14 +57,13 @@ Reference:
 import keras
 import numpy as np
 from keras import ops
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers import LinearUpInitializer
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # THERA argument defaults (from the reference ``args/train.py``).

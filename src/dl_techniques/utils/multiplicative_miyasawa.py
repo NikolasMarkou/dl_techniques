@@ -810,7 +810,7 @@ def run_checkpoint_diagnostic(
     # Importing these modules registers the custom Keras objects (Gabor stem
     # initializer + ConvUNeXt denoiser layers) needed to deserialize a checkpoint.
     # Imported lazily so library import of this module stays light and src/train-free.
-    import dl_techniques.initializers.gabor_filters_initializer  # noqa: F401
+    import dl_techniques.initializers.gabor_filters_initializer
     from dl_techniques.models.bias_free_denoisers.bfconvunext import (
         create_convunext_denoiser,
     )

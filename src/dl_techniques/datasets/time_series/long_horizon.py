@@ -20,7 +20,7 @@ Example:
 
 import pandas as pd
 from types import MappingProxyType
-from typing import Dict, Optional, Tuple, Mapping
+from typing import Optional, Tuple, Mapping
 
 # ---------------------------------------------------------------------
 # local imports

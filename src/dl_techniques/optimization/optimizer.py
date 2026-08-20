@@ -25,7 +25,7 @@ additionally support an `exclude_from_weight_decay` list of name patterns
 
 import keras
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 from keras.api.optimizers import Optimizer
 from keras.api.optimizers.schedules import LearningRateSchedule

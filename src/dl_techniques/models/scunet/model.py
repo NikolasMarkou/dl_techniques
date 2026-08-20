@@ -56,7 +56,6 @@ Reference
 """
 
 import keras
-import numpy as np
 from keras import ops
 from typing import List, Optional, Dict, Any
 

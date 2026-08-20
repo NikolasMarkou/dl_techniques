@@ -17,11 +17,10 @@ Example:
     >>> print(f"Number of series: {y_df['unique_id'].nunique()}")
 """
 
-import logging
 import pandas as pd
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, List, Optional, Tuple, Mapping
+from typing import List, Optional, Tuple, Mapping
 
 # ---------------------------------------------------------------------
 # local imports

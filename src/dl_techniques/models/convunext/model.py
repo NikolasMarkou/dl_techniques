@@ -1767,7 +1767,6 @@ def create_convunext_variant(
 # copy that rebuilt a subclassed model from its config and round-tripped weights
 # through a temp file; the shared util slices the functional graph instead
 # (`training_model.output` / `.input`), which is what a functional ConvUNext needs.
-from dl_techniques.utils.deep_supervision import (  # noqa: E402
-    get_model_output_info,
+from dl_techniques.utils.deep_supervision import (  # noqa: F401
     create_inference_model_from_training_model,
 )

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -38,7 +38,6 @@ from dl_techniques.utils.logger import logger
 # We import at module import time to surface the dependency early.
 try:
     from pycocotools.coco import COCO
-    from pycocotools import mask as cocomask
 except ImportError as e:  # pragma: no cover
     raise ImportError(
         "pycocotools is required for coco_multitask_local. "

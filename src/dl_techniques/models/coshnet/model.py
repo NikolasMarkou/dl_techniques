@@ -103,8 +103,7 @@ from dl_techniques.layers.complex_layers import (
     ComplexConv2D,
     ComplexReLU,
     ComplexDropout,
-    ComplexAveragePooling2D,
-    ComplexGlobalAveragePooling2D
+    ComplexGlobalAveragePooling2D,
 )
 
 # ---------------------------------------------------------------------

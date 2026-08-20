@@ -223,7 +223,6 @@ from typing import Optional, Dict, Any, List, Tuple
 # ---------------------------------------------------------------------
 
 from .transformers.transformer import TransformerLayer
-from .attention.multi_head_attention import MultiHeadAttention
 from .embedding.positional_embedding import PositionalEmbedding
 from ..utils.masking import create_mask
 from ..utils.logger import logger

@@ -25,7 +25,6 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger  # noqa: F401  (kept for parity with model.py imports)
 from dl_techniques.layers.ffn import create_ffn_layer, FFNType
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
 from dl_techniques.layers.norms import (

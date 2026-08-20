@@ -34,13 +34,22 @@ from typing import Optional, Union, Tuple
 # can resolve every custom class a saved bias-free ConvUNext graph names. None of these
 # are USED below any more (the builder itself moved to `models/convunext/model.py`);
 # they are imported for their registration side effect. Do NOT "clean up" as unused.
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
-from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.initializers import create_gabor_depthwise_conv2d
-from dl_techniques.layers.match_channels import MatchChannels
-from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
+# DECISION plan-2026-08-19T163559-499b6f0e/D-080: every import in this block
+# carries `# noqa: F401` because this module is a REGISTRAR. Twelve of its
+# imports are bound for their side effect -- importing them REGISTERS the Keras
+# serializables and re-exports the ONE import path the bf test suite, the bfunet
+# trainer and `utils/multiplicative_miyasawa.py` use. A static unused-import
+# tool cannot see that, and step 19's sweep DELETED all twelve despite the prose
+# comments below each saying "Do NOT delete this re-export"; the bf suite then
+# failed 7 tests at `TestRegistrarContract`. The prose is for humans; the
+# `# noqa` is for the next tool.
+from dl_techniques.layers.convnext_v1_block import ConvNextV1Block  # noqa: F401
+from dl_techniques.layers.convnext_v2_block import ConvNextV2Block  # noqa: F401
+from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization  # noqa: F401
+from dl_techniques.layers.stochastic_depth import StochasticDepth  # noqa: F401
+from dl_techniques.initializers import create_gabor_depthwise_conv2d  # noqa: F401
+from dl_techniques.layers.match_channels import MatchChannels  # noqa: F401
+from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip  # noqa: F401
 
 from dl_techniques.utils.logger import logger
 
@@ -57,7 +66,7 @@ from dl_techniques.utils.logger import logger
 # bf test suite imports it from here. The class's decorator deliberately keeps
 # `package="dl_techniques.bias_free_denoisers"` so its registry key does not move.
 # Do NOT delete this re-export, and do NOT re-home the class's `package=` string.
-from dl_techniques.models.convunext.model import ConvUNextStem
+from dl_techniques.models.convunext.model import ConvUNextStem  # noqa: F401
 
 # Re-exported from the merged home so this module stays the ONE import path the bf
 # test suite, the bfunet trainer and `utils/multiplicative_miyasawa.py` use, and so it
@@ -66,7 +75,7 @@ from dl_techniques.models.convunext.model import ConvUNextStem
 # `Custom>SpatialLinearAttention` was MEASURED to be module-independent on Keras 3.8.0
 # (decisions.md D-008), so the move did not change it. Do NOT add a `package=` argument
 # "for symmetry" with `ConvUNextStem` — that WOULD change the key.
-from dl_techniques.models.convunext.model import (
+from dl_techniques.models.convunext.model import (  # noqa: F401
     SpatialLinearAttention,
     CONVUNEXT_CONFIGS,
     create_convunext,
@@ -275,7 +284,7 @@ def create_convunext_variant(
 # Utility Functions for Deep Supervision
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.deep_supervision import (
+from dl_techniques.utils.deep_supervision import (  # noqa: F401
     get_model_output_info,
     create_inference_model_from_training_model,
 )
