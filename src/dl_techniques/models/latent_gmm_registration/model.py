@@ -3,13 +3,26 @@ Latent-GMM Point Cloud Registration model.
 
 ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10):
     The weighted-Procrustes rotation solver in the forward path uses
-    ``tf.linalg.svd`` / ``tf.linalg.det`` / ``tf.linalg.diag`` to recover the
-    optimal rigid rotation from the cross-covariance matrix. This cannot migrate
-    to ``keras.ops``: there is no ``keras.ops.svd`` (nor a backend-agnostic
-    determinant/diag-construct path suitable here), so the SVD-based closed-form
-    rotation is not expressible without the raw ``tf.linalg`` ops. The raw-TF
-    linear-algebra path is therefore an accepted, documented exception to the
-    keras.ops-only (H10) rule for the forward pass.
+    ``tf.linalg.svd`` / ``tf.linalg.diag`` to recover the
+    optimal rigid rotation from the cross-covariance matrix.
+
+    CORRECTED 2026-08-20 (step 19.1, D-083). The previous wording here --
+    "there is no ``keras.ops.svd``" -- is FALSE and was never re-measured:
+    ``keras.ops.svd``, ``keras.ops.det`` and ``keras.ops.diag`` all exist in
+    Keras 3.8. What is true is narrower, and it is the reason two of the three
+    calls stay raw:
+
+    * ``ops.svd`` is batched, but returns ``(u, s, vh)`` where
+      ``tf.linalg.svd`` returns ``(s, u, v)`` -- a different tuple ORDER and a
+      transposed third factor. Mis-binding that tuple is the exact defect
+      ``D-001`` records at this site.
+    * ``ops.diag`` is NOT batched: for a ``(B, 3)`` input it returns ``(3,)``
+      where ``tf.linalg.diag`` returns ``(B, 3, 3)``.
+    * ``ops.det`` IS a drop-in and HAS been migrated.
+
+    The two remaining raw ``tf.linalg`` calls are therefore an accepted,
+    documented exception to the keras.ops-only (H10) rule for the forward pass
+    -- on the measured semantics above, not on an availability claim.
 
 FLOAT32 ONLY -- this model does NOT run under ``mixed_float16``.
     MEASURED (2026-08-19, TF 2.18 / Keras 3.8, RTX 4070 and CPU): a single
@@ -34,6 +47,7 @@ FLOAT32 ONLY -- this model does NOT run under ``mixed_float16``.
 
 import keras
 import tensorflow as tf
+from keras import ops
 from typing import Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
@@ -573,7 +587,8 @@ def compute_rigid_transform(
     )  # Result: (B, 3, 3)
 
     # H = U * S * V^T; the optimal rotation is R = V * U^T when det(V*U^T) = +1.
-    # Raw tf.linalg is used because keras.ops has no SVD (module docstring §L2-5).
+    # Raw tf.linalg.svd is kept for its TUPLE ORDER, not for availability --
+    # see the module docstring's corrected §L2-5 note.
     # DECISION plan_2026-06-15_00924f53/D-001: tf.linalg.svd returns (s, u, v) with
     # H = u @ diag(s) @ v^T (v is NOT pre-transposed). The original unpack `U,_,Vt`
     # mis-bound s->U and v->Vt, crashing transpose on the rank-2 singular values.
@@ -592,7 +607,14 @@ def compute_rigid_transform(
 
     # det(R) = -1 means a reflection, not a rotation; correct it by flipping the
     # sign of the smallest singular direction.
-    det = tf.linalg.det(R)  # Shape: (B,)
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `ops.det` IS batched and
+    # IS a drop-in here (measured bit-identical). Its two neighbours are not:
+    # `ops.svd` returns `(u, s, vh)` where `tf.linalg.svd` returns `(s, u, v)`
+    # -- a different tuple order AND a transposed third factor, which is exactly
+    # the mistake D-001 records being made at this site once already -- and
+    # `ops.diag` is NOT batched (it returns (3,) for a (B, 3) input where
+    # `tf.linalg.diag` returns (B, 3, 3)).
+    det = ops.det(R)  # Shape: (B,)
 
     # Create correction matrix: diag([1, 1, det(R)])
     # When det(R) = +1, this is identity (no change)

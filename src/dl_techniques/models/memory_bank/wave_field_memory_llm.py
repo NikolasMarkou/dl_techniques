@@ -734,7 +734,10 @@ class WaveFieldMemoryLLM(keras.Model):
         if memory_pairs:
             self.memory_optimizer.apply_gradients(memory_pairs)
 
-        self._global_step.assign_add(tf.constant(1.0, dtype="float32"))
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-083: a plain float, not
+        # `tf.constant`. `assign_add` converts it, and the raw-`tf` spelling
+        # bought nothing.
+        self._global_step.assign_add(1.0)
 
         # B5: dict-keyed forward + dict-keyed compile must work for
         # non-loss metrics. The Keras `CompileMetrics` container expects

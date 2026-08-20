@@ -501,14 +501,22 @@ class TheraHypernetwork(keras.layers.Layer):
         # full Jacobian; batch_jacobian computes only the per-pixel blocks).
         out_dim = self.out_dim
         hidden = self.hidden_dim
-        flat = tf.shape(rel)  # (B, Hq, Wq, 2)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `keras.ops`, not raw
+        # `tf`, for the shape arithmetic. `ops.shape` returns a TUPLE whose
+        # entries are ints where the dimension is static and tensors where it is
+        # dynamic, so the pieces below are assembled with Python tuple
+        # concatenation rather than `tf.concat` -- there is no tensor to
+        # concatenate. Only the `GradientTape` below stays raw: it is the
+        # documented exception (module docstring), because `keras.ops` has no
+        # `batch_jacobian`.
+        flat = ops.shape(rel)  # (B, Hq, Wq, 2)
         n = flat[0] * flat[1] * flat[2]
 
         rel_flat = ops.reshape(rel, (n, 2))  # (N, 2)
         phase_flat = ops.reshape(phi_phase, (n, hidden))  # (N, hidden)
         kernel_flat = ops.reshape(phi_kernel, (n, hidden, out_dim))  # (N, hidden, out)
         # t=0 broadcast to every pixel: (N, 1) zeros -> envelope == 1.
-        t_zero = tf.zeros((n, 1), dtype=rel_flat.dtype)
+        t_zero = ops.zeros((n, 1), dtype=rel_flat.dtype)
 
         # persistent=True is REQUIRED by tf: batch_jacobian with
         # experimental_use_pfor=False in eager mode unrolls a per-output loop that
@@ -526,9 +534,7 @@ class TheraHypernetwork(keras.layers.Layer):
         del jac_tape
 
         # Reshape back to (B, Hq, Wq, out_dim, 2).
-        out_shape = tf.concat(
-            [flat[:3], tf.constant([out_dim, 2], dtype=flat.dtype)], axis=0
-        )
+        out_shape = tuple(flat[:3]) + (out_dim, 2)
         jac = ops.reshape(jac_flat, out_shape)
         return out, jac
 

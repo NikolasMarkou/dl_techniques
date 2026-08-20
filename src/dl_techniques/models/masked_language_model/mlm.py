@@ -80,6 +80,7 @@ References:
 
 import keras
 import tensorflow as tf
+from keras import ops
 from typing import Dict, Any, Optional, Union, List, Tuple
 
 # ---------------------------------------------------------------------
@@ -478,12 +479,15 @@ class MaskedLanguageModel(keras.Model):
         loss = loss_fn(y, y_pred)
 
         if sample_weight is not None:
-            sample_weight = tf.cast(sample_weight, dtype=loss.dtype)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `keras.ops` on the
+            # traced path. Only the `GradientTape` in `train_step` stays raw --
+            # it is the documented exception (module docstring line 61).
+            sample_weight = ops.cast(sample_weight, dtype=loss.dtype)
             loss = loss * sample_weight
-            num_masked = tf.maximum(tf.reduce_sum(sample_weight), 1.0)
-            return tf.reduce_sum(loss) / num_masked
+            num_masked = ops.maximum(ops.sum(sample_weight), 1.0)
+            return ops.sum(loss) / num_masked
         else:
-            return tf.reduce_mean(loss)
+            return ops.mean(loss)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the configuration of the model for serialization."""
