@@ -177,6 +177,58 @@ class CausalLanguageModel(keras.Model):
     def metrics(self):
         return [self.loss_tracker, self.acc_metric, self.perplexity_metric]
 
+    def _embedding_variable_of(
+            self, layer: Any
+    ) -> Optional[keras.KerasTensor]:
+        """Return `layer`'s ``(vocab_size, hidden_size)`` variable, or None.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-035
+        SHAPE MATCHING FIRST, attribute names second. Do NOT reintroduce a bare
+        ``layer.weight`` access: ``weight`` is the PyTorch spelling, a Keras
+        ``Embedding`` calls it ``embeddings``, and reading either attribute on
+        an UNBUILT layer raises rather than returning None. That combination
+        made `CausalLanguageModel(backbone=BERT(...))` raise
+        ``AttributeError: 'Embedding' object has no attribute 'weight'`` at
+        construction time for this repository's OWN BERT -- the most obvious
+        backbone there is. Matching on the variable's shape works for a built
+        layer of any provenance and degrades to `None` (weight tying disabled)
+        instead of crashing.
+
+        WHAT THIS DOES NOT FIX, stated so nobody reads the row as closed: with a
+        `BERT` backbone the locator still finds nothing when `build()` calls it,
+        because `BERT` implements no ``build()`` at all and is therefore marked
+        built while creating ZERO variables (Keras says so in a
+        ``UserWarning``). Weight tying -- which is ON BY DEFAULT -- still falls
+        back to an untied ``Dense``. MEASURED: after a full forward pass
+        ``embedding_weights`` is None and ``use_weight_tying`` is False, while
+        calling ``_locate_embedding_weights()`` at that same moment RETURNS the
+        matrix. The locator was never wrong; it is called before anything exists
+        to find. Closing that needs ``BERT.build``, which is the R-002 family
+        routed to step 18, not a change here. It is pinned by an
+        ``xfail(strict=True)`` in
+        ``tests/test_models/test_masked_language_model/test_the_embedding_locator_finds_a_keras_embedding.py``.
+        See decisions.md D-035.
+
+        Interface contract (2 callers by design):
+            :param layer: Any object that may own the token-embedding variable.
+            :returns: The variable whose shape is exactly
+                ``(vocab_size, hidden_size)``, else the value of a
+                ``embeddings`` / ``weight`` attribute if one is readable, else
+                ``None``.
+            :raises: Nothing. An unreadable attribute is treated as absent.
+        """
+        for variable in getattr(layer, "variables", ()):  # built layers only
+            if tuple(variable.shape) == (self.vocab_size, self.hidden_size):
+                return variable
+        for attribute in ("embeddings", "weight"):
+            try:
+                value = getattr(layer, attribute)
+            except (AttributeError, ValueError):
+                continue
+            if value is not None:
+                return value
+        return None
+
     def _locate_embedding_weights(self) -> Optional[keras.KerasTensor]:
         """Attempts to find the embedding weights in the backbone."""
         # 1. Explicit Method
@@ -185,22 +237,21 @@ class CausalLanguageModel(keras.Model):
 
         # 2. Token Embeddings Layer (KerasNLP / Custom)
         if hasattr(self.backbone, "token_embeddings"):
-            layer = self.backbone.token_embeddings
-            if hasattr(layer, "variables"):
-                for v in layer.variables:
-                    if v.shape == (self.vocab_size, self.hidden_size):
-                        return v
-            if hasattr(layer, "embeddings"):
-                return layer.embeddings
-            if hasattr(layer, "weight"):
-                return layer.weight
+            located = self._embedding_variable_of(self.backbone.token_embeddings)
+            if located is not None:
+                return located
 
         # 3. HF Style
-        if hasattr(self.backbone, "embeddings"):
-            if hasattr(self.backbone.embeddings, "word_embeddings"):
-                return self.backbone.embeddings.word_embeddings.weight
-            if hasattr(self.backbone.embeddings, "weight"):
-                return self.backbone.embeddings.weight
+        embeddings = getattr(self.backbone, "embeddings", None)
+        if embeddings is not None:
+            word_embeddings = getattr(embeddings, "word_embeddings", None)
+            if word_embeddings is not None:
+                located = self._embedding_variable_of(word_embeddings)
+                if located is not None:
+                    return located
+            located = self._embedding_variable_of(embeddings)
+            if located is not None:
+                return located
 
         return None
 
@@ -396,9 +447,28 @@ class CausalLanguageModel(keras.Model):
             sequence_output = backbone_outputs["last_hidden_state"]
             logits = self._apply_output_head(sequence_output)
             loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
+            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
+            # the SCALED value is what `tape.gradient` differentiates while the
+            # UNSCALED value is what is reported. Do NOT "simplify" this back
+            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
+            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
+            # every gradient by `dynamic_scale` (2**15 initially)
+            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
+            # precision -- it divides the whole update by the loss scale, with
+            # no warning of any kind. In float32 it is a provable no-op: the
+            # base `Optimizer.scale_loss` returns `loss` unchanged unless
+            # `loss_scale_factor` is set. Keras' own default TF `train_step`
+            # does exactly this; overriding `train_step` silently opts out.
+            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
+            # float32 1.859214e+01 vs mixed_float16 6.757726e-04, ratio
+            # 2.7513e+04, on a REAL BERT backbone
+            # See decisions.md D-036, and the same ruling at
+            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            scaled_loss = self.optimizer.scale_loss(loss)
 
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
+        gradients = tape.gradient(scaled_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         self.loss_tracker.update_state(loss)

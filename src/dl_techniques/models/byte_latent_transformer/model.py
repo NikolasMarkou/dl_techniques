@@ -537,9 +537,27 @@ class ByteLatentTransformer(keras.Model):
 
             # Compute loss with proper masking
             loss = self._compute_masked_loss(y, logits, sample_weight)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
+            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
+            # the SCALED value is what `tape.gradient` differentiates while the
+            # UNSCALED value is what is reported. Do NOT "simplify" this back
+            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
+            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
+            # every gradient by `dynamic_scale` (2**15 initially)
+            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
+            # precision -- it divides the whole update by the loss scale, with
+            # no warning of any kind. In float32 it is a provable no-op: the
+            # base `Optimizer.scale_loss` returns `loss` unchanged unless
+            # `loss_scale_factor` is set. Keras' own default TF `train_step`
+            # does exactly this; overriding `train_step` silently opts out.
+            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
+            # float32 2.156337e+03 vs mixed_float16 1.294069e-01, ratio 1.666e+04
+            # See decisions.md D-036, and the same ruling at
+            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            scaled_loss = self.optimizer.scale_loss(loss)
 
         # Compute gradients
-        gradients = tape.gradient(loss, self.trainable_variables)
+        gradients = tape.gradient(scaled_loss, self.trainable_variables)
 
         # Apply gradients
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
