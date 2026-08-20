@@ -102,8 +102,16 @@ class ComplexLayer(keras.layers.Layer):
     and i is the imaginary unit. Operations are performed using split real/imaginary
     arithmetic to maintain numerical stability and computational efficiency.
 
-        :param epsilon: Float, small value added for numerical stability in division operations.
-            Prevents catastrophic cancellation and division by zero. Defaults to 1e-7.
+        :param epsilon: **INERT.** Accepted, validated (must be positive) and
+            serialized for config compatibility, but read by NO computation in
+            this module. It is kept because existing ``.keras`` files carry it in
+            their layer configs; it is not a numerical-stability knob. MEASURED
+            under a same-weights protocol on ``CoShNet``: ``1e-7`` vs ``1e+3``
+            and ``1e-7`` vs ``1e-30`` both move the output by exactly
+            ``0.000000e+00``, against three live controls on the same model
+            (``dropout_rate`` ``3.54e-01``, ``conv_filters`` ``2.48e-01`` plus a
+            parameter-count change, ``include_top`` structural). Defaults to
+            1e-7. See the ``DECISION`` anchor on ``self.epsilon`` below.
         :param kernel_regularizer: Optional regularizer instance for kernel weights.
             Applied to both real and imaginary parts of complex weights.
             Defaults to None (no regularization).
@@ -128,6 +136,18 @@ class ComplexLayer(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
         # Store configuration
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-053
+        # `epsilon` is an INERT knob and is deliberately left that way. There is
+        # no division anywhere in this module for it to guard: `grep -n
+        # "self.epsilon"` over this file returns exactly this line and the one in
+        # `get_config`. Do NOT "wire it up" to the first division you can find —
+        # inventing a consumer would change the numerics of every existing
+        # `CoShNet` checkpoint to satisfy a docstring. Do NOT delete the
+        # parameter either: `from_config` on every saved complex layer passes
+        # `epsilon=`, so removing it turns every existing `.keras` file into a
+        # `TypeError`. The docstring above now states the measurement instead of
+        # promising a behaviour. See decisions.md D-053.
         self.epsilon = epsilon
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer or keras.initializers.GlorotUniform()

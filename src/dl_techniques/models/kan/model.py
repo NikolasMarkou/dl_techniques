@@ -150,11 +150,48 @@ class KAN(keras.Model):
             **kwargs
         )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-052
+        # `grids_adapted` is REAL, INSPECTABLE STATE, not decoration. A KAN built
+        # at the documented defaults and trained without a grid pass is a CONSTANT
+        # FUNCTION — measured: output exactly `1/output_features` for every input,
+        # `std == 0.0` over the batch, and 0 of 12 trainable weights receiving a
+        # non-zero gradient; the same model after `update_kan_grids` is 12 of 12.
+        # That state is pinned by `tests/test_models/test_kan/test_model.py`'s
+        # `xfail(strict=True)` pair and is NOT re-litigated here. What this flag
+        # closes is the SILENCE: the failure mode is a flat loss curve with no
+        # error, so the untrainable state is now readable from the object and
+        # announced once at construction. Do NOT set this to `True` anywhere but
+        # `update_kan_grids`, and do NOT "fix" the constant-function finding by
+        # flipping an initializer: the spline basis is identically zero after
+        # layer 0 because the activations leave `grid_range`, so symmetry
+        # breaking alone would leave the spline weights just as dead.
+        # See decisions.md D-052.
+        self._grids_adapted = False
+
         self._log_model_creation()
+
+    @property
+    def grids_adapted(self) -> bool:
+        """Whether ``update_kan_grids`` has been run on this instance.
+
+        ``False`` on a freshly constructed model. A KAN whose knot grids have not
+        been fitted to the data is not merely under-tuned — at the documented
+        defaults it is a constant function with identically-zero gradients — so
+        this is a training precondition, not a tuning knob.
+        """
+        return self._grids_adapted
 
     def _log_model_creation(self):
         structure = [str(self.input_features)] + [str(cfg['features']) for cfg in self.layer_configs]
         logger.info(f"Created KAN model: {' -> '.join(structure)} ({self.num_layers} layers)")
+        logger.warning(
+            "KAN knot grids are NOT yet adapted to your data. Call "
+            "`model.update_kan_grids(x_sample)` before training: at the "
+            "documented defaults an unadapted KAN is a CONSTANT FUNCTION "
+            "(output exactly 1/output_features, 0 of 12 trainable weights "
+            "receiving a non-zero gradient), and it fails as a flat loss curve "
+            "with no error. `model.grids_adapted` reports this state."
+        )
 
     def _validate_and_copy_configs(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         validated_configs = []
@@ -231,6 +268,7 @@ class KAN(keras.Model):
         for layer, data in zip(kan_layers, intermediate_values):
             layer.update_grid_from_samples(data)
             
+        self._grids_adapted = True
         logger.info(f"Updated grids for {len(kan_layers)} KAN layers.")
 
     def load_pretrained_weights(
@@ -567,10 +605,24 @@ def create_kan_model(
         **model_kwargs: Additional model arguments.
 
     Returns:
-        Uncompiled KAN model.
+        Uncompiled KAN model whose knot grids are NOT yet adapted
+        (``model.grids_adapted is False``).
 
     Raises:
         NotImplementedError: If pretrained is True.
+
+    Warning:
+        The returned model **cannot be trained as-is at these defaults.**
+        ``KANLinear`` sums over the input axis, so activations grow roughly 30x
+        per layer and leave ``grid_range=(-2.0, 2.0)`` after the first layer; the
+        B-spline basis is then identically zero and, with ``base_scaler``
+        initialized to the constant 1.0, every output unit computes the same
+        value. Measured on the documented defaults: the output is exactly
+        ``1 / output_features`` for every input with ``std == 0.0``, and 0 of 12
+        trainable weights receive a non-zero gradient. Call
+        :meth:`KAN.update_kan_grids` with a representative sample first — after
+        it, the same model has 12 of 12 live gradients. This is setup, not
+        tuning.
     """
     return KAN.from_variant(
         variant=variant,
