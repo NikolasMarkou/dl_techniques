@@ -28,6 +28,7 @@ from typing import Optional, Union, Tuple, List, Dict, Any, Callable
 # ---------------------------------------------------------------------
 
 from ..ffn import create_ffn_layer
+from ...initializers import clone_initializer
 from ..transformers import TransformerLayer
 from ..norms import create_normalization_layer
 
@@ -389,10 +390,19 @@ class RELGTTokenEncoder(keras.layers.Layer):
             name="HopEncoder",
         )
 
-        # 4. Time Encoder
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
+        # `TimeEncoder` and `PEProjection` get CLONES; `FeatureEncoder` keeps
+        # the stored instance so `get_config` still reports what the caller
+        # passed. All three project INTO `embedding_dim` from different sources
+        # -- raw node features, relative time, and the GNN positional encoding
+        # -- so whenever two of those source dims coincide the shared seedless
+        # instance made them the same function. MEASURED at the audit's
+        # construction (`embedding_dim=32, ffn_dim=32, gnn_pe_dim=8`, feature
+        # dim 8): `FeatureEncoder/kernel == PEProjection/kernel` at (8, 32).
+        # See decisions.md D-070.
         self.time_encoder = keras.layers.Dense(
             embedding_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="TimeEncoder",
         )
 
@@ -403,7 +413,7 @@ class RELGTTokenEncoder(keras.layers.Layer):
         ]
         self.pe_projection = keras.layers.Dense(
             embedding_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="PEProjection",
         )
 

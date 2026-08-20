@@ -129,6 +129,7 @@ from dl_techniques.utils.clip_utils import (
 )
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 
 # ---------------------------------------------------------------------------
 
@@ -153,6 +154,21 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 
 # ---------------------------------------------------------------------------
 
+# DECISION plan-2026-08-19T163559-499b6f0e/D-072
+# This is ONE module-level `Initializer` INSTANCE used as a default argument, so
+# every `CliffordCLIP` in the process -- and every sub-layer inside one -- was
+# handed the same seedless object, which replays its draw. MEASURED on
+# `CliffordCLIP.from_variant("nano", image_size=64, context_length=16,
+# vision_patch_size=4)`: **763 bit-identical same-size weight pairs of 137
+# non-constant tensors**, including
+# `vision_clifford_block_0/linear_det/kernel == text_clifford_block_0/linear_det/kernel`
+# -- the two TOWERS starting as the same function, which is the most extreme
+# different-role collision D-057 convicts anywhere in the tree.
+#
+# The constant STAYS (it is the documented 0.02 truncated-normal default, and
+# `get_config` must keep reporting it), but EVERY consumer below now takes
+# `clone_initializer(...)`. Do NOT pass this object straight to a sub-layer, and
+# do NOT "simplify" the clones away. See decisions.md D-072.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 _LN_EPS: float = 1e-6
 
@@ -593,7 +609,7 @@ class CliffordCLIP(keras.Model):
     def _dense_kwargs(self) -> Dict[str, Any]:
         return dict(
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -613,7 +629,7 @@ class CliffordCLIP(keras.Model):
         when it differs from ``2 * src``.
         """
         _conv_kw: Dict[str, Any] = dict(
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -723,7 +739,7 @@ class CliffordCLIP(keras.Model):
                 use_global_context=self.vision_use_global_context,
                 layer_scale_init=self.layer_scale_init,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
@@ -760,7 +776,7 @@ class CliffordCLIP(keras.Model):
                 PatchMerging(
                     dim=src_c,
                     use_bias=self.use_bias,
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     bias_initializer=self.bias_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     bias_regularizer=self.bias_regularizer,
@@ -772,7 +788,7 @@ class CliffordCLIP(keras.Model):
                     keras.layers.Dense(
                         dst_c,
                         use_bias=self.use_bias,
-                        kernel_initializer=self.kernel_initializer,
+                        kernel_initializer=clone_initializer(self.kernel_initializer),
                         bias_initializer=self.bias_initializer,
                         kernel_regularizer=self.kernel_regularizer,
                         bias_regularizer=self.bias_regularizer,
@@ -802,13 +818,13 @@ class CliffordCLIP(keras.Model):
         self.token_embedding = keras.layers.Embedding(
             self.vocab_size,
             self.text_channels,
-            embeddings_initializer=_DEFAULT_KERNEL_INIT,
+            embeddings_initializer=clone_initializer(_DEFAULT_KERNEL_INIT),
             name="token_embedding",
         )
         self.position_embedding = keras.layers.Embedding(
             self.context_length,
             self.text_channels,
-            embeddings_initializer=_DEFAULT_KERNEL_INIT,
+            embeddings_initializer=clone_initializer(_DEFAULT_KERNEL_INIT),
             name="position_embedding",
         )
         self.text_embed_norm = keras.layers.LayerNormalization(
@@ -829,7 +845,7 @@ class CliffordCLIP(keras.Model):
             use_global_context=self.text_use_global_context,
             layer_scale_init=self.layer_scale_init,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -898,7 +914,7 @@ class CliffordCLIP(keras.Model):
                 strategy="attention",
                 attention_hidden_dim=self.vision_channels,
                 attention_num_heads=1,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 name="vision_ctx_pool",
             )
         else:  # plain — vision anchor is z_det (mean); no context pool.
@@ -917,7 +933,7 @@ class CliffordCLIP(keras.Model):
                     strategy="attention",
                     attention_hidden_dim=self.text_channels,
                     attention_num_heads=1,
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     name="text_ctx_pool",
                 )
             else:  # mean_max — text z_ctx is last_feat; no context pool.
@@ -935,7 +951,7 @@ class CliffordCLIP(keras.Model):
                 shifts=v_head_shifts,
                 cli_mode=self.head_cli_mode,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
@@ -946,7 +962,7 @@ class CliffordCLIP(keras.Model):
                 shifts=t_head_shifts,
                 cli_mode=self.head_cli_mode,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,

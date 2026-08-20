@@ -58,6 +58,7 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 # Local imports - assumed to exist as per instructions
 # ---------------------------------------------------------------------
 from ..utils.logger import logger
+from ..initializers import clone_initializer
 from .yolo12_blocks import ConvBlock
 from .squeeze_excitation import SqueezeExcitation
 
@@ -201,25 +202,40 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 
             logger.info(f"Scale {i}: input_channels={in_channels}, bbox_channels={bbox_c}, cls_channels={cls_c}")
 
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-071
+            # Every one of the eight consumers below takes a CLONE, not
+            # `self.kernel_initializer`. One shared instance is handed to the
+            # bbox branch and the cls branch of all three scales, and MEASURED
+            # on `create_yolov12_multitask(scale='n', input_shape=(64,64,3))`
+            # that produced 161 bit-identical same-size weight pairs of 140
+            # non-constant tensors. 155 of those are SAME-role
+            # (`conv/kernel` against `conv/kernel`), which D-057 does not
+            # convict -- but SIX are DIFFERENT-role, all here:
+            # `bbox_N_pred/kernel` against `cls_0_pw{1,2}/conv/kernel`, i.e.
+            # the box-regression head and the classification head starting as
+            # the same function. The clone is applied to all eight rather than
+            # to seven, because the loop runs three times and cloning "all but
+            # the first" would still tie scale 0's first layer to scale 1's.
+            # See decisions.md D-071.
             # Populate bbox branch layers
             self.bbox_branches[i].add(ConvBlock(
                 filters=bbox_c,
                 kernel_size=3,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_conv1"
             ))
             self.bbox_branches[i].add(ConvBlock(
                 filters=bbox_c,
                 kernel_size=3,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_conv2"
             ))
             self.bbox_branches[i].add(keras.layers.Conv2D(
                 filters=4 * self.reg_max,
                 kernel_size=1,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_pred"
             ))
@@ -229,14 +245,14 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 filters=in_channels,
                 kernel_size=3,
                 groups=in_channels,  # Depthwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_dw1"
             ))
             self.cls_branches[i].add(ConvBlock(
                 filters=cls_c,
                 kernel_size=1,  # Pointwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pw1"
             ))
@@ -244,21 +260,21 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 filters=cls_c,
                 kernel_size=3,
                 groups=cls_c,  # Depthwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_dw2"
             ))
             self.cls_branches[i].add(ConvBlock(
                 filters=cls_c,
                 kernel_size=1,  # Pointwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pw2"
             ))
             self.cls_branches[i].add(keras.layers.Conv2D(
                 filters=self.num_classes,
                 kernel_size=1,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pred"
             ))

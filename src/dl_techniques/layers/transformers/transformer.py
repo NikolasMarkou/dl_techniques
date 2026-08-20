@@ -91,6 +91,7 @@ from ..layer_scale import LearnableMultiplier
 from ..ffn import assemble_ffn_config, create_ffn_from_config, FFNType
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
+from ...initializers import clone_initializer
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -865,6 +866,18 @@ class TransformerLayer(keras.layers.Layer):
         :return: Parameter dictionary for the FFN factory.
         :rtype: Dict[str, Any]
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
+        # The FFN gets a CLONE of the block's initializer, the attention keeps
+        # the stored instance. One shared seedless instance reaching both means
+        # the attention OUTPUT projection and the FFN EXPAND projection are the
+        # same flat draw whenever their shapes coincide -- MEASURED on
+        # `RELGT(embedding_dim=32, ffn_dim=32)`:
+        # `LocalTransformer/attention/cross_attention/proj/kernel ==
+        # LocalTransformer/ffn/fc1/kernel` at (32, 32). Attention output and FFN
+        # input are different architectural roles, which is the D-057 test. The
+        # clone is applied on the FFN side so `_get_attention_params` and
+        # `get_config` still report the instance the caller passed.
+        # See decisions.md D-070.
         return build_transformer_ffn_config(
             ffn_type=self.ffn_type,
             name=name,
@@ -872,7 +885,7 @@ class TransformerLayer(keras.layers.Layer):
             intermediate_size=self.intermediate_size,
             activation=self.activation,
             dropout_rate=self.dropout_rate,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             use_bias=self.use_bias,
             ffn_args=self.ffn_args,

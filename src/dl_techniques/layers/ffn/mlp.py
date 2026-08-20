@@ -67,6 +67,7 @@ from typing import Optional, Union, Any, Dict, Tuple, Callable
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -221,10 +222,20 @@ class MLPBlock(keras.layers.Layer):
             name="fc1"
         )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
+        # `fc2` gets a CLONE. One shared initializer INSTANCE reaches both
+        # `Dense` layers, so whenever `hidden_dim == output_dim` the EXPAND
+        # kernel and the PROJECT kernel are bit-identical -- MEASURED on
+        # `RELGT(embedding_dim=32, ffn_dim=32)`, where
+        # `PredictionFFN/fc1/kernel == fc2/kernel` at (32, 32) even though the
+        # caller passed the STRING `'glorot_uniform'`: `keras.initializers.get`
+        # resolves the string to an instance ONCE, and a shared seedless
+        # instance replays its draw. The string form is NOT a defence here.
+        # See decisions.md D-070.
         self.fc2 = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
