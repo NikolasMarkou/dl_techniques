@@ -221,7 +221,7 @@ class FFTMixer(keras.layers.Layer):
         c = keras.ops.mean(inputs, axis=1)
         delta_W = self.filter_mlp(c)
         delta_W_expanded = keras.ops.expand_dims(delta_W, axis=1)
-        W = self.W_base + delta_W_expanded
+        W = keras.ops.cast(self.W_base, delta_W_expanded.dtype) + delta_W_expanded
         W_complex = keras.ops.cast(W, dtype="complex64")
         F_filtered = F * W_complex
 
@@ -231,7 +231,9 @@ class FFTMixer(keras.layers.Layer):
         # 4. Inverse Fourier Transform (same axis handling as the forward FFT)
         Y_complex = keras.ops.transpose(
             tf.signal.ifft(keras.ops.transpose(F_activated, (0, 2, 1))), (0, 2, 1))
-        Y = keras.ops.real(Y_complex)
+        # ``real()`` of a complex64 tensor is float32; hand the caller the
+        # layer's own compute dtype (a no-op under the float32 policy).
+        Y = keras.ops.cast(keras.ops.real(Y_complex), self.compute_dtype)
 
         # 5. Apply dropout
         Y = self.dropout(Y, training=training)
@@ -240,10 +242,23 @@ class FFTMixer(keras.layers.Layer):
 
     def _apply_modrelu(self, z: keras.KerasTensor) -> keras.KerasTensor:
         """Apply modReLU activation to complex tensor."""
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
+        # ``magnitude`` is float32 by construction -- it is ``abs()`` of a
+        # complex64 tensor and TensorFlow's complex ops have no half-precision
+        # kernel. ``self.modrelu_bias`` is an ordinary autocast weight, so under
+        # ``mixed_float16`` it arrived as float16 and this add raised
+        # ``InvalidArgumentError: cannot compute AddV2``. The bias is lifted TO
+        # the magnitude's dtype, never the magnitude cast DOWN to the bias's:
+        # halving the magnitude would put the modReLU threshold and the
+        # ``1e-8`` floor two lines below on different scales (float16 cannot
+        # represent 1e-8 at all -- it is exactly 0.0). The sibling ``eps`` at
+        # :252 already pins float32 for that reason. See decisions.md D-054.
         magnitude = keras.ops.abs(z)
 
         if self.modrelu_bias is not None:
-            magnitude_biased = magnitude + self.modrelu_bias
+            magnitude_biased = magnitude + keras.ops.cast(
+                self.modrelu_bias, magnitude.dtype
+            )
         else:
             magnitude_biased = magnitude
 

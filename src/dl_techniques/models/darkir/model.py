@@ -397,7 +397,18 @@ class FreMLP(keras.layers.Layer):
         # the spatial (H, W) dims by moving them last: NHWC -> NCHW.
 
         # 1. FFT over spatial dimensions (H, W). Input is real -> zero imag part.
-        x_t = ops.transpose(x, (0, 3, 1, 2))           # (B, C, H, W)
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
+        # The whole spectral section (steps 1, 2, 4 and 5) is a float32 ISLAND.
+        # TensorFlow has no float16 kernel for ``fft2``/``ifft2``, so under
+        # ``mixed_float16`` this raised ``TypeError: the `real` and `imag`
+        # components have incorrect types: float16 float16``. Only step 3 -- the
+        # 1x1-conv MLP, whose weights autocast -- runs at ``compute_dtype``, so
+        # the magnitude is cast DOWN before the convs and back UP after them.
+        # Do NOT collapse the two casts by running the convs in float32: that
+        # would silently opt the layer's only matmuls out of mixed precision.
+        # See decisions.md D-054.
+        x_t = ops.transpose(ops.cast(x, "float32"), (0, 3, 1, 2))  # (B, C, H, W)
         freq_real, freq_imag = ops.fft2((x_t, ops.zeros_like(x_t)))
 
         # 2. Magnitude (phase is retained implicitly via the unit phasor below).
@@ -405,11 +416,15 @@ class FreMLP(keras.layers.Layer):
 
         # 3. Process the magnitude spectrum through the 1x1-conv MLP, which
         # operates channels-last; transpose to NHWC and back.
-        mag_nhwc = ops.transpose(mag, (0, 2, 3, 1))    # (B, H, W, C)
+        mag_nhwc = ops.cast(
+            ops.transpose(mag, (0, 2, 3, 1)), self.compute_dtype
+        )                                              # (B, H, W, C)
         mag_nhwc = self.conv1(mag_nhwc)
         mag_nhwc = self.act(mag_nhwc)
         mag_nhwc = self.conv2(mag_nhwc)
-        mag_proc = ops.transpose(mag_nhwc, (0, 3, 1, 2))  # (B, C, H, W)
+        mag_proc = ops.cast(
+            ops.transpose(mag_nhwc, (0, 3, 1, 2)), "float32"
+        )                                              # (B, C, H, W)
 
         # 4. Reconstruct with the original phase: scale the unit phasor
         # (freq / |freq|) by the processed magnitude. Guard the divide.
@@ -421,7 +436,9 @@ class FreMLP(keras.layers.Layer):
         # keeps the Hermitian symmetry of a real signal (the 1x1 conv acts
         # identically on conjugate-pair bins), so the real part is the output.
         spatial_real, _ = ops.ifft2((out_real, out_imag))  # (B, C, H, W)
-        return ops.transpose(spatial_real, (0, 2, 3, 1))   # (B, H, W, C)
+        return ops.cast(
+            ops.transpose(spatial_real, (0, 2, 3, 1)), self.compute_dtype
+        )                                                  # (B, H, W, C)
 
     def compute_output_shape(
         self,
