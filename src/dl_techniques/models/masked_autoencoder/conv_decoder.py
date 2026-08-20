@@ -79,48 +79,63 @@ class ConvDecoder(keras.layers.Layer):
         self.use_batch_norm = use_batch_norm
         self.final_activation = final_activation
 
-        # CREATE all sub-layers in __init__
-        self.decoder_blocks = []
+        # CREATE all sub-layers in __init__.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-026
+        # These are SIX FLAT, PARALLEL LISTS -- one list per role, indexed by
+        # block -- and NOT the obvious `self.decoder_blocks = [{"upsample": ...,
+        # "refine": ...}, ...]`. Do NOT "tidy" them back into a list of dicts (or
+        # a list of lists): Keras 3.8 does not write a layer container nested two
+        # or more levels deep to `model.weights.h5` when its owner is a
+        # `keras.layers.Layer`. It DOES write the identical container when the
+        # owner is a `keras.Model`, which is why the same shape is harmless in
+        # `models/accunet/model.py:304` and `models/cliffordnet/model.py:352`.
+        # MEASURED on this exact class: the list-of-dicts form put 11 of 51
+        # tensors and 98,403 of 329,827 parameters into the archive -- every
+        # decoder conv kernel and all 32 BatchNorm tensors silently absent, and
+        # only 8 of 51 tensors surviving a perturb / save / reload comparison.
+        # See decisions.md D-026 and REF-9 in findings/audit-batch-6.md.
+        self.upsample_convs: List[keras.layers.Layer] = []
+        self.norm_upsamples: List[keras.layers.Layer] = []
+        self.act_upsamples: List[keras.layers.Layer] = []
+        self.refine_convs: List[keras.layers.Layer] = []
+        self.norm_refines: List[keras.layers.Layer] = []
+        self.act_refines: List[keras.layers.Layer] = []
 
         for i, dim in enumerate(decoder_dims):
             # 1. Upsampling Layer
-            upsample_conv = keras.layers.Conv2DTranspose(
+            self.upsample_convs.append(keras.layers.Conv2DTranspose(
                 filters=dim,
                 kernel_size=2,
                 strides=2,
                 padding="same",
                 use_bias=not use_batch_norm,
                 name=f"decoder_upsample_{i}"
-            )
+            ))
 
             # 2. Refinement Layer
-            refine_conv = keras.layers.Conv2D(
+            self.refine_convs.append(keras.layers.Conv2D(
                 filters=dim,
                 kernel_size=kernel_size,
                 padding="same",
                 use_bias=not use_batch_norm,
                 name=f"decoder_refine_{i}"
-            )
+            ))
 
-            # 3. Normalization Layers
-            norm_upsample = None
-            norm_refine = None
+            # 3. Normalization Layers -- both lists stay EMPTY when
+            #    `use_batch_norm` is False, so no `None` ever enters a tracked
+            #    container.
             if use_batch_norm:
-                norm_upsample = keras.layers.BatchNormalization(name=f"decoder_bn_{i}")
-                norm_refine = keras.layers.BatchNormalization(name=f"decoder_refine_bn_{i}")
+                self.norm_upsamples.append(
+                    keras.layers.BatchNormalization(name=f"decoder_bn_{i}"))
+                self.norm_refines.append(
+                    keras.layers.BatchNormalization(name=f"decoder_refine_bn_{i}"))
 
             # 4. Activation Layers (Stateless, but good to instantiate for config)
-            act_upsample = keras.layers.Activation(activation, name=f"decoder_act_{i}")
-            act_refine = keras.layers.Activation(activation, name=f"decoder_refine_act_{i}")
-
-            self.decoder_blocks.append({
-                "upsample": upsample_conv,
-                "norm_upsample": norm_upsample,
-                "act_upsample": act_upsample,
-                "refine": refine_conv,
-                "norm_refine": norm_refine,
-                "act_refine": act_refine
-            })
+            self.act_upsamples.append(
+                keras.layers.Activation(activation, name=f"decoder_act_{i}"))
+            self.act_refines.append(
+                keras.layers.Activation(activation, name=f"decoder_refine_act_{i}"))
 
         # Final projection to output channels
         self.final_conv = keras.layers.Conv2D(
@@ -137,6 +152,37 @@ class ConvDecoder(keras.layers.Layer):
                 name="decoder_final_activation"
             )
 
+    @property
+    def num_blocks(self) -> int:
+        """Number of upsampling blocks, i.e. ``len(decoder_dims)``."""
+        return len(self.upsample_convs)
+
+    def decoder_block(self, index: int) -> Dict[str, Optional[keras.layers.Layer]]:
+        """Return one decoder block as a role-keyed view over the flat lists.
+
+        This is the read-only accessor that replaces the former
+        ``self.decoder_blocks[index]`` dict. The layers themselves live in six
+        flat, per-role lists (see the note in ``__init__``); this method only
+        assembles a view of them and must never be used to STORE a layer, which
+        would re-create the nested container the flat lists exist to avoid.
+
+        Args:
+            index: Block index in ``[0, num_blocks)``.
+
+        Returns:
+            Mapping with keys ``upsample``, ``norm_upsample``, ``act_upsample``,
+            ``refine``, ``norm_refine``, ``act_refine``. The two ``norm_*``
+            values are ``None`` when ``use_batch_norm`` is False.
+        """
+        return {
+            "upsample": self.upsample_convs[index],
+            "norm_upsample": self.norm_upsamples[index] if self.use_batch_norm else None,
+            "act_upsample": self.act_upsamples[index],
+            "refine": self.refine_convs[index],
+            "norm_refine": self.norm_refines[index] if self.use_batch_norm else None,
+            "act_refine": self.act_refines[index],
+        }
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build decoder sub-layers explicitly using the input shape.
 
@@ -145,22 +191,22 @@ class ConvDecoder(keras.layers.Layer):
         """
         current_shape = input_shape
 
-        for block in self.decoder_blocks:
+        for i in range(self.num_blocks):
             # Build Upsample
-            block["upsample"].build(current_shape)
-            current_shape = block["upsample"].compute_output_shape(current_shape)
+            self.upsample_convs[i].build(current_shape)
+            current_shape = self.upsample_convs[i].compute_output_shape(current_shape)
 
-            if block["norm_upsample"]:
-                block["norm_upsample"].build(current_shape)
+            if self.use_batch_norm:
+                self.norm_upsamples[i].build(current_shape)
 
             # Activation doesn't change shape
 
             # Build Refine
-            block["refine"].build(current_shape)
-            current_shape = block["refine"].compute_output_shape(current_shape)
+            self.refine_convs[i].build(current_shape)
+            current_shape = self.refine_convs[i].compute_output_shape(current_shape)
 
-            if block["norm_refine"]:
-                block["norm_refine"].build(current_shape)
+            if self.use_batch_norm:
+                self.norm_refines[i].build(current_shape)
 
         # Build Final Projection
         self.final_conv.build(current_shape)
@@ -180,18 +226,18 @@ class ConvDecoder(keras.layers.Layer):
         """
         x = inputs
 
-        for block in self.decoder_blocks:
+        for i in range(self.num_blocks):
             # Upsample Phase
-            x = block["upsample"](x)
-            if block["norm_upsample"]:
-                x = block["norm_upsample"](x, training=training)
-            x = block["act_upsample"](x)
+            x = self.upsample_convs[i](x)
+            if self.use_batch_norm:
+                x = self.norm_upsamples[i](x, training=training)
+            x = self.act_upsamples[i](x)
 
             # Refine Phase
-            x = block["refine"](x)
-            if block["norm_refine"]:
-                x = block["norm_refine"](x, training=training)
-            x = block["act_refine"](x)
+            x = self.refine_convs[i](x)
+            if self.use_batch_norm:
+                x = self.norm_refines[i](x, training=training)
+            x = self.act_refines[i](x)
 
         # Final Projection
         x = self.final_conv(x)
