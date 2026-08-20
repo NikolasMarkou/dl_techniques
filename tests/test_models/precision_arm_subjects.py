@@ -42,7 +42,9 @@ from typing import Any, Callable, Dict, Tuple
 import numpy as np
 
 
-__all__ = ["CHARGED_PACKAGES", "SUBJECTS", "subject_names"]
+__all__ = ["CHARGED_PACKAGES", "SUBJECTS", "subject_names",
+           "XLA_OVERRIDES", "xla_subject",
+           "FLOAT64_CHARGED", "FLOAT64_OVERRIDES", "float64_subject"]
 
 
 #: Every package the audit charged with R-088 / R-141 and that step 18 left
@@ -347,7 +349,18 @@ def _b_gemma():
                   ffn_hidden_size=64, max_seq_len=32, sliding_window_size=8)
 
 
-_sub("gemma", _b_gemma, lambda: _ids(256, 2, 16))
+# ``_ids(64, ...)``, not ``_ids(256, ...)``: this subject's ``vocab_size`` is 64.
+#
+# DECISION plan-2026-08-19T163559-499b6f0e/D-076
+# The original ``_ids(256, 2, 16)`` fed token ids up to 255 to a 64-row
+# embedding table. Out-of-bounds gather is NOT an error on either backend, and
+# eager-GPU and XLA resolve it DIFFERENTLY, so the R-143 arm read a spurious
+# eager-vs-XLA divergence of 3.238814e-01 against an ``absmax`` of 3.200422e-01
+# -- a "defect" larger than the signal. With in-range ids the same measurement
+# is 3.565848e-04, a factor of ~900. The fp16 arm was gathering the same
+# garbage. Keep every ``_ids`` bound equal to its subject's ``vocab_size``.
+# See decisions.md D-076.
+_sub("gemma", _b_gemma, lambda: _ids(64, 2, 16))
 
 
 def _b_qwen():
@@ -358,7 +371,11 @@ def _b_qwen():
                      moe_intermediate_size=32)
 
 
-_sub("qwen", _b_qwen, lambda: _ids(256, 2, 16))
+# DECISION plan-2026-08-19T163559-499b6f0e/D-076
+# ``_ids(64, ...)``: same correction as ``gemma``. MEASURED eager-vs-XLA
+# 4.184644e-01 with out-of-range ids against 4.322007e-04 with in-range ones.
+# Every ``_ids`` bound must equal its subject's ``vocab_size``.
+_sub("qwen", _b_qwen, lambda: _ids(64, 2, 16))
 
 
 def _b_blt():
@@ -763,3 +780,191 @@ def _b_time_series():
 
 
 _sub("time_series", _b_time_series, lambda: _f32(2, 16, 1))
+
+
+# ===========================================================================
+# R-143 -- the graph / XLA equivalence arm's per-subject deviations
+# ===========================================================================
+#
+# The XLA arm reuses the table above: same builders, same inputs, same
+# ``call_fn``, and ``forward_training`` carried over as ``training``. Only the
+# entries below deviate, and each names the measurement that made it deviate.
+# Everything not listed here runs the default arm at ``rtol=1e-2``, which the
+# whole-registry sweep clears with roughly 2.7x margin (the largest relative
+# eager-vs-XLA delta over the 51 compiling subjects is ``lewm``'s 3.6e-3).
+
+def _b_sam_training_model():
+    """``SAMTrainingModel``, not ``SAM`` -- the traceable half of the package.
+
+    MEASURED: ``SAM.call`` raises under ``tf.function`` at ``jit_compile=False``
+    AND ``jit_compile=True``, with the same ``TypeError: len is not well defined
+    for a symbolic Tensor`` from ``model.py:634``, because ``postprocess_masks``
+    hands a TENSOR ``original_size`` to ``ops.image.resize``. That is a
+    graph-mode property, not an XLA one, and the package already documents it
+    (``model.py:68-72``) along with the remedy: ``SAMTrainingModel`` drives the
+    submodules directly and never reaches the postprocess. Pointing the XLA arm
+    at ``SAM`` would test a documented eager-only contract and call it an XLA
+    finding. MEASURED on the wrapper: ``jit_compile=True`` OK, max|delta|
+    4.140615e-03 against ``absmax`` 1.475909e+00.
+    """
+    from .test_sam.test_correctness import build_reduced_sam
+    from dl_techniques.models.SAM.SAM1.training_model import SAMTrainingModel
+    return SAMTrainingModel(build_reduced_sam(), multimask_output=False)
+
+
+def _sam_training_inputs():
+    from .test_sam.test_training_model import _wrapper_inputs
+    return _wrapper_inputs()
+
+
+# DECISION plan-2026-08-19T163559-499b6f0e/D-075
+# Every entry below is a DEVIATION and every one states the measurement that
+# forced it. Do NOT add an entry that merely raises ``rtol`` to make a subject
+# pass: a tolerance above the signal asserts nothing, and the two subjects with
+# a genuinely large float32 delta (`yolo12`, `hierarchical_reasoning_model`)
+# are judged at float64 -- where the SAME assertion still runs -- precisely so
+# that no such entry is ever needed. See decisions.md D-075.
+#: name -> ``{"build": ..., "make_inputs": ..., **assert_xla_equivalence kwargs}``
+XLA_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    "SAM": {
+        "build": _b_sam_training_model,
+        "make_inputs": _sam_training_inputs,
+        "call_fn": None,
+    },
+    # ``expect="raises"``: superpoint is the ONE subject of 53 that genuinely
+    # cannot be XLA-compiled, and the repo already ships the opt-out
+    # (`src/train/superpoint/train_superpoint.py:873`, `jit_compile=False`,
+    # anchored). MEASURED: it traces fine at ``jit_compile=False`` (max|delta|
+    # 2.717853e-03 / 1.198910e-04) and raises `InvalidArgumentError` at
+    # ``jit_compile=True`` -- "No registered 'ResizeBicubic' OpKernel for
+    # XLA_GPU_JIT devices". Same missing kernel family as D-060's missing
+    # float16 ResizeBicubic GRADIENT. Asserting the RAISE, keyed on the op
+    # name, is what keeps the documented opt-out from becoming cargo: if TF
+    # ever registers the kernel, this test fails and the `jit_compile=False`
+    # becomes removable.
+    "superpoint": {
+        "expect": "raises",
+        "expect_reason": "ResizeBicubic",
+    },
+    # ``scope="float64"``: yolo12 is the only compiling subject whose float32
+    # eager-vs-XLA delta is large -- 1.188995e+00 against ``absmax``
+    # 4.583885e+00, i.e. 2.594e-01 relative, with an eager-vs-eager spread of
+    # exactly 0.0 so it is not stochasticity. It is CONDITIONING, and the
+    # float64 control proves it: the SAME comparison on the SAME graph measures
+    # 5.685979e-12 against ``absmax`` 3.787825e+00, a relative 1.501e-12 -- ten
+    # orders of magnitude, from nothing but the mantissa. XLA computes the same
+    # function; the model at initialization is ill-conditioned (the D-065
+    # untrained-BatchNorm story again, which is also why ``training=True`` is
+    # carried over from the precision arm). Judging at float64 keeps a REAL
+    # assertion here instead of an rtol of 0.3, which would assert nothing.
+    "yolo12": {
+        "scope": "float64",
+        "rtol": 1e-6,
+    },
+    # ``scope="float64"``: the second and last conditioning row, and the one
+    # whose refutation needed its own probe. At float32, eager and XLA disagree
+    # by 7.260822e+00 on an ``absmax`` of 5.541113e+00 -- a delta LARGER than
+    # the signal -- with an eager-vs-eager spread of exactly 0.0 across three
+    # independent trials, so it is neither noise nor stochasticity. It is also
+    # not XLA: perturbing ONE element of
+    # ``core/token_embedding/embeddings`` by ONE ULP (7.450581e-09) moves the
+    # output by 9.618139e-02, an amplification of **1.3e7**, and restoring the
+    # element returns the output to a delta of exactly 0.0. A recursive model
+    # with that gain turns XLA's ULP-level reassociation into a whole-output
+    # change. Corroborating: ``q_halt_logits`` and ``q_continue_logits``, which
+    # read a shallower path, agree at EXACTLY 0.0 in both scopes and at both
+    # precisions. At float64 the logits delta is 2.852738e-02 against
+    # ``absmax`` 5.044708e+00, i.e. 5.655e-03 relative -- hence rtol 2e-2,
+    # a 3.5x margin, chosen from the measurement rather than to make it pass.
+    "hierarchical_reasoning_model": {
+        "scope": "float64",
+        "rtol": 2e-2,
+    },
+}
+
+
+def xla_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], Dict[str, Any]]:
+    """Resolve one subject for :func:`assert_xla_equivalence`.
+
+    Interface contract (1 call site, ``test_xla_equivalence_family.py``):
+    starts from :data:`SUBJECTS`, keeps ``call_fn``, renames the precision arm's
+    ``forward_training`` to the XLA arm's ``training``, drops every other
+    precision-only kwarg, then applies :data:`XLA_OVERRIDES` on top. Raises
+    ``KeyError`` for an unregistered name.
+
+    :param name: A key of :data:`SUBJECTS`.
+    :return: ``(build, make_inputs, kwargs)`` ready to splat into the arm.
+    """
+    build, make_inputs, kwargs = SUBJECTS[name]
+    resolved: Dict[str, Any] = {}
+    if kwargs.get("call_fn") is not None:
+        resolved["call_fn"] = kwargs["call_fn"]
+    if kwargs.get("forward_training"):
+        resolved["training"] = True
+    override = dict(XLA_OVERRIDES.get(name, {}))
+    build = override.pop("build", build)
+    make_inputs = override.pop("make_inputs", make_inputs)
+    if "call_fn" in override and override["call_fn"] is None:
+        override.pop("call_fn")
+        resolved.pop("call_fn", None)
+    resolved.update(override)
+    return build, make_inputs, resolved
+
+
+# ===========================================================================
+# R-142 -- the five directories charged with a float64 arm that never ran
+# ===========================================================================
+#
+# Batch 1 charged exactly five: ``set_floatx`` count 0 across the directory
+# while ``float64`` is NAMED in 14 test files for SAM and in 1-2 files for each
+# of the others. The charge is "the arm is absent", not "float64 is broken" --
+# so these five get a real one. ``SAM`` is again represented by
+# ``SAMTrainingModel``: ``SAM.call``'s ``ops.image.resize`` is a graph-mode
+# limitation that has nothing to do with precision, and the wrapper is the
+# supervised path.
+
+#: The five R-142 rows, as names into :data:`SUBJECTS`.
+FLOAT64_CHARGED: Tuple[str, ...] = (
+    "SAM", "bias_free_denoisers", "ideogram4", "sd3_mmdit", "time_series",
+)
+
+#: name -> ``{"build": ..., "make_inputs": ..., **assert_float64_arm kwargs}``
+FLOAT64_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    "SAM": {
+        "build": _b_sam_training_model,
+        "make_inputs": _sam_training_inputs,
+    },
+    # ``expected_output_dtype="float32"``: NOT an exemption -- the assertion
+    # still runs, against the value the package DOCUMENTS. ``ideogram4``'s
+    # velocity head casts to float32 unconditionally, stated three times in
+    # `models/ideogram4/transformer.py` (module notes line 86, class docstring
+    # line 160, call site line 325) as mirroring the reference implementation's
+    # `.float()` return. D-058 ruled the same way for its mixed-precision arm.
+    # MEASURED here: under a real float64 scope the model returns float32, so a
+    # plain float64 assertion would convict a documented contract -- and
+    # switching part 3 off would stop noticing if the cast ever disappeared.
+    "ideogram4": {
+        "expected_output_dtype": "float32",
+    },
+}
+
+
+def float64_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], Dict[str, Any]]:
+    """Resolve one subject for :func:`assert_float64_arm`.
+
+    Interface contract (1 call site, ``test_float64_arm_family.py``): same shape
+    as :func:`xla_subject` -- start from :data:`SUBJECTS`, keep ``call_fn``,
+    carry ``forward_training`` across as ``training``, apply
+    :data:`FLOAT64_OVERRIDES`.
+    """
+    build, make_inputs, kwargs = SUBJECTS[name]
+    resolved: Dict[str, Any] = {}
+    if kwargs.get("call_fn") is not None:
+        resolved["call_fn"] = kwargs["call_fn"]
+    if kwargs.get("forward_training"):
+        resolved["training"] = True
+    override = dict(FLOAT64_OVERRIDES.get(name, {}))
+    build = override.pop("build", build)
+    make_inputs = override.pop("make_inputs", make_inputs)
+    resolved.update(override)
+    return build, make_inputs, resolved

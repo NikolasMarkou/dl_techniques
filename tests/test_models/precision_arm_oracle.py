@@ -1,6 +1,6 @@
 """
-Precision-arm oracle -- the R-088 / R-141 instrument, with its own anti-vacuity
-==============================================================================
+Arm oracle -- R-088 / R-141 (precision), R-142 (float64) and R-143 (graph/XLA)
+=============================================================================
 
 This module is an *instrument*, not a test suite. Like
 ``smoke_contract_oracle.py`` and ``gradient_flow_oracle.py`` beside it, it is
@@ -67,6 +67,15 @@ How to use it
 
 ``build`` is a *callable*, not a model: it is invoked INSIDE the policy context
 so the model's variables and sub-layers are created under it.
+
+Two further arms live here, on the same helpers
+-----------------------------------------------
+:func:`assert_float64_arm` (R-142) and :func:`assert_xla_equivalence` (R-143)
+share this module's ``default_call``, ``flatten_tensors``, seeded single build
+and self-calibrating spread control rather than re-deriving them. They are
+different *judgements* on the same forward pass -- did the requested precision
+reach the tensors, and does the traced graph compute what eager computes -- and
+each carries its own anti-vacuity control, argued at its own docstring.
 """
 
 from __future__ import annotations
@@ -81,6 +90,9 @@ from keras import ops
 
 __all__ = [
     "precision_policy",
+    "float64_scope",
+    "assert_float64_arm",
+    "assert_xla_equivalence",
     "default_call",
     "flatten_tensors",
     "PrecisionArmReport",
@@ -477,3 +489,378 @@ def assert_precision_arm(
         )
 
     return reports
+
+
+# ===========================================================================
+# R-142 -- the float64 arm
+# ===========================================================================
+
+
+@contextlib.contextmanager
+def float64_scope() -> Iterator[None]:
+    """Set ``floatx`` AND the global dtype policy to ``float64``, and restore both.
+
+    DECISION plan-2026-08-19T163559-499b6f0e/D-074
+    Both switches are required, and R-142's own wording ("needs
+    ``keras.backend.set_floatx('float64')``, not just the mixed-precision
+    policy") has it backwards for Keras 3.8. MEASURED, in one process:
+
+    ==========================================  =================  ============
+    what the arm does                           layer output       variables
+    ==========================================  =================  ============
+    ``set_floatx('float64')`` FIRST THING       ``float64``        ``float64``
+    ``set_global_policy('float64')`` alone      ``float64``        ``float64``
+    ``set_floatx('float64')`` AFTER anything
+    has read ``global_policy()``                **``float32``**    **``float32``**
+    ==========================================  =================  ============
+
+    ``keras.mixed_precision.global_policy()`` lazily constructs
+    ``DTypePolicy(backend.floatx())`` on first read and **caches it**;
+    ``set_floatx`` does not invalidate that cache. So a float64 arm written as
+    ``set_floatx`` alone is a no-op for every layer dtype the moment it is not
+    the first thing in the process -- which it never is, because any earlier
+    test, any ``compile()``, and this module's own ``precision_policy`` have
+    all read the policy already. That is why the audit found float64 arms
+    "silently running at float32", and the mechanism is the cache, not the
+    direction of the switch. Do NOT reduce this to one call. See D-074.
+    """
+    prev_floatx = keras.backend.floatx()
+    prev_policy = keras.mixed_precision.global_policy()
+    keras.backend.set_floatx("float64")
+    keras.mixed_precision.set_global_policy("float64")
+    try:
+        yield
+    finally:
+        keras.mixed_precision.set_global_policy(prev_policy)
+        keras.backend.set_floatx(prev_floatx)
+
+
+def _cast_float_leaves(inputs: Any, dtype: str) -> Any:
+    """Return ``inputs`` with every FLOATING-point array cast to ``dtype``.
+
+    Integer leaves (token ids, masks, hop distances) are left alone: there is
+    no such thing as a float64 index, the same rule part 2 of the precision arm
+    follows (D-058).
+    """
+    if isinstance(inputs, dict):
+        return {k: _cast_float_leaves(v, dtype) for k, v in inputs.items()}
+    if isinstance(inputs, (list, tuple)):
+        return type(inputs)(_cast_float_leaves(v, dtype) for v in inputs)
+    arr = getattr(inputs, "dtype", None)
+    if arr is not None and np.issubdtype(np.dtype(str(arr)), np.floating):
+        return np.asarray(inputs).astype(dtype)
+    return inputs
+
+
+def _float_leaf_dtypes(inputs: Any) -> List[str]:
+    """Every floating-point leaf dtype of ``inputs``, in a stable order."""
+    if isinstance(inputs, dict):
+        items: Sequence[Any] = list(inputs.values())
+    elif isinstance(inputs, (list, tuple)):
+        items = list(inputs)
+    else:
+        items = [inputs]
+    out = []
+    for v in items:
+        if isinstance(v, (dict, list, tuple)):
+            out.extend(_float_leaf_dtypes(v))
+            continue
+        d = getattr(v, "dtype", None)
+        if d is not None and np.issubdtype(np.dtype(str(d)), np.floating):
+            out.append(str(d))
+    return out
+
+
+def assert_float64_arm(
+        build: Callable[[], Any],
+        make_inputs: Callable[[], Any],
+        *,
+        call_fn: Optional[Callable[[Any, Any, bool], Any]] = None,
+        training: bool = False,
+        dtype_exempt_outputs: Sequence[int] = (),
+        expected_output_dtype: str = "float64",
+) -> PrecisionArmReport:
+    """Assert a real ``float64`` arm: the policy took, the INPUT took, the OUTPUT took.
+
+    R-142 charges five ``models/`` test directories with naming ``float64`` in a
+    test while ``set_floatx`` count is 0 across the directory, so the arm ran at
+    float32 and the two "different precisions" agreed for the wrong reason. The
+    three assertions here are what make it not that test:
+
+    1. **The scope took.** ``floatx`` and the global policy are BOTH ``float64``
+       inside the arm, and the model built under it carries that policy.
+    2. **The input took.** Every floating-point input leaf is ``float64``, which
+       R-142 names explicitly (``an assertion on inputs[0].dtype``). Integer
+       leaves are exempt and are not cast.
+    3. **The output took.** Every floating-point output leaf is ``float64``. This
+       is the one that catches a hard-coded ``dtype="float32"`` constant or a
+       cast island, and it is the only assertion here that can fail on a model
+       rather than on the harness.
+
+    :param build: Zero-argument model factory, invoked INSIDE the float64 scope.
+    :param make_inputs: Zero-argument input factory; its float leaves are cast.
+    :param call_fn: Replacement for :func:`default_call`; same contract.
+    :param training: Forwarded to the model.
+    :param dtype_exempt_outputs: Indices into the flattened output that
+        assertion 3 skips. Same escape hatch as the precision arm's, and it
+        carries the same requirement: a stated reason at the call site.
+    :param expected_output_dtype: What assertion 3 requires of every float
+        output. Leave it at ``"float64"`` unless the model DOCUMENTS a pinned
+        dtype, in which case name that dtype here so the assertion keeps
+        running against the documented value instead of being switched off --
+        the D-058 shape, applied to this arm. ``ideogram4`` is the one such
+        subject.
+    :return: A report with ``floatx_seen``, ``policy_seen``, ``model_policy``,
+        ``input_dtypes``, ``dtypes``, ``n_nan``, ``n_inf`` and ``absmax``.
+    :rtype: PrecisionArmReport
+    :raises AssertionError: on any failed part.
+    """
+    with float64_scope():
+        floatx_seen = keras.backend.floatx()
+        policy_seen = keras.mixed_precision.global_policy().name
+        keras.utils.set_random_seed(0)
+        model = build()
+        inputs = _cast_float_leaves(make_inputs(), "float64")
+        input_dtypes = _float_leaf_dtypes(inputs)
+        call = call_fn or default_call
+        tensors = flatten_tensors(call(model, inputs, training))
+        arrays = [np.asarray(ops.convert_to_numpy(t)) for t in tensors]
+        report = PrecisionArmReport(
+            floatx_seen=floatx_seen,
+            policy_seen=policy_seen,
+            model_policy=getattr(model.dtype_policy, "name", None),
+            input_dtypes=input_dtypes,
+            dtypes=[str(t.dtype).replace("<dtype: '", "").strip("'>")
+                    for t in tensors],
+            n_nan=[int(np.isnan(a).sum()) for a in arrays
+                   if a.dtype.kind == "f"],
+            n_inf=[int(np.isinf(a).sum()) for a in arrays
+                   if a.dtype.kind == "f"],
+            absmax=[float(np.abs(a).max()) for a in arrays
+                    if a.dtype.kind == "f" and a.size],
+        )
+
+    # 1 -- the scope took. Asserted OUTSIDE the context so a failure cannot
+    #      leave the process at float64 for every test that follows.
+    assert floatx_seen == "float64", (
+        f"keras.backend.floatx() was {floatx_seen!r} inside the arm")
+    assert policy_seen == "float64", (
+        f"the global dtype policy was {policy_seen!r} inside the arm -- "
+        "set_floatx alone does not move it once global_policy() has been "
+        "read, which is the whole D-074 finding")
+    assert report["model_policy"] == "float64", (
+        f"the model carries dtype_policy {report['model_policy']!r}; it was "
+        "built outside the float64 scope, so this arm is a float32 test "
+        "wearing a float64 name")
+
+    # 2 -- the input took.
+    assert input_dtypes, (
+        "the model was given no floating-point input, so the input-dtype "
+        "assertion would be vacuous")
+    assert all(d == "float64" for d in input_dtypes), (
+        f"the float inputs are {input_dtypes}, expected every one float64")
+
+    # 3 -- the output took.
+    float_out = [d for i, d in enumerate(report["dtypes"])
+                 if i not in set(dtype_exempt_outputs)
+                 and (d.startswith("float") or d.startswith("bfloat"))]
+    assert float_out, (
+        f"the model returned no floating-point tensor ({report['dtypes']}), "
+        "so the output-dtype assertion would be vacuous")
+    assert all(d == expected_output_dtype for d in float_out), (
+        f"under float64 the float outputs are {float_out} (all outputs "
+        f"{report['dtypes']}), expected every one {expected_output_dtype!r}; "
+        "an unexpected float32 output means the model pins a dtype somewhere "
+        "and the caller's requested precision never reached it")
+
+    assert sum(report["n_nan"]) == 0 and sum(report["n_inf"]) == 0, (
+        f"float64 forward is non-finite: nan={report['n_nan']} "
+        f"inf={report['n_inf']}")
+    return report
+
+
+# ===========================================================================
+# R-143 -- the graph / XLA equivalence arm
+# ===========================================================================
+
+
+def _max_delta(a: Any, b: Any) -> float:
+    """``inf`` for an exact-integer mismatch, else the max absolute float delta.
+
+    R-143 asks for ``np.array_equal`` on exact-integer outputs and a tolerance
+    on floats. Returning ``inf`` for an integer mismatch lets one comparison
+    loop carry both rules without a second code path.
+    """
+    if a.dtype.kind != "f":
+        return 0.0 if np.array_equal(a, b) else float("inf")
+    if a.size == 0:
+        return 0.0
+    return float(np.nanmax(np.abs(a.astype("float64") - b.astype("float64"))))
+
+
+def assert_xla_equivalence(
+        build: Callable[[], Any],
+        make_inputs: Callable[[], Any],
+        *,
+        call_fn: Optional[Callable[[Any, Any, bool], Any]] = None,
+        training: bool = False,
+        rtol: float = 1e-2,
+        seed: Optional[int] = 0,
+        expect: str = "compiles",
+        expect_reason: Optional[str] = None,
+        scope: Optional[str] = None,
+) -> PrecisionArmReport:
+    """Assert that ``tf.function(jit_compile=True)`` computes what eager does.
+
+    R-143: "an eager-only fix is not a fix". Every defect this plan fixed was
+    measured eagerly, and ``fit()`` on a GPU defaults to ``jit_compile='auto'``,
+    which is not eager. This arm is the one that notices the difference.
+
+    DECISION plan-2026-08-19T163559-499b6f0e/D-075
+    **The eager-vs-eager CONTROL is what makes it usable.** The model is called
+    twice eagerly, on the same weights and the same inputs, BEFORE the traced
+    call. For a deterministic forward that spread is exactly ``0.0`` and the
+    tolerance below is the flat ``rtol`` it looks like. For a STOCHASTIC one it
+    is not, and without this control three healthy models convict:
+
+    ==============  ==============  ==============  =========
+    package         eager spread    eager-vs-XLA    verdict
+    ==============  ==============  ==============  =========
+    ``vae``         1.034906e+00    1.029735e+00    the sampler, not XLA
+    ``sd3_mmdit``   3.591807e+00    3.483226e+00    the sampler, not XLA
+    ``relgt``       9.723109e-02    8.883548e-02    the sampler, not XLA
+    ==============  ==============  ==============  =========
+
+    Each of those would have been an "XLA breaks this model" finding under a
+    flat tolerance, and each is a model whose forward is documented stochastic
+    at ``training=False``. This is the same self-calibration D-055 argues for
+    the fp16 arm, applied to a different axis. Do NOT replace the
+    ``max(rtol * absmax, 3 * spread)`` bound with a flat ``rtol``, and do NOT
+    "fix" a large delta by raising ``rtol`` past the signal -- the two subjects
+    that needed it are judged at float64 instead, and the reason is recorded at
+    their entries in ``precision_arm_subjects.XLA_OVERRIDES``.
+    See decisions.md D-075.
+
+    **``expect='raises'`` is not the same claim as a missing arm.** Some models
+    genuinely cannot be XLA-compiled and the repo already ships
+    ``jit_compile=False`` for them. Naming that here, with the exception type
+    the compiler actually raises, keeps a documented opt-out from silently
+    becoming an unnoticed regression in either direction: if the model starts
+    compiling, this test fails and the ``jit_compile=False`` becomes removable
+    rather than cargo.
+
+    :param build: Zero-argument model factory. Called ONCE; both arms share the
+        weights, because two builds would measure the build spread instead
+        (D-055 measured a 43% gap from that alone).
+    :param make_inputs: Zero-argument input factory. Called once.
+    :param call_fn: Replacement for :func:`default_call`; same contract.
+    :param training: Forwarded to the model in every arm. Pass ``True`` for a
+        model whose untrained BatchNorms make the inference path meaningless --
+        the same D-065 reason the precision arm has ``forward_training``.
+    :param rtol: Relative tolerance against each output's own ``absmax``. The
+        effective bound is ``max(rtol * absmax, 3 * eager_spread)``.
+    :param seed: Seeded immediately before ``build()``.
+    :param expect: ``"compiles"`` or ``"raises"``.
+    :param expect_reason: Required when ``expect="raises"`` -- a substring that
+        must appear in the exception text, so "it raised" cannot be satisfied
+        by a DIFFERENT failure than the documented one.
+    :return: A report with ``absmax``, ``eager_spread``, ``xla_delta``,
+        ``dtypes`` and, for ``expect="raises"``, ``exception``.
+    :rtype: PrecisionArmReport
+    :raises AssertionError: on any failed part.
+    """
+    import tensorflow as tf
+
+    # ``scope='float64'`` runs BOTH arms at double precision. It is not a way to
+    # relax the assertion -- the tolerance below is applied the same way, and a
+    # model that computes a genuinely different function under XLA still fails.
+    # It is the answer to "is this disagreement XLA or is it the model's own
+    # conditioning": if the delta collapses by ten orders of magnitude when the
+    # only thing that changed is the mantissa, it was never XLA. See D-075.
+    outer = float64_scope() if scope == "float64" else contextlib.nullcontext()
+    with outer:
+        if seed is not None:
+            keras.utils.set_random_seed(seed)
+        model = build()
+        inputs = make_inputs()
+        if scope == "float64":
+            inputs = _cast_float_leaves(inputs, "float64")
+        call = call_fn or default_call
+        return _xla_body(tf, model, inputs, call, training, rtol, expect,
+                         expect_reason)
+
+
+def _xla_body(tf, model, inputs, call, training, rtol, expect, expect_reason):
+    """The body of :func:`assert_xla_equivalence`, inside its dtype scope.
+
+    Split out only so the ``float64`` scope can wrap build, call and judge
+    together; every argument is exactly the resolved form of the public one.
+    """
+
+    def _arrays(out: Any) -> List[Any]:
+        return [np.asarray(ops.convert_to_numpy(t)) for t in flatten_tensors(out)]
+
+    eager_1 = _arrays(call(model, inputs, training))
+    eager_2 = _arrays(call(model, inputs, training))
+
+    @tf.function(jit_compile=True)
+    def _jitted(x: Any) -> Any:
+        return call(model, x, training)
+
+    if expect == "raises":
+        assert expect_reason, (
+            "expect='raises' without an expect_reason would pass on ANY "
+            "failure, including one introduced by the test itself")
+        try:
+            _jitted(inputs)
+        except Exception as exc:  # noqa: BLE001 -- the type is the finding
+            text = " ".join(str(exc).split())
+            assert expect_reason in text, (
+                f"XLA raised, but not for the documented reason "
+                f"{expect_reason!r}: {type(exc).__name__}: {text[:400]}")
+            return PrecisionArmReport(
+                exception=type(exc).__name__, message=text[:400],
+                absmax=[float(np.abs(a).max()) for a in eager_1
+                        if a.dtype.kind == "f" and a.size])
+        raise AssertionError(
+            "this model is documented as NOT XLA-compilable and it just "
+            "compiled. Either the blocker was fixed -- in which case the "
+            f"shipped jit_compile=False and this arm are both stale -- or "
+            f"{expect_reason!r} no longer describes the blocker.")
+
+    assert expect == "compiles", f"unknown expect={expect!r}"
+    xla = _arrays(_jitted(inputs))
+
+    assert eager_1, "the model returned no tensors to judge"
+    assert len(xla) == len(eager_1), (
+        f"the traced arm returned {len(xla)} tensors, eager returned "
+        f"{len(eager_1)}")
+
+    spread = [_max_delta(a, b) for a, b in zip(eager_1, eager_2)]
+    delta = [_max_delta(a, b) for a, b in zip(eager_1, xla)]
+    absmax = [float(np.abs(a).max()) if a.dtype.kind == "f" and a.size else 0.0
+              for a in eager_1]
+    report = PrecisionArmReport(
+        dtypes=[str(a.dtype) for a in eager_1],
+        absmax=absmax, eager_spread=spread, xla_delta=delta)
+
+    assert any(m > 0.0 for m in absmax) or any(
+        a.dtype.kind != "f" for a in eager_1), (
+        "every output is an all-zero float tensor, so an agreement between "
+        "the two arms proves nothing")
+
+    for i, (d, s, m) in enumerate(zip(delta, spread, absmax)):
+        if eager_1[i].dtype.kind != "f":
+            assert d == 0.0, (
+                f"output {i} is {eager_1[i].dtype} and the traced arm returned "
+                "DIFFERENT values; an exact-integer output must be "
+                "bit-identical under XLA")
+            continue
+        tol = max(rtol * max(m, 1e-8), 3.0 * s)
+        assert d <= tol, (
+            f"output {i}: eager-vs-XLA max|delta| {d:.6e} exceeds "
+            f"tol={tol:.6e} (rtol={rtol} against absmax {m:.6e}; the model's "
+            f"own eager-vs-eager spread is {s:.6e}). A delta far above the "
+            "eager spread is XLA computing a different function, not "
+            "precision.")
+    return report

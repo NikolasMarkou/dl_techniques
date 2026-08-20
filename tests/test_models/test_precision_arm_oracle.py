@@ -456,3 +456,221 @@ def test_forward_training_moves_the_arm_off_the_untrained_inference_path():
     with pytest.raises(AssertionError, match="opted its consumer out"):
         assert_precision_arm(build=_Float32LeakModel, make_inputs=_inputs,
                              forward_training=True)
+
+
+# ===========================================================================
+# RED proofs for the R-143 graph/XLA arm and the R-142 float64 arm.
+#
+# Both arms live in the same oracle and reuse the same helpers, so their
+# proofs live here rather than in a third file. Each defect modelled below is a
+# shape this step actually measured in the tree, not an invented one:
+#
+#   _EagerBranchModel     -- computes something DIFFERENT under tf.function.
+#                            The whole point of R-143 ("an eager-only fix is
+#                            not a fix"); this is the failure the 51-subject
+#                            sweep would have to be able to see to mean
+#                            anything.
+#   _NonDeterministic     -- a stochastic forward. `vae`, `sd3_mmdit` and
+#                            `relgt` all measure an eager-vs-XLA delta inside
+#                            their own eager-vs-eager spread, and all three
+#                            would convict without the control.
+#   _DriftingIntModel     -- an exact-integer output that changes under XLA.
+#                            R-143 asks for np.array_equal on these, not a
+#                            tolerance.
+# ===========================================================================
+
+from .precision_arm_oracle import (  # noqa: E402
+    assert_float64_arm,
+    assert_xla_equivalence,
+    float64_scope,
+)
+
+
+class _EagerBranchModel(keras.Model):
+    """Returns a DIFFERENT function when traced. The R-143 defect, distilled."""
+
+    def __init__(self):
+        # An explicit name is load-bearing: Keras derives
+        # "_eagerbranchmodel" from the leading underscore and TF rejects it as a
+        # graph root scope, so the traced arm would raise ValueError before it
+        # ever measured anything.
+        super().__init__(name="eager_branch_model")
+        self.d = keras.layers.Dense(3, kernel_initializer="ones",
+                                    bias_initializer="zeros")
+
+    def call(self, inputs, training=False):
+        import tensorflow as tf
+        y = self.d(inputs)
+        return ops.where(
+            ops.convert_to_tensor(tf.executing_eagerly()), y, y * 2.0)
+
+
+class _DriftingIntModel(keras.Model):
+    """An int output that is off by one under tracing."""
+
+    def __init__(self):
+        # An explicit name is load-bearing: Keras derives
+        # "_driftingintmodel" from the leading underscore and TF rejects it as a
+        # graph root scope, so the traced arm would raise ValueError before it
+        # ever measured anything.
+        super().__init__(name="drifting_int_model")
+        self.d = keras.layers.Dense(3)
+
+    def call(self, inputs, training=False):
+        import tensorflow as tf
+        y = self.d(inputs)
+        bump = ops.cast(ops.logical_not(
+            ops.convert_to_tensor(tf.executing_eagerly())), "int32")
+        return [y, ops.zeros((1, 3), "int32") + bump]
+
+
+class _NonDeterministic(keras.Model):
+    """A stochastic forward at ``training=False`` -- the `vae` / `relgt` shape."""
+
+    def __init__(self):
+        # An explicit name is load-bearing: Keras derives
+        # "_nondeterministic" from the leading underscore and TF rejects it as a
+        # graph root scope, so the traced arm would raise ValueError before it
+        # ever measured anything.
+        super().__init__(name="non_deterministic_model")
+        self.d = keras.layers.Dense(3)
+
+    def call(self, inputs, training=False):
+        return self.d(inputs) + keras.random.normal(ops.shape(inputs)[:1] + (3,))
+
+
+def _x4():
+    return np.random.RandomState(0).randn(2, 4).astype("float32")
+
+
+def test_the_xla_arm_rejects_a_model_that_computes_a_different_graph():
+    with pytest.raises(AssertionError, match="eager-vs-XLA max"):
+        assert_xla_equivalence(build=_EagerBranchModel, make_inputs=_x4)
+
+
+def test_the_xla_arm_accepts_the_healthy_twin():
+    """Same shape, same size, no branch -- so the failure above is the BRANCH."""
+    report = assert_xla_equivalence(
+        build=lambda: keras.Sequential([keras.layers.Input((4,)),
+                                        keras.layers.Dense(3)]),
+        make_inputs=_x4)
+    assert report["eager_spread"] == [0.0]
+
+
+def test_the_xla_arm_requires_exact_equality_on_an_integer_output():
+    """An off-by-one int output must fail, and it must fail on the INT rule --
+    a tolerance would have swallowed a delta of 1 on a tensor of zeros."""
+    with pytest.raises(AssertionError, match="must be\n?\\s*bit-identical|bit-identical"):
+        assert_xla_equivalence(build=_DriftingIntModel, make_inputs=_x4)
+
+
+def test_the_eager_spread_control_keeps_a_stochastic_model_from_convicting():
+    """The reading that reversed three models.
+
+    Both halves are asserted: the spread must be non-zero (otherwise this
+    subject is not stochastic and proves nothing about the control), and the
+    arm must pass. Delete the ``3 * spread`` term and this test fails.
+    """
+    report = assert_xla_equivalence(build=_NonDeterministic, make_inputs=_x4,
+                                    rtol=1e-6)
+    assert report["eager_spread"][0] > 0.0, (
+        "this subject is deterministic, so it cannot demonstrate the control")
+
+
+class _UntraceableModel(keras.Model):
+    """Raises under ANY tracing -- the literal ``SAM.postprocess_masks`` shape.
+
+    ``len()`` on a symbolic tensor is exactly what ``ops.image.resize`` does to
+    ``SAM``'s tensor ``original_size`` (``SAM/SAM1/model.py:634``), and it is
+    why that model fails identically at ``jit_compile=False`` and ``True``.
+    """
+
+    def __init__(self):
+        super().__init__(name="untraceable_model")
+        self.d = keras.layers.Dense(3)
+
+    def call(self, inputs, training=False):
+        _ = len(inputs)
+        return self.d(inputs)
+
+
+def test_the_raises_arm_will_not_accept_a_different_failure():
+    """``expect='raises'`` keyed on the WRONG reason must still fail.
+
+    Without the ``expect_reason`` check, a documented opt-out would be
+    satisfied by any exception at all -- including one the test itself
+    introduced -- and would go on passing after the real blocker was fixed.
+    This subject raises, but on ``len is not well defined``, not on the
+    ``ResizeBicubic`` the caller documented.
+    """
+    with pytest.raises(AssertionError, match="not for the documented reason"):
+        assert_xla_equivalence(build=_UntraceableModel, make_inputs=_x4,
+                               expect="raises",
+                               expect_reason="ResizeBicubic")
+
+
+def test_the_raises_arm_accepts_the_reason_it_was_given():
+    """The GREEN twin of the test above -- same model, correct reason."""
+    report = assert_xla_equivalence(build=_UntraceableModel, make_inputs=_x4,
+                                    expect="raises",
+                                    expect_reason="len is not well defined")
+    assert report["exception"] == "TypeError"
+
+
+def test_the_raises_arm_fails_when_the_model_actually_compiles():
+    with pytest.raises(AssertionError, match="it just\n?\\s*compiled|just compiled"):
+        assert_xla_equivalence(
+            build=lambda: keras.Sequential([keras.layers.Input((4,)),
+                                            keras.layers.Dense(3)]),
+            make_inputs=_x4, expect="raises", expect_reason="ResizeBicubic")
+
+
+def test_the_raises_arm_refuses_to_run_without_a_reason():
+    with pytest.raises(AssertionError, match="would pass on ANY"):
+        assert_xla_equivalence(build=_EagerBranchModel, make_inputs=_x4,
+                               expect="raises")
+
+
+class _PinnedFloat32(keras.Model):
+    """Casts its output to float32 -- the R-142 defect the arm exists to see."""
+
+    def __init__(self):
+        super().__init__()
+        self.d = keras.layers.Dense(3)
+
+    def call(self, inputs, training=False):
+        return ops.cast(self.d(inputs), "float32")
+
+
+def test_the_float64_arm_rejects_a_pinned_float32_output():
+    with pytest.raises(AssertionError, match="float outputs are"):
+        assert_float64_arm(build=_PinnedFloat32, make_inputs=_x4)
+
+
+def test_the_float64_arm_accepts_the_healthy_twin_and_casts_its_input():
+    report = assert_float64_arm(
+        build=lambda: keras.Sequential([keras.layers.Input((4,)),
+                                        keras.layers.Dense(3)]),
+        make_inputs=_x4)
+    assert report["input_dtypes"] == ["float64"], (
+        "the arm did not cast its float input, so its inputs[0].dtype "
+        "assertion was asserting the caller's own choice")
+    assert report["dtypes"] == ["float64"]
+
+
+def test_the_float64_arm_rejects_a_model_built_outside_the_scope():
+    """The most common way one of these arms silently becomes a float32 test."""
+    prebuilt = keras.Sequential([keras.layers.Input((4,)),
+                                 keras.layers.Dense(3)])
+    with pytest.raises(AssertionError, match="dtype_policy"):
+        assert_float64_arm(build=lambda: prebuilt, make_inputs=_x4)
+
+
+def test_the_float64_scope_restores_both_switches_even_when_the_body_raises():
+    before = (keras.backend.floatx(),
+              keras.mixed_precision.global_policy().name)
+    with pytest.raises(RuntimeError):
+        with float64_scope():
+            raise RuntimeError("boom")
+    assert (keras.backend.floatx(),
+            keras.mixed_precision.global_policy().name) == before
