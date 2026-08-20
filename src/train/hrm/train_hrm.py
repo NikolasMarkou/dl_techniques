@@ -62,7 +62,7 @@ class HRMTrainer:
 
     def _create_model(self) -> HierarchicalReasoningModel:
         model_config = self.config.get("model", {})
-        return create_hierarchical_reasoning_model(
+        model = create_hierarchical_reasoning_model(
             vocab_size=model_config["vocab_size"],
             seq_len=model_config["seq_len"],
             embed_dim=model_config.get("embed_dim", 512),
@@ -82,6 +82,20 @@ class HRMTrainer:
             dropout_rate=model_config.get("dropout_rate", 0.0),
             use_bias=model_config.get("use_bias", False)
         )
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-031
+        # BUILD EAGERLY, HERE. Without this, `HRMTrainer.__init__` raised
+        # `ValueError: You tried to call count_params on layer
+        # 'hierarchical_reasoning_model', but the layer isn't built` from its own
+        # closing log line, so `python -m train.hrm.train_hrm` could not START --
+        # the module was unreachable before any data was touched. Do NOT "fix"
+        # this by deleting the parameter count from the log: the trainer needs a
+        # built model regardless, and `HierarchicalReasoningModel.build` IGNORES
+        # `input_shape` (it creates fixed-shape weights from its own config, see
+        # that method's own D-005 anchor), so there is nothing to defer.
+        # See decisions.md D-031.
+        model.build()
+        return model
 
     def _create_optimizer(self) -> Tuple[optimizers.Optimizer, Any]:
         lr_config = self.config.get("learning_rate", {})

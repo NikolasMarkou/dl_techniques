@@ -284,7 +284,9 @@ class CLIPTrainer:
 
         with tf.GradientTape() as tape:
             outputs = self.model(inputs, training=True)
-            loss = self.loss_fn(None, outputs)
+            # `self.loss_fn(None, outputs)` RAISES -- see
+            # CLIPContrastiveLoss.reduced_loss and decisions.md D-030.
+            loss = self.loss_fn.reduced_loss(outputs)
             if self.model.losses:
                 loss += tf.add_n(self.model.losses)
             if self.mixed_precision:
@@ -310,7 +312,9 @@ class CLIPTrainer:
         images, texts = batch
         inputs = {'image': images, 'text': texts}
         outputs = self.model(inputs, training=False)
-        loss = self.loss_fn(None, outputs)
+        # `self.loss_fn(None, outputs)` RAISES -- see
+        # CLIPContrastiveLoss.reduced_loss and decisions.md D-030.
+        loss = self.loss_fn.reduced_loss(outputs)
 
         for metric in self.metrics:
             metric.update_state(outputs)

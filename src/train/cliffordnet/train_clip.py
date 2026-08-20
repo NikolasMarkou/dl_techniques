@@ -276,17 +276,16 @@ class ContrastiveCliffordCLIP(keras.Model):
     def _contrastive_loss(
         self, outputs: Dict[str, keras.KerasTensor]
     ) -> keras.KerasTensor:
-        # Call CLIPContrastiveLoss.call() directly and mean the per-sample
-        # losses ourselves. This avoids having to synthesise a dummy
-        # y_true tensor just to satisfy the base Loss __call__ signature.
-        per_sample = self.loss_fn.call(
-            None,
+        # Shared entry point: `CLIPContrastiveLoss.reduced_loss` calls
+        # `call(None, ...)` and means the per-sample losses. Calling
+        # `self.loss_fn(None, ...)` instead RAISES -- the base `Loss.__call__`
+        # converts `y_true` to a tensor. See decisions.md D-030.
+        return self.loss_fn.reduced_loss(
             {
                 "logits_per_image": outputs["logits_per_image"],
                 "logits_per_text": outputs["logits_per_text"],
-            },
+            }
         )
-        return keras.ops.mean(per_sample)
 
     # DECISION plan-2026-07-15T114613-5add9baa/D-003: custom train_step RETAINED
     # -- a dict-output CLIP model cannot route a single contrastive loss through
@@ -297,7 +296,7 @@ class ContrastiveCliffordCLIP(keras.Model):
     # -> KeyError "path ('logits_per_image',) ... can't be found"; per-key dict
     # loss -> ValueError "Unsupported y_pred format: SymbolicTensor" (the loss
     # is fed one key's tensor, but it needs BOTH keys at once). So the wrapper
-    # calls loss_fn.call(None, dict_output) directly in _contrastive_loss.
+    # calls CLIPContrastiveLoss.reduced_loss(dict_output) in _contrastive_loss.
     # Revisit only if CliffordCLIP.call returns a single tensor. See D-003.
     def train_step(self, data):
         if isinstance(data, tuple):
