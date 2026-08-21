@@ -18,8 +18,21 @@ from typing import List, Optional, Dict, Any, Tuple
 from dl_techniques.utils.logger import logger
 
 
-@keras.saving.register_keras_serializable()
-
+# DECISION plan-2026-08-19T163559-499b6f0e/D-093
+# This helper is DELIBERATELY NOT `@keras.saving.register_keras_serializable()`.
+# Step 17 decorated it and that created `Custom>_principal_shape`, the ONLY
+# function-valued entry among the tree's 726 registry keys -- exactly the
+# "function-decorated" shape `_sweep_registry_keys` cannot see, so the
+# population count it reports stopped being honest and the blind-spot arm of
+# `test_package_api_contract.py` began emitting a live `UserWarning`
+# (`{'n_function_decorated': 1}`) inside a GREEN run. Registration is only
+# needed for an object that appears as a config VALUE and must be resolved BY
+# NAME at load time; this is a module-private shape helper called directly from
+# three `compute_output_shape` methods and named in no config. MEASURED across
+# the removal: `VisionDenoiser`, `TextDenoiser` and `JointDenoiser` each
+# perturb / save / reload at max|dW| = 0.000000e+00 and max|dOut| =
+# 0.000000e+00 both before AND after, with 28 / 28 / 60 weights. Do not re-add
+# it. See decisions.md D-093.
 def _principal_shape(input_shape: Any) -> Tuple[Optional[int], ...]:
     """Return the FIRST shape when handed a list of shapes, else the shape.
 
