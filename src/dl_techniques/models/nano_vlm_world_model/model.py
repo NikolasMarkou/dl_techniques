@@ -493,10 +493,23 @@ class ScoreBasedNanoVLM(keras.Model):
             generator: Optional[Any] = None
     ) -> keras.KerasTensor:
         """
-        Generate images from text via reverse diffusion (Protocol 1).
+        Generate vision-encoder LATENTS from text via reverse diffusion (Protocol 1).
 
         Implements the reverse-time SDE: starting from noise, iteratively
-        denoise by following the score field ∇ log p(image | text).
+        denoise by following the score field ∇ log p(vision latent | text).
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+        This method does NOT return images. The diffusion runs entirely in the
+        VISION ENCODER'S feature space -- the loop's state is seeded from
+        ``ops.shape(self.vision_encoder(dummy_img))``, so the returned tensor is
+        rank-3 ``(batch, num_tokens, embed_dim)``, never a rank-4 pixel grid. No
+        latent-to-pixel decoder exists in this package; do NOT restore the former
+        ``Generated images [batch, H, W, C]`` wording or write a caller that
+        indexes the result as ``[..., H, W, C]``. MEASURED at ``img_size=32,
+        patch_size=16, embed_dim=64``: the return is ``(2, 5, 64)`` (2x2 patches +
+        CLS), rank 3. Pinned by
+        ``tests/test_models/test_nano_vlm_world_model/test_generation_docstrings_match_the_return.py``.
+        See decisions.md D-122.
 
         Args:
             text_features: Text conditioning [batch, seq_len, text_dim]
@@ -505,7 +518,10 @@ class ScoreBasedNanoVLM(keras.Model):
             generator: Random generator for reproducibility
 
         Returns:
-            Generated images [batch, H, W, C]
+            Generated vision latents [batch, num_tokens, vision_embed_dim] --
+            encoder-space features. (What this is NOT, and why, is in the
+            DECISION note above: the guard bans the words rather than the
+            claim, so the negation has to live outside this block.)
         """
         if not hasattr(self, 'vision_denoiser'):
             raise ValueError("Model not configured for text-to-image generation")
@@ -594,8 +610,24 @@ class ScoreBasedNanoVLM(keras.Model):
             max_length: Maximum text sequence length
             guidance_scale: Guidance strength
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+        The return is NOT the denoised embedding. The final two statements push
+        the latents through ``self.text_decoder_head`` and take
+        ``ops.argmax(logits, axis=-1)``, so the value handed back is rank-2
+        INTEGER token ids ``(batch, max_length)`` -- the ``text_dim`` axis is
+        already gone. Do NOT restore the former ``Generated text embeddings
+        [batch, max_length, text_dim]`` wording, and do not feed the result to
+        anything expecting a float embedding. MEASURED at ``max_length=8,
+        embed_dim=64, vocab_size=64``: return shape ``(2, 8)``, dtype ``int32``.
+        Pinned by the same guard module as ``generate_from_text``. See
+        decisions.md D-122.
+
         Returns:
-            Generated text embeddings [batch, max_length, text_dim]
+            Generated token ids [batch, max_length], integer dtype -- already
+            decoded by ``text_decoder_head`` + argmax, so the feature axis is
+            gone. (What this is NOT, and why, is in the DECISION note above:
+            the guard bans the words rather than the claim, so the negation
+            has to live outside the ``Returns:`` block.)
         """
         if not hasattr(self, 'text_denoiser'):
             raise ValueError("Model not configured for image-to-text generation")
