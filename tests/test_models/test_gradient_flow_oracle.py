@@ -38,12 +38,35 @@ from .gradient_flow_oracle import (
 X = np.random.default_rng(0).random((2, 4)).astype("float32")
 
 
+# DECISION plan-2026-08-19T163559-499b6f0e/D-096
+# The two `seed=` arguments are LOAD-BEARING -- do not drop them for looking
+# like noise. Without them this "healthy" control drew from the process-global
+# RNG, and on an unlucky draw every unit of `hidden` is dead for both rows of
+# `X`; `head` is then fed exact zeros, its zero-initialized bias makes the
+# output exactly 0.0, and the oracle correctly reports 4 of 4 weights dead --
+# so the control that exists to prove the oracle stays SILENT on a healthy
+# model fails, and it fails only in some collection orders. MEASURED
+# 2026-08-21: green alone and after eight other files, RED when
+# `test_dino/test_oracle_adoption.py` ran first (0/4 live). This is the exact
+# process-order hazard this module's own docstring records for `test_bert`
+# ("61 of 61 weights had identically-zero gradients ... the draw came from the
+# process-global RNG"), reproduced in the oracle's own control.
+# Do NOT use `keras.utils.set_random_seed` here instead: it mutates the python
+# and numpy global RNGs for every test that runs after this one in the process,
+# which trades one order dependence for a wider one.
+# See D-096 in plans/plan-2026-08-19T163559-499b6f0e/decisions.md.
 def _healthy_model() -> keras.Model:
     model = keras.Sequential(
         [
             keras.layers.Input(shape=(4,)),
-            keras.layers.Dense(5, activation="relu", name="hidden"),
-            keras.layers.Dense(3, name="head"),
+            keras.layers.Dense(
+                5, activation="relu", name="hidden",
+                kernel_initializer=keras.initializers.GlorotUniform(seed=0),
+            ),
+            keras.layers.Dense(
+                3, name="head",
+                kernel_initializer=keras.initializers.GlorotUniform(seed=100),
+            ),
         ],
         name="healthy",
     )

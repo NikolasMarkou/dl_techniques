@@ -130,10 +130,52 @@ import tensorflow as tf
 __all__ = [
     "default_loss",
     "gradient_report",
+    "stop_all_gradients",
     "assert_gradients_reach_every_trainable_weight",
 ]
 
 LossFn = Callable[[Any], Any]
+
+
+# DECISION plan-2026-08-19T163559-499b6f0e/D-095
+# This injection lives HERE, once, and is EXPORTED -- do not "simplify" an
+# adopting suite by re-typing it as a local lambda. Eleven suites adopted this
+# oracle in one step; eleven hand-written detach lambdas is eleven chances to
+# write one that detaches only the first leaf of a dict-returning model, which
+# convicts nothing while looking exactly like a RED proof. It is also a
+# DEAD-COMPONENT injection on purpose rather than a simulation of one specific
+# bug: a guard proven only against the bug its author had in mind is the guard
+# that let a transposed attention bias through 219 tests in this same lineage.
+# See D-095 in plans/plan-2026-08-19T163559-499b6f0e/decisions.md.
+def stop_all_gradients(outputs: Any) -> Any:
+    """Detach every leaf of a model output from the backward graph.
+
+    THE SHARED RED-PROOF INJECTION for this oracle. Adopting suites pass it as
+    the ``breaker`` of ``smoke_contract_oracle.broken_forward`` to prove their
+    own gradient-flow assertion is capable of failing::
+
+        with broken_forward(model, stop_all_gradients):
+            with pytest.raises(AssertionError, match="received NO gradient"):
+                assert_gradients_reach_every_trainable_weight(model, x)
+
+    It is defined HERE, once, rather than re-typed in every adopting suite: an
+    injection that each call site rewrites is an injection each call site can
+    quietly weaken (the failure mode is a lambda that detaches only the first
+    output of a dict-returning model, which convicts nothing).
+
+    This is a DEAD-COMPONENT injection, not a simulation of one specific bug --
+    every trainable weight leaves the backward graph, so the oracle must report
+    the FULL weight set as disconnected. A suite whose assertion survives it is
+    asserting nothing at all.
+
+    :param outputs: a tensor, or any nested dict/list/tuple of them.
+    :returns: the same structure with ``keras.ops.stop_gradient`` applied to
+        every leaf.
+    :raises: nothing; a non-tensor leaf is passed to ``stop_gradient`` unchanged
+        by ``keras.tree.map_structure`` semantics and will raise there if the
+        backend cannot handle it, which is a call-site error worth seeing.
+    """
+    return keras.tree.map_structure(keras.ops.stop_gradient, outputs)
 
 
 def _iter_tensors(outputs: Any) -> Iterable[Any]:
