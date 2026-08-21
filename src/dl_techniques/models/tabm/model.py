@@ -718,6 +718,17 @@ class TabMModel(keras.Model):
         # them. Pop it before the splat below, matching fnet/model.py:598,
         # time_series/tirex/model.py:747 and mamba/mamba_v1.py:451.
         description = config.pop("description", "")
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
+        config.update(kwargs)
 
         logger.info(f"Creating TabM-{variant.upper()} model")
         logger.info(f"Configuration: {description}")
@@ -726,8 +737,7 @@ class TabMModel(keras.Model):
             n_num_features=n_num_features,
             cat_cardinalities=cat_cardinalities,
             n_classes=n_classes,
-            **config,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:

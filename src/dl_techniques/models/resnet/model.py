@@ -666,7 +666,19 @@ class ResNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        config = cls.MODEL_VARIANTS[variant]
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
+        config = cls.MODEL_VARIANTS[variant].copy()
+        config.pop("description", None)
+        config.update(kwargs)
 
         if input_shape is None:
             input_shape = (224, 224, 3)
@@ -706,11 +718,8 @@ class ResNet(keras.Model):
 
         model = cls(
             num_classes=num_classes,
-            blocks_per_stage=config["blocks_per_stage"],
-            filters_per_stage=config["filters_per_stage"],
-            block_type=config["block_type"],
             input_shape=input_shape,
-            **kwargs
+            **config
         )
 
         if load_weights_path:

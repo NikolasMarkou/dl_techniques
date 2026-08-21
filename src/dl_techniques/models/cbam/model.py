@@ -429,13 +429,24 @@ class CBAMNet(keras.Model):
                 f"Unknown variant '{variant}'. Available variants: {available}"
             )
 
-        variant_config = cls.MODEL_VARIANTS[variant]
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
+        variant_config = cls.MODEL_VARIANTS[variant].copy()
+        variant_config.pop("description", None)
+        variant_config.update(kwargs)
 
         model = cls(
             num_classes=num_classes,
-            dims=variant_config["dims"],
             input_shape=input_shape,
-            **kwargs
+            **variant_config
         )
 
         if pretrained:

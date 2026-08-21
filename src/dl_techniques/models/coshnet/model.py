@@ -592,7 +592,19 @@ class CoShNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
         config = cls.MODEL_VARIANTS[variant].copy()
+        config.pop("description", None)
+        config.update(kwargs)
 
         # Set default input shape based on variant if not provided
         if input_shape is None:
@@ -607,8 +619,7 @@ class CoShNet(keras.Model):
         return cls(
             num_classes=num_classes,
             input_shape=input_shape,
-            **config,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:
