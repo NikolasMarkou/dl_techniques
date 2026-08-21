@@ -540,12 +540,15 @@ class SqueezeNoduleNetV2(keras.Model):
             variant: String, one of "v1", "v2", "v1_3d", "v2_3d"
             num_classes: Integer, number of output classes
             input_shape: Tuple, input shape
-            **kwargs: Additional arguments passed to the constructor
+            **kwargs: Additional arguments passed to the constructor. A
+                non-None ``weights`` here raises NotImplementedError; no
+                pretrained checkpoints are distributed with this package.
 
         Returns:
             SqueezeNoduleNetV2 model instance
 
         Raises:
+            NotImplementedError: If a non-None ``weights`` is passed.
             ValueError: If variant is not recognized, or if `input_shape`'s
                 spatial extent is below the computed minimum of 35 (shared by
                 all four variants, which share one stem and pooling schedule).
@@ -563,6 +566,16 @@ class SqueezeNoduleNetV2(keras.Model):
             raise ValueError(
                 f"Unknown variant '{variant}'. Available variants: "
                 f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        if kwargs.pop("weights", None) is not None:
+            # Guard lives HERE, not in create_squeezenet_v2: ``from_variant`` is the
+            # chokepoint both public entry points reach, and ``**kwargs``
+            # swallowed ``weights`` silently, returning a random model.
+            raise NotImplementedError(
+                f"No pretrained SqueezeNodule-Net weights are distributed with dl_techniques. "
+                f"Train from scratch, or load a local checkpoint with "
+                f"keras.models.load_model()."
             )
 
         variant_config = cls.MODEL_VARIANTS[variant]
@@ -601,11 +614,15 @@ class SqueezeNoduleNetV2(keras.Model):
                 config['kernel_initializer']
             )
 
-        # Remove base config keys that are handled by Model
-        base_config = {}
-        for key in ['name', 'layers', 'input_layers', 'output_layers']:
-            if key in config:
-                base_config[key] = config.pop(key)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-129
+        # Drop only the Functional-graph keys that ``__init__`` rebuilds. Do NOT
+        # add 'name' back to this list: dropping it renamed a nested backbone
+        # from 'backbone' to 'squeeze_net_v1' on reload, and
+        # ``utils/weight_transfer.py`` keys its layer map by ``layer.name``, so
+        # the whole backbone landed in missing_in_source and kept its random
+        # init while the call still returned normally.
+        for key in ('layers', 'input_layers', 'output_layers'):
+            config.pop(key, None)
 
         return cls(**config)
 
@@ -684,20 +701,11 @@ def create_squeezenodule_net_v2(
         >>> model = create_squeezenodule_net_v2("v2_3d", num_classes=2,
         >>>                                     input_shape=(48, 48, 48, 1))
     """
-    if weights is not None:
-        # Raise rather than log-and-ignore: silently returning a randomly
-        # initialized model to a caller who asked for pretrained weights is the
-        # failure mode this package's house shape exists to prevent.
-        raise NotImplementedError(
-            f"No pretrained SqueezeNodule-Net weights are distributed with dl_techniques "
-            f"(got weights={weights!r}). Train from scratch, or load a local "
-            f"checkpoint with keras.models.load_model()."
-        )
-
     return SqueezeNoduleNetV2.from_variant(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        weights=weights,
         **kwargs
     )
 
