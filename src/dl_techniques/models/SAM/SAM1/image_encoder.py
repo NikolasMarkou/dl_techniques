@@ -798,11 +798,24 @@ class ImageEncoderViT(keras.Model):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Creates the model's own weights.
+        Creates the positional embedding AND materializes every sub-layer.
 
-        For `keras.Model`, sub-layers are built automatically on the first
-        call. We only need to create weights that belong directly to this model,
-        like the positional embedding.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+        The explicit sub-layer builds below are LOAD-PATH CORRECTNESS, not
+        style. The former comment here ("sub-layers are built automatically on
+        the first call") is true of `__call__` and false of
+        `keras.models.load_model`, which builds from the saved `input_shape`
+        and then restores. With `pos_embed` as the only weight `build` created,
+        a reloaded encoder owned **1 of 65** weights at restore time and the
+        other 64 were silently re-initialised: MEASURED on CPU at
+        `img_size=64, patch_size=16, embed_dim=32, depth=4, out_chans=16`,
+        perturb-save-reload gave `max|dOut| = 4.628568e+00` with 64/65 weights
+        back at class defaults. Do NOT "simplify" this away, and do NOT verify
+        it with a post-forward weight count: the SAME broken build reads
+        `len(model.weights) == 65` once anything has called the model, and the
+        `.keras` archive is a red herring too (its `model.weights.h5` held all
+        65 both before and after this fix -- the loss was on the LOAD side).
+        See decisions.md D-122.
 
         Args:
             input_shape: Shape tuple of the input.
@@ -813,6 +826,11 @@ class ImageEncoderViT(keras.Model):
             initializer="zeros",
             trainable=True
         )
+        token_shape = (input_shape[0], self.grid_size, self.grid_size, self.embed_dim)
+        self.patch_embed.build(input_shape)
+        for blk in self.blocks:
+            blk.build(token_shape)
+        self.neck.build(token_shape)
         super().build(input_shape)
 
     def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
