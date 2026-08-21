@@ -27,7 +27,6 @@ References:
       between the embedding and the output head, already cited by ``mlm.py``.
 """
 import keras
-import tensorflow as tf
 from typing import Dict, Any, Optional, List
 
 # ---------------------------------------------------------------------
@@ -69,11 +68,11 @@ def visualize_mlm_predictions(
     # Get model predictions
     predictions = mlm_model(masked_inputs, training=False)
     predicted_ids = keras.ops.argmax(predictions, axis=-1)
-    predicted_ids = tf.cast(predicted_ids, dtype=tf.int32)
+    predicted_ids = keras.ops.cast(predicted_ids, "int32")
 
-    # Limit to num_samples
-    batch_size = tf.shape(labels)[0]
-    num_samples = tf.minimum(num_samples, batch_size)
+    # Limit to num_samples. Resolved to a Python int: it indexes slices and
+    # drives `range(...)` below, and everything downstream is numpy anyway.
+    num_samples = min(num_samples, int(keras.ops.shape(labels)[0]))
 
     masked_input_ids = masked_inputs["input_ids"][:num_samples]
     predicted_ids = predicted_ids[:num_samples]
@@ -101,7 +100,7 @@ def visualize_mlm_predictions(
         )
 
         # Create filled sequence (use predictions for masked positions only)
-        filled_ids = tf.where(
+        filled_ids = keras.ops.where(
             masked_positions[i],
             predicted_ids[i],
             labels[i]
