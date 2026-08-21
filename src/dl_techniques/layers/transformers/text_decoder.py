@@ -84,7 +84,7 @@ based on subsequent research, such as:
 
 import keras
 from keras import ops, layers, initializers
-from typing import Optional, Dict, Any, Literal, Tuple
+from typing import Optional, Dict, Any, Literal, Tuple, Union, Callable
 
 # ---------------------------------------------------------------------
 # local imports
@@ -206,6 +206,7 @@ class TextDecoder(keras.layers.Layer):
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPositionType = 'post',
             ffn_type: FFNType = 'mlp',
+            activation: Union[str, Callable] = 'gelu',
             stochastic_depth_rate: float = 0.0,
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
@@ -279,6 +280,7 @@ class TextDecoder(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
+        self.activation = activation
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
@@ -338,6 +340,7 @@ class TextDecoder(keras.layers.Layer):
                 ffn_norm_args={'epsilon': self.layer_norm_eps},
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
+                activation=self.activation,
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.stochastic_depth_rate > 0.0,
@@ -598,6 +601,7 @@ class TextDecoder(keras.layers.Layer):
             'normalization_type': self.normalization_type,
             'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
+            'activation': self.activation,
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,

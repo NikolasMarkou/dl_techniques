@@ -51,13 +51,26 @@ substitutes an independent bias-free ``Dense``; that is the modern preference at
 multi-billion-parameter scale, where the embedding is a small fraction of the total
 and the coupling costs more capacity than it saves.
 
-Two departures from the published model are worth stating plainly. The default
+Three departures from the published model are worth stating plainly. The default
 vocabulary is 100277 (Tiktoken ``cl100k_base``), not GPT-2's own 50257-entry BPE
 vocabulary, so a checkpoint from OpenAI will not load against the defaults; pass
 ``vocab_size=50257`` for shape compatibility with the original. And ``attention_type``
 and ``ffn_type`` are factory keys rather than fixed choices, so the class describes a
 GPT-2-*shaped* decoder whose mixer and MLP can be swapped; only the defaults
-(``'multi_head'``, ``'mlp'``) reproduce the paper.
+(``'multi_head'``, ``'mlp'``) reproduce the paper. And the residual output
+projections are initialized at the plain ``initializer_range``; the reference
+scales them by ``1/sqrt(2 * n_layer)`` so that the residual stream's variance
+does not grow with depth. That third one is a genuine remaining gap, not a
+choice: ``TransformerLayer`` exposes a single ``kernel_initializer`` for all of
+its projections, so scaling only ``attn.c_proj`` and ``mlp.c_proj`` would mean
+per-sublayer initializer plumbing through shared transformer infrastructure.
+Deliberately NOT worked around by scaling the whole layer -- that would shrink
+the QKV and FC1 initializations too, which the reference does not do. See
+decisions.md D-130.
+
+The FFN nonlinearity IS fixed here: GPT-2 uses ``gelu_new``, the tanh
+approximation, while Keras' ``'gelu'`` string resolves to the exact-erf form.
+``gpt2_gelu`` below supplies the correct one.
 
 No pretrained weights are distributed with this package. ``pretrained=True`` routes
 to ``_download_weights``, which raises ``NotImplementedError`` rather than logging a
@@ -94,6 +107,24 @@ from typing import Any, Dict, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable(package="dl_techniques")
+def gpt2_gelu(x: keras.KerasTensor) -> keras.KerasTensor:
+    """GPT-2's ``gelu_new``: the tanh approximation, not the exact-erf form.
+
+    Keras' own ``'gelu'`` string resolves to ``gelu(x, approximate=False)``
+    (``keras/src/activations/activations.py``), which is a different function.
+    Measured divergence over 1e5 samples of ``N(0, 3)``: ``max|d| = 4.74e-04``,
+    ``mean|d| = 1.49e-04``.
+
+    Registered because a bare lambda is not serializable: ``TextDecoder``
+    round-trips this through ``get_config()``.
+    """
+    return ops.gelu(x, approximate=True)
+
 
 # ---------------------------------------------------------------------
 
@@ -293,6 +324,7 @@ class GPT2(keras.Model):
             normalization_type="layer_norm",
             normalization_position="pre",  # GPT-2 uses pre-layer normalization
             ffn_type=self.ffn_type,
+            activation=gpt2_gelu,
             dropout_rate=self.dropout_rate,
             attention_dropout_rate=self.attention_dropout_rate,
             initializer_range=self.initializer_range,
