@@ -60,8 +60,10 @@ dropout in the head, whereas here dropout sits between them.
 
 `train_step` and `test_step` are hand-written over `tf.GradientTape`, so this model is
 TensorFlow-backend only. The `metrics` property is overridden to return the two internal
-trackers, which means metrics passed to `compile()` are never updated and will not
-appear in the logs. Validation masking is dynamic as well, so `val_loss` carries the
+trackers PLUS whatever was passed to `compile(metrics=...)`, and `train_step` feeds the
+compiled ones explicitly; a compiled metric whose NAME collides with `loss` or
+`accuracy` is still dropped, because the step's return dict is keyed by name, but it now
+logs a warning instead of vanishing. Validation masking is dynamic as well, so `val_loss` carries the
 noise of a fresh corruption draw and an epoch-to-epoch comparison mixes model change
 with sampling noise. `call()` deliberately does no masking at all: it runs the encoder
 on the inputs as given and returns logits for every position, which is what makes
@@ -262,6 +264,22 @@ class MaskedLanguageModel(keras.Model):
         compiled = getattr(self, "_compile_metrics", None)
         if compiled is not None:
             names = {m.name for m in tracked}
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-131
+            # The name dedup must stay NAME-based: train_step returns
+            # ``{m.name: m.result() for m in self.metrics}``, so admitting a
+            # second metric called "accuracy" would not add a row, it would
+            # overwrite the tracker's under the same key. Do NOT "fix" this by
+            # comparing identity. Warn instead -- the dropped metric IS updated
+            # (measured 0.015625 against the tracker's 0.055556 on one epoch),
+            # so silence made a live, diverging number invisible. See D-131.
+            dropped = sorted(m.name for m in compiled.metrics if m.name in names)
+            if dropped and not getattr(self, "_warned_metric_name_clash", False):
+                self._warned_metric_name_clash = True
+                logger.warning(
+                    f"compile(metrics=...) supplied {dropped}, which collide with this "
+                    f"model's own trackers {sorted(names)} and will NOT be reported. "
+                    f"Rename them to see their values."
+                )
             tracked += [m for m in compiled.metrics if m.name not in names]
         return tracked
 

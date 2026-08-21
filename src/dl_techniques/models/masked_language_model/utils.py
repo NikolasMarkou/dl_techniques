@@ -210,11 +210,18 @@ def create_mlm_training_model(
     # Create optimizer
     optimizer = keras.optimizers.AdamW(**default_optimizer_config)
 
-    # Compile the model
-    mlm_model.compile(
-        optimizer=optimizer,
-        metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
-    )
+    # Compile the model.
+    #
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-131
+    # No `metrics=` here on purpose. This factory used to compile a
+    # SparseCategoricalAccuracy literally named "accuracy", which collides with
+    # MaskedLanguageModel's own tracker of that name and was therefore dropped
+    # by the name dedup in `MaskedLanguageModel.metrics` -- the repo's own
+    # headline factory reproducing the exact defect that property was fixed to
+    # close. It was not inert: it computed 0.015625 while the reported tracker
+    # read 0.055556. Do NOT add it back under the name "accuracy"; the model
+    # already reports masked accuracy under that key.
+    mlm_model.compile(optimizer=optimizer)
 
     logger.info(
         f"Created and compiled MLM training model with "
