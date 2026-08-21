@@ -3127,14 +3127,24 @@ class TestRealVariantForwardPass:
 
     # DECISION plan-2026-08-03T191222-1d751f81/D-027: count parameters by
     # BUILDING, never by forward-passing, and do it under keras.device("cpu").
-    # Do NOT replace the explicit sub-layer builds below with the obvious
+    # Do NOT replace `encoder.build(image_shape)` below with the obvious
     # `model.image_encoder(zeros((1, 1024, 1024, 3)))` -- that spelling
     # measured a 6,754.5 MiB GPU peak for vit_h on a 10,160 MiB card and made
     # the ordinary gate hard-OOM (unskippable) under any concurrent GPU work.
-    # And do NOT collapse the sub-layer builds into a bare
-    # `encoder.build(shape)`: ImageEncoderViT.build creates only `pos_embed`,
-    # so that alone counts 5,242,880 of vit_h's 637,026,048. See decisions.md
-    # D-027.
+    #
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-122 amends the second half of
+    # D-027. This test used to follow `encoder.build(...)` with three EXPLICIT
+    # sub-layer builds, because `ImageEncoderViT.build` created only `pos_embed`
+    # and "that alone counts 5,242,880 of vit_h's 637,026,048". That premise is
+    # dead: F-19 found the same gap on the LOAD path (a reloaded encoder owned 1
+    # of 65 weights) and `build` now materializes patch_embed, every block and
+    # the neck itself. The explicit builds are not merely redundant now -- they
+    # RAISE (`ValueError: You cannot add new elements of state ... to a layer
+    # that is already built`), which is how this test found the change. MEASURED
+    # after the amendment, CPU, `build()` alone: vit_b 89,670,912 / vit_l
+    # 308,278,272 / vit_h 637,026,048, all three exact, i.e. the 121.5x gap
+    # D-027 quantified is closed at real-variant scale. Do NOT re-add the
+    # sub-layer builds. See decisions.md D-122.
     @pytest.mark.parametrize(
         "variant,encoder_params",
         [
@@ -3167,28 +3177,21 @@ class TestRealVariantForwardPass:
         on the 10,160 MiB GPU 1, i.e. the ordinary gate hard-OOMed (it cannot
         skip) whenever anything else held more than ~3.3 GB of that card --
         which is this machine's normal working condition. Counting parameters
-        never needed the forward. `ImageEncoderViT.build` creates only
-        `pos_embed` (its sub-layers are built lazily on first call), so the
-        sub-layers are built EXPLICITLY below at the geometry the forward would
-        have given them, and the whole thing runs inside `keras.device("cpu")`.
-        Measured after the change: all three variants exact, peak GPU **0.0
-        MiB**. Do NOT "simplify" this back to a forward pass, and do NOT drop
-        the explicit sub-layer builds -- `build()` alone counts 5,242,880 of
-        `vit_h`'s 637,026,048. See decisions.md D-027.
+        never needed the forward. `ImageEncoderViT.build` now materializes every
+        sub-layer at the geometry the forward would have given them (D-122), so
+        a single `encoder.build(image_shape)` inside `keras.device("cpu")` is
+        the whole measurement. Measured: all three variants exact, peak GPU
+        **0.0 MiB**. Do NOT "simplify" this back to a forward pass, and do NOT
+        re-add the explicit sub-layer builds this test used to carry -- they now
+        raise, because `build` already created that state. See decisions.md
+        D-027 and D-122.
         """
         with keras.device("cpu"):
             model = SAM.from_variant(variant)
             try:
                 encoder = model.image_encoder
                 image_shape = (1, encoder.img_size, encoder.img_size, encoder.in_chans)
-                token_shape = (
-                    1, encoder.grid_size, encoder.grid_size, encoder.embed_dim,
-                )
                 encoder.build(image_shape)
-                encoder.patch_embed.build(image_shape)
-                for block in encoder.blocks:
-                    block.build(token_shape)
-                encoder.neck.build(token_shape)
                 measured = int(encoder.count_params())
                 assert measured == encoder_params, (
                     f"{variant} image encoder measures {measured:,} params, "
