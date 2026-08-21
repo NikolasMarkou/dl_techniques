@@ -35,6 +35,19 @@ attention math inside the window is stubbed out. The recorded shape is
 ``test_windowing_does_engage_for_tiny_above_its_threshold`` is the CONTROL: it
 uses the same instrument on a configuration that genuinely windows, so a
 "one window" result elsewhere cannot be an artefact of the recorder.
+
+DECISION plan-2026-08-19T163559-499b6f0e/D-139 -- READ THIS BEFORE TRUSTING
+``test_base_and_large_can_never_window``. Since D-135 set
+``global_attention_interval = 1`` for ``base`` and ``large`` (at the inherited
+``3`` both variants raised ``ResourceExhaustedError`` on their first forward),
+those two variants build NO local attention layer at all, so that test is now
+vacuous for its own subjects in a second, stronger way: not merely "the window
+never engages", but "there is no windowed layer". It is kept deliberately, as a
+threshold pin on a still-public knob -- ``from_variant("base",
+global_attention_interval=3)`` restores the hybrid, and at that moment the
+threshold becomes load-bearing again. Do NOT "fix" the vacuity by shrinking
+``local_attention_window_size``: D-019 forbids it, because a smaller window buys
+a different wrong adjacency, not the paper's.
 """
 
 import os
