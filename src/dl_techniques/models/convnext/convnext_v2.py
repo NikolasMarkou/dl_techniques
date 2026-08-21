@@ -231,6 +231,17 @@ class ConvNeXtV2(keras.Model):
             filters=self.dims[0],
             kernel_size=stem_kernel_size,
             strides=stem_stride,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-125
+            # Deliberately NOT the unconditional `padding="same"` the
+            # downsample layers use. MEASURED at kernel == stride == 4:
+            # the two are identical on a divisible input ((32,32,3) ->
+            # 8x8 either way) and differ only on a non-divisible one
+            # ((30,30,3) -> 7x7 valid vs 8x8 same), so "making it
+            # consistent" would silently move the spatial geometry of
+            # every checkpoint trained at a non-divisible size --
+            # weight-shape-compatible, activation-value different. The
+            # 0x0-collapse-to-NaN the downsample fix was for cannot reach
+            # the stem, whose input is the image. See decisions.md D-125.
             padding="same" if stem_stride == 1 else "valid",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,
