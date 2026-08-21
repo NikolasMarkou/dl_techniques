@@ -610,6 +610,13 @@ class DINOv2VisionTransformer(keras.Model):
         self.num_patches = (self.image_size[0] // self.patch_size[0]) * (self.image_size[1] // self.patch_size[1])
 
         # Set input shape
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-115: the RAW argument is kept,
+        # not the derived `(*image_size, in_chans)`. `get_config` serializes THIS,
+        # so a caller-supplied override survives a round trip and a `None` stays
+        # `None` (re-derived identically on reload). Do NOT store the derived
+        # tuple instead: that pins a shape into every config, including the ones
+        # that were meant to follow `image_size`/`in_chans`.
+        self._input_shape_arg = input_shape
         if input_shape is None:
             input_shape = (*self.image_size, self.in_chans)
 
@@ -985,6 +992,7 @@ class DINOv2VisionTransformer(keras.Model):
             'interpolate_antialias': self.interpolate_antialias,
             'interpolate_offset': self.interpolate_offset,
             'include_top': self.include_top,
+            'input_shape': self._input_shape_arg,
         })
         return config
 
@@ -1105,6 +1113,11 @@ class DINOv2(keras.Model):
         self.backbone_kwargs = backbone_kwargs
 
         # Set input shape
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-115: same rule as the backbone
+        # -- keep the RAW argument for `get_config`. Without this key the composite
+        # reloaded SILENTLY at the 3-channel default, which is why 11 existing
+        # `.save(` call sites never caught it: they all use the default arm.
+        self._input_shape_arg = input_shape
         if input_shape is None:
             in_chans = backbone_kwargs.get('in_chans', 3)
             input_shape = (*self.image_size, in_chans)
@@ -1247,6 +1260,7 @@ class DINOv2(keras.Model):
             'patch_size': self.patch_size,
             'num_classes': self.num_classes,
             'include_top': self.include_top,
+            'input_shape': self._input_shape_arg,
             **self.backbone_kwargs
         })
         return config

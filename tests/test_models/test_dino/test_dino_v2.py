@@ -35,6 +35,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
 
 def _assert_finite(value):
@@ -271,3 +272,65 @@ def test_dtype_policy_forward(dtype_policy):
         f"the mask token has no effect under {dtype_policy} — the masked branch "
         "is dead in this dtype regime"
     )
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-115 / D-120
+#
+# `input_shape` was missing from BOTH `get_config` implementations in this
+# module. The carried finding predicted two failure modes (the backbone raising,
+# the composite reloading silently); MEASURED at HEAD there is only ONE, and it
+# is the silent one -- both classes reloaded at the 3-channel default with no
+# error at all. The default arm is clean, which is why the 11 existing `.save(`
+# call sites in this suite never saw it: every one of them uses 3 channels.
+# ---------------------------------------------------------------------------
+_ODD_CHANNEL_KW = dict(
+    image_size=32, patch_size=16, embed_dim=32, depth=1, num_heads=2,
+    stochastic_depth_rate=0.0,
+)
+
+
+@pytest.mark.parametrize("cls_name", ["DINOv2VisionTransformer", "DINOv2"])
+def test_a_non_default_input_shape_survives_the_config_round_trip(cls_name):
+    """Pre-fix BOTH classes reloaded as (None, 32, 32, 3) with NO exception."""
+    from dl_techniques.models.dino import dino_v2 as _v2
+
+    cls = getattr(_v2, cls_name)
+    model = cls(input_shape=(32, 32, 1), **_ODD_CHANNEL_KW)
+    assert tuple(model.inputs[0].shape) == (None, 32, 32, 1)
+
+    reloaded = cls.from_config(model.get_config())
+    assert tuple(reloaded.inputs[0].shape) == (None, 32, 32, 1), (
+        f"{cls_name} dropped `input_shape` on the round trip and silently came "
+        f"back at {tuple(reloaded.inputs[0].shape)} -- the 3-channel default"
+    )
+
+
+@pytest.mark.parametrize("cls_name", ["DINOv2VisionTransformer", "DINOv2"])
+def test_the_default_input_shape_arm_is_unchanged(cls_name):
+    """The control: `input_shape=None` must still follow image_size/in_chans."""
+    from dl_techniques.models.dino import dino_v2 as _v2
+
+    cls = getattr(_v2, cls_name)
+    model = cls(**_ODD_CHANNEL_KW)
+    reloaded = cls.from_config(model.get_config())
+    assert tuple(model.inputs[0].shape) == (None, 32, 32, 3)
+    assert tuple(reloaded.inputs[0].shape) == tuple(model.inputs[0].shape)
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-120: F-04's `name=` collision is
+# CLOSED (D-082 gave all three classes the `kwargs.pop`/`setdefault` treatment),
+# but nothing pinned it. A DINO training harness builds a teacher AND a student
+# in one process, so this is the shape that would notice a regression.
+# ---------------------------------------------------------------------------
+def test_a_teacher_and_a_student_can_be_named_in_one_process():
+    from dl_techniques.models.dino.dino_v2 import DINOv2, DINOv2VisionTransformer
+    from dl_techniques.models.dino.dino_v3 import DINOv3
+
+    for cls in (DINOv2VisionTransformer, DINOv2, DINOv3):
+        teacher = cls(name="dino_teacher", **_ODD_CHANNEL_KW)
+        student = cls(name="dino_student", **_ODD_CHANNEL_KW)
+        assert (teacher.name, student.name) == ("dino_teacher", "dino_student"), (
+            f"{cls.__name__} did not honour a caller-supplied `name=`"
+        )
