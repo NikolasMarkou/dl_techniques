@@ -90,8 +90,14 @@ be justified without training runs; see decisions.md D-028 of
 plan-2026-08-18T140459-7991552f for the full ruling and the numbers a future
 re-tune needs. The training step is custom
 because the loss depends on intermediate encoder outputs rather than on
-`(y_true, y_pred)` alone; it clips gradients elementwise to `[-1, 1]`, a blunt but
-effective guard against the loss spikes the KL term can produce early in training.
+`(y_true, y_pred)` alone; it clips gradients elementwise so that the TRUE gradient
+lands in `[-1, 1]`, a blunt but effective guard against the loss spikes the KL term
+can produce early in training. Read that bound literally only in float32. The clip
+is expressed in the SCALED domain -- the limit is `optimizer.scale_loss(1.0)`, which
+is exactly `1.0` in float32 and the current loss scale under a `LossScaleOptimizer`
+-- because a hard `[-1, 1]` on the scaled gradient would clip essentially every
+component to the limit and, after unscaling, shrink the whole update by the loss
+scale. That is measured, not hypothetical; see the anchor at the clip itself.
 The vMF mode opts out of XLA on every compile path — direct `compile()`, factory,
 and reload — because the beta sampler it uses crashes under jit; that opt-out is
 reapplied on deserialization so a reloaded model does not inherit a stale
