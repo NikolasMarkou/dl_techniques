@@ -870,13 +870,10 @@ class ViT(keras.Model):
     ) -> "ViT":
         """Create a ViT model from a predefined variant.
 
-        # DECISION plan_2026-05-12_f2d29729/D-003
-        Resnet-template parity. The ``except (IOError, OSError, ValueError)``
-        around ``_download_weights`` is narrow on purpose so a
-        :class:`NotImplementedError` from ``_download_weights`` propagates
-        (LESSONS L53 -- silent fallbacks hide bugs). A user who sets
-        ``pretrained=True`` without providing a local checkpoint path
-        gets a clear error.
+        A user who sets ``pretrained=True`` without providing a local checkpoint
+        path gets a clear :class:`NotImplementedError` straight out of
+        ``_download_weights``; see the ``# DECISION ... D-122`` note at that call
+        site for why no ``except`` clause guards it.
 
         Args:
             variant: One of the keys in :attr:`MODEL_VARIANTS`
@@ -925,19 +922,28 @@ class ViT(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # boolean True -- delegate to _download_weights, narrow except.
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir,
-                    )
-                except (IOError, OSError, ValueError) as e:
-                    logger.warning(
-                        f"Failed to acquire pretrained weights via download: {e}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+                # `_download_weights` is called BARE on purpose. It raises
+                # `NotImplementedError` unconditionally, and `NotImplementedError`
+                # inherits from `RuntimeError`, NOT from `OSError`/`ValueError`
+                # (MEASURED: `issubclass(NotImplementedError, OSError)` is False,
+                # `issubclass(NotImplementedError, ValueError)` is False; `IOError`
+                # IS `OSError` on Python 3, so the deleted 3-tuple was really a
+                # 2-tuple). The former
+                # `except (IOError, OSError, ValueError): warn + random init`
+                # therefore could not fire from ANY reachable state -- a
+                # warn-and-continue branch whose own `# DECISION` comment argued it
+                # was "narrow on purpose" while closing nothing. Do NOT reinstate it
+                # and do NOT broaden the tuple to `RuntimeError`/`Exception` "to make
+                # it work": broadening is the ONE edit that turns this into a silent
+                # fallback that hands the caller a randomly initialised model when
+                # `pretrained=True` (LESSONS L53), and the repo-wide guard added at
+                # step 6 fires on exactly that shape. See decisions.md D-122.
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir,
+                )
 
             # Decide whether to enable shape-mismatch skipping.
             include_top = kwargs.get("include_top", True)

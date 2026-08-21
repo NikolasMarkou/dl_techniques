@@ -2433,11 +2433,18 @@ def _sweep_weight_load_handlers(roots=None, src_root=None):
 #: not catch the ``NotImplementedError`` their body can raise. A waiver keyed to
 #: the clause TEXT fails loudly on exactly that edit.
 _WEIGHT_LOAD_HANDLER_WAIVERS = {
-    # 1-5: dead by construction. `_download_weights` raises only
+    # 1-4: dead by construction. `_download_weights` raises only
     # NotImplementedError, which `(IOError, OSError, ValueError)` does not catch,
     # so the handler body never runs and the NIE reaches the caller (runtime-proved
-    # at D-003 §3a: 45/45 sites raise). Each is one broadened `except` away from
+    # at D-003 3a: 45/45 sites raise). Each is one broadened `except` away from
     # being the live defect, which is what the clause-text key catches.
+    #
+    # There were FIVE. `models/vit/model.py::from_variant` was the fifth and its
+    # waiver is GONE because the handler itself is gone -- step 25 deleted the
+    # clause outright (F-32) rather than waiving it forever, so `vit` now calls
+    # `_download_weights` bare. Re-adding any `except` there makes this sweep
+    # report an unwaived R-049 offender, which is this deletion's RED-proof.
+    # See decisions.md D-122.
     (
         "models/bert/bert.py",
         "from_variant",
@@ -2453,11 +2460,6 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): "dead handler -- same proof as bert",
-    (
-        "models/vit/model.py",
-        "from_variant",
-        "(IOError, OSError, ValueError)",
-    ): "dead handler -- same proof as bert; scheduled for deletion (prior plan F-32)",
     (
         "models/wave_field/model.py",
         "from_variant",
