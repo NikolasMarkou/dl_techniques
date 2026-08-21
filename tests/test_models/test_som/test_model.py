@@ -912,10 +912,24 @@ class TestSOMModel:
 
             loaded_model = keras.models.load_model(filepath)
 
-            # Class prototypes should be preserved (if implemented in get/from_config)
-            # Note: This may require additional serialization logic
-            # For now, just verify model loads successfully
-            assert loaded_model is not None
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-108
+            # Do NOT weaken this back to `assert loaded_model is not None`. That
+            # was the body until 2026-08-21 and it CANNOT FAIL: replacing the
+            # `class_prototypes` entry of `SOMModel.get_config` with a literal
+            # `None` left this test GREEN. Compare the VALUES.
+            assert loaded_model.class_prototypes is not None, (
+                "class_prototypes did not survive the .keras round trip"
+            )
+            assert set(loaded_model.class_prototypes) == set(model.class_prototypes)
+            for class_id, bmu in model.class_prototypes.items():
+                assert tuple(loaded_model.class_prototypes[class_id]) == tuple(bmu), (
+                    f"prototype for class {class_id} moved: "
+                    f"{bmu} -> {loaded_model.class_prototypes[class_id]}"
+                )
+
+            # Control: the prototypes are a non-trivial payload, so an equality
+            # over an empty dict cannot be what passed above.
+            assert len(model.class_prototypes) == len(np.unique(y)) > 1
 
     def test_config_completeness(self, model_config):
         """Test that get_config contains all parameters."""

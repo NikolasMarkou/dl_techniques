@@ -130,14 +130,40 @@ class TestGemma3ModelAndBlock:
             rtol=1e-6
         )
 
-        # Check that scaling is applied in the forward pass
-        raw_embeddings = model.embeddings(sample_input)
-        scaled_embeddings_manual = raw_embeddings * model.emb_scale
+        # The scaling must actually be APPLIED, not merely stored. Capture the
+        # tensor `call` hands to block 0 and compare it to the scaled embeddings.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-107
+        # Do NOT replace this with `scaled = raw * emb_scale; _ = model(x)`. That
+        # was the previous body: it computed the comparison and DISCARDED it, so
+        # deleting `* self.emb_scale` from Gemma3.call kept this test GREEN.
+        raw_embeddings = keras.ops.convert_to_numpy(model.embeddings(sample_input))
+        scale = float(keras.ops.convert_to_numpy(model.emb_scale))
 
-        # To verify, we can use a hook or a subclass, but a simpler check is to
-        # ensure the model runs without error, implying the operation is valid.
-        # A full check would require a more complex setup.
-        _ = model(sample_input) # This ensures the multiplication step works
+        captured = {}
+        original_call = model.blocks[0].call
+
+        def capturing_call(hidden_states, *args, **kwargs):
+            captured['x'] = keras.ops.convert_to_numpy(hidden_states)
+            return original_call(hidden_states, *args, **kwargs)
+
+        model.blocks[0].call = capturing_call
+        try:
+            _ = model(sample_input, training=False)
+        finally:
+            model.blocks[0].call = original_call
+
+        assert 'x' in captured, "block 0 was never reached; the capture proved nothing"
+        np.testing.assert_allclose(
+            captured['x'], raw_embeddings * scale, rtol=1e-6, atol=1e-6,
+            err_msg="Gemma3.call does not apply the sqrt(hidden_size) embedding scale"
+        )
+
+        # Negative control: the same assertion against the UNSCALED embeddings must
+        # fail, otherwise scale == 1 and the check above is vacuous.
+        assert scale > 1.0
+        assert not np.allclose(captured['x'], raw_embeddings, rtol=1e-6, atol=1e-6), (
+            "scaled and unscaled embeddings are indistinguishable"
+        )
 
     def test_attention_mask_creation_in_block(self):
         """Test attention mask creation within the transformer block."""
