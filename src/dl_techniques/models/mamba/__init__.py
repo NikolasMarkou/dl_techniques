@@ -1,9 +1,13 @@
 from .components import MambaLayer,  MambaResidualBlock
+from .components_v2 import Mamba2Layer, Mamba2ResidualBlock
 from .mamba_v1 import Mamba
 from .mamba_v2 import Mamba2
 
 __all__ = [
     'MambaLayer',
     'Mamba',
-    'MambaResidualBlock'
+    'MambaResidualBlock',
+    'Mamba2Layer',
+    'Mamba2',
+    'Mamba2ResidualBlock',
 ]

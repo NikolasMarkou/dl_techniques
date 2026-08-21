@@ -3,6 +3,8 @@ import keras
 import numpy as np
 from typing import Optional, Any, Dict, Tuple
 
+from dl_techniques.layers.norms.rms_norm import RMSNorm
+
 
 # ---------------------------------------------------------------------
 
@@ -156,16 +158,41 @@ class Mamba2Layer(keras.layers.Layer):
 
         # RMS Normalization (or LayerNorm as a fallback)
         if self.rmsnorm:
-            self.norm = keras.layers.LayerNormalization(
-                epsilon=self.norm_epsilon,
-                rms_scaling=True,  # Use RMSNorm
-                name="rmsnorm"
-            )
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-123
+            # A real RMSNorm. Do NOT go back to
+            # `LayerNormalization(rms_scaling=True)`: MEASURED 2026-08-21, that
+            # flag divides by sqrt(VAR + eps), i.e. by the mean-DEPENDENT
+            # standard deviation, not by sqrt(mean(x**2) + eps). It does not
+            # subtract the mean (the carried "it mean-centers" claim is wrong),
+            # but it is still not RMSNorm: max|LN(rms_scaling) - RMSNorm| =
+            # 8.5928 on an input with per-token mean 3.0, while RMSNorm matches
+            # the closed form to 2.4e-07. Mamba-2 is defined with RMSNorm, so
+            # the CODE was wrong here, not the comment. Weight path moves
+            # `rmsnorm/gamma` -> `norm/scale`; 0 mamba checkpoints exist under
+            # `results/` (8 `.keras` total, none mamba), so nothing reloads.
+            # The layer NAME stays "rmsnorm" -- it is finally accurate, and
+            # keeping it holds the weight-path prefix that
+            # `test_build_and_reload.py` pins.
+            # See decisions.md D-123.
+            self.norm = RMSNorm(epsilon=self.norm_epsilon, name="rmsnorm")
 
         # Output projection
         self.out_proj = keras.layers.Dense(self.d_model, use_bias=bias, name="out_proj")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-123
+        # Idempotence guard. Without it `Mamba2ResidualBlock.build` -- which
+        # calls `self.mamba2.build(input_shape)` unconditionally -- kills any
+        # instance whose child was already built, with `ValueError: You cannot
+        # add new elements of state ... to a layer that is already built`
+        # (MEASURED). Do NOT reach for the "parent whose call() runs the layer
+        # twice" reproduction: `Layer.__call__` short-circuits on `self.built`,
+        # so that probe passes identically with and without this guard and
+        # proves nothing. The RED proof is a DIRECT second `build(shape)`.
+        # See decisions.md D-123.
+        if self.built:
+            return
+
         # A_log initialization (per head).
         # `np.random`, deliberately and MEASURED: `keras.utils.set_random_seed`
         # calls `np.random.seed(seed)`, so two seeded builds of this layer
@@ -494,9 +521,8 @@ class Mamba2ResidualBlock(keras.layers.Layer):
         self.conv_bias = conv_bias
 
         if rmsnorm:
-            self.norm = keras.layers.LayerNormalization(
-                epsilon=self.norm_epsilon, rms_scaling=True, name="norm"
-            )
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-123 (see `Mamba2Layer`)
+            self.norm = RMSNorm(epsilon=self.norm_epsilon, name="norm")
         else:
             self.norm = keras.layers.LayerNormalization(
                 epsilon=self.norm_epsilon, name="norm"

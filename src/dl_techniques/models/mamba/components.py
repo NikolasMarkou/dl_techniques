@@ -332,11 +332,21 @@ class MambaLayer(keras.layers.Layer):
         :param input_shape: Shape of input tensor (batch_size, seq_len, d_model).
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Keras traces `call()` more than once on a layer's first invocation, so
-        # without this guard `add_weight` runs twice and the second attempt dies
-        # with "Variable .../A_log is already initialized." That makes this layer
-        # unusable from inside a parent LAYER's `call()` -- the path the D-084
-        # anchor below is about. Every sibling in this package already has it.
+        # Idempotence guard: a parent that calls `child.build(shape)` directly
+        # (both residual blocks in this package do) would otherwise re-run
+        # `add_weight` on an instance a forward pass already built, and Keras
+        # raises `ValueError: You cannot add new elements of state ... to a
+        # layer that is already built` (MEASURED 2026-08-21). The rationale that
+        # used to stand here -- "Keras traces `call()` more than once on the
+        # first invocation" -- is NOT the live path: `Layer.__call__` checks
+        # `self.built`, so a parent whose `call()` runs this layer twice
+        # succeeds even with no guard at all. A second CORRECTION: the claim
+        # "every sibling in this package already has it" was FALSE --
+        # `Mamba2Layer` had no guard at all until D-123 added one. The two
+        # `add_weight`-owning layers (`MambaLayer`, `Mamba2Layer`) both carry it
+        # now; `MambaResidualBlock` / `Mamba2ResidualBlock` deliberately do not,
+        # because they only delegate to sub-layer `build`s that are themselves
+        # guarded.
         if self.built:
             return
 
