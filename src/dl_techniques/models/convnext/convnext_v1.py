@@ -37,11 +37,22 @@ times and leave every stage's first block unregularized.
 
 Downsampling is a separate LayerNorm + strided convolution between stages rather
 than a stride inside a residual block, and the stem is the same operation applied
-to the image (a `strides x strides` patchify, default 4). Those convolutions use
-`padding="same"` rather than `"valid"`: at kernel == stride the two are identical
-whenever the spatial dimension divides the stride, but `"valid"` collapses to a
-0x0 feature map on the small inputs the CIFAR-scale variants use, which produced
-non-finite output.
+to the image (a `strides x strides` patchify, default 4). The DOWNSAMPLE
+convolutions use `padding="same"` rather than `"valid"`: at kernel == stride the
+two are identical whenever the spatial dimension divides the stride, but
+`"valid"` collapses to a 0x0 feature map on the small inputs the CIFAR-scale
+variants use, which produced non-finite output.
+
+The STEM does NOT follow that rule and this is deliberate, not an oversight: it
+uses `"same"` only at `stem_stride == 1` and `"valid"` otherwise. MEASURED at
+kernel == stride == 4: on a divisible `(32,32,3)` the two agree exactly (8x8
+either way), and they diverge only on a non-divisible input -- `(30,30,3)` gives
+7x7 under `"valid"` and 8x8 under `"same"`. Changing the stem to unconditional
+`"same"` would therefore move the spatial geometry of every checkpoint trained
+at a non-divisible input size: weight-SHAPE-compatible, activation-value
+different, and silently so. The 0x0 collapse the downsample fix was for cannot
+reach the stem, whose input is the image. See the F-60 ruling in
+`plans/plan-2026-08-19T163559-499b6f0e/decisions.md` (D-125).
 
 `stochastic_mode` selects what the per-block regularizer actually does: `depth`
 is standard stochastic depth (drops the whole branch at training time), while

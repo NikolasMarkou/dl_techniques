@@ -230,17 +230,39 @@ class DPTDecoder(keras.layers.Layer):
         self._build_input_shape: Optional[Tuple[int, ...]] = None
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Build decoder layers based on input shape.
-
-        Sublayers are created in __init__ (their dims are shape-independent);
-        build only records the input shape for serialization. Sublayer weights
-        are constructed lazily on the first call.
+        """Build every sublayer `call` runs, in `call`'s own shape order.
 
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        # Store input shape for serialization
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-124
+        # Do NOT go back to "sublayers are built lazily on the first call". That
+        # is true of `__call__` and FALSE of `keras.models.load_model`, which
+        # builds from the SAVED input_shape and restores immediately -- so the
+        # restore found a zero-weight decoder. MEASURED 2026-08-21, standalone,
+        # CPU: pre-forward weight count after `build` was 0 (post-forward 12),
+        # and a perturb-save-reload moved the output by max|dOut| = 70.98 with
+        # 12 of 12 weights back at class defaults. The save side was BLIND --
+        # the archive held 12 of 12 HDF5 datasets both before and after the fix
+        # -- so an archive-content check alone cannot see this, and neither can
+        # a post-forward count. Inside `DepthAnything` it was masked by that
+        # model's `load_own_variables` force-build; `DPTDecoder` is public API.
+        # See decisions.md D-124.
         self._build_input_shape = input_shape
+        shape = tuple(input_shape)
+        for conv, bn, act, up in zip(
+                self.conv_layers,
+                self.batch_norm_layers,
+                self.activation_layers,
+                self.upsample_layers,
+        ):
+            conv.build(shape)
+            shape = conv.compute_output_shape(shape)
+            bn.build(shape)
+            act.build(shape)
+            if up is not None:
+                shape = up.compute_output_shape(shape)
+        self.output_conv.build(shape)
 
         super().build(input_shape)
 

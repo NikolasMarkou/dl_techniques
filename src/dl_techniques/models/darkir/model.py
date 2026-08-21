@@ -682,7 +682,10 @@ class DarkIREncoderBlock(keras.layers.Layer):
     2. **Path 2 (Frequency)**: out = y + γ · (y ⊙ FreMLP(Norm(y)))
 
     Where:
-    - β, γ: learnable scalar parameters (initialized to 0)
+    - β, γ: learnable PER-CHANNEL gates of shape `(1, 1, 1, channels)`,
+      initialized to 0. NOT scalars, despite how the equations above read:
+      `build` allocates one weight per channel and the multiply broadcasts
+      over N, H, W only.
     - DConvᵢ: dilated convolution with rate dᵢ
     - SG: SimpleGate activation
     - Attn: channel attention mechanism
@@ -1029,7 +1032,10 @@ class DarkIRDecoderBlock(keras.layers.Layer):
     2. **Path 2 (Gated FFN)**: out = y + γ · Conv1x1(SG₂(Conv1x1(Norm(y))))
 
     Where:
-    - β, γ: learnable scalar parameters (initialized to 0)
+    - β, γ: learnable PER-CHANNEL gates of shape `(1, 1, 1, channels)`,
+      initialized to 0. NOT scalars, despite how the equations above read:
+      `build` allocates one weight per channel and the multiply broadcasts
+      over N, H, W only.
     - DConvᵢ: dilated convolution with rate dᵢ
     - SG₁, SG₂: SimpleGate activations (separate instances)
     - Attn: channel attention mechanism
@@ -1533,8 +1539,21 @@ def create_darkir_model(
         raise ValueError(f"width must be positive, got {width}")
     if middle_blk_num_enc < 0:
         raise ValueError(f"middle_blk_num_enc must be non-negative, got {middle_blk_num_enc}")
-    if middle_blk_num_dec < 0:
-        raise ValueError(f"middle_blk_num_dec must be non-negative, got {middle_blk_num_dec}")
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-126
+    # `>= 1`, not `>= 0`: at 0 the middle decoder loop never runs, so `x` is
+    # still `x_light` when `layers.Add(name="middle_residual")([x, x_light])`
+    # fires and the "residual" is EXACTLY `2 * x_light` -- MEASURED 2026-08-21,
+    # max|middle_residual - 2*x_light| = 0.0 against a 2*x_light of magnitude
+    # 4.427. Do NOT relax this back to non-negative for symmetry with
+    # `middle_blk_num_enc`, which is genuinely 0-safe (at 0, `x_light` is just
+    # the encoder output and the residual is still a real one). See
+    # decisions.md D-126.
+    if middle_blk_num_dec < 1:
+        raise ValueError(
+            "middle_blk_num_dec must be >= 1, got "
+            f"{middle_blk_num_dec}: at 0 the middle residual degenerates to "
+            "2 * x_light"
+        )
     if len(enc_blk_nums) != len(dec_blk_nums):
         raise ValueError(
             f"enc_blk_nums and dec_blk_nums must have same length, "

@@ -25,9 +25,11 @@ expansion to `4F`, one GELU, now GRN, a 1x1 reduction back to `F`, and a
 learnable `gamma` layer scale. As in V1 the block is TRANSFORM-ONLY — it returns
 `F(x)`, and the residual plus drop-path wiring is the caller's responsibility,
 which this model performs in `call`. The drop-path ramp is global across the
-network rather than per stage, and downsampling is a separate LayerNorm +
+network rather than per stage, and DOWNSAMPLING is a separate LayerNorm +
 strided convolution with `padding="same"` for the same small-input reason
-documented in V1.
+documented in V1. As in V1 the STEM is the exception and keeps `"valid"` at
+`stem_stride > 1`; V1's module docstring carries the measurement and the
+ruling.
 
 The variant table spans a much wider range than V1's because the FCMAE recipe
 was evaluated from Atto (3.7M parameters) to Huge (660M), and the small end is
