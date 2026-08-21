@@ -1,1034 +1,958 @@
-# Miyasawa's Theorem: A Complete Guide
+# Miyasawa's Theorem (Tweedie's Formula): A Corrected and Unified Reference
+
+Scope: the empirical-Bayes identity linking the MMSE denoiser to the score of the noisy
+density; its exact extensions (conditional, linear-transformed, signal-dependent, composite);
+its role in score matching, diffusion models and inverse problems; and the architectural and
+normalization questions that surround bias-free denoisers.
+
+---
 
 ## Table of Contents
-1. [Introduction](#introduction)
-2. [Mathematical Statement](#mathematical-statement)
-3. [Detailed Mathematical Derivation](#detailed-mathematical-derivation)
-4. [Intuitive Understanding](#intuitive-understanding)
-5. [Connection to Energy Functions](#connection-to-energy-functions)
-6. [Score Matching and Probability Theory](#score-matching-and-probability-theory)
-7. [Applications in Modern Machine Learning](#applications-in-modern-machine-learning)
-8. [Practical Implementation](#practical-implementation)
-9. [Limitations and Caveats](#limitations-and-caveats)
-10. [Historical Context](#historical-context)
-11. [Further Reading](#further-reading)
+
+1. [Notation and conventions](#1-notation-and-conventions)
+2. [Statement and hypotheses](#2-statement-and-hypotheses)
+3. [Derivation](#3-derivation)
+4. [Second-order Tweedie: the Jacobian is the posterior covariance](#4-second-order-tweedie-the-jacobian-is-the-posterior-covariance)
+5. [What the theorem does and does not require](#5-what-the-theorem-does-and-does-not-require)
+6. [Equivalent forms and reparameterizations](#6-equivalent-forms-and-reparameterizations)
+7. [Score matching: why MSE denoising learns the score](#7-score-matching-why-mse-denoising-learns-the-score)
+8. [Conditional Miyasawa](#8-conditional-miyasawa)
+9. [Classifier-free guidance](#9-classifier-free-guidance)
+10. [Extension 1: linear transformation and correlated noise](#10-extension-1-linear-transformation-and-correlated-noise)
+11. [Extension 2: multiplicative and composite (Poisson-Gaussian) noise](#11-extension-2-multiplicative-and-composite-poisson-gaussian-noise)
+12. [Bias-free architectures: what they are and what they actually buy](#12-bias-free-architectures-what-they-are-and-what-they-actually-buy)
+13. [Input normalization for bias-free denoisers](#13-input-normalization-for-bias-free-denoisers)
+14. [Sampling with a denoiser](#14-sampling-with-a-denoiser)
+15. [Inverse problems, PnP and RED](#15-inverse-problems-pnp-and-red)
+16. [Diagnostics: SURE, generalized SURE, homogeneity, DC probe](#16-diagnostics-sure-generalized-sure-homogeneity-dc-probe)
+17. [Limitations and failure modes](#17-limitations-and-failure-modes)
+18. [Reference implementation](#18-reference-implementation)
+19. [History and references](#19-history-and-references)
+20. [Appendix A: quick-reference table](#appendix-a-quick-reference-table)
+21. [Appendix B: conventions that are commonly mixed up](#appendix-b-conventions-that-are-commonly-mixed-up)
 
 ---
 
-## Introduction
+## 1. Notation and conventions
 
-Miyasawa's theorem (1961) is a fundamental result in statistical estimation that has found profound applications in modern machine learning, particularly in denoising, generative modeling, and score-based methods. The theorem establishes a deep connection between optimal denoising and probability density gradients, providing a mathematical bridge between signal processing and probabilistic modeling.
+| Symbol | Meaning |
+|---|---|
+| $x \in \mathbb{R}^N$ | clean signal, drawn from prior $p(x)$ |
+| $\varepsilon$ | noise |
+| $y$ | noisy observation |
+| $p(y)$ | density of the **noisy** observation (a Gaussian-smoothed version of $p(x)$) |
+| $\hat{x}(y)$ | the MMSE (least-squares optimal) estimator, i.e. $\mathbb{E}[x\mid y]$ |
+| $D_\theta$ | a neural denoiser, an *approximation* to $\hat{x}$ |
+| $s(y) = \nabla_y \log p(y)$ | score of the noisy density |
+| $E(y) = -\log p(y)$ | energy (up to an additive constant) |
+| $J(y) = \partial \hat{x}/\partial y$ | Jacobian of the estimator |
 
-**Core Insight**: The theorem reveals that every optimal denoiser is secretly computing the gradient of a log-probability density function. This connection has revolutionary implications for generative modeling, energy-based methods, and understanding the implicit priors learned by neural networks.
+Two things that are constantly conflated and should not be:
 
----
-
-## Mathematical Statement
-
-### Problem Setup
-
-Consider the standard denoising problem:
-- **Clean signal**: $x \in \mathbb{R}^n$
-- **Additive Gaussian noise**: $\varepsilon \sim \mathcal{N}(0, \sigma^2 I)$
-- **Noisy observation**: $y = x + \varepsilon$
-
-### The Theorem
-
-**Miyasawa's Theorem (1961)**: For the least-squares optimal denoiser $\hat{x}(y)$ that minimizes the mean squared error $\mathbb{E}[\|\hat{x}(y) - x\|^2]$, the following identity holds:
-
-$$\boxed{\hat{x}(y) = y + \sigma^2 \nabla_y \log p(y)}$$
-
-where:
-- $\hat{x}(y)$ is the optimal denoised estimate
-- $p(y)$ is the probability density function of the noisy observations
-- $\nabla_y \log p(y)$ is the **score function** (gradient of log-density)
-- $\sigma^2$ is the noise variance
-
-### Equivalent Formulations
-
-The theorem can be expressed in several equivalent ways:
-
-**Residual Form**:
-$$\hat{x}(y) - y = \sigma^2 \nabla_y \log p(y)$$
-
-**Score Function Form**:
-$$\nabla_y \log p(y) = \frac{1}{\sigma^2}(\hat{x}(y) - y)$$
-
-**Energy Function Form** (since $E(y) = -\log p(y)$):
-$$\hat{x}(y) - y = -\sigma^2 \nabla_y E(y)$$
+- $\nabla_y \log p(y)$ is the score of the **noise-smoothed** density $p_\sigma = p_x * \mathcal{N}(0,\sigma^2 I)$, **not** of the clean prior $p(x)$. It converges to the clean score only as $\sigma \to 0$, and $\nabla \log p_x$ may not even exist if the data lie on a lower-dimensional manifold.
+- $\hat{x}$ denotes the exact MMSE estimator (a mathematical object); $D_\theta$ denotes a trained network. Every identity below is exact for $\hat{x}$ and approximate for $D_\theta$.
 
 ---
 
-## Detailed Mathematical Derivation
+## 2. Statement and hypotheses
 
-### Step 1: Optimal Denoiser Definition
+**Setup (additive white Gaussian noise).**
 
-The least-squares optimal denoiser is the conditional expectation:
-$$\hat{x}(y) = \mathbb{E}[x|y] = \int x \, p(x|y) \, dx$$
+$$y = x + \varepsilon, \qquad x \sim p(x), \qquad \varepsilon \sim \mathcal{N}(0, \sigma^2 I), \qquad x \perp \varepsilon.$$
 
-### Step 2: Bayes' Rule Application
+**Theorem (Miyasawa 1961; Tweedie's formula, cf. Robbins 1956, Efron 2011).**
+The least-squares optimal denoiser satisfies
 
-Using Bayes' rule:
-$$p(x|y) = \frac{p(y|x)p(x)}{p(y)}$$
+$$\boxed{\ \hat{x}(y) \;=\; \mathbb{E}[x \mid y] \;=\; y + \sigma^2\, \nabla_y \log p(y).\ }$$
 
-For additive Gaussian noise: $p(y|x) = \frac{1}{(2\pi\sigma^2)^{n/2}} \exp\left(-\frac{\|y-x\|^2}{2\sigma^2}\right)$
+**Hypotheses actually needed.**
 
-### Step 3: Gradient of Observation Density
+1. $\mathbb{E}\|x\| < \infty$ (so the conditional mean exists).
+2. The noise is additive Gaussian with known, signal-independent covariance $\sigma^2 I$, independent of $x$.
+3. Nothing else. $p(y)$ is automatically smooth and strictly positive everywhere, because it is a convolution with a Gaussian, so differentiation under the integral sign is justified by dominated convergence. There is no smoothness or support requirement on the prior $p(x)$: it may be discrete, singular, or supported on a measure-zero manifold.
 
-The key insight is to compute $\nabla_y p(y)$:
-
-$$p(y) = \int p(y|x) p(x) \, dx$$
-
-Taking the gradient:
-$$\nabla_y p(y) = \int \nabla_y p(y|x) p(x) \, dx$$
-
-### Step 4: Gradient of Gaussian Likelihood
-
-For the Gaussian likelihood:
-$$\nabla_y p(y|x) = p(y|x) \cdot \frac{x - y}{\sigma^2}$$
-
-Therefore:
-$$\nabla_y p(y) = \frac{1}{\sigma^2} \int (x - y) p(y|x) p(x) \, dx$$
-
-### Step 5: Simplification Using Bayes' Rule
-
-$$\nabla_y p(y) = \frac{1}{\sigma^2} \int (x - y) p(x|y) p(y) \, dx$$
-
-$$= \frac{p(y)}{\sigma^2} \int (x - y) p(x|y) \, dx$$
-
-$$= \frac{p(y)}{\sigma^2} \left(\int x p(x|y) \, dx - y \int p(x|y) \, dx\right)$$
-
-$$= \frac{p(y)}{\sigma^2} (\hat{x}(y) - y)$$
-
-### Step 6: Final Result
-
-Dividing both sides by $p(y)$:
-$$\frac{\nabla_y p(y)}{p(y)} = \nabla_y \log p(y) = \frac{1}{\sigma^2}(\hat{x}(y) - y)$$
-
-Rearranging:
-$$\boxed{\hat{x}(y) = y + \sigma^2 \nabla_y \log p(y)}$$
+**What the theorem is.** It is a statement about the *exact posterior mean*, an object defined by
+the prior and the noise model. It says nothing about how you compute or approximate that object.
 
 ---
 
-## Intuitive Understanding
+## 3. Derivation
 
-### Geometric Interpretation
+**Step 1. The MMSE estimator is the posterior mean.**
 
-Think of the theorem in terms of **energy landscapes**:
+$$\arg\min_{f} \mathbb{E}\big[\|f(y) - x\|^2\big] \;=\; \mathbb{E}[x\mid y] \;=\; \int x\, p(x\mid y)\, dx .$$
 
-1. **Clean data** lies on a low-dimensional manifold in high-dimensional space
-2. **Noise** pushes observations away from this manifold
-3. **Optimal denoising** moves observations back toward the manifold
-4. **The movement direction** is given by the gradient of log-probability
+**Step 2. Gaussian likelihood and its gradient.**
 
-```
-Noisy Point (y) ──────> Clean Estimate (x̂)
-      │                        │
-      │ Movement Direction     │
-      │ = σ²∇log p(y)          │
-      └────────────────────────┘
-```
+$$p(y\mid x) = (2\pi\sigma^2)^{-N/2} \exp\!\Big(-\tfrac{\|y-x\|^2}{2\sigma^2}\Big),
+\qquad
+\nabla_y\, p(y\mid x) = \frac{x-y}{\sigma^2}\, p(y\mid x).$$
 
-### Physical Analogy
+The essential structural fact: the gradient of the log-likelihood is **linear in $x$**. This is
+what makes the whole thing collapse to a first moment.
 
-Imagine a **particle in a potential field**:
-- The **potential energy** is $-\log p(y)$
-- **High probability regions** have low potential energy
-- The **gradient** points toward regions of higher probability
-- **Denoising** is like letting the particle slide downhill to equilibrium
+**Step 3. Differentiate the marginal.**
 
-### Information Theory Perspective
+$$p(y) = \int p(y\mid x)\, p(x)\, dx
+\;\Longrightarrow\;
+\nabla_y\, p(y) = \int \frac{x-y}{\sigma^2}\, p(y\mid x)\, p(x)\, dx .$$
 
-- **Score function** $\nabla \log p(y)$ measures the "information gradient"
-- It points toward directions of increasing likelihood
-- **Optimal denoising** follows this information gradient
-- The movement is proportional to noise level ($\sigma^2$)
+**Step 4. Convert to a posterior expectation.** Using $p(y\mid x)p(x) = p(x\mid y)p(y)$,
+
+$$\nabla_y\, p(y) = \frac{p(y)}{\sigma^2} \int (x-y)\, p(x\mid y)\, dx
+= \frac{p(y)}{\sigma^2}\big(\mathbb{E}[x\mid y] - y\big).$$
+
+**Step 5. Divide by $p(y) > 0$.**
+
+$$\nabla_y \log p(y) = \frac{1}{\sigma^2}\big(\hat{x}(y) - y\big)
+\qquad\Longleftrightarrow\qquad
+\hat{x}(y) = y + \sigma^2 \nabla_y \log p(y). \qquad \blacksquare$$
 
 ---
 
-## Connection to Energy Functions
+## 4. Second-order Tweedie: the Jacobian is the posterior covariance
 
-### Energy-Based Modeling
+Differentiating the identity once more gives a result that is at least as useful as the first,
+and that the source drafts omit entirely:
 
-In energy-based models, we define:
-$$E(y) = -\log p(y) + \text{constant}$$
+$$\boxed{\ J(y) \;=\; \frac{\partial \hat{x}}{\partial y} \;=\; I + \sigma^2 \nabla_y^2 \log p(y) \;=\; \frac{1}{\sigma^2}\,\operatorname{Cov}[x \mid y].\ }$$
 
-Miyasawa's theorem becomes:
-$$\hat{x}(y) = y - \sigma^2 \nabla_y E(y)$$
+Consequences:
 
-This reveals that **optimal denoising is gradient descent on an energy landscape**!
-
-### Implicit Energy Learning
-
-When we train a denoiser on data:
-1. The denoiser implicitly learns the data distribution $p(x)$
-2. Through the noise model, it learns $p(y)$
-3. Miyasawa's theorem extracts $\nabla E(y)$ from the denoiser
-4. We obtain the **energy landscape without explicit energy modeling**
-
-### Connection to Physics
-
-This connects to **Langevin dynamics** in statistical physics:
-$$dx = -\nabla E(x) dt + \sqrt{2T} dW$$
-
-where:
-- $E(x)$ is the potential energy
-- $T$ is temperature
-- $dW$ is Brownian motion
-
-Denoising follows a similar gradient flow on the learned energy landscape.
+- **The Jacobian of the exact MMSE denoiser is automatically symmetric and positive semidefinite.** Symmetry is not an extra assumption on $\hat{x}$; it is forced. It *is* an extra assumption when you swap $\hat{x}$ for a trained network $D_\theta$ (see [§15](#15-inverse-problems-pnp-and-red) on RED).
+- The eigenvalues of $\sigma^2 \nabla^2 \log p(y)$ are $\ge -1$.
+- **Free uncertainty quantification.** $\operatorname{Cov}[x\mid y] = \sigma^2 J(y)$: a Jacobian-vector product against a trained denoiser gives per-direction posterior variance without any extra head or ensemble.
+- **Risk.** $\mathrm{MMSE} = \mathbb{E}\big[\operatorname{tr}\operatorname{Cov}[x\mid y]\big] = \sigma^2\,\mathbb{E}\big[\operatorname{tr} J(y)\big]$, which is exactly the term that appears in SURE ([§16](#16-diagnostics-sure-generalized-sure-homogeneity-dc-probe)).
 
 ---
 
-## Score Matching and Probability Theory
+## 5. What the theorem does and does not require
 
-### Score Function Definition
+This section exists because the source drafts get it wrong, and the error propagates into
+architecture decisions.
 
-The **score function** is defined as:
-$$s(y) = \nabla_y \log p(y)$$
+**Required:** additive Gaussian noise, independence, finite first moment, and that the estimator
+be the *exact* conditional mean.
 
-Key properties:
-- Points toward regions of higher probability density
-- Independent of normalization constant
-- Central to many modern generative models
+**Not required, at all:**
 
-### Score Matching Objective
+- **A bias-free architecture.** The theorem is a statement about $\mathbb{E}[x\mid y]$, not about any network. A denoiser with biases, with a sigmoid head, or implemented as BM3D, that happened to be exactly MMSE-optimal would satisfy the identity exactly. Bias-free design is a separate inductive bias with separate justifications ([§12](#12-bias-free-architectures-what-they-are-and-what-they-actually-buy)).
+- **A linear final activation.** Same reason. It is nevertheless good practice, for the reason given below, which is not the reason the drafts give.
+- **A symmetric Jacobian.** As shown in [§4](#4-second-order-tweedie-the-jacobian-is-the-posterior-covariance), symmetry is a *consequence* for the exact estimator, not a hypothesis.
 
-**Traditional score matching** minimizes:
-$$\mathbb{E}_{p(y)}[\|s_\theta(y) - \nabla_y \log p(y)\|^2]$$
+**The correct reasons for the usual architectural choices:**
 
-**Miyasawa's insight**: We can estimate the score function through denoising!
-$$s(y) \approx \frac{1}{\sigma^2}(\text{denoiser}(y) - y)$$
-
-### Denoising Score Matching
-
-This leads to **denoising score matching**:
-1. Add noise to clean data: $y = x + \varepsilon$
-2. Train denoiser to predict $x$ from $y$
-3. Extract score function from denoiser residuals
-4. Use for sampling and generation
+| Choice | Correct justification | Incorrect justification found in the drafts |
+|---|---|---|
+| MSE loss | MSE is minimized by the conditional mean; L1 gives the conditional median, perceptual/adversarial losses give neither. This is the only architectural choice the theorem genuinely constrains. | (correct in the drafts) |
+| Linear output head | The residual $\hat{x}-y = \sigma^2 s(y)$ is unbounded and signed; a bounded (sigmoid, tanh) or one-sided (ReLU) head cannot represent it, and any head with a nonzero output at zero input injects a constant offset. | "Non-linear activations introduce bias because $\mathbb{E}[\mathrm{sigmoid}(f(x+\varepsilon))] \ne x$", which is a non-sequitur (that inequality is also true of the correct estimator composed with sigmoid). |
+| Residual parameterization $D(y) = y + r_\theta(y)$ | The network then directly regresses $\sigma^2 s(y)$, which is small and zero-mean, so the score readout is not a difference of two large nearly-equal numbers. Better conditioning, no theoretical content. | "Matches theory" (it does, but that is a statement about arithmetic, not a requirement). |
+| No bias terms | Enforces $f(\alpha y) = \alpha f(y)$, which is an inductive bias useful for blind denoising across noise levels. | "Critical for theoretical guarantees" / "required for Miyasawa's theorem". False. |
 
 ---
 
-## Applications in Modern Machine Learning
+## 6. Equivalent forms and reparameterizations
 
-### 1. Score-Based Generative Models
+**Residual form**
 
-**Key insight**: If we can estimate $\nabla \log p(y)$, we can generate samples using Langevin dynamics:
-$$y_{t+1} = y_t + \epsilon \nabla \log p(y_t) + \sqrt{2\epsilon} z_t$$
+$$\hat{x}(y) - y = \sigma^2 \nabla_y \log p(y).$$
 
-where $z_t \sim \mathcal{N}(0,I)$.
+**Score readout from a denoiser**
 
-**Miyasawa's contribution**: Provides a way to estimate the score function through denoising.
+$$s(y) \;\approx\; \frac{D_\theta(y) - y}{\sigma^2}.$$
 
-### 2. Diffusion Models
+**Energy form**, with $E(y) = -\log p(y) + \text{const}$
 
-Modern diffusion models use Miyasawa's theorem implicitly:
-1. **Forward process**: Add noise at multiple scales
-2. **Reverse process**: Learn to denoise at each scale
-3. **Generation**: Chain denoising steps together
-4. **Theoretical foundation**: Each denoising step follows Miyasawa's formula
+$$\hat{x}(y) - y = -\sigma^2 \nabla_y E(y).$$
 
-### 3. Implicit Prior Extraction
+One denoiser step is therefore a gradient-descent step on the energy of the *noisy* density with
+step size $\sigma^2$. The energy is only ever accessible through its gradient; the normalizing
+constant never appears, which is the entire practical appeal.
 
-For a trained denoiser $D_\theta(y)$:
-$\text{Implicit energy gradient} = \frac{1}{\sigma^2}(D_\theta(y) - y)$
+**Noise-prediction form.** If $\hat{\varepsilon}(y) = \mathbb{E}[\varepsilon\mid y] = y - \hat{x}(y)$,
 
-This allows:
-- **Sampling** from the implicit prior
-- **Inverse problem solving** with learned priors
-- **Energy-based optimization** using denoisers
+$$s(y) = -\frac{\hat{\varepsilon}(y)}{\sigma^2}.$$
 
-**Keras Implementation Example**:
-```python
-def extract_implicit_prior_gradients(denoiser_model, data, sigma):
-    """
-    Extract energy gradients from trained denoiser
-    """
-    denoised = denoiser_model(data, training=False)
-    residual = denoised - data
-    energy_gradients = residual / (sigma**2)
-    return energy_gradients
+If instead the network predicts *unit-variance* noise, $\varepsilon_\theta(y) \approx \varepsilon/\sigma$ (the DDPM convention), then
 
-# Use for inverse problem solving
-def solve_inverse_problem_with_denoiser(denoiser, measurements, measurement_matrix, 
-                                      sigma, num_iterations=100):
-    """
-    Solve inverse problem using denoiser-based prior
-    """
-    # Initialize estimate
-    x = tf.random.normal(measurement_matrix.shape[1:])
-    
-    for i in range(num_iterations):
-        # Data fidelity term
-        residual = measurements - tf.linalg.matvec(measurement_matrix, x)
-        data_gradient = tf.linalg.matvec(measurement_matrix, residual, transpose_a=True)
-        
-        # Prior term from denoiser
-        prior_gradient = extract_implicit_prior_gradients(denoiser, x[None, ...], sigma)[0]
-        
-        # Combined update
-        x = x + 0.01 * (data_gradient + prior_gradient)
-    
-    return x
-```
+$$s(y) = -\frac{\varepsilon_\theta(y)}{\sigma}.$$
 
-### 4. Regularization by Denoising (RED)
+Mixing these two up by a factor of $\sigma$ is the single most common implementation bug in this area.
 
-RED methods use denoisers as regularizers:
-$$\min_x \|Ax - b\|^2 + \lambda \rho(x)$$
+**Variance-preserving / DDPM scaling.** With $x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\varepsilon$, $\varepsilon \sim \mathcal{N}(0,I)$, the conditional law is $x_t \mid x_0 \sim \mathcal{N}(\sqrt{\bar\alpha_t} x_0,\ (1-\bar\alpha_t) I)$. Applying Tweedie to the mean $u = \sqrt{\bar\alpha_t}x_0$:
 
-where $\rho(x)$ is derived from denoiser properties via Miyasawa's theorem.
+$$\boxed{\ \mathbb{E}[x_0 \mid x_t] = \frac{x_t + (1-\bar\alpha_t)\,\nabla_{x_t}\log p_t(x_t)}{\sqrt{\bar\alpha_t}}\ }$$
+
+which is exactly the standard "predict $x_0$ from $\varepsilon_\theta$" formula once you substitute
+$\nabla \log p_t = -\varepsilon_\theta/\sqrt{1-\bar\alpha_t}$. Every $x_0$-prediction / $\varepsilon$-prediction /
+$v$-prediction parameterization in the diffusion literature is this identity rearranged.
 
 ---
 
-## Practical Implementation
+## 7. Score matching: why MSE denoising learns the score
 
-### Algorithm: Extracting Score Functions from Denoisers
+**Explicit score matching** (the objective one wants) is
 
-```python
-import tensorflow as tf
-import numpy as np
+$$\mathcal{L}_{\mathrm{ESM}}(\theta) = \mathbb{E}_{p(y)}\big\|s_\theta(y) - \nabla_y \log p(y)\big\|^2,$$
 
-def extract_score_function(denoiser, y, sigma):
-    """
-    Extract score function using Miyasawa's theorem
-    
-    Args:
-        denoiser: Trained Keras denoising model
-        y: Noisy observation (tf.Tensor)
-        sigma: Noise standard deviation (float)
-    
-    Returns:
-        Estimated score function ∇log p(y)
-    """
-    denoised = denoiser(y, training=False)
-    residual = denoised - y
-    score = residual / (sigma**2)
-    return score
-```
+which is not directly computable, since $\nabla \log p$ is unknown. Hyvärinen (2005) showed it
+equals, up to a constant, $\mathbb{E}\big[\operatorname{tr}\nabla s_\theta(y) + \tfrac12\|s_\theta(y)\|^2\big]$,
+which is computable but requires a trace of a Jacobian per sample and scales badly.
 
-### Algorithm: Sampling Using Denoiser-Based Scores
+**Denoising score matching** (Vincent 2011) replaces the unknown marginal score with the known
+conditional one, $\nabla_y \log p(y\mid x) = (x-y)/\sigma^2$:
 
-```python
-def sample_with_denoiser(denoiser, sample_shape, sigma, num_steps=1000, step_size=0.01, decay_rate=0.99):
-    """
-    Generate samples using Langevin dynamics with denoiser-based scores
-    
-    Args:
-        denoiser: Trained Keras denoising model
-        sample_shape: Shape of samples to generate (tuple)
-        sigma: Initial noise standard deviation
-        num_steps: Number of sampling steps
-        step_size: Langevin dynamics step size
-        decay_rate: Noise decay rate per step
-    
-    Returns:
-        Generated samples
-    """
-    # Initialize with random noise
-    y = tf.random.normal(sample_shape)
-    
-    for i in range(num_steps):
-        # Extract score using Miyasawa's theorem
-        score = extract_score_function(denoiser, y, sigma)
-        
-        # Langevin dynamics step
-        noise = tf.random.normal(tf.shape(y))
-        y = y + step_size * score + tf.sqrt(2.0 * step_size) * noise
-        
-        # Optional: gradually reduce noise level
-        sigma = sigma * decay_rate
-    
-    return y
-```
+$$\mathcal{L}_{\mathrm{DSM}}(\theta) = \mathbb{E}_{x,\varepsilon}\Big\|s_\theta(y) - \frac{x-y}{\sigma^2}\Big\|^2,
+\qquad y = x + \varepsilon .$$
 
-### Requirements for Validity
+$\mathcal{L}_{\mathrm{DSM}}$ and $\mathcal{L}_{\mathrm{ESM}}$ differ by a constant independent of $\theta$, so they
+have the same minimizer.
 
-For Miyasawa's theorem to hold exactly:
+**The link to plain MSE denoising is exact, not analogical.** Substituting the residual
+parameterization $s_\theta(y) = (D_\theta(y) - y)/\sigma^2$:
 
-1. **Least-squares training**: Denoiser must minimize MSE loss
-2. **Gaussian noise**: Additive noise must be Gaussian
-3. **Optimal denoiser**: Must achieve minimum possible MSE
-4. **Bias-free architecture**: Critical for theoretical guarantees (see detailed requirements below)
+$$\mathcal{L}_{\mathrm{DSM}}(\theta) = \frac{1}{\sigma^4}\,\mathbb{E}\big\|D_\theta(y) - x\big\|^2 .$$
 
-### Bias-Free Architecture Requirements
+So training a denoiser with MSE **is** denoising score matching up to the constant $\sigma^{-4}$.
+This, rather than any hand-waving about "implicit priors", is the reason a trained denoiser gives
+you a score estimate.
 
-For neural networks to satisfy Miyasawa's theorem, they must be **completely bias-free**:
+**Multi-noise-level training.** In practice one trains a single network over a range of $\sigma$,
+either by conditioning it on $\sigma$ or by leaving it blind. The per-level objectives are usually
+weighted by $\lambda(\sigma) \propto \sigma^2$ (or $\sigma^4$ in the score parameterization) so that
+each noise level contributes comparably; unweighted score-space losses are dominated by the
+smallest $\sigma$.
 
-#### 1. Framework-Agnostic Architectural Principles
+---
 
-The core principles for bias-free architectures are **universal across frameworks**:
+## 8. Conditional Miyasawa
 
-- **No bias terms**: All layers must exclude additive bias parameters
-- **Linear final activation**: No activation function on the output layer
-- **Modified normalization**: Batch/layer normalization without centering terms
-- **A strictly-positive input domain**: for images, `[0,1]` - **not** a zero-centered one. See
-  §5 (*Critical Input Normalization Requirements*), which corrects the widespread
-  "zero-center your inputs" advice: it is exactly backwards for a bias-free denoiser.
+Let $c$ be any conditioning variable: a class label, an RGB image, a text embedding, a tuple of
+these. Assume only that **the noise is independent of the conditioning**, $p(y\mid x,c) = p(y\mid x)$.
+Then, repeating the derivation of [§3](#3-derivation) with every density conditioned on $c$:
 
-*Note: In PyTorch, this corresponds to setting `bias=False` in `nn.Conv2d`/`nn.Linear` layers and `center=False` (or `affine=False`) in `nn.BatchNorm2d`. The mathematical principles remain identical across frameworks.*
+$$\boxed{\ \hat{x}(y,c) = \mathbb{E}[x\mid y,c] = y + \sigma^2\,\nabla_y \log p(y\mid c).\ }$$
 
-#### 2. Linear Final Activation (Identity)
+Derivation, condensed: $\nabla_y p(y\mid c) = \int \frac{x-y}{\sigma^2} p(y\mid x) p(x\mid c)\,dx = \frac{p(y\mid c)}{\sigma^2}\big(\mathbb{E}[x\mid y,c]-y\big)$.
 
-The **final activation must be linear** - meaning **no activation function** at all:
+**Nothing in the mathematics depends on the type of $c$.** Discrete labels, dense conditioning
+images (for example depth-from-RGB posed as denoising a depth map conditioned on the image), and
+hybrid conditioning are all the same theorem. What differs is only the architecture used to encode
+and inject $c$.
 
-```python
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+**Bayes decomposition of the conditional score:**
 
-def create_gold_standard_bias_free_denoiser(input_shape=(None, None, 3)):
-    """
-    Gold standard bias-free denoiser implementation
-    Satisfies all requirements for Miyasawa's theorem
-    """
-    inputs = keras.Input(shape=input_shape)
-    
-    # Feature extraction layers (all bias-free with proper normalization)
-    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(inputs)  # No bias
-    x = layers.Activation('relu')(x)  # ReLU OK for intermediate layers
-    x = BiasFreeBatchNorm()(x)  # Bias-free normalization
-    
-    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(x)  # No bias
-    x = layers.Activation('relu')(x)
-    x = BiasFreeBatchNorm()(x)
-    
-    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(x)  # No bias
-    x = layers.Activation('relu')(x)
-    x = BiasFreeBatchNorm()(x)
-    
-    # Final layer: CRITICAL - Linear output, no bias, no activation
-    residual = layers.Conv2D(input_shape[-1], 3, padding='same', use_bias=False)(x)
-    # ↑ KEY: No activation function here - linear output only
-    
-    # Residual connection (helps training stability and matches theory)
-    outputs = layers.Add()([inputs, residual])  # x̂(y) = y + residual
-    
-    return keras.Model(inputs, outputs, name='gold_standard_bias_free_denoiser')
-```
+$$\nabla_y \log p(y\mid c) = \nabla_y \log p(y) + \nabla_y \log p(c\mid y).$$
 
-**Why Linear Final Activation?**
-- The residual `denoiser(y) - y = σ²∇ log p(y)` can be positive or negative
-- Non-linear activations introduce bias: `E[sigmoid(f(x + ε))] ≠ x`
-- Linear preserves unbiased property: `E[f(x + ε)] = x` when properly trained
+The second term is what classifier guidance estimates with a separate noisy classifier, and what
+classifier-free guidance estimates implicitly as the difference of two denoiser outputs.
 
-#### 3. No Bias Terms Anywhere
+**Injection and homogeneity (important, and wrong in the source drafts).** If you want the network
+to remain degree-1 homogeneous in $y$ (see [§12](#12-bias-free-architectures-what-they-are-and-what-they-actually-buy)),
+then how you inject $c$ matters:
 
-```python
-# All layers must use use_bias=False
-layers.Conv2D(..., use_bias=False)
-layers.Dense(..., use_bias=False)
-layers.Conv1D(..., use_bias=False)
-layers.Conv3D(..., use_bias=False)
-```
+- **Additive injection** (broadcast a projected class embedding and add it to the features) injects a
+  constant that does not scale with $y$. It **breaks homogeneity**: $f(\alpha y, c) \ne \alpha f(y,c)$.
+  A source draft "proves" scaling invariance for this case via the step
+  $\alpha y + e_c = \alpha(y + e_c/\alpha)$, which is an identity about numbers, not a proof of
+  equivariance, and the conclusion is false.
+- **Multiplicative injection** (scale-only FiLM: $h \mapsto h \odot \gamma(c)$, with $\gamma$ a function of $c$ alone) **preserves homogeneity**, because $\gamma$ does not depend on $y$.
+- **Channel concatenation** of a tiled conditioning tensor also breaks homogeneity in $y$, for the same reason as additive injection: the concatenated channels do not scale with $y$.
 
-#### 4. Modified Batch Normalization
+Pick one and be honest about it. Either use scale-only modulation and keep exact homogeneity, or
+use additive injection and accept that the network is no longer homogeneous (which is fine, but
+then do not also claim noise-level generalization from homogeneity, and do not run a DC probe and
+expect it to pass).
 
-Standard BatchNormalization has bias terms - use bias-free versions:
+**Conditioning on $\sigma$ while keeping equivariance.** If you feed $\sigma$ to the network,
+the natural structure to preserve is *joint* degree-1 homogeneity, $D(\alpha y, \alpha\sigma) = \alpha D(y,\sigma)$.
+The clean way to get it exactly is
 
-```python
-class BiasFreeBatchNorm(layers.Layer):
-    def __init__(self, **kwargs):
-        super(BiasFreeBatchNorm, self).__init__(**kwargs)
-        # Only scale parameter, no shift (bias)
-        self.bn = layers.BatchNormalization(center=False, scale=True)
-        
-    def call(self, x, training=None):
-        # Normalize but don't add bias term (center=False)
-        return self.bn(x, training=training)
+$$D(y, \sigma) = \sigma \cdot g_\theta\!\big(y/\sigma\big),$$
 
-# Alternative: Use built-in BatchNormalization with center=False
-def bias_free_batch_norm():
-    return layers.BatchNormalization(center=False, scale=True)
-```
+with $g_\theta$ an ordinary (bias-allowed) network. This is a strictly larger and better-matched
+hypothesis class than a blind bias-free net, and it is the recommended route whenever $\sigma$ is known.
 
-#### 4. Problematic Activations for Final Layer
+---
 
-**ReLU/LeakyReLU**: 
-```python
-# PROBLEMATIC - clips negative residuals
-output = tf.nn.relu(features)  # Can't output negative corrections
-output = tf.nn.leaky_relu(features)  # Still clips some negative values
-```
+## 9. Classifier-free guidance
 
-**Sigmoid/Tanh**:
-```python
-# PROBLEMATIC - bounds the output range
-output = tf.nn.sigmoid(features)  # Bounded to [0,1]
-output = tf.nn.tanh(features)     # Bounded to [-1,1]
-```
+**Two conventions are in circulation and they differ by one.** Both appear in the source drafts,
+unreconciled. State which you are using.
 
-**Softmax**:
-```python
-# PROBLEMATIC - normalizes outputs to sum to 1
-output = tf.nn.softmax(features, axis=-1)  # Not appropriate for denoising
-```
-
-#### 5. Critical Input Normalization Requirements
-
-For bias-free networks, **the choice of input domain is not a tuning knob - it decides which
-properties the network is able to learn at all.** Get it wrong and the network still trains,
-still reports a good loss, and is still quietly missing the one property the whole
-empirical-Bayes construction rests on.
-
-> ### CORRECTION (2026-07-12) - this section previously said the opposite
->
-> An earlier revision of this document rated `[0, 1]` normalization as **unsuitable, to be
-> avoided** for bias-free networks, claimed it causes training instability, dead neurons and
-> vanishing gradients, recommended `[-1, +1]` / zero-centering as best practice, and flagged
-> the line `images / 255.0` as a harmful mistake.
->
-> **That advice was wrong, and it has been reversed in this repository.** The bias-free
-> denoisers in `dl_techniques` are trained on `[0, 1]`. See
-> `research/2026_bfunet_unit_domain_migration.md` for the full migration record.
->
-> **Why it was wrong.** It imported a generic deep-learning heuristic - *"zero-center your
-> inputs, it conditions optimization better"* - into a setting where the network is
-> **bias-free**. That heuristic is not wrong in general. It is wrong *here*, and for a
-> specific structural reason: in a bias-free network, zero-centering silently removes the
-> training signal for the one property the residual-equals-score reading depends on. The
-> argument follows.
-
-##### The structural fact: a bias-free network is degree-1 homogeneous
-
-A standard layer computes `activation(W·x + b)`. A **bias-free** layer computes
-`activation(W·x)`, with no additive bias anywhere - including a variance-only
-`BatchNormalization(center=False)`. With a positively-homogeneous activation (ReLU and
-friends) the whole network `f` is then **degree-1 homogeneous**:
-
-```
-f(c · x) = c · f(x)   for every scalar c > 0        and therefore        f(0) = 0
-```
-
-This is a *structural* identity, true at initialization, true after training, true for any
-weights. It is exactly what makes a bias-free denoiser generalize across noise levels
-(Mohan et al., ICLR 2020) - but it also means the network **cannot represent a DC offset**.
-It has no mechanism to add or subtract a constant. Keep that in mind for both halves of the
-argument below.
-
-##### Why zero-centering (`[-0.5, +0.5]` or `[-1, +1]`) is the wrong domain
-
-Consider the most common patch in any natural-image dataset: a **flat patch** - sky, a wall,
-paper, an out-of-focus background. A denoiser's local filters must *preserve* its DC level:
-average away the noise, leave the brightness alone.
-
-On a zero-centered domain, a flat **mid-grey** patch is the vector `0`.
-
-```
-f(0) = 0
-```
-
-The network reproduces it **for free**. The correct answer is handed to it by homogeneity;
-no weight had to learn anything. So the DC component - the very thing the filters must
-preserve - is **never supervised at its most important operating point**, and a large
-fraction of natural-image background sits right there. The training pressure to learn
-DC preservation is badly weakened. If the filters never learn to sum to one, the denoiser
-produces **unpredictable brightness shifts**, most visibly at out-of-distribution noise
-levels where nothing else pins the DC down.
-
-Zero-centering does not make the flat-patch case *hard*. It makes it **vacuous**.
-
-##### Why `[0, 1]` is the right domain: it forces sum-to-one filters
-
-On `[0, 1]` a flat patch of value `c` is the vector `c · 1` (all-ones times `c`). Apply
-homogeneity:
-
-```
-f(c · 1) = c · f(1)
-```
-
-To reproduce that patch - `f(c·1) = c·1` - the network is **required** to satisfy
-
-```
-f(1) = 1
-```
-
-i.e. **its local filter weights must sum to one**. There is no way to fake it and no way to
-get it for free. The network is forced to become an adaptive low-pass / averaging filter,
-which is precisely the geometrically correct behavior for a denoiser, and precisely what the
-Miyasawa / Tweedie empirical-Bayes identity
-
-```
-E[x | y] = y + σ² · ∇_y log p(y)
-```
-
-relies on for the residual-equals-score reading to hold *across* noise manifolds rather than
-at one radius. `[0, 1]` makes the sum-to-one property **learnable and testable**;
-`[-0.5, +0.5]` makes it vacuous. Note that the *same* homogeneity that makes the property
-free under zero-centering is what makes it mandatory under `[0, 1]` - one structural fact,
-two opposite consequences, decided entirely by where the domain sits.
-
-**Foundational references.** Mohan, Kadkhodaie, Simoncelli & Fernandez-Granda, *Robust and
-Interpretable Blind Image Denoising via Bias-Free Convolutional Neural Networks*, ICLR 2020
-(bias-free CNNs; homogeneity; noise-level generalization). Kadkhodaie & Simoncelli,
-*Stochastic Solutions for Linear Inverse Problems using the Prior Implicit in a Denoiser*,
-NeurIPS 2021 (the implicit prior; residual-as-score).
-
-##### Empirical corroboration measured in this repo
-
-`src/train/bfunet/common.py` now runs a DC / sum-to-one probe at build time, reporting
-`rel_err = ‖f(c·1) − c·1‖ / ‖c·1‖` for a flat image at several levels `c`. On an
-**untrained** bias-free ConvUNext:
-
-| `c` | 0.1 | 0.25 | 0.5 | 0.75 | 0.9 |
-|---|---|---|---|---|---|
-| `rel_err` | 1.502 | 1.502 | 1.502 | 1.502 | 1.502 |
-
-The value is **identical for every `c`** - which is exactly what degree-1 homogeneity
-predicts, since the ratio `‖c·f(1) − c·1‖ / ‖c·1‖ = ‖f(1) − 1‖ / ‖1‖` cannot depend on `c`.
-That constancy confirms the probe is measuring `‖f(1) − 1‖` - **the sum-to-one property
-itself**, and nothing else. A random untrained network's filters do not sum to one, so
-`1.502` is the expected baseline, not a failure. It is now a first-class training-time
-diagnostic: on `[0,1]` this number is a *training signal*; on `[-0.5,+0.5]` there was no
-such number to report, because the flat mid-grey case was `f(0) = 0`.
-
-##### Normalization options compared (corrected)
-
-| Normalization | Flat-patch case | Suitability for a bias-free **denoiser** | Notes |
+| Convention | Formula | Unconditional | Plain conditional |
 |---|---|---|---|
-| **`[0, 1]`** | `f(c·1) = c·1` ⇒ **requires `f(1) = 1`** | **Recommended** | Forces DC-preserving, sum-to-one filters. The domain used by `dl_techniques`. |
-| **`[-0.5, +0.5]`** | mid-grey ⇒ `f(0) = 0`, free | **Avoid** | The property the denoiser needs is never supervised. Previously recommended here; that was the error. |
-| **`[-1, +1]`** | mid-grey ⇒ `f(0) = 0`, free | **Avoid** | Same defect as above. Fine for generative models with biased networks; not for a bias-free denoiser. |
-| **Z-score** | destroys the pixel domain | **Avoid** | Also makes `max_val` for PSNR/SSIM ill-defined and couples every image to dataset statistics. |
+| Interpolation ("$w$ is the guidance scale", used by most codebases) | $\tilde{s} = s_u + w\,(s_c - s_u)$ | $w=0$ | $w=1$ |
+| Ho and Salimans (2022) ("$w$ is the guidance *strength*") | $\tilde{s} = (1+w)\,s_c - w\,s_u$ | $w=-1$ | $w=0$ |
 
-##### What remains UNVERIFIED - do not over-read this correction
+They are the same family: $w_{\text{interp}} = 1 + w_{\text{HS}}$.
 
-The old section's concern about **dying units / training instability on strictly-positive
-inputs** is a real ReLU-family failure mode in general, and it has **not** been empirically
-refuted in this repository. What has been established here is the *structural* argument above
-plus the probe's confirmation that it is measuring what it claims. What settles the training
-question is a **full `[0,1]` retrain**, which has not been run at the time of writing.
+**Guidance on denoiser outputs equals guidance on scores.** Because $s = (D(y)-y)/\sigma^2$ is affine
+in $D$ and the two combinations use weights summing to one,
 
-The migration plan names the stop trigger explicitly: if the `[0,1]` smoke train diverges
-(NaN loss, or `val_loss` never falling below its epoch-0 value), or if the DC probe on a
-short-trained model moves *away* from `f(c·1) = c·1` as training proceeds, then the concern
-was real and the hypothesis must be revisited. Until such a retrain completes, **no claim in
-this repository about `[0,1]` denoising quality, DC preservation, or Miyasawa score fidelity
-is verified.** See `research/2026_bfunet_unit_domain_migration.md` §6.
+$$\frac{\big[D_u + w(D_c - D_u)\big] - y}{\sigma^2} \;=\; s_u + w\,(s_c - s_u),$$
 
-##### Correct normalization (for a bias-free denoiser)
+so it is legitimate (and cheaper) to apply CFG directly to the two denoiser outputs. This holds only
+because the weights sum to one; it fails for any "guidance" formula that does not preserve that.
 
-```python
-def normalize_images_for_bias_free_denoiser(images):
-    """Normalize images to [0, 1] for a bias-free denoiser.
+**Training.** Reserve one extra token as the null condition and replace the true label with it with
+probability $p_{\text{drop}}$ (typically 0.1, with 0.05 to 0.2 a reasonable range). The single network
+then estimates both $s_c$ and $s_u$.
 
-    Strictly positive, on purpose: a flat patch of value c is c*1, and degree-1
-    homogeneity then forces f(1) = 1, i.e. filters that sum to one. Do NOT
-    zero-center - that makes the flat mid-grey patch f(0) = 0, which is free,
-    and the DC-preserving property is then never learned.
-    """
-    if tf.reduce_max(images) > 1.0:
-        return tf.cast(images, tf.float32) / 255.0   # [0, 255] -> [0, 1]
-    return tf.cast(images, tf.float32)               # already [0, 1]
+**What guidance is not.** $\tilde{s}$ is not the score of any normalized density for $w \ne 1$
+(interpolation convention). Guidance trades distributional fidelity for conditional fidelity; large
+$w$ produces oversaturated, low-diversity samples. Treat the usual "$w \in [1,10]$" table as a
+practitioner's heuristic, not a result.
 
+---
 
-def denormalize_images(normalized_images):
-    """[0, 1] is already the display domain: only a clip is needed."""
-    return tf.clip_by_value(normalized_images, 0.0, 1.0)
+## 10. Extension 1: linear transformation and correlated noise
+
+**Model.** $y = Ax + \varepsilon$, $\varepsilon \sim \mathcal{N}(0,\Sigma)$ with $\Sigma \succ 0$, $\varepsilon \perp x$.
+
+Then $y\mid x \sim \mathcal{N}(Ax, \Sigma)$, so $\nabla_y p(y\mid x) = -\Sigma^{-1}(y - Ax)\,p(y\mid x)$, hence
+$(Ax - y)p(y\mid x) = \Sigma \nabla_y p(y\mid x)$. Integrating against $p(x)$ and dividing by $p(y)$:
+
+$$\boxed{\ A\,\mathbb{E}[x\mid y] \;=\; y + \Sigma\, \nabla_y \log p(y).\ }$$
+
+**Read this carefully.** The identity determines only $A\hat{x}$, that is, the component of the
+posterior mean in the row space of $A$. If $A$ is not injective, $\hat{x}$ is **not** recoverable
+from the score alone: the null-space component is supplied by the prior through the estimator, not
+by this identity. There is no valid closed form of the shape
+$\hat{x} = A^{\dagger}\big[y + \Sigma A^{\top}(AA^{\top}\Sigma + \sigma^2 I)^{-1}\nabla_y \log p(y)\big]$;
+that expression, which appears in one source draft, is not dimensionally coherent as a general
+result and should be discarded.
+
+**Special case: noise then blur.** With $y = K(x+\varepsilon)$, $\varepsilon\sim\mathcal{N}(0,\sigma^2 I)$, we have
+$A = K$ and $\Sigma = \sigma^2 KK^{\top}$, so
+
+$$K\hat{x}(y) = y + \sigma^2 (KK^{\top})\,\nabla_y \log p(y),
+\qquad
+\nabla_y \log p(y) = \frac{1}{\sigma^2}(KK^{\top})^{-1}\big(K\hat{x}(y) - y\big),$$
+
+the second form requiring $KK^{\top}$ invertible. For a blur kernel this is ill-conditioned at the
+kernel's spectral zeros, so solve the system iteratively (conjugate gradient) with regularization
+rather than inverting.
+
+**Practical consequence.** A network trained to restore $x$ from a *degraded* observation does not
+expose the prior score by subtracting its input. Restoration residuals and score readouts coincide
+only in the pure-denoising case $A = I$, $\Sigma = \sigma^2 I$.
+
+**Claims to avoid.** Two "extensions" in the source drafts are not supported:
+
+- *Heavy-tailed / $\alpha$-stable:* "$\hat{x}(y) = y + \sigma^{\alpha}\nabla_y \log p_\alpha(y)$" is not a
+  theorem. Tweedie's formula is a property of exponential families; the $\alpha$-stable case has no
+  such elementary first-moment identity (the score relation involves fractional operators, and for
+  $\alpha < 2$ the mean may not even exist for $\alpha \le 1$).
+- *Binary/Bernoulli:* "$\hat{x}_i(y) = \mathrm{sigmoid}(\nabla_{y_i}\log p(y))$" is meaningless on a
+  discrete domain where $\nabla_{y_i}$ is undefined. The correct discrete analogue replaces the
+  derivative with a finite ratio $p(y^{\oplus i})/p(y)$ of the density at bit-flipped neighbours.
+- *Riemannian:* $\hat{x}(y) = \exp_y(\sigma^2 \operatorname{grad}_g \log p(y))$ is a reasonable
+  small-noise heuristic and the basis of Riemannian score-based models, but it is an approximation
+  (the exact posterior mean is not even well defined on a manifold without choosing a notion of mean,
+  e.g. Fréchet), not an identity.
+
+---
+
+## 11. Extension 2: multiplicative and composite (Poisson-Gaussian) noise
+
+### 11.1 Pure multiplicative Gaussian noise
+
+$$y = x\cdot n, \qquad n \sim \mathcal{N}(1,\sigma^2)\ \text{per pixel}, \qquad x \perp n
+\quad\Longleftrightarrow\quad y\mid x \sim \mathcal{N}(x,\ \sigma^2 x^2).$$
+
+The conditional variance is signal-dependent, and the log-likelihood gradient is no longer linear
+in $x$. Differentiating,
+
+$$\partial_y p(y\mid x) = -\frac{y-x}{\sigma^2 x^2} p(y\mid x)
+\quad\Longrightarrow\quad
+(x-y)\,p(y\mid x) = \sigma^2 x^2\, \partial_y p(y\mid x).$$
+
+Integrating against $p(x)$ and pulling $\partial_y$ out of the integral (legitimate because $x^2$ does
+not depend on $y$):
+
+$$\boxed{\ \mathbb{E}[x\mid y] = y + \sigma^2\,\frac{\partial_y\big[\mathbb{E}[x^2\mid y]\,p(y)\big]}{p(y)}\ }\tag{A}$$
+
+Relation (A) is **exact for all $\sigma$**. The correction now involves the **second** posterior
+moment. A single-output denoiser exposes only the first moment, so:
+
+> Under multiplicative noise there is no residual-equals-score identity. The residual of an optimal
+> denoiser is not a rescaled score, and no amount of architectural care recovers one.
+
+### 11.2 Small-$\sigma$ expansion
+
+For small $\sigma$ the posterior concentrates, $\mathbb{E}[x^2\mid y] \approx y^2$. Then
+$\partial_y[y^2 p] = 2yp + y^2 \partial_y p$, so
+
+$$\boxed{\ D(y) - y \;\approx\; 2\sigma^2 y \;+\; \sigma^2 y^2\,\nabla_y \log p(y).\ }\tag{B}$$
+
+Two structurally different terms:
+
+- $2\sigma^2 y$: **prior-independent, signal-proportional, and directed away from zero.** Sanity
+  check with a flat (improper uniform) prior, where the score term vanishes: a second-order
+  expansion of the posterior gives $\mathbb{E}[x\mid y] \approx y(1+2\sigma^2)$, matching (B). This term
+  is an *inflation*, not a shrinkage, and it arises from the $1/|x|$ normalizer and the $x$-dependent
+  variance in the likelihood, both of which tilt the posterior outward.
+- $\sigma^2 y^2 \nabla_y \log p(y)$: the score term, reweighted by the **local variance** $\sigma^2 y^2$
+  instead of the constant $\sigma^2$.
+
+### 11.3 Composite (affine-variance / Poisson-Gaussian) noise
+
+$$y = x\cdot n + a, \quad n\sim\mathcal{N}(1,\sigma_m^2),\ a\sim\mathcal{N}(0,\sigma_a^2)
+\quad\Longleftrightarrow\quad
+y\mid x \sim \mathcal{N}\big(x,\ \sigma_m^2 x^2 + \sigma_a^2\big).$$
+
+This is the Gaussian approximation of the standard sensor model (Foi et al. 2008): a read-noise floor
+$\sigma_a^2$ plus a signal-dependent shot-noise-like term. The variance factor splits linearly, so the
+derivation superposes exactly:
+
+$$\boxed{\ \mathbb{E}[x\mid y] = y + \sigma_a^2\,\nabla_y \log p(y) + \sigma_m^2\,\frac{\partial_y\big[\mathbb{E}[x^2\mid y]\,p(y)\big]}{p(y)}\ }\tag{A$_c$}$$
+
+$$\boxed{\ D(y) - y \;\approx\; \big(\sigma_a^2 + \sigma_m^2 y^2\big)\,\nabla_y \log p(y) \;+\; 2\sigma_m^2 y\ }\tag{B$_c$}$$
+
+with the local variance $v(y) = \sigma_a^2 + \sigma_m^2 y^2$ as the score weight. Limits: $\sigma_a=0$
+recovers (A)/(B); $\sigma_m=0$ recovers additive Miyasawa.
+
+**Why the additive floor matters.** Under pure multiplicative noise the conditional variance
+$\sigma_m^2 x^2$ vanishes as $x\to 0$, so near-zero pixels are essentially uncorrupted and the score
+weight collapses; the empirical-Bayes quantities are ill-conditioned there. The floor $\sigma_a^2$
+bounds $v(y)$ away from zero everywhere. This is both physically right and numerically necessary.
+
+**Log / variance-stabilizing transform.** With $u=\log x$, $v = \log y$, one has $v = u + \log n \approx u + (n-1)$
+for small $\sigma$, so additive Miyasawa applies in log space. This requires $x > 0$. On a
+strictly-positive $[0,1]$ domain (see [§13](#13-input-normalization-for-bias-free-denoisers)) the
+transform is therefore *available in principle*, though badly conditioned near $0$ and it changes the
+loss geometry (MSE in log space is not MSE in linear space, so the trained network is no longer the
+linear-domain MMSE estimator). One source draft rules the transform out on the grounds that the
+domain is signed $[-1,+1]$; that is inconsistent with the same repository's own $[0,1]$ decision. If
+you stay in the linear domain, do so as a deliberate choice, not because the log is unavailable.
+
+### 11.4 The bias-free question under multiplicative noise (source drafts are wrong here)
+
+A source draft claims that strict bias-free design is theoretically wrong for multiplicative noise
+because the $2\sigma^2 y$ term is "non-homogeneous". **It is not.** $2\sigma^2 y$ is linear in $y$ and
+therefore degree-1 homogeneous at fixed $\sigma$. Check the whole of (B) under a scaled prior
+$p_\alpha(x) = \alpha^{-1}p(x/\alpha)$, whose marginal satisfies $\nabla \log p_\alpha(\alpha y) = \alpha^{-1}\nabla\log p(y)$:
+
+$$D_\alpha(\alpha y) = \alpha y + 2\sigma^2(\alpha y) + \sigma^2(\alpha y)^2\cdot\tfrac1\alpha \nabla\log p(y) = \alpha\,D(y).$$
+
+So the multiplicative MMSE denoiser is **exactly scale-equivariant at fixed $\sigma$**, without needing
+to co-scale the noise level, which is a *stronger* compatibility with a homogeneous network than the
+additive case enjoys (there you must co-scale $\sigma$ along with $x$). If anything, bias-free design
+is more natural here, not less.
+
+The real caveat under multiplicative noise is the one in §11.1: **the residual is no longer the score**.
+That breaks score readout, RED, and denoiser-driven sampling, and no architectural change fixes it.
+Keep the bias-free network if you like it; just do not read $\big(D(y)-y\big)/\sigma^2$ as a score.
+
+---
+
+## 12. Bias-free architectures: what they are and what they actually buy
+
+**Definition.** Every affine map in the network has zero additive offset: `use_bias=False` in all
+convolutions and dense layers, `center=False` in normalization layers (so no learned $\beta$), and no
+activation with a nonzero value at zero on the output path.
+
+**Homogeneity.** With positively-homogeneous activations (ReLU, leaky ReLU, PReLU) and no offsets, the
+network is positively homogeneous of degree one:
+
+$$f(\alpha y) = \alpha f(y)\quad \text{for all } \alpha > 0, \qquad\text{hence}\qquad f(0)=0.$$
+
+Equivalently $f(y) = J(y)\,y$ with $J$ locally constant: the network is piecewise linear through the
+origin. This is what makes bias-free nets analyzable (you can look at the effective filters $J(y)$ for
+each input).
+
+**Two caveats the drafts do not mention.**
+
+1. **Batch normalization breaks homogeneity in training mode.** With batch statistics,
+   $\mathrm{BN}(\alpha x) = \gamma \cdot \frac{\alpha x - \alpha\mu}{\alpha\varsigma} = \mathrm{BN}(x)$: degree **zero**, not one.
+   The homogeneity property holds only in inference mode, where the running statistics are frozen
+   constants and BN reduces to a fixed diagonal scaling. Run all homogeneity and DC diagnostics with
+   `training=False`. If you want homogeneity to hold during training too, use a normalization that
+   does not divide by an input-dependent statistic, or drop normalization on the output path.
+2. **Homogeneity is not implied by the theorem, and is exactly correct only for a scale-invariant prior.**
+   The exact statement for additive noise is a joint equivariance: if the prior is scaled by $\alpha$
+   *and* the noise level by $\alpha$, the MMSE estimator scales by $\alpha$. A $\sigma$-blind homogeneous
+   network conflates "scale the input" with "scale the prior and the noise together", which is exactly
+   right only if $p$ is scale-invariant. Natural image statistics are approximately scale-invariant,
+   which is the honest justification, and the empirical payoff is what Mohan et al. (ICLR 2020)
+   measured: generalization to noise levels far outside the training range, where biased networks fail
+   badly.
+
+**When to prefer bias-free:** blind denoising, wide or unknown noise-level ranges, when you want
+interpretable effective filters, when you want to reuse the denoiser as an implicit prior across scales.
+
+**When not to bother:** when $\sigma$ is known and you can condition on it (use $D(y,\sigma) = \sigma g(y/\sigma)$
+instead, which is strictly more expressive and exactly equivariant), or when the conditioning mechanism
+already breaks homogeneity anyway ([§8](#8-conditional-miyasawa)).
+
+---
+
+## 13. Input normalization for bias-free denoisers
+
+The source drafts contain a self-reversal on this point, plus an overstated argument. Here is what is
+actually true.
+
+**Fact 1 (structural).** A bias-free network cannot represent a DC offset. It has no mechanism to add
+or subtract a constant. Therefore the input domain is **not** a free relabeling: a model trained on
+$[0,1]$ fed data on $[-0.5,+0.5]$ produces silent garbage, not an error. Record the data range in the
+checkpoint metadata and refuse to load a checkpoint whose range does not match.
+
+**Fact 2 (scale, not shift).** $[0,1]$ and $[-0.5,+0.5]$ have the same peak-to-peak width of $1.0$.
+Moving between them is a pure DC shift. So $\sigma$, `max_val` for PSNR/SSIM, and any conversion like
+$\sigma_{255} = 255\sigma$ are **unchanged**. Rescaling them "because the domain moved" silently corrupts
+every reported dB number, and nothing fails loudly. This is the most likely mistake in this area.
+
+**Fact 3 (flat patches).** For a flat patch of value $c>0$, homogeneity gives $f(c\mathbf{1}) = c f(\mathbf{1})$.
+Preserving the patch therefore requires $f(\mathbf{1}) = \mathbf{1}$: the local filters must sum to one, which
+is the correct DC-preserving behaviour for a denoiser.
+
+**What is true about $[0,1]$ versus zero-centered, stated correctly.** The claim in one draft that
+zero-centering makes the sum-to-one property "vacuous" or "never supervised" is **overstated**. On
+$[-0.5,+0.5]$, any flat patch with $c \ne 0$ still imposes $f(\mathbf{1}) = \mathbf{1}$ (for $c>0$) or
+$f(-\mathbf{1}) = -\mathbf{1}$ (for $c<0$). Only the single value $c=0$ is degenerate. The defensible version of
+the argument is a **weighting** argument:
+
+- The squared-error contribution of a flat patch at level $c$ is $c^2\,\|f(\mathbf{1})-\mathbf{1}\|^2$, so the
+  gradient signal for the DC property scales as $c^2$.
+- On $[0,1]$, mid-grey sits at $c=0.5$ (weight $0.25$) and white at $c=1$ (weight $1$).
+- On $[-0.5,+0.5]$, mid-grey sits at $c=0$ (weight $0$) and the extremes only reach weight $0.25$.
+- Natural images have a large mass of near-mid-grey flat content (sky, walls, paper, out-of-focus
+  background). Zero-centering places exactly that mass at the point where the DC constraint carries
+  no gradient, and it splits the remaining constraint across two independent rays ($f(\mathbf{1})$ and
+  $f(-\mathbf{1})$), since positive homogeneity relates $f(\alpha y)$ to $f(y)$ only for $\alpha>0$.
+
+So: **$[0,1]$ is the better default for a bias-free denoiser**, for weighting and diagnosability
+reasons, not because the alternative is mathematically vacuous. It is also what Mohan et al. and
+Kadkhodaie and Simoncelli use, and it makes the sampler initialization at mid-grey ($0.5\mathbf{1}$, a
+nonzero vector) well behaved.
+
+**What remains unverified.** The concern that strictly-positive inputs aggravate dead-ReLU behaviour is
+a real failure mode in general and is not refuted by the argument above. The structural argument
+constrains what the network *can* learn; it does not prove the optimizer will get there. Treat any
+claim about $[0,1]$ denoising quality as unverified until a full retrain is measured against a matched
+baseline. Stop conditions worth pre-committing to: divergence, validation loss never falling below its
+epoch-0 value, or a DC probe that moves *away* from $f(c\mathbf{1}) = c\mathbf{1}$ as training proceeds.
+
+**Other domains.** Z-scoring per image or per dataset destroys the pixel domain, makes `max_val`
+ill-defined for PSNR/SSIM, and couples every image to dataset statistics. Avoid it for denoising.
+
+**Do not clip the noisy input.** Clipping $y$ to $[0,1]$ after adding noise changes the likelihood from
+Gaussian to a truncated Gaussian, so the MMSE target is no longer the one the theorem describes, and
+the bias grows with $\sigma$ and with proximity to the domain edges. Clip only for display. If you must
+clip for pipeline reasons, document it as an approximation whose error concentrates at the extremes.
+
+---
+
+## 14. Sampling with a denoiser
+
+### 14.1 Annealed Langevin dynamics
+
+Unadjusted Langevin for a fixed density $p$:
+
+$$y \leftarrow y + \tfrac{\eta}{2}\,\nabla_y \log p(y) + \sqrt{\eta}\,z, \qquad z\sim\mathcal{N}(0,I).$$
+
+(Some references write $y \leftarrow y + \eta s + \sqrt{2\eta}z$; that is the same recursion with
+$\eta' = 2\eta$. Be consistent, or your effective temperature is off by a factor of two.)
+
+With a denoiser supplying the score at noise level $\sigma$, sweep $\sigma$ from large to small and use
+$\eta_\sigma \propto \sigma^2$, which keeps the signal-to-noise ratio of each step roughly constant across
+levels (Song and Ermon 2019). A single fixed step size across a wide $\sigma$ range does not work.
+
+### 14.2 Denoiser-driven coarse-to-fine sampling (Kadkhodaie and Simoncelli 2021)
+
+This is the sampler that is native to the Miyasawa formulation, because it estimates the noise level
+from the residual itself rather than requiring a schedule:
+
+```
+inputs: denoiser f, sigma_0 (large), sigma_L (small), h_0 in (0,1], beta in [0,1]
+y <- N(0.5 * 1, sigma_0^2 I)          # mid-grey initialization on the [0,1] domain
+t <- 1
+while sigma_t > sigma_L:
+    h_t     <- h_0 * t / (1 + h_0 * (t - 1))
+    d_t     <- f(y) - y                       # = sigma_t^2 * score, by Miyasawa
+    sigma_t <- ||d_t|| / sqrt(N)              # effective noise level, read off the residual
+    gamma_t <- sqrt(((1 - beta*h_t)^2 - (1 - h_t)^2)) * sigma_t
+    y       <- y + h_t * d_t + gamma_t * N(0, I)
+    t       <- t + 1
+return y
 ```
 
-**The noise scale does NOT change with this domain.** Both `[-0.5, +0.5]` and `[0, 1]` have a
-peak-to-peak width of `1.0`, so `sigma`, `PsnrMetric(max_val=1.0)`, `SsimMetric(max_val=1.0)`
-and `sigma_255 = sigma * 255` are all **unchanged and still exactly correct**. Moving between
-these two domains is a pure **DC shift, not a rescale**. Rescaling sigma or `max_val`
-"because the domain moved" would silently corrupt every reported dB number, and **nothing
-would fail**. This is the single most likely mistake in this area.
+`beta = 0` gives a deterministic gradient ascent onto the manifold (useful for inverse problems);
+`beta = 1` gives fully stochastic sampling.
 
-##### Training pipeline with the correct normalization
+### 14.3 CFG sampling
+
+Batch the conditional and unconditional passes into one forward call of doubled batch size, then
+combine the two *denoiser outputs* with weights summing to one ([§9](#9-classifier-free-guidance)).
+
+---
+
+## 15. Inverse problems, PnP and RED
+
+**Plug-and-play (Venkatakrishnan et al. 2013).** Split $\min_x \tfrac{1}{2}\|Ax-b\|^2 + \lambda R(x)$ with
+ADMM or proximal gradient, and replace the proximal operator of $R$ with a call to an off-the-shelf
+denoiser. Convergence guarantees require assumptions on the denoiser (nonexpansiveness or similar) that
+generic networks do not satisfy; spectral-normalized or explicitly constrained denoisers do.
+
+**RED (Romano et al. 2017).** Define $R(x) = \tfrac12 x^{\top}\big(x - D(x)\big)$, and claim
+$\nabla R(x) = x - D(x)$. This step requires two conditions on $D$: local homogeneity and **Jacobian
+symmetry**. Reehorst and Schniter (2019) showed both typically fail for real denoisers (BM3D, DnCNN,
+and standard CNNs), and reinterpreted the RED updates as score-matching-by-denoising, which does not
+need an explicit regularizer to exist. The correct framing:
+
+- For the **exact** MMSE denoiser, $J$ is symmetric automatically ([§4](#4-second-order-tweedie-the-jacobian-is-the-posterior-covariance)), so the gradient interpretation is sound.
+- For a **trained** denoiser, symmetry is an assumption, usually violated, and the algorithm should be
+  justified as a fixed-point scheme rather than as descent on an energy.
+- Bias-free architectures give exact local homogeneity but say nothing about symmetry.
+
+**Score-based posterior sampling.** The cleanest formulation avoids RED entirely: alternate a
+denoiser-driven prior step (§14.2) with a measurement-consistency projection or gradient step,
+
+$$x \leftarrow x + h\big(D(x) - x\big) \;-\; \mu\, A^{\top}(Ax - b) \;+\; \gamma z .$$
+
+Signs matter: $D(x)-x$ is $+\sigma^2\nabla\log p$ (ascent on log-prior) while $A^{\top}(Ax-b)$ is the
+gradient of the data term (subtract it). One source draft mixes these signs between two versions of the
+same function.
+
+---
+
+## 16. Diagnostics: SURE, generalized SURE, homogeneity, DC probe
+
+### 16.1 SURE (additive Gaussian, reference-free risk)
+
+For $y = x + \mathcal{N}(0,\sigma^2 I)$ and weakly differentiable $D$ (Stein 1981):
+
+$$\mathrm{SURE}(D) = \|D(y)-y\|^2 + 2\sigma^2 \operatorname{div}(D) - N\sigma^2,
+\qquad \mathbb{E}[\mathrm{SURE}] = \mathbb{E}\|D(y)-x\|^2 .$$
+
+This estimates the true risk from noisy data alone, with no clean references. Estimate the divergence
+with a Hutchinson probe and a finite-difference Jacobian-vector product:
+
+$$\operatorname{div}(D) \approx \mathbb{E}_v\Big[v^{\top}\tfrac{D(y+\epsilon v)-D(y)}{\epsilon}\Big],
+\qquad v_i \in \{\pm 1\}\ \text{i.i.d.}$$
+
+Validate the estimator before trusting it: on a linear toy denoiser $D(y) = ay$ the divergence is
+analytically $aN$, and SURE should reproduce the realized MSE to a percent or so.
+
+### 16.2 Generalized SURE (signal-dependent variance)
+
+For $y\mid x \sim \mathcal{N}(x,\Sigma)$ with **known** $\Sigma$ (Eldar 2009):
+
+$$\mathrm{gSURE} = \|D(y)-y\|^2 + 2\operatorname{tr}\!\big(\Sigma\, J_D\big) - \operatorname{tr}\Sigma .$$
+
+For the multiplicative model $\Sigma = \sigma^2\operatorname{diag}(x^2)$, which is unknown; the usual
+substitution $\Sigma \approx \sigma^2 \operatorname{diag}(y^2)$ makes this a **leading-order approximation,
+not an unbiased estimator**. Report it as a consistency scalar for tracking a checkpoint, not as a risk
+estimate. The weighted divergence is estimated with a probe pre-scaled so that
+$\mathbb{E}[v_iv_j] = \sigma^2 y_i^2 \delta_{ij}$, i.e. $v_i = \sigma|y_i| r_i$ with $r$ Rademacher.
+
+### 16.3 Homogeneity probe (bias-free nets only)
+
+$$\mathrm{err}(\alpha) = \frac{\|f(\alpha y) - \alpha f(y)\|}{\alpha\|f(y)\|}, \qquad \text{expected } \approx 0 \text{ for all } \alpha>0 .$$
+
+Run in inference mode. A nonzero, $\alpha$-dependent value indicates a residual bias term or a
+training-mode normalization layer.
+
+### 16.4 DC / sum-to-one probe
+
+$$\mathrm{rel\_err}(c) = \frac{\|f(c\mathbf{1}) - c\mathbf{1}\|}{\|c\mathbf{1}\|} .$$
+
+By homogeneity this is **independent of $c$** and equals $\|f(\mathbf{1})-\mathbf{1}\|/\|\mathbf{1}\|$. A constant column
+across $c$ is therefore the *expected signature*, and confirms the probe is measuring the sum-to-one
+property and nothing else. A random untrained network gives a large constant (order 1); the number
+should fall during training. If it is *not* constant across $c$, your network is not homogeneous
+(check for biases, additive conditioning, or training-mode BN).
+
+---
+
+## 17. Limitations and failure modes
+
+1. **Approximation, not identity.** Real denoisers are not MMSE-optimal: finite capacity, finite data,
+   imperfect optimization. Every score readout inherits that error, amplified by $1/\sigma^2$ at small
+   noise levels. Score estimates at very small $\sigma$ are the least reliable and the most heavily used
+   at the end of sampling.
+2. **Score of the smoothed density.** You never get $\nabla\log p_x$; you get $\nabla \log p_\sigma$. On
+   manifold-supported data the clean score does not exist, which is exactly why multi-scale (annealed)
+   methods are needed.
+3. **Model mismatch.** Non-Gaussian, signal-dependent, or spatially correlated noise invalidates the
+   plain identity; use §10 or §11, or accept a documented approximation.
+4. **Clipping and quantization.** Clipping the noisy input, 8-bit quantization, and demosaicing all
+   perturb the likelihood. Effects concentrate at the domain edges and grow with $\sigma$.
+5. **Jacobian symmetry for trained nets.** Assumed by RED-style methods, generally false.
+6. **Sampling is not a proof of correctness.** A denoiser can produce plausible samples while its
+   residual field is a poor score estimate (and vice versa). Use SURE and the probes in §16 rather than
+   eyeballing samples.
+7. **Benchmark numbers.** The FID/IS/AbsRel tables circulating in the source drafts (CIFAR-10, CelebA-HQ,
+   FFHQ, ImageNet, NYU) mix conventions, model classes and guidance settings, and several do not match
+   the cited papers. Do not propagate them; re-check against the original papers for any number you plan
+   to publish.
+
+---
+
+## 18. Reference implementation
+
+Keras 3 style. Minimal, correct, and framework-portable in structure. In PyTorch the equivalents are
+`bias=False` on `nn.Conv2d`/`nn.Linear` and `affine=False` (or a norm layer with no learned shift).
+
+### 18.1 Bias-free denoiser
 
 ```python
-def create_bias_free_training_pipeline(train_images, val_images, noise_levels):
-    """Training pipeline for a bias-free denoiser on the [0, 1] domain."""
-
-    def add_noise_and_normalize(batch):
-        # Normalize FIRST (to [0, 1]), then add noise in that same domain.
-        clean_batch = normalize_images_for_bias_free_denoiser(batch)
-
-        sigma = tf.random.uniform([], minval=min(noise_levels), maxval=max(noise_levels))
-        noise = tf.random.normal(tf.shape(clean_batch))
-        noisy_batch = clean_batch + sigma * noise
-
-        return noisy_batch, clean_batch
-
-    train_dataset = tf.data.Dataset.from_tensor_slices(train_images)
-    train_dataset = train_dataset.shuffle(1000).batch(32).repeat()
-    train_dataset = train_dataset.map(add_noise_and_normalize)
-
-    val_dataset = tf.data.Dataset.from_tensor_slices(val_images)
-    val_dataset = val_dataset.batch(32)
-    val_dataset = val_dataset.map(add_noise_and_normalize)
-
-    return train_dataset, val_dataset
+import keras
+from keras import layers, ops
 
 
-def verify_normalization(dataset_sample):
-    """Verify the domain AND the property zero-centering used to hide."""
-    lo = tf.reduce_min(dataset_sample)
-    hi = tf.reduce_max(dataset_sample)
-    print(f"Dataset range: [{lo:.3f}, {hi:.3f}]  (should be within [0, 1])")
+def bias_free_block(x, filters):
+    x = layers.Conv2D(filters, 3, padding="same", use_bias=False)(x)
+    # center=False removes the learned beta offset. Note: with batch statistics this
+    # layer is degree-0 homogeneous; exact degree-1 homogeneity holds in inference mode.
+    x = layers.BatchNormalization(center=False, scale=True)(x)
+    return layers.Activation("relu")(x)
 
-    if lo < -1e-6 or hi > 1.0 + 1e-6:
-        print("WARNING: data is not on [0, 1]. A bias-free denoiser trained on a "
-              "different domain cannot be reused here - it has no way to shift the DC.")
-    else:
-        print("OK: data is on [0, 1] - the flat-patch case will supervise f(1) = 1.")
+
+def bias_free_denoiser(input_shape=(None, None, 1), filters=64, num_blocks=8):
+    """Residual, bias-free, linear output head. Predicts x_hat = y + r(y)."""
+    inp = keras.Input(shape=input_shape)
+    x = inp
+    for _ in range(num_blocks):
+        x = bias_free_block(x, filters)
+    residual = layers.Conv2D(input_shape[-1], 3, padding="same", use_bias=False)(x)
+    out = layers.Add()([inp, residual])          # r(y) approximates sigma^2 * score(y)
+    return keras.Model(inp, out, name="bias_free_denoiser")
+```
+
+### 18.2 Sigma-conditioned alternative (exactly equivariant, more expressive)
+
+```python
+class SigmaConditionedDenoiser(keras.Model):
+    """D(y, sigma) = sigma * g(y / sigma).
+
+    Satisfies D(a*y, a*sigma) = a*D(y, sigma) exactly, for any inner network g,
+    including one with biases. Prefer this whenever sigma is known.
+    """
+
+    def __init__(self, inner, **kwargs):
+        super().__init__(**kwargs)
+        self.inner = inner
+
+    def call(self, inputs, training=None):
+        y, sigma = inputs                        # sigma shape (B, 1, 1, 1)
+        return sigma * self.inner(y / sigma, training=training)
+```
+
+### 18.3 Training data pipeline
+
+```python
+import tensorflow as tf
+
+
+def make_noisy(clean, sigma_min=0.0, sigma_max=0.4):
+    """clean is already on [0, 1]. Per-example sigma. No clipping of the noisy input."""
+    b = tf.shape(clean)[0]
+    sigma = tf.random.uniform([b, 1, 1, 1], sigma_min, sigma_max)
+    noisy = clean + sigma * tf.random.normal(tf.shape(clean))
+    return noisy, clean, sigma
+
+
+def to_unit_domain(images):
+    """[0, 255] -> [0, 1]. Strictly positive, deliberately not zero-centered."""
+    images = tf.cast(images, tf.float32)
+    return tf.cond(tf.reduce_max(images) > 1.0, lambda: images / 255.0, lambda: images)
+```
+
+Compile with `loss="mse"`. MSE is the one choice the theorem actually dictates: it is the loss whose
+minimizer is $\mathbb{E}[x\mid y]$.
+
+### 18.4 Score readout and Langevin sampling
+
+```python
+def score_from_denoiser(denoiser, y, sigma):
+    """Miyasawa: grad_y log p(y) = (E[x|y] - y) / sigma^2."""
+    return (denoiser(y, training=False) - y) / (sigma ** 2)
+
+
+def annealed_langevin(denoiser, shape, sigmas, steps_per_level=100, eta0=2e-5, seed=None):
+    """sigmas: decreasing list. Step size scales as sigma^2."""
+    g = tf.random.Generator.from_seed(seed if seed is not None else 0)
+    y = 0.5 + sigmas[0] * g.normal(shape)        # mid-grey init on the [0, 1] domain
+    for sigma in sigmas:
+        eta = eta0 * (sigma / sigmas[-1]) ** 2
+        for _ in range(steps_per_level):
+            s = score_from_denoiser(denoiser, y, sigma)
+            y = y + 0.5 * eta * s + tf.sqrt(eta) * g.normal(tf.shape(y))
+    return tf.clip_by_value(y, 0.0, 1.0)         # clip for display only
+```
+
+### 18.5 Kadkhodaie-Simoncelli sampler (schedule-free)
+
+```python
+def ks_sample(denoiser, shape, sigma_0=1.0, sigma_L=0.01, h0=0.05, beta=0.5, max_iter=500):
+    n = float(tf.reduce_prod(shape[1:]).numpy())
+    y = 0.5 + sigma_0 * tf.random.normal(shape)
+    sigma_t, t = sigma_0, 1
+    while sigma_t > sigma_L and t <= max_iter:
+        h = h0 * t / (1.0 + h0 * (t - 1))
+        d = denoiser(y, training=False) - y                    # sigma_t^2 * score
+        sigma_t = float(tf.norm(d) / tf.sqrt(n))               # noise level from the residual
+        gamma = tf.sqrt(tf.maximum((1 - beta * h) ** 2 - (1 - h) ** 2, 0.0)) * sigma_t
+        y = y + h * d + gamma * tf.random.normal(tf.shape(y))
+        t += 1
+    return tf.clip_by_value(y, 0.0, 1.0)
+```
+
+### 18.6 Classifier-free guidance (interpolation convention)
+
+```python
+def cfg_denoise(denoiser, y, labels, null_token, w=3.0):
+    """w=0 unconditional, w=1 plain conditional, w>1 amplified."""
+    y2 = tf.concat([y, y], axis=0)
+    null = tf.fill(tf.shape(labels), tf.cast(null_token, labels.dtype))
+    lab2 = tf.concat([labels, null], axis=0)
+    out = denoiser([y2, lab2], training=False)
+    d_cond, d_uncond = tf.split(out, 2, axis=0)
+    return d_uncond + w * (d_cond - d_uncond)    # weights sum to 1: valid on outputs
+```
+
+### 18.7 Diagnostics
+
+```python
+def homogeneity_error(model, y, alpha=3.7):
+    a = model(alpha * y, training=False)
+    b = alpha * model(y, training=False)
+    return float(tf.norm(a - b) / tf.norm(b))
 
 
 def dc_probe(model, levels=(0.1, 0.25, 0.5, 0.75, 0.9), shape=(1, 64, 64, 1)):
-    """The sum-to-one diagnostic: does f(c*1) reproduce c*1?
-
-    By homogeneity the reported rel_err cannot depend on c; a constant column is
-    the expected signature, and its VALUE is ||f(1) - 1|| / ||1||.
-    """
+    """Expected signature: identical rel_err for every c, equal to ||f(1)-1|| / ||1||."""
+    out = {}
     for c in levels:
         flat = tf.fill(shape, tf.constant(c, tf.float32))
-        out = model(flat, training=False)
-        rel = tf.norm(out - flat) / tf.norm(flat)
-        print(f"  c={c:<5} rel_err={float(rel):.4f}")
+        pred = model(flat, training=False)
+        out[c] = float(tf.norm(pred - flat) / tf.norm(flat))
+    return out
+
+
+def hutchinson_divergence(model, y, sigma=None, eps=1e-3, n_probes=8):
+    """Unweighted (sigma=None) or variance-weighted divergence estimate.
+
+    Weighted mode draws v_i = sigma * |y_i| * rademacher_i, so that
+    E[v v^T] = diag(sigma^2 y_i^2) and E[v^T J v] = sum_i sigma^2 y_i^2 dD_i/dy_i.
+    """
+    base = model(y, training=False)
+    total = 0.0
+    for _ in range(n_probes):
+        r = tf.cast(tf.random.uniform(tf.shape(y), 0, 2, dtype=tf.int32) * 2 - 1, y.dtype)
+        v = r if sigma is None else sigma * tf.abs(y) * r
+        jvp = (model(y + eps * v, training=False) - base) / eps
+        total += float(tf.reduce_sum(v * jvp))
+    return total / n_probes
+
+
+def sure_risk(model, y, sigma, **kw):
+    """Reference-free estimate of E||D(y) - x||^2 for additive Gaussian noise."""
+    n = float(tf.size(y).numpy())
+    resid_sq = float(tf.reduce_sum((model(y, training=False) - y) ** 2))
+    div = hutchinson_divergence(model, y, **kw)
+    return resid_sq + 2.0 * sigma ** 2 * div - n * sigma ** 2
 ```
 
-##### Summary: input normalization for a bias-free denoiser
-
-**DO**: normalize images to `[0, 1]` (`image / 255.0`) - strictly positive, on purpose.
-**DO**: apply normalization *before* adding training noise.
-**DO**: monitor the DC / sum-to-one probe; it is the property the domain exists to expose.
-**DO**: record the data range in the checkpoint's `config.json` (`data_range: "[0,1]"`) and
-refuse to load a checkpoint that lacks it - a bias-free net fed the wrong domain produces
-*silent garbage*, not an error.
-
-**DON'T**: zero-center (`[-0.5, +0.5]`, `[-1, +1]`, z-score). It hands the network the
-flat-patch answer for free and the sum-to-one property is never learned.
-**DON'T**: rescale `sigma`, `max_val`, or any PSNR/SSIM constant when moving between two
-unit-peak-to-peak domains. The width is `1.0` in both; only the center moved.
-**DON'T**: mix domains across a checkpoint boundary. Homogeneity means a wrong-domain load
-cannot be detected from the output - it just looks bad.
-
-#### 6. Complete Correct Implementation Examples
-
-**WRONG - Multiple Issues**:
-```python
-# Zero-centered input: the flat mid-grey patch becomes f(0) = 0, so the
-# DC-preserving (sum-to-one) property is never supervised - BAD for a bias-free denoiser!
-wrong_images = (tf.cast(images, tf.float32) / 127.5) - 1.0
-wrong_model = wrong_denoiser()  # Has bias terms and a sigmoid head - also WRONG
-```
-
-**CORRECT - Bias-Free with Proper Normalization**:
-```python
-# Usage with correct normalization and architecture
-correct_images = tf.cast(images, tf.float32) / 255.0  # [0,1] range - GOOD! forces f(1) = 1
-correct_model = create_gold_standard_bias_free_denoiser()  # Bias-free - GOOD!
-```
-
-### Advanced Applications
-
-#### Extracting Implicit Prior Gradients
+### 18.8 Homogeneity-preserving conditioning
 
 ```python
-def extract_implicit_prior_gradients(denoiser_model, data, sigma):
+def film_scale_only(features, cond_embedding, name=None):
+    """Multiplicative (scale-only) FiLM. Preserves degree-1 homogeneity in the
+    feature path, because gamma depends on the condition alone, not on y.
+
+    Contrast with additive broadcast injection (features + Dense(emb)), which
+    injects a y-independent constant and destroys homogeneity.
     """
-    Extract energy gradients from trained denoiser using Miyasawa's theorem
-    
-    Args:
-        denoiser_model: Trained bias-free denoising model
-        data: Input data (tf.Tensor)
-        sigma: Noise standard deviation used during training
-    
-    Returns:
-        Energy gradients: ∇E(data) = -(1/σ²)(denoiser(data) - data)
-    """
-    with tf.GradientTape() as tape:
-        tape.watch(data)
-        denoised = denoiser_model(data, training=False)
-    
-    residual = denoised - data
-    energy_gradients = residual / (sigma**2)
-    return energy_gradients
-
-def solve_inverse_problem_with_denoiser(denoiser, measurements, measurement_matrix, 
-                                      sigma, num_iterations=100, step_size=0.01):
-    """
-    Solve inverse problems using denoiser-based implicit priors
-    
-    Example: Image inpainting, super-resolution, compressive sensing
-    """
-    # Initialize estimate
-    x = tf.Variable(tf.random.normal(measurement_matrix.shape[1:]))
-    
-    for i in range(num_iterations):
-        with tf.GradientTape() as tape:
-            # Data fidelity term
-            predicted_measurements = tf.linalg.matvec(measurement_matrix, x)
-            data_loss = tf.reduce_sum(tf.square(predicted_measurements - measurements))
-        
-        # Data gradient
-        data_gradient = tape.gradient(data_loss, x)
-        
-        # Prior gradient from denoiser (Miyasawa's theorem)
-        prior_gradient = extract_implicit_prior_gradients(denoiser, x[None, ...], sigma)[0]
-        
-        # Combined gradient descent step
-        x.assign_sub(step_size * (data_gradient - prior_gradient))
-    
-    return x.numpy()
-```
-```python
-# WRONG - introduces bias
-class BiasedDenoisier(keras.Model):
-    def __init__(self):
-        super().__init__()
-        self.backbone = self.build_backbone()
-        self.final_layer = layers.Conv2D(3, 3, padding='same')
-        
-    def call(self, x):
-        features = self.backbone(x)
-        output = tf.nn.sigmoid(self.final_layer(features))  # BAD
-        return output
-
-# CORRECT - bias-free with linear final activation
-class BiasFreeDenoisier(keras.Model):
-    def __init__(self):
-        super().__init__()
-        self.backbone = self.build_backbone()
-        self.final_layer = layers.Conv2D(3, 3, padding='same', use_bias=False)
-        
-    def call(self, x):
-        features = self.backbone(x)
-        residual = self.final_layer(features)  # Linear output
-        return x + residual  # Residual connection
-
-# Complete working example with residual learning
-def create_complete_bias_free_denoiser(input_shape=(None, None, 3)):
-    inputs = keras.Input(shape=input_shape)
-    
-    # Feature extraction layers (all bias-free)
-    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(inputs)
-    x = layers.Activation('relu')(x)
-    x = BiasFreeBatchNorm()(x)
-    
-    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(x)
-    x = layers.Activation('relu')(x)
-    x = BiasFreeBatchNorm()(x)
-    
-    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(x)
-    x = layers.Activation('relu')(x)
-    x = BiasFreeBatchNorm()(x)
-    
-    # Final layer: LINEAR output, no bias
-    residual = layers.Conv2D(input_shape[-1], 3, padding='same', use_bias=False)(x)
-    
-    # Residual connection (helps training stability)
-    outputs = layers.Add()([inputs, residual])
-    
-    return keras.Model(inputs, outputs, name='complete_bias_free_denoiser')
-
-# Training setup for bias-free denoiser
-def compile_bias_free_denoiser(model):
-    model.compile(
-        optimizer='adam',
-        loss='mse',  # Critical: MSE loss for least-squares optimality
-        metrics=['mae']
-    )
-    return model
-
-### Complete Training Pipeline
-
-```python
-def train_bias_free_denoiser(train_images, val_images, noise_levels=[0.05, 0.1, 0.15, 0.2, 0.25]):
-    """
-    Complete training pipeline for bias-free denoiser
-    """
-    
-    # 1. Create and compile model
-    model = create_gold_standard_bias_free_denoiser(input_shape=(256, 256, 3))
-    model.compile(optimizer='adam', loss='mse', metrics=['mae'])  # MSE critical for optimality
-    
-    # 2. Create training pipeline with proper normalization
-    train_dataset, val_dataset = create_bias_free_training_pipeline(train_images, val_images, noise_levels)
-    
-    # 3. Training callbacks
-    callbacks = [
-        keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
-        keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5),
-        keras.callbacks.ModelCheckpoint('bias_free_denoiser.h5', save_best_only=True)
-    ]
-    
-    # 4. Train model
-    history = model.fit(
-        train_dataset,
-        steps_per_epoch=len(train_images) // 32,
-        validation_data=val_dataset,
-        validation_steps=len(val_images) // 32,
-        epochs=100,
-        callbacks=callbacks
-    )
-    
-    # 5. Verify model satisfies Miyasawa's theorem requirements
-    verify_bias_free_properties(model)
-    
-    return model, history
-
-def verify_bias_free_properties(model):
-    """Verify that model satisfies bias-free requirements"""
-    print("🔍 Verifying bias-free properties...")
-    
-    # Check for bias terms
-    has_bias = any(layer.use_bias for layer in model.layers if hasattr(layer, 'use_bias'))
-    print(f"✅ No bias terms: {not has_bias}")
-    
-    # Check final layer activation
-    final_layer = model.layers[-2]  # Before Add layer
-    has_activation = hasattr(final_layer, 'activation') and final_layer.activation != 'linear'
-    print(f"✅ Linear final activation: {not has_activation}")
-    
-    # Test on the [0, 1] domain (NOT zero-centered - see section 5)
-    test_input = tf.random.uniform((1, 64, 64, 3), minval=0.0, maxval=1.0)
-    lo, hi = tf.reduce_min(test_input), tf.reduce_max(test_input)
-    in_domain = bool(lo >= -1e-6 and hi <= 1.0 + 1e-6)
-    print(f"Input on [0, 1]: {in_domain}")
-
-    # The property the [0, 1] domain exists to expose: f(c*1) == c*1, i.e. filters
-    # that sum to one. A zero-centered domain would give this away for free (f(0)=0).
-    dc_probe(model)
-
-    if not has_bias and not has_activation and in_domain:
-        print("Model satisfies the structural requirements for Miyasawa's theorem.")
-    else:
-        print("WARNING: model may not fully satisfy the theoretical requirements.")
-
-# Example usage
-if __name__ == "__main__":
-    # Load your properly normalized data here
-    # train_images = load_and_normalize_training_data()  # Should be in [0, 1]
-    # val_images = load_and_normalize_validation_data()   # Should be in [0, 1]
-    
-    # Train the bias-free denoiser
-    # model, history = train_bias_free_denoiser(train_images, val_images)
-    
-    # Use for score-based sampling
-    # samples = sample_with_denoiser(model, (10, 256, 256, 3), sigma=0.1)
-    pass
+    c = features.shape[-1]
+    gamma = layers.Dense(c, use_bias=False, name=name)(cond_embedding)
+    gamma = layers.Reshape((1, 1, c))(gamma)
+    return layers.Multiply()([features, 1.0 + gamma])
 ```
 
 ---
 
-## Limitations and Caveats
+## 19. History and references
 
-### 1. Optimality Requirements
+### Timeline
 
-**Challenge**: Real denoisers are not optimal
-- Neural networks approximate the optimal denoiser
-- Finite training data and model capacity limit optimality
-- **Implication**: Miyasawa's formula holds approximately
+| Year | Contribution |
+|---|---|
+| 1956 | Robbins: empirical Bayes framework; the identity is attributed to Tweedie in this line of work |
+| 1961 | Miyasawa: the Gaussian empirical-Bayes estimator identity |
+| 1981 | Stein: SURE, unbiased risk estimation for the same model |
+| 1982 | Anderson: reverse-time SDEs, later the backbone of score-based generation |
+| 2005 | Hyvärinen: score matching for unnormalized models |
+| 2011 | Vincent: denoising score matching, connecting DAEs to score estimation |
+| 2011 | Raphan and Simoncelli: empirical-Bayes estimation without priors, general noise models |
+| 2011 | Efron: Tweedie's formula and selection bias, the modern statistical exposition |
+| 2019 | Song and Ermon: annealed Langevin generation from learned scores |
+| 2020 | Ho, Jain, Abbeel: DDPM; Mohan et al.: bias-free CNNs |
+| 2021 | Song et al.: unified SDE framework; Kadkhodaie and Simoncelli: the implicit prior in a denoiser |
+| 2022 | Ho and Salimans: classifier-free guidance |
 
-### 2. Symmetric Jacobian Assumption
+### Primary references
 
-**Problem**: Many practical denoisers don't have symmetric Jacobians
+- Miyasawa, K. (1961). *An empirical Bayes estimator of the mean of a normal population.* Bulletin of the International Statistical Institute, 38(4), 181-188. (Hard to obtain; the identity is most accessibly stated in Efron 2011 and Raphan and Simoncelli 2011.)
+- Robbins, H. (1956). *An empirical Bayes approach to statistics.* Proc. 3rd Berkeley Symposium.
+- Stein, C. (1981). *Estimation of the mean of a multivariate normal distribution.* Annals of Statistics, 9(6), 1135-1151.
+- Efron, B. (2011). *Tweedie's formula and selection bias.* JASA, 106(496), 1602-1614.
+- Hyvärinen, A. (2005). *Estimation of non-normalized statistical models by score matching.* JMLR, 6, 695-709.
+- Vincent, P. (2011). *A connection between score matching and denoising autoencoders.* Neural Computation, 23(7), 1661-1674.
+- Raphan, M., and Simoncelli, E. P. (2011). *Least squares estimation without priors or supervision.* Neural Computation, 23(2), 374-420.
+- Anderson, B. D. O. (1982). *Reverse-time diffusion equation models.* Stochastic Processes and their Applications, 12(3), 313-326.
+- Eldar, Y. C. (2009). *Generalized SURE for exponential families.* IEEE Transactions on Signal Processing, 57(2), 471-481.
+- Foi, A., Trimeche, M., Katkovnik, V., and Egiazarian, K. (2008). *Practical Poissonian-Gaussian noise modeling and fitting for single-image raw data.* IEEE TIP, 17(10), 1737-1754.
 
-For the denoiser's residual to be a true gradient of a scalar energy function, its Jacobian matrix must be symmetric. This means that for any denoiser $D(y)$, we need:
+### Modern applications
 
-$\frac{\partial D_i}{\partial y_j} = \frac{\partial D_j}{\partial y_i}$
-
-**Practical implications**:
-- Standard convolutional networks do not guarantee this property
-- BM3D, Non-local means, DnCNN often fail this requirement
-- Architectures with tied or shared weights (like certain autoencoders) can satisfy this property
-- **However**, many models work well even if this condition is only approximately met
-
-**Consequence**: Some theoretical guarantees may not hold exactly, but the framework often remains practically useful as an approximation.
-
-### 3. Noise Model Assumptions
-
-**Limitation**: Theorem assumes additive Gaussian noise
-- Real-world noise may be non-Gaussian or signal-dependent
-- **Workaround**: Use Gaussian approximations or extend theory
-
-### 4. High-Dimensional Challenges
-
-**Issues**:
-- Curse of dimensionality affects score estimation
-- Sparse data in high dimensions
-- Manifold structure may not be well-captured
-
-### 5. Training Stability
-
-**Practical concerns**:
-- Score function can have large magnitude
-- Numerical instabilities in high dimensions
-- Requires careful hyperparameter tuning
-
----
-
-## Historical Context
-
-### Origins and Development
-
-- **1961**: Miyasawa proves the original theorem
-- **1980s-1990s**: Score matching theory develops
-- **2005**: Hyvärinen formalizes score matching
-- **2011**: Vincent introduces denoising score matching
-- **2019**: Song & Ermon connect to generative modeling
-- **2020-2021**: Kadkhodaie & Simoncelli popularize in vision community
-
-### Modern Revival
-
-The theorem gained renewed attention due to:
-1. **Diffusion models** success in generation
-2. **Score-based methods** for inverse problems
-3. **Energy-based modeling** renaissance
-4. **Implicit prior** understanding in deep learning
-
-### Key Contributors
-
-- **Miyasawa (1961)**: Original theorem
-- **Stein (1981)**: Related unbiased risk estimation
-- **Efron (2011)**: Tweedie's formula connections
-- **Vincent (2011)**: Denoising score matching
-- **Song et al. (2019-2021)**: Score-based generative models
-- **Kadkhodaie & Simoncelli (2021)**: Modern applications
+- Song, Y., and Ermon, S. (2019). *Generative modeling by estimating gradients of the data distribution.* NeurIPS.
+- Ho, J., Jain, A., and Abbeel, P. (2020). *Denoising diffusion probabilistic models.* NeurIPS.
+- Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., and Poole, B. (2021). *Score-based generative modeling through stochastic differential equations.* ICLR.
+- Mohan, S., Kadkhodaie, Z., Simoncelli, E. P., and Fernandez-Granda, C. (2020). *Robust and interpretable blind image denoising via bias-free convolutional neural networks.* ICLR.
+- Kadkhodaie, Z., and Simoncelli, E. P. (2021). *Stochastic solutions for linear inverse problems using the prior implicit in a denoiser.* NeurIPS. arXiv:2007.13640. Reference code: `LabForComputationalVision/universal_inverse_problem`.
+- Venkatakrishnan, S. V., Bouman, C. A., and Wohlberg, B. (2013). *Plug-and-play priors for model based reconstruction.* GlobalSIP.
+- Romano, Y., Elad, M., and Milanfar, P. (2017). *The little engine that could: regularization by denoising (RED).* SIAM Journal on Imaging Sciences, 10(4), 1804-1844.
+- Reehorst, E. T., and Schniter, P. (2019). *Regularization by denoising: clarifications and new interpretations.* IEEE Transactions on Computational Imaging, 5(1), 52-67.
+- Ho, J., and Salimans, T. (2022). *Classifier-free diffusion guidance.* arXiv:2207.12598.
+- Dhariwal, P., and Nichol, A. (2021). *Diffusion models beat GANs on image synthesis.* NeurIPS. (Classifier guidance.)
+- Zhang, L., Rao, A., and Agrawala, M. (2023). *Adding conditional control to text-to-image diffusion models (ControlNet).* ICCV.
+- Ke, B., Obukhov, A., Huang, S., Metzger, N., Daudt, R. C., and Schindler, K. (2024). *Repurposing diffusion-based image generators for monocular depth estimation (Marigold).* CVPR.
 
 ---
 
-## Further Reading
+## Appendix A: quick-reference table
 
-### Foundational Papers
+| Noise model | Likelihood | Exact identity | Residual is the score? | Score weight |
+|---|---|---|---|---|
+| Additive AWGN, $y=x+\varepsilon$ | $\mathcal{N}(x,\sigma^2 I)$ | $\hat{x} = y + \sigma^2\nabla\log p(y)$ | Yes | $\sigma^2$ |
+| Correlated / transformed, $y=Ax+\varepsilon$ | $\mathcal{N}(Ax,\Sigma)$ | $A\hat{x} = y + \Sigma\nabla\log p(y)$ | Only $A\hat x$; not invertible in general | $\Sigma$ |
+| Blur after noise, $y=K(x+\varepsilon)$ | $\mathcal{N}(Kx,\sigma^2KK^{\top})$ | $K\hat{x} = y + \sigma^2 KK^{\top}\nabla\log p(y)$ | Requires $(KK^{\top})^{-1}$ | $\sigma^2KK^{\top}$ |
+| Conditional | $\mathcal{N}(x,\sigma^2 I)$, $c \perp \varepsilon$ | $\hat{x}(y,c)=y+\sigma^2\nabla\log p(y\mid c)$ | Yes | $\sigma^2$ |
+| Multiplicative, $y=xn$ | $\mathcal{N}(x,\sigma^2x^2)$ | (A): needs $\mathbb{E}[x^2\mid y]$ | **No** | $\sigma^2y^2$ (approx.) |
+| Composite, $y=xn+a$ | $\mathcal{N}(x,\sigma_m^2x^2+\sigma_a^2)$ | (A$_c$): additive term plus second-moment term | Only if $\sigma_m=0$ | $\sigma_a^2+\sigma_m^2y^2$ (approx.) |
+| VP / DDPM | $\mathcal{N}(\sqrt{\bar\alpha}x_0,(1-\bar\alpha)I)$ | $\mathbb{E}[x_0\mid x_t]=\frac{x_t+(1-\bar\alpha)\nabla\log p_t}{\sqrt{\bar\alpha}}$ | Yes, after rescaling | $1-\bar\alpha$ |
 
-1. **Miyasawa (1961)**: "On the convergence of the iteration of expectations and quadratic forms" *(original source - difficult to find)*
-
-2. **Kadkhodaie & Simoncelli (2021)**: ["Solving Linear Inverse Problems Using the Prior Implicit in a Denoiser"](https://arxiv.org/abs/2007.13640) *(modern treatment)*
-
-3. **Vincent (2011)**: "A connection between score matching and denoising autoencoders" *(denoising score matching)*
-
-### Related Theoretical Work
-
-4. **Efron (2011)**: "Tweedie's formula and selection bias" *(Tweedie's formula connections)*
-
-5. **Song & Ermon (2019)**: "Generative Modeling by Estimating Gradients of the Data Distribution" *(score-based generative models)*
-
-6. **Romano et al. (2017)**: "The Little Engine that Could: Regularization by Denoising" *(RED framework)*
-
-### Modern Applications
-
-7. **Ho et al. (2020)**: "Denoising Diffusion Probabilistic Models" *(DDPM)*
-
-8. **Song et al. (2021)**: "Score-Based Generative Modeling through Stochastic Differential Equations" *(SDE framework)*
-
-9. **Dhariwal & Nichol (2021)**: "Diffusion Models Beat GANs on Image Synthesis" *(practical applications)*
-
-### Implementation Resources
-
-10. **Kadkhodaie & Simoncelli GitHub**: [Universal Inverse Problem](https://github.com/LabForComputationalVision/universal_inverse_problem) *(reference implementation)*
+| Property | Additive | Multiplicative | Composite |
+|---|---|---|---|
+| MSE training yields $\mathbb{E}[x\mid y]$ | Yes | Yes | Yes |
+| Residual-equals-score identity | Yes | No | No ($\sigma_m>0$) |
+| Optimal estimator scale-equivariant | Yes, if $\sigma$ co-scales | Yes, at fixed $\sigma_m$ | Yes, if $\sigma_a$ co-scales |
+| Bias-free network compatible | Yes | Yes | Yes |
+| Reference-free audit | SURE (exact) | gSURE (approximate) | gSURE (approximate) |
 
 ---
 
-## Summary
+## Appendix B: conventions that are commonly mixed up
 
-Miyasawa's theorem provides a fundamental bridge between:
-- **Signal processing** (denoising) and **probability theory** (score functions)
-- **Energy-based modeling** and **learned representations**
-- **Classical statistics** and **modern deep learning**
+1. **Score versus noise prediction.** $s = -\hat{\varepsilon}/\sigma^2$ if the network predicts the noise
+   *vector*; $s = -\varepsilon_\theta/\sigma$ if it predicts *unit-variance* noise.
+2. **Langevin step size.** $y \mathrel{+}= \tfrac{\eta}{2}s + \sqrt{\eta}z$ and $y \mathrel{+}= \eta s + \sqrt{2\eta}z$ are the same up to $\eta \to 2\eta$.
+3. **CFG scale.** Interpolation convention ($w=1$ is plain conditional) versus Ho and Salimans ($w=0$ is plain conditional).
+4. **Domain shift versus rescale.** $[0,1]$ and $[-0.5,+0.5]$ differ by a shift only. Do **not** rescale $\sigma$, `max_val`, or PSNR constants. $[-1,+1]$ has width 2, so moving there **does** require $\sigma \to 2\sigma$ and `max_val = 2.0`.
+5. **`center=False` in Keras BatchNormalization** removes the learned offset $\beta$. It does not remove mean subtraction; mean subtraction is linear and does not break homogeneity anyway.
+6. **Variance versus standard deviation.** The score weight is $\sigma^2$, not $\sigma$. Half the sign and scale bugs in this area are this.
 
-The theorem's power lies not just in its mathematical elegance, but in its practical implications for understanding and leveraging the implicit knowledge embedded in trained neural networks. As machine learning continues to evolve, Miyasawa's theorem remains a cornerstone for connecting optimization, probability, and learning in high-dimensional spaces.
-
-**Key Takeaway**: Every optimal denoiser is secretly computing probability gradients, and this insight unlocks powerful connections between seemingly disparate areas of machine learning and statistics.
+---
