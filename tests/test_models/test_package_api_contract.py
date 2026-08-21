@@ -974,6 +974,20 @@ class TestFactoryKnobsAreForwarded:
         a path is actually built -- but they are invisible to the check above, and
         an inventory that shrinks silently is how a guard's coverage rots.
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-136
+        # This inventory is the TRIGGER CONDITION for the `strict_forward`
+        # helper (`layers/factory_forward.py`), which was re-costed on
+        # 2026-08-21 and RULED AGAINST -- see decisions.md D-136. The short
+        # version, so the next reader does not re-propose it: a runtime
+        # forwarding helper is strictly WEAKER than the static sweep above,
+        # because an omitted kwarg is indistinguishable at runtime from a
+        # caller who wanted the default, and the AST guard found 0 live
+        # offenders at HEAD. What would change that answer is measured RIGHT
+        # HERE: the helper becomes the only available instrument if the
+        # statically uncheckable population grows, because those sites are
+        # exactly the ones the sweep cannot see. The ceiling below is what
+        # makes that growth loud instead of a warning nobody reads. Do NOT
+        # raise it to make a red test green -- re-open D-136 instead.
         _, dynamic = _sweep_factory_call_sites()
         if dynamic:
             warnings.warn(
@@ -982,6 +996,23 @@ class TestFactoryKnobsAreForwarded:
                 UserWarning,
                 stacklevel=2,
             )
+        assert len(dynamic) <= _DYNAMIC_CALL_SITE_CEILING, (
+            f"the statically uncheckable factory call sites grew from "
+            f"{_DYNAMIC_CALL_SITE_CEILING} to {len(dynamic)}. Every one of "
+            "them is invisible to test_no_declared_and_stored_param_is_dropped "
+            "above, so this guard's coverage just shrank. Either give the new "
+            "sites a literal `type=`, or re-open the `strict_forward` ruling "
+            f"(decisions.md D-136). Sites: {dynamic}"
+        )
+
+
+#: Ceiling on factory call sites whose ``type=`` is a variable rather than a
+#: literal. Such a site has no static declared-param set, so the dropped-param
+#: sweep cannot check it at all. MEASURED 2026-08-21: 15, against 6 literal-typed
+#: dropped-param hits of which all 6 are cleared name collisions -- i.e. **0 live
+#: offenders**. This number is the evidence the `strict_forward` ruling rests on
+#: (decisions.md D-136), which is why it is pinned rather than merely reported.
+_DYNAMIC_CALL_SITE_CEILING = 15
 
 
 # ---------------------------------------------------------------------------
