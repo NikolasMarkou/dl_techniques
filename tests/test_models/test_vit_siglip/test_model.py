@@ -462,12 +462,66 @@ class TestSigLIPForwardPass:
         assert cls_token.shape == (1, 192)  # tiny embed_dim
         assert not np.any(np.isnan(cls_token.numpy()))
 
-        # CLS token should be the first token
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-113
+        # This assertion USED to be
+        #     np.testing.assert_allclose(cls_token, full_output[:, 0, :])
+        # -- i.e. it compared `get_cls_token` against a re-typing of that
+        # method's own one-line body, `features[:, 0, :]`. It therefore said
+        # nothing about whether sequence position 0 HOLDS the CLS token.
+        # MEASURED 2026-08-21: appending the CLS token at the END of the
+        # sequence instead of prepending it (`concatenate([x, cls_tokens])` at
+        # model.py:604), which makes `get_cls_token` return a PATCH and makes the
+        # include_top head classify off a patch, left the ENTIRE directory at
+        # 62 passed. The tautology is kept -- it does pin the index -- but the
+        # real claim is now stated below it.
         expected_cls = full_output[:, 0, :]
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(cls_token),
             keras.ops.convert_to_numpy(expected_cls),
             rtol=1e-6, atol=1e-6
+        )
+
+        # The claim the line above cannot make: position 0 is the LEARNED,
+        # INPUT-INDEPENDENT token, not a patch. Capture what `call` hands the
+        # first transformer layer for two DIFFERENT images: position 0 must be
+        # bit-identical across them (it is `cls_token + pos[0]`, which no pixel
+        # can reach), while every patch position must differ. Under the append
+        # injection position 0 is a patch embedding and moves with the image.
+        captured = []
+        original_call = model.transformer_layers[0].call
+
+        def capturing_call(x, *args, **kwargs):
+            captured.append(keras.ops.convert_to_numpy(x))
+            return original_call(x, *args, **kwargs)
+
+        model.transformer_layers[0].call = capturing_call
+        try:
+            rng = np.random.default_rng(20260821)
+            for _ in range(2):
+                model(rng.random((1, 64, 64, 3)).astype("float32"), training=False)
+        finally:
+            model.transformer_layers[0].call = original_call
+
+        assert len(captured) == 2, "the capture never fired; it proves nothing"
+        first, second = captured
+        num_patches = (64 // 16) ** 2
+        assert first.shape[1] == num_patches + 1, (
+            f"sequence is {first.shape[1]} long; expected {num_patches} patches "
+            "+ 1 CLS"
+        )
+
+        cls_drift = float(np.max(np.abs(first[:, 0, :] - second[:, 0, :])))
+        assert cls_drift == 0.0, (
+            f"sequence position 0 moved by {cls_drift:.6e} when only the IMAGE "
+            "changed -- it is a patch embedding, not the prepended CLS token"
+        )
+
+        # Control: the patch positions MUST move, or the zero above is a model
+        # that ignores its input rather than a CLS token at position 0.
+        patch_drift = float(np.max(np.abs(first[:, 1:, :] - second[:, 1:, :])))
+        assert patch_drift > 1e-3, (
+            f"no patch position moved either ({patch_drift:.6e}); the CLS "
+            "assertion above is vacuous"
         )
 
     def test_patch_tokens_functionality(self):
