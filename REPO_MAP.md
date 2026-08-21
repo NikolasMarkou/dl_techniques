@@ -490,6 +490,7 @@ table are named precisely *because* they do not resolve.
 | "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Now holds for models too, though it did not when this row was written: 69 of the 73 model packages bind a `create_*` in their package init and only 1 (`power_sampling`) defines none anywhere. The row is kept because the pre-`1bfe89d08` figures — 27 and 14 — are what the root `CLAUDE.md` claim was measured against, and they moved without the map moving. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
 | **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split is 255 of 294. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
+| `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired by shipping `global_attention_interval = 1` for those two variants (all-global attention); they now run and measure **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
 are gitignored and will not be in your clone. The root `CLAUDE.md` is tracked, and the
@@ -505,6 +506,25 @@ against `~=2.0.2`), i.e. redundancy, not conflict. The divergence is coverage:
 `src/dl_techniques/datasets/nlp.py` and `src/dl_techniques/utils/tokenizer.py` import
 them. `pyproject.toml` is authoritative for the library API; a bare `pip install -e .`
 will not run the dataset loaders or the tokenizer, nor put you on a GPU wheel.
+
+
+### Checkpoint-affecting changes
+
+Recorded here because they change a weight tree, not just behaviour, and this file is
+the tracked place a future reader will look.
+
+* **2026-08-21 — `ModernBERT` `base` / `large` moved to `global_attention_interval = 1`.**
+  Every layer is now a `group_query` global layer, so the local layers' fused-QKV subtree
+  and its `relative_position_bias_table` are gone and the global layers' RoPE caches take
+  their place: **every parameter path under a swapped layer changes**, and any pre-existing
+  `base`/`large` checkpoint is unloadable. Impact check, run read-only BEFORE the edit:
+  `find results -iname "*modern*bert*"` returned **nothing**, and `find results -name '*.keras'`
+  returned **8 files, all `sam3_tiny_*/final_model.keras`** — so the local impact is **zero**.
+  A clone contains no checkpoints at all (see the `results/` row above). The hybrid schedule
+  remains reachable as `ModernBERT.from_variant("base", global_attention_interval=3)`, which
+  is the configuration that cannot complete a forward pass on this hardware.
+  Rationale and the rejected alternatives: the `D-019` / `D-027` / `D-135` anchors in
+  `models/modern_bert/model.py`.
 
 ---
 
@@ -552,7 +572,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1006 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1011 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1012 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |

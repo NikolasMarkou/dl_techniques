@@ -61,6 +61,21 @@ grid-formation/padding/partition code:
 * `tiny` (`window_size=64`) partitions into **one** window for `L <= 4096` and
   into **four** for `4097 <= L <= 8192`. In that band the windowing is real.
 
+AMENDED 2026-08-21 (plan-2026-08-19T163559-499b6f0e/D-135). The two bullets
+above describe the variant table as it was SHIPPED UNTIL 2026-08-21, and they
+remain the correct account of what a `window` local layer does at
+`window_size=128` -- but they understated the consequence. Measured on a 12 GB
+GPU at a sequence length of EIGHT, `from_variant("base")` and
+`from_variant("large")` did not merely pay for padding: both raised
+`ResourceExhaustedError` inside `SingleWindowAttention.call`. Two of the three
+shipped variants were DEAD ON FORWARD. `base` and `large` therefore now ship
+`global_attention_interval = 1`, i.e. every layer global, which preserves the
+all-to-all connectivity their padded single window already had, adds the RoPE
+those local layers lacked, and runs. `tiny` is unchanged and remains the
+variant where the hybrid schedule is real. The knob is not deleted:
+`from_variant("base", global_attention_interval=3)` restores the hybrid
+schedule for anyone who wants it, with the cost above.
+
 Do not write "windowing always degenerates" (false for `tiny` above 4096) and
 do not write "windowing delivers linear cost" (false for `base` and `large` at
 every admissible length). Where a local layer is dense it additionally carries
@@ -291,9 +306,27 @@ class ModernBERT(keras.Model):
             "num_heads": 12,
             "intermediate_size": 1152,
             "use_bias": False,
-            "global_attention_interval": 3,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-135
+            # `global_attention_interval: 1` -- EVERY layer global -- is not a
+            # tuning choice, it is what makes this variant RUNNABLE. At the
+            # inherited `3`, two thirds of the layers were `window` layers at
+            # `local_attention_window_size=128`, and a window is padded to
+            # `128**2 = 16384` slots INDEPENDENT of L, so `from_variant("base")`
+            # raised `ResourceExhaustedError` inside `SingleWindowAttention.call`
+            # at a sequence length of EIGHT, on a 12 GB GPU (measured
+            # 2026-08-21). Do NOT "restore the hybrid schedule" by putting `3`
+            # back, and do NOT shrink `local_attention_window_size` instead: the
+            # window layer is a SPATIAL layer over a synthetic sqrt(L) grid, so a
+            # smaller window buys a strided, non-contiguous adjacency that is not
+            # the paper's 1-D window -- see the D-019/D-027 anchors in `_build`,
+            # which forbid exactly that shrink. The real fix is a 1-D
+            # sliding-window layer in `layers/attention/`, which does not exist.
+            # `local_attention_window_size` is retained and stays reachable via
+            # `from_variant("base", global_attention_interval=3)`.
+            # See decisions.md D-135.
+            "global_attention_interval": 1,
             "local_attention_window_size": 128,
-            "description": "ModernBERT-Base: 95M parameters, efficient base model",
+            "description": "ModernBERT-Base: 160.6M parameters (measured), all-global attention",
         },
         "large": {
             "hidden_size": 1024,
@@ -301,9 +334,13 @@ class ModernBERT(keras.Model):
             "num_heads": 16,
             "intermediate_size": 2624,
             "use_bias": False,
-            "global_attention_interval": 3,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-135
+            # Same repair, same reason, same measurement as `base` above:
+            # `from_variant("large")` raised `ResourceExhaustedError` at L=8.
+            # See decisions.md D-135.
+            "global_attention_interval": 1,
             "local_attention_window_size": 128,
-            "description": "ModernBERT-Large: 280M parameters, high-performance model",
+            "description": "ModernBERT-Large: 409.5M parameters (measured), all-global attention",
         },
     }
 
@@ -536,6 +573,25 @@ class ModernBERT(keras.Model):
             #     projections plus 2 RoPE caches, so EVERY parameter name under
             #     a swapped layer changes, not just the bias table. It is
             #     deferred to a follow-up plan with the measurement attached.
+            #
+            # SUPERSEDE-NOTE 2026-08-21
+            # (plan-2026-08-19T163559-499b6f0e/D-135): the second bullet above
+            # ("Do NOT quietly stop emitting 'window' for base/large here
+            # either ... deferred to a follow-up plan with the measurement
+            # attached") HAS NOW BEEN TAKEN UP, and the measurement is attached.
+            # It was not done "here" -- this expression is untouched. It was done
+            # in MODEL_VARIANTS, by setting `global_attention_interval = 1` for
+            # `base` and `large`, so `is_global` is true at every layer and this
+            # line simply never selects 'window' for them. The measurement that
+            # forced it: at the inherited interval of 3, `from_variant("base")`
+            # and `from_variant("large")` raised `ResourceExhaustedError` inside
+            # `SingleWindowAttention.call` at a sequence length of EIGHT on a
+            # 12 GB GPU -- not a cost inefficiency, an unrunnable model. The
+            # FIRST bullet is unaffected and still binds: `tiny` keeps its knobs
+            # and its real 4x saving. The window-shrink alternative the carried
+            # ledger proposed remains FORBIDDEN by the bullet above it, for the
+            # strided-adjacency reason given there. See decisions.md D-135.
+            #
             #   * Do NOT re-derive any of this by reading. Two readings failed
             #     here already: "the local layers have no positional term at
             #     all" is FALSE (injecting `N(0,1)` into the relative-position
