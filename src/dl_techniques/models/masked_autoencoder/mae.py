@@ -480,8 +480,16 @@ class MaskedAutoencoder(keras.Model):
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
         self.reconstruction_loss_tracker.update_state(loss)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-133
+        # Both keys carry the SAME quantity, so both must carry the same
+        # AGGREGATION. Reporting the raw `loss` here made the headline metric
+        # the LAST BATCH's value while `reconstruction_loss` -- literally the
+        # tracker fed from that same variable one line up -- was the epoch mean.
+        # Do NOT "restore" `"loss": loss`: it makes the two keys disagree for a
+        # reason no reader can see, and it is the only Keras model in the repo
+        # whose `history["loss"]` is not an epoch mean. See decisions.md D-133.
         return {
-            "loss": loss,
+            "loss": self.reconstruction_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result()
         }
 
@@ -496,8 +504,16 @@ class MaskedAutoencoder(keras.Model):
         loss = self.compute_loss(x=x, y=None, y_pred=y_pred)
 
         self.reconstruction_loss_tracker.update_state(loss)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-133
+        # Both keys carry the SAME quantity, so both must carry the same
+        # AGGREGATION. Reporting the raw `loss` here made the headline metric
+        # the LAST BATCH's value while `reconstruction_loss` -- literally the
+        # tracker fed from that same variable one line up -- was the epoch mean.
+        # Do NOT "restore" `"loss": loss`: it makes the two keys disagree for a
+        # reason no reader can see, and it is the only Keras model in the repo
+        # whose `history["loss"]` is not an epoch mean. See decisions.md D-133.
         return {
-            "loss": loss,
+            "loss": self.reconstruction_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result()
         }
 

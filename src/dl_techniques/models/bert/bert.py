@@ -769,11 +769,16 @@ class BERT(keras.Model):
             weights ship with ``dl_techniques``. If False (default), the model
             is randomly initialized.
         :type pretrained: Union[bool, str]
-        :param weights_dataset: Dataset/version for pretrained weights.
-            Options: "uncased", "cased", "multilingual".
-            Only used if pretrained=True.
+        :param weights_dataset: UNREACHABLE, exactly like ``cache_dir``. It is
+            forwarded only to ``_download_weights``, which raises
+            ``NotImplementedError`` before reading it, and ``pretrained=True``
+            is the only route there. The docstring said "Only used if
+            pretrained=True", which is true and misleading: that path never
+            returns. Kept for signature stability with the house
+            ``from_variant`` shape, not because any value of it does anything.
         :type weights_dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
+        :param cache_dir: UNREACHABLE for the same reason; the
+            ``_download_weights`` docstring already marks it ``(unused)``.
         :type cache_dir: Optional[str]
         :param kwargs: Additional arguments to override the variant's defaults.
         :type kwargs: Any

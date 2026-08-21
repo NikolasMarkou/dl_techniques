@@ -552,7 +552,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1006 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1006 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1011 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -612,7 +612,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files using `@keras.saving.register_keras_serializable` | 478 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 479 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
 | Files using the central logger | 340 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
-| Files importing raw `tensorflow` | 61 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
+| Files importing raw `tensorflow` | 60 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 256 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
@@ -623,8 +623,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Loose `test_*.py` directly under `tests/test_layers/` | 83 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
 | Subdirectories under `tests/test_layers/` | 21 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model packages with no `create_` function ANYWHERE in the package | 1 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
-| Model packages BINDING a `create_` in their own package init (what a caller sees) | 69 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
-| …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 71 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| Model packages BINDING a `create_` in their own package init (what a caller sees) | 70 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 72 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
 | Lines in the mandatory authoring guide | 2698 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
 | Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |

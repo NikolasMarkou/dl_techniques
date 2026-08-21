@@ -251,16 +251,15 @@ _PRETRAINED_UNREACHABLE_EVIDENCE = {
         "models/bias_free_denoisers/bfunet.py",
         "create_bfunet_variant",
     ): "no MODEL_VARIANTS table is reachable from the callable",
-    # These two are not exported by their package `__init__.py`, so no namespace
-    # walk can see them at all -- their four siblings (bert, distilbert,
-    # modern_bert, tree_transformer `create_*_with_head`) ARE exported and ARE
-    # reached, with the same resolver. The gap is an EXPORT gap, not a resolver
-    # gap: this arm reaches them the day they are exported, and the fix is in the
-    # package, not in this file.
-    (
-        "models/fnet/model.py",
-        "create_fnet_with_head",
-    ): "not exported from dl_techniques.models.fnet",
+    # This one is not exported by its package `__init__.py`, so no namespace
+    # walk can see it at all -- its siblings (bert, distilbert, modern_bert,
+    # tree_transformer `create_*_with_head`) ARE exported and ARE reached, with
+    # the same resolver. The gap is an EXPORT gap, not a resolver gap: this arm
+    # reaches them the day they are exported, and the fix is in the package, not
+    # in this file. `models/fnet/model.py::create_fnet_with_head` was the second
+    # entry here and was DELETED on 2026-08-21 (step 27, D-133) when
+    # `models/fnet/__init__.py` started exporting it -- the prediction in this
+    # comment held exactly, and the arm now covers it.
     (
         "models/mamba/mamba_v1.py",
         "create_mamba_with_head",
@@ -3706,8 +3705,12 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/mobile_clip/mobile_clip_v1.py", "create_mobile_clip_model"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     ("models/mobile_clip/mobile_clip_v2.py", "create_mobile_clip_v2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
     ("models/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/squeezenet/squeezenet_v1.py", "create_squeezenet_v1"): "ROUTE step 19 -- `if weights is not None: raise` duplicated from from_variant",
-    ("models/squeezenet/squeezenet_v2.py", "create_squeezenodule_net_v2"): "ROUTE step 19 -- `if weights is not None: raise` duplicated from from_variant",
+    # The two `models/squeezenet/*` entries were DELETED on 2026-08-21 (step 27,
+    # D-129). Their recorded reason -- "duplicated from from_variant" -- was
+    # FALSE: the guard existed ONLY in the factory, and
+    # `SqueezeNetV1.from_variant(weights="imagenet")` returned a randomly
+    # initialised model with no error at all. The guard now lives in
+    # `from_variant`, the chokepoint, and the factories delegate cleanly.
     ("models/dino/dino_v3.py", "create_dino_v3"): "ROUTE step 19 -- reject_input_shape + `if pretrained: raise` + kwargs patching",
     # (b) Optional-argument patching into **kwargs before delegating. Small, but
     # it is logic the callee's own signature should be expressing.
