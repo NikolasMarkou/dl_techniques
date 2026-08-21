@@ -186,3 +186,55 @@ class TestPFTSRGradientFlow:
         assert len(report) == len(model.trainable_weights)
         assert len(report) > 0
         assert max(v for v in report.values() if v is not None) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-118
+#
+# `create_pft_sr(scale, variant)` took ZERO `**kwargs` and hard-coded nine
+# `PFTSR` arguments in its `return`, making `window_size`, `drop_path_rate`,
+# `upsampler`, `norm_type`, `use_lepe` and the three dropout knobs unreachable
+# through the only public factory this package exposes. Each hard-coded literal
+# was byte-identical to the constructor's own default, which is why the three
+# variants' parameter counts are UNCHANGED by the repair (measured before and
+# after: light 1_025_027, base 2_180_283, large 4_120_739).
+# ---------------------------------------------------------------------------
+_PFT_VARIANT_PARAMS = {"light": 1_025_027, "base": 2_180_283, "large": 4_120_739}
+
+
+@pytest.mark.parametrize("variant, expected_params", sorted(_PFT_VARIANT_PARAMS.items()))
+def test_the_variant_parameter_counts_did_not_move(variant, expected_params):
+    keras.utils.set_random_seed(0)
+    model = create_pft_sr(4, variant)
+    model(keras.ops.zeros((1, 32, 32, 3)))
+    assert model.count_params() == expected_params
+
+
+@pytest.mark.parametrize("key, value, default", [
+    ("window_size", 16, 8),
+    ("upsampler", "pixelshuffledirect", "pixelshuffle"),
+    ("norm_type", "rms_norm", "layer_norm"),
+    ("use_lepe", False, True),
+    ("drop_path_rate", 0.2, 0.0),
+])
+def test_every_constructor_knob_is_reachable_through_the_factory(key, value, default):
+    keras.utils.set_random_seed(0)
+    assert getattr(create_pft_sr(4, "base"), key) == default
+    overridden = create_pft_sr(4, "base", **{key: value})
+    assert getattr(overridden, key) == value, (
+        f"create_pft_sr ignored the documented override {key}={value!r}"
+    )
+
+
+def test_a_factory_override_does_not_write_back_into_the_variant_table():
+    """`.copy()` guards the LOCAL dict `config.update(kwargs)` mutates.
+
+    Note the model-side alias this looks like is NOT the hazard: Keras 3
+    rewraps any list assigned to a Model attribute as a fresh `TrackedList`,
+    so `m.num_blocks.append(99)` leaves `MODEL_VARIANTS` untouched even on the
+    unfixed source (measured). The table entry itself is what needed guarding.
+    """
+    before = list(PFTSR.MODEL_VARIANTS["base"]["num_blocks"])
+    create_pft_sr(4, "base", num_blocks=[1, 1])
+    assert PFTSR.MODEL_VARIANTS["base"]["num_blocks"] == before
+    assert PFTSR.MODEL_VARIANTS["base"]["embed_dim"] == 60

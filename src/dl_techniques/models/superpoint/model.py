@@ -357,9 +357,22 @@ class SuperPoint(keras.Model):
         Returns:
             Dict mapping `"keypoints"` and `"descriptors"` to their output shapes.
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-119: the two heads are
+        # ASYMMETRIC and only ONE of them may read `input_shape`. The detector grid
+        # is a real function of the tensor handed in (measured on a model built at
+        # 64x64: a 128x128 batch really produces a 16x16 keypoint grid and a 32x32
+        # batch a 4x4 one, while this method reported 8x8 for all three). The
+        # descriptor head is NOT: `_build_descriptor_head` resizes to the
+        # construction-time `(input_height, input_width)` as a graph-safe static
+        # target, so its shape is genuinely config-fixed. Do NOT "finish the job" by
+        # deriving the descriptor shape from `input_shape` as well -- that would make
+        # this method disagree with the forward pass in the opposite direction.
         batch = input_shape[0] if len(input_shape) == 4 else None
-        grid_h = self.input_height // 8
-        grid_w = self.input_width // 8
+        stride = self.ENCODER_STRIDES ** len(self.depths)
+        height = input_shape[-3] if len(input_shape) == 4 else self.input_height
+        width = input_shape[-2] if len(input_shape) == 4 else self.input_width
+        grid_h = height // stride if height is not None else None
+        grid_w = width // stride if width is not None else None
         return {
             "keypoints": (batch, grid_h, grid_w, self.DETECTOR_CHANNELS),
             "descriptors": (batch, self.input_height, self.input_width, self.descriptor_dim),

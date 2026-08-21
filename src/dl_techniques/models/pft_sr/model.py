@@ -556,7 +556,8 @@ class PFTSR(keras.Model):
 
 def create_pft_sr(
         scale: int = 4,
-        variant: Literal['base', 'light', 'large'] = 'base'
+        variant: Literal['base', 'light', 'large'] = 'base',
+        **kwargs: Any,
 ) -> PFTSR:
     """
     Factory function to create PFT-SR models with predefined configurations.
@@ -567,6 +568,9 @@ def create_pft_sr(
             - 'light': Lightweight model (48 channels, [4, 4, 4, 4] blocks)
             - 'base': Base model (60 channels, [4, 4, 4, 6, 6, 6] blocks)
             - 'large': Large model (80 channels, [6, 6, 6, 8, 8, 8] blocks)
+        **kwargs: Any :class:`PFTSR` constructor argument, overriding the variant
+            table. This is the only route to ``window_size``, ``drop_path_rate``,
+            ``upsampler``, ``norm_type``, ``use_lepe`` and the dropout knobs.
 
     Returns:
         PFTSR model instance.
@@ -587,21 +591,22 @@ def create_pft_sr(
             f"Available variants: {list(PFTSR.MODEL_VARIANTS.keys())}"
         )
 
-    config = PFTSR.MODEL_VARIANTS[variant]
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-118: `config.update(kwargs)` is the
+    # house `from_variant` shape. The `.copy()` + `list(...)` beneath it protect the
+    # LOCAL dict that `config.update(kwargs)` then mutates -- without them a caller's
+    # override would be written straight into `PFTSR.MODEL_VARIANTS[variant]`. They do
+    # NOT repair a model-side alias, and it is worth saying why the obvious probe
+    # misleads here: `m.num_blocks is PFTSR.MODEL_VARIANTS[variant]['num_blocks']` reads
+    # False even on the pre-fix code, because Keras 3 auto-tracking rewraps any list
+    # assigned to a Layer/Model attribute as a NEW `TrackedList`. MEASURED against the
+    # unfixed source: `m.num_blocks.append(99)` left the class table at [4,4,4,6,6,6].
+    # The nine arguments this call used to spell out (`in_channels=3`,
+    # `window_size=8`, `qkv_bias=True`, the three dropouts, `norm_type`, `use_lepe`,
+    # `upsampler`) were each byte-identical to `PFTSR.__init__`'s own default, and
+    # hard-coding them is exactly what made every one of them unreachable through
+    # this factory. Do NOT re-inline them.
+    config = PFTSR.MODEL_VARIANTS[variant].copy()
+    config['num_blocks'] = list(config['num_blocks'])
+    config.update(kwargs)
 
-    return PFTSR(
-        scale=scale,
-        in_channels=3,
-        embed_dim=config['embed_dim'],
-        num_blocks=config['num_blocks'],
-        num_heads=config['num_heads'],
-        window_size=8,
-        mlp_ratio=config['mlp_ratio'],
-        qkv_bias=True,
-        attention_dropout=0.0,
-        projection_dropout=0.0,
-        drop_path_rate=0.0,
-        norm_type='layer_norm',
-        use_lepe=True,
-        upsampler='pixelshuffle',
-    )
+    return PFTSR(scale=scale, **config)
