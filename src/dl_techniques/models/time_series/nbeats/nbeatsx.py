@@ -60,9 +60,10 @@ stream here is the univariate target, and covariate width lives entirely in
 of the target only — the covariates are passed through unscaled, since a calendar
 indicator or a one-hot has no meaningful per-window z-score — and the summed
 forecast is de-normalized with the target's own statistics. Note that
-`use_normalization` is a single switch with two effects here: besides the target
-RevIN, it is forwarded to every block, enabling RMSNorm inside the fully connected
-trunk. Optional dropout is applied to the *residual stream* between blocks, not
+`use_normalization` gates the target RevIN. It ALSO gates the RMSNorm layers
+inside every block's fully connected trunk, but only by default: pass
+`use_block_normalization` to control the in-block norms independently (`False`
+matches `NBeatsNet`, which never forwards this flag to its blocks at all). Optional dropout is applied to the *residual stream* between blocks, not
 inside the trunk, so it perturbs what the next block is asked to explain. Unlike
 `NBeatsNet`, `call` returns the forecast tensor alone; there is no reconstruction
 output, so `predict()` and `call` agree exactly.
@@ -151,7 +152,14 @@ class NBeatsXNet(keras.Model):
         share_weights_in_stack: Boolean, share weights across the blocks of a
             stack by reusing one block object at every position, dividing the
             stack's parameter count by ``nb_blocks_per_stack``.
-        use_normalization: Boolean, apply reversible instance norm to target.
+        use_normalization: Boolean, apply reversible instance normalization to
+            the target series (the RevIN at the model boundary).
+        use_block_normalization: Optional boolean, enable the four RMSNorm layers
+            *inside* every block's FC trunk. ``None`` (the default) means "follow
+            ``use_normalization``", which is the historical behaviour of this
+            class -- ``use_normalization`` was a single switch with two effects.
+            Pass ``False`` to keep the target RevIN while matching ``NBeatsNet``,
+            whose blocks never receive this flag at all.
         dropout_rate: Float in [0, 1), residual-stream dropout probability.
         activation: Activation for block hidden layers.
         use_bias: Boolean, bias on block FC layers.
@@ -194,6 +202,7 @@ class NBeatsXNet(keras.Model):
             hidden_layer_units: int = 256,
             share_weights_in_stack: bool = False,
             use_normalization: bool = True,
+            use_block_normalization: Optional[bool] = None,
             dropout_rate: float = 0.0,
             activation: Union[str, Callable] = 'relu',
             use_bias: bool = False,
@@ -224,6 +233,15 @@ class NBeatsXNet(keras.Model):
         self.hidden_layer_units = hidden_layer_units
         self.share_weights_in_stack = share_weights_in_stack
         self.use_normalization = use_normalization
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-116: ADDITIVE, never a rename.
+        # `use_normalization` here gates TWO unrelated things -- the target RevIN at
+        # the model boundary AND the four RMSNorm layers inside every block's FC
+        # trunk -- while the sibling `NBeatsNet` puts NO such key in its
+        # `block_kwargs`, so the same flag means different architectures in the two
+        # classes. `None` reproduces the historical coupling EXACTLY, so no existing
+        # config or checkpoint moves. Do NOT rename `use_normalization` to
+        # `use_target_normalization`: that breaks every stored config in the tree.
+        self.use_block_normalization = use_block_normalization
         self.dropout_rate = dropout_rate
         self.activation = activation
         self.use_bias = use_bias
@@ -309,7 +327,7 @@ class NBeatsXNet(keras.Model):
                     'forecast_length': self.forecast_length,
                     'input_dim': 1,  # Endogenous target is usually univariate
                     'output_dim': 1,
-                    'use_normalization': self.use_normalization,
+                    'use_normalization': self._block_normalization,
                     'activation': self.activation,
                     'use_bias': self.use_bias,
                     'kernel_initializer': self.kernel_initializer,
@@ -437,6 +455,18 @@ class NBeatsXNet(keras.Model):
         # Return only forecast for predict() consistency
         return forecast_3d
 
+    @property
+    def _block_normalization(self) -> bool:
+        """Resolve the in-block RMSNorm switch.
+
+        ``use_block_normalization is None`` means "follow ``use_normalization``",
+        which is what this class did before the two effects were separable. See
+        the D-116 anchor in ``__init__``.
+        """
+        if self.use_block_normalization is None:
+            return self.use_normalization
+        return self.use_block_normalization
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -449,6 +479,7 @@ class NBeatsXNet(keras.Model):
             'hidden_layer_units': self.hidden_layer_units,
             'share_weights_in_stack': self.share_weights_in_stack,
             'use_normalization': self.use_normalization,
+            'use_block_normalization': self.use_block_normalization,
             'dropout_rate': self.dropout_rate,
             'activation': self.activation,
             'use_bias': self.use_bias,

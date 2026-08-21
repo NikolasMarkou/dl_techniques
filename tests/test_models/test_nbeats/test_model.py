@@ -748,3 +748,78 @@ class TestNBeatsXNet:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-116
+#
+# `NBeatsXNet.use_normalization` gated TWO unrelated things at once: the target
+# RevIN at the model boundary and the four RMSNorm layers inside every block's
+# FC trunk. `NBeatsNet` puts NO such key in its `block_kwargs`, so the same
+# argument name meant a different architecture in the two sibling classes.
+#
+# THE INSTRUMENT MATTERS AND THIS IS WHY THE KNOB WAS INVISIBLE: the in-block
+# RMSNorm is built with `use_scale=False`, so it has ZERO parameters. Measured,
+# all four arms below report `count_params() == 368`. A parameter-count
+# assertion -- the obvious one, and the one the carried finding first proposed
+# -- passes identically with the norms present and absent. Count the RMSNorm
+# SUBLAYERS, never the parameters.
+# ---------------------------------------------------------------------------
+_NBX_KW = dict(
+    backcast_length=8, forecast_length=4, exogenous_dim=2,
+    stack_types=('trend',), nb_blocks_per_stack=1, thetas_dim=(4,),
+    hidden_layer_units=8, dropout_rate=0.0,
+)
+
+
+def _built_nbeatsx(**kwargs):
+    from dl_techniques.models.time_series.nbeats.nbeatsx import NBeatsXNet
+
+    keras.utils.set_random_seed(0)
+    model = NBeatsXNet(**_NBX_KW, **kwargs)
+    model({
+        'target_history': ops.zeros((2, 8, 1)),
+        'exog_history': ops.zeros((2, 8, 2)),
+        'exog_forecast': ops.zeros((2, 4, 2)),
+    })
+    return model
+
+
+def _rms_sublayers(model):
+    return [l for l in model._flatten_layers()
+            if 'rms' in type(l).__name__.lower()]
+
+
+@pytest.mark.parametrize(
+    "kwargs, expect_norms",
+    [
+        (dict(use_normalization=True), 4),                                 # legacy coupling
+        (dict(use_normalization=False), 0),                                # legacy coupling
+        (dict(use_normalization=True, use_block_normalization=False), 0),  # NBeatsNet-alike
+        (dict(use_normalization=False, use_block_normalization=True), 4),  # RevIN off, trunk on
+    ],
+)
+def test_the_in_block_norm_is_controllable_independently_of_the_revin(
+        kwargs, expect_norms):
+    model = _built_nbeatsx(**kwargs)
+    assert len(_rms_sublayers(model)) == expect_norms, (
+        f"{kwargs} produced {len(_rms_sublayers(model))} in-block RMSNorm layers, "
+        f"expected {expect_norms}"
+    )
+    # The blind instrument, pinned so nobody reaches for it again.
+    assert model.count_params() == 368
+
+
+def test_omitting_the_new_knob_reproduces_the_historical_coupling():
+    """`None` must mean "follow use_normalization" -- no stored config moves."""
+    for flag in (True, False):
+        model = _built_nbeatsx(use_normalization=flag)
+        assert model.use_block_normalization is None
+        assert model._block_normalization is flag
+        assert len(_rms_sublayers(model)) == (4 if flag else 0)
+
+
+def test_the_new_knob_round_trips_through_get_config():
+    model = _built_nbeatsx(use_normalization=True, use_block_normalization=False)
+    config = model.get_config()
+    assert config['use_block_normalization'] is False
+    assert config['use_normalization'] is True
