@@ -266,3 +266,152 @@ class TestKerasSequenceHasNoIter:
             "a plain `for ... in` over a PyDataset walks past __len__ -- this "
             "is why train_nanovlm indexes by range(len(...))"
         )
+
+
+# ---------------------------------------------------------------------
+# `steps_per_epoch == 0` and the unbuilt model (D-134)
+# ---------------------------------------------------------------------
+
+
+class _UnbuiltStandIn(keras.Model):
+    """A stand-in that is UNBUILT on construction, like ``create_nanovlm()``.
+
+    ``NanoVLM.build`` takes a dict of ``{'images': ..., 'text_tokens': ...}``
+    shapes and materialises its sub-layers; nothing else builds it, so
+    ``count_params()`` raises until someone calls it. This records the shape
+    dict it was handed so the test can assert where those numbers came from.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="unbuilt_standin")
+        self.dense = keras.layers.Dense(VOCAB)
+        self.build_shapes = []
+
+    def build(self, input_shape) -> None:
+        self.build_shapes.append(input_shape)
+        self.dense.build((None, SEQ, FEATURES))
+        super().build((None, SEQ, FEATURES))
+
+    def call(self, inputs, training=None):
+        return self.dense(inputs)
+
+
+class TestTrainNanoVLMRefusesZeroSteps:
+    """``steps_per_epoch == 0`` at the shipped defaults, MEASURED.
+
+    ``VQADataSequence.__len__`` is ``len(samples) // batch_size`` and
+    ``load_cauldron_sample()`` returns exactly 3 placeholder rows, so the
+    shipped default ``batch_size=8`` gives ``3 // 8 == 0``. Pre-fix, that made
+    ``for step in range(0)`` run ZERO steps: ten epochs each logged
+    ``Loss=0.0000`` from an untouched ``Mean`` metric and the run saved an
+    UNTRAINED ``final_model.keras`` with no error anywhere. Not a crash -- the
+    quiet outcome is the whole defect.
+
+    The real ``load_cauldron_sample`` / ``create_vqa_dataset`` are used here on
+    purpose: the arithmetic under test is theirs, and patching them would pin
+    a number this test made up.
+    """
+
+    def test_the_shipped_default_batch_size_is_refused_by_name(
+            self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(train_nano_vlm_module, "create_nanovlm",
+                            lambda *a, **k: _tiny_model())
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValueError) as excinfo:
+            train_nanovlm(epochs=10, batch_size=8, use_multi_optimizer=False,
+                          checkpoint_frequency=0, log_frequency=10)
+
+        message = str(excinfo.value)
+        assert "steps_per_epoch == 0" in message, message
+        # The arithmetic must be IN the message: a bare "invalid batch size"
+        # would not tell the caller that the sample loader has only 3 rows.
+        assert "len(samples)=3" in message and "batch_size=8" in message, message
+        # Pre-fix this directory held a saved, untrained model.
+        assert list(tmp_path.glob("results/nanovlm_*/*.keras")) == []
+
+    def test_a_batch_size_the_sample_loader_can_fill_is_not_refused(
+            self, monkeypatch, tmp_path
+    ):
+        """The control. ``3 // 3 == 1``, so the guard must NOT fire -- it must
+        let the run through to the (separate, loud) placeholder-image failure
+        at ``vqa_dataset.py``'s ``np.stack``, which is a data problem and not
+        this guard's business."""
+        monkeypatch.setattr(train_nano_vlm_module, "create_nanovlm",
+                            lambda *a, **k: _tiny_model())
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValueError) as excinfo:
+            train_nanovlm(epochs=1, batch_size=3, use_multi_optimizer=False,
+                          checkpoint_frequency=0, log_frequency=1)
+
+        assert "steps_per_epoch" not in str(excinfo.value), str(excinfo.value)
+        assert "need at least one array to stack" in str(excinfo.value)
+
+
+class TestTrainNanoVLMBuildsTheModelBeforeUsingIt:
+    """``create_nanovlm()`` returns an UNBUILT subclassed model.
+
+    MEASURED at HEAD, before this fix::
+
+        ValueError: You tried to call `count_params` on layer 'nano_vlm',
+        but the layer isn't built.
+
+    raised from ``train_nano_vlm.py``'s own second statement, so the entry
+    point died before it ever touched the data -- the identical defect the
+    D-031 anchor fixed in ``src/train/hrm/train_hrm.py``. A second, quieter
+    consequence: ``setup_different_learning_rates`` reads
+    ``layer.trainable_variables``, which on an unbuilt model is empty, so the
+    multi-optimizer partition would have been three EMPTY lists.
+    """
+
+    def test_the_model_is_built_with_the_processors_own_shapes(
+            self, monkeypatch, tmp_path
+    ):
+        model = _UnbuiltStandIn()
+        dataset = _CountingDataset(length=2)
+        monkeypatch.setattr(train_nano_vlm_module, "create_nanovlm",
+                            lambda *a, **k: model)
+        monkeypatch.setattr(train_nano_vlm_module, "load_cauldron_sample",
+                            lambda *a, **k: [{}, {}])
+        monkeypatch.setattr(train_nano_vlm_module, "create_vqa_dataset",
+                            lambda *a, **k: dataset)
+        monkeypatch.chdir(tmp_path)
+
+        # Pre-fix: ValueError from `count_params` on the unbuilt model.
+        train_nanovlm(epochs=1, batch_size=BATCH, use_multi_optimizer=False,
+                      checkpoint_frequency=0, log_frequency=1)
+
+        assert model.build_shapes == [
+            {"images": (None, 224, 224, 3), "text_tokens": (None, 512)}
+        ], model.build_shapes
+
+    def test_the_multi_optimizer_partition_sees_real_variables(
+            self, monkeypatch, tmp_path
+    ):
+        """Proves the build happens BEFORE ``NanoVLMTrainer`` is constructed,
+        not merely somewhere in the function."""
+        model = _UnbuiltStandIn()
+        dataset = _CountingDataset(length=2)
+        seen = {}
+        original = train_nano_vlm_module.setup_different_learning_rates
+
+        def _recording(m):
+            seen["n_trainable"] = len(m.trainable_variables)
+            return original(m)
+
+        monkeypatch.setattr(train_nano_vlm_module, "create_nanovlm",
+                            lambda *a, **k: model)
+        monkeypatch.setattr(train_nano_vlm_module, "load_cauldron_sample",
+                            lambda *a, **k: [{}, {}])
+        monkeypatch.setattr(train_nano_vlm_module, "create_vqa_dataset",
+                            lambda *a, **k: dataset)
+        monkeypatch.setattr(train_nano_vlm_module,
+                            "setup_different_learning_rates", _recording)
+        monkeypatch.chdir(tmp_path)
+
+        train_nanovlm(epochs=1, batch_size=BATCH, use_multi_optimizer=True,
+                      checkpoint_frequency=0, log_frequency=1)
+
+        assert seen["n_trainable"] == 2, seen

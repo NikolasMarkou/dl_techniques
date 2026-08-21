@@ -183,17 +183,44 @@ def train_nanovlm(
     setup_gpu(gpu_id=gpu_index)
     configure_mixed_precision()
 
+    data_processor = VQADataProcessor(image_size=224, max_text_length=512, vocab_size=32000)
+    sample_data = load_cauldron_sample()
+    train_dataset = create_vqa_dataset(sample_data, data_processor, batch_size=batch_size, shuffle=True)
+    steps_per_epoch = len(train_dataset)
+
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-134
+    # REFUSE `steps_per_epoch == 0`. `VQADataSequence.__len__` is
+    # `len(samples) // batch_size`, and `load_cauldron_sample()` returns exactly
+    # 3 placeholder samples, so at the shipped default `batch_size=8` this is
+    # `3 // 8 == 0`. `for step in range(0)` then runs ZERO steps, every epoch
+    # logs `Loss=0.0000` from an untouched `Mean` metric, and the run "completes"
+    # and saves an UNTRAINED model with no error anywhere. Do NOT "fix" this by
+    # rounding `__len__` up (the last partial batch is not what is missing here)
+    # and do NOT lower the default `batch_size` silently -- the sample loader is
+    # a 3-row placeholder, and the caller must be told. See decisions.md D-134.
+    if steps_per_epoch == 0:
+        raise ValueError(
+            f"steps_per_epoch == 0: len(samples)={len(sample_data)} // batch_size={batch_size} == 0. "
+            f"Every epoch would run zero training steps and an untrained model would be saved. "
+            f"Use batch_size <= {len(sample_data)}, or supply more samples."
+        )
+
     model = create_nanovlm()
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-134
+    # BUILD EAGERLY, HERE, BEFORE the `count_params` log AND before
+    # `NanoVLMTrainer` partitions the variables. Same defect as the D-031 anchor
+    # in `src/train/hrm/train_hrm.py`: `count_params()` on an unbuilt subclassed
+    # model raises `ValueError: ... the layer isn't built`, so `train_nanovlm`
+    # died on its own second statement and never reached the data at all.
+    # Building here also makes `setup_different_learning_rates(model)` see real
+    # variables -- on an unbuilt model it partitions three EMPTY lists.
+    model.build({'images': (None, data_processor.image_size, data_processor.image_size, 3),
+                 'text_tokens': (None, data_processor.max_text_length)})
     logger.info(f"Created nanoVLM-222M: {model.count_params():,} parameters")
 
     training_setup = create_training_setup()
     trainer = NanoVLMTrainer(model, training_setup['loss_fn'], use_multi_optimizer=use_multi_optimizer)
     logger.info(f"Using {'multi-optimizer' if use_multi_optimizer else 'single optimizer'} training")
-
-    data_processor = VQADataProcessor(image_size=224, max_text_length=512, vocab_size=32000)
-    sample_data = load_cauldron_sample()
-    train_dataset = create_vqa_dataset(sample_data, data_processor, batch_size=batch_size, shuffle=True)
-    steps_per_epoch = len(train_dataset)
 
     logger.info(f"Epochs: {epochs}, Batch: {batch_size}, Steps/epoch: {steps_per_epoch}")
 
