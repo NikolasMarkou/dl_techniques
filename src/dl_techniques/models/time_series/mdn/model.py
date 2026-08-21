@@ -537,10 +537,11 @@ class MDNModel(keras.Model):
         if not (0 < confidence_level < 1):
             raise ValueError("confidence_level must be in the range (0, 1)")
 
-        # Get model predictions (mixture parameters)
-        # Use the model's predict method for batch processing
-        predictions = self.predict(inputs)
-
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-117: there is deliberately NO
+        # `predictions = self.predict(inputs)` here. It used to run a full forward pass
+        # over `inputs` whose result was never read -- `get_point_estimate` and
+        # `get_uncertainty` below each run their own -- so this method cost THREE
+        # forward passes to use two. Do NOT re-add it "for clarity".
         # COMPUTE POINT ESTIMATES
         # Calculate the expected value of the mixture distribution
         # E[y|x] = Σᵢ πᵢ(x) * μᵢ(x)

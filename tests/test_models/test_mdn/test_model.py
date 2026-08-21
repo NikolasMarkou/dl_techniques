@@ -328,3 +328,35 @@ class TestMDNModel:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-117
+#
+# `predict_with_uncertainty` opened with `predictions = self.predict(inputs)`
+# whose result was never read: `get_point_estimate` and `get_uncertainty` below
+# it each run their OWN forward pass. The method therefore cost three forward
+# passes to use two, and no existing test could see it -- every assertion in
+# this suite is about the returned dict's keys, shapes and finiteness, all of
+# which are identical either way. COUNT THE CALLS.
+# ---------------------------------------------------------------------------
+def test_predict_with_uncertainty_runs_exactly_two_forward_passes(monkeypatch):
+    model = MDNModel(hidden_layers=[8], output_dimension=2, num_mixtures=2)
+    inputs = np.random.RandomState(0).normal(size=(4, 5)).astype("float32")
+    model(inputs, training=False)
+
+    calls = []
+    original = type(model).predict
+
+    def _counting_predict(self, x, *args, **kwargs):
+        calls.append(1)
+        return original(self, x, *args, **kwargs)
+
+    monkeypatch.setattr(type(model), "predict", _counting_predict, raising=True)
+    result = model.predict_with_uncertainty(inputs, confidence_level=0.95)
+
+    assert len(calls) == 2, (
+        f"predict_with_uncertainty ran {len(calls)} forward passes; two are "
+        "used (point estimate, uncertainty) and any third is a discarded result"
+    )
+    assert np.all(np.isfinite(result["point_estimates"]))

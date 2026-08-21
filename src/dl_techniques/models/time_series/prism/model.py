@@ -734,10 +734,16 @@ class PRISMModel(keras.Model, ForecastMixin):
         quantile_preds = raw_predictions[:, :, :, quantile_indices]
 
         # Extract Median (Point Forecast)
-        if 0.5 in self.quantile_levels:
-            median_idx = self.quantile_levels.index(0.5)
-        else:
-            median_idx = len(self.quantile_levels) // 2
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-117: the median head is chosen by
+        # VALUE (nearest level to 0.5), reusing `trained_quantiles_arr` built ten lines
+        # above -- not by `0.5 in <list of floats>` with a `len(...) // 2` fallback.
+        # When 0.5 IS present this is bit-identical to the old `.index(0.5)` (argmin of
+        # an exact zero, first occurrence). When it is not, the old fallback took the
+        # POSITIONAL middle, which is only the median for a level set that happens to be
+        # symmetric; for an asymmetric caller-supplied set such as
+        # [0.01, 0.05, 0.1, 0.48, 0.9] it returned the 0.1 head as the point forecast.
+        # Do NOT reintroduce a float `in` test here.
+        median_idx = int(np.argmin(np.abs(trained_quantiles_arr - 0.5)))
 
         mean_preds = raw_predictions[:, :, :, median_idx]
 

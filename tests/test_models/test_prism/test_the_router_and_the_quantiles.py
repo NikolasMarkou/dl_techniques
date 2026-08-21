@@ -156,3 +156,78 @@ class TestQuantileHeadDoesNotCross:
             "with enforce_monotonicity=False the quantiles still never cross, "
             "so the enforced case proves nothing about the mechanism"
         )
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-117
+#
+# `predict_quantiles` chose its point-forecast head with
+# `if 0.5 in self.quantile_levels: ... else: len(self.quantile_levels) // 2`.
+#
+# RE-DERIVED, AND THE CARRIED MECHANISM IS ONLY HALF RIGHT. The float `in` test
+# really does miss on every even `num_quantiles` -- but for the class's OWN
+# `np.linspace(0, 1, n + 2)[1:-1]` fallback the positional middle and the
+# nearest-to-0.5 index are always equidistant from 0.5 (measured n=2..11: they
+# differ only at n in {4, 8, 10}, and there they straddle 0.5 symmetrically, so
+# neither is more correct). The linspace half of the finding is REFUTED.
+#
+# What is live is the `len(...) // 2` fallback itself: it reads POSITION, never
+# VALUE, so an asymmetric caller-supplied level set picks an arbitrary head.
+# ---------------------------------------------------------------------------
+def _median_head_index(levels):
+    """The repaired selection rule, as `PRISMModel.predict_quantiles` runs it."""
+    return int(np.argmin(np.abs(np.array(levels) - 0.5)))
+
+
+def _legacy_median_head_index(levels):
+    """The pre-fix rule, verbatim."""
+    if 0.5 in levels:
+        return levels.index(0.5)
+    return len(levels) // 2
+
+
+def test_an_asymmetric_level_set_picks_the_head_nearest_the_median():
+    levels = [0.01, 0.05, 0.1, 0.48, 0.9]
+    assert _legacy_median_head_index(levels) == 2   # -> the 0.10 head
+    assert _median_head_index(levels) == 3          # -> the 0.48 head
+    assert levels[_median_head_index(levels)] == 0.48
+
+
+@pytest.mark.parametrize("levels", [
+    [0.1, 0.5, 0.9],
+    [0.25, 0.5, 0.75],
+    [0.05, 0.5, 0.95],
+])
+def test_an_exact_median_still_selects_the_same_head_as_before(levels):
+    """Bit-identical on every level set that actually contains 0.5."""
+    assert _median_head_index(levels) == _legacy_median_head_index(levels)
+
+
+def test_the_model_uses_the_value_based_rule(monkeypatch):
+    """RED against the real source: pin the rule inside `predict_quantiles`."""
+    keras.utils.set_random_seed(9)
+    model = PRISMModel(
+        context_len=48, forecast_len=12, num_features=3, hidden_dim=32,
+        num_layers=1, tree_depth=2, overlap_ratio=0.25, num_wavelet_levels=2,
+        router_hidden_dim=16, router_temperature=1.0, dropout_rate=0.0,
+        use_quantile_head=True, num_quantiles=5,
+        quantile_levels=[0.01, 0.05, 0.1, 0.48, 0.9],
+    )
+    context = np.zeros((2, 48, 3), dtype="float32")
+    captured = {}
+
+    def _fake_predict(self, x, **kwargs):
+        out = np.zeros((2, 12, 3, 5), dtype="float32")
+        # Tag each quantile head with its own index so the chosen column is
+        # identifiable in the returned point forecast.
+        for i in range(5):
+            out[..., i] = float(i)
+        return out
+
+    monkeypatch.setattr(type(model), "predict", _fake_predict, raising=True)
+    _quantiles, point = model.predict_quantiles(context, quantile_levels=[0.9])
+    captured["idx"] = float(np.unique(point)[0])
+    assert captured["idx"] == 3.0, (
+        "predict_quantiles took the POSITIONAL middle head "
+        f"({captured['idx']:.0f}) instead of the head nearest 0.5 (3)"
+    )
