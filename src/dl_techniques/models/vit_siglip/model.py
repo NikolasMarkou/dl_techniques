@@ -36,7 +36,7 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
+from keras import ops, layers, activations, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -767,9 +767,62 @@ class SigLIPVisionTransformer(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            # DECISION plan-2026-08-22T035419-a11304c8/D-012
+            # A callable activation MUST be serialized here, and `from_config`
+            # below MUST deserialize it -- the pair is symmetric and a one-sided
+            # fix breaks the other direction. Storing the raw value made
+            # `get_config()` non-JSON-serializable (`TypeError: Object of type
+            # function is not JSON serializable`) and pushed the raw
+            # `{'module': 'builtins', 'class_name': 'function', ...}` dict back
+            # into `self.activation` on reload, from where `get_config` and
+            # `get_feature_extractor` propagated it further. An UNREGISTERED
+            # callable additionally failed `keras.models.load_model` outright
+            # with `ValueError: Could not interpret activation function
+            # identifier: {...}`. Strings are passed through unchanged rather
+            # than routed through `activations.serialize`, which REJECTS a bare
+            # string ("Unknown activation function 'gelu' cannot be serialized"),
+            # and because passing them through is exactly today's shipped
+            # behaviour for every stock config. See D-012 in decisions.md.
+            "activation": (
+                self.activation
+                if isinstance(self.activation, str)
+                else activations.serialize(self.activation)
+            ),
         })
         return config
+
+    @classmethod
+    def from_config(
+            cls,
+            config: Dict[str, Any],
+            custom_objects: Optional[Dict[str, Any]] = None
+    ) -> "SigLIPVisionTransformer":
+        """
+        Create a model from its configuration.
+
+        The only key needing explicit handling is ``activation``: ``get_config``
+        writes a serialized form for callables, and it has to be turned back into
+        a callable BEFORE ``__init__`` hands it to ``TransformerLayer``, which
+        resolves it through ``keras.activations.get``. Every other key is either
+        a plain value or already handled by ``initializers.get`` /
+        ``regularizers.get`` inside ``__init__``.
+
+        Args:
+            config: Configuration dictionary from ``get_config``.
+            custom_objects: Optional mapping of names to custom callables, used
+                to resolve an activation that is not registered with
+                ``keras.saving.register_keras_serializable``.
+
+        Returns:
+            A new ``SigLIPVisionTransformer`` instance.
+        """
+        config = dict(config)
+        activation = config.get("activation")
+        if activation is not None and not isinstance(activation, str):
+            config["activation"] = activations.deserialize(
+                activation, custom_objects=custom_objects
+            )
+        return cls(**config)
 
     def get_feature_extractor(self) -> "SigLIPVisionTransformer":
         """
