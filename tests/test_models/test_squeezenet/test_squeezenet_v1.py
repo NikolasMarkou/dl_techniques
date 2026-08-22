@@ -15,6 +15,7 @@ import os
 from typing import Tuple, Dict, Any
 
 from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule, create_squeezenet_v1
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestSqueezeNetV1:
@@ -246,6 +247,10 @@ class TestSqueezeNetV1:
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model_path = os.path.join(tmpdirname, "squeezenet_model.keras")
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             loaded_model = keras.models.load_model(

@@ -14,6 +14,7 @@ import numpy as np
 from dl_techniques.models.hierarchical_reasoning_model.model import (
     create_hierarchical_reasoning_model,
 )
+from tests.optimizer_state import build_optimizer_state
 
 SEQ_LEN = 16
 
@@ -131,6 +132,10 @@ class TestHRM:
         before = keras.ops.convert_to_numpy(model(x, training=False)["logits"])
 
         path = os.path.join(str(tmp_path), "hrm.keras")
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(path)
         loaded = keras.models.load_model(path)
         after = keras.ops.convert_to_numpy(loaded(x, training=False)["logits"])

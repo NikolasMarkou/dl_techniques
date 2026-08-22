@@ -627,6 +627,10 @@ class TestModelSaveLoad:
         with tempfile.TemporaryDirectory() as tmpdirname:
             model_path = os.path.join(tmpdirname, "kan_hybrid.keras")
 
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             loaded_model = keras.models.load_model(
@@ -815,6 +819,7 @@ from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
     gradient_report,
 )
+from tests.optimizer_state import build_optimizer_state
 
 GF_INPUT_FEATURES = 16
 GF_OUTPUT_FEATURES = 4

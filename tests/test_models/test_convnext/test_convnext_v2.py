@@ -21,6 +21,7 @@ from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
     assert_value_knob_changes_output,
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestConvNeXtV2:
@@ -524,6 +525,10 @@ class TestConvNeXtV2:
             model_path = os.path.join(tmpdirname, "convnext_v2_model.keras")
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load the model
