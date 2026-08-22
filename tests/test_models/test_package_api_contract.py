@@ -3707,6 +3707,20 @@ def _sweep_create_delegation(roots=None, src_root=None):
                 continue
             params = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
             if "variant" not in params:
+                # DECISION plan-2026-08-22T035419-a11304c8/D-071
+                # WHAT NOT TO DO: do NOT restore the bare `continue` that used
+                # to sit here. It dropped the factory BEFORE classification, so
+                # a no-`variant` factory could not be flagged, waived, counted
+                # or reported by anything in this file -- MEASURED 2026-08-22:
+                # of the 8 module-level `create_*` that call `.compile()`, only
+                # 3 were reachable, and the other 5 (capsnet x2,
+                # mlm_training_model, power_mlp, vae_from_config) were
+                # STRUCTURALLY invisible, not waived-and-tracked. They are still
+                # OUT OF SCOPE for R-051 -- a fixed-architecture builder has
+                # nothing to delegate -- but "out of scope" is now a VERDICT
+                # carried in `sites`, which the compile pin below can see. See
+                # decisions.md D-071.
+                sites.append((rel, fn.name, fn.lineno, "no-variant", ""))
                 continue
             if not module_has_from_variant:
                 sites.append((rel, fn.name, fn.lineno, "no-from_variant", ""))
@@ -3724,12 +3738,50 @@ def _sweep_create_delegation(roots=None, src_root=None):
             sites.append((rel, fn.name, fn.lineno, verdict, detail))
     sites.sort()
     counts = {
-        "n_variant_factories": len(sites),
+        # NOT `len(sites)`: since D-071 `sites` also carries the no-`variant`
+        # factories, and this key names the R-051 subject population, which the
+        # anti-vacuity floors and every waiver test are calibrated against.
+        "n_variant_factories": sum(1 for s in sites if s[3] != "no-variant"),
         "n_delegates": sum(1 for s in sites if s[3] == "delegates"),
         "n_logic": sum(1 for s in sites if s[3] == "logic"),
         "n_no_from_variant": sum(1 for s in sites if s[3] == "no-from_variant"),
+        "n_no_variant": sum(1 for s in sites if s[3] == "no-variant"),
     }
     return sites, counts
+
+
+def _sweep_create_compile_calls(roots=None, src_root=None):
+    """Every module-level ``create_*`` whose body calls ``.compile()``.
+
+    Contract: returns a dict mapping ``(relpath, func_name)`` to the line number.
+    Walks the SAME ``_iter_modules`` the R-051 sweep does, so the two cannot
+    drift in what tree they see. Matches any ``<anything>.compile(...)`` inside
+    the function, including inside a branch -- a compile that only happens on
+    one path is still a compile.
+
+    Why this is its own instrument rather than a field on
+    ``_sweep_create_delegation``: R-051 grades DELEGATION, and 5 of the 8 sites
+    here have nothing to delegate. The population that matters -- "a factory
+    that hands back an already-compiled model, so the caller's own
+    ``compile()`` is a silent second one" -- cuts across the delegation verdicts.
+    """
+    roots = (MODELS_DIR,) if roots is None else roots
+    src_root = SRC_ROOT if src_root is None else src_root
+    found = {}
+    for rel, tree in _iter_modules(roots, src_root):
+        for fn in tree.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not fn.name.startswith("create_"):
+                continue
+            if any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "compile"
+                for n in ast.walk(fn)
+            ):
+                found[(rel, fn.name)] = fn.lineno
+    return found
 
 
 def _is_from_variant_call(node: ast.expr) -> bool:
@@ -3859,6 +3911,61 @@ _CREATE_WITHOUT_FROM_VARIANT = {
     ("models/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
     ("models/time_series/tirex/model_extended.py", "create_tirex_extended"),
 }
+
+
+#: Every module-level ``create_*`` under ``models/`` that calls ``.compile()``,
+#: pinned BY NAME with the read that clears it.
+#:
+#: **Why this pin exists.** Until 2026-08-22 the R-051 sweep dropped any
+#: ``create_*`` with no ``variant`` parameter before classifying it, so of these
+#: 8 it could see only the 3 that happen to take a ``variant``. The other 5 were
+#: not waived-and-tracked, they were STRUCTURALLY invisible: a sixth compiling
+#: factory could have landed and no assertion in this 5,500-line file would have
+#: moved. Re-derived by AST 2026-08-22 (independently of the finding that
+#: reported it): exactly 8, keyed by ``(relpath, name)`` and not by line, because
+#: 2 of the 8 had already drifted by ~15 lines since the census.
+#:
+#: **The read, and it is the same read for all 8**: each one's docstring says
+#: "create and compile" (or "Compiled ... ready for training"), so the compile IS
+#: the advertised contract, not a hidden side effect -- the ruling D-078 already
+#: reached for ``create_fractal_net``. The cost of that contract is real and is
+#: what this pin makes visible: the returned model carries an optimizer the
+#: caller did not choose, and a caller who then calls ``compile()`` again
+#: silently discards it. Growth is the risk being guarded, not these 8.
+_CREATE_FACTORIES_THAT_COMPILE = {
+    ("models/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
+    ("models/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
+    ("models/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
+    ("models/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
+    ("models/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
+    ("models/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
+    ("models/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
+    ("models/vae/model.py", "create_vae_from_config"): "no `variant` param -- was invisible until D-071. Docstring: 'Compiled VAE model'; carries the same vmf jit_compile=False opt-out as create_vae (D-005), so it is the sibling of an already-ruled site",
+}
+
+
+#: A no-``variant`` factory that compiles -- the exact shape that was invisible.
+_INJECTED_COMPILING_FACTORY_SRC = '''
+class Injected(keras.Model):
+    pass
+
+
+def create_injected_compiled(num_classes=10, **kwargs):
+    model = Injected(**kwargs)
+    model.compile(optimizer="adam")
+    return model
+'''
+
+#: The same factory returning an UNcompiled model. A predicate that still
+#: reports this one is matching the name, not the body.
+_INJECTED_NONCOMPILING_FACTORY_SRC = '''
+class Injected(keras.Model):
+    pass
+
+
+def create_injected_compiled(num_classes=10, **kwargs):
+    return Injected(**kwargs)
+'''
 
 
 #: A factory that validates, logs and compiles instead of delegating -- and a
@@ -4023,6 +4130,106 @@ class TestCreateFactoriesDelegateToFromVariant:
         assert counts["n_variant_factories"] == 2, "the fixture must still be reached"
         assert counts["n_delegates"] == 2, sites
         assert counts["n_logic"] == 0, sites
+
+    def test_no_create_factory_is_dropped_before_classification(self):
+        """The widening itself: a no-``variant`` factory gets a VERDICT now.
+
+        Measured 2026-08-22: 61 factories take a ``variant`` and 74 do not. The
+        74 remain OUT OF SCOPE for R-051 -- that ruling is unchanged -- but they
+        are now carried in ``sites`` under the ``no-variant`` verdict instead of
+        being dropped by a bare ``continue``, which is what made 5 of the 8
+        compiling factories unreachable by any assertion in this file.
+        """
+        sites, counts = _sweep_create_delegation()
+        assert counts["n_no_variant"] >= 59, (
+            f"expected ~74 module-level create_* with no variant parameter, "
+            f"found {counts['n_no_variant']}: the widening stopped seeing them "
+            f"({counts})"
+        )
+        assert counts["n_variant_factories"] >= 48, counts
+        verdicts = {verdict for _r, _n, _l, verdict, _d in sites}
+        assert verdicts <= {
+            "delegates", "logic", "no-from_variant", "no-variant"
+        }, verdicts
+
+
+class TestFactoriesThatCompileAreAllVisible:
+    """Every ``create_*`` that hands back a COMPILED model is named here.
+
+    A factory that compiles decides the caller's optimizer, loss and jit policy;
+    a caller who compiles again silently throws that away, and one who does not
+    trains against a default nobody chose. That is worth a population pin.
+
+    The pin is a NAMED WAIVER SET plus a LIVENESS CONTROL, the shape used by
+    ``_CREATE_DELEGATION_WAIVERS`` and by ``KEY_BIAS_SUFFIX`` in
+    ``tests/test_models/test_video_jepa/test_oracle_adoption.py``: set equality
+    in both directions, so a new compiling factory fails here and a repaired one
+    fails here too until its entry is deleted in the same commit.
+    """
+
+    def test_the_compiling_factory_set_is_exactly_the_pinned_one(self):
+        found = set(_sweep_create_compile_calls())
+        new = sorted(found - set(_CREATE_FACTORIES_THAT_COMPILE))
+        gone = sorted(set(_CREATE_FACTORIES_THAT_COMPILE) - found)
+        assert found == set(_CREATE_FACTORIES_THAT_COMPILE), (
+            "the set of module-level create_* that call .compile() changed. "
+            f"NEW (a factory now decides the caller's optimizer -- add it with "
+            f"the read that clears it, or move the compile out): {new}; GONE "
+            f"(delete the pin entry in the same commit as the repair): {gone}"
+        )
+
+    def test_all_eight_are_reachable_by_the_delegation_sweep(self):
+        """The visibility claim, asserted rather than asserted-about.
+
+        Before D-071 exactly 3 of these 8 appeared in ``sites``; the other 5 were
+        dropped by the ``variant`` gate before classification. This is the test
+        that goes RED if that gate is ever restored.
+        """
+        sites, _ = _sweep_create_delegation()
+        seen = {(rel, name) for rel, name, _l, _v, _d in sites}
+        missing = sorted(set(_CREATE_FACTORIES_THAT_COMPILE) - seen)
+        assert not missing, (
+            "these compiling factories are invisible to the R-051 sweep, so no "
+            f"assertion in this file can see them change: {missing}"
+        )
+
+    def test_the_five_widened_in_are_out_of_r051_scope_not_offenders(self):
+        """The five newly-visible ones are ``no-variant``, not silent ``logic``.
+
+        Stated because the widening MUST NOT be read as "5 new R-051
+        violations": a fixed-architecture builder has no ``from_variant`` call
+        to make. If one of them ever grows a ``variant`` parameter, it becomes a
+        real R-051 subject and this assertion is what says so.
+        """
+        sites, _ = _sweep_create_delegation()
+        verdict_of = {(rel, name): v for rel, name, _l, v, _d in sites}
+        widened_in = {
+            ("models/capsnet/model.py", "create_capsnet"),
+            ("models/capsnet/model_v2.py", "create_capsnet_v2"),
+            ("models/masked_language_model/utils.py", "create_mlm_training_model"),
+            ("models/power_mlp/model.py", "create_power_mlp"),
+            ("models/vae/model.py", "create_vae_from_config"),
+        }
+        assert {verdict_of[k] for k in widened_in} == {"no-variant"}, {
+            k: verdict_of[k] for k in widened_in
+        }
+
+    def test_the_compile_sweep_fires_on_an_injected_compiling_factory(self, tmp_path):
+        """Dead-component probe, in the exact shape that used to be invisible."""
+        roots, src_root = _write_fixture(tmp_path, _INJECTED_COMPILING_FACTORY_SRC)
+        found = _sweep_create_compile_calls(roots, src_root)
+        assert set(found) == {
+            ("models/injected/model.py", "create_injected_compiled")
+        }, found
+        sites, counts = _sweep_create_delegation(roots, src_root)
+        assert counts["n_no_variant"] == 1, sites
+
+    def test_the_compile_sweep_is_silent_on_the_uncompiled_twin(self, tmp_path):
+        """...and must NOT fire on the same factory without the compile call."""
+        roots, src_root = _write_fixture(
+            tmp_path, _INJECTED_NONCOMPILING_FACTORY_SRC
+        )
+        assert _sweep_create_compile_calls(roots, src_root) == {}
 
 
 # ---------------------------------------------------------------------------
