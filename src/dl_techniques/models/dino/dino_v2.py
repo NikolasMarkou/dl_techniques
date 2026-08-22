@@ -176,7 +176,7 @@ class DINOv2Block(keras.layers.Layer):
         ffn_bias: Whether to use bias in FFN layers.
         stochastic_depth_rate: Stochastic depth drop probability.
         init_values: LearnableMultiplier initialization value (None disables scaling).
-        attention_dropout: Dropout rate for attention.
+        attention_dropout_rate: Dropout rate for attention.
         ffn_dropout_rate: Dropout rate for FFN.
         **kwargs: Additional keyword arguments for the Layer base class.
 
@@ -221,7 +221,7 @@ class DINOv2Block(keras.layers.Layer):
             ffn_bias: bool = True,
             stochastic_depth_rate: float = 0.0,
             init_values: Optional[float] = None,
-            attention_dropout: float = 0.0,
+            attention_dropout_rate: float = 0.0,
             ffn_dropout_rate: float = 0.0,
             **kwargs
     ) -> None:
@@ -249,7 +249,7 @@ class DINOv2Block(keras.layers.Layer):
         self.ffn_bias = ffn_bias
         self.stochastic_depth_rate = stochastic_depth_rate
         self.init_values = init_values
-        self.attention_dropout = attention_dropout
+        self.attention_dropout_rate = attention_dropout_rate
         self.ffn_dropout_rate = ffn_dropout_rate
 
         # Create sub-layers in __init__ following Modern Keras 3 patterns
@@ -267,7 +267,7 @@ class DINOv2Block(keras.layers.Layer):
         # Attention layer - map parameters appropriately
         attention_args = {
             'num_heads': self.num_heads,
-            'dropout_rate': self.attention_dropout
+            'dropout_rate': self.attention_dropout_rate
         }
 
         if self.attention_type == 'multi_head':
@@ -415,7 +415,7 @@ class DINOv2Block(keras.layers.Layer):
             "ffn_bias": self.ffn_bias,
             "stochastic_depth_rate": self.stochastic_depth_rate,
             "init_values": self.init_values,
-            "attention_dropout": self.attention_dropout,
+            "attention_dropout_rate": self.attention_dropout_rate,
             "ffn_dropout_rate": self.ffn_dropout_rate,
         })
         return config

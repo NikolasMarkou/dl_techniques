@@ -100,7 +100,7 @@ class VideoJEPA(keras.Model):
             img_channels=cfg.img_channels,
             depth=cfg.encoder_clifford_depth,
             shifts=tuple(cfg.encoder_shifts),
-            dropout=cfg.dropout,
+            dropout_rate=cfg.dropout_rate,
             name="encoder",
         )
         # DECISION plan_2026-05-23_15151c75/D-001 — EMA target encoder
@@ -118,7 +118,7 @@ class VideoJEPA(keras.Model):
             img_channels=cfg.img_channels,
             depth=cfg.encoder_clifford_depth,
             shifts=tuple(cfg.encoder_shifts),
-            dropout=cfg.dropout,
+            dropout_rate=cfg.dropout_rate,
             name="target_encoder",
         )
         # Freeze target — no gradient flows through this branch. Set here
@@ -135,7 +135,7 @@ class VideoJEPA(keras.Model):
             dim_head=cfg.predictor_dim_head,
             mlp_dim=cfg.predictor_mlp_dim,
             shifts=tuple(cfg.predictor_shifts),
-            dropout=cfg.dropout,
+            dropout_rate=cfg.dropout_rate,
             name="predictor",
         )
         self.sigreg = SIGRegLayer(

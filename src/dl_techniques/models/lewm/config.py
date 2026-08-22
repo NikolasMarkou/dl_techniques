@@ -34,8 +34,8 @@ class LeWMConfig:
     heads: int = 16
     dim_head: int = 64
     mlp_dim: int = 2048
-    dropout: float = 0.1
-    emb_dropout: float = 0.0
+    dropout_rate: float = 0.1
+    emb_dropout_rate: float = 0.0
 
     # Projector (both projector and pred_proj share this config)
     projector_hidden_dim: int = 192

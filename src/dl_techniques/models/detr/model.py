@@ -138,7 +138,7 @@ class DetrTransformer(layers.Layer):
         num_encoder_layers: Number of encoder layers. Defaults to 6.
         num_decoder_layers: Number of decoder layers. Defaults to 6.
         ffn_dim: The hidden dimension of the FFN. Defaults to 2048.
-        dropout: The dropout rate. Defaults to 0.1.
+        dropout_rate: The dropout rate. Defaults to 0.1.
         activation: Activation function for FFN. Defaults to "relu".
         normalization_type: Type of normalization. Defaults to "layer_norm".
         ffn_type: Type of FFN to use. Defaults to "mlp".
@@ -162,7 +162,7 @@ class DetrTransformer(layers.Layer):
         num_encoder_layers: int = 6,
         num_decoder_layers: int = 6,
         ffn_dim: int = 2048,
-        dropout: float = 0.1,
+        dropout_rate: float = 0.1,
         activation: str = "relu",
         normalization_type: NormalizationType = "layer_norm",
         ffn_type: FFNType = "mlp",
@@ -182,7 +182,7 @@ class DetrTransformer(layers.Layer):
         self.num_encoder_layers = num_encoder_layers
         self.num_decoder_layers = num_decoder_layers
         self.ffn_dim = ffn_dim
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.activation = activation
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
@@ -195,7 +195,7 @@ class DetrTransformer(layers.Layer):
                     hidden_size=hidden_dim,
                     num_heads=num_heads,
                     intermediate_size=ffn_dim,
-                    dropout_rate=dropout,
+                    dropout_rate=dropout_rate,
                     activation=activation,
                     normalization_type=normalization_type,
                     normalization_position='pre',
@@ -213,7 +213,7 @@ class DetrTransformer(layers.Layer):
                     hidden_size=hidden_dim,
                     num_heads=num_heads,
                     intermediate_size=ffn_dim,
-                    dropout_rate=dropout,
+                    dropout_rate=dropout_rate,
                     activation=activation,
                     normalization_type=normalization_type,
                     normalization_position='pre',
@@ -324,7 +324,7 @@ class DetrTransformer(layers.Layer):
             "num_encoder_layers": self.num_encoder_layers,
             "num_decoder_layers": self.num_decoder_layers,
             "ffn_dim": self.ffn_dim,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "activation": self.activation,
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
@@ -639,7 +639,7 @@ def create_detr(
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
         ffn_dim=ffn_dim,
-        dropout=dropout_rate,
+        dropout_rate=dropout_rate,
         activation=activation,
         normalization_type=normalization_type,
         ffn_type=ffn_type

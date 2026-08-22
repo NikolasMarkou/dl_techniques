@@ -40,7 +40,7 @@ MODEL_CONFIG = dict(
     num_layers=2,
     mlp_hidden_dim=8,
     ffn_ratio=2,
-    dropout_p=0.0,
+    dropout_rate=0.0,
 )
 
 

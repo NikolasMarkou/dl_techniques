@@ -110,8 +110,8 @@ class LeWM(keras.Model):
             input_dim=cfg.embed_dim,
             hidden_dim=cfg.embed_dim,
             output_dim=cfg.embed_dim,
-            dropout=cfg.dropout,
-            emb_dropout=cfg.emb_dropout,
+            dropout_rate=cfg.dropout_rate,
+            emb_dropout_rate=cfg.emb_dropout_rate,
             name="predictor",
         )
 

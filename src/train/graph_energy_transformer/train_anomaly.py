@@ -86,7 +86,7 @@ class TrainingConfig:
     num_steps: int = 2  # T -- the block's internal descent steps (paper T ∈ {1, 2, 3})
     step_size: float = 0.1  # alpha
     mlp_hidden_dim: int = 64
-    mlp_dropout: float = 0.0
+    mlp_dropout_rate: float = 0.0
 
     # Training (paper Table 6)
     epochs: int = 100
@@ -140,8 +140,8 @@ class TrainingConfig:
             raise ValueError(f"num_steps must be in [1, 3], got {self.num_steps}")
         if self.step_size <= 0:
             raise ValueError(f"step_size must be positive, got {self.step_size}")
-        if not (0.0 <= self.mlp_dropout <= 1.0):
-            raise ValueError(f"mlp_dropout must be in [0, 1], got {self.mlp_dropout}")
+        if not (0.0 <= self.mlp_dropout_rate <= 1.0):
+            raise ValueError(f"mlp_dropout_rate must be in [0, 1], got {self.mlp_dropout_rate}")
         if self.epochs <= 0:
             raise ValueError(f"epochs must be positive, got {self.epochs}")
         if self.learning_rate <= 0:
@@ -243,7 +243,7 @@ def train_anomaly(config: TrainingConfig) -> Dict[str, Any]:
         hopfield_dim=config.hopfield_dim,
         mlp_hidden_dim=config.mlp_hidden_dim,
         num_steps=config.num_steps,
-        mlp_dropout=config.mlp_dropout,
+        mlp_dropout_rate=config.mlp_dropout_rate,
         step_size=config.step_size,
         seed=config.seed,
     )
@@ -414,7 +414,7 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--step-size", type=float, default=0.1,
                         help="alpha: descent step size.")
     parser.add_argument("--mlp-hidden-dim", type=int, default=64)
-    parser.add_argument("--mlp-dropout", type=float, default=0.0)
+    parser.add_argument("--mlp-dropout-rate", type=float, default=0.0)
 
     # Training (paper Table 6)
     parser.add_argument("--epochs", type=int, default=100)
@@ -474,7 +474,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         num_steps=args.num_steps,
         step_size=args.step_size,
         mlp_hidden_dim=args.mlp_hidden_dim,
-        mlp_dropout=args.mlp_dropout,
+        mlp_dropout_rate=args.mlp_dropout_rate,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         optimizer_type=args.optimizer,

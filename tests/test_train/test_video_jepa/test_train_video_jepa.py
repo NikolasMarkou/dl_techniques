@@ -57,7 +57,7 @@ def _tiny_args(**overrides) -> argparse.Namespace:
         sigreg_knots=5,
         sigreg_num_proj=4,
         sigreg_weight=0.09,
-        dropout=0.0,
+        dropout_rate=0.0,
         mask_prediction_enabled=False,
         mask_ratio=0.0,
         lambda_next_frame=1.0,

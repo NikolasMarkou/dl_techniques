@@ -42,7 +42,7 @@ skip list that silently absorbs a new dead weight.
 
 A HARD-WIRED DROPOUT RATE, AND WHY THE MEASUREMENT PINS IT
 -----------------------------------------------------------
-SAM 2's memory attention ships ``dropout=0.1`` (the single home of the number
+SAM 2's memory attention ships ``dropout_rate=0.1`` (the single home of the number
 is ``memory_attention.DEFAULT_DROPOUT_RATE``). Since D-090 it IS reachable --
 ``SAM2.from_variant(dropout_rate=...)``, ``create_sam2(dropout_rate=...)`` and
 a ``dropout_rate`` key in every variant table -- but the SHIPPED default is
@@ -124,7 +124,7 @@ def _one_adam_step(model: keras.Model, inputs) -> None:
 
 
 #: MEASURED 2026-08-21 and worth stating plainly: SAM 2's memory attention
-#: ships ``dropout=0.1``. Since plan-2026-08-22T035419-a11304c8 D-090 the rate
+#: ships ``dropout_rate=0.1``. Since plan-2026-08-22T035419-a11304c8 D-090 the rate
 #: IS configurable (``SAM2.from_variant(dropout_rate=...)``), but the shipped
 #: default these models are built with is still 0.1, so a training-mode
 #: measurement on a stock SAM 2 is a DRAW, which is the exact hazard that made a BeiT arm in batch A flaky 1 run

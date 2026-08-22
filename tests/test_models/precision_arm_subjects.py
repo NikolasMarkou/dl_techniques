@@ -420,7 +420,7 @@ def _b_masked_language_model():
     from dl_techniques.models.masked_language_model import MaskedLanguageModel
     encoder = BERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                    intermediate_size=64, max_position_embeddings=32,
-                   hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0)
+                   hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0)
     return MaskedLanguageModel(encoder=encoder, vocab_size=64, mask_token_id=3)
 
 
@@ -651,7 +651,7 @@ def _b_lewm():
     return create_lewm(img_size=56, patch_size=14, encoder_scale="tiny",
                        embed_dim=192, projector_hidden_dim=192,
                        history_size=2, num_preds=1, depth=1, heads=2,
-                       dim_head=32, mlp_dim=128, dropout=0.0, emb_dropout=0.0,
+                       dim_head=32, mlp_dim=128, dropout_rate=0.0, emb_dropout_rate=0.0,
                        action_dim=2, smoothed_dim=10, mlp_scale=2,
                        sigreg_knots=17, sigreg_num_proj=32)
 
@@ -1062,7 +1062,7 @@ def _b_detr():
     ], name="stub_backbone")
     transformer = DetrTransformer(hidden_dim=32, num_heads=2,
                                   num_encoder_layers=1, num_decoder_layers=1,
-                                  ffn_dim=32, dropout=0.0,
+                                  ffn_dim=32, dropout_rate=0.0,
                                   name="detr_transformer_subject")
     return DETR(num_classes=4, num_queries=5, backbone=backbone,
                 transformer=transformer, hidden_dim=32, aux_loss=False)

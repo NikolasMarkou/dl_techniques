@@ -123,7 +123,7 @@ class FractalNet(keras.Model):
             Default is None.
         global_pool: String, global pooling type ("avg" or "max").
             Default is "avg".
-        classifier_dropout: Float, dropout rate before final dense layer.
+        classifier_dropout_rate: Float, dropout rate before final dense layer.
             Default is 0.2.
         include_top: Boolean, whether to include the classification head.
             Default is True.
@@ -172,7 +172,7 @@ class FractalNet(keras.Model):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         global_pool: str = "avg",
-        classifier_dropout: float = 0.2,
+        classifier_dropout_rate: float = 0.2,
         include_top: bool = True,
         input_shape: Tuple[int, ...] = (32, 32, 3),
         **kwargs
@@ -211,7 +211,7 @@ class FractalNet(keras.Model):
         self.kernel_initializer = kernel_initializer
         self.kernel_regularizer = kernel_regularizer
         self.global_pool = global_pool
-        self.classifier_dropout = classifier_dropout
+        self.classifier_dropout_rate = classifier_dropout_rate
         self.include_top = include_top
         self._input_shape = input_shape
 
@@ -338,9 +338,9 @@ class FractalNet(keras.Model):
             raise ValueError(f"Unsupported global_pool: {self.global_pool}")
 
         # Classifier dropout
-        if self.classifier_dropout > 0:
+        if self.classifier_dropout_rate > 0:
             x = keras.layers.Dropout(
-                self.classifier_dropout,
+                self.classifier_dropout_rate,
                 name="classifier_dropout"
             )(x)
 
@@ -438,7 +438,7 @@ class FractalNet(keras.Model):
             ),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "global_pool": self.global_pool,
-            "classifier_dropout": self.classifier_dropout,
+            "classifier_dropout_rate": self.classifier_dropout_rate,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
         })

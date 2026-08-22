@@ -130,7 +130,7 @@ class FFTMixer(keras.layers.Layer):
     Args:
         embed_dim: Embedding dimension.
         mlp_hidden_dim: Hidden dimension for the adaptive filter MLP. Default: 256.
-        dropout_p: Dropout probability. Default: 0.0.
+        dropout_rate: Dropout probability. Default: 0.0.
         use_bias_in_modrelu: Whether to use learnable bias in modReLU. Default: True.
         **kwargs: Additional keyword arguments for the Layer base class.
 
@@ -145,7 +145,7 @@ class FFTMixer(keras.layers.Layer):
             self,
             embed_dim: int,
             mlp_hidden_dim: int = 256,
-            dropout_p: float = 0.0,
+            dropout_rate: float = 0.0,
             use_bias_in_modrelu: bool = True,
             **kwargs: Any
     ) -> None:
@@ -153,7 +153,7 @@ class FFTMixer(keras.layers.Layer):
 
         self.embed_dim = embed_dim
         self.mlp_hidden_dim = mlp_hidden_dim
-        self.dropout_p = dropout_p
+        self.dropout_rate = dropout_rate
         self.use_bias_in_modrelu = use_bias_in_modrelu
 
         # Adaptive filter MLP: c -> ΔW
@@ -162,7 +162,7 @@ class FFTMixer(keras.layers.Layer):
             keras.layers.Dense(embed_dim, name='mlp_out')
         ], name='filter_mlp')
 
-        self.dropout = keras.layers.Dropout(dropout_p)
+        self.dropout = keras.layers.Dropout(dropout_rate)
 
         # Will be created in build()
         self.modrelu_bias = None
@@ -281,7 +281,7 @@ class FFTMixer(keras.layers.Layer):
         config.update({
             'embed_dim': self.embed_dim,
             'mlp_hidden_dim': self.mlp_hidden_dim,
-            'dropout_p': self.dropout_p,
+            'dropout_rate': self.dropout_rate,
             'use_bias_in_modrelu': self.use_bias_in_modrelu,
         })
         return config
@@ -304,7 +304,7 @@ class FFTNetBlock(keras.layers.Layer):
         embed_dim: Embedding dimension.
         mlp_hidden_dim: Hidden dimension for FFTMixer's adaptive MLP. Default: 256.
         ffn_ratio: Expansion factor for FFN hidden dimension. Default: 4.
-        dropout_p: Dropout probability. Default: 0.0.
+        dropout_rate: Dropout probability. Default: 0.0.
         ffn_type: Type of FFN from factory. Default: 'mlp'.
         normalization_type: Type of normalization from factory. Default: 'layer_norm'.
         use_bias_in_modrelu: Whether the block's ``FFTMixer`` uses a learnable
@@ -318,7 +318,7 @@ class FFTNetBlock(keras.layers.Layer):
             embed_dim: int,
             mlp_hidden_dim: int = 256,
             ffn_ratio: int = 4,
-            dropout_p: float = 0.0,
+            dropout_rate: float = 0.0,
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
             use_bias_in_modrelu: bool = True,
@@ -329,7 +329,7 @@ class FFTNetBlock(keras.layers.Layer):
         self.embed_dim = embed_dim
         self.mlp_hidden_dim = mlp_hidden_dim
         self.ffn_ratio = ffn_ratio
-        self.dropout_p = dropout_p
+        self.dropout_rate = dropout_rate
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
         self.use_bias_in_modrelu = use_bias_in_modrelu
@@ -351,7 +351,7 @@ class FFTNetBlock(keras.layers.Layer):
         self.fft_mixer = FFTMixer(
             embed_dim=embed_dim,
             mlp_hidden_dim=mlp_hidden_dim,
-            dropout_p=dropout_p,
+            dropout_rate=dropout_rate,
             use_bias_in_modrelu=use_bias_in_modrelu,
             name='fft_mixer'
         )
@@ -362,7 +362,7 @@ class FFTNetBlock(keras.layers.Layer):
             ffn_type,
             hidden_dim=ffn_ratio * embed_dim,
             output_dim=embed_dim,
-            dropout_rate=dropout_p,
+            dropout_rate=dropout_rate,
             name='ffn'
         )
 
@@ -400,7 +400,7 @@ class FFTNetBlock(keras.layers.Layer):
             'embed_dim': self.embed_dim,
             'mlp_hidden_dim': self.mlp_hidden_dim,
             'ffn_ratio': self.ffn_ratio,
-            'dropout_p': self.dropout_p,
+            'dropout_rate': self.dropout_rate,
             'ffn_type': self.ffn_type,
             'normalization_type': self.normalization_type,
             'use_bias_in_modrelu': self.use_bias_in_modrelu,
@@ -454,7 +454,7 @@ class FFTNet(keras.Model):
         num_layers: Number of FFTNet blocks. Default: 12.
         mlp_hidden_dim: Hidden dimension for FFTMixer adaptive MLP. Default: 256.
         ffn_ratio: Expansion factor for FFN. Default: 4.
-        dropout_p: Dropout probability. Default: 0.1.
+        dropout_rate: Dropout probability. Default: 0.1.
         ffn_type: Type of FFN from factory. Default: 'mlp'.
         normalization_type: Type of normalization from factory. Default: 'layer_norm'.
         use_bias_in_modrelu: Whether each block's ``FFTMixer`` uses a learnable
@@ -533,7 +533,7 @@ class FFTNet(keras.Model):
             num_layers: int = 12,
             mlp_hidden_dim: int = 256,
             ffn_ratio: int = 4,
-            dropout_p: float = DEFAULT_DROPOUT,
+            dropout_rate: float = DEFAULT_DROPOUT,
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
             use_bias_in_modrelu: bool = True,
@@ -543,7 +543,7 @@ class FFTNet(keras.Model):
 
         # Validate configuration
         self._validate_config(
-            image_size, patch_size, embed_dim, num_layers, dropout_p
+            image_size, patch_size, embed_dim, num_layers, dropout_rate
         )
 
         # Store configuration
@@ -553,7 +553,7 @@ class FFTNet(keras.Model):
         self.num_layers = num_layers
         self.mlp_hidden_dim = mlp_hidden_dim
         self.ffn_ratio = ffn_ratio
-        self.dropout_p = dropout_p
+        self.dropout_rate = dropout_rate
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
         self.use_bias_in_modrelu = use_bias_in_modrelu
@@ -575,7 +575,7 @@ class FFTNet(keras.Model):
             patch_size: int,
             embed_dim: int,
             num_layers: int,
-            dropout_p: float
+            dropout_rate: float
     ) -> None:
         """Validate model configuration parameters."""
         if image_size <= 0:
@@ -591,9 +591,9 @@ class FFTNet(keras.Model):
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if num_layers <= 0:
             raise ValueError(f"num_layers must be positive, got {num_layers}")
-        if not (0.0 <= dropout_p <= 1.0):
+        if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(
-                f"dropout_p must be between 0 and 1, got {dropout_p}"
+                f"dropout_rate must be between 0 and 1, got {dropout_rate}"
             )
 
     def _build_architecture(self) -> None:
@@ -610,7 +610,7 @@ class FFTNet(keras.Model):
         self.pos_embed = None
 
         # Dropout after embeddings
-        self.pos_drop = keras.layers.Dropout(self.dropout_p)
+        self.pos_drop = keras.layers.Dropout(self.dropout_rate)
 
         # Stack of FFTNet blocks
         self.blocks = [
@@ -618,7 +618,7 @@ class FFTNet(keras.Model):
                 embed_dim=self.embed_dim,
                 mlp_hidden_dim=self.mlp_hidden_dim,
                 ffn_ratio=self.ffn_ratio,
-                dropout_p=self.dropout_p,
+                dropout_rate=self.dropout_rate,
                 ffn_type=self.ffn_type,
                 normalization_type=self.normalization_type,
                 use_bias_in_modrelu=self.use_bias_in_modrelu,
@@ -751,7 +751,7 @@ class FFTNet(keras.Model):
             "num_layers": self.num_layers,
             "mlp_hidden_dim": self.mlp_hidden_dim,
             "ffn_ratio": self.ffn_ratio,
-            "dropout_p": self.dropout_p,
+            "dropout_rate": self.dropout_rate,
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
             "use_bias_in_modrelu": self.use_bias_in_modrelu,
@@ -773,7 +773,7 @@ class FFTNet(keras.Model):
         logger.info(f"  - FFT mixer MLP: {self.mlp_hidden_dim} hidden dim")
         logger.info(f"  - Feed-forward: {self.ffn_type}, ratio={self.ffn_ratio}")
         logger.info(f"  - Normalization: {self.normalization_type}")
-        logger.info(f"  - Dropout: {self.dropout_p}")
+        logger.info(f"  - Dropout: {self.dropout_rate}")
 
 
 # ---------------------------------------------------------------------
@@ -824,7 +824,7 @@ def create_fftnet_with_head(
         ...     fftnet_variant="large",
         ...     task_type="classification",
         ...     num_classes=100,
-        ...     fftnet_config_overrides={"dropout_p": 0.2, "ffn_type": "swiglu"}
+        ...     fftnet_config_overrides={"dropout_rate": 0.2, "ffn_type": "swiglu"}
         ... )
     """
     fftnet_config_overrides = fftnet_config_overrides or {}
@@ -846,9 +846,9 @@ def create_fftnet_with_head(
             raise ValueError("num_classes must be provided for classification tasks")
 
         # Simple classification head
-        head_dropout = head_config_overrides.get("dropout", 0.0)
+        head_dropout_rate = head_config_overrides.get("dropout_rate", 0.0)
         classification_head = keras.Sequential([
-            keras.layers.Dropout(head_dropout) if head_dropout > 0 else keras.layers.Lambda(lambda x: x),
+            keras.layers.Dropout(head_dropout_rate) if head_dropout_rate > 0 else keras.layers.Lambda(lambda x: x),
             keras.layers.Dense(
                 num_classes,
                 kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
@@ -926,7 +926,7 @@ def create_fftnet(
         >>> # Create large model with custom settings
         >>> model = create_fftnet(
         ...     'large',
-        ...     dropout_p=0.2,
+        ...     dropout_rate=0.2,
         ...     ffn_type='swiglu'
         ... )
     """
@@ -967,7 +967,7 @@ def create_fftnet_classifier(
         ...     'small',
         ...     num_classes=10,
         ...     image_size=32,
-        ...     dropout_p=0.3
+        ...     dropout_rate=0.3
         ... )
     """
     return create_fftnet_with_head(

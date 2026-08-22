@@ -161,8 +161,8 @@ class MaskedLanguageModel(keras.Model):
     :param initializer_range: The standard deviation for weight initialization
         in the MLM head. Defaults to 0.02.
     :type initializer_range: float
-    :param mlm_head_dropout: Dropout rate for the MLM head. Defaults to 0.1.
-    :type mlm_head_dropout: float
+    :param mlm_head_dropout_rate: Dropout rate for the MLM head. Defaults to 0.1.
+    :type mlm_head_dropout_rate: float
     :param layer_norm_eps: Epsilon for LayerNormalization in MLM head.
         Defaults to 1e-12.
     :type layer_norm_eps: float
@@ -180,7 +180,7 @@ class MaskedLanguageModel(keras.Model):
             special_token_ids: Optional[List[int]] = None,
             mlm_head_activation: str = "gelu",
             initializer_range: float = 0.02,
-            mlm_head_dropout: float = 0.1,
+            mlm_head_dropout_rate: float = 0.1,
             layer_norm_eps: float = 1e-12,
             **kwargs: Any,
     ) -> None:
@@ -190,7 +190,7 @@ class MaskedLanguageModel(keras.Model):
         # Validate configuration
         self._validate_config(
             vocab_size, mask_ratio, mask_token_id, random_token_ratio,
-            unchanged_ratio, initializer_range, mlm_head_dropout
+            unchanged_ratio, initializer_range, mlm_head_dropout_rate
         )
 
         # Store all configuration parameters
@@ -203,7 +203,7 @@ class MaskedLanguageModel(keras.Model):
         self.special_token_ids = special_token_ids or []
         self.mlm_head_activation = mlm_head_activation
         self.initializer_range = initializer_range
-        self.mlm_head_dropout = mlm_head_dropout
+        self.mlm_head_dropout_rate = mlm_head_dropout_rate
         self.layer_norm_eps = layer_norm_eps
 
         # Validate encoder has required attributes
@@ -223,7 +223,7 @@ class MaskedLanguageModel(keras.Model):
             name="mlm_dense",
         )
         self.mlm_dropout = keras.layers.Dropout(
-            rate=self.mlm_head_dropout,
+            rate=self.mlm_head_dropout_rate,
             name="mlm_dropout"
         )
         self.mlm_norm = keras.layers.LayerNormalization(
@@ -310,7 +310,7 @@ class MaskedLanguageModel(keras.Model):
             random_token_ratio: float,
             unchanged_ratio: float,
             initializer_range: float,
-            mlm_head_dropout: float,
+            mlm_head_dropout_rate: float,
     ) -> None:
         """Validate model configuration parameters."""
         if vocab_size <= 0:
@@ -342,10 +342,10 @@ class MaskedLanguageModel(keras.Model):
             raise ValueError(
                 f"initializer_range must be positive, got {initializer_range}"
             )
-        if not (0.0 <= mlm_head_dropout < 1.0):
+        if not (0.0 <= mlm_head_dropout_rate < 1.0):
             raise ValueError(
-                f"mlm_head_dropout must be between 0 and 1, "
-                f"got {mlm_head_dropout}"
+                f"mlm_head_dropout_rate must be between 0 and 1, "
+                f"got {mlm_head_dropout_rate}"
             )
 
     def build(self, input_shape: Any) -> None:
@@ -538,7 +538,7 @@ class MaskedLanguageModel(keras.Model):
                 "special_token_ids": self.special_token_ids,
                 "mlm_head_activation": self.mlm_head_activation,
                 "initializer_range": self.initializer_range,
-                "mlm_head_dropout": self.mlm_head_dropout,
+                "mlm_head_dropout_rate": self.mlm_head_dropout_rate,
                 "layer_norm_eps": self.layer_norm_eps,
             }
         )

@@ -276,7 +276,7 @@ class Sam3Image(keras.Model):
             "num_queries": 200, "decoder_layers": 6, "decoder_heads": 8,
             "dim_feedforward": 2048, "dropout_rate": 0.1,
             "d_proj": 256, "prompt_mlp_hidden_dim": 2048,
-            "prompt_mlp_dropout": 0.1, "seg_num_heads": 8, "seg_num_groups": 8,
+            "prompt_mlp_dropout_rate": 0.1, "seg_num_heads": 8, "seg_num_groups": 8,
         },
         # DECISION plan-2026-08-05T124709-6c4fac48/D-017
         # `small` is NOT a published SAM 3 size. It exists because the two
@@ -344,7 +344,7 @@ class Sam3Image(keras.Model):
             # Do NOT "restore" the shipped variant's 0.1 here.
             # See decisions.md D-018.
             "drop_path_rate": 0.0, "dropout_rate": 0.0,
-            "prompt_mlp_dropout": 0.0,
+            "prompt_mlp_dropout_rate": 0.0,
             # DIVERGENCE +16 on R7 (embed_dim/4 = 48). 48 forces either a
             # 3-head decoder or a non-integral head width, and the segmentation
             # head requires `d_model % num_groups == 0` at num_groups=8.
@@ -417,7 +417,7 @@ class Sam3Image(keras.Model):
             "num_queries": 5, "decoder_layers": 2, "decoder_heads": 2,
             "dim_feedforward": 16, "dropout_rate": 0.0,
             "d_proj": 8, "prompt_mlp_hidden_dim": 16,
-            "prompt_mlp_dropout": 0.0, "seg_num_heads": 2, "seg_num_groups": 2,
+            "prompt_mlp_dropout_rate": 0.0, "seg_num_heads": 2, "seg_num_groups": 2,
         },
     }
 
@@ -615,7 +615,7 @@ class Sam3Image(keras.Model):
         dot_prod_scoring = Sam3DotProductScoring(
             d_model=table["d_model"], d_proj=table["d_proj"],
             prompt_mlp_hidden_dim=table["prompt_mlp_hidden_dim"],
-            prompt_mlp_dropout=table["prompt_mlp_dropout"])
+            prompt_mlp_dropout_rate=table["prompt_mlp_dropout_rate"])
         segmentation_head = Sam3SegmentationHead(
             d_model=table["d_model"], upsampling_stages=levels - 1,
             num_heads=table["seg_num_heads"],

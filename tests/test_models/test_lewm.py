@@ -25,7 +25,7 @@ def _small_cfg() -> LeWMConfig:
         embed_dim=192, projector_hidden_dim=192,
         history_size=2, num_preds=1,  # num_frames derived = 3
         depth=2, heads=4, dim_head=48, mlp_dim=256,
-        dropout=0.0, emb_dropout=0.0,
+        dropout_rate=0.0, emb_dropout_rate=0.0,
         action_dim=2, smoothed_dim=10, mlp_scale=4,
         sigreg_weight=0.09, sigreg_knots=17, sigreg_num_proj=32,
     )

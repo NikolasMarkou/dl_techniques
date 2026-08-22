@@ -715,10 +715,10 @@ class GraphAnomalyDetector(keras.Model):
     :type backbone: GraphEnergyTransformerBackbone
     :param mlp_hidden_dim: Hidden width of the readout MLP. Must be positive.
     :type mlp_hidden_dim: int
-    :param mlp_dropout: Dropout between the MLP's two Dense layers. Defaults to ``0.0``.
-    :type mlp_dropout: float
+    :param mlp_dropout_rate: Dropout between the MLP's two Dense layers. Defaults to ``0.0``.
+    :type mlp_dropout_rate: float
 
-    :raises ValueError: If ``mlp_hidden_dim <= 0`` or ``mlp_dropout`` is outside ``[0, 1]``.
+    :raises ValueError: If ``mlp_hidden_dim <= 0`` or ``mlp_dropout_rate`` is outside ``[0, 1]``.
 
     Input shape:
         The variant-B graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
@@ -737,7 +737,7 @@ class GraphAnomalyDetector(keras.Model):
             self,
             backbone: GraphEnergyTransformerBackbone,
             mlp_hidden_dim: int,
-            mlp_dropout: float = 0.0,
+            mlp_dropout_rate: float = 0.0,
             name: Optional[str] = "graph_anomaly_detector",
             **kwargs: Any
     ) -> None:
@@ -747,12 +747,12 @@ class GraphAnomalyDetector(keras.Model):
 
         if not isinstance(mlp_hidden_dim, int) or mlp_hidden_dim <= 0:
             raise ValueError(f"mlp_hidden_dim must be a positive integer, got {mlp_hidden_dim}")
-        if not (0.0 <= mlp_dropout <= 1.0):
-            raise ValueError(f"mlp_dropout must be in [0, 1], got {mlp_dropout}")
+        if not (0.0 <= mlp_dropout_rate <= 1.0):
+            raise ValueError(f"mlp_dropout_rate must be in [0, 1], got {mlp_dropout_rate}")
 
         self.backbone = backbone
         self.mlp_hidden_dim = int(mlp_hidden_dim)
-        self.mlp_dropout = float(mlp_dropout)
+        self.mlp_dropout_rate = float(mlp_dropout_rate)
         self.embed_dim = backbone.embed_dim
 
         # `head_` prefix so a B-pretext -> B warm-start (name-matched) moves ONLY the shared
@@ -776,7 +776,7 @@ class GraphAnomalyDetector(keras.Model):
         # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so the
         # layer structure does not depend on a numeric value.
         self.head_dropout = layers.Dropout(
-            self.mlp_dropout, name="head_mlp_dropout", dtype=self.dtype_policy
+            self.mlp_dropout_rate, name="head_mlp_dropout", dtype=self.dtype_policy
         )
         self.mlp_out = layers.Dense(1, name="head_mlp_out", dtype=self.dtype_policy)
 
@@ -857,7 +857,7 @@ class GraphAnomalyDetector(keras.Model):
         config.update({
             "backbone": serialize_keras_object(self.backbone),
             "mlp_hidden_dim": self.mlp_hidden_dim,
-            "mlp_dropout": self.mlp_dropout,
+            "mlp_dropout_rate": self.mlp_dropout_rate,
         })
         return config
 
@@ -914,11 +914,11 @@ class GraphClassifier(keras.Model):
     :type backbone: GraphEnergyTransformerBackbone
     :param num_classes: Number of graph classes ``C``. Must be ``>= 2``.
     :type num_classes: int
-    :param head_dropout: Dropout on the CLS representation before the classifier Dense. Defaults
+    :param head_dropout_rate: Dropout on the CLS representation before the classifier Dense. Defaults
         to ``0.0``.
-    :type head_dropout: float
+    :type head_dropout_rate: float
 
-    :raises ValueError: If ``num_classes < 2`` or ``head_dropout`` is outside ``[0, 1]``.
+    :raises ValueError: If ``num_classes < 2`` or ``head_dropout_rate`` is outside ``[0, 1]``.
 
     Input shape:
         The variant-C graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
@@ -932,7 +932,7 @@ class GraphClassifier(keras.Model):
             self,
             backbone: GraphEnergyTransformerBackbone,
             num_classes: int,
-            head_dropout: float = 0.0,
+            head_dropout_rate: float = 0.0,
             name: Optional[str] = "graph_classifier",
             **kwargs: Any
     ) -> None:
@@ -942,12 +942,12 @@ class GraphClassifier(keras.Model):
 
         if not isinstance(num_classes, int) or num_classes < 2:
             raise ValueError(f"num_classes must be an integer >= 2, got {num_classes}")
-        if not (0.0 <= head_dropout <= 1.0):
-            raise ValueError(f"head_dropout must be in [0, 1], got {head_dropout}")
+        if not (0.0 <= head_dropout_rate <= 1.0):
+            raise ValueError(f"head_dropout_rate must be in [0, 1], got {head_dropout_rate}")
 
         self.backbone = backbone
         self.num_classes = int(num_classes)
-        self.head_dropout_rate = float(head_dropout)
+        self.head_dropout_rate = float(head_dropout_rate)
         self.embed_dim = backbone.embed_dim
 
         # `head_` prefix so a warm-start (name-matched) moves ONLY the shared trunk
@@ -1017,7 +1017,7 @@ class GraphClassifier(keras.Model):
         config.update({
             "backbone": serialize_keras_object(self.backbone),
             "num_classes": self.num_classes,
-            "head_dropout": self.head_dropout_rate,
+            "head_dropout_rate": self.head_dropout_rate,
         })
         return config
 
@@ -1071,7 +1071,7 @@ def create_graph_anomaly_detector(
         hopfield_dim: int,
         mlp_hidden_dim: int,
         num_steps: int = 12,
-        mlp_dropout: float = 0.0,
+        mlp_dropout_rate: float = 0.0,
         **overrides: Any,
 ) -> GraphAnomalyDetector:
     """Create a variant-B :class:`GraphAnomalyDetector` (backbone + target-node readout head).
@@ -1091,7 +1091,7 @@ def create_graph_anomaly_detector(
     :param hopfield_dim: Hopfield memory count ``K``.
     :param mlp_hidden_dim: Hidden width of the readout MLP.
     :param num_steps: Descent steps ``T`` (the head captures ``g_1`` and ``g_T``).
-    :param mlp_dropout: Dropout between the MLP's two Dense layers.
+    :param mlp_dropout_rate: Dropout between the MLP's two Dense layers.
     :param overrides: Any other backbone ctor kwarg (``step_size``, ``beta``,
         ``hopfield_activation``, ``hopfield_beta``, ``norm_epsilon``, ``attn_self``, ``seed``).
     :return: A :class:`GraphAnomalyDetector` whose trunk is named :data:`GRAPH_BACKBONE_NAME`.
@@ -1123,7 +1123,7 @@ def create_graph_anomaly_detector(
     return GraphAnomalyDetector(
         backbone=backbone,
         mlp_hidden_dim=mlp_hidden_dim,
-        mlp_dropout=mlp_dropout,
+        mlp_dropout_rate=mlp_dropout_rate,
     )
 
 
@@ -1140,7 +1140,7 @@ def create_graph_classifier(
         beta: Optional[float] = None,
         noise_std: float = 0.02,
         pe_dim: int = 15,
-        head_dropout: float = 0.0,
+        head_dropout_rate: float = 0.0,
         use_weighted_adjacency: bool = False,
         adjacency_kernel_size: int = 1,
         adjacency_proj_dim: Optional[int] = None,
@@ -1168,7 +1168,7 @@ def create_graph_classifier(
     :param beta: Attention inverse temperature; ``None`` -> ``1/sqrt(head_dim)``.
     :param noise_std: eq.-27 Langevin saddle-escape noise std (training only; Table 9: 0.02).
     :param pe_dim: Laplacian-PE width ``k`` (matches the dataset's ``k_pe``; default 15).
-    :param head_dropout: Dropout on the CLS representation before the classifier Dense.
+    :param head_dropout_rate: Dropout on the CLS representation before the classifier Dense.
     :param use_weighted_adjacency: If ``True``, each ET block learns the paper's eq.-25 per-edge
         weighted adjacency ``Ŵ`` (default ``False`` -> the C-lite binary-adjacency model,
         byte-identical to today).
@@ -1211,5 +1211,5 @@ def create_graph_classifier(
     return GraphClassifier(
         backbone=backbone,
         num_classes=num_classes,
-        head_dropout=head_dropout,
+        head_dropout_rate=head_dropout_rate,
     )

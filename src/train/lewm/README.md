@@ -187,7 +187,7 @@ by this script).
 | Model | `--heads` | 16 | |
 | Model | `--dim-head` | 64 | |
 | Model | `--mlp-dim` | 2048 | |
-| Model | `--dropout` | 0.0 | |
+| Model | `--dropout-rate` | 0.0 | |
 | Action | `--action-dim` | 2 | PushT = 2. |
 | Action | `--smoothed-dim` | 10 | ActionEmbedder intermediate. |
 | Action | `--mlp-scale` | 4 | |
@@ -323,7 +323,7 @@ The "Fixed" subsection below records what landed in
     dimensions at inference, `ops.reshape` will fail with an opaque shape
     error rather than a `ValueError` naming the inputs.
 
-14. **Missing CLI mirror for `emb_dropout`, `projector_hidden_dim`,
+14. **Missing CLI mirror for `emb_dropout_rate`, `projector_hidden_dim`,
     `img_channels`.** All hardcoded in `_build_model` to either CLI or
     config defaults. Low priority.
 
@@ -395,5 +395,5 @@ The "Fixed" subsection below records what landed in
 - **Issue 12 (synthetic dataset shuffle determinism)**: addressed for
   HDF5 path; synthetic stays deterministic by design.
 - **Issue 13 (`encode_pixels` rebuilds H,W,C from config)**: low priority.
-- **Issue 14 (CLI mirrors for `emb_dropout`, `projector_hidden_dim`,
+- **Issue 14 (CLI mirrors for `emb_dropout_rate`, `projector_hidden_dim`,
   `img_channels`)**: low priority.

@@ -822,7 +822,7 @@ class TestMemoryAttentionContract:
 
         attention = SAM2MemoryAttention(
             d_model=d_model, num_layers=1, num_heads=1, kv_in_dim=mem_dim,
-            dim_feedforward=32, dropout=0.0, feat_sizes=feat,
+            dim_feedforward=32, dropout_rate=0.0, feat_sizes=feat,
         )
         features = ops.convert_to_tensor(
             np.random.default_rng(0).standard_normal(

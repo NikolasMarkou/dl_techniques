@@ -1,18 +1,19 @@
 """The SAM 2 memory-attention dropout rate is reachable from every entry point.
 
 Before this guard existed the rate was hard-wired: ``SAM2MemoryAttention``
-declared ``dropout: float = 0.1`` and ``SAM2.from_variant`` constructed it
+declared ``dropout_rate: float = 0.1`` (then spelled ``dropout``) and
+``SAM2.from_variant`` constructed it
 without passing the keyword, so the 12 (``tiny``) / 24 (``hiera_l``) live
 ``Dropout`` layers could not be reached from ``from_variant`` or ``create_sam2``
 at all. The knob added by plan-2026-08-22T035419-a11304c8 D-090 is threaded as
-``SAM2.MODEL_VARIANTS[...]["dropout_rate"]`` -> ``SAM2MemoryAttention(dropout=)``.
+``SAM2.MODEL_VARIANTS[...]["dropout_rate"]`` -> ``SAM2MemoryAttention(dropout_rate=)``.
 
 WHY THE DEFAULT ARM ALONE WOULD BE VACUOUS
 ------------------------------------------
 Asserting that a stock model's rates are ``{0.1}`` passes just as well with the
 threading DELETED -- the layer default is also ``0.1``. So the load-bearing
 assertion here is the NON-DEFAULT one: every rate must equal a value that
-exists nowhere as a default. RED-proved by deleting the ``dropout=dropout_rate``
+exists nowhere as a default. RED-proved by deleting the ``dropout_rate=dropout_rate``
 keyword at ``model.py``'s ``SAM2MemoryAttention(...)`` construction, which turns
 ``test_a_non_default_rate_reaches_every_dropout`` red at the rate-set assertion
 (observed ``{0.1} != {0.37}``) while every default-arm assertion stays green.
@@ -163,7 +164,7 @@ class TestSerialization:
         """
         config = SAM2.from_variant("tiny").get_config()
         assert "dropout_rate" not in config
-        assert config["memory_attention"]["config"]["dropout"] == 0.1
+        assert config["memory_attention"]["config"]["dropout_rate"] == 0.1
 
     def test_a_config_without_the_key_still_reconstructs(self) -> None:
         """The pre-knob config shape IS the current config shape."""

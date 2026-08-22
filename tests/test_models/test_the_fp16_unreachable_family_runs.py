@@ -57,7 +57,7 @@ def _detr():
     )
     transformer = DetrTransformer(
         hidden_dim=32, num_heads=2, num_encoder_layers=1,
-        num_decoder_layers=1, ffn_dim=32, dropout=0.0,
+        num_decoder_layers=1, ffn_dim=32, dropout_rate=0.0,
     )
     model = DETR(
         num_classes=3, num_queries=4, backbone=backbone,

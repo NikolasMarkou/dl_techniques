@@ -43,7 +43,7 @@ def _tiny_args(**overrides) -> argparse.Namespace:
         heads=2,
         dim_head=16,
         mlp_dim=32,
-        dropout=0.0,
+        dropout_rate=0.0,
         action_dim=2,
         smoothed_dim=4,
         mlp_scale=2,

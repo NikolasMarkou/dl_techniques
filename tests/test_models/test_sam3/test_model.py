@@ -1036,7 +1036,7 @@ class TestSmallVariant:
         table = Sam3Image.MODEL_VARIANTS["small"]
         assert table["drop_path_rate"] == 0.0
         assert table["dropout_rate"] == 0.0
-        assert table["prompt_mlp_dropout"] == 0.0
+        assert table["prompt_mlp_dropout_rate"] == 0.0
         # The shipped variant is the contrast, and it is NOT changed.
         assert Sam3Image.MODEL_VARIANTS["sam3"]["drop_path_rate"] == 0.1
 

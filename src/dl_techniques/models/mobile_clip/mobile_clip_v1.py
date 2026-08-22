@@ -170,7 +170,7 @@ class MobileClipModel(keras.Model):
             'backbone_name': 'vit_b16',
             'image_size': 224,
             'backbone_trainable': True,
-            'projection_dropout': 0.1
+            'projection_dropout_rate': 0.1
         }
 
         text_config = {
@@ -213,7 +213,7 @@ class MobileClipModel(keras.Model):
                 "image_size": 224,
                 "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
-                "projection_dropout": 0.1,
+                "projection_dropout_rate": 0.1,
             },
             "text_config": {
                 "vocab_size": 49408,
@@ -235,7 +235,7 @@ class MobileClipModel(keras.Model):
                 "image_size": 256,
                 "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
-                "projection_dropout": 0.1,
+                "projection_dropout_rate": 0.1,
             },
             "text_config": {
                 "vocab_size": 49408,
@@ -257,7 +257,7 @@ class MobileClipModel(keras.Model):
                 "image_size": 256,
                 "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
-                "projection_dropout": 0.1,
+                "projection_dropout_rate": 0.1,
             },
             "text_config": {
                 "vocab_size": 49408,
@@ -279,7 +279,7 @@ class MobileClipModel(keras.Model):
                 "image_size": 256,
                 "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
-                "projection_dropout": 0.1,
+                "projection_dropout_rate": 0.1,
             },
             "text_config": {
                 "vocab_size": 49408,

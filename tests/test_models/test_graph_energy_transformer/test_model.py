@@ -584,7 +584,7 @@ class TestGraphConfigCycle:
         )
         assert model2.backbone.get_config() == model.backbone.get_config()
         assert model2.mlp_hidden_dim == model.mlp_hidden_dim
-        assert model2.mlp_dropout == model.mlp_dropout
+        assert model2.mlp_dropout_rate == model.mlp_dropout_rate
 
     def test_classifier_cycle(self):
         model = _c_model(unsafe=False)

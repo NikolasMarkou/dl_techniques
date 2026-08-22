@@ -75,9 +75,9 @@ class Sam3DotProductScoring(keras.layers.Layer):
     :type use_prompt_mlp: bool
     :param prompt_mlp_hidden_dim: Hidden width of that MLP. Default: ``2048``.
     :type prompt_mlp_hidden_dim: int
-    :param prompt_mlp_dropout: Dropout rate applied after the MLP's activation
+    :param prompt_mlp_dropout_rate: Dropout rate applied after the MLP's activation
         only. Default: ``0.1``.
-    :type prompt_mlp_dropout: float
+    :type prompt_mlp_dropout_rate: float
     :param clamp_logits: Whether to clamp the scores. Default: ``True``.
     :type clamp_logits: bool
     :param clamp_max_val: Symmetric clamp bound. Default: ``12.0``.
@@ -99,7 +99,7 @@ class Sam3DotProductScoring(keras.layers.Layer):
     def __init__(
             self, d_model: int = 256, d_proj: int = 256,
             use_prompt_mlp: bool = True, prompt_mlp_hidden_dim: int = 2048,
-            prompt_mlp_dropout: float = 0.1, clamp_logits: bool = True,
+            prompt_mlp_dropout_rate: float = 0.1, clamp_logits: bool = True,
             clamp_max_val: float = 12.0, **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -108,9 +108,9 @@ class Sam3DotProductScoring(keras.layers.Layer):
                             ("prompt_mlp_hidden_dim", prompt_mlp_hidden_dim)):
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
-        if not 0.0 <= prompt_mlp_dropout < 1.0:
-            raise ValueError(f"prompt_mlp_dropout must be in [0, 1), got "
-                             f"{prompt_mlp_dropout}")
+        if not 0.0 <= prompt_mlp_dropout_rate < 1.0:
+            raise ValueError(f"prompt_mlp_dropout_rate must be in [0, 1), got "
+                             f"{prompt_mlp_dropout_rate}")
         if clamp_max_val <= 0.0:
             raise ValueError(f"clamp_max_val must be positive, got "
                              f"{clamp_max_val}")
@@ -120,7 +120,7 @@ class Sam3DotProductScoring(keras.layers.Layer):
         self.d_proj = int(d_proj)
         self.use_prompt_mlp = bool(use_prompt_mlp)
         self.prompt_mlp_hidden_dim = int(prompt_mlp_hidden_dim)
-        self.prompt_mlp_dropout = float(prompt_mlp_dropout)
+        self.prompt_mlp_dropout_rate = float(prompt_mlp_dropout_rate)
         self.clamp_logits = bool(clamp_logits)
         self.clamp_max_val = float(clamp_max_val)
         self.scale = 1.0 / math.sqrt(float(self.d_proj))
@@ -138,7 +138,7 @@ class Sam3DotProductScoring(keras.layers.Layer):
             self.prompt_fc1 = layers.Dense(self.prompt_mlp_hidden_dim,
                                            name="prompt_mlp_fc1")
             self.prompt_fc2 = layers.Dense(self.d_model, name="prompt_mlp_fc2")
-            self.prompt_drop = layers.Dropout(self.prompt_mlp_dropout,
+            self.prompt_drop = layers.Dropout(self.prompt_mlp_dropout_rate,
                                               name="prompt_mlp_dropout")
             self.prompt_norm = layers.LayerNormalization(
                 epsilon=1e-5, name="prompt_mlp_norm")
@@ -314,7 +314,7 @@ class Sam3DotProductScoring(keras.layers.Layer):
             "d_model": self.d_model, "d_proj": self.d_proj,
             "use_prompt_mlp": self.use_prompt_mlp,
             "prompt_mlp_hidden_dim": self.prompt_mlp_hidden_dim,
-            "prompt_mlp_dropout": self.prompt_mlp_dropout,
+            "prompt_mlp_dropout_rate": self.prompt_mlp_dropout_rate,
             "clamp_logits": self.clamp_logits,
             "clamp_max_val": self.clamp_max_val,
         })

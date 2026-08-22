@@ -91,7 +91,7 @@ def mlm_model(mock_encoder: MockEncoder) -> MaskedLanguageModel:
         special_token_ids=[0, 101, 102],  # PAD, CLS, SEP
         mlm_head_activation="gelu",
         initializer_range=0.02,
-        mlm_head_dropout=0.1,
+        mlm_head_dropout_rate=0.1,
         layer_norm_eps=1e-12,
     )
 
@@ -375,7 +375,7 @@ class TestMaskedLanguageModelInit:
         assert model.special_token_ids == []
         assert model.mlm_head_activation == "gelu"
         assert model.initializer_range == 0.02
-        assert model.mlm_head_dropout == 0.1
+        assert model.mlm_head_dropout_rate == 0.1
         assert model.layer_norm_eps == 1e-12
 
     def test_invalid_vocab_size(self, mock_encoder: MockEncoder) -> None:
@@ -467,15 +467,15 @@ class TestMaskedLanguageModelInit:
                 initializer_range=0.0,
             )
 
-    def test_invalid_mlm_head_dropout(self, mock_encoder: MockEncoder) -> None:
-        """Test that invalid mlm_head_dropout raises ValueError."""
+    def test_invalid_mlm_head_dropout_rate(self, mock_encoder: MockEncoder) -> None:
+        """Test that invalid mlm_head_dropout_rate raises ValueError."""
         with pytest.raises(
-                ValueError, match="mlm_head_dropout must be between 0 and 1"
+                ValueError, match="mlm_head_dropout_rate must be between 0 and 1"
         ):
             MaskedLanguageModel(
                 encoder=mock_encoder,
                 vocab_size=1000,
-                mlm_head_dropout=1.0,
+                mlm_head_dropout_rate=1.0,
             )
 
     def test_encoder_missing_hidden_size(self) -> None:
@@ -787,7 +787,7 @@ class TestMaskedLanguageModelSerialization:
         assert config["special_token_ids"] == [0, 101, 102]
         assert config["mlm_head_activation"] == "gelu"
         assert config["initializer_range"] == 0.02
-        assert config["mlm_head_dropout"] == 0.1
+        assert config["mlm_head_dropout_rate"] == 0.1
         assert config["layer_norm_eps"] == 1e-12
 
     def test_from_config(

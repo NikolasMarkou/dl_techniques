@@ -180,7 +180,7 @@ class TestMobileClipImageEncoder:
             'projection_dim': 512,
             'backbone_weights': None,  # Use None to avoid downloading weights
             'backbone_trainable': True,
-            'projection_dropout': 0.1
+            'projection_dropout_rate': 0.1
         }
 
     @pytest.fixture
@@ -271,7 +271,7 @@ class TestMobileClipImageEncoder:
             MobileClipImageEncoder(projection_dim=0)  # Invalid projection_dim
 
         with pytest.raises(ValueError):
-            MobileClipImageEncoder(projection_dim=512, projection_dropout=-0.1)  # Invalid dropout
+            MobileClipImageEncoder(projection_dim=512, projection_dropout_rate=-0.1)  # Invalid dropout
 
         with pytest.raises(ValueError):
             MobileClipImageEncoder(backbone_name='NonexistentBackbone')  # Invalid backbone

@@ -78,7 +78,7 @@ def _build_model(args: argparse.Namespace) -> LeWM:
         heads=args.heads,
         dim_head=args.dim_head,
         mlp_dim=args.mlp_dim,
-        dropout=args.dropout,
+        dropout_rate=args.dropout_rate,
         projector_hidden_dim=args.embed_dim,
         action_dim=args.action_dim,
         smoothed_dim=args.smoothed_dim,
@@ -202,7 +202,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--heads", type=int, default=16)
     p.add_argument("--dim-head", type=int, default=64)
     p.add_argument("--mlp-dim", type=int, default=2048)
-    p.add_argument("--dropout", type=float, default=0.0)
+    p.add_argument("--dropout-rate", type=float, default=0.0)
 
     p.add_argument("--action-dim", type=int, default=2)
     p.add_argument("--smoothed-dim", type=int, default=10)

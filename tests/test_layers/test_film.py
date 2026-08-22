@@ -26,7 +26,7 @@ class TestFiLMLayer:
         assert layer.modulation_mode == "both"
 
     @pytest.mark.parametrize("bad", [
-        {"projection_dropout": 1.0},
+        {"projection_dropout_rate": 1.0},
         {"modulation_mode": "bogus"},
         {"epsilon": 0.0},
     ])
@@ -44,7 +44,7 @@ class TestFiLMLayer:
 
     def test_forward_with_layer_norm_and_dropout(self, sample_inputs):
         content, style = sample_inputs
-        layer = FiLMLayer(use_layer_norm=True, projection_dropout=0.1)
+        layer = FiLMLayer(use_layer_norm=True, projection_dropout_rate=0.1)
         out = layer([content, style], training=True)
         assert tuple(out.shape) == (B, H, W, C)
 

@@ -139,7 +139,7 @@ def _dead(model: keras.Model, inputs) -> list:
 class TestSAM3GradientFlow:
 
     def test_the_tiny_variant_pins_every_stochastic_rate(self):
-        for key in ("drop_path_rate", "dropout_rate", "prompt_mlp_dropout"):
+        for key in ("drop_path_rate", "dropout_rate", "prompt_mlp_dropout_rate"):
             assert TABLE[key] == 0.0, (
                 f"{key} is {TABLE[key]} at the {VARIANT!r} variant; a gradient "
                 f"report taken under it reports the DRAW, not the model"

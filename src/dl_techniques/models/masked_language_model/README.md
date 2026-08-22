@@ -218,8 +218,8 @@ encoder = BERT.from_variant(
     "base",
     vocab_size=tokenizer.vocab_size,
     max_position_embeddings=128,
-    hidden_dropout_prob=0.1,
-    attention_probs_dropout_prob=0.1,
+    hidden_dropout_rate=0.1,
+    attention_probs_dropout_rate=0.1,
 )
 
 # Wrap with MLM pretrainer
@@ -230,7 +230,7 @@ mlm_model = MaskedLanguageModel(
     mask_token_id=tokenizer.mask_token_id,
     special_token_ids=tokenizer.all_special_ids,
     mlm_head_activation="gelu",
-    mlm_head_dropout=0.1,
+    mlm_head_dropout_rate=0.1,
 )
 ```
 
@@ -338,7 +338,7 @@ MaskedLanguageModel(
     # MLM head configuration
     mlm_head_activation: str = "gelu", # Activation function
     initializer_range: float = 0.02,   # Weight init stddev
-    mlm_head_dropout: float = 0.1,     # Dropout rate
+    mlm_head_dropout_rate: float = 0.1,     # Dropout rate
     layer_norm_eps: float = 1e-12,     # LayerNorm epsilon
 )
 ```
@@ -355,7 +355,7 @@ mlm_config = {
     "unchanged_ratio": 0.1,
     "mlm_head_activation": "gelu",
     "initializer_range": 0.02,
-    "mlm_head_dropout": 0.1,
+    "mlm_head_dropout_rate": 0.1,
 }
 ```
 
@@ -366,7 +366,7 @@ mlm_config = {
     "mask_ratio": 0.20,  # More aggressive masking
     "random_token_ratio": 0.05,
     "unchanged_ratio": 0.05,
-    "mlm_head_dropout": 0.15,  # Higher dropout for regularization
+    "mlm_head_dropout_rate": 0.15,  # Higher dropout for regularization
 }
 ```
 
@@ -377,7 +377,7 @@ mlm_config = {
     "mask_ratio": 0.10,  # Gentler masking for fine-tuning
     "random_token_ratio": 0.05,
     "unchanged_ratio": 0.05,
-    "mlm_head_dropout": 0.05,  # Lower dropout when adapting
+    "mlm_head_dropout_rate": 0.05,  # Lower dropout when adapting
 }
 ```
 
@@ -898,7 +898,7 @@ mlm_model = keras.models.load_model("pretrained_general.keras")
 
 # Adjust masking for domain adaptation
 mlm_model.mask_ratio = 0.10  # Gentler masking
-mlm_model.mlm_head_dropout = 0.05  # Less dropout
+mlm_model.mlm_head_dropout_rate = 0.05  # Less dropout
 
 # Compile with lower learning rate
 mlm_model.compile(
@@ -1031,7 +1031,7 @@ class MaskedLanguageModel(keras.Model):
         special_token_ids: Token IDs to never mask
         mlm_head_activation: Activation for MLM head (default: "gelu")
         initializer_range: Weight initialization stddev (default: 0.02)
-        mlm_head_dropout: Dropout rate for MLM head (default: 0.1)
+        mlm_head_dropout_rate: Dropout rate for MLM head (default: 0.1)
         layer_norm_eps: LayerNorm epsilon (default: 1e-12)
     
     Attributes:

@@ -39,7 +39,7 @@ SEQ_LEN = 16
 def _transformer() -> DetrTransformer:
     return DetrTransformer(
         hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS,
-        num_encoder_layers=2, num_decoder_layers=2, ffn_dim=64, dropout=0.0,
+        num_encoder_layers=2, num_decoder_layers=2, ffn_dim=64, dropout_rate=0.0,
     )
 
 

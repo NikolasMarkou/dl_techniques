@@ -105,8 +105,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
     **[PRIVATE-ATTRIBUTE NAMING — known deviation]** Constructor arguments are stored
     under leading-underscore names (``self._dim``, ``self._num_heads``,
-    ``self._attention_dropout``, ...) rather than the package-wide public spelling
-    (``self.dim``, ``self.num_heads``, ``self.attention_dropout``). The four
+    ``self._attention_dropout_rate``, ...) rather than the package-wide public spelling
+    (``self.dim``, ``self.num_heads``, ``self.attention_dropout_rate``). The four
     later-added arguments (``probability_type``, ``probability_config``,
     ``qk_norm_type``, ``qk_norm_kwargs``) use the public spelling, so the file is
     internally inconsistent as well. Renaming is deliberately **not** done here: these
@@ -203,10 +203,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :type sparsity_mode: SparsityMode
     :param qkv_bias: Whether to include bias terms in QKV projections.
     :type qkv_bias: bool
-    :param attention_dropout: Dropout rate for attention weights.
-    :type attention_dropout: float
-    :param projection_dropout: Dropout rate for output projection.
-    :type projection_dropout: float
+    :param attention_dropout_rate: Dropout rate for attention weights.
+    :type attention_dropout_rate: float
+    :param projection_dropout_rate: Dropout rate for output projection.
+    :type projection_dropout_rate: float
     :param use_lepe: Whether to use Locally-Enhanced Positional Encoding via
         depthwise convolution on value vectors.
     :type use_lepe: bool
@@ -244,7 +244,7 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         ``'threshold'``.
     :raises ValueError: If ``sparsity_mode='top_k'`` and ``top_k`` is ``None``, or
         if ``top_k`` is set but not positive.
-    :raises ValueError: If ``attention_dropout`` or ``projection_dropout`` is
+    :raises ValueError: If ``attention_dropout_rate`` or ``projection_dropout_rate`` is
         outside ``[0.0, 1.0]``.
     :raises ValueError: If ``probability_type`` is a routing / hierarchical variant.
     :raises ValueError: From ``build()``, if ``shift_size > 0`` and the input height
@@ -263,8 +263,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             sparsity_threshold: float = 0.0,
             sparsity_mode: SparsityMode = 'none',
             qkv_bias: bool = True,
-            attention_dropout: float = 0.0,
-            projection_dropout: float = 0.0,
+            attention_dropout_rate: float = 0.0,
+            projection_dropout_rate: float = 0.0,
             use_lepe: bool = True,
             lepe_kernel_size: int = 3,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
@@ -287,8 +287,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         self._sparsity_threshold = sparsity_threshold
         self._sparsity_mode = sparsity_mode
         self._qkv_bias = qkv_bias
-        self._attention_dropout = attention_dropout
-        self._projection_dropout = projection_dropout
+        self._attention_dropout_rate = attention_dropout_rate
+        self._projection_dropout_rate = projection_dropout_rate
         self._use_lepe = use_lepe
         self._lepe_kernel_size = lepe_kernel_size
         self._kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -387,18 +387,18 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         )
 
         # Attention dropout (applied to attention weights after softmax).
-        if self._attention_dropout > 0.0:
+        if self._attention_dropout_rate > 0.0:
             self._attn_drop = keras.layers.Dropout(
-                self._attention_dropout,
+                self._attention_dropout_rate,
                 name="attention_dropout"
             )
         else:
             self._attn_drop = None
 
         # Projection dropout (regularizes the final output projection).
-        if self._projection_dropout > 0.0:
+        if self._projection_dropout_rate > 0.0:
             self._proj_drop = keras.layers.Dropout(
-                self._projection_dropout,
+                self._projection_dropout_rate,
                 name="projection_dropout"
             )
         else:
@@ -492,15 +492,15 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             )
 
         # Check dropout rates
-        if self._attention_dropout < 0.0 or self._attention_dropout > 1.0:
+        if self._attention_dropout_rate < 0.0 or self._attention_dropout_rate > 1.0:
             raise ValueError(
-                f"attention_dropout ({self._attention_dropout}) must be "
+                f"attention_dropout_rate ({self._attention_dropout_rate}) must be "
                 f"between 0.0 and 1.0"
             )
 
-        if self._projection_dropout < 0.0 or self._projection_dropout > 1.0:
+        if self._projection_dropout_rate < 0.0 or self._projection_dropout_rate > 1.0:
             raise ValueError(
-                f"projection_dropout ({self._projection_dropout}) must be "
+                f"projection_dropout_rate ({self._projection_dropout_rate}) must be "
                 f"between 0.0 and 1.0"
             )
 
@@ -1090,8 +1090,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             "sparsity_threshold": self._sparsity_threshold,
             "sparsity_mode": self._sparsity_mode,
             "qkv_bias": self._qkv_bias,
-            "attention_dropout": self._attention_dropout,
-            "projection_dropout": self._projection_dropout,
+            "attention_dropout_rate": self._attention_dropout_rate,
+            "projection_dropout_rate": self._projection_dropout_rate,
             "use_lepe": self._use_lepe,
             "lepe_kernel_size": self._lepe_kernel_size,
             "kernel_initializer": keras.initializers.serialize(

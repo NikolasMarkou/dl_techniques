@@ -85,7 +85,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
     :param num_heads: Number of attention heads.
     :param dim_head: Per-head dimension (``key_dim`` of MHA).
     :param mlp_dim: Hidden dimension of the MLP.
-    :param dropout: Dropout rate inside both attention and MLP.
+    :param dropout_rate: Dropout rate inside both attention and MLP.
     :param layer_scale_init: Initial value of the LayerScale γ (default 1e-5).
     :param kwargs: passthrough.
     """
@@ -96,7 +96,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         num_heads: int = 4,
         dim_head: int = 16,
         mlp_dim: int = 128,
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         layer_scale_init: float = 1e-5,
         **kwargs: Any,
     ) -> None:
@@ -114,7 +114,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.num_heads = num_heads
         self.dim_head = dim_head
         self.mlp_dim = mlp_dim
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.layer_scale_init = layer_scale_init
 
         # Sub-layers.
@@ -138,7 +138,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.attn = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=dim_head,
-            dropout=dropout,
+            dropout=dropout_rate,
             name="mha",
         )
         self.ln2 = keras.layers.LayerNormalization(
@@ -149,12 +149,12 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         # DECISION plan_2026-05-24_ca745a6c/D-005: mirror encoder.py:112-116 pattern.
         # `keras.layers.Dropout.call(training=<symbolic tensor>)` raises
         # OperatorNotAllowedInGraphError under @tf.function even at rate=0.0.
-        # At production default (dropout=0.0) the layer is identity, so we skip
+        # At production default (dropout_rate=0.0) the layer is identity, so we skip
         # instantiation entirely. Residual @tf.function-with-tensor-training risk
-        # at `dropout > 0` is documented in README (sibling to D-003 mask-gate doc).
+        # at `dropout_rate > 0` is documented in README (sibling to D-003 mask-gate doc).
         self.mlp_drop = (
-            keras.layers.Dropout(dropout, name="mlp_dropout")
-            if dropout > 0.0
+            keras.layers.Dropout(dropout_rate, name="mlp_dropout")
+            if dropout_rate > 0.0
             else None
         )
         self.mlp_out = keras.layers.Dense(dim, name="mlp_out")
@@ -220,7 +220,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
             "num_heads": self.num_heads,
             "dim_head": self.dim_head,
             "mlp_dim": self.mlp_dim,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "layer_scale_init": self.layer_scale_init,
         })
         return config
@@ -239,7 +239,7 @@ class VideoJEPAPredictor(keras.layers.Layer):
     :param dim_head: Per-head dimension for the temporal MHA.
     :param mlp_dim: MLP hidden dim inside the temporal block.
     :param shifts: Channel-shift offsets for predictor Clifford blocks.
-    :param dropout: Dropout rate inside the temporal block.
+    :param dropout_rate: Dropout rate inside the temporal block.
     :param kwargs: passthrough.
     """
 
@@ -253,7 +253,7 @@ class VideoJEPAPredictor(keras.layers.Layer):
         dim_head: int = 16,
         mlp_dim: int = 128,
         shifts: Iterable[int] = (1, 2),
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -278,7 +278,7 @@ class VideoJEPAPredictor(keras.layers.Layer):
         self.dim_head = dim_head
         self.mlp_dim = mlp_dim
         self.shifts = list(shifts)
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
 
         # Per-pair sub-layers.
         self.spatial_blocks: List[CliffordNetBlock] = [
@@ -298,7 +298,7 @@ class VideoJEPAPredictor(keras.layers.Layer):
                 num_heads=num_heads,
                 dim_head=dim_head,
                 mlp_dim=mlp_dim,
-                dropout=dropout,
+                dropout_rate=dropout_rate,
                 name=f"attn_block_{i}",
             )
             for i in range(depth)
@@ -437,6 +437,6 @@ class VideoJEPAPredictor(keras.layers.Layer):
             "dim_head": self.dim_head,
             "mlp_dim": self.mlp_dim,
             "shifts": self.shifts,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
         })
         return config

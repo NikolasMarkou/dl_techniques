@@ -43,7 +43,7 @@ from dl_techniques.models.SAM.SAM3.model_misc import Sam3DotProductScoring
 
 TINY = dict(
     d_model=8, d_proj=4, use_prompt_mlp=True, prompt_mlp_hidden_dim=16,
-    prompt_mlp_dropout=0.1, clamp_logits=True, clamp_max_val=12.0,
+    prompt_mlp_dropout_rate=0.1, clamp_logits=True, clamp_max_val=12.0,
 )
 
 # The settled SAM 3 head, re-read from the pinned upstream clone's
@@ -51,7 +51,7 @@ TINY = dict(
 # 256 -> 2048 -> 256 with dropout 0.1, residual, and a terminal LayerNorm.
 SHIPPED = dict(
     d_model=256, d_proj=256, use_prompt_mlp=True, prompt_mlp_hidden_dim=2048,
-    prompt_mlp_dropout=0.1, clamp_logits=True, clamp_max_val=12.0,
+    prompt_mlp_dropout_rate=0.1, clamp_logits=True, clamp_max_val=12.0,
 )
 
 BATCH, SEQ, QUERIES = 2, 6, 5
@@ -191,7 +191,7 @@ class TestConstruction:
 
     @pytest.mark.parametrize("bad", [
         dict(d_model=0), dict(d_proj=0), dict(prompt_mlp_hidden_dim=0),
-        dict(prompt_mlp_dropout=1.0), dict(prompt_mlp_dropout=-0.1),
+        dict(prompt_mlp_dropout_rate=1.0), dict(prompt_mlp_dropout_rate=-0.1),
         dict(clamp_max_val=0.0),
     ])
     def test_invalid_configuration_raises(self, bad):

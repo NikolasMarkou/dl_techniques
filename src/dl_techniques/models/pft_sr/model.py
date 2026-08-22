@@ -149,8 +149,8 @@ class PFTSR(keras.Model):
         window_size: Integer, size of the attention window. Default: 8.
         mlp_ratio: Float, expansion ratio for MLP. Default: 2.0.
         qkv_bias: Boolean, whether to use bias in QKV projections. Default: True.
-        attention_dropout: Float, dropout rate for attention. Default: 0.0.
-        projection_dropout: Float, dropout rate for projections. Default: 0.0.
+        attention_dropout_rate: Float, dropout rate for attention. Default: 0.0.
+        projection_dropout_rate: Float, dropout rate for projections. Default: 0.0.
         drop_path_rate: Float, stochastic depth rate. Default: 0.0.
         norm_type: String, normalization type ('layer_norm' or 'rms_norm'). Default: 'layer_norm'.
         use_lepe: Boolean, whether to use LePE. Default: True.
@@ -221,8 +221,8 @@ class PFTSR(keras.Model):
             window_size: int = 8,
             mlp_ratio: float = 2.0,
             qkv_bias: bool = True,
-            attention_dropout: float = 0.0,
-            projection_dropout: float = 0.0,
+            attention_dropout_rate: float = 0.0,
+            projection_dropout_rate: float = 0.0,
             drop_path_rate: float = 0.0,
             norm_type: Literal['layer_norm', 'rms_norm'] = 'layer_norm',
             use_lepe: bool = True,
@@ -242,8 +242,8 @@ class PFTSR(keras.Model):
         self.window_size = window_size
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
-        self.attention_dropout = attention_dropout
-        self.projection_dropout = projection_dropout
+        self.attention_dropout_rate = attention_dropout_rate
+        self.projection_dropout_rate = projection_dropout_rate
         self.drop_path_rate = drop_path_rate
         self.norm_type = norm_type
         self.use_lepe = use_lepe
@@ -298,8 +298,8 @@ class PFTSR(keras.Model):
                     shift_size=shift_size,
                     mlp_ratio=self.mlp_ratio,
                     qkv_bias=self.qkv_bias,
-                    attention_dropout=self.attention_dropout,
-                    projection_dropout=self.projection_dropout,
+                    attention_dropout_rate=self.attention_dropout_rate,
+                    projection_dropout_rate=self.projection_dropout_rate,
                     drop_path_rate=self.dpr[block_idx],
                     norm_type=self.norm_type,
                     use_lepe=self.use_lepe,
@@ -544,8 +544,8 @@ class PFTSR(keras.Model):
             "window_size": self.window_size,
             "mlp_ratio": self.mlp_ratio,
             "qkv_bias": self.qkv_bias,
-            "attention_dropout": self.attention_dropout,
-            "projection_dropout": self.projection_dropout,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "projection_dropout_rate": self.projection_dropout_rate,
             "drop_path_rate": self.drop_path_rate,
             "norm_type": self.norm_type,
             "use_lepe": self.use_lepe,

@@ -99,7 +99,7 @@ class TrainingConfig:
     num_steps: int = 12  # T -- descent steps per block
     step_size: float = 0.01  # alpha (Table 9)
     noise_std: float = 0.02  # eq.-27 saddle-escape (training only; Table 9)
-    head_dropout: float = 0.0
+    head_dropout_rate: float = 0.0
     # eq.-25 learned per-edge weighted adjacency (Branch A). Default-off = the C-lite
     # binary-adjacency model. adjacency_proj_dim bottlenecks the X⊗X pairing to avoid the
     # D²-channel memory blow-up at D=128 (set 8-16 when the flag is on).
@@ -166,8 +166,8 @@ class TrainingConfig:
             raise ValueError(f"step_size must be positive, got {self.step_size}")
         if self.noise_std < 0:
             raise ValueError(f"noise_std must be non-negative, got {self.noise_std}")
-        if not (0.0 <= self.head_dropout <= 1.0):
-            raise ValueError(f"head_dropout must be in [0, 1], got {self.head_dropout}")
+        if not (0.0 <= self.head_dropout_rate <= 1.0):
+            raise ValueError(f"head_dropout_rate must be in [0, 1], got {self.head_dropout_rate}")
         if self.epochs <= 0:
             raise ValueError(f"epochs must be positive, got {self.epochs}")
         if self.learning_rate <= 0:
@@ -310,7 +310,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         step_size=config.step_size,
         noise_std=config.noise_std,
         pe_dim=config.k_pe,
-        head_dropout=config.head_dropout,
+        head_dropout_rate=config.head_dropout_rate,
         use_weighted_adjacency=config.use_weighted_adjacency,
         adjacency_kernel_size=config.adjacency_kernel_size,
         adjacency_proj_dim=config.adjacency_proj_dim,
@@ -448,7 +448,7 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help="alpha: descent step size (Table 9).")
     parser.add_argument("--noise-std", type=float, default=0.02,
                         help="eq.-27 saddle-escape noise std (training only; Table 9).")
-    parser.add_argument("--head-dropout", type=float, default=0.0)
+    parser.add_argument("--head-dropout-rate", type=float, default=0.0)
     parser.add_argument("--use-weighted-adjacency", dest="use_weighted_adjacency",
                         action="store_true",
                         help="Learn the paper's eq.-25 per-edge weighted adjacency in each ET "
@@ -524,7 +524,7 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         num_steps=args.num_steps,
         step_size=args.step_size,
         noise_std=args.noise_std,
-        head_dropout=args.head_dropout,
+        head_dropout_rate=args.head_dropout_rate,
         use_weighted_adjacency=args.use_weighted_adjacency,
         adjacency_kernel_size=args.adjacency_kernel_size,
         adjacency_proj_dim=args.adjacency_proj_dim,

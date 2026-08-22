@@ -29,7 +29,7 @@ def _cfg(**overrides) -> VideoJEPAConfig:
         predictor_depth=1, predictor_num_heads=2, predictor_dim_head=16,
         predictor_mlp_dim=64, predictor_shifts=(1, 2),
         sigreg_knots=17, sigreg_num_proj=8, sigreg_weight=0.09,
-        dropout=0.0,
+        dropout_rate=0.0,
     )
     defaults.update(overrides)
     return VideoJEPAConfig(**defaults)

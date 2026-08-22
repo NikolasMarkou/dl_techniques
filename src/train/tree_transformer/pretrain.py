@@ -157,7 +157,7 @@ def create_tree_transformer_mlm_model(config: TrainingConfig) -> MaskedLanguageM
         special_token_ids=special_token_ids,
         mlm_head_activation="gelu",
         initializer_range=0.02,
-        mlm_head_dropout=0.1,
+        mlm_head_dropout_rate=0.1,
         layer_norm_eps=1e-12,
     )
 

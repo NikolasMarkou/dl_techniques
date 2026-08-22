@@ -147,7 +147,7 @@ def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
         sigreg_knots=args.sigreg_knots,
         sigreg_num_proj=args.sigreg_num_proj,
         sigreg_weight=args.sigreg_weight,
-        dropout=args.dropout,
+        dropout_rate=args.dropout_rate,
         mask_prediction_enabled=args.mask_prediction_enabled,
         mask_ratio=args.mask_ratio,
         lambda_next_frame=args.lambda_next_frame,
@@ -322,7 +322,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sigreg-weight", type=float, default=0.09)
 
     # --- Dropout ---
-    p.add_argument("--dropout", type=float, default=0.0)
+    p.add_argument("--dropout-rate", type=float, default=0.0)
 
     # --- V-JEPA tube-masked latent prediction (D-008..D-012) ---
     p.add_argument(

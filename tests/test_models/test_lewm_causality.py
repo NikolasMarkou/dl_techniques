@@ -48,7 +48,7 @@ mask makes the earlier positions' arithmetic literally independent of the pertur
 token — this is not a cancelling sum, so it is not reduction-order-dependent (contrast
 the key-bias gradient zero of D-106, which is).
 
-``dropout`` and ``emb_dropout`` are pinned to 0.0 and ``training=False`` is explicit:
+``dropout_rate`` and ``emb_dropout_rate`` are pinned to 0.0 and ``training=False`` is explicit:
 one stochastic draw between the two forward passes would make arm 1 nonzero for a
 reason unrelated to masking.
 """
@@ -75,7 +75,7 @@ def _built_predictor():
     keras.utils.set_random_seed(SEED)
     pred = ARPredictor(
         num_frames=NUM_FRAMES, depth=2, num_heads=4, dim_head=8, mlp_dim=64,
-        input_dim=INPUT_DIM, hidden_dim=INPUT_DIM, dropout=0.0, emb_dropout=0.0,
+        input_dim=INPUT_DIM, hidden_dim=INPUT_DIM, dropout_rate=0.0, emb_dropout_rate=0.0,
     )
     x, c = _inputs()
     pred([x, c], training=False)          # build

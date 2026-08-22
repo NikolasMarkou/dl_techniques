@@ -219,7 +219,7 @@ class TestTubeMaskGenerator:
 def _default_encoder_kwargs() -> dict:
     return dict(
         embed_dim=32, patch_size=8, img_size=32, img_channels=3,
-        depth=1, shifts=(1, 2), dropout=0.0,
+        depth=1, shifts=(1, 2), dropout_rate=0.0,
     )
 
 
@@ -290,7 +290,7 @@ def _make_predictor(
         dim_head=dim_head,
         mlp_dim=mlp_dim,
         shifts=(1, 2),
-        dropout=0.0,
+        dropout_rate=0.0,
         name="pred",
     )
     pred.build((2, T, Hp, Hp, embed_dim))
@@ -415,7 +415,7 @@ class TestPredictor:
         pred = VideoJEPAPredictor(
             embed_dim=D, num_frames_max=T, patches_per_side=Hp,
             depth=2, num_heads=2, dim_head=16, mlp_dim=64,
-            shifts=(1, 2), dropout=0.0, name="pred",
+            shifts=(1, 2), dropout_rate=0.0, name="pred",
         )
         out = pred(z_in)
         model = keras.Model(z_in, out, name="pred_wrap")
@@ -493,7 +493,7 @@ def _small_config(**overrides) -> VideoJEPAConfig:
         predictor_depth=1, predictor_num_heads=2, predictor_dim_head=16,
         predictor_mlp_dim=64, predictor_shifts=(1, 2),
         sigreg_knots=17, sigreg_num_proj=8, sigreg_weight=0.09,
-        dropout=0.0,
+        dropout_rate=0.0,
     )
     defaults.update(overrides)
     return VideoJEPAConfig(**defaults)
@@ -957,11 +957,11 @@ class TestVideoJEPAIter2:
     # itself a failure, and this test now covers the encoder gate as well as
     # the predictor Dropout site it was named for.
     def test_predictor_graph_mode_dropout_zero(self) -> None:
-        """F9 regression (iter-3 D-005): at production default dropout=0.0,
+        """F9 regression (iter-3 D-005): at production default dropout_rate=0.0,
         @tf.function-wrapped inference must not raise at the predictor MLP
         Dropout site. Pre-D-005 this raised OperatorNotAllowedInGraphError at
         predictor.py `self.mlp_drop(h, training=<symbolic tensor>)`. Post-fix
-        `self.mlp_drop` is None at dropout=0.0 so the call site short-circuits
+        `self.mlp_drop` is None at dropout_rate=0.0 so the call site short-circuits
         and the trace succeeds for Python bool / None / tf.constant.
 
         Sibling test to `test_graph_mode_tracing_with_tensor_training` which
@@ -971,7 +971,7 @@ class TestVideoJEPAIter2:
         import tensorflow as tf
 
         cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6,
-                            dropout=0.0)
+                            dropout_rate=0.0)
         model = VideoJEPA(config=cfg)
         pixels = np.random.RandomState(0).randn(
             2, cfg.num_frames, cfg.img_size, cfg.img_size, cfg.img_channels
@@ -983,7 +983,7 @@ class TestVideoJEPAIter2:
         def fn(inputs, training):
             return model(inputs, training=training)
 
-        # All three callers must succeed at dropout=0.0 with the D-005 guard:
+        # All three callers must succeed at dropout_rate=0.0 with the D-005 guard:
         # Python None, Python False, tf.constant(False).
         y_none = fn(inputs, None)
         y_false = fn(inputs, False)
@@ -991,14 +991,14 @@ class TestVideoJEPAIter2:
 
         assert y_none.shape[0] == 2, y_none.shape
         # All inference paths must produce the same output (no masking,
-        # no dropout) — bit-equal up to atol=1e-6.
+        # no dropout_rate) — bit-equal up to atol=1e-6.
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(y_none),
             keras.ops.convert_to_numpy(y_tensor_false),
             atol=1e-6,
             err_msg=(
                 "@tf.function with tf.constant(False) training must equal "
-                "training=None inference at predictor dropout=0.0"
+                "training=None inference at predictor dropout_rate=0.0"
             ),
         )
         np.testing.assert_allclose(

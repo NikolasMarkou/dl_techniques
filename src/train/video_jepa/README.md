@@ -219,11 +219,11 @@ wrapping the model in your own `@tf.function`:
 - `@tf.function`-wrapped inference with `training=None` or Python
   bool — OK at every configuration.
 - `@tf.function`-wrapped call with `training=tf.constant(True/False)`:
-  - At production default `dropout=0.0` — OK (the predictor's
+  - At production default `dropout_rate=0.0` — OK (the predictor's
     `mlp_drop` is `None`; mask gate uses Python identity
     `training is True`). Anchored as `# DECISION
     plan_2026-05-24_ca745a6c/D-005`.
-  - At `dropout > 0` — raises `OperatorNotAllowedInGraphError`
+  - At `dropout_rate > 0` — raises `OperatorNotAllowedInGraphError`
     inside `keras.layers.Dropout.call`. This is a generic Keras 3
     limitation, not specific to this model. Workaround: pass a
     Python `True`/`False` instead of a symbolic tensor — which is

@@ -80,7 +80,7 @@ verifies the pin STILL HOLDS at the model level (the existing test verifies the
 gate expression); it does not attempt to make masking work under a symbolic
 flag.
 
-``dropout`` is pinned to ``0.0`` and every build is seeded: batch A had an arm
+``dropout_rate`` is pinned to ``0.0`` and every build is seeded: batch A had an arm
 flaky 1 run in 4 and batch B one flaky 2 in 5. On top of that, ``TubeMaskGenerator``
 calls an UNSEEDED ``keras.random.uniform``, so ``mask_prediction_enabled`` is
 turned OFF for every gradient reading here and exercised separately.
@@ -167,7 +167,7 @@ def _video_jepa(**o) -> VideoJEPA:
         img_size=IMG_SIZE, patch_size=PATCH_SIZE, num_frames=NUM_FRAMES,
         history_size_k=NUM_FRAMES,
         # Pinned, not defaulted, for the reasons in the module docstring.
-        dropout=0.0, mask_prediction_enabled=False,
+        dropout_rate=0.0, mask_prediction_enabled=False,
     )
     kwargs.update(o)
     return create_video_jepa(**kwargs)
@@ -336,7 +336,7 @@ class TestVideoJEPAGradientFlow:
         stochastic = [
             (layer.name, attr, getattr(layer, attr))
             for layer in model._flatten_layers(include_self=False)
-            for attr in ("rate", "drop_path_rate", "dropout_rate", "dropout")
+            for attr in ("rate", "drop_path_rate", "dropout", "dropout_rate")
             if isinstance(getattr(layer, attr, None), float)
             and getattr(layer, attr) > 0.0
         ]

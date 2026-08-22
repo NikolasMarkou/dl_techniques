@@ -223,7 +223,7 @@ class MobileClipImageEncoder(keras.Model):
             with (e.g., 'imagenet'). Defaults to 'imagenet'.
         backbone_trainable: Boolean, whether to fine-tune the backbone weights.
             Defaults to True.
-        projection_dropout: Float between 0 and 1. Dropout rate for the
+        projection_dropout_rate: Float between 0 and 1. Dropout rate for the
             projection head. Defaults to 0.0.
         **kwargs: Additional arguments for the Model base class.
 
@@ -245,7 +245,7 @@ class MobileClipImageEncoder(keras.Model):
         projection_dim: int = 512,
         backbone_weights: Optional[str] = 'imagenet',
         backbone_trainable: bool = True,
-        projection_dropout: float = 0.0,
+        projection_dropout_rate: float = 0.0,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -256,13 +256,13 @@ class MobileClipImageEncoder(keras.Model):
         self.projection_dim = projection_dim
         self.backbone_weights = backbone_weights
         self.backbone_trainable = backbone_trainable
-        self.projection_dropout = projection_dropout
+        self.projection_dropout_rate = projection_dropout_rate
 
         # CREATE all sub-layers in __init__
         self.backbone = self._create_backbone()
         self.projection_head = ImageProjectionHead(
             projection_dim=self.projection_dim,
-            dropout_rate=self.projection_dropout,
+            dropout_rate=self.projection_dropout_rate,
             name='projection_head'
         )
 
@@ -326,7 +326,7 @@ class MobileClipImageEncoder(keras.Model):
             'projection_dim': self.projection_dim,
             'backbone_weights': self.backbone_weights,
             'backbone_trainable': self.backbone_trainable,
-            'projection_dropout': self.projection_dropout,
+            'projection_dropout_rate': self.projection_dropout_rate,
         })
         return config
 

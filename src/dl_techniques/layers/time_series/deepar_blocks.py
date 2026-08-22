@@ -474,8 +474,8 @@ class DeepARCell(keras.layers.Layer):
 
     :param units: Number of LSTM units (hidden dimension).
     :type units: int
-    :param dropout: Dropout rate for LSTM. Defaults to 0.0.
-    :type dropout: float
+    :param dropout_rate: Dropout rate for LSTM. Defaults to 0.0.
+    :type dropout_rate: float
     :param recurrent_dropout_rate: Recurrent dropout rate for LSTM. Defaults to 0.0.
     :type recurrent_dropout_rate: float
     :param kwargs: Additional arguments for Layer base class.
@@ -484,7 +484,7 @@ class DeepARCell(keras.layers.Layer):
     def __init__(
             self,
             units: int,
-            dropout: float = 0.0,
+            dropout_rate: float = 0.0,
             recurrent_dropout_rate: float = 0.0,
             **kwargs: Any
     ) -> None:
@@ -493,22 +493,22 @@ class DeepARCell(keras.layers.Layer):
 
         :param units: Number of LSTM units.
         :type units: int
-        :param dropout: Dropout rate for LSTM.
-        :type dropout: float
+        :param dropout_rate: Dropout rate for LSTM.
+        :type dropout_rate: float
         :param recurrent_dropout_rate: Recurrent dropout rate for LSTM.
         :type recurrent_dropout_rate: float
         :param kwargs: Additional arguments for Layer base class.
         """
         super().__init__(**kwargs)
         self.units = units
-        self.dropout = dropout
+        self.dropout_rate = dropout_rate
         self.recurrent_dropout_rate = recurrent_dropout_rate
         self.state_size = units
 
         # Create LSTM cell
         self.lstm_cell = layers.LSTMCell(
             units,
-            dropout=dropout,
+            dropout=dropout_rate,
             recurrent_dropout=recurrent_dropout_rate,
             name='lstm_cell'
         )
@@ -582,7 +582,7 @@ class DeepARCell(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'units': self.units,
-            'dropout': self.dropout,
+            'dropout_rate': self.dropout_rate,
             'recurrent_dropout_rate': self.recurrent_dropout_rate,
         })
         return config

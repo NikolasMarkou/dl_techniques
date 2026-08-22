@@ -97,7 +97,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         normalization_type: String, type of normalization to use. Supports
             'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
         activation: String, activation function for FFN. Defaults to 'relu'.
-        attention_dropout: Float, dropout rate for attention layers.
+        attention_dropout_rate: Float, dropout rate for attention layers.
             Defaults to 0.0.
         attention_downsample_rate: Integer, factor by which the internal
             (per-head x heads) dimension of the two CROSS-attentions is reduced
@@ -152,7 +152,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         skip_first_layer_pe: bool = False,
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
         activation: str = 'relu',
-        attention_dropout: float = 0.0,
+        attention_dropout_rate: float = 0.0,
         attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
@@ -170,8 +170,8 @@ class TwoWayAttentionBlock(keras.layers.Layer):
             )
         if mlp_dim <= 0:
             raise ValueError(f"mlp_dim must be positive, got {mlp_dim}")
-        if not 0.0 <= attention_dropout < 1.0:
-            raise ValueError(f"attention_dropout must be in [0, 1), got {attention_dropout}")
+        if not 0.0 <= attention_dropout_rate < 1.0:
+            raise ValueError(f"attention_dropout_rate must be in [0, 1), got {attention_dropout_rate}")
         if attention_downsample_rate <= 0:
             raise ValueError(
                 f"attention_downsample_rate must be positive, got "
@@ -193,7 +193,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.skip_first_layer_pe = skip_first_layer_pe
         self.normalization_type = normalization_type
         self.activation = activation
-        self.attention_dropout = attention_dropout
+        self.attention_dropout_rate = attention_dropout_rate
         self.attention_downsample_rate = attention_downsample_rate
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-009
@@ -216,7 +216,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.self_attn = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=self.key_dim,
-            dropout=attention_dropout,
+            dropout=attention_dropout_rate,
             name="self_attn"
         )
         self.norm1 = create_normalization_layer(
@@ -229,7 +229,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.cross_attn_token_to_image = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=self.cross_attn_key_dim,
-            dropout=attention_dropout,
+            dropout=attention_dropout_rate,
             name="cross_attn_token_to_image"
         )
         self.norm2 = create_normalization_layer(
@@ -256,7 +256,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.cross_attn_image_to_token = keras.layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=self.cross_attn_key_dim,
-            dropout=attention_dropout,
+            dropout=attention_dropout_rate,
             name="cross_attn_image_to_token"
         )
         self.norm4 = create_normalization_layer(
@@ -428,7 +428,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
             "skip_first_layer_pe": self.skip_first_layer_pe,
             "normalization_type": self.normalization_type,
             "activation": self.activation,
-            "attention_dropout": self.attention_dropout,
+            "attention_dropout_rate": self.attention_dropout_rate,
             "attention_downsample_rate": self.attention_downsample_rate,
         })
         return config
@@ -479,7 +479,7 @@ class TwoWayTransformer(layers.Layer):
         normalization_type: String, type of normalization to use. Supports
             'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
         activation: String, activation function for FFN. Defaults to 'relu'.
-        attention_dropout: Float, dropout rate for attention layers.
+        attention_dropout_rate: Float, dropout rate for attention layers.
             Defaults to 0.0.
         attention_downsample_rate: Integer, forwarded to every
             :class:`TwoWayAttentionBlock` and applied to
@@ -537,7 +537,7 @@ class TwoWayTransformer(layers.Layer):
         mlp_dim: int = 2048,
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
         activation: str = 'relu',
-        attention_dropout: float = 0.0,
+        attention_dropout_rate: float = 0.0,
         attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
@@ -578,7 +578,7 @@ class TwoWayTransformer(layers.Layer):
         self.mlp_dim = mlp_dim
         self.normalization_type = normalization_type
         self.activation = activation
-        self.attention_dropout = attention_dropout
+        self.attention_dropout_rate = attention_dropout_rate
         self.attention_downsample_rate = attention_downsample_rate
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-009
@@ -603,7 +603,7 @@ class TwoWayTransformer(layers.Layer):
                 skip_first_layer_pe=(i == 0),  # First block skips PE in self-attention
                 normalization_type=normalization_type,
                 activation=activation,
-                attention_dropout=attention_dropout,
+                attention_dropout_rate=attention_dropout_rate,
                 attention_downsample_rate=attention_downsample_rate,
                 name=f"block_{i}"
             )
@@ -613,7 +613,7 @@ class TwoWayTransformer(layers.Layer):
         self.final_attn_token_to_image = layers.MultiHeadAttention(
             num_heads=num_heads,
             key_dim=self.cross_attn_key_dim,
-            dropout=attention_dropout,
+            dropout=attention_dropout_rate,
             name="final_attn_token_to_image"
         )
         self.norm_final_attn = create_normalization_layer(
@@ -760,7 +760,7 @@ class TwoWayTransformer(layers.Layer):
             "mlp_dim": self.mlp_dim,
             "normalization_type": self.normalization_type,
             "activation": self.activation,
-            "attention_dropout": self.attention_dropout,
+            "attention_dropout_rate": self.attention_dropout_rate,
             "attention_downsample_rate": self.attention_downsample_rate,
         })
         return config

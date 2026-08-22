@@ -47,7 +47,7 @@ def _make_tiny_detr(aux_loss=True):
         num_encoder_layers=NUM_ENC_LAYERS,
         num_decoder_layers=NUM_DEC_LAYERS,
         ffn_dim=FFN_DIM,
-        dropout=0.0,
+        dropout_rate=0.0,
     )
     return DETR(
         num_classes=NUM_CLASSES,
@@ -89,7 +89,7 @@ class TestDetrTransformerInit:
             num_encoder_layers=NUM_ENC_LAYERS,
             num_decoder_layers=NUM_DEC_LAYERS,
             ffn_dim=FFN_DIM,
-            dropout=0.0,
+            dropout_rate=0.0,
         )
         assert t.hidden_dim == HIDDEN_DIM
         assert t.num_heads == NUM_HEADS
@@ -130,7 +130,7 @@ class TestDetrTransformerForward:
             num_encoder_layers=NUM_ENC_LAYERS,
             num_decoder_layers=NUM_DEC_LAYERS,
             ffn_dim=FFN_DIM,
-            dropout=0.0,
+            dropout_rate=0.0,
         )
 
     @pytest.fixture
@@ -196,7 +196,7 @@ class TestDetrModelInit:
             transformer = DetrTransformer(
                 hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS,
                 num_encoder_layers=NUM_ENC_LAYERS, num_decoder_layers=NUM_DEC_LAYERS,
-                ffn_dim=FFN_DIM, dropout=0.0,
+                ffn_dim=FFN_DIM, dropout_rate=0.0,
             )
             DETR(
                 num_classes=0,
@@ -211,7 +211,7 @@ class TestDetrModelInit:
             transformer = DetrTransformer(
                 hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS,
                 num_encoder_layers=NUM_ENC_LAYERS, num_decoder_layers=NUM_DEC_LAYERS,
-                ffn_dim=FFN_DIM, dropout=0.0,
+                ffn_dim=FFN_DIM, dropout_rate=0.0,
             )
             DETR(
                 num_classes=NUM_CLASSES,
@@ -226,7 +226,7 @@ class TestDetrModelInit:
             transformer = DetrTransformer(
                 hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS,
                 num_encoder_layers=NUM_ENC_LAYERS, num_decoder_layers=NUM_DEC_LAYERS,
-                ffn_dim=FFN_DIM, dropout=0.0,
+                ffn_dim=FFN_DIM, dropout_rate=0.0,
             )
             DETR(
                 num_classes=NUM_CLASSES,

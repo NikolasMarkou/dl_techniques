@@ -458,11 +458,7 @@ class SAM2(keras.Model):
         :return: The rate carried by :attr:`memory_attention`.
         :rtype: float
         """
-        rate = getattr(
-            self.memory_attention, "dropout_rate",
-            getattr(self.memory_attention, "dropout", None),
-        )
-        return float(rate)
+        return float(self.memory_attention.dropout_rate)
 
     def _validate_component_agreement(self) -> None:
         """Refuse every component mismatch that is silent downstream.
@@ -614,11 +610,11 @@ class SAM2(keras.Model):
             # 12 (tiny) / 24 (hiera_l) live `Dropout` layers. Deleting this
             # keyword does not fail any shape, any count or any round trip --
             # the layer default silently takes over and the knob goes dead
-            # exactly as it was before this step. The keyword is spelled
-            # `dropout=` because that is still the LAYER's parameter name; the
-            # model-level name is `dropout_rate` per the `*_dropout_rate`
-            # convention. See decisions.md D-090.
-            dropout=dropout_rate,
+            # exactly as it was before this step. The layer parameter is now
+            # spelled `dropout_rate=` too (D-130 renamed it), so the model-level
+            # knob and the layer knob finally share one name. See decisions.md
+            # D-090 and D-130.
+            dropout_rate=dropout_rate,
         )
         memory_encoder = SAM2MemoryEncoder(
             in_dim=hidden_dim,

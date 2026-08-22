@@ -728,9 +728,9 @@ class SAM(keras.Model):
         )
 
         # DECISION plan-2026-08-22T035419-a11304c8/D-091
-        # `attention_dropout` is deliberately NOT threaded here, and this is
+        # `attention_dropout_rate` is deliberately NOT threaded here, and this is
         # the opposite ruling to SAM 2's (D-090) for one measured reason: this
-        # transformer's `attention_dropout` default is 0.0, so the rate that
+        # transformer's `attention_dropout_rate` default is 0.0, so the rate that
         # `from_variant` cannot reach is a rate that does NOTHING. MEASURED
         # 2026-08-22 on `vit_b`: 0 live `keras.layers.Dropout`, 7
         # `MultiHeadAttention` all at `dropout=0.0`. SAM 2 got a knob because
@@ -740,7 +740,7 @@ class SAM(keras.Model):
         # configurable. COST, stated so it is not rediscovered as a bug: a
         # caller who wants SAM 1 attention dropout must build the transformer
         # themselves -- `SAM(mask_decoder=MaskDecoder(transformer=
-        # TwoWayTransformer(..., attention_dropout=r), ...), ...)` -- rather
+        # TwoWayTransformer(..., attention_dropout_rate=r), ...), ...)` -- rather
         # than passing it to `from_variant`. See decisions.md D-091.
         transformer = TwoWayTransformer(
             depth=2,

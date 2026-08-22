@@ -58,7 +58,7 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
     :param depth: Number of stacked :class:`CliffordNetBlock` layers
         (``encoder_clifford_depth`` in config).
     :param shifts: Channel-shift offsets for the encoder Clifford blocks.
-    :param dropout: Dropout rate applied to the post-patch-embed features
+    :param dropout_rate: Dropout rate applied to the post-patch-embed features
         (kept as a layer for potential future use; 0.0 by default).
     :param kwargs: passthrough to :class:`keras.layers.Layer`.
     """
@@ -71,7 +71,7 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
         img_channels: int = 3,
         depth: int = 2,
         shifts: Iterable[int] = (1, 2),
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -94,7 +94,7 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
         self.img_channels = img_channels
         self.depth = depth
         self.shifts = list(shifts)
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
 
         self._patches_per_side = img_size // patch_size
         self._num_patches = self._patches_per_side ** 2
@@ -110,8 +110,8 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
             name="pos_embed",
         )
         self.dropout = (
-            keras.layers.Dropout(dropout, name="drop")
-            if dropout > 0.0
+            keras.layers.Dropout(dropout_rate, name="drop")
+            if dropout_rate > 0.0
             else None
         )
         self.blocks: List[CliffordNetBlock] = [
@@ -217,6 +217,6 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
             "img_channels": self.img_channels,
             "depth": self.depth,
             "shifts": self.shifts,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
         })
         return config
