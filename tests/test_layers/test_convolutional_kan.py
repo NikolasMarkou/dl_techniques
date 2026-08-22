@@ -397,11 +397,14 @@ class TestKANvolution:
 
         assert len(gradients) > 0, "No gradients were computed."
 
-        # Note: In the current simplified implementation, control_points are not used
-        # in the forward pass, so their gradients may be None. We check that at least
-        # some gradients are computed for the weights that are actually used.
+        # Every trainable weight is in the forward path since D-052 wired the
+        # B-spline in; before that, `control_points`' gradient was None here and
+        # this comment said so.
+        assert all(g is not None for g in gradients), (
+            "some trainable weight got no gradient: "
+            f"{[v.name for v, g in zip(layer.trainable_variables, gradients) if g is None]}"
+        )
         non_none_gradients = [g for g in gradients if g is not None]
-        assert len(non_none_gradients) > 0, "No non-None gradients were computed."
 
         # Check that non-None gradients are not all zeros
         for grad in non_none_gradients:
@@ -414,7 +417,6 @@ class TestKANvolution:
         layer(sample_input_small)  # Build the layer
 
         # Expected weights: control_points, w_spline, w_silu, bias (if use_bias)
-        # Note: control_points may not contribute to gradients in simplified implementation
         expected_count = 4 if layer.use_bias else 3
         assert len(layer.trainable_variables) == expected_count
 
@@ -456,9 +458,8 @@ class TestKANvolution:
         """
         Tests B-spline basis function computation.
 
-        Note: In the current simplified implementation, B-spline computation
-        is not used in the forward pass, but we test it to ensure the
-        mathematical foundation is correct for future full implementations.
+        This is a unit test of the basis itself; ``call()`` consumes it on the
+        extracted patches (D-052).
         """
         layer = KANvolution(**layer_config)
         layer(sample_input_small)  # Build the layer
@@ -486,8 +487,8 @@ class TestKANvolution:
         """
         Tests B-spline basis function with edge cases.
 
-        Note: Testing the mathematical foundation even though not currently
-        used in the simplified forward pass implementation.
+        The basis is on the forward path (D-052), so its clamping behaviour is
+        load-bearing.
         """
         layer = KANvolution(**layer_config)
         layer(sample_input_small)  # Build the layer
@@ -589,13 +590,15 @@ class TestKANvolution:
     # ===============================================
     # 10. Performance and Edge Case Tests
     # ===============================================
-    def test_simplified_implementation_note(self, layer_config, sample_input_small):
+    def test_every_kan_component_exists_and_is_reached(self, layer_config, sample_input_small):
         """
-        Tests and documents the current simplified implementation behavior.
+        Tests that every advertised KAN component is created AND consumed.
 
-        The current implementation uses effective kernels (w_spline + w_silu)
-        rather than full patch-wise KAN transformations for computational efficiency.
-        This test validates this simplified approach works correctly.
+        Until 2026-08-22 this test was named ``test_simplified_implementation_note``
+        and documented the opposite: the forward path built effective kernels
+        ``w_spline + w_silu`` and never touched ``control_points``, ``grid`` or
+        ``_compute_bspline_basis``. See decisions.md D-052; the behavioural pins
+        live in ``test_the_kan_actually_splines.py``.
         """
         layer = KANvolution(**layer_config)
 
@@ -613,8 +616,8 @@ class TestKANvolution:
         assert output.shape[-1] == layer.filters
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
 
-        # Note: A full KAN implementation would apply B-spline transformations
-        # to input patches and use control_points in the forward pass
+        # The B-spline IS applied to input patches and control_points IS read;
+        # `test_the_kan_actually_splines.py` pins that behaviourally.
 
     @pytest.mark.parametrize("batch_size", [1, 4, 16])
     def test_different_batch_sizes(self, batch_size, layer_config):

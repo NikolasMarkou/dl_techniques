@@ -184,6 +184,7 @@ class KANvolution(keras.layers.Layer):
         self.w_silu = None
         self.bias = None
         self.grid = None
+        self._input_channels = None
 
     def _normalize_kernel_size(self, kernel_size: Union[int, Tuple[int, int]]) -> Tuple[int, int]:
         """Normalize kernel size to tuple format with validation.
@@ -251,6 +252,7 @@ class KANvolution(keras.layers.Layer):
         input_channels = input_shape[-1]
         if input_channels is None:
             raise ValueError("Input channels dimension must be defined")
+        self._input_channels = input_channels
 
         # Create B-spline control points for learnable univariate functions
         # Shape: (filters, input_channels, kernel_h, kernel_w, grid_size + 1)
@@ -359,8 +361,9 @@ class KANvolution(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass applying KAN transformation followed by convolution.
 
-        For computational efficiency, this implementation creates effective kernels
-        by combining the spline and SiLU weights.
+        Computes, per convolution tap, ``K(x) = w_spline * B(x) + w_silu * SiLU(x)``
+        where ``B`` is the linear B-spline interpolation over ``control_points``
+        and ``x`` is the tap value squashed into ``[-1, 1]`` by ``tanh``.
 
         :param inputs: Input tensor with shape (batch_size, height, width, channels).
         :type inputs: keras.KerasTensor
@@ -369,22 +372,66 @@ class KANvolution(keras.layers.Layer):
         :return: Output tensor with shape (batch_size, new_height, new_width, filters).
         :rtype: keras.KerasTensor
         """
-        # Create effective kernel weights by combining spline and SiLU components
-        # This is a simplified implementation for computational efficiency
-        effective_kernel = self.w_spline + self.w_silu
+        # DECISION plan-2026-08-22T035419-a11304c8/D-052
+        # Do NOT "simplify" this back to `ops.conv(inputs, w_spline + w_silu)`.
+        # That is what stood here until 2026-08-22 and it is not a KAN: it never
+        # called `_compute_bspline_basis`, never read `control_points` and never
+        # read `grid`, so the whole learnable-univariate-function apparatus this
+        # module is named for was decorative. MEASURED at that revision, on CPU:
+        # the layer's output equalled `ops.conv` with kernel `w_spline + w_silu`
+        # to `max|delta| = 0.0` EXACTLY; `|f(2x) - 2f(x)| = 0.0` EXACTLY, i.e.
+        # the layer was degree-1 homogeneous and therefore carried no
+        # non-linearity at all, not even the advertised SiLU; and after one real
+        # `SGD(lr=1.0)` step `control_points` moved `0.000000e+00` while
+        # `w_spline` and `w_silu` moved by the IDENTICAL `1.221391e+00`,
+        # confirming they were a redundant reparameterization of one kernel.
+        # The cost of doing it properly is the `basis` tensor below, which is
+        # `(batch, out_h, out_w, kh*kw*channels, grid_size + 1)` -- that is
+        # inherent to a convolutional KAN, not an artifact of this code. Use a
+        # small `grid_size` on large inputs. See decisions.md D-052.
+        num_taps = self.kernel_size[0] * self.kernel_size[1] * self._input_channels
 
-        # Transpose to match Keras convolution expected format:
-        # (filters, input_channels, kernel_h, kernel_w) -> (kernel_h, kernel_w, input_channels, filters)
-        kernel = ops.transpose(effective_kernel, (2, 3, 1, 0))
-
-        # Apply convolution with the adaptive kernel
-        outputs = ops.conv(
+        # Patches in the SAME (kernel_h, kernel_w, channels) tap order that the
+        # weight reshapes below assume.
+        patches = ops.image.extract_patches(
             inputs,
-            kernel,
+            size=self.kernel_size,
             strides=self.strides,
+            dilation_rate=self.dilation_rate,
             padding=self.padding,
-            dilation_rate=self.dilation_rate
         )
+
+        # Normalize tap values into the spline's [-1, 1] grid domain. tanh is the
+        # squashing the module docstring specifies, and it is what makes the
+        # B-spline basis well defined for unbounded inputs.
+        taps = ops.tanh(patches)
+
+        # (batch, out_h, out_w, num_taps, grid_size + 1)
+        basis = self._compute_bspline_basis(taps)
+
+        # Weights are stored (filters, channels, kernel_h, kernel_w[, grid]);
+        # transpose to (filters, kernel_h, kernel_w, channels[, grid]) so that
+        # flattening matches `extract_patches`' tap order exactly.
+        w_spline_flat = ops.reshape(
+            ops.transpose(self.w_spline, (0, 2, 3, 1)), (self.filters, num_taps)
+        )
+        w_silu_flat = ops.reshape(
+            ops.transpose(self.w_silu, (0, 2, 3, 1)), (self.filters, num_taps)
+        )
+        control_flat = ops.reshape(
+            ops.transpose(self.control_points, (0, 2, 3, 1, 4)),
+            (self.filters, num_taps, self.grid_size + 1),
+        )
+
+        # w_spline * B(x) folded into one contraction: the per-tap spline
+        # coefficients are `w_spline[f, m] * control_points[f, m, :]`.
+        spline_coeffs = ops.expand_dims(w_spline_flat, axis=-1) * control_flat
+        spline_term = ops.einsum('bhwmg,fmg->bhwf', basis, spline_coeffs)
+
+        # w_silu * SiLU(x) on the same normalized taps.
+        silu_term = ops.einsum('bhwm,fm->bhwf', ops.silu(taps), w_silu_flat)
+
+        outputs = spline_term + silu_term
 
         # Add bias if enabled
         if self.use_bias:
