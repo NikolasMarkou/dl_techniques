@@ -13,6 +13,7 @@ from dl_techniques.losses.multi_labels_loss import (
     DiceLossPerChannel,
     create_multilabel_segmentation_loss,
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestWeightedBinaryFocalLoss:
@@ -376,6 +377,10 @@ class TestModelSaveLoad:
         model.compile(optimizer='adam', loss=loss_fn)
 
         model_path = tmp_path / "model.keras"
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(model_path)
 
         loaded_model = keras.models.load_model(model_path)
@@ -402,6 +407,10 @@ class TestModelSaveLoad:
         model.compile(optimizer='adam', loss=loss_fn)
 
         model_path = tmp_path / "model_dice.keras"
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(model_path)
 
         loaded_model = keras.models.load_model(model_path)

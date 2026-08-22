@@ -21,6 +21,7 @@ from dl_techniques.losses.segmentation_loss import (
     SegmentationLosses,
     create_loss_function
 )
+from tests.optimizer_state import build_optimizer_state
 
 # ---------------------------------------------------------------------
 
@@ -495,6 +496,10 @@ def test_loss_serialization_and_deserialization() -> None:
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model_path = os.path.join(tmp_dir, 'segmentation_model.keras')
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(model_path)
 
         # NO custom_objects, NO compile=False — must work as-is.

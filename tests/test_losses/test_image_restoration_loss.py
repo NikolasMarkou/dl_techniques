@@ -17,6 +17,7 @@ from dl_techniques.losses.image_restoration_loss import (
     EnhanceLoss,
     DarkIRCompositeLoss
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestCharbonnierLoss:
@@ -675,6 +676,10 @@ class TestIntegration:
         # Save model
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = os.path.join(tmpdir, 'test_model.keras')
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load model

@@ -21,6 +21,7 @@ from dl_techniques.losses.segmentation_wrapper_loss import (
     create_segmentation_wrapper_loss,
 )
 from dl_techniques.losses.segmentation_loss import LossConfig
+from tests.optimizer_state import build_optimizer_state
 
 
 # ---------------------------------------------------------------------
@@ -163,6 +164,10 @@ def test_full_model_round_trip(
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, f"model_{loss_name}.keras")
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(path)
         loaded = keras.models.load_model(path)  # NO custom_objects, NO compile=False
 
