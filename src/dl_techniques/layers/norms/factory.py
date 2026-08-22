@@ -152,6 +152,43 @@ def create_normalization_layer(
     layers, supporting both standard Keras layers and specialized layers from the
     dl_techniques framework.
 
+    .. warning::
+
+       **THIS IS NOT A DROP-IN REPLACEMENT FOR CONSTRUCTING THE LAYER DIRECTLY.**
+       The factory imposes its own ``epsilon=1e-6`` on every type that accepts one
+       (via ``setdefault``), which for **11 of the 16 bare-constructible registry
+       types** is NOT the value that class would have chosen for itself.
+       MEASURED 2026-08-23 on keras 3.8.0, factory default vs class own default:
+
+       ============================================  =========  =========  =========
+       ``normalization_type``                        factory    class own  ratio
+       ============================================  =========  =========  =========
+       ``batch_norm``, ``layer_norm``                ``1e-6``   ``1e-3``   **1000x**
+       ``energy_layer_norm``                         ``1e-6``   ``1e-5``   10x
+       ``band_rms``, ``adaptive_band_rms``,          ``1e-6``   ``1e-7``   0.1x
+       ``band_logit_norm``, ``logit_norm``,
+       ``max_logit_norm``, ``decoupled_max_logit``,
+       ``zero_centered_band_rms_norm``,
+       ``zero_centered_adaptive_band_rms_norm``
+       ``rms_norm``, ``zero_centered_rms_norm``,     ``1e-6``   ``1e-6``   1x
+       ``bias_free_batch_norm``,
+       ``global_response_norm``
+       ``dynamic_tanh``                              (popped)   n/a        n/a
+       ``dml_plus_focal``, ``dml_plus_center``       ``1e-6``   n/a        not bare
+       ============================================  =========  =========  =========
+
+       So **rewriting ``keras.layers.BatchNormalization()`` as
+       ``create_normalization_layer('batch_norm')`` silently divides epsilon by
+       1000** and changes inference on every affected layer. This is not
+       hypothetical: it was proposed for ``mobilenet`` and ``cbam`` (189 layers)
+       and rejected on this measurement. See ``decisions.md`` D-202 and the guard
+       ``tests/test_layers/test_norms/test_the_norm_factory_family_is_pinned.py::
+       TestTheFactoryEpsilonIsNotTheLayerDefault``.
+
+       If you want a layer's own default, **instantiate the class directly**.
+       There is deliberately no ``epsilon=None`` sentinel meaning "use the class
+       default" — see D-202 for why that was rejected.
+
     :param normalization_type: Type of normalization layer to create. Supported types
         include 'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
         'zero_centered_rms_norm', 'zero_centered_band_rms_norm',

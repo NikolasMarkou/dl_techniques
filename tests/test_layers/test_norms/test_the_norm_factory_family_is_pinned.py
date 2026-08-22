@@ -26,7 +26,10 @@ import warnings
 from collections import Counter
 from typing import Dict, List, Tuple
 
+import keras
 import pytest
+
+from tests.norm_epsilon_oracle import _epsilon_of
 
 from dl_techniques.layers.norms.factory import (
     _TYPE_TO_CLASS,
@@ -174,3 +177,124 @@ class TestTheNormFactoryRaisesRatherThanFallingBack:
         layer = create_normalization_layer(valid_key)
         assert isinstance(layer, type(layer))
         assert layer is not None
+
+
+# ---------------------------------------------------------------------------
+# N-11: the factory is NOT a drop-in for constructing the layer directly.
+# ---------------------------------------------------------------------------
+
+#: What each registry key's epsilon is when the caller says nothing, MEASURED
+#: 2026-08-23 on keras 3.8.0: ``(factory default, the class's OWN default)``.
+#: ``None`` means the layer has no epsilon at all (``dynamic_tanh`` -- the factory
+#: pops the key). Entries whose two values differ are the trap: a caller who
+#: "just routes through the factory like resnet does" silently moves epsilon.
+#:
+#: **11 of the 16 bare-constructible types diverge.** The 1000x ``batch_norm`` /
+#: ``layer_norm`` rows are
+#: the ones that nearly shipped: step 18's brief proposed routing mobilenet and
+#: cbam (189 BatchNormalization layers) through this factory, which would have
+#: divided their epsilon by 1000 with no test noticing.
+_EPSILON_DEFAULTS = {
+    "adaptive_band_rms": (1e-06, 1e-07),
+    "band_logit_norm": (1e-06, 1e-07),
+    "band_rms": (1e-06, 1e-07),
+    "batch_norm": (1e-06, 1e-03),
+    "bias_free_batch_norm": (1e-06, 1e-06),
+    "decoupled_max_logit": (1e-06, 1e-07),
+    "dynamic_tanh": (None, None),
+    "energy_layer_norm": (1e-06, 1e-05),
+    "global_response_norm": (1e-06, 1e-06),
+    "layer_norm": (1e-06, 1e-03),
+    "logit_norm": (1e-06, 1e-07),
+    "max_logit_norm": (1e-06, 1e-07),
+    "rms_norm": (1e-06, 1e-06),
+    "zero_centered_adaptive_band_rms_norm": (1e-06, 1e-07),
+    "zero_centered_band_rms_norm": (1e-06, 1e-07),
+    "zero_centered_rms_norm": (1e-06, 1e-06),
+}
+
+#: ``dml_plus_focal`` / ``dml_plus_center`` cannot be constructed bare (their
+#: classes take a required positional argument), so their class-own default is
+#: not observable this way. Named rather than silently absent, because "the dict
+#: happens not to mention it" and "it was checked and excluded" must not look the
+#: same (LESSONS: an all-skip module reads as a pass).
+_EPSILON_UNCONSTRUCTIBLE_BARE = ("dml_plus_focal", "dml_plus_center")
+
+
+class TestTheFactoryEpsilonIsNotTheLayerDefault:
+    """N-11. Make the 1000x trap impossible to fall into a second time."""
+
+    def test_the_keras_batchnorm_default_is_still_a_thousand_times_the_factorys(self):
+        keras_default = keras.layers.BatchNormalization().epsilon
+        factory_default = _epsilon_of(create_normalization_layer("batch_norm"))
+        assert keras_default == pytest.approx(1e-3), (
+            f"keras.layers.BatchNormalization default epsilon moved to "
+            f"{keras_default}. Every claim in create_normalization_layer's "
+            "not-a-drop-in warning is calibrated against 1e-3; re-measure the "
+            "whole table in D-202 before touching this number."
+        )
+        assert factory_default == pytest.approx(1e-6), (
+            f"create_normalization_layer's epsilon default moved to "
+            f"{factory_default}. That silently re-tunes every one of the 178 "
+            "call sites that does not pass epsilon explicitly."
+        )
+        assert keras_default / factory_default == pytest.approx(1000.0), (
+            "the documented 1000x divergence between "
+            "keras.layers.BatchNormalization() and "
+            "create_normalization_layer('batch_norm') no longer holds. Either "
+            "the trap is gone (update the factory warning and D-202) or one "
+            "default drifted (find out which)."
+        )
+
+    @pytest.mark.parametrize("norm_type", sorted(_EPSILON_DEFAULTS))
+    def test_the_factory_and_class_defaults_are_both_pinned(self, norm_type):
+        expected_factory, expected_own = _EPSILON_DEFAULTS[norm_type]
+        observed_factory = _epsilon_of(create_normalization_layer(norm_type))
+        observed_own = _epsilon_of(_TYPE_TO_CLASS[norm_type]())
+        matches_factory = (
+            observed_factory is None
+            if expected_factory is None
+            else observed_factory == pytest.approx(expected_factory)
+        )
+        matches_own = (
+            observed_own is None
+            if expected_own is None
+            else observed_own == pytest.approx(expected_own)
+        )
+        assert matches_factory, (
+            f"{norm_type}: factory epsilon default moved from "
+            f"{expected_factory} to {observed_factory}"
+        )
+        assert matches_own, (
+            f"{norm_type}: the CLASS's own epsilon default moved from "
+            f"{expected_own} to {observed_own}. The divergence table in "
+            "create_normalization_layer's warning is now wrong."
+        )
+
+    def test_the_divergent_majority_is_still_the_majority(self):
+        diverging = sorted(
+            key
+            for key, (factory, own) in _EPSILON_DEFAULTS.items()
+            if factory != own
+        )
+        assert len(diverging) == 11, (
+            f"the number of registry types whose factory epsilon differs from "
+            f"their own class default changed from 11 to {len(diverging)}: "
+            f"{diverging}. That is the headline number in the factory's "
+            "not-a-drop-in warning."
+        )
+
+    @pytest.mark.parametrize("norm_type", _EPSILON_UNCONSTRUCTIBLE_BARE)
+    def test_the_excluded_types_are_excluded_for_the_stated_reason(self, norm_type):
+        with pytest.raises(TypeError):
+            _TYPE_TO_CLASS[norm_type]()
+
+    def test_the_factory_warns_in_its_own_docstring(self):
+        doc = create_normalization_layer.__doc__ or ""
+        assert "NOT A DROP-IN REPLACEMENT" in doc, (
+            "create_normalization_layer's docstring no longer carries the "
+            "not-a-drop-in warning. That warning is the only thing standing "
+            "between a reviewer and the 1000x epsilon change that step 18's "
+            "brief proposed for 189 mobilenet/cbam layers."
+        )
+        assert "1000x" in doc and "batch_norm" in doc
