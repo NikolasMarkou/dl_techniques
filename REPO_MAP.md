@@ -571,14 +571,14 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1006 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1012 | `find tests -name '*.py' \| wc -l` |
+| Python files under `src/` | 1007 | `find src -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1017 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/models/` | 267 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 42 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/utils/` | 39 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/utils/` | 40 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/datasets/` | 37 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/analyzer/` | 24 | `find src/dl_techniques/analyzer -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/metrics/` | 15 | `find src/dl_techniques/metrics -name '*.py' \| wc -l` |
@@ -636,7 +636,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 256 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
-| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 339 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 340 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 247 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 18 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 9 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
