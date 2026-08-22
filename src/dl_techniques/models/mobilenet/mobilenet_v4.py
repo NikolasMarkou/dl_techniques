@@ -391,6 +391,11 @@ class MobileNetV4(keras.Model):
                 filters=dim,
                 stride=block_stride,
                 block_type=block_type,
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- see
+                # mobilenet_v1.py. Without this the block's norms take
+                # create_normalization_layer's own epsilon=1e-6 rather than the
+                # fetched TF Model Garden reference's 1e-3.
+                normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"stage_{stage_idx}_block_{block_idx}",

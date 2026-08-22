@@ -194,19 +194,20 @@ class Qwen3Next(keras.Model):
         # reference, with `from_variant("80b_a3b", num_experts=64)` available
         # for anyone who wants a feasible stand-in.
         #
-        # KNOWN REMAINING DIVERGENCE, not fixable from this table: the released
-        # config sets `head_dim = 256` DECOUPLED from `hidden_size /
-        # num_attention_heads = 2048/16 = 128`, while `__init__` derives
-        # `self.head_dim = hidden_size // num_attention_heads` unconditionally
-        # (see below). This model therefore has half the released per-head
-        # width. Fixing it needs a `head_dim` constructor argument, not a table
-        # entry.
-        # See decisions.md D-112.
+        # CLOSED 2026-08-23 by D-204 (N-10). The divergence this note used to
+        # record -- released `head_dim: 256` DECOUPLED from
+        # `hidden_size / num_attention_heads = 2048/16 = 128`, so this model had
+        # HALF the released per-head width -- is fixed. `head_dim` is now a
+        # constructor argument defaulting to `None` (= the quotient), and the row
+        # below carries the released 256. Re-fetched 2026-08-23 from the same
+        # URL: `"head_dim": 256, "hidden_size": 2048, "num_attention_heads": 16`.
+        # See decisions.md D-112 and D-204.
         "80b_a3b": {
             "vocab_size": 151936,
             "hidden_size": 2048,
             "num_layers": 12,  # 12 blocks, each with 3 delta + 1 attn = 48 layers total
             "num_attention_heads": 16,
+            "head_dim": 256,  # RELEASED value; NOT hidden_size // num_attention_heads
             "num_key_value_heads": 2,
             "max_seq_len": 262144,
             "num_experts": 512,
@@ -259,6 +260,7 @@ class Qwen3Next(keras.Model):
             num_layers: int = 12,
             num_attention_heads: int = 16,
             num_key_value_heads: int = 4,
+            head_dim: Optional[int] = None,
             max_seq_len: int = 8192,
             num_experts: int = 64,
             num_experts_per_tok: int = 8,
@@ -299,8 +301,22 @@ class Qwen3Next(keras.Model):
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
 
-        # Calculate head dimension
-        self.head_dim = self.hidden_size // self.num_attention_heads
+        # DECISION plan-2026-08-22T035419-a11304c8/D-204 -- head_dim is DECOUPLED
+        # upstream and must stay an explicit override here. The released
+        # Qwen3-Next config (fetched 2026-08-23) sets `head_dim: 256` alongside
+        # `hidden_size: 2048` and `num_attention_heads: 16`, whose quotient is
+        # 128. Do NOT "simplify" this back to the bare quotient: that silently
+        # halves the per-head width of the 80b_a3b variant, and the resulting
+        # model is not the architecture its variant name claims. `None` keeps the
+        # quotient, so every other variant and every existing caller is unchanged
+        # BY CONSTRUCTION.
+        self.head_dim = (
+            int(head_dim)
+            if head_dim is not None
+            else self.hidden_size // self.num_attention_heads
+        )
+        if self.head_dim <= 0:
+            raise ValueError(f"head_dim must be positive, got {self.head_dim}")
 
         # Build the model architecture
         self._build_architecture()
@@ -558,6 +574,7 @@ class Qwen3Next(keras.Model):
             "num_layers": self.num_layers,
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
+            "head_dim": self.head_dim,
             "max_seq_len": self.max_seq_len,
             "num_experts": self.num_experts,
             "num_experts_per_tok": self.num_experts_per_tok,

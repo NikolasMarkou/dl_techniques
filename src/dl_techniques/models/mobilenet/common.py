@@ -67,21 +67,23 @@ import keras
 # at `training=False`, while their `moving_mean` diverges by 1.75e-2 after a
 # single `training=True` step.
 #
-# KNOWN, MEASURED DEVIATION -- these constants govern only the SIX BatchNorm
-# layers this package constructs by hand (V1 `conv1_bn`; V2 `conv1_bn`,
-# `conv_last_bn`; V3 `stem_bn`, `last_bn`; V4 `stem_bn`). Every OTHER BatchNorm
-# in these models is created inside the shared depthwise-separable / inverted-
-# residual block layers, which route through `create_normalization_layer` and
-# therefore inherit its `epsilon=1e-6`. Counted 2026-08-22 at
-# `input_shape=(64, 64, 3)`: V1 1 site at 1e-3 vs 26 at 1e-6; V2 2 vs 51; V3 2
-# vs 45; V4 1 vs 61. Momentum is a uniform 0.99 everywhere and matches the
-# reference; epsilon does NOT, at 183 of 189 layers. Aligning those 183 to the
-# reference's 1e-3 is a real outstanding item, but it CHANGES THE INFERENCE
-# FORWARD PASS for the whole family and is deliberately not done here -- it needs
-# its own ruling, not a drive-by. Do not "make the stem consistent" by moving
-# these six DOWN to 1e-6: that walks away from the fetched reference instead of
-# toward it, and it would change inference too.
-# See decisions.md D-111.
+# CLOSED 2026-08-23 by D-203 (N-9) -- the deviation this comment used to record
+# is GONE. It was: these constants governed only the SIX BatchNorm layers this
+# package constructs by hand (V1 `conv1_bn`; V2 `conv1_bn`, `conv_last_bn`; V3
+# `stem_bn`, `last_bn`; V4 `stem_bn`), while every OTHER BatchNorm lives inside
+# the shared depthwise-separable / inverted-residual block layers, which route
+# through `create_normalization_layer` and therefore inherited its OWN
+# `epsilon=1e-6`. Counted 2026-08-22 at `input_shape=(64, 64, 3)`: V1 1 site at
+# 1e-3 vs 26 at 1e-6; V2 2 vs 51; V3 2 vs 45; V4 1 vs 61 -- 183 of 189 layers
+# wrong. All four models now forward `epsilon=REFERENCE_BN_EPSILON` into the
+# block layers' `normalization_args` / `normalization_kwargs`, and the count is
+# 189 of 189 at 1e-3. It DID change inference, measured on a non-degenerate
+# network (see D-203): max|delta| 1.1e-3 (V1), 9.8e-4 (V2), 4.6e-4 (V3),
+# 3.7e-3 (V4), up to 0.62% relative. Pinned by
+# `tests/test_models/test_mobilenet/test_every_batchnorm_uses_the_reference_epsilon.py`.
+# Do not "make the stem consistent" by moving anything DOWN to 1e-6: that walks
+# away from the fetched reference instead of toward it.
+# See decisions.md D-111 and D-203.
 REFERENCE_BN_MOMENTUM: float = 0.99
 REFERENCE_BN_EPSILON: float = 1e-3
 

@@ -284,6 +284,10 @@ class MobileNetV3(keras.Model):
                 use_squeeze_excitation=use_se,
                 activation_type=activation,
                 normalization_type='batch_norm',
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- see
+                # mobilenet_v1.py. `normalization_type` alone leaves epsilon at
+                # the factory's 1e-6, not the fetched reference's 1e-3.
+                normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                 use_bias=False,
                 use_dw1=True,  # Standard inverted bottleneck structure
                 use_dw2=False,

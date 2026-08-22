@@ -266,6 +266,10 @@ class MobileNetV2(keras.Model):
                     activation_type='relu',     # Use ReLU...
                     activation_args={'max_value': 6}, # ...with max_value=6 (ReLU6)
                     normalization_type='batch_norm',
+                    # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- see
+                    # mobilenet_v1.py. `normalization_type` alone leaves epsilon
+                    # at the factory's 1e-6, not the fetched reference's 1e-3.
+                    normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                     use_bias=False,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,

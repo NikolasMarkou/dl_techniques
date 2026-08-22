@@ -212,6 +212,13 @@ class MobileNetV1(keras.Model):
                 filters=actual_filters,
                 stride=stride,
                 block_id=block_id,
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- the block's
+                # norms go through create_normalization_layer, whose OWN default
+                # is epsilon=1e-6, not the reference's 1e-3. Do NOT drop this
+                # kwarg "because batch_norm is the default anyway": the type is
+                # defaulted, the epsilon is not, and without it 183 of this
+                # family's 189 BatchNorm layers silently run at 1e-6.
+                normalization_kwargs={'epsilon': REFERENCE_BN_EPSILON},
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'block_{block_id}'
