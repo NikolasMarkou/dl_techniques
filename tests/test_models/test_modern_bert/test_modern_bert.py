@@ -70,13 +70,13 @@ class TestModernBERTModelInitialization:
         with pytest.raises(ValueError, match="Sizes and layer/head counts must be positive"):
             ModernBERT(vocab_size=1000, hidden_size=-100, num_layers=4, num_heads=8)
 
-        with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
+        with pytest.raises(ValueError, match="hidden_dropout_rate must be between 0 and 1"):
             ModernBERT(
                 vocab_size=1000,
                 hidden_size=256,
                 num_layers=4,
                 num_heads=8,
-                hidden_dropout_prob=1.5
+                hidden_dropout_rate=1.5
             )
 
         with pytest.raises(ValueError, match="global_attention_interval must be positive"):
@@ -90,14 +90,14 @@ class TestModernBERTModelInitialization:
             num_layers=8,
             num_heads=8,
             intermediate_size=1024,
-            hidden_dropout_prob=0.2,
+            hidden_dropout_rate=0.2,
             global_attention_interval=4,
             local_attention_window_size=TEST_WINDOW_SIZE, # FIX: Use small window size
         )
         assert model.vocab_size == 25000
         assert model.hidden_size == 512
         assert model.num_layers == 8
-        assert model.hidden_dropout_prob == 0.2
+        assert model.hidden_dropout_rate == 0.2
         assert model.global_attention_interval == 4
 
 

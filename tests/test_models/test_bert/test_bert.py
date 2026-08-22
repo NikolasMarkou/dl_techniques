@@ -63,13 +63,13 @@ class TestBERTModelInitialization:
         with pytest.raises(ValueError, match="hidden_size must be positive"):
             BERT(vocab_size=1000, hidden_size=-100, num_layers=4, num_heads=8)
 
-        with pytest.raises(ValueError, match="hidden_dropout_prob must be between"):
+        with pytest.raises(ValueError, match="hidden_dropout_rate must be between"):
             BERT(
                 vocab_size=1000,
                 hidden_size=256,
                 num_layers=4,
                 num_heads=8,
-                hidden_dropout_prob=1.5
+                hidden_dropout_rate=1.5
             )
 
     def test_initialization_with_custom_config(self):
@@ -80,15 +80,15 @@ class TestBERTModelInitialization:
             num_layers=8,
             num_heads=8,
             intermediate_size=2048,
-            hidden_dropout_prob=0.2,
-            attention_probs_dropout_prob=0.1,
+            hidden_dropout_rate=0.2,
+            attention_probs_dropout_rate=0.1,
             normalization_type="rms_norm",
             normalization_position="pre"
         )
         assert model.vocab_size == 25000
         assert model.hidden_size == 512
         assert model.num_layers == 8
-        assert model.hidden_dropout_prob == 0.2
+        assert model.hidden_dropout_rate == 0.2
         assert model.normalization_type == "rms_norm"
 
 

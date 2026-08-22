@@ -82,7 +82,7 @@ def create_fnet_mlm_model(config: TrainingConfig) -> MaskedLanguageModel:
         variant=config.fnet_variant,
         vocab_size=config.vocab_size,
         max_position_embeddings=config.max_seq_length,
-        hidden_dropout_prob=0.1,
+        hidden_dropout_rate=0.1,
     )
 
     special_token_ids = [
@@ -99,7 +99,7 @@ def create_fnet_mlm_model(config: TrainingConfig) -> MaskedLanguageModel:
         special_token_ids=special_token_ids,
         mlm_head_activation="gelu",
         initializer_range=0.02,
-        mlm_head_dropout=0.1,
+        mlm_head_dropout_rate=0.1,
         layer_norm_eps=1e-12,
     )
 

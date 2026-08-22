@@ -201,8 +201,8 @@ class TestMlmCompilesAndTrains:
             variant="tiny",
             vocab_size=self.VOCAB,
             max_position_embeddings=self.SEQ,
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1,
+            hidden_dropout_rate=0.1,
+            attention_probs_dropout_rate=0.1,
         )
         return MaskedLanguageModel(
             encoder=encoder,

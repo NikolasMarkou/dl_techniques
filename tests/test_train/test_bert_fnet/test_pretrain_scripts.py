@@ -15,7 +15,7 @@ What is pinned, and why each pin is not satisfied-by-construction:
 * ``test_encoder_factory_kwargs`` -- VALUE-carrying. Pins the kwargs each
   script hands ``<Model>.from_variant``, read back out of the built encoder's
   own config, including the bert/fnet divergence: bert passes
-  ``attention_probs_dropout_prob``, FNet's factory does not take it (Fourier
+  ``attention_probs_dropout_rate``, FNet's factory does not take it (Fourier
   token mixing has no attention block).
 * ``test_argv_maps_onto_the_config`` -- VALUE-carrying. Pins the whole
   ``argv -> config`` map, i.e. every default a shared scaffold could silently
@@ -58,8 +58,8 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "encoder_kwargs": {
             "vocab_size": 100277,
             "max_position_embeddings": 128,
-            "hidden_dropout_prob": 0.1,
-            "attention_probs_dropout_prob": 0.1,
+            "hidden_dropout_rate": 0.1,
+            "attention_probs_dropout_rate": 0.1,
         },
         "config_defaults": {
             "bert_variant": "tiny",
@@ -101,7 +101,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "encoder_kwargs": {
             "vocab_size": 100277,
             "max_position_embeddings": 128,
-            "hidden_dropout_prob": 0.1,
+            "hidden_dropout_rate": 0.1,
         },
         "config_defaults": {
             "fnet_variant": "tiny",
@@ -196,11 +196,11 @@ class TestModelConstruction:
 
     def test_only_bert_passes_an_attention_dropout_kwarg(self, name, built):
         """FNet mixes tokens with a Fourier transform -- it has no attention
-        block, so its factory must not be handed ``attention_probs_dropout_prob``.
+        block, so its factory must not be handed ``attention_probs_dropout_rate``.
         """
         encoder_config = built(name).encoder.get_config()
         expected = name == "bert"
-        assert ("attention_probs_dropout_prob" in encoder_config) is expected
+        assert ("attention_probs_dropout_rate" in encoder_config) is expected
 
 
 @pytest.mark.parametrize("name", [BERT, FNET])

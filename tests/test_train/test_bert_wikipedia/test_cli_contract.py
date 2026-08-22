@@ -371,9 +371,9 @@ def test_from_variant_is_called_with_the_kwargs_BERT_actually_has(script: str) -
         f"{script}.py passes dropout_rate to BERT.from_variant. BERT.__init__ has "
         f"no such parameter and Keras raises "
         f"'Unrecognized keyword arguments passed to BERT'. Use "
-        f"hidden_dropout_prob / attention_probs_dropout_prob (both default 0.1)."
+        f"hidden_dropout_rate / attention_probs_dropout_rate (both default 0.1)."
     )
-    assert {"hidden_dropout_prob", "attention_probs_dropout_prob"} <= set(keywords), (
+    assert {"hidden_dropout_rate", "attention_probs_dropout_rate"} <= set(keywords), (
         f"{script}.py no longer passes both dropout probabilities explicitly; "
         f"got {keywords}. The working sibling train/bert/pretrain.py:85-86 passes both."
     )
@@ -395,8 +395,8 @@ def test_from_variant_source_kwargs_are_accepted_by_BERT(script: str) -> None:
             f"{script}.py's BERT.from_variant call shape is rejected by BERT: "
             f"{exc} (kwargs used: {sorted(call)})"
         )
-    assert encoder.hidden_dropout_prob == pytest.approx(0.1)
-    assert encoder.attention_probs_dropout_prob == pytest.approx(0.1)
+    assert encoder.hidden_dropout_rate == pytest.approx(0.1)
+    assert encoder.attention_probs_dropout_rate == pytest.approx(0.1)
 
 
 # ---------------------------------------------------------------------

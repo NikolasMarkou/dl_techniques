@@ -61,8 +61,8 @@ def all_global_model():
         intermediate_size=48,
         global_attention_interval=1,
         max_position_embeddings=128,
-        hidden_dropout_prob=0.0,
-        attention_probs_dropout_prob=0.0,
+        hidden_dropout_rate=0.0,
+        attention_probs_dropout_rate=0.0,
     )
 
 
@@ -155,7 +155,7 @@ class TestLocalWindowAdjacencyIsSynthetic:
             intermediate_size=48,
             global_attention_interval=999,  # no layer is global
             local_attention_window_size=2,
-            hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0,
+            hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0,
         )
         assert model.encoder_layers[0].attention_type == "window"
 

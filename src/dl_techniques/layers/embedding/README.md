@@ -212,7 +212,7 @@ sincos_embed_2d = create_embedding_layer(
 
 ### BertEmbeddings (`bert_embeddings`)
 - **Required**: `vocab_size`, `hidden_size`, `max_position_embeddings`, `type_vocab_size`
-- **Optional**: `initializer_range` (default: `0.02`), `layer_norm_eps` (default: `1e-8`), `hidden_dropout_prob` (default: `0.0`), `normalization_type` (default: `'layer_norm'`)
+- **Optional**: `initializer_range` (default: `0.02`), `layer_norm_eps` (default: `1e-8`), `hidden_dropout_rate` (default: `0.0`), `normalization_type` (default: `'layer_norm'`)
 
 ```python
 # Standard BERT embeddings

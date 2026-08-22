@@ -239,8 +239,8 @@ class TestVariantTableAgainstTheThreshold:
                 intermediate_size=24,
                 global_attention_interval=interval,
                 local_attention_window_size=spec["local_attention_window_size"],
-                hidden_dropout_prob=0.0,
-                attention_probs_dropout_prob=0.0,
+                hidden_dropout_rate=0.0,
+                attention_probs_dropout_rate=0.0,
             )
             windowed = [
                 i
@@ -288,8 +288,8 @@ class TestVariantTableAgainstTheThreshold:
             intermediate_size=24,
             global_attention_interval=3,  # the inherited hybrid
             local_attention_window_size=128,
-            hidden_dropout_prob=0.0,
-            attention_probs_dropout_prob=0.0,
+            hidden_dropout_rate=0.0,
+            attention_probs_dropout_rate=0.0,
         )
         windowed = [
             i
@@ -333,8 +333,8 @@ class TestModelWiresTheShippedWindowSize:
             intermediate_size=24,
             global_attention_interval=999,  # no layer is global
             local_attention_window_size=128,
-            hidden_dropout_prob=0.0,
-            attention_probs_dropout_prob=0.0,
+            hidden_dropout_rate=0.0,
+            attention_probs_dropout_rate=0.0,
         )
         layer = model.encoder_layers[0]
         assert layer.attention_type == "window"

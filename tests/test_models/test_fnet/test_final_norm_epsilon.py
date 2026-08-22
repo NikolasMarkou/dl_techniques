@@ -29,7 +29,7 @@ FNET_CONFIG = dict(
     num_layers=1,
     intermediate_size=32,
     max_position_embeddings=16,
-    hidden_dropout_prob=0.0,
+    hidden_dropout_rate=0.0,
     normalization_position="pre",
 )
 

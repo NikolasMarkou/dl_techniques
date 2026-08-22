@@ -233,12 +233,16 @@ class ModernBERT(keras.Model):
     :param hidden_act: The non-linear activation function in the FFN.
         Defaults to "gelu".
     :type hidden_act: str
-    :param hidden_dropout_prob: Dropout probability for all fully connected
-        layers in embeddings and encoder. Defaults to 0.1.
-    :type hidden_dropout_prob: float
-    :param attention_probs_dropout_prob: Dropout ratio for attention
-        probabilities. Defaults to 0.1.
-    :type attention_probs_dropout_prob: float
+    :param hidden_dropout_rate: Dropout probability for all fully connected
+        layers in embeddings and encoder. Defaults to 0.1. Upstream this field is
+        ``ModernBertConfig.hidden_dropout_prob``; it is spelled ``_rate`` here
+        because every dropout rate in this repository is (D-130), and the value
+        and meaning are unchanged.
+    :type hidden_dropout_rate: float
+    :param attention_probs_dropout_rate: Dropout ratio for attention
+        probabilities. Defaults to 0.1. Upstream:
+        ``ModernBertConfig.attention_probs_dropout_prob``.
+    :type attention_probs_dropout_rate: float
     :param type_vocab_size: Vocabulary size for token type IDs.
         Defaults to 2.
     :type type_vocab_size: int
@@ -366,8 +370,8 @@ class ModernBERT(keras.Model):
             num_heads: int = 12,
             intermediate_size: int = 1152,
             hidden_act: str = DEFAULT_HIDDEN_ACT,
-            hidden_dropout_prob: float = 0.1,
-            attention_probs_dropout_prob: float = 0.1,
+            hidden_dropout_rate: float = 0.1,
+            attention_probs_dropout_rate: float = 0.1,
             type_vocab_size: int = DEFAULT_TYPE_VOCAB_SIZE,
             initializer_range: float = DEFAULT_INITIALIZER_RANGE,
             layer_norm_eps: float = DEFAULT_LAYER_NORM_EPSILON,
@@ -383,7 +387,7 @@ class ModernBERT(keras.Model):
         # Validate configuration parameters
         self._validate_config(
             hidden_size, num_layers, num_heads,
-            hidden_dropout_prob, attention_probs_dropout_prob,
+            hidden_dropout_rate, attention_probs_dropout_rate,
             global_attention_interval, max_position_embeddings,
             global_rope_theta
         )
@@ -395,8 +399,8 @@ class ModernBERT(keras.Model):
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act
-        self.hidden_dropout_prob = hidden_dropout_prob
-        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.hidden_dropout_rate = hidden_dropout_rate
+        self.attention_probs_dropout_rate = attention_probs_dropout_rate
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
@@ -419,8 +423,8 @@ class ModernBERT(keras.Model):
             hidden_size: int,
             num_layers: int,
             num_heads: int,
-            hidden_dropout_prob: float,
-            attention_probs_dropout_prob: float,
+            hidden_dropout_rate: float,
+            attention_probs_dropout_rate: float,
             global_attention_interval: int,
             max_position_embeddings: int,
             global_rope_theta: float
@@ -433,14 +437,14 @@ class ModernBERT(keras.Model):
                 f"hidden_size ({hidden_size}) must be divisible by "
                 f"num_heads ({num_heads})"
             )
-        if not (0.0 <= hidden_dropout_prob <= 1.0):
+        if not (0.0 <= hidden_dropout_rate <= 1.0):
             raise ValueError(
-                f"hidden_dropout_prob must be between 0 and 1, got {hidden_dropout_prob}"
+                f"hidden_dropout_rate must be between 0 and 1, got {hidden_dropout_rate}"
             )
-        if not (0.0 <= attention_probs_dropout_prob <= 1.0):
+        if not (0.0 <= attention_probs_dropout_rate <= 1.0):
             raise ValueError(
-                "attention_probs_dropout_prob must be between 0 and 1, got "
-                f"{attention_probs_dropout_prob}"
+                "attention_probs_dropout_rate must be between 0 and 1, got "
+                f"{attention_probs_dropout_rate}"
             )
         if global_attention_interval <= 0:
             raise ValueError("global_attention_interval must be positive.")
@@ -462,7 +466,7 @@ class ModernBERT(keras.Model):
             type_vocab_size=self.type_vocab_size,
             initializer_range=self.initializer_range,
             layer_norm_eps=self.layer_norm_eps,
-            dropout_rate=self.hidden_dropout_prob,
+            dropout_rate=self.hidden_dropout_rate,
             use_bias=self.use_bias,
             name="embeddings",
         )
@@ -634,8 +638,8 @@ class ModernBERT(keras.Model):
                 normalization_position='pre',
                 ffn_type='geglu',
                 ffn_args={'activation': self.hidden_act},
-                dropout_rate=self.hidden_dropout_prob,
-                attention_dropout_rate=self.attention_probs_dropout_prob,
+                dropout_rate=self.hidden_dropout_rate,
+                attention_dropout_rate=self.attention_probs_dropout_rate,
                 use_bias=self.use_bias,
                 kernel_initializer=keras.initializers.TruncatedNormal(
                     stddev=self.initializer_range
@@ -922,8 +926,8 @@ class ModernBERT(keras.Model):
             "num_heads": self.num_heads,
             "intermediate_size": self.intermediate_size,
             "hidden_act": self.hidden_act,
-            "hidden_dropout_prob": self.hidden_dropout_prob,
-            "attention_probs_dropout_prob": self.attention_probs_dropout_prob,
+            "hidden_dropout_rate": self.hidden_dropout_rate,
+            "attention_probs_dropout_rate": self.attention_probs_dropout_rate,
             "type_vocab_size": self.type_vocab_size,
             "initializer_range": self.initializer_range,
             "layer_norm_eps": self.layer_norm_eps,

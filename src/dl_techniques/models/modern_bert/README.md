@@ -186,7 +186,7 @@ Input (from previous layer)
 > The asymmetry is real, not a drawing shortcut. These blocks are
 > `TransformerLayer(normalization_position='pre', ...)`, and `TransformerLayer`
 > applies its `dropout_rate` layer to the **FFN sub-block only** — there is no
-> dropout step after attention. `attention_probs_dropout_prob` is not an output
+> dropout step after attention. `attention_probs_dropout_rate` is not an output
 > dropout either: it becomes the attention sub-layer's own internal
 > attention-weight dropout. Being pre-LN, neither branch ends in a
 > normalization ("Add & Norm" is the post-LN shape); the only trailing

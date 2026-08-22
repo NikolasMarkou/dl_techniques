@@ -40,7 +40,7 @@ def model() -> CausalLanguageModel:
     backbone = BERT(
         vocab_size=VOCAB, hidden_size=HIDDEN, num_layers=1, num_heads=2,
         intermediate_size=64, max_position_embeddings=64,
-        hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0,
+        hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0,
     )
     # `verify_causality=False`: BERT is bidirectional by construction, so the
     # causality probe would (correctly) reject it. This test is about the

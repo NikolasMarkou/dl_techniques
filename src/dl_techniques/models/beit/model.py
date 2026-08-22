@@ -303,10 +303,14 @@ class BeitModel(keras.Model):
         drop_path_rate: Maximum stochastic-depth rate. The per-block rates are the
             linear ramp ``0 -> drop_path_rate`` across ``num_layers``. Defaults to
             ``0.1``.
-        hidden_dropout_prob: Dropout after the embedding stage and on each block's FFN
-            output. Defaults to ``0.0`` (HF ``BeitConfig``).
-        attention_probs_dropout_prob: Dropout on the attention probabilities. Defaults
-            to ``0.0`` (HF ``BeitConfig``).
+        hidden_dropout_rate: Dropout after the embedding stage and on each block's FFN
+            output. Defaults to ``0.0`` (HF ``BeitConfig``). Upstream the field is
+            ``BeitConfig.hidden_dropout_prob``; it is spelled ``_rate`` here because
+            every dropout rate in this repository is (D-130), and the value and
+            meaning are unchanged.
+        attention_probs_dropout_rate: Dropout on the attention probabilities. Defaults
+            to ``0.0`` (HF ``BeitConfig``). Upstream:
+            ``BeitConfig.attention_probs_dropout_prob``.
         use_absolute_position_embeddings: Add a learnable absolute position embedding
             over the ``N + 1`` token sequence. Defaults to ``False`` — BEiT uses
             RELATIVE position bias instead, and no shipped BEiT/BEiTv2 variant in HF or
@@ -350,8 +354,8 @@ class BeitModel(keras.Model):
             layer_scale_init_value: Optional[float] = None,
             layer_norm_eps: float = 1e-12,
             drop_path_rate: float = 0.1,
-            hidden_dropout_prob: float = 0.0,
-            attention_probs_dropout_prob: float = 0.0,
+            hidden_dropout_rate: float = 0.0,
+            attention_probs_dropout_rate: float = 0.0,
             use_absolute_position_embeddings: bool = False,
             use_relative_position_bias: bool = True,
             use_shared_relative_position_bias: bool = False,
@@ -383,8 +387,8 @@ class BeitModel(keras.Model):
         )
         self.layer_norm_eps = float(layer_norm_eps)
         self.drop_path_rate = float(drop_path_rate)
-        self.hidden_dropout_prob = float(hidden_dropout_prob)
-        self.attention_probs_dropout_prob = float(attention_probs_dropout_prob)
+        self.hidden_dropout_rate = float(hidden_dropout_rate)
+        self.attention_probs_dropout_rate = float(attention_probs_dropout_rate)
         self.use_absolute_position_embeddings = bool(use_absolute_position_embeddings)
         self.use_relative_position_bias = bool(use_relative_position_bias)
         self.use_shared_relative_position_bias = bool(use_shared_relative_position_bias)
@@ -442,7 +446,7 @@ class BeitModel(keras.Model):
             )
 
         self.embed_dropout = layers.Dropout(
-            self.hidden_dropout_prob, name="embed_dropout"
+            self.hidden_dropout_rate, name="embed_dropout"
         )
 
         # The stochastic-depth LINEAR RAMP is a MODEL-level responsibility:
@@ -481,8 +485,8 @@ class BeitModel(keras.Model):
                     ffn_norm_args={'epsilon': self.layer_norm_eps},
                     ffn_type='mlp',
                     activation='gelu',
-                    dropout_rate=self.hidden_dropout_prob,
-                    attention_dropout_rate=self.attention_probs_dropout_prob,
+                    dropout_rate=self.hidden_dropout_rate,
+                    attention_dropout_rate=self.attention_probs_dropout_rate,
                     use_layer_scale=True,
                     layer_scale_init_value=self.layer_scale_init_value,
                     use_stochastic_depth=True,
@@ -569,8 +573,8 @@ class BeitModel(keras.Model):
 
         for rate_name, rate in (
                 ("drop_path_rate", self.drop_path_rate),
-                ("hidden_dropout_prob", self.hidden_dropout_prob),
-                ("attention_probs_dropout_prob", self.attention_probs_dropout_prob),
+                ("hidden_dropout_rate", self.hidden_dropout_rate),
+                ("attention_probs_dropout_rate", self.attention_probs_dropout_rate),
         ):
             if not 0.0 <= rate <= 1.0:
                 raise ValueError(f"{rate_name} must be in [0, 1], got {rate}")
@@ -690,8 +694,8 @@ class BeitModel(keras.Model):
             "layer_scale_init_value": self.layer_scale_init_value,
             "layer_norm_eps": self.layer_norm_eps,
             "drop_path_rate": self.drop_path_rate,
-            "hidden_dropout_prob": self.hidden_dropout_prob,
-            "attention_probs_dropout_prob": self.attention_probs_dropout_prob,
+            "hidden_dropout_rate": self.hidden_dropout_rate,
+            "attention_probs_dropout_rate": self.attention_probs_dropout_rate,
             "use_absolute_position_embeddings": self.use_absolute_position_embeddings,
             "use_relative_position_bias": self.use_relative_position_bias,
             "use_shared_relative_position_bias": self.use_shared_relative_position_bias,

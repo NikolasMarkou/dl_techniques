@@ -135,12 +135,16 @@ class BERT(keras.Model):
     :param hidden_act: The non-linear activation function in the encoder.
         Defaults to "gelu".
     :type hidden_act: str
-    :param hidden_dropout_prob: Dropout probability for all fully connected
-        layers in embeddings and encoder. Defaults to 0.1.
-    :type hidden_dropout_prob: float
-    :param attention_probs_dropout_prob: Dropout ratio for attention
-        probabilities. Defaults to 0.1.
-    :type attention_probs_dropout_prob: float
+    :param hidden_dropout_rate: Dropout probability for all fully connected
+        layers in embeddings and encoder. Defaults to 0.1. Upstream this field is
+        ``BertConfig.hidden_dropout_prob``; it is spelled ``_rate`` here because
+        every dropout rate in this repository is (D-130), and the value and
+        meaning are unchanged.
+    :type hidden_dropout_rate: float
+    :param attention_probs_dropout_rate: Dropout ratio for attention
+        probabilities. Defaults to 0.1. Upstream:
+        ``BertConfig.attention_probs_dropout_prob``.
+    :type attention_probs_dropout_rate: float
     :param max_position_embeddings: Maximum sequence length for positional
         embeddings. Defaults to 512.
     :type max_position_embeddings: int
@@ -277,8 +281,8 @@ class BERT(keras.Model):
         num_heads: int = 12,
         intermediate_size: int = 3072,
         hidden_act: str = DEFAULT_HIDDEN_ACT,
-        hidden_dropout_prob: float = 0.1,
-        attention_probs_dropout_prob: float = 0.1,
+        hidden_dropout_rate: float = 0.1,
+        attention_probs_dropout_rate: float = 0.1,
         max_position_embeddings: int = DEFAULT_MAX_POSITION_EMBEDDINGS,
         type_vocab_size: int = DEFAULT_TYPE_VOCAB_SIZE,
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
@@ -307,10 +311,10 @@ class BERT(keras.Model):
         :type intermediate_size: int
         :param hidden_act: Activation function in the encoder.
         :type hidden_act: str
-        :param hidden_dropout_prob: Dropout probability for embeddings/encoder.
-        :type hidden_dropout_prob: float
-        :param attention_probs_dropout_prob: Dropout for attention scores.
-        :type attention_probs_dropout_prob: float
+        :param hidden_dropout_rate: Dropout probability for embeddings/encoder.
+        :type hidden_dropout_rate: float
+        :param attention_probs_dropout_rate: Dropout for attention scores.
+        :type attention_probs_dropout_rate: float
         :param max_position_embeddings: Maximum sequence length.
         :type max_position_embeddings: int
         :param type_vocab_size: Vocabulary size for token type IDs.
@@ -343,7 +347,7 @@ class BERT(keras.Model):
         # Validate configuration parameters
         self._validate_config(
             vocab_size, hidden_size, num_layers, num_heads,
-            hidden_dropout_prob, attention_probs_dropout_prob
+            hidden_dropout_rate, attention_probs_dropout_rate
         )
 
         # Store all configuration parameters
@@ -353,8 +357,8 @@ class BERT(keras.Model):
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act
-        self.hidden_dropout_prob = hidden_dropout_prob
-        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.hidden_dropout_rate = hidden_dropout_rate
+        self.attention_probs_dropout_rate = attention_probs_dropout_rate
         self.max_position_embeddings = max_position_embeddings
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
@@ -399,8 +403,8 @@ class BERT(keras.Model):
         hidden_size: int,
         num_layers: int,
         num_heads: int,
-        hidden_dropout_prob: float,
-        attention_probs_dropout_prob: float
+        hidden_dropout_rate: float,
+        attention_probs_dropout_rate: float
     ) -> None:
         """Validate model configuration parameters.
 
@@ -412,10 +416,10 @@ class BERT(keras.Model):
         :type num_layers: int
         :param num_heads: Number of attention heads.
         :type num_heads: int
-        :param hidden_dropout_prob: Dropout probability for hidden layers.
-        :type hidden_dropout_prob: float
-        :param attention_probs_dropout_prob: Dropout for attention scores.
-        :type attention_probs_dropout_prob: float
+        :param hidden_dropout_rate: Dropout probability for hidden layers.
+        :type hidden_dropout_rate: float
+        :param attention_probs_dropout_rate: Dropout for attention scores.
+        :type attention_probs_dropout_rate: float
         :raises ValueError: If any configuration value is invalid.
         """
         if vocab_size <= 0:
@@ -433,15 +437,15 @@ class BERT(keras.Model):
                 f"hidden_size ({hidden_size}) must be divisible by "
                 f"num_heads ({num_heads})"
             )
-        if not (0.0 <= hidden_dropout_prob <= 1.0):
+        if not (0.0 <= hidden_dropout_rate <= 1.0):
             raise ValueError(
-                f"hidden_dropout_prob must be between 0 and 1, "
-                f"got {hidden_dropout_prob}"
+                f"hidden_dropout_rate must be between 0 and 1, "
+                f"got {hidden_dropout_rate}"
             )
-        if not (0.0 <= attention_probs_dropout_prob <= 1.0):
+        if not (0.0 <= attention_probs_dropout_rate <= 1.0):
             raise ValueError(
-                f"attention_probs_dropout_prob must be between 0 and 1, "
-                f"got {attention_probs_dropout_prob}"
+                f"attention_probs_dropout_rate must be between 0 and 1, "
+                f"got {attention_probs_dropout_rate}"
             )
 
     def _build_architecture(self) -> None:
@@ -453,7 +457,7 @@ class BERT(keras.Model):
             type_vocab_size=self.type_vocab_size,
             initializer_range=self.initializer_range,
             layer_norm_eps=self.layer_norm_eps,
-            dropout_rate=self.hidden_dropout_prob,
+            dropout_rate=self.hidden_dropout_rate,
             normalization_type=self.normalization_type,
             position_embedding_type=self.position_embedding_type,
             name="embeddings"
@@ -488,8 +492,8 @@ class BERT(keras.Model):
                 normalization_position=self.normalization_position,
                 attention_type=self.attention_type,
                 ffn_type=self.ffn_type,
-                dropout_rate=self.hidden_dropout_prob,
-                attention_dropout_rate=self.attention_probs_dropout_prob,
+                dropout_rate=self.hidden_dropout_rate,
+                attention_dropout_rate=self.attention_probs_dropout_rate,
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=self.stochastic_depth_rate,
                 activation=self.hidden_act,
@@ -904,8 +908,8 @@ class BERT(keras.Model):
             "num_heads": self.num_heads,
             "intermediate_size": self.intermediate_size,
             "hidden_act": self.hidden_act,
-            "hidden_dropout_prob": self.hidden_dropout_prob,
-            "attention_probs_dropout_prob": self.attention_probs_dropout_prob,
+            "hidden_dropout_rate": self.hidden_dropout_rate,
+            "attention_probs_dropout_rate": self.attention_probs_dropout_rate,
             "max_position_embeddings": self.max_position_embeddings,
             "type_vocab_size": self.type_vocab_size,
             "initializer_range": self.initializer_range,

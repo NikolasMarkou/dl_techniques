@@ -38,8 +38,8 @@ def _tiny_modern_bert(*, use_bias: bool) -> ModernBERT:
         use_bias=use_bias,
         global_attention_interval=999,  # no layer is global
         local_attention_window_size=16,
-        hidden_dropout_prob=0.0,
-        attention_probs_dropout_prob=0.0,
+        hidden_dropout_rate=0.0,
+        attention_probs_dropout_rate=0.0,
     )
     _ = model(
         {

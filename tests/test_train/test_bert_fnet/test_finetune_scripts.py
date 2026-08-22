@@ -51,7 +51,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
     "bert": {
         "module": bert_finetune,
         "encoder_cls": BERT,
-        "encoder_kwargs": {"attention_probs_dropout_prob": 0.1},
+        "encoder_kwargs": {"attention_probs_dropout_rate": 0.1},
         "train_fn": "finetune_sentiment_model",
         "model_name": "bert_sentiment_analyzer",
         "encoder_layer_name": "bert",
@@ -160,7 +160,7 @@ def built(tmp_path_factory):
                 variant="tiny",
                 vocab_size=PROBE_VOCAB_SIZE,
                 max_position_embeddings=PROBE_SEQ_LENGTH,
-                hidden_dropout_prob=0.1,
+                hidden_dropout_rate=0.1,
                 **spec["encoder_kwargs"],
             )
             encoder(_probe_inputs(1), training=False)

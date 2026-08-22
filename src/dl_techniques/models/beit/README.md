@@ -497,7 +497,7 @@ from dl_techniques.models.beit import create_beit_backbone
 model = create_beit_backbone(
     "base", (224, 224, 3), 16,
     drop_path_rate=0.2,          # heavier stochastic depth for a long run
-    hidden_dropout_prob=0.1,
+    hidden_dropout_rate=0.1,
     num_layers=6,                # a half-depth base
 )
 print(model.num_layers, model.hidden_size, len(model.drop_path_rates))   # 6 768 6
@@ -795,8 +795,8 @@ From the paper's appendix (see the caveat in §16.3):
 | Fine-tuning (base) | AdamW + layer-wise decay 0.65 | swept 2e-3…5e-3 | — | — | 100 | 1024 | — |
 | Fine-tuning (large) | AdamW + layer-wise decay 0.75 | — | — | — | 50 | 1024 | — |
 
-Dropout is **disabled** during pre-training (`hidden_dropout_prob=0.0`,
-`attention_probs_dropout_prob=0.0` — the shipped defaults); regularization comes from
+Dropout is **disabled** during pre-training (`hidden_dropout_rate=0.0`,
+`attention_probs_dropout_rate=0.0` — the shipped defaults); regularization comes from
 stochastic depth.
 
 ### 11.2 Rules this package enforces
