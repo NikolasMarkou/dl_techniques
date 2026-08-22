@@ -31,7 +31,7 @@ went from materializing **0** weights to materializing all of them (e.g.
 NOT here --
 see :data:`UNFIXED` for the measured reason on each.
 
-See ``decisions.md`` D-008.
+See ``decisions.md`` D-013.
 """
 
 import os
