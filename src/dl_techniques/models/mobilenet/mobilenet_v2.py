@@ -84,7 +84,11 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
-from dl_techniques.models.mobilenet.common import materialize_for_summary
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
@@ -238,7 +242,11 @@ class MobileNetV2(keras.Model):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer, name='conv1'
         )
-        self.initial_bn = layers.BatchNormalization(name='conv1_bn')
+        self.initial_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name='conv1_bn',
+        )
         self.initial_relu = layers.ReLU(max_value=6, name='conv1_relu6')
 
         # Bottleneck Blocks (using UniversalInvertedBottleneck)
@@ -277,7 +285,11 @@ class MobileNetV2(keras.Model):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer, name='conv_last'
         )
-        self.last_bn = layers.BatchNormalization(name='conv_last_bn')
+        self.last_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name='conv_last_bn',
+        )
         self.last_relu = layers.ReLU(max_value=6, name='conv_last_relu6')
 
         # Top (Classification Head)

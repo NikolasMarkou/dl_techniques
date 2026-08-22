@@ -268,7 +268,27 @@ class CBAMNet(keras.Model):
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"stage_{i}_conv"
                 ),
-                keras.layers.BatchNormalization(name=f"stage_{i}_bn"),
+                # DECISION plan-2026-08-22T035419-a11304c8/D-111
+                # This BatchNorm keeps Keras' documented defaults
+                # (momentum=0.99, epsilon=1e-3) and that is a RULING, not an
+                # oversight. R-083 asks that a numeric trace to a named external
+                # reference; here there is none to trace to. Woo et al. 2018
+                # (CBAM) specifies an attention MODULE, not a backbone -- the
+                # paper's experiments bolt CBAM onto ResNet/WideResNet/MobileNet
+                # and inherit each host's BatchNorm settings, so "the CBAM
+                # momentum" does not exist as a published quantity. This stage
+                # stack is this repository's own demonstration backbone, so the
+                # framework default is the honest provenance. Do NOT copy
+                # MobileNet's `REFERENCE_BN_MOMENTUM` here: that constant is
+                # traced to the TF Model Garden MobileNet backbone and means
+                # nothing outside it. If you host CBAM inside a real backbone,
+                # take that backbone's value.
+                # See decisions.md D-111.
+                keras.layers.BatchNormalization(
+                    momentum=0.99,
+                    epsilon=1e-3,
+                    name=f"stage_{i}_bn",
+                ),
                 CBAM(
                     channels=dim,
                     ratio=self.attention_ratio,

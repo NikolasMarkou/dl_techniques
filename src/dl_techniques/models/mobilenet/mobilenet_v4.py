@@ -104,7 +104,11 @@ from typing import List, Tuple, Optional, Dict, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
-from dl_techniques.models.mobilenet.common import materialize_for_summary
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 
 # ---------------------------------------------------------------------
 
@@ -338,7 +342,11 @@ class MobileNetV4(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        stem_bn = layers.BatchNormalization(name="stem_bn")
+        stem_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name="stem_bn",
+        )
         stem_activation = layers.ReLU(name="stem_relu")
         return stem_conv, stem_bn, stem_activation
 

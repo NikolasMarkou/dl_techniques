@@ -89,7 +89,11 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.hard_swish import HardSwish
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
-from dl_techniques.models.mobilenet.common import materialize_for_summary
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 
 # ---------------------------------------------------------------------
 # MobileNetV3 Model
@@ -253,7 +257,11 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        self.stem_bn = layers.BatchNormalization(name="stem_bn")
+        self.stem_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name="stem_bn",
+        )
         self.stem_activation = HardSwish(name="stem_hard_swish")
 
         # Build inverted residual blocks using UniversalInvertedBottleneck
@@ -300,7 +308,11 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="last_conv"
         )
-        self.last_bn = layers.BatchNormalization(name="last_bn")
+        self.last_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name="last_bn",
+        )
         self.last_activation = HardSwish(name="last_hard_swish")
 
         # Head

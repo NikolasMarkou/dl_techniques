@@ -74,7 +74,11 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.depthwise_separable_block import DepthwiseSeparableBlock
-from dl_techniques.models.mobilenet.common import materialize_for_summary
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 
 # ---------------------------------------------------------------------
 
@@ -191,7 +195,11 @@ class MobileNetV1(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name='conv1'
         )
-        self.initial_bn = layers.BatchNormalization(name='conv1_bn')
+        self.initial_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name='conv1_bn',
+        )
         self.initial_relu = layers.ReLU(name='conv1_relu')
 
         # Build depthwise separable blocks
