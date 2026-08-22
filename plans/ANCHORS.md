@@ -491,3 +491,114 @@ plan-2026-08-18T140459-7991552f/D-062 | 2026-08-19 | Apply step 11's repair unch
 plan-2026-08-18T140459-7991552f/D-063 | 2026-08-19 | Return the per-sample vector (`ops.mean(square(err), axis=1..rank-1)`), which the method already computed one line above and then threw away. Guard `rank <= 1` explicitly rather than relying on `axis=[]`.
 plan-2026-08-18T140459-7991552f/D-064 | 2026-08-19 | Fix the path rather than refuse it. In the unshared arrangement return `_unreduced_base_loss(y_true, y_pred_flat)` directly -- shape `(B*k,)`. Docstring rewritten to state both modes' shapes and why they differ; the...
 plan-2026-08-18T140459-7991552f/D-067 | 2026-08-19 | Add a `# DECISION` anchor at the block construction recording what the initializer does, the measurement that motivated it, and what to do when the GPT-2 control runs out of headroom.
+plan-2026-08-19T070627-a616f581/D-003 | 2026-08-19 | Seed `_compiled_probe_model`'s weight init with `keras.utils.set_random_seed(6)`, the argmax of a 12-seed RAW-gradient sweep (not the first seed that passed); the plan's literal "nonzero in every phase" criterion was itself unsatisfiable and narrowed to match the product's own phase-gating invariant.
+plan-2026-08-19T070627-a616f581/D-004 | 2026-08-19 | Replace the drop-path oracle's batch-wide `max` with a direct per-sample `StochasticDepth` mask observation (shape (a)), pooled per-layer over only live-rate layers, cutting the residual collapse probability from ~6.8% to ~5e-10.
+plan-2026-08-19T070627-a616f581/D-005 | 2026-08-19 | Add `'qkv_bias': self.use_bias, 'proj_bias': self.use_bias` to `TransformerLayer._get_attention_params`'s `'window'` branch, the only one of {multi_head, group_query, anchor} that never forwarded `use_bias`; a weight-SET change affecting ModernBERT only (0 checkpoints found under `results/`).
+plan-2026-08-19T070627-a616f581/D-006 | 2026-08-19 | Add a required keyword-only `use_bias` to `build_transformer_ffn_config`, forwarded from both dispatchers, with `swiglu` withholding it (its class default is the one bias-free-by-design type) so the fix does not silently expand the weight set of every swiglu-based model.
+plan-2026-08-19T070627-a616f581/D-007 | 2026-08-19 | Copy D-049's shipped `attention_norm_args`/`ffn_norm_args` pattern verbatim at 5 `TransformerLayer` sites (BERT, DistilBERT, ModernBERT, Qwen3, TextDecoder) so in-block norms honour each model's own epsilon knob, plus a genuine product fix giving `GroupAttention` a real `layer_norm_eps` parameter.
+plan-2026-08-19T070627-a616f581/D-008 | 2026-08-19 | Ship two separate norm-forwarding guard predicates in `test_package_api_contract.py` — a direct-call registry sweep (finds ~0 real defects, kept for completeness) and an indirection sweep on `TransformerLayer(...)` construction sites (the one that finds real defects) — rather than one guard that would ship guarding zero.
+plan-2026-08-19T070627-a616f581/D-009 | 2026-08-19 | Enforce `MODEL_VARIANTS` with three predicates transcribed from `models/CLAUDE.md`'s house rule (from_variant-without-table, legacy-table-without-alias, function-local-table), fixing 7 genuine gaps (SAM1, KAN, NTM, NanoVLM, ScoreBasedNanoVLM, PFTSR, depth_anything) rather than the 5 or 9 the carried ledger claimed.
+plan-2026-08-19T070627-a616f581/D-010 | 2026-08-19 | Ship one shared `gradient_flow_oracle.py` asserting per-weight (never aggregate) gradient liveness with an exact-zero floor and a two-sided `expect_zero` waiver (raises if the waived weight actually learns, or if a waiver pattern matches nothing), replacing the two pre-existing hand-rolled, unfalsifiable gradient checks.
+plan-2026-08-19T070627-a616f581/D-011 | 2026-08-19 | Re-choose gradient-flow adoption batch A by measured per-suite probe cost (not plan.md's alphabetical list); ship KAN's constant-function collapse and BLT's 54-dead-weight `entropy_model` subtree as `xfail(strict=True)` product findings rather than absorbing them into a waiver.
+plan-2026-08-19T070627-a616f581/D-012 | 2026-08-19 | For a large dead-gradient set caused by a documented zero-initialized residual gate (darkir, LeWM, SD3MMDiT), assert gradient-flow AFTER one or two real optimizer steps with no waivers, never with a large `expect_zero` — the warm-up is what surfaced GF-04 (3 permanently-dead SD3 weights) that a waiver would have hidden.
+plan-2026-08-19T070627-a616f581/D-013 | 2026-08-19 | Waive `EnergyTransformerClassifier`'s `mask_token/mask_token` with `expect_zero`, checkable from both sides because the same tensor is asserted LIVE by name in the MIM head's suite — a documented always-built/conditionally-used pattern, not a defect.
+plan-2026-08-19T070627-a616f581/D-014 | 2026-08-19 | Express PRISM's softmax-annihilated router biases (GF-07, ~8% flaky-zero gradient) as two deterministic tests — a per-weight liveness claim over the non-inert weights plus a value-space inertness perturbation — rather than `expect_zero` or `xfail(strict=True)`, both of which are two-sided and would flap on a flaky-zero signal.
+plan-2026-08-19T070627-a616f581/D-015 | 2026-08-19 | Repair the energy_transformer round-trip liveness guard's annihilated whole-kernel perturbation (a `LayerNormalization` output is zero-mean, so a uniform kernel shift adds exactly 0) with a single-element bite plus an unperturbed-baseline arm and a ratio-based inertness control; keep the `1e-2` threshold, now with a 228x margin instead of the original GPU-noise-calibrated 1.2x.
+plan-2026-08-19T070627-a616f581/D-016 | 2026-08-19 | F-62 (darkir "identity at init") is REFUTED as a defect — it is the documented ReZero design and clears after one optimizer step; ship two coverage tests (init no-op, post-step load-bearing) with no product change, reusing the existing `dead_component_oracle.py` rather than adding a third oracle.
+plan-2026-08-19T070627-a616f581/D-017 | 2026-08-19 | F-58 (tree_transformer `group_prob`) is refuted-as-stated (an `ones_like` mutation is already caught by an existing gradient-flow test) but a real orientation gap survives (a TRANSPOSED `group_prob` passes all 41 tests); pin the key-axis orientation with a column-selector oracle derived from the semantics, not the implementation.
+plan-2026-08-19T070627-a616f581/D-018 | 2026-08-19 | F-80's mothnet half holds (`hebbian_update -> pass` leaves all 8 tests green); ship a write-happened assertion plus an outer-product-shape assertion (without which `W += const` would falsely satisfy it) plus a winner-take-all top-k bound.
+plan-2026-08-19T070627-a616f581/D-019 | 2026-08-19 | F-80's vq_vae_rotation half holds and is the widest gap measured (103 green tests, zero backward-pass assertions); assert the trick's direction- and magnitude-transport PROPERTIES as exact identities plus pairwise gradient distinctness under the model's real training objective, rather than a hand-derived closed-form gradient (self-referential-oracle risk) or a frozen numeric delta.
+plan-2026-08-19T163559-499b6f0e/D-009 | 2026-08-19 | EXECUTE step 5.6 (the 3 RED ModernBERT tests)
+plan-2026-08-19T163559-499b6f0e/D-011 | 2026-08-19 | EXECUTE step 5.8 (`mixed_float16` reachability of the 6 unreachable models)
+plan-2026-08-19T163559-499b6f0e/D-012 | 2026-08-20 | EXECUTE step 6 (Phase 2 registration + export guards)
+plan-2026-08-19T163559-499b6f0e/D-013 | 2026-08-20 | EXECUTE step 7 (Phase 2 package-shape guards)
+plan-2026-08-19T163559-499b6f0e/D-014 | 2026-08-20 | EXECUTE step 8(i)+(ii) (call-purity guards on the CALLEE CLOSURE)
+plan-2026-08-19T163559-499b6f0e/D-015 | 2026-08-20 | EXECUTE step 8(iii) (`super().get_config()`, base-resolved + merge order)
+plan-2026-08-19T163559-499b6f0e/D-016 | 2026-08-20 | EXECUTE step 8(iv) (mutable defaults, three shapes)
+plan-2026-08-19T163559-499b6f0e/D-017 | 2026-08-20 | EXECUTE step 8(v) (step-override population freeze + its liveness)
+plan-2026-08-19T163559-499b6f0e/D-026 | 2026-08-20 | `ConvDecoder` keeps SIX FLAT PER-ROLE LISTS, at the cost of a less readable block structure and a weight-path change
+plan-2026-08-19T163559-499b6f0e/D-027 | 2026-08-20 | the Poincaré boundary margin is `max(boundary_eps, 4 ULP)`, at the cost of a dtype-dependent number in a formerly dtype-free file
+plan-2026-08-19T163559-499b6f0e/D-028 | 2026-08-20 | fixed curvature is a Python float, at the cost of a conversion on every `curvature` read
+plan-2026-08-19T163559-499b6f0e/D-029 | 2026-08-20 | the three shgcn models get a real `build()`, at the cost of three hand-written shape derivations
+plan-2026-08-19T163559-499b6f0e/D-030 | 2026-08-20 | one shared `CLIPContrastiveLoss.reduced_loss`, at the cost of a training-loop concern living inside a loss class
+plan-2026-08-19T163559-499b6f0e/D-031 | 2026-08-20 | `HRMTrainer` builds its model in `_create_model`, at the cost of paying full materialisation before any config validation
+plan-2026-08-19T163559-499b6f0e/D-032 | 2026-08-20 | `BERT` resolves its echoed mask at the RETURN, at the cost of an output key that is no longer a verbatim echo
+plan-2026-08-19T163559-499b6f0e/D-033 | 2026-08-20 | the T5 padding mask SELECTS instead of ADDS, at the cost of a `where` on every masked forward
+plan-2026-08-19T163559-499b6f0e/D-034 | 2026-08-20 | BLT is made XLA-COMPATIBLE rather than opting out of XLA, at the cost of departing from five in-repo precedents
+plan-2026-08-19T163559-499b6f0e/D-035 | 2026-08-20 | `CausalLanguageModel` locates its embedding matrix by SHAPE, at the cost of a defect it deliberately does NOT close
+plan-2026-08-19T163559-499b6f0e/D-036 | 2026-08-20 | four custom `train_step`s call `optimizer.scale_loss`, at the cost of a guard that is static where the evidence is runtime
+plan-2026-08-19T163559-499b6f0e/D-037 | 2026-08-20 | `TiRexExtended`'s query tokens move to `build()`, at the cost of shipping an edit whose predicted harm did NOT reproduce
+plan-2026-08-19T163559-499b6f0e/D-039 | 2026-08-20 | the nano-VLM denoisers flatten their block containers, at the cost of twelve parallel lists in one class
+plan-2026-08-19T163559-499b6f0e/D-040 | 2026-08-20 | `_principal_shape` tests the FIRST ELEMENT, at the cost of one more shared helper
+plan-2026-08-19T163559-499b6f0e/D-041 | 2026-08-20 | the ResNet stem width follows `filters_per_stage[0]`, at the cost of changing a config that already worked
+plan-2026-08-19T163559-499b6f0e/D-043 | 2026-08-20 | the KAN knot grid is `autocast=False` and the recursion runs in the variable dtype, at the cost of two casts on every forward
+plan-2026-08-19T163559-499b6f0e/D-044 | 2026-08-20 | the Mamba selective scan runs in the variable dtype, at the cost of a scan that ignores the compute dtype entirely
+plan-2026-08-19T163559-499b6f0e/D-045 | 2026-08-20 | the memory-bank mask is built in the compute dtype with a CLAMPED sentinel, at the cost of a policy-dependent mask value
+plan-2026-08-19T163559-499b6f0e/D-046 | 2026-08-20 | `interpolate_grid` returns the GRID's dtype and keeps index math in float32, at the cost of breaking a documented float32 return contract
+plan-2026-08-19T163559-499b6f0e/D-047 | 2026-08-20 | the diffusion schedule and the timestep sinusoid RETURN the compute dtype, at the cost of coefficients whose dtype is now caller-determined
+plan-2026-08-19T163559-499b6f0e/D-048 | 2026-08-20 | `MaskedAutoencoder` gets a real `build()`, at the cost of a shape-resolution heuristic
+plan-2026-08-19T163559-499b6f0e/D-049 | 2026-08-20 | `BERT` gets a `build()`, and that single edit closes THREE rows, at the cost of a second shape-normalising helper
+plan-2026-08-19T163559-499b6f0e/D-050 | 2026-08-20 | the two ULP-void floors become `max(literal, finfo(dtype).tiny)`, at the cost of a denominator that differs between policies
+plan-2026-08-19T163559-499b6f0e/D-051 | 2026-08-20 | the HRM factory builds the model it returns, at the cost of paying materialisation for callers who only wanted a config
+plan-2026-08-19T163559-499b6f0e/D-052 | 2026-08-20 | `KAN` reports `grids_adapted` and warns at construction; the constant-function pin STANDS, at the cost of shipping state instead of a fix
+plan-2026-08-19T163559-499b6f0e/D-053 | 2026-08-20 | `ComplexLayer.epsilon` stays inert and says so, at the cost of a public argument that is documented as doing nothing
+plan-2026-08-19T163559-499b6f0e/D-054 | 2026-08-20 | the four fp16-raising FFT/complex packages get a float32 CAST ISLAND, not a float32-only declaration, at the cost of a spectral section that never uses mixed precision
+plan-2026-08-19T163559-499b6f0e/D-055 | 2026-08-20 | the precision-arm oracle's cross-arm comparison CALIBRATES ITSELF on the model's own build spread, at the cost of a tolerance that is not a constant
+plan-2026-08-19T163559-499b6f0e/D-057 | 2026-08-20 | initializer-instance symmetry is ruled PER SITE by the ROLE of the colliding weights, not by the shape, at the cost of a rule that cannot be applied mechanically
+plan-2026-08-19T163559-499b6f0e/D-058 | 2026-08-20 | the compute-dtype arm is applied to the FLOATING-POINT outputs only, at the cost of an escape hatch that must be justified per site
+plan-2026-08-19T163559-499b6f0e/D-059 | 2026-08-20 | the backward arm's loss is RAMP-WEIGHTED, because a symmetric loss on a uniform softmax has an exactly-zero gradient
+plan-2026-08-19T163559-499b6f0e/D-060 | 2026-08-20 | `superpoint`'s bicubic upsample runs in float32 under any policy, because TensorFlow has no float16 `ResizeBicubic` gradient
+plan-2026-08-19T163559-499b6f0e/D-061 | 2026-08-20 | `exp_map_0` / `log_map_0` use a DOUBLE `where`, because `ops.where` differentiates the branch it discards
+plan-2026-08-19T163559-499b6f0e/D-062 | 2026-08-20 | the SOM competitive update is forced to float32, because Keras autocasts a float32 VARIABLE read inside `call`
+plan-2026-08-19T163559-499b6f0e/D-063 | 2026-08-20 | SAM's normalization constants are cast at USE, not built in the compute dtype
+plan-2026-08-19T163559-499b6f0e/D-064 | 2026-08-20 | the MoE routing weight and mask are cast to the EXPERT OUTPUT's dtype, because `ops.one_hot` ignores the policy
+plan-2026-08-19T163559-499b6f0e/D-065 | 2026-08-20 | an UNTRAINED BatchNorm makes an inference-mode fp16 arm measure the initializer, so `yolo12` is judged in training mode
+plan-2026-08-19T163559-499b6f0e/D-066 | 2026-08-20 | the six R-057 `get_config` omissions are fixed, and `coshnet`'s hard-coded `name` had to go with them
+plan-2026-08-19T163559-499b6f0e/D-067 | 2026-08-20 | R-082 is closed by STATING every epsilon, not by changing any of them
+plan-2026-08-19T163559-499b6f0e/D-068 | 2026-08-20 | three `layers/` initializer-sharing sites are cloned; five R-123 rows close, four stay open with a MEASURED census that corrects the audit
+plan-2026-08-19T163559-499b6f0e/D-069 | 2026-08-20 | `ConvNeXtV1` gets `compute_output_shape` because its SIBLING has it; and `tabm`'s `count_params` row is CLOSED-as-refuted in the form it was written
+plan-2026-08-19T163559-499b6f0e/D-070 | 2026-08-20 | the shared-initializer fix moves to the SHARED `layers/` sites, because three of the four open R-123 rows have their cause there and not in the model package
+plan-2026-08-19T163559-499b6f0e/D-071 | 2026-08-20 | `yolo12`'s 161 pairs are ruled PER PAIR: 6 are a defect, 155 are not, and the 155 are asserted to STAY
+plan-2026-08-19T163559-499b6f0e/D-072 | 2026-08-20 | `clifford_clip`'s module-level `_DEFAULT_KERNEL_INIT` stays, and every consumer clones it
+plan-2026-08-19T163559-499b6f0e/D-073 | 2026-08-20 | the R-123 census probe compares FLAT, not by shape, because the shape form was structurally blind to `cbam` — and the audit's "transposed" is also wrong
+plan-2026-08-19T163559-499b6f0e/D-074 | 2026-08-20 | the float64 arm sets `set_floatx` AND `set_global_policy`, because `set_floatx` ALONE is a no-op after anything reads the policy
+plan-2026-08-19T163559-499b6f0e/D-075 | 2026-08-20 | the XLA arm judges against the model's OWN eager-vs-eager spread, and two conditioning rows are judged at float64 rather than exempted
+plan-2026-08-19T163559-499b6f0e/D-076 | 2026-08-20 | the R-143 arm's two largest "defects" were the subject table feeding OUT-OF-RANGE token ids, and the fp16 arm was gathering the same garbage
+plan-2026-08-19T163559-499b6f0e/D-077 | 2026-08-20 | the delta-impulse probe's first RED injection was a SYMMETRY of every subject, and all nine RED proofs passed against it
+plan-2026-08-19T163559-499b6f0e/D-078 | 2026-08-20 | the four SEVERE R-051 factories: three repaired, one refuted, and the VAE's "eager 0.0 forward delta" is NOT OBTAINABLE at all
+plan-2026-08-19T163559-499b6f0e/D-079 | 2026-08-20 | the two ALIAS shapes of R-009 are closed at the TYPE, not with a copy — and a dict cannot become a tuple
+plan-2026-08-19T163559-499b6f0e/D-080 | 2026-08-20 | the un-re-derived "~95 unused imports" is 98 flagged / 74 removable / 24 LOAD-BEARING — and the sweep broke the tree three times before it was right
+plan-2026-08-19T163559-499b6f0e/D-081 | 2026-08-20 | the ~290-row instrument bulk is ONE oracle and one 232-test family; the substance already passed everywhere, and the instrument was wrong twice before it was right
+plan-2026-08-19T163559-499b6f0e/D-082 | 2026-08-20 | the last five `super().get_config()` omissions are fixed, two carried the `coshnet` compounding defect, and the `dtype` half is REFUTED for ten of eleven
+plan-2026-08-19T163559-499b6f0e/D-083 | 2026-08-20 | 10 of the 11 traced raw-`tf.` sites migrate, and the eleventh's stated reason -- "there is no keras.ops.svd" -- is FALSE
+plan-2026-08-19T163559-499b6f0e/D-084 | 2026-08-20 | the `logger`-in-`call()` family splits EXACTLY along `debug` vs `warning`: 16 removed, 8 kept, and the line is not a judgement call
+plan-2026-08-19T163559-499b6f0e/D-085 | 2026-08-21 | the 34 S1 mutable defaults become tuples and the R-009 waiver set is EMPTY; the rule that made it invisible is "tuple default, LIST attribute"
+plan-2026-08-19T163559-499b6f0e/D-089 | 2026-08-21 | the five owed `scale_loss` sites are repaired and land at 1.00 +- 0.008 on CPU, but ONLY after my own instrument was wrong twice
+plan-2026-08-19T163559-499b6f0e/D-091 | 2026-08-21 | the REF-9 mechanism is LIVE in `layers/`: graphsage archived 12 of 20 tensors, and the reloaded model computed a different function
+plan-2026-08-19T163559-499b6f0e/D-092 | 2026-08-21 | `src/train/clip`'s mixed-precision branch called two Keras 2 methods that do not exist, and step 17's own test never set the flag
+plan-2026-08-19T163559-499b6f0e/D-093 | 2026-08-21 | the decorator step 17 put on `_principal_shape` comes OFF: a guard that warns inside a green run is a guard nobody reads
+plan-2026-08-19T163559-499b6f0e/D-094 | 2026-08-21 | Phase 5 batch A: 11 suites adopt all three oracles, the carried adoption counts were wrong a FOURTH time, and two `mask_token` findings turned out to be the same documented mechanism
+plan-2026-08-19T163559-499b6f0e/D-095 | 2026-08-21 | the RED-proof injection is defined ONCE in the oracle and exported, not re-typed in eleven suites
+plan-2026-08-19T163559-499b6f0e/D-096 | 2026-08-21 | the gradient oracle's own "healthy model" control was a coin flip, and this step's dino adoption is what finally lost it
+plan-2026-08-19T163559-499b6f0e/D-107 | 2026-08-21 | Gemma3 `test_embedding_scaling` computes-and-discards: repaired with a block-0 input capture
+plan-2026-08-19T163559-499b6f0e/D-108 | 2026-08-21 | SOM: the carried claim was HALF stale; only the prototypes test was vacuous
+plan-2026-08-19T163559-499b6f0e/D-115 | 2026-08-21 | `input_shape` was dropped by BOTH dino_v2 `get_config`s, and the carried "two failure modes" is ONE
+plan-2026-08-19T163559-499b6f0e/D-116 | 2026-08-21 | NBeatsX: `use_normalization` gated two architectures, and a parameter count cannot see the second
+plan-2026-08-19T163559-499b6f0e/D-117 | 2026-08-21 | PRISM's median head is chosen by VALUE; the linspace half of the finding is refuted; and MDN paid for a third forward pass it discarded
+plan-2026-08-19T163559-499b6f0e/D-118 | 2026-08-21 | `create_pft_sr` hard-coded nine defaults, and the obvious aliasing probe is defeated by Keras auto-tracking
+plan-2026-08-19T163559-499b6f0e/D-119 | 2026-08-21 | SuperPoint's two heads are asymmetric, and only ONE of them may read `input_shape`
+plan-2026-08-19T163559-499b6f0e/D-120 | 2026-08-21 | F-03 and F-04 are CLOSED-as-refuted: this plan's own steps 19 / 19.1 already shipped both
+plan-2026-08-19T163559-499b6f0e/D-122 | 2026-08-21 | F-19 was LIVE and only one of three instruments could see it; F-24 was already closed; F-32's vit_hmlp half never existed
+plan-2026-08-19T163559-499b6f0e/D-123 | 2026-08-21 | mamba: the guard's own rationale was false twice, and `rms_scaling=True` is not RMSNorm — but not for the recorded reason
+plan-2026-08-19T163559-499b6f0e/D-124 | 2026-08-21 | F-61: `DPTDecoder.build()` built nothing, and step 25's instrument lesson reproduced exactly
+plan-2026-08-19T163559-499b6f0e/D-125 | 2026-08-21 | F-60: the stem ruling held; the docstring was the thing that was provably wrong
+plan-2026-08-19T163559-499b6f0e/D-126 | 2026-08-21 | F-63 / F-64: a residual that was a scalar doubling, and two docstrings naming the wrong shape
+plan-2026-08-19T163559-499b6f0e/D-127 | 2026-08-21 | F-73 is six sites, not four; F-74's list half is refuted and its dict half is the F-73 fix's precondition
+plan-2026-08-19T163559-499b6f0e/D-129 | 2026-08-21 | the SqueezeNet pair: the name loss is LIVE, but its blast radius is NESTED-ONLY and the top-level probe cannot see it
+plan-2026-08-19T163559-499b6f0e/D-131 | 2026-08-21 | F-76 is LIVE and the dropped metric was NOT inert; the identity-based-dedup remedy the ledger offered is worse than the defect
+plan-2026-08-19T163559-499b6f0e/D-133 | 2026-08-21 | F-88 re-derived item by item: 12 sub-items, 2 already closed, 3 refuted as stated or as remedied, 4 shipped, 3 routed with a measured cost
+plan-2026-08-19T163559-499b6f0e/D-134 | 2026-08-21 | the nano_vlm trainer had TWO defects in series, and the inherited one was MASKED by an unrecorded earlier crash
+plan-2026-08-19T163559-499b6f0e/D-135 | 2026-08-21 | the ModernBERT item was not a cost tidy-up: TWO OF THREE SHIPPED VARIANTS WERE DEAD ON FORWARD, and the ruling the ledger carried is FORBIDDEN by the anchor it cites
+plan-2026-08-19T163559-499b6f0e/D-136 | 2026-08-21 | `strict_forward`: RULED AGAINST, and not on the file cap -- the helper is strictly WEAKER than the guard that already exists
+plan-2026-08-19T163559-499b6f0e/D-139 | 2026-08-21 | `test_base_and_large_can_never_window` is now vacuous for its own subjects in a SECOND way, and is kept as a threshold pin
+plan-2026-08-19T163559-499b6f0e/D-149 | 2026-08-22 | The plan's ONE regression was a guard measuring an untrained network's LUCK, and the fix is the fixture, not the margin
