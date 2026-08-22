@@ -23,6 +23,7 @@ from typing import Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import validate_orthonormality
 from dl_techniques.initializers.orthonormal_initializer import OrthonormalInitializer
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestOrthonormalInitializer:
@@ -373,6 +374,10 @@ class TestOrthonormalInitializer:
             model_path = os.path.join(tmpdirname, "orthonormal_model.keras")
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load the model with custom objects

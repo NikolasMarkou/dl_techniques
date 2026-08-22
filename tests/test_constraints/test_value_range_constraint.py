@@ -23,6 +23,7 @@ from dl_techniques.utils.logger import logger
 
 # Import the constraint to test (adjust import path as needed)
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestValueRangeConstraint:
@@ -325,6 +326,10 @@ class TestValueRangeConstraint:
             model_path = os.path.join(tmpdirname, "constrained_model.keras")
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load the model with custom objects
