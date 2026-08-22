@@ -235,11 +235,27 @@ class BERT(keras.Model):
             "intermediate_size": 2048,
             "description": "BERT-Small: Lightweight variant for resource-constrained environments"
         },
+        # DECISION plan-2026-08-22T035419-a11304c8/D-110
+        # `intermediate_size` is 1024, NOT 512. 512 was a 2x-hidden entry in a
+        # table whose other three rows are all 4x-hidden, and it disagreed with
+        # the released checkpoint this row names. MEASURED 2026-08-22 by fetching
+        # https://huggingface.co/google/bert_uncased_L-4_H-256_A-4/raw/main/config.json
+        # (Turc et al. 2019, "Well-Read Students Learn Better" -- the release
+        # that publishes every (L, H) combination): hidden_size=256,
+        # num_hidden_layers=4, num_attention_heads=4, intermediate_size=1024.
+        # The sibling rows were fetched in the same pass and all AGREE at 4x
+        # (base 768->3072, large 1024->4096, small L-6_H-512_A-8 -> 2048), so 512
+        # was the single outlier, not a deliberate ladder. Do NOT "restore" 512
+        # for parameter-budget reasons: this row exists to mirror a named public
+        # checkpoint, and halving its FFN makes `from_variant("tiny")` unable to
+        # accept those weights. Use `from_variant("tiny", intermediate_size=512)`
+        # if a smaller FFN is wanted.
+        # See decisions.md D-110.
         "tiny": {
             "hidden_size": 256,
             "num_layers": 4,
             "num_heads": 4,
-            "intermediate_size": 512,
+            "intermediate_size": 1024,
             "description": "BERT-Tiny: Ultra-lightweight for mobile/edge deployment"
         },
     }

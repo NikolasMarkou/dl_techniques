@@ -345,12 +345,22 @@ The recommended high-level factory for creating a complete, end-to-end model for
 
 This implementation provides several standard configurations based on the original paper.
 
-| Variant | Hidden Size | Layers | Heads | Parameters | Use Case |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`tiny`** | 256 | 4 | 4 | ~15M | Quick tests, mobile/edge deployment |
-| **`small`**| 512 | 6 | 8 | ~40M | Resource-constrained environments |
-| **`base`** | 768 | 12 | 12 | ~110M | Standard for most applications |
-| **`large`** | 1024| 24 | 16 | ~340M | Maximum performance, requires significant compute |
+Every row is traced to a **released public checkpoint config**, fetched and compared on
+2026-08-22 (not recalled). `base`/`large` come from Devlin et al. 2019; `small`/`tiny` come from
+Turc et al. 2019, *Well-Read Students Learn Better* (https://arxiv.org/abs/1908.08962), which
+released a checkpoint for every `(L, H)` pair.
+
+| Variant | Hidden Size | Layers | Heads | Intermediate | Parameters | Upstream config (fetched) |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| **`tiny`** | 256 | 4 | 4 | 1024 | ~15M | `google/bert_uncased_L-4_H-256_A-4` |
+| **`small`**| 512 | 6 | 8 | 2048 | ~40M | `google/bert_uncased_L-6_H-512_A-8` |
+| **`base`** | 768 | 12 | 12 | 3072 | ~110M | `bert-base-uncased` |
+| **`large`** | 1024| 24 | 16 | 4096 | ~340M | `bert-large-uncased` |
+
+All four rows AGREE with their upstream `config.json` on `hidden_size`, `num_hidden_layers`,
+`num_attention_heads` and `intermediate_size`. `tiny`'s `intermediate_size` was **512 until
+2026-08-22**, the single row in this table that disagreed with its own named checkpoint; see
+`bert.py` `MODEL_VARIANTS` (decision `D-110`).
 
 ### Customizing the Configuration
 
