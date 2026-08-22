@@ -338,7 +338,35 @@ class FastVLM(keras.Model):
         )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the FastVLM model architecture."""
+        """Build the FastVLM model architecture.
+
+        The ``training=None`` on every sublayer call below is TRACE-ONLY and
+        deliberately not ``training=training``: this method runs exactly once,
+        from ``__init__``, to produce the ``outputs`` tensor handed to
+        ``super().__init__(inputs=, outputs=)``. It builds the layer objects and
+        records their shapes; it is never executed again.
+        """
+        # DECISION plan-2026-08-22T035419-a11304c8/D-010
+        # Do NOT "fix" the hard-coded ``training=None`` calls in this method to
+        # thread a ``training`` argument. The source text reads like a defect --
+        # ``call()`` below passes ``training=training`` at every step while this
+        # method pins ``None`` -- and it was carried forward twice as one. It is
+        # not: ``type(model).call is FastVLM.call`` is True and
+        # ``type(model).__mro__`` is ``(FastVLM, Functional, Function, Model,
+        # ...)``, so Keras dispatches to the overriding ``call()`` and the traced
+        # functional graph is never the forward path. MEASURED (CPU, seed 3,
+        # ``embed_dims=[16,32,64]``, ``depths=[1,1,1]``, ``input_shape=(32,32,3)``,
+        # ``dropout_rate=0.9``): two ``training=True`` calls diverge by 400.48,
+        # ``training=True`` vs ``False`` by 224.41, two ``training=False`` calls
+        # are bit-identical at 0.0, and one ``training=True`` forward moved all
+        # 10 ``BatchNormalization`` ``moving_mean`` tensors. Dropout and BN both
+        # reach training mode through the real path. Independently: with the
+        # ``call()`` override DELETED the same divergence is measured (400.475,
+        # unchanged), because Keras 3's ``Functional.call`` injects the caller's
+        # ``training`` into every operation of the traced graph -- the value
+        # recorded here is overridden at runtime either way. Guarded by
+        # tests/test_models/test_fastvlm/test_training_mode_reaches_the_forward_path.py.
+        # See D-010 in decisions.md.
         x = inputs
 
         self.stem = ConvolutionalStem(
