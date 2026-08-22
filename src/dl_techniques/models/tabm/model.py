@@ -108,6 +108,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.one_hot_encoding import OneHotEncoding
 from dl_techniques.layers.tabm_blocks import ScaleEnsemble, NLinear, TabMBackbone
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -234,9 +235,9 @@ class TabMModel(keras.Model):
         ```
 
     Note:
-        For models, Keras automatically handles sub-layer building, so no custom
-        build() method is needed. The model can be compiled and trained directly
-        after instantiation. `call` returns the raw member axis; use
+        All sub-layers are created in ``__init__`` and materialized by
+        ``build()``, which traces ``call()`` on symbolic inputs. `call`
+        returns the raw member axis; use
         `predict_with_uncertainty` (or the module-level `ensemble_predict`) to
         reduce it to a point estimate and a spread.
     """
@@ -544,6 +545,23 @@ class TabMModel(keras.Model):
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer
             )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method TabMModel inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        Args:
+            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
             self,

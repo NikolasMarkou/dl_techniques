@@ -76,6 +76,7 @@ from typing import List, Optional, Union, Dict, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
+from dl_techniques.utils.model_build import materialize_sublayers
 
 
 # ---------------------------------------------------------------------
@@ -241,10 +242,11 @@ class PowerMLP(keras.Model):
         ```
 
     Note:
-        For models, Keras automatically handles sub-layer building, so no custom
-        build() method is needed. The model can be compiled and trained directly
-        after instantiation. All sub-layers are created in __init__ and built
-        automatically on first call.
+        All sub-layers are created in ``__init__``. ``build()`` materializes
+        them by tracing ``call()`` on symbolic inputs, so an explicit
+        ``model.build(shape)`` -- and the ``build_from_config`` step of
+        ``.keras`` deserialization -- leave the model actually built rather
+        than merely marked built.
     """
 
     # Model variant configurations
@@ -436,6 +438,23 @@ class PowerMLP(keras.Model):
             use_bias=self.use_bias,
             name="output_layer"
         )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method PowerMLP inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        Args:
+            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,
