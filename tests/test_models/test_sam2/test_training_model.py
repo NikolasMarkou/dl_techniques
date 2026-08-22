@@ -1035,6 +1035,20 @@ class TestIoUSupervision:
         general hazard: any oracle assembled ACROSS two forward passes must
         pin the training flag, or it is measuring dropout.
         """
+        # The DRAW is pinned, not the bar, and the bar cannot be widened.
+        # MEASURED over ``keras.utils.set_random_seed(0..19)``, the separation
+        # ``abs(hand_gated - hand_ungated)`` is BIMODAL, not noisy: 19 of 20
+        # seeds give exactly 0.270000 and seed 4 gives 0.003333. That outlier
+        # is not sampling spread -- it is a degenerate draw in which the
+        # UNTRAINED mask head happens to achieve IoU ~0.8 on the revealed
+        # frame, so ``(0.9 - 0.8)**2 = 0.01`` collapses the frame's whole
+        # contribution. On such a draw the separation assertion below is
+        # telling the truth: a guard sited here genuinely cannot discriminate
+        # the gated pack from the ungated one, so widening the 0.01 bar would
+        # not make the guard correct, it would make it vacuous on exactly the
+        # fixture where it stops working. Pinning the draw is the only repair
+        # that keeps the assertion meaningful.
+        keras.utils.set_random_seed(0)
         model = trainer(object_score=5.0)
         pin_predicted_iou(model, 0.9)
         inputs = clip_inputs(model, absent_frames=(1,))
