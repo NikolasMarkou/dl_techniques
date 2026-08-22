@@ -229,10 +229,10 @@ def test_different_input_shapes(input_shape):
     assert output.shape == input_shape
 
 
-@pytest.mark.parametrize("drop_rate", [0.0, 0.3, 0.7, 0.999])
-def test_different_drop_rates(drop_rate, sample_input):
+@pytest.mark.parametrize("drop_path_rate", [0.0, 0.3, 0.7, 0.999])
+def test_different_drop_rates(drop_path_rate, sample_input):
     """Test layer with different drop rates."""
-    layer = StochasticDepth(drop_path_rate=drop_rate)
+    layer = StochasticDepth(drop_path_rate=drop_path_rate)
     output = layer(sample_input, training=True)
     assert output.shape == sample_input.shape
 
