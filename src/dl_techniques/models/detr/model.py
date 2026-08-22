@@ -589,7 +589,7 @@ def create_detr(
     num_encoder_layers: int = 6,
     num_decoder_layers: int = 6,
     ffn_dim: int = 2048,
-    dropout: float = 0.1,
+    dropout_rate: float = 0.1,
     aux_loss: bool = True,
     activation: str = "relu",
     normalization_type: str = "layer_norm",
@@ -608,7 +608,7 @@ def create_detr(
         num_encoder_layers: Number of encoder layers.
         num_decoder_layers: Number of decoder layers.
         ffn_dim: Hidden dimension of the FFNs in the transformer.
-        dropout: Dropout rate used in the transformer.
+        dropout_rate: Dropout rate used in the transformer.
         aux_loss: If True, model outputs predictions from intermediate layers.
         activation: Activation function for FFN. Defaults to "relu".
         normalization_type: Type of normalization to use. Defaults to "layer_norm".
@@ -639,7 +639,7 @@ def create_detr(
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
         ffn_dim=ffn_dim,
-        dropout=dropout,
+        dropout=dropout_rate,
         activation=activation,
         normalization_type=normalization_type,
         ffn_type=ffn_type

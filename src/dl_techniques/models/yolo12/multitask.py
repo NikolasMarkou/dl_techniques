@@ -138,9 +138,9 @@ class YOLOv12MultiTask(keras.Model):
         reg_max: Maximum value for DFL regression in detection.
         task_config: TaskConfiguration instance or list of VisionTaskType enums.
         segmentation_filters: Filter sizes for segmentation decoder.
-        segmentation_dropout: Dropout rate for segmentation head.
+        segmentation_dropout_rate: Dropout rate for segmentation head.
         classification_hidden_dims: Hidden dimensions for classification head.
-        classification_dropout: Dropout rate for classification head.
+        classification_dropout_rate: Dropout rate for classification head.
         kernel_initializer: Weight initializer for all layers.
         name: Model name.
 
@@ -181,10 +181,10 @@ class YOLOv12MultiTask(keras.Model):
         ] = VisionTaskType.DETECTION,
         # Segmentation head configuration
         segmentation_filters: Optional[List[int]] = None,
-        segmentation_dropout: float = 0.1,
+        segmentation_dropout_rate: float = 0.1,
         # Classification head configuration
         classification_hidden_dims: Optional[List[int]] = None,
-        classification_dropout: float = 0.3,
+        classification_dropout_rate: float = 0.3,
         # Common configuration
         kernel_initializer: str = "he_normal",
         name: Optional[str] = None,
@@ -204,9 +204,9 @@ class YOLOv12MultiTask(keras.Model):
             task_config: Task configuration - can be TaskConfiguration, list of VisionTaskType enums,
                         list of strings, single VisionTaskType, or single string.
             segmentation_filters: Filter sizes for segmentation decoder.
-            segmentation_dropout: Dropout rate for segmentation.
+            segmentation_dropout_rate: Dropout rate for segmentation.
             classification_hidden_dims: Hidden dims for classification MLP.
-            classification_dropout: Dropout rate for classification.
+            classification_dropout_rate: Dropout rate for classification.
             kernel_initializer: Weight initializer.
             name: Model name.
             **kwargs: Additional keyword arguments.
@@ -249,9 +249,9 @@ class YOLOv12MultiTask(keras.Model):
         self.scale = scale
         self.reg_max = reg_max
         self.segmentation_filters = segmentation_filters
-        self.segmentation_dropout = segmentation_dropout
+        self.segmentation_dropout_rate = segmentation_dropout_rate
         self.classification_hidden_dims = classification_hidden_dims
-        self.classification_dropout = classification_dropout
+        self.classification_dropout_rate = classification_dropout_rate
         self.kernel_initializer = kernel_initializer
 
         if name is None:
@@ -312,7 +312,7 @@ class YOLOv12MultiTask(keras.Model):
             segmentation_head = YOLOv12SegmentationHead(
                 num_classes=self.num_segmentation_classes,  # Use segmentation-specific class count
                 intermediate_filters=self.segmentation_filters,
-                dropout_rate=self.segmentation_dropout,
+                dropout_rate=self.segmentation_dropout_rate,
                 kernel_initializer=self.kernel_initializer,
                 name="segmentation_head"
             )
@@ -323,7 +323,7 @@ class YOLOv12MultiTask(keras.Model):
             classification_head = YOLOv12ClassificationHead(
                 num_classes=self.num_classification_classes,  # Use classification-specific class count
                 hidden_dims=self.classification_hidden_dims,
-                dropout_rate=self.classification_dropout,
+                dropout_rate=self.classification_dropout_rate,
                 kernel_initializer=self.kernel_initializer,
                 name="classification_head"
             )
@@ -364,9 +364,9 @@ class YOLOv12MultiTask(keras.Model):
             # Serialize task config as task names list for simplicity
             "task_config": self.task_config.get_task_names(),
             "segmentation_filters": self.segmentation_filters,
-            "segmentation_dropout": self.segmentation_dropout,
+            "segmentation_dropout_rate": self.segmentation_dropout_rate,
             "classification_hidden_dims": self.classification_hidden_dims,
-            "classification_dropout": self.classification_dropout,
+            "classification_dropout_rate": self.classification_dropout_rate,
             "kernel_initializer": self.kernel_initializer,
         })
         return config

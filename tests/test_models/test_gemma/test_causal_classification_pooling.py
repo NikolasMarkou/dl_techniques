@@ -59,7 +59,7 @@ def _build(strategy):
         GEMMA3_CONFIG,
         num_labels=3,
         pooling_strategy=strategy,
-        classifier_dropout=0.0,
+        classifier_dropout_rate=0.0,
     )
 
 

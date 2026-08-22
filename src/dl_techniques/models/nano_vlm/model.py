@@ -165,7 +165,7 @@ class NanoVLM(keras.Model):
         use_shared_embedding: Boolean, whether to tie input and output embeddings
             for memory efficiency. Only applicable when text_component_type='decoder'.
             Defaults to True.
-        output_dropout: Float, dropout rate for the final output projection layer.
+        output_dropout_rate: Float, dropout rate for the final output projection layer.
             Must be between 0.0 and 1.0. Defaults to 0.1.
         initializer_range: Float, standard deviation for weight initialization.
             Must be positive. Defaults to 0.02.
@@ -301,7 +301,7 @@ class NanoVLM(keras.Model):
             vocab_size: int = 32000,
             text_component_type: TextComponentType = 'decoder',
             use_shared_embedding: bool = True,
-            output_dropout: float = 0.1,
+            output_dropout_rate: float = 0.1,
             initializer_range: float = 0.02,
             kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
@@ -314,8 +314,8 @@ class NanoVLM(keras.Model):
         # Validate basic parameters
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
-        if not (0.0 <= output_dropout <= 1.0):
-            raise ValueError(f"output_dropout must be between 0.0 and 1.0, got {output_dropout}")
+        if not (0.0 <= output_dropout_rate <= 1.0):
+            raise ValueError(f"output_dropout_rate must be between 0.0 and 1.0, got {output_dropout_rate}")
         if initializer_range <= 0.0:
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
 
@@ -326,7 +326,7 @@ class NanoVLM(keras.Model):
         self.vocab_size = vocab_size
         self.text_component_type = text_component_type
         self.use_shared_embedding = use_shared_embedding
-        self.output_dropout = output_dropout
+        self.output_dropout_rate = output_dropout_rate
         self.initializer_range = initializer_range
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -350,9 +350,9 @@ class NanoVLM(keras.Model):
 
         # 4. Create output layers
         self.final_dropout = layers.Dropout(
-            rate=output_dropout,
+            rate=output_dropout_rate,
             name='final_dropout'
-        ) if output_dropout > 0.0 else None
+        ) if output_dropout_rate > 0.0 else None
 
         self.output_projection = self._create_output_projection()
 
@@ -825,7 +825,7 @@ class NanoVLM(keras.Model):
             'vocab_size': self.vocab_size,
             'text_component_type': self.text_component_type,
             'use_shared_embedding': self.use_shared_embedding,
-            'output_dropout': self.output_dropout,
+            'output_dropout_rate': self.output_dropout_rate,
             'initializer_range': self.initializer_range,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),

@@ -679,7 +679,7 @@ def create_qwen3_classification(
     config: Dict[str, Any],
     num_labels: int,
     pooling_strategy: str = "last",
-    classifier_dropout: Optional[float] = None,
+    classifier_dropout_rate: Optional[float] = None,
 ) -> keras.Model:
     """
     Create a Qwen3 model for sequence classification tasks.
@@ -702,7 +702,7 @@ def create_qwen3_classification(
               function of the first token id ALONE; it is kept only for
               bidirectional-era checkpoints.
             Defaults to "last".
-        classifier_dropout: The dropout rate for the classification head. If
+        classifier_dropout_rate: The dropout rate for the classification head. If
             `None`, it defaults to the `dropout_rate` from the main `config`.
             Defaults to `None`.
 
@@ -752,7 +752,7 @@ def create_qwen3_classification(
     )
 
     # Determine classifier dropout
-    dropout_rate = classifier_dropout if classifier_dropout is not None else config.get("dropout_rate", 0.1)
+    dropout_rate = classifier_dropout_rate if classifier_dropout_rate is not None else config.get("dropout_rate", 0.1)
     if dropout_rate > 0.0:
         logger.info(f"Applying classifier dropout with rate: {dropout_rate}")
         pooled_output = keras.layers.Dropout(
@@ -808,7 +808,7 @@ def create_qwen3(
             parameters or provide task-specific settings.
             - For base model: `hidden_size`, `num_layers`, etc.
             - For classification task: `num_labels`, `pooling_strategy`,
-              `classifier_dropout`.
+              `classifier_dropout_rate`.
 
     Returns:
         A Keras `Model` configured for the specified task.
@@ -853,7 +853,7 @@ def create_qwen3(
     # 2. Separate task-specific kwargs from model config kwargs
     task_kwargs = {}
     model_kwargs = {}
-    task_specific_keys = ["num_labels", "pooling_strategy", "classifier_dropout"]
+    task_specific_keys = ["num_labels", "pooling_strategy", "classifier_dropout_rate"]
 
     for key, value in kwargs.items():
         if key in task_specific_keys:

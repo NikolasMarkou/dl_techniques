@@ -177,7 +177,7 @@ class DINOv2Block(keras.layers.Layer):
         stochastic_depth_rate: Stochastic depth drop probability.
         init_values: LearnableMultiplier initialization value (None disables scaling).
         attention_dropout: Dropout rate for attention.
-        ffn_dropout: Dropout rate for FFN.
+        ffn_dropout_rate: Dropout rate for FFN.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -222,7 +222,7 @@ class DINOv2Block(keras.layers.Layer):
             stochastic_depth_rate: float = 0.0,
             init_values: Optional[float] = None,
             attention_dropout: float = 0.0,
-            ffn_dropout: float = 0.0,
+            ffn_dropout_rate: float = 0.0,
             **kwargs
     ) -> None:
         super().__init__(**kwargs)
@@ -250,7 +250,7 @@ class DINOv2Block(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.init_values = init_values
         self.attention_dropout = attention_dropout
-        self.ffn_dropout = ffn_dropout
+        self.ffn_dropout_rate = ffn_dropout_rate
 
         # Create sub-layers in __init__ following Modern Keras 3 patterns
 
@@ -286,7 +286,7 @@ class DINOv2Block(keras.layers.Layer):
         hidden_dim = int(self.dim * self.mlp_ratio)
         ffn_args = {
             'output_dim': self.dim,
-            'dropout_rate': self.ffn_dropout,
+            'dropout_rate': self.ffn_dropout_rate,
             'use_bias': self.ffn_bias
         }
 
@@ -416,7 +416,7 @@ class DINOv2Block(keras.layers.Layer):
             "stochastic_depth_rate": self.stochastic_depth_rate,
             "init_values": self.init_values,
             "attention_dropout": self.attention_dropout,
-            "ffn_dropout": self.ffn_dropout,
+            "ffn_dropout_rate": self.ffn_dropout_rate,
         })
         return config
 

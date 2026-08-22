@@ -641,7 +641,7 @@ class TestQwen3NextModelFactories:
             "tiny",
             task_type="classification",
             num_labels=num_labels,
-            classifier_dropout=0.5
+            classifier_dropout_rate=0.5
         )
         # Check that the dropout layer was created with the correct rate
         classifier_dropout_layer = dropout_model.get_layer("classifier_dropout")

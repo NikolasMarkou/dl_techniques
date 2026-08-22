@@ -544,7 +544,7 @@ def create_gemma3_classification(
     config: Dict[str, Any],
     num_labels: int,
     pooling_strategy: str = "last",
-    classifier_dropout: Optional[float] = None,
+    classifier_dropout_rate: Optional[float] = None,
 ) -> keras.Model:
     """Creates a Gemma3 model for sequence classification tasks.
 
@@ -590,8 +590,8 @@ def create_gemma3_classification(
     )
 
     dropout_rate = (
-        classifier_dropout
-        if classifier_dropout is not None
+        classifier_dropout_rate
+        if classifier_dropout_rate is not None
         else config.get("dropout_rate", 0.0)
     )
     if dropout_rate > 0.0:
@@ -642,7 +642,7 @@ def create_gemma3(
     else:
         raise TypeError("config_or_variant must be a string or a dictionary.")
 
-    task_keys = ["num_labels", "pooling_strategy", "classifier_dropout"]
+    task_keys = ["num_labels", "pooling_strategy", "classifier_dropout_rate"]
     task_kwargs = {k: kwargs.pop(k) for k in task_keys if k in kwargs}
     config.update(kwargs)  # The rest are model overrides
 

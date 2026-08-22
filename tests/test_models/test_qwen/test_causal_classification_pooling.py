@@ -77,7 +77,7 @@ def _build(factory, config, strategy):
         config,
         num_labels=3,
         pooling_strategy=strategy,
-        classifier_dropout=0.0,
+        classifier_dropout_rate=0.0,
     )
 
 

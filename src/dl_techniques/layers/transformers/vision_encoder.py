@@ -955,7 +955,7 @@ def create_vision_encoder(
         ffn_type: FFNType = 'mlp',
         use_cls_token: bool = True,
         output_mode: PoolingStrategy = 'cls',
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         **kwargs: Any
 ) -> VisionEncoder:
     """
@@ -991,8 +991,8 @@ def create_vision_encoder(
     :type use_cls_token: bool
     :param output_mode: Output pooling mode.
     :type output_mode: str
-    :param dropout: General dropout rate.
-    :type dropout: float
+    :param dropout_rate: General dropout rate.
+    :type dropout_rate: float
     :param kwargs: Additional arguments for VisionEncoder constructor.
     :return: Configured VisionEncoder instance.
     :rtype: VisionEncoder
@@ -1025,7 +1025,7 @@ def create_vision_encoder(
         ffn_type=ffn_type,
         use_cls_token=use_cls_token,
         output_mode=output_mode,
-        dropout_rate=dropout,
+        dropout_rate=dropout_rate,
         **kwargs
     )
 
