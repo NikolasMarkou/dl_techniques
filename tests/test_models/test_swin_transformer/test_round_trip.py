@@ -89,8 +89,44 @@ class TestSwinGradientFlow:
     would keep every shape and every round-trip test green.
     """
 
+    # DECISION plan-2026-08-22T035419-a11304c8/D-030
+    # ``drop_path_rate=0.0`` and the seed are BOTH load-bearing; do not restore
+    # the variant default here, and do not "fix" the flake by picking a lucky
+    # seed at the default rate.
+    #
+    # This test was flaky at 1 failed / 11 passed over 12 solo runs, with
+    # ``170/176 trainable weights receive a live gradient`` and six dead weights
+    # confined to ONE block's ``norm2`` + ``mlp`` (the block index moved between
+    # observations: stage_3_block_0 in one record, stage_3_block_1 in another).
+    # Root cause, measured: ``StochasticDepth.call`` draws an UNSEEDED
+    # ``keras.random.uniform`` of shape ``(batch, 1, ..., 1)``
+    # (``layers/stochastic_depth.py:172``), one independent Bernoulli per sample.
+    # A SwinTransformerBlock has two such draws, one per residual branch, so when
+    # both of a batch-of-2's samples are dropped on a branch that branch's
+    # weights receive an identically-zero -- not disconnected -- gradient.
+    # Probe (8 fresh models per arm, tape step at ``training=True``):
+    #   drop_path_rate=0.0 -> 0/8 runs with any dead weight
+    #   drop_path_rate=0.1 -> 0/8 (the shipped "tiny" default; ~1/12 in the wild)
+    #   drop_path_rate=0.9 -> 8/8, 26-60 dead weights, a DIFFERENT random subset
+    #                         of blocks each run, always whole {norm1,attn} or
+    #                         {norm2,mlp} branch pairs.
+    # The dead set follows the draw exactly, so this is regularization firing,
+    # not a broken backward graph.
+    #
+    # Seeding ALONE is not the fix: over ``set_random_seed(0..15)`` at the
+    # default rate, 4 of 16 seeds still produce dead weights (1, 9, 11, 12), so
+    # "seed it" reduces to pinning one of the 12 lucky seeds -- a guard that
+    # passes by luck and silently re-flakes the moment any upstream RNG
+    # consumption shifts the seed-to-draw map. The claim this test makes is
+    # backward-graph CONNECTIVITY, which is a structural property; at
+    # ``drop_path_rate=0.0`` StochasticDepth early-returns its input
+    # (``stochastic_depth.py:157``) and no draw can decide the verdict. The seed
+    # additionally pins the weight init so the magnitudes are reproducible.
     def test_gradients_reach_every_trainable_weight(self):
-        model = create_swin_transformer("tiny", 10, input_shape=(32, 32, 3))
+        keras.utils.set_random_seed(0)
+        model = create_swin_transformer(
+            "tiny", 10, input_shape=(32, 32, 3), drop_path_rate=0.0
+        )
         x = _images(s=32)
         model(x, training=False)  # a subclassed model is unbuilt until first call
 
