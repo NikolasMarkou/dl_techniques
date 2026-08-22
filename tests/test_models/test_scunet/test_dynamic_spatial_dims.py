@@ -41,6 +41,11 @@ class TestSymbolicBuild:
         assert model.output_shape[1:] == (None, None, 3), model.output_shape
 
 
+# fp32 graph-vs-eager reassociation bound for SCUNet's output range; derived at
+# the single use site below (D-031). ~52 ulp at |y| = 16.
+_GRAPH_VS_EAGER_ATOL = 1e-4
+
+
 class TestDynamicTrace:
     def test_one_dynamic_trace_serves_two_different_sizes(self) -> None:
         model = _tiny()
@@ -65,13 +70,49 @@ class TestDynamicTrace:
         # A model that baked in a constant crop would still produce the right
         # shape for whichever size it baked; assert the CONTENT agrees with the
         # eager path at both sizes.
+        #
+        # DECISION plan-2026-08-22T035419-a11304c8/D-031
+        # ``atol=_GRAPH_VS_EAGER_ATOL`` (1e-4), NOT the 1e-5 this pair carried
+        # until 2026-08-22, and NOT a seeded model. Derivation, measured:
+        #
+        #   * At atol=rtol=1e-5 this assertion was RED at 1 failed / 11 passed
+        #     over 12 solo runs, with ``Mismatched elements: 1 / 27648`` and
+        #     ``Max absolute difference among violations: 1.168251e-05``
+        #     (an earlier capture read 1.049e-05 -- the number moves because the
+        #     model is a fresh unseeded draw every run).
+        #   * Noise distribution, sampled over 25 freshly initialized ``_tiny()``
+        #     models x both sizes = 50 graph-vs-eager comparisons: max |delta|
+        #     ranged 6.2e-06 .. 1.335e-05, and the worst ratio to the OLD
+        #     tolerance was 1.0137 -- i.e. 1 of 50 comparisons exceeded the bar,
+        #     by 1.4%. The bound was not provably attainable: it sat inside the
+        #     noise it was measuring.
+        #   * Output magnitudes reach |y| ~ 15, where one fp32 ulp is 1.907e-06.
+        #     The worst observed delta is therefore ~7 ulp -- ordinary fp32
+        #     reassociation for a network whose per-output accumulation depth is
+        #     in the thousands of MACs, and whose graph and eager paths take
+        #     different kernel fusion/vectorization routes.
+        #   * The new bar is 1e-4 ~= 52 ulp at |y| = 16, giving 7.5x headroom
+        #     over the worst of the 50 samples (worst ratio under the new bar:
+        #     0.134). It stays four to five orders of magnitude below any real
+        #     defect this assertion can see: a one-pixel crop shift moves
+        #     elements by O(1), and a baked-in constant crop is caught by the
+        #     shape assertions above plus
+        #     ``test_the_crop_is_not_a_no_op_under_a_dynamic_trace``.
+        #
+        # Seeding was considered and rejected. It is the right fix for a
+        # DISCRETE draw that decides a verdict (see D-030, swin stochastic
+        # depth); here the quantity is continuous, every model in the sample
+        # lands in the same 6e-06..1.3e-05 band, and pinning one weight draw
+        # would hide a mis-set bound instead of correcting it -- while costing
+        # the population sampling that the unseeded init gives this numerics
+        # test for free.
         np.testing.assert_allclose(
             out_a.numpy(), np.asarray(model(a, training=False)),
-            atol=1e-5, rtol=1e-5,
+            atol=_GRAPH_VS_EAGER_ATOL, rtol=1e-5,
         )
         np.testing.assert_allclose(
             out_b.numpy(), np.asarray(model(b, training=False)),
-            atol=1e-5, rtol=1e-5,
+            atol=_GRAPH_VS_EAGER_ATOL, rtol=1e-5,
         )
 
     def test_the_crop_is_not_a_no_op_under_a_dynamic_trace(self) -> None:
@@ -101,6 +142,14 @@ class TestDynamicTrace:
         # different fusion paths than dynamically-shaped ones; this is fp32
         # reassociation noise, not a padding difference (a one-pixel crop shift
         # moves elements by O(1)).
+        # [RE-MEASURED 2026-08-22, D-031] 25 freshly initialized models: max
+        # |delta| 5.722e-06 (above the 3.46e-06 recorded here), worst ratio to
+        # this tolerance 0.449, ZERO violations in 25 of 25. This pair keeps
+        # atol=1e-5 deliberately: it compares two GRAPH traces of the same
+        # model, whose spread is roughly half the graph-vs-eager spread above,
+        # and it has never been observed RED. It is not widened to
+        # _GRAPH_VS_EAGER_ATOL just for symmetry -- a tolerance is a claim about
+        # a measured distribution, and these are two different distributions.
         np.testing.assert_allclose(
             static_fn(x).numpy(), dynamic_fn(x).numpy(), atol=1e-5, rtol=1e-5,
         )
