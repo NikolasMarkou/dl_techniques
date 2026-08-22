@@ -82,6 +82,7 @@ based on subsequent research, such as:
 
 """
 
+import math
 import keras
 from keras import ops, layers, initializers
 from typing import Optional, Dict, Any, Literal, Tuple, Union, Callable
@@ -179,6 +180,19 @@ class TextDecoder(keras.layers.Layer):
     :type attention_dropout_rate: float
     :param initializer_range: Std-dev for TruncatedNormal. Default: 0.02.
     :type initializer_range: float
+    :param scale_residual_initializer_by_depth: When True, the two residual-path
+        output projections of every block (the attention output projection and
+        the FFN's contracting projection) are initialized at
+        ``initializer_range / sqrt(2 * depth)`` instead of ``initializer_range``,
+        so that the residual stream's variance does not grow with depth. Q/K/V
+        and the FFN expansion are UNAFFECTED. Default: False, which is the
+        behaviour of every consumer written before 2026-08-22. This is GPT-2's
+        published rule; see ``models/gpt2/gpt2.py`` and
+        ``huggingface/transformers`` ``modeling_gpt2.py::_init_weights``.
+        Requires ``attention_type='multi_head'`` and ``ffn_type='mlp'`` -- any
+        other choice RAISES from the respective layer factory rather than
+        silently ignoring the request.
+    :type scale_residual_initializer_by_depth: bool
     :param layer_norm_eps: Normalization epsilon. Default: 1e-12. Applies to
         ``embed_norm``, ``final_norm`` AND every one of the ``2 * depth``
         in-block norms. **Numerics change (2026-08-19, decisions.md D-007):**
@@ -211,6 +225,7 @@ class TextDecoder(keras.layers.Layer):
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
             initializer_range: float = 0.02,
+            scale_residual_initializer_by_depth: bool = False,
             layer_norm_eps: float = 1e-12,
             **kwargs: Any
     ) -> None:
@@ -285,6 +300,7 @@ class TextDecoder(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range
+        self.scale_residual_initializer_by_depth = bool(scale_residual_initializer_by_depth)
         self.layer_norm_eps = layer_norm_eps
 
         # --- Create Sub-layers in __init__ ---
@@ -315,6 +331,30 @@ class TextDecoder(keras.layers.Layer):
         # must dominate). If that control ever loses its remaining headroom,
         # RE-DERIVE it against a measurement -- do not loosen the bar again.
         # See decisions.md D-067.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        # `1/sqrt(2 * depth)`, NOT `1/sqrt(depth)`: the 2 counts the residual
+        # ADDITIONS per block (attention and FFN), which is why the same factor
+        # is applied to both projections. Verbatim upstream --
+        # huggingface/transformers `modeling_gpt2.py::_init_weights`:
+        # `std = self.config.initializer_range / math.sqrt(2 * self.config.n_layer)`
+        # applied to `GPT2Attention.c_proj` and `GPT2MLP.c_proj`; karpathy/nanoGPT
+        # `model.py:145`: `std=0.02/math.sqrt(2 * config.n_layer)` for every
+        # parameter whose name ends `c_proj.weight`.
+        # WHAT NOT TO DO: do not "simplify" by scaling `initializer_range`
+        # itself for the whole block -- that shrinks Q/K/V and the FFN expansion
+        # too, which the reference explicitly does not do, and which was the
+        # documented reason gpt2.py carried this as an unfixed departure until
+        # today. Note also that the std that lands is the TRUNCATED-normal one:
+        # `TruncatedNormal(stddev=s)` has empirical std `0.8796 * s` (2-sigma
+        # truncation), so a test must pin the RATIO or the truncated value, not
+        # the bare `initializer_range / sqrt(2 * depth)`.
+        # See decisions.md D-160.
+        residual_output_kernel_initializer = None
+        if self.scale_residual_initializer_by_depth:
+            residual_output_kernel_initializer = initializers.TruncatedNormal(
+                stddev=self.initializer_range / math.sqrt(2.0 * self.depth)
+            )
+
         self.decoder_layers = []
         for i in range(self.depth):
             # Linearly increase drop rate per layer
@@ -348,6 +388,7 @@ class TextDecoder(keras.layers.Layer):
                 kernel_initializer=initializers.TruncatedNormal(
                     stddev=self.initializer_range
                 ),
+                residual_output_kernel_initializer=residual_output_kernel_initializer,
                 name=f"decoder_layer_{i}"
             )
             self.decoder_layers.append(layer)
@@ -606,6 +647,7 @@ class TextDecoder(keras.layers.Layer):
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'initializer_range': self.initializer_range,
+            'scale_residual_initializer_by_depth': self.scale_residual_initializer_by_depth,
             'layer_norm_eps': self.layer_norm_eps,
         })
         return config

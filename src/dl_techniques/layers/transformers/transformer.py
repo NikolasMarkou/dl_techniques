@@ -89,7 +89,9 @@ from ..moe import MixtureOfExperts, MoEConfig
 from ..stochastic_depth import StochasticDepth
 from ..layer_scale import LearnableMultiplier
 from ..ffn import assemble_ffn_config, create_ffn_from_config, FFNType
+from ..ffn.factory import FFN_REGISTRY
 from ..attention import create_attention_layer, AttentionType
+from ..attention.factory import ATTENTION_REGISTRY
 from ..norms import create_normalization_layer, NormalizationType
 from ...initializers import clone_initializer
 
@@ -129,6 +131,7 @@ def build_transformer_ffn_config(
         kernel_initializer: Any,
         bias_initializer: Any,
         use_bias: bool,
+        output_kernel_initializer: Any = None,
         ffn_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the FFN factory config for a transformer encoder/decoder block.
@@ -187,6 +190,14 @@ def build_transformer_ffn_config(
     :type dropout_rate: float
     :param kernel_initializer: The block's kernel initializer.
     :type kernel_initializer: Any
+    :param output_kernel_initializer: Optional initializer for the FFN's
+        OUTPUT/contracting projection alone (the residual-path projection).
+        Emitted into the wrapper config only when not ``None``, so it is
+        subject to the same registry intersection as every other wrapper
+        convenience -- only ``'mlp'`` declares it. The caller is responsible
+        for rejecting the combination earlier if a silent drop would be wrong;
+        ``TransformerLayer`` does exactly that.
+    :type output_kernel_initializer: Any
     :param bias_initializer: The block's bias initializer.
     :type bias_initializer: Any
     :param use_bias: The block's bias switch. Forwarded to every registry type
@@ -212,6 +223,9 @@ def build_transformer_ffn_config(
         'activation': activation,
         'use_bias': use_bias,
     }
+
+    if output_kernel_initializer is not None:
+        config['output_kernel_initializer'] = output_kernel_initializer
 
     if ffn_type == 'swiglu':
         del config['hidden_dim']
@@ -443,6 +457,18 @@ class TransformerLayer(keras.layers.Layer):
     :type use_bias: bool
     :param kernel_initializer: Kernel weight initializer.
     :type kernel_initializer: Union[str, initializers.Initializer]
+    :param residual_output_kernel_initializer: Optional initializer applied to
+        the block's TWO residual-path output projections ONLY -- the attention
+        output projection and the FFN's contracting projection -- leaving Q/K/V
+        and the FFN expansion on ``kernel_initializer``. ``None`` (the default)
+        means every projection keeps ``kernel_initializer``, i.e. the behaviour
+        of every consumer written before 2026-08-22. It exists for GPT-2's
+        residual-init rule (std scaled by ``1/sqrt(2 * n_layer)``, HF
+        ``modeling_gpt2.py::_init_weights``); it is only accepted by
+        ``attention_type`` in ``{'multi_head', 'multi_head_cross'}`` and
+        ``ffn_type == 'mlp'``, and any other combination RAISES from the
+        respective factory rather than ignoring it.
+    :type residual_output_kernel_initializer: Optional[Union[str, initializers.Initializer]]
     :param bias_initializer: Bias weight initializer.
     :type bias_initializer: Union[str, initializers.Initializer]
     :param kernel_regularizer: Kernel weight regularizer.
@@ -512,6 +538,7 @@ class TransformerLayer(keras.layers.Layer):
             activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
             kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
+            residual_output_kernel_initializer: Optional[Union[str, initializers.Initializer]] = None,
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
@@ -567,6 +594,10 @@ class TransformerLayer(keras.layers.Layer):
         self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
+        self.residual_output_kernel_initializer = (
+            initializers.get(residual_output_kernel_initializer)
+            if residual_output_kernel_initializer is not None else None
+        )
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
@@ -575,6 +606,9 @@ class TransformerLayer(keras.layers.Layer):
         self.lambda_init = lambda_init
         self.use_layer_scale = bool(use_layer_scale)
         self.layer_scale_init_value = float(layer_scale_init_value)
+
+        if self.residual_output_kernel_initializer is not None:
+            self._reject_unsupported_residual_output_init()
 
         # --- Handle MoE Configuration ---
         # Convert dict to MoEConfig if needed
@@ -833,8 +867,24 @@ class TransformerLayer(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown attention type: {self.attention_type}")
 
-        # User-provided args override defaults
-        return {**default_params, **self.attention_args}
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        # Merged HERE, at the same precedence as `attention_args`, and NOT into
+        # each per-type `default_params` branch. That placement is the point:
+        # `create_attention_layer` RAISES on a keyword the chosen type does not
+        # declare, and only 'multi_head'/'multi_head_cross' declare
+        # `output_kernel_initializer`, so asking for a residual-scaled init on
+        # (say) 'window' or 'differential' is a LOUD construction failure
+        # instead of a silently dropped request. Do NOT "fix" that raise by
+        # filtering the key out here -- a silently-ignored initializer scaling
+        # is precisely the defect class this parameter was added to remove.
+        # See decisions.md D-160.
+        params = {**default_params, **self.attention_args}
+        if self.residual_output_kernel_initializer is not None:
+            params.setdefault(
+                'output_kernel_initializer',
+                self.residual_output_kernel_initializer,
+            )
+        return params
 
     def _create_attention_layer(self, name: str) -> keras.layers.Layer:
         """Create an attention layer using the component factory.
@@ -858,6 +908,58 @@ class TransformerLayer(keras.layers.Layer):
                 f"Original error: {e}"
             )
 
+    def _reject_unsupported_residual_output_init(self) -> None:
+        """Raise unless BOTH sub-layer types can honour a residual-only init.
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        This exists because the two channels the initializer travels on fail
+        DIFFERENTLY, and one of them fails silently. The FFN side goes through
+        ``assemble_ffn_config``, which INTERSECTS the wrapper's config with the
+        target type's declared params and drops the remainder without a word
+        (correct in general -- those are the wrapper's own defaults). So
+        ``ffn_type='swiglu'`` would accept
+        ``residual_output_kernel_initializer=...`` and build an entirely
+        UNSCALED residual projection with no error anywhere. A
+        silently-ignored initializer request is precisely the defect class this
+        parameter was added to remove, so the combination is rejected HERE,
+        naming this class's own parameter rather than the forwarded spelling.
+        Do NOT relax this to a warning. See decisions.md D-160.
+
+        :raises ValueError: If ``ffn_type`` or ``attention_type`` does not
+            declare ``output_kernel_initializer``.
+        """
+        supported_ffn = sorted(
+            t for t, info in FFN_REGISTRY.items()
+            if 'output_kernel_initializer' in info['optional_params']
+        )
+        supported_attention = sorted(
+            t for t, info in ATTENTION_REGISTRY.items()
+            if 'output_kernel_initializer' in info.get('optional_params', {})
+        )
+        if self.moe_config is None and self.ffn_type not in supported_ffn:
+            raise ValueError(
+                f"residual_output_kernel_initializer was supplied but "
+                f"ffn_type='{self.ffn_type}' has no separable output "
+                f"projection to apply it to. Supported ffn_type values: "
+                f"{supported_ffn}. (Passing it anyway would be silently "
+                f"dropped by the FFN factory's registry intersection, leaving "
+                f"the residual projection unscaled.)"
+            )
+        if self.attention_type not in supported_attention:
+            raise ValueError(
+                f"residual_output_kernel_initializer was supplied but "
+                f"attention_type='{self.attention_type}' does not expose its "
+                f"output projection's initializer. Supported attention_type "
+                f"values: {supported_attention}."
+            )
+        if self.moe_config is not None:
+            raise ValueError(
+                "residual_output_kernel_initializer is not supported together "
+                "with moe_config: the FFN is a MixtureOfExperts layer whose "
+                "expert output projections are configured through "
+                "moe_config.expert_config.ffn_config, not through this block."
+            )
+
     def _get_ffn_config(self, name: str) -> Dict[str, Any]:
         """Consolidate configuration for FFN layer creation.
 
@@ -878,6 +980,19 @@ class TransformerLayer(keras.layers.Layer):
         # clone is applied on the FFN side so `_get_attention_params` and
         # `get_config` still report the instance the caller passed.
         # See decisions.md D-070.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        # `output_kernel_initializer` rides the WRAPPER channel (a named
+        # parameter of `build_transformer_ffn_config`), NOT `ffn_args`. The
+        # tempting alternative -- injecting it into `ffn_args` so the strict
+        # factory raises for an `ffn_type` that cannot honour it -- is exactly
+        # what `TestModelBuiltFFNKwargDictSweep::
+        # test_no_raw_self_built_dict_meets_a_dynamic_ffn_type` forbids (D-017/
+        # D-023: a model-injected key on the unfiltered channel makes the
+        # factory blame the USER for a name the model chose), and it was tried
+        # here and measured RED. The silent-drop hazard that routing creates is
+        # closed EARLIER instead, by `_reject_unsupported_residual_output_init`
+        # in `__init__`, which raises naming THIS class's own parameter. Do not
+        # move this back. See decisions.md D-160.
         return build_transformer_ffn_config(
             ffn_type=self.ffn_type,
             name=name,
@@ -888,6 +1003,7 @@ class TransformerLayer(keras.layers.Layer):
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             use_bias=self.use_bias,
+            output_kernel_initializer=self.residual_output_kernel_initializer,
             ffn_args=self.ffn_args,
         )
 
@@ -1070,6 +1186,10 @@ class TransformerLayer(keras.layers.Layer):
             'activation': keras.activations.serialize(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'residual_output_kernel_initializer': (
+                initializers.serialize(self.residual_output_kernel_initializer)
+                if self.residual_output_kernel_initializer is not None else None
+            ),
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),

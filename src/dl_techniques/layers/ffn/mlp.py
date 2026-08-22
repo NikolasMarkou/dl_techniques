@@ -131,6 +131,13 @@ class MLPBlock(keras.layers.Layer):
         Accepts string names ('glorot_uniform', 'he_normal') or Initializer instances.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param output_kernel_initializer: Optional initializer for the OUTPUT
+        projection (``fc2``) only. ``None`` (the default) means ``fc2`` keeps a
+        clone of ``kernel_initializer``, i.e. exactly the historical behaviour.
+        Supply it only to give the residual-path projection a different scale
+        from the expansion -- see ``TransformerLayer``'s
+        ``residual_output_kernel_initializer``.
+    :type output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param bias_initializer: Initializer for the bias vectors. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for the dense layer kernels.
@@ -158,6 +165,7 @@ class MLPBlock(keras.layers.Layer):
         dropout_rate: float = 0.0,
         use_bias: bool = True,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -178,6 +186,9 @@ class MLPBlock(keras.layers.Layer):
         :type use_bias: bool
         :param kernel_initializer: Initializer for the dense layer kernels.
         :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param output_kernel_initializer: Optional initializer for ``fc2`` only;
+            ``None`` keeps a clone of ``kernel_initializer``.
+        :type output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
         :param bias_initializer: Initializer for the bias vectors.
         :type bias_initializer: Union[str, keras.initializers.Initializer]
         :param kernel_regularizer: Optional regularizer for the dense layer kernels.
@@ -203,6 +214,10 @@ class MLPBlock(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.output_kernel_initializer = (
+            keras.initializers.get(output_kernel_initializer)
+            if output_kernel_initializer is not None else None
+        )
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
@@ -232,10 +247,23 @@ class MLPBlock(keras.layers.Layer):
         # resolves the string to an instance ONCE, and a shared seedless
         # instance replays its draw. The string form is NOT a defence here.
         # See decisions.md D-070.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        # `output_kernel_initializer`, when supplied, governs `fc2` ALONE. Do NOT
+        # "simplify" by letting it fall back through `kernel_initializer` here --
+        # the whole reason it exists is that GPT-2's reference scales the
+        # residual-path projection (`mlp.c_proj`) by `1/sqrt(2*n_layer)` while
+        # leaving the expansion (`fc1`) at the plain `initializer_range`, so a
+        # fallback that reached `fc1` too would reproduce exactly the defect this
+        # parameter removes. Still cloned: a caller can legitimately hand the SAME
+        # instance to both roles. See decisions.md D-160.
         self.fc2 = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
-            kernel_initializer=clone_initializer(self.kernel_initializer),
+            kernel_initializer=clone_initializer(
+                self.output_kernel_initializer
+                if self.output_kernel_initializer is not None
+                else self.kernel_initializer
+            ),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -352,6 +380,10 @@ class MLPBlock(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "output_kernel_initializer": (
+                keras.initializers.serialize(self.output_kernel_initializer)
+                if self.output_kernel_initializer is not None else None
+            ),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),

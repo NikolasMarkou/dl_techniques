@@ -315,6 +315,16 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
+            # DECISION plan-2026-08-22T035419-a11304c8/D-160
+            # `output_kernel_initializer` is declared ONLY here, not on the other
+            # 20 entries: `mlp` is the one registry type whose output projection
+            # is the transformer's residual-path projection AND whose expansion
+            # is a separate weight, which is the pair GPT-2's `1/sqrt(2*n_layer)`
+            # rule distinguishes. Declaring it
+            # here and nowhere else is what makes
+            # `TransformerLayer(residual_output_kernel_initializer=..., ffn_type=<other>)`
+            # a LOUD `create_ffn_layer` raise instead of a silent no-op.
+            'output_kernel_initializer': None,
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
             'bias_regularizer': None

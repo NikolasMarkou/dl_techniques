@@ -57,16 +57,26 @@ vocabulary, so a checkpoint from OpenAI will not load against the defaults; pass
 ``vocab_size=50257`` for shape compatibility with the original. And ``attention_type``
 and ``ffn_type`` are factory keys rather than fixed choices, so the class describes a
 GPT-2-*shaped* decoder whose mixer and MLP can be swapped; only the defaults
-(``'multi_head'``, ``'mlp'``) reproduce the paper. And the residual output
-projections are initialized at the plain ``initializer_range``; the reference
-scales them by ``1/sqrt(2 * n_layer)`` so that the residual stream's variance
-does not grow with depth. That third one is a genuine remaining gap, not a
-choice: ``TransformerLayer`` exposes a single ``kernel_initializer`` for all of
-its projections, so scaling only ``attn.c_proj`` and ``mlp.c_proj`` would mean
-per-sublayer initializer plumbing through shared transformer infrastructure.
-Deliberately NOT worked around by scaling the whole layer -- that would shrink
-the QKV and FC1 initializations too, which the reference does not do. See
-decisions.md D-130.
+(``'multi_head'``, ``'mlp'``) reproduce the paper.
+
+The residual-init rule IS implemented, as of 2026-08-22: the two residual-path
+output projections of every block -- the attention output projection
+(``attn.c_proj``) and the FFN's contracting projection (``mlp.c_proj``) -- are
+initialized at ``initializer_range / sqrt(2 * n_layer)``, while Q/K/V and the
+FFN expansion stay at the plain ``initializer_range``, exactly as the reference
+does it (HF ``modeling_gpt2.py::_init_weights``; nanoGPT ``model.py``'s
+``c_proj.weight`` sweep). This closes what the 2026-08-19 revision of this
+docstring listed as a third departure. It required one new optional parameter
+threaded through shared infrastructure --
+``TransformerLayer(residual_output_kernel_initializer=...)`` and
+``TextDecoder(scale_residual_initializer_by_depth=...)`` -- both defaulted so
+that every other consumer is unchanged by construction. Do NOT "simplify" it by
+scaling ``initializer_range`` for the whole block: that shrinks the QKV and FC1
+initializations too, which the reference does not do. The initializers here are
+``TruncatedNormal``, so the std that actually lands is ``0.8796`` times the
+nominal ``stddev`` (2-sigma truncation) -- a test must pin the depth RATIO, not
+the bare ``0.02 / sqrt(2 * n_layer)``. See decisions.md D-160 (and D-130 for the
+history).
 
 The FFN nonlinearity IS fixed here: GPT-2 uses ``gelu_new``, the tanh
 approximation, while Keras' ``'gelu'`` string resolves to the exact-erf form.
@@ -329,6 +339,19 @@ class GPT2(keras.Model):
             dropout_rate=self.dropout_rate,
             attention_dropout_rate=self.attention_dropout_rate,
             initializer_range=self.initializer_range,
+            # DECISION plan-2026-08-22T035419-a11304c8/D-160
+            # GPT-2's published residual-init rule. Hard-coded True rather than
+            # exposed as a `GPT2.__init__` knob: this class exists to reproduce
+            # GPT-2, and the reference has no "off" for it, so a knob would only
+            # buy the ability to build a deliberately unfaithful GPT-2. The
+            # departure it removes was documented in this module's docstring
+            # from 2026-08-19 until today. Do NOT flip it off to make an old
+            # freshly-initialized run reproduce -- initializers are a
+            # fresh-model-only concern (verified: `_download_weights` raises,
+            # `from_variant(pretrained=<path>)` restores weight VALUES and never
+            # re-invokes an initializer), so no checkpoint is affected, only new
+            # training runs' starting point. See decisions.md D-160.
+            scale_residual_initializer_by_depth=True,
             layer_norm_eps=self.layer_norm_eps,
             name="decoder",
         )

@@ -558,6 +558,17 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'num_heads': 8,
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
+            # DECISION plan-2026-08-22T035419-a11304c8/D-160
+            # Declared on 'multi_head' and 'multi_head_cross' ONLY, of the 32
+            # registered types: these two are the ones whose output projection
+            # is the transformer block's residual-path projection (GPT-2's
+            # `attn.c_proj`). Leaving it undeclared everywhere else is
+            # load-bearing -- it turns
+            # `TransformerLayer(residual_output_kernel_initializer=...,
+            # attention_type=<anything else>)` into a LOUD
+            # `create_attention_layer` raise rather than a silently-ignored
+            # request. See decisions.md D-160.
+            'output_kernel_initializer': None,
             'kernel_regularizer': None,
             'use_bias': False,
             'probability_type': 'softmax',
@@ -588,6 +599,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'shared_qk_projections': False,
             'use_bias': True,
             'kernel_initializer': "glorot_uniform",
+            'output_kernel_initializer': None,
             'bias_initializer': "zeros",
             'kernel_regularizer': None,
             'bias_regularizer': None,
