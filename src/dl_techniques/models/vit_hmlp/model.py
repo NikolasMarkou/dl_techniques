@@ -655,14 +655,36 @@ class ViTHMLP(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            # DECISION plan-2026-08-22T035419-a11304c8/D-205
+            # A callable activation MUST be serialized here, and `from_config`
+            # below MUST deserialize it -- the pair is symmetric and a one-sided
+            # fix breaks the other direction. Storing the raw value makes
+            # `get_config()` non-JSON-serializable for a callable, and an
+            # UNREGISTERED callable then fails `keras.models.load_model` outright
+            # with `ValueError: Could not interpret activation function
+            # identifier: {...}`. With `custom_objects` supplied it loads but
+            # leaves `self.activation` a raw dict, which `get_config` propagates.
+            # Strings are passed through unchanged rather than routed through
+            # `activations.serialize`, which REJECTS a bare string ("Unknown
+            # activation function 'gelu' cannot be serialized"), and because
+            # passing them through is exactly today's shipped behaviour for every
+            # stock config. Same fix as `vit_siglip` (D-012). See D-205.
+            "activation": (
+                self.activation
+                if isinstance(self.activation, str)
+                else keras.activations.serialize(self.activation)
+            ),
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ViTHMLP":
+    def from_config(
+            cls,
+            config: Dict[str, Any],
+            custom_objects: Optional[Dict[str, Any]] = None
+    ) -> "ViTHMLP":
         """
         Recreate a model from its serialized configuration.
 
@@ -670,8 +692,15 @@ class ViTHMLP(keras.Model):
         be deserialized back into objects here; without this, the raw config
         dicts reach `__init__` and are stored (and re-serialized) as dicts.
 
+        ``activation`` was NOT handled here before D-205, even though this method
+        already existed -- the presence of a `from_config` is not evidence that
+        every serialized key is covered by it.
+
         Args:
             config: Configuration dictionary from `get_config`.
+            custom_objects: Optional mapping of names to custom callables, used
+                to resolve an activation that is not registered with
+                ``keras.saving.register_keras_serializable``.
 
         Returns:
             ViTHMLP model instance.
@@ -683,6 +712,11 @@ class ViTHMLP(keras.Model):
         for key in ("kernel_regularizer", "bias_regularizer"):
             if config.get(key) is not None:
                 config[key] = regularizers.deserialize(config[key])
+        activation = config.get("activation")
+        if activation is not None and not isinstance(activation, str):
+            config["activation"] = keras.activations.deserialize(
+                activation, custom_objects=custom_objects
+            )
         return cls(**config)
 
     @classmethod

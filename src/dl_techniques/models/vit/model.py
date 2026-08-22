@@ -700,11 +700,62 @@ class ViT(keras.Model):
             "normalization_kwargs": dict(self.normalization_kwargs),
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            # DECISION plan-2026-08-22T035419-a11304c8/D-205
+            # A callable activation MUST be serialized here, and `from_config`
+            # below MUST deserialize it -- the pair is symmetric and a one-sided
+            # fix breaks the other direction. Storing the raw value makes
+            # `get_config()` non-JSON-serializable for a callable, and an
+            # UNREGISTERED callable then fails `keras.models.load_model` outright
+            # with `ValueError: Could not interpret activation function
+            # identifier: {...}`. With `custom_objects` supplied it loads but
+            # leaves `self.activation` a raw dict, which `get_config` propagates.
+            # Strings are passed through unchanged rather than routed through
+            # `activations.serialize`, which REJECTS a bare string ("Unknown
+            # activation function 'gelu' cannot be serialized"), and because
+            # passing them through is exactly today's shipped behaviour for every
+            # stock config. Same fix as `vit_siglip` (D-012). See D-205.
+            "activation": (
+                self.activation
+                if isinstance(self.activation, str)
+                else keras.activations.serialize(self.activation)
+            ),
             "use_layer_scale": self.use_layer_scale,
             "layer_scale_init_value": self.layer_scale_init_value,
         })
         return config
+
+    @classmethod
+    def from_config(
+            cls,
+            config: Dict[str, Any],
+            custom_objects: Optional[Dict[str, Any]] = None
+    ) -> "ViT":
+        """
+        Recreate a model from its serialized configuration.
+
+        ViT had NO ``from_config`` at all before D-205. That was survivable only
+        because every other serialized key (`initializers`, `regularizers`) is
+        resolved by ``keras.initializers.get`` / ``keras.regularizers.get``
+        inside ``__init__``. ``activation`` is not: it is handed straight to
+        ``TransformerLayer``, so a serialized callable has to be turned back
+        into one here.
+
+        Args:
+            config: Configuration dictionary from ``get_config``.
+            custom_objects: Optional mapping of names to custom callables, used
+                to resolve an activation that is not registered with
+                ``keras.saving.register_keras_serializable``.
+
+        Returns:
+            A new ``ViT`` instance.
+        """
+        config = dict(config)
+        activation = config.get("activation")
+        if activation is not None and not isinstance(activation, str):
+            config["activation"] = keras.activations.deserialize(
+                activation, custom_objects=custom_objects
+            )
+        return cls(**config)
 
     def get_feature_extractor(self) -> "ViT":
         """
