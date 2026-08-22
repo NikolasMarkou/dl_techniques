@@ -264,6 +264,12 @@ class TestRoutingIterationsReachTheModel:
             iteration  1            2            3            4            5
                        0.0 (exact)  2.376735e-06 4.760921e-06 7.130206e-06 9.514391e-06
 
+        RE-MEASURED 2026-08-22 (D-035), same config, identical in 3 of 3 runs:
+
+            iteration  1            2            3            4            5
+                       7.450581e-09 2.369285e-06 4.738569e-06 7.137656e-06 9.506941e-06
+                       = 1 ulp      = 318 ulp    = 636 ulp    = 958 ulp    = 1276 ulp
+
         and at the N=1 floor of the capsule-count axis: 5.43e-05 then
         1.09e-04. The magnitudes are tiny for the squash reason in the class
         docstring, but the SHAPE is exact and reproducible: zero, then strictly
@@ -281,10 +287,35 @@ class TestRoutingIterationsReachTheModel:
             float(np.max(np.abs(c - 1.0 / NUM_MODEL_PARENTS))) for c in couplings
         ]
 
-        assert departures[0] == 0.0, (
-            f"`b` starts at zeros, so `c` must be exactly uniform "
-            f"(1/{NUM_MODEL_PARENTS}) at iteration 1; measured a departure of "
-            f"{departures[0]:.6e}"
+        # DECISION plan-2026-08-22T035419-a11304c8/D-035
+        # `departures[0] == 0.0` was UNSATISFIABLE and was RED 12 of 12 solo
+        # runs at baseline with `assert 7.450580596923828e-09 == 0.0`. Do NOT
+        # restore it, and do NOT replace it with a hand-picked `abs=1e-8`.
+        # 1/10 is not representable in binary: `float32(0.1)` is
+        # 0.100000001490116119384765625, the softmax denominator rounds one ulp
+        # the other way, and the reference `1.0 / NUM_MODEL_PARENTS` is a
+        # float64 -- so `max|c - 0.1|` is 7.450581e-09 = EXACTLY ONE
+        # `np.spacing(np.float32(0.1))`, and no correct implementation can make
+        # it zero. LESSONS: a tolerance below the output dtype's representable
+        # resolution is not strict, it is broken.
+        # The uniformity claim is kept EXACT by asserting it where it IS exact:
+        # every element of `c` at iteration 1 is BIT-IDENTICAL (measured: a
+        # single unique float32 value, 0.09999999), which is what "b starts at
+        # zeros so c must be uniform" actually says and which no tolerance can
+        # launder. The magnitude arm below is then the ulp bound. Its 4-ulp
+        # headroom is 79x below iteration 2's departure (318 ulp), so it cannot
+        # swallow the effect this test exists to see.
+        first = couplings[0]
+        assert np.unique(first).size == 1, (
+            f"`b` starts at zeros, so `c` must be BIT-uniform at iteration 1; "
+            f"measured {np.unique(first).size} distinct coupling values, "
+            f"spread {float(first.max() - first.min()):.6e}"
+        )
+        uniform_ulp = float(np.spacing(np.float32(1.0 / NUM_MODEL_PARENTS)))
+        assert departures[0] <= 4 * uniform_ulp, (
+            f"`c` at iteration 1 sits {departures[0] / uniform_ulp:.2f} ulp from "
+            f"uniform (1/{NUM_MODEL_PARENTS}), over the 4-ulp float32 rounding "
+            f"budget; measured a departure of {departures[0]:.6e}"
         )
         assert departures[1] > 0.0, (
             "`c` never left uniform after the first agreement update: the "
