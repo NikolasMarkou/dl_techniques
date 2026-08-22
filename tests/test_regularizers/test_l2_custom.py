@@ -8,7 +8,7 @@ including its support for negative l2 values (anti-regularization).
 import pytest
 import numpy as np
 import tensorflow as tf
-from keras.api.layers import Dense
+from keras.api.layers import Dense, Input
 from keras.api.models import Sequential
 
 from dl_techniques.regularizers.l2_custom import L2_custom, validate_float_arg
@@ -147,7 +147,8 @@ def test_keras_integration():
     """Test integration with Keras model."""
     reg = L2_custom(l2=0.01)
     model = Sequential([
-        Dense(4, input_shape=(2,), kernel_regularizer=reg)
+        Input(shape=(2,)),
+        Dense(4, kernel_regularizer=reg)
     ])
     model.compile(optimizer='adam', loss='mse')
     assert model.layers[0].kernel_regularizer is not None
@@ -157,7 +158,8 @@ def test_keras_integration_negative_l2():
     """Test Keras integration with negative l2 (anti-regularization)."""
     reg = L2_custom(l2=-0.0001)
     model = Sequential([
-        Dense(4, input_shape=(2,), kernel_regularizer=reg)
+        Input(shape=(2,)),
+        Dense(4, kernel_regularizer=reg)
     ])
     model.compile(optimizer='adam', loss='mse')
     assert model.layers[0].kernel_regularizer is not None

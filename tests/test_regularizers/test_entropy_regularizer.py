@@ -8,7 +8,7 @@ including its mathematical properties, integration with Keras, and edge cases.
 import pytest
 import numpy as np
 import tensorflow as tf
-from keras.api.layers import Dense
+from keras.api.layers import Dense, Input
 from keras.api.models import Sequential
 
 from dl_techniques.regularizers.entropy_regularizer import (
@@ -159,7 +159,8 @@ def test_keras_integration():
     regularizer = EntropyRegularizer(strength=0.01)
 
     model = Sequential([
-        Dense(4, input_shape=(2,), kernel_regularizer=regularizer)
+        Input(shape=(2,)),
+        Dense(4, kernel_regularizer=regularizer)
     ])
     model.compile(optimizer='adam', loss='mse')
 

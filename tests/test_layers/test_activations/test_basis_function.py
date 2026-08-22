@@ -397,7 +397,8 @@ class TestBasisFunction:
         """Test that the layer works correctly during training."""
         # Create a simple model
         model = keras.Sequential([
-            keras.layers.Dense(16, input_shape=(8,)),
+            keras.Input(shape=(8,)),
+            keras.layers.Dense(16),
             BasisFunction(),
             keras.layers.Dense(8),
             BasisFunction(),

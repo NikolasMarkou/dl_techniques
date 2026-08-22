@@ -279,7 +279,8 @@ class TestHierarchicalRoutingLayer:
     def test_model_save_and_load(self):
         """Test full model saving and loading."""
         model = keras.Sequential([
-            keras.layers.Dense(4, input_shape=(4,)),
+            keras.Input(shape=(4,)),
+            keras.layers.Dense(4),
             _make_layer(output_dim=3)
         ])
 

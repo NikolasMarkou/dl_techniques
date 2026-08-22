@@ -71,7 +71,7 @@ class _StubConfig:
 
 def _tiny_saved_model(path: str) -> None:
     """Save a real (trivial) ``.keras`` file so the REAL loader can open it."""
-    model = keras.Sequential([keras.layers.Dense(1, input_shape=(1,))])
+    model = keras.Sequential([keras.Input(shape=(1,)), keras.layers.Dense(1)])
     model.save(path)
 
 
@@ -154,7 +154,7 @@ def test_the_analysis_loads_the_file_the_checkpoint_callback_writes(
         config,
         model_name=name,
         create_initial_model=lambda: keras.Sequential(
-            [keras.layers.Dense(1, input_shape=(1,))]
+            [keras.Input(shape=(1,)), keras.layers.Dense(1)]
         ),
         results_dir=results_dir,
     )

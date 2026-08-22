@@ -230,7 +230,6 @@ class TestValueRangeConstraint:
         layer = keras.layers.Dense(
             units=5,
             kernel_constraint=constraint,
-            input_shape=(sample_weights.shape[-1],)
         )
 
         # Build the layer
@@ -251,11 +250,11 @@ class TestValueRangeConstraint:
         """Test the constraint in a model context."""
         # Create a model with constrained layers
         model = keras.Sequential([
+            keras.Input(shape=(10,)),
             keras.layers.Dense(
                 units=32,
                 activation="relu",
                 kernel_constraint=ValueRangeConstraint(min_value=0.0, max_value=2.0),
-                input_shape=(10,)
             ),
             keras.layers.Dense(
                 units=16,
@@ -301,12 +300,12 @@ class TestValueRangeConstraint:
         """Test saving and loading a model with the constraint."""
         # Create a simple model with the constraint
         model = keras.Sequential([
+            keras.Input(shape=(8,)),
             keras.layers.Dense(
                 units=16,
                 activation="relu",
                 kernel_constraint=ValueRangeConstraint(min_value=-0.5, max_value=0.5),
                 bias_constraint=ValueRangeConstraint(min_value=0.0),
-                input_shape=(8,)
             ),
             keras.layers.Dense(units=1, activation="sigmoid")
         ])

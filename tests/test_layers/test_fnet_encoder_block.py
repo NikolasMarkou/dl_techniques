@@ -764,7 +764,8 @@ class TestFNetEncoderBlockIntegration:
     def test_in_sequential_model(self):
         """Test FNetEncoderBlock as part of a Sequential model."""
         model = keras.Sequential([
-            keras.layers.Embedding(1000, 64, input_shape=(32,)),
+            keras.Input(shape=(32,)),
+            keras.layers.Embedding(1000, 64),
             FNetEncoderBlock(intermediate_dim=256),
             FNetEncoderBlock(
                 intermediate_dim=256,
