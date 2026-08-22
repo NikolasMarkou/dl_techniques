@@ -130,11 +130,19 @@ def _resolve_required_arg(param_name: str, fn) -> Tuple[Any, str]:
             NLPTaskType,
         )
 
+        # `vocabulary_size` is a size like any other here, and it is REQUIRED by
+        # `mamba.create_mamba_with_head`, which reads the encoder's vocabulary
+        # off the task config and raises `ValueError` before it ever reaches its
+        # `pretrained` branch without it. Leaving it unset made this probe report
+        # "raised ValueError instead of NotImplementedError" for that site on the
+        # day it became reachable (2026-08-22) -- a harness gap wearing the
+        # costume of a contract violation.
         return (
             NLPTaskConfig(
                 name="pretrained-contract-probe",
                 task_type=NLPTaskType.TEXT_CLASSIFICATION,
                 num_classes=2,
+                vocabulary_size=32,
             ),
             "",
         )
@@ -235,7 +243,8 @@ PRETRAINED_FACTORIES, PRETRAINED_UNREACHED = _pretrained_factories()
 #: The AST-population sites the widened arm still cannot call, each keyed by
 #: ``(relpath, function name)`` -- never by line, for the reason
 #: ``_SCHEDULED_FIXES`` gives -- and each carrying the evidence that clears it.
-#: Measured 2026-08-20: 3 of 45, so the arm reaches **42 of 45**.
+#: Measured 2026-08-22: 1 of 45, so the arm reaches **44 of 45**. (It read
+#: "3 of 45 ... 42 of 45" from 2026-08-20 until the two export gaps closed.)
 #:
 #: ``test_the_uncovered_sites_are_the_named_ones`` fails if this set stops
 #: matching, in EITHER direction: a new uncovered site is a factory that silently
@@ -251,19 +260,17 @@ _PRETRAINED_UNREACHABLE_EVIDENCE = {
         "models/bias_free_denoisers/bfunet.py",
         "create_bfunet_variant",
     ): "no MODEL_VARIANTS table is reachable from the callable",
-    # This one is not exported by its package `__init__.py`, so no namespace
-    # walk can see it at all -- its siblings (bert, distilbert, modern_bert,
-    # tree_transformer `create_*_with_head`) ARE exported and ARE reached, with
-    # the same resolver. The gap is an EXPORT gap, not a resolver gap: this arm
-    # reaches them the day they are exported, and the fix is in the package, not
-    # in this file. `models/fnet/model.py::create_fnet_with_head` was the second
-    # entry here and was DELETED on 2026-08-21 (step 27, D-133) when
-    # `models/fnet/__init__.py` started exporting it -- the prediction in this
-    # comment held exactly, and the arm now covers it.
-    (
-        "models/mamba/mamba_v1.py",
-        "create_mamba_with_head",
-    ): "not exported from dl_techniques.models.mamba",
+    # The EXPORT-gap entries are all gone. Two `create_*_with_head` factories
+    # sat here because their package `__init__.py` did not export them, so no
+    # namespace walk could see them at all, while their siblings (bert,
+    # distilbert, modern_bert, tree_transformer) were reached by the same
+    # resolver. Both were deleted when the export landed, exactly as the
+    # original comment predicted: `models/fnet/model.py::create_fnet_with_head`
+    # on 2026-08-21 (step 27, D-133) and
+    # `models/mamba/mamba_v1.py::create_mamba_with_head` on 2026-08-22
+    # (plan-2026-08-22-a11304c8 step 14). Do not re-add an export-gap waiver
+    # here: an unexported factory is a package defect, and this file is the
+    # wrong place to absorb it.
 }
 
 

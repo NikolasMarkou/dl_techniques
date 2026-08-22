@@ -63,8 +63,13 @@ def restore_global_dtype_policy():
 
 
 def _tiny_model() -> keras.Model:
-    """A stand-in for the 222M-parameter nanoVLM: same call contract
-    (``inputs -> [batch, seq, vocab]`` logits), small enough for CPU."""
+    """A stand-in for the real nanoVLM: same call contract
+    (``inputs -> [batch, seq, vocab]`` logits), small enough for CPU.
+
+    Not "the 222M-parameter nanoVLM", which is what this said until 2026-08-22:
+    `create_nanovlm()` at the default `variant="base"` measures **305,435,904**
+    parameters. 222M is a design target from `research/nanoVLM_research.md` that
+    the shipped model never hit; see D-008."""
     model = keras.Sequential(
         [keras.layers.Input(shape=(SEQ, FEATURES)), keras.layers.Dense(VOCAB)],
         name="tiny_nanovlm",

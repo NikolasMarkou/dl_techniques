@@ -216,7 +216,18 @@ def train_nanovlm(
     # variables -- on an unbuilt model it partitions three EMPTY lists.
     model.build({'images': (None, data_processor.image_size, data_processor.image_size, 3),
                  'text_tokens': (None, data_processor.max_text_length)})
-    logger.info(f"Created nanoVLM-222M: {model.count_params():,} parameters")
+    # DECISION plan-2026-08-22T035419-a11304c8/D-008
+    # The label is DERIVED, never written down. This line read
+    # "Created nanoVLM-222M" while printing the real count beside it: the model
+    # `create_nanovlm()` actually builds measures 305,435,904 parameters at the
+    # default `variant="base"` and this trainer's own build shapes -- 1.38x the
+    # "222M" design target carried over from `research/nanoVLM_research.md`,
+    # which proposes a `create_nanovlm_222m()` that exists nowhere in `src/`.
+    # Do not replace this with a hardcoded "305M": a second literal is the same
+    # defect one refactor later, and the count moves with `variant` and with the
+    # image/text shapes built above.
+    n_params = model.count_params()
+    logger.info(f"Created nanoVLM-{n_params / 1e6:.0f}M: {n_params:,} parameters")
 
     training_setup = create_training_setup()
     trainer = NanoVLMTrainer(model, training_setup['loss_fn'], use_multi_optimizer=use_multi_optimizer)

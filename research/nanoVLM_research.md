@@ -1,5 +1,24 @@
 # nanoVLM Implementation Guide for dl-techniques Framework
 
+> **STATUS (2026-08-22): this is an UNIMPLEMENTED PROPOSAL, and the shipped
+> model does not match it.** Read it as a design document, not as a description
+> of `src/dl_techniques/models/nano_vlm/`.
+>
+> - `create_nanovlm_222m()` (proposed at line 703, used in the examples at 1073,
+>   1210 and 1400) **does not exist anywhere in `src/`**. The implemented factory
+>   is `create_nanovlm(variant="base", ...)`, and it is what
+>   `src/train/nano_vlm/train_nano_vlm.py` calls.
+> - The `"nanovlm_222m"` variant-table entry (line 1491) with
+>   `"total_params": "222M"` (line 1513) is likewise unimplemented.
+> - **222M is a design target the shipped model missed by 1.38x.** Measured
+>   2026-08-22 on CPU: `create_nanovlm()` built at `(224, 224, 3)` images and
+>   512 text tokens has **305,435,904** parameters. Every "222M" below is that
+>   target, never a measurement of this repo's model.
+>
+> The trainer used to log the literal string `nanoVLM-222M` next to the real
+> count; it now derives the label from `count_params()`. Ruling: D-008 of
+> `plan-2026-08-22-a11304c8`.
+
 ## Overview
 
 This guide provides a comprehensive implementation plan for nanoVLM (nano Vision-Language Model) within the dl-techniques framework. nanoVLM is a compact 222M parameter vision-language model that achieves 35.3% accuracy on MMStar benchmark while maintaining simplicity and efficiency.
