@@ -1678,7 +1678,12 @@ class TestGroupedQueryAttention:
                 load_weights_or_raise(strict, path, skip_mismatch=False)
 
             lenient = stack(2)
-            restored = load_weights_or_raise(lenient, path, skip_mismatch=True)
+            # R-038 / D-054: the partial restore this test exists to pin is
+            # reported by Keras as `A total of N objects could not be loaded`
+            # (measured: 12 objects, example `<Dense name=k_linear>`). Asserted,
+            # not suppressed -- it is the instrument working.
+            with pytest.warns(UserWarning, match="could not be loaded"):
+                restored = load_weights_or_raise(lenient, path, skip_mismatch=True)
 
         total = len(lenient.weights)
         assert 0 < restored < total, (

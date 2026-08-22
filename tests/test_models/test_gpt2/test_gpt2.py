@@ -695,8 +695,13 @@ class TestPretrainedLocalPathIsVerified:
         ckpt = str(tmp_path / "not_a_gpt2.keras")
         other.save(ckpt)
 
-        with pytest.raises(ValueError, match="changed none of this model"):
-            GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        # R-038 / D-054: the mismatched load Keras is asked to perform here
+        # emits `A total of N objects could not be loaded` -- that warning IS the
+        # instrument working, so it is asserted rather than suppressed. Without
+        # this context the test aborts under `-W error::UserWarning`.
+        with pytest.warns(UserWarning, match="could not be loaded"):
+            with pytest.raises(ValueError, match="changed none of this model"):
+                GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
 
     def test_matching_checkpoint_still_loads(self, tmp_path):
         """Anti-vacuity: the real warm-start path must still work."""

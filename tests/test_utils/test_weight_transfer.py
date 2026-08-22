@@ -395,8 +395,12 @@ class TestLoadWeightsOrRaise:
         out = keras.layers.Dense(13, name="totally_other_b")(x)
         tgt = keras.Model(inp, out, name="other")
 
-        with pytest.raises(ValueError, match="changed none of this model"):
-            load_weights_or_raise(tgt, ckpt, skip_mismatch=True)
+        # R-038 / D-054: every variable being skipped is exactly what this
+        # test constructs, and Keras reports it as
+        # `A total of N objects could not be loaded`. Asserted, not suppressed.
+        with pytest.warns(UserWarning, match="could not be loaded"):
+            with pytest.raises(ValueError, match="changed none of this model"):
+                load_weights_or_raise(tgt, ckpt, skip_mismatch=True)
 
     def test_the_raise_is_about_the_changed_count_not_the_exception(self, tmp_path):
         """Pin the *count*, not merely "no exception escaped".

@@ -632,8 +632,12 @@ class TestPretrainedWeightLoading:
         mismatched = DistilBERT.from_variant(
             "tiny", vocab_size=512, max_position_embeddings=128
         )
-        with caplog.at_level(logging.WARNING, logger="dl"):
-            mismatched.load_pretrained_weights(path, skip_mismatch=True)
+        # R-038 / D-054: the embedding tables really cannot be restored here,
+        # and Keras says so with `A total of N objects could not be loaded`.
+        # That warning is the subject of this test, so it is asserted.
+        with pytest.warns(UserWarning, match="could not be loaded"):
+            with caplog.at_level(logging.WARNING, logger="dl"):
+                mismatched.load_pretrained_weights(path, skip_mismatch=True)
 
         text = caplog.text
         assert "skip_mismatch=True" in text

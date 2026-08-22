@@ -796,8 +796,12 @@ class TestWaveFieldPretrainedLocalPathIsVerified:
         ckpt = str(tmp_path / "not_a_wave_field.keras")
         other.save(ckpt)
 
-        with pytest.raises(ValueError, match="changed none of this model"):
-            WaveFieldLLM.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        # R-038 / D-054: see the GPT-2 twin of this test. The
+        # `A total of N objects could not be loaded` warning is the deliberately
+        # provoked mismatch being reported, so it is asserted, not suppressed.
+        with pytest.warns(UserWarning, match="could not be loaded"):
+            with pytest.raises(ValueError, match="changed none of this model"):
+                WaveFieldLLM.from_variant("tiny", vocab_size=64, pretrained=ckpt)
 
     def test_matching_checkpoint_still_loads(self, tmp_path):
         """Anti-vacuity: the real warm-start path must still work."""
