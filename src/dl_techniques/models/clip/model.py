@@ -282,13 +282,33 @@ class CLIP(keras.Model):
             "text_kv_heads": 12,
             "embed_dim": 768,
         },
+        # DECISION plan-2026-08-22T035419-a11304c8/D-112
+        # `text_layers` is 24, not 12. FETCHED 2026-08-22 from the only released
+        # ViT-H/14 CLIP,
+        # https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/raw/main/config.json
+        # -- text_config: hidden_size 1024, num_hidden_layers 24,
+        # num_attention_heads 16, projection_dim 1024; vision_config:
+        # hidden_size 1280, num_hidden_layers 32, num_attention_heads 16,
+        # patch_size 14. Every other field in this row already agreed. The 12
+        # was the L/14 row's text depth carried down one line: B/32, B/16 and
+        # L/14 all legitimately have 12 text layers (verified against
+        # `openai/clip-vit-{base-patch32,base-patch16,large-patch14}`), H/14 is
+        # the one scale where the text tower deepens, and copying the previous
+        # row is exactly how that gets missed. Do NOT "restore consistency" by
+        # putting 12 back.
+        # `vision_kv_heads`/`text_kv_heads` are NOT from any released CLIP -- no
+        # CLIP checkpoint uses grouped-query attention. They are this
+        # implementation's declared modernization (GQA + RMSNorm + SwiGLU +
+        # RoPE, module docstring line 3, Ainslie et al. 2023 cited), so they are
+        # deliberately not traced to Radford et al. 2021.
+        # See decisions.md D-112.
         "ViT-H/14": {
             "patch_size": 14,
             "vision_layers": 32,
             "vision_width": 1280,
             "vision_heads": 16,
             "vision_kv_heads": 4,
-            "text_layers": 12,
+            "text_layers": 24,
             "text_width": 1024,
             "text_heads": 16,
             "text_kv_heads": 16,

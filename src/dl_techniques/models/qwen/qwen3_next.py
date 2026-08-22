@@ -30,8 +30,9 @@ residual updates, not one.
 
 Mixture-of-experts is applied per sublayer when configured, replacing the FFN with
 `num_experts` experts of which `num_experts_per_tok` are routed. This decouples
-parameter count from per-token arithmetic: the `80b_a3b` variant routes 8 of 64, so
-it carries eight times the FFN capacity it pays for at inference. The `80b` variant
+parameter count from per-token arithmetic: the `80b_a3b` variant routes 10 of 512 --
+the released ratio, fetched 2026-08-22, `2.0%` active -- so it carries fifty times
+the FFN capacity it pays for at inference. The `80b` variant
 sets `num_experts=1`, which is how a dense configuration is expressed here rather
 than by a separate flag. FFN keyword dicts pass through `assemble_ffn_config` rather
 than being written as literals, because the FFN factory raises on a key its target
@@ -176,16 +177,41 @@ class Qwen3Next(keras.Model):
 
     # Model variant configurations following Qwen3 Next specifications
     MODEL_VARIANTS = {
+        # DECISION plan-2026-08-22T035419-a11304c8/D-112
+        # Every value below is the RELEASED config, fetched 2026-08-22 from
+        # https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct/raw/main/config.json
+        # Five of them used to be something else, and the row still called
+        # itself "80B-A3B": num_key_value_heads 4 (released 2), num_experts 64
+        # (released 512), num_experts_per_tok 8 (released 10),
+        # moe_intermediate_size 1408 (released 512), max_seq_len 8192 (released
+        # max_position_embeddings 262144). A 64-expert router is not the
+        # 512-expert router the name promises, and `active = 8/64 = 12.5%` is
+        # not the released `10/512 = 2.0%` -- the sparsity headline of this
+        # architecture. Do NOT shrink these back "so it instantiates": nothing
+        # in the repo builds this variant at full size (the tests override
+        # `num_layers`/`hidden_size` down, see
+        # `test_qwen3_next.py:280`), and a variant table's job is to state the
+        # reference, with `from_variant("80b_a3b", num_experts=64)` available
+        # for anyone who wants a feasible stand-in.
+        #
+        # KNOWN REMAINING DIVERGENCE, not fixable from this table: the released
+        # config sets `head_dim = 256` DECOUPLED from `hidden_size /
+        # num_attention_heads = 2048/16 = 128`, while `__init__` derives
+        # `self.head_dim = hidden_size // num_attention_heads` unconditionally
+        # (see below). This model therefore has half the released per-head
+        # width. Fixing it needs a `head_dim` constructor argument, not a table
+        # entry.
+        # See decisions.md D-112.
         "80b_a3b": {
             "vocab_size": 151936,
             "hidden_size": 2048,
             "num_layers": 12,  # 12 blocks, each with 3 delta + 1 attn = 48 layers total
             "num_attention_heads": 16,
-            "num_key_value_heads": 4,
-            "max_seq_len": 8192,
-            "num_experts": 64,
-            "num_experts_per_tok": 8,
-            "moe_intermediate_size": 1408,
+            "num_key_value_heads": 2,
+            "max_seq_len": 262144,
+            "num_experts": 512,
+            "num_experts_per_tok": 10,
+            "moe_intermediate_size": 512,
             "description": "Qwen3 Next 80B-A3B: 12 blocks × (3 delta + 1 attn) = 48 effective layers"
         },
         "80b": {
