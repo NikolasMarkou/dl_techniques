@@ -36,18 +36,23 @@ attention math inside the window is stubbed out. The recorded shape is
 uses the same instrument on a configuration that genuinely windows, so a
 "one window" result elsewhere cannot be an artefact of the recorder.
 
-DECISION plan-2026-08-19T163559-499b6f0e/D-139 -- READ THIS BEFORE TRUSTING
-``test_base_and_large_can_never_window``. Since D-135 set
+DECISION plan-2026-08-19T163559-499b6f0e/D-139, amended by
+plan-2026-08-22T035419-a11304c8/D-073. Since D-135 set
 ``global_attention_interval = 1`` for ``base`` and ``large`` (at the inherited
 ``3`` both variants raised ``ResourceExhaustedError`` on their first forward),
-those two variants build NO local attention layer at all, so that test is now
-vacuous for its own subjects in a second, stronger way: not merely "the window
-never engages", but "there is no windowed layer". It is kept deliberately, as a
-threshold pin on a still-public knob -- ``from_variant("base",
-global_attention_interval=3)`` restores the hybrid, and at that moment the
-threshold becomes load-bearing again. Do NOT "fix" the vacuity by shrinking
-``local_attention_window_size``: D-019 forbids it, because a smaller window buys
-a different wrong adjacency, not the paper's.
+those two variants build NO local attention layer at all -- not merely "the
+window never engages", but "there is no windowed layer". D-139 kept
+``test_base_and_large_can_never_window`` as a pure threshold pin and named the
+vacuity here; **that was not enough**, because the threshold arithmetic passes
+whatever the interval is, so the test would have stayed GREEN through the very
+edit (interval back to 3) that makes the threshold load-bearing -- MEASURED
+2026-08-22. The test now asserts the OPERATIVE fact first, against a real
+constructed model: at each variant's own interval, ZERO layers are
+``WindowAttention``. ``test_the_restored_hybrid_does_build_windowed_layers`` is
+its control, and the threshold assertion is kept behind it exactly as D-139
+intended. Do NOT "fix" the vacuity by shrinking ``local_attention_window_size``:
+D-019 forbids it, because a smaller window buys a different wrong adjacency, not
+the paper's.
 """
 
 import os
@@ -197,17 +202,104 @@ class TestVariantTableAgainstTheThreshold:
     """Arithmetic over the shipped constants, not over hand-copied numbers."""
 
     def test_base_and_large_can_never_window(self):
+        """The OPERATIVE reason, then the dormant threshold behind it.
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-073
+        # WHAT NOT TO DO: do not go back to asserting ONLY
+        # ``window_size ** 2 >= DEFAULT_MAX_POSITION_EMBEDDINGS``. That
+        # arithmetic is true, but it is not WHY ``base``/``large`` never window:
+        # since D-135 set ``global_attention_interval = 1``,
+        # ``(i + 1) % 1 == 0`` holds for every layer in
+        # ``model.py:_build_architecture``, so those variants build ZERO
+        # ``WindowAttention`` sublayers and the threshold has no consumer. A
+        # test that pins only the dormant knob passes for a reason it does not
+        # check, and would keep passing if the interval were changed back to 3
+        # -- the exact edit that makes the threshold load-bearing again. It is
+        # ALSO not fixable by shrinking ``local_attention_window_size``:
+        # D-019/D-139 forbid that, because a smaller window buys a different
+        # wrong adjacency, not the paper's. So the operative claim is asserted
+        # FIRST, against a real constructed model, and the threshold is kept
+        # after it as the pin on the restored-hybrid path.
+        # See decisions.md D-073.
+        """
         max_pos = ModernBERT.DEFAULT_MAX_POSITION_EMBEDDINGS
         for variant in ("base", "large"):
-            window_size = ModernBERT.MODEL_VARIANTS[variant][
-                "local_attention_window_size"
+            spec = ModernBERT.MODEL_VARIANTS[variant]
+            interval = spec["global_attention_interval"]
+
+            # (1) The operative claim, on a REAL model at the variant's own
+            # interval. Sizes are shrunk (base is 22 layers of 768) because the
+            # attention TYPE per layer depends on the interval and the layer
+            # index only -- never on the widths.
+            model = ModernBERT(
+                vocab_size=32,
+                hidden_size=16,
+                num_layers=4,
+                num_heads=2,
+                intermediate_size=24,
+                global_attention_interval=interval,
+                local_attention_window_size=spec["local_attention_window_size"],
+                hidden_dropout_prob=0.0,
+                attention_probs_dropout_prob=0.0,
+            )
+            windowed = [
+                i
+                for i, layer in enumerate(model.encoder_layers)
+                if isinstance(layer.attention, WindowAttention)
             ]
+            assert windowed == [], (
+                f"variant '{variant}' builds windowed layers at indices "
+                f"{windowed}: global_attention_interval = {interval}. The "
+                f"claim that these variants never window rests on the interval "
+                f"being 1 (every layer global), NOT on the window size. If the "
+                f"interval was changed deliberately, the threshold assertion "
+                f"below stops being dormant and this package needs a real "
+                f"windowed-path test at the shipped window size."
+            )
+            assert interval == 1, (
+                f"variant '{variant}': global_attention_interval = {interval}, "
+                f"not 1 -- see D-135 for why it was set to 1"
+            )
+
+            # (2) The dormant threshold, kept per D-139: it becomes
+            # load-bearing the moment a caller passes
+            # ``from_variant(variant, global_attention_interval=3)``.
+            window_size = spec["local_attention_window_size"]
             threshold = window_size ** 2
             assert threshold >= max_pos, (
                 f"variant '{variant}': window_size**2 = {threshold} vs "
                 f"max_position_embeddings = {max_pos}. The docstring claim "
                 f"that no admissible length is ever windowed depends on this."
             )
+
+    def test_the_restored_hybrid_does_build_windowed_layers(self):
+        """CONTROL for the test above: the instrument can see a windowed layer.
+
+        Without this arm, ``windowed == []`` could be an artefact of reading the
+        wrong attribute or of ``WindowAttention`` never being the class used --
+        and it would then pass for every interval, which is precisely the
+        vacuity being repaired.
+        """
+        model = ModernBERT(
+            vocab_size=32,
+            hidden_size=16,
+            num_layers=4,
+            num_heads=2,
+            intermediate_size=24,
+            global_attention_interval=3,  # the inherited hybrid
+            local_attention_window_size=128,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+        )
+        windowed = [
+            i
+            for i, layer in enumerate(model.encoder_layers)
+            if isinstance(layer.attention, WindowAttention)
+        ]
+        assert windowed == [0, 1, 3], (
+            f"at interval 3 every layer except every 3rd is windowed; got "
+            f"{windowed}"
+        )
 
     def test_tiny_is_the_only_variant_where_windowing_can_engage(self):
         max_pos = ModernBERT.DEFAULT_MAX_POSITION_EMBEDDINGS
