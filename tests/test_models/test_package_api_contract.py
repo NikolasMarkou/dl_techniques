@@ -606,9 +606,8 @@ class TestPretrainedNeverSilentlyRandom:
 def _docstring_line_numbers(path: Path) -> set:
     """1-based line numbers covered by any module/class/function docstring."""
     lines: set = set()
-    try:
-        tree = ast.parse(path.read_text())
-    except SyntaxError:  # covered by the import tests
+    tree = _parse_or_fail(path)
+    if tree is None:
         return lines
     holders = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
     for node in ast.walk(tree):
@@ -804,21 +803,73 @@ def _callee_name(node: ast.Call) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Step 15a (plan-2026-08-22T035419-a11304c8) -- every AST sweep in this file
+# parses through ONE helper, and that helper FAILS LOUDLY.
+# ---------------------------------------------------------------------------
+
+#: Files under the swept roots that are legitimately unparseable and may be
+#: skipped. Measured 2026-08-22 by ``ast.parse`` over all 1,007 ``src/**/*.py``:
+#: ZERO files fail to parse, so this allow-list is EMPTY by measurement, not by
+#: assumption. It exists only so that a future generated/templated source has a
+#: named home instead of silently re-opening the blind spot; adding an entry is
+#: a reviewable act. ``test_the_unparseable_allow_list_is_still_empty`` pins it.
+_UNPARSEABLE_ALLOW_LIST: set = set()
+
+
+def _parse_or_fail(path: Path, src_root: Path = None):
+    """Parse ``path`` to an ``ast.Module``, or FAIL naming the file.
+
+    Contract: takes a filesystem path and (optionally) the root its name is
+    reported relative to; returns the parsed :class:`ast.Module`. Raises
+    ``AssertionError`` -- which pytest reports as a test failure carrying this
+    message -- when the source does not parse. Returns ``None`` only for a path
+    named in ``_UNPARSEABLE_ALLOW_LIST``; callers must skip a ``None``.
+
+    # DECISION plan-2026-08-22T035419-a11304c8/D-070
+    # WHAT NOT TO DO: do NOT restore ``except SyntaxError: continue`` here or at
+    # any call site. That policy was MEASURED blind on 2026-08-22: with a syntax
+    # error injected into ``models/cbam/model.py``, ``_sweep_create_delegation``
+    # silently dropped the site (61 -> 60 factories) and the whole guard class
+    # still read ``21 passed``. "Covered by the import tests" was the stated
+    # justification and it is not sufficient: the import tests are a DIFFERENT
+    # node id, so a broken file turns every AST guard here into a smaller,
+    # quieter, still-green sweep. See decisions.md D-070.
+    """
+    try:
+        return ast.parse(path.read_text())
+    except SyntaxError as exc:
+        rel = path.as_posix()
+        if src_root is not None:
+            try:
+                rel = path.relative_to(src_root).as_posix()
+            except ValueError:
+                pass
+        if rel in _UNPARSEABLE_ALLOW_LIST:
+            return None
+        raise AssertionError(
+            f"{rel} does not parse, so every AST guard in this file is blind to "
+            f"it: {type(exc).__name__} at line {exc.lineno}: {exc.msg}. Fix the "
+            f"source. Only add it to _UNPARSEABLE_ALLOW_LIST if it is "
+            f"unparseable BY DESIGN."
+        ) from exc
+
+
 def _iter_classes(roots, src_root):
     """Yield ``(relpath, ast.ClassDef)`` for every class under ``roots``.
 
     Contract: ``roots`` is any iterable of directories to ``rglob("*.py")``;
     ``src_root`` is the directory paths are reported relative to (it must be a
-    parent of every root, or ``relative_to`` raises). Files that do not parse are
-    skipped silently -- ``test_every_package_imports`` is what catches those.
-    Shared by the three call-site sweeps so they cannot drift in what they walk.
+    parent of every root, or ``relative_to`` raises). A file that does not parse
+    FAILS the consuming guard by name via ``_parse_or_fail`` -- it is never
+    skipped. Shared by the three call-site sweeps so they cannot drift in what
+    they walk.
     """
     for root in roots:
         for path in sorted(Path(root).rglob("*.py")):
             rel = path.relative_to(src_root).as_posix()
-            try:
-                tree = ast.parse(path.read_text())
-            except SyntaxError:  # covered by the import tests
+            tree = _parse_or_fail(path, src_root)
+            if tree is None:
                 continue
             for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
                 yield rel, cls
@@ -1496,19 +1547,20 @@ def _is_variant_table_literal(node: ast.expr) -> bool:
 def _iter_modules(roots, src_root):
     """Yield ``(relpath, ast.Module)`` for every parseable file under ``roots``.
 
-    Contract: same arguments and same silent-skip-on-SyntaxError policy as
-    ``_iter_classes``; this one keeps the MODULE node because the MODEL_VARIANTS
-    rule is satisfiable at module scope (``beit``/``energy_transformer`` define
-    theirs there, deliberately) and because one of its three predicates walks
-    module-level FUNCTIONS, which ``_iter_classes`` cannot reach.
+    Contract: same arguments and same fail-loudly-on-SyntaxError policy as
+    ``_iter_classes`` (both go through ``_parse_or_fail``); this one keeps the
+    MODULE node because the MODEL_VARIANTS rule is satisfiable at module scope
+    (``beit``/``energy_transformer`` define theirs there, deliberately) and
+    because one of its three predicates walks module-level FUNCTIONS, which
+    ``_iter_classes`` cannot reach.
     """
     for root in roots:
         for path in sorted(Path(root).rglob("*.py")):
             rel = path.relative_to(src_root).as_posix()
-            try:
-                yield rel, ast.parse(path.read_text())
-            except SyntaxError:  # covered by the import tests
+            tree = _parse_or_fail(path, src_root)
+            if tree is None:
                 continue
+            yield rel, tree
 
 
 def _sweep_model_variants(roots=None, src_root=None):
@@ -2205,9 +2257,8 @@ def _sweep_init_subpackage_shadows(roots=None, src_root=None):
             if not subs:
                 continue
             counts["n_subpackage_relations"] += len(subs)
-            try:
-                tree = ast.parse(init.read_text())
-            except SyntaxError:  # covered by the import tests
+            tree = _parse_or_fail(init, src_root)
+            if tree is None:
                 continue
             rel = init.relative_to(src_root).as_posix()
             bound: dict = {}
@@ -2856,9 +2907,8 @@ def _init_imported_submodules(pkgdir: Path, pkg_suffix: str) -> dict:
     init = pkgdir / "__init__.py"
     if not init.exists():
         return {}
-    try:
-        tree = ast.parse(init.read_text())
-    except SyntaxError:  # covered by test_every_package_imports
+    tree = _parse_or_fail(init)
+    if tree is None:
         return {}
     marker = "." + pkg_suffix + "."
     mods: dict = {}
@@ -2949,9 +2999,8 @@ def _sweep_main_modules(roots=None, src_root=None):
             path = pkgdir / (sub.replace(".", "/") + ".py")
             if not path.exists():
                 continue
-            try:
-                tree = ast.parse(path.read_text())
-            except SyntaxError:
+            tree = _parse_or_fail(path, src_root)
+            if tree is None:
                 continue
             if not _is_model_module(tree):
                 continue
@@ -5474,3 +5523,78 @@ class TestCustomStepOverridePopulationIsFrozen:
             "a frozen key grew a fourth field -- if that field is the line "
             "number, this freeze now fails on unrelated edits"
         )
+
+
+# ---------------------------------------------------------------------------
+# Step 15a (plan-2026-08-22T035419-a11304c8) -- the parser gate itself.
+#
+# Every sweep above walks the tree through ``_parse_or_fail``. If that helper
+# ever goes back to swallowing a ``SyntaxError``, every guard in this 5,500-line
+# file quietly starts sweeping a SMALLER tree while still reporting green. These
+# two tests are the dead-component probe for the helper and the liveness control
+# on its allow-list.
+# ---------------------------------------------------------------------------
+
+
+class TestUnparseableSourceFailsLoudly:
+    """A source file that does not parse must FAIL a guard, not shrink it."""
+
+    def test_the_unparseable_allow_list_is_still_empty(self):
+        """Measured 2026-08-22: 0 of 1,007 ``src/**/*.py`` fail ``ast.parse``.
+
+        The allow-list exists so a future generated source has a reviewable
+        home; it is not a place to park a broken file. If this fails, the entry
+        that was added is the thing to argue about.
+        """
+        assert _UNPARSEABLE_ALLOW_LIST == set(), (
+            "a file was excused from the AST sweeps: "
+            f"{sorted(_UNPARSEABLE_ALLOW_LIST)}. Every guard in this file is "
+            "blind to each entry, so each one needs a written reason."
+        )
+
+    def test_every_swept_file_actually_parses(self):
+        """The population statement behind the empty allow-list, re-derived."""
+        unparseable = []
+        for path in sorted(SRC_ROOT.rglob("*.py")):
+            try:
+                ast.parse(path.read_text())
+            except SyntaxError as exc:
+                unparseable.append(f"{path.relative_to(SRC_ROOT)}: {exc.msg}")
+        assert not unparseable, unparseable
+
+    def test_parse_or_fail_raises_on_a_broken_file(self, tmp_path):
+        """Dead-component probe: the loud failure must actually be loud.
+
+        Written against the exact injection that PROVED the old policy blind --
+        a broken argument list in a ``create_*`` signature, which is what was
+        appended to ``models/cbam/model.py`` on 2026-08-22 to make
+        ``_sweep_create_delegation`` drop the site from 61 to 60 with the guard
+        class still reporting ``21 passed``.
+        """
+        broken = tmp_path / "model.py"
+        broken.write_text("def create_broken(variant=,):\n    return None\n")
+        with pytest.raises(AssertionError, match="does not parse"):
+            _parse_or_fail(broken, tmp_path)
+
+    def test_the_sweeps_propagate_that_failure(self, tmp_path):
+        """...and it reaches the SWEEPS, naming the file, not just the helper."""
+        pkg = tmp_path / "models" / "broken"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "model.py").write_text("def create_broken(variant=,):\n    pass\n")
+        roots, src_root = (tmp_path / "models",), tmp_path
+        with pytest.raises(AssertionError, match="models/broken/model.py"):
+            _sweep_create_delegation(roots, src_root)
+        with pytest.raises(AssertionError, match="models/broken/model.py"):
+            list(_iter_classes(roots, src_root))
+
+    def test_the_sweeps_are_silent_on_the_parseable_twin(self, tmp_path):
+        """...and must NOT fire once the same fixture parses."""
+        pkg = tmp_path / "models" / "broken"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "model.py").write_text("def create_broken(variant='a'):\n    pass\n")
+        roots, src_root = (tmp_path / "models",), tmp_path
+        sites, counts = _sweep_create_delegation(roots, src_root)
+        assert counts["n_variant_factories"] == 1, sites
+        assert list(_iter_classes(roots, src_root)) == []
