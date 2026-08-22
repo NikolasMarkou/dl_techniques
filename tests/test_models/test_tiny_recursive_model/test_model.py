@@ -320,7 +320,13 @@ class TestTRMIntegration:
 
         # Apply gradients
         grads = tape.gradient(total_loss, model.trainable_weights)
-        optimizer.apply_gradients(zip(grads, model.trainable_weights))
+        # R-038 / D-056: this simulation supervises `logits` only, so TRM's ACT
+        # `q_head` gets no gradient HERE. That is a property of this test's
+        # loss, not of the model: `src/train/tiny_recursive_model/train_trm.py`
+        # drives `create_hrm_loss(q_loss_weight=...)`, which does reach it.
+        # Asserted rather than suppressed.
+        with pytest.warns(UserWarning, match="Gradients do not exist"):
+            optimizer.apply_gradients(zip(grads, model.trainable_weights))
 
         # Check if weights have been updated
         weights_updated = False

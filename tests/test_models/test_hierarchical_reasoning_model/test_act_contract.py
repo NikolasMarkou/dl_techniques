@@ -241,13 +241,20 @@ class TestFactoryReturnsACompiledModel:
             "the factory returned an uncompiled model while its docstring "
             "promises an optionally compiled one (decisions.md D-032)"
         )
-        history = model.fit(
-            batch,
-            {"logits": batch["token_ids"]},
-            epochs=1,
-            verbose=0,
-            batch_size=2,
-        )
+        # R-038 / D-056: the factory's default compile supervises `logits`
+        # ONLY -- the Q/ACT term couples two model OUTPUTS and cannot be a
+        # per-output Keras loss (D-032). Keras therefore reports the q_head as
+        # gradient-free, DELIBERATELY. Asserted rather than suppressed; the
+        # paired liveness control is
+        # test_the_q_head_trains_where_it_is_supposed_to.py.
+        with pytest.warns(UserWarning, match="Gradients do not exist"):
+            history = model.fit(
+                batch,
+                {"logits": batch["token_ids"]},
+                epochs=1,
+                verbose=0,
+                batch_size=2,
+            )
         loss = history.history["loss"][0]
         assert np.isfinite(loss), f"fit ran but produced a non-finite loss {loss}"
 

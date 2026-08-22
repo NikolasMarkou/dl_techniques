@@ -117,7 +117,12 @@ class TestHRM:
         before = [keras.ops.convert_to_numpy(v).copy()
                   for v in model.trainable_variables]
         assert before, "model must be built before snapshotting weights"
-        history = model.fit(x, y, epochs=1, batch_size=4, verbose=0)
+        # R-038 / D-056: a logits-only compile leaves the ACT `q_head`
+        # gradient-free by design (D-032); Keras says so. Asserted, not
+        # suppressed -- the paired liveness control lives in
+        # test_the_q_head_trains_where_it_is_supposed_to.py.
+        with pytest.warns(UserWarning, match="Gradients do not exist"):
+            history = model.fit(x, y, epochs=1, batch_size=4, verbose=0)
 
         assert np.isfinite(history.history["loss"][0])
         moved = sum(
