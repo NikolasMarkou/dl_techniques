@@ -84,6 +84,7 @@ from dl_techniques.layers.transformers import (
 )
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -532,6 +533,22 @@ class DistilBERT(keras.Model):
                 name=f"transformer_layer_{i}"
             )
             self.encoder_layers.append(transformer_layer)
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method DistilBERT inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,
