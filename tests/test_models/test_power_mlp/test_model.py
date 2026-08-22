@@ -351,8 +351,14 @@ class TestPowerMLPSerialization:
             )
 
     def test_save_model_method(self, model_config: Dict[str, Any]) -> None:
-        """Test the save_model convenience method."""
+        """The archive must contain the WEIGHTS, not just exist.
+
+        Before D-053 this test asserted only ``os.path.exists`` plus the class
+        of the reloaded object, and passed against a 9,997-byte archive holding
+        zero weights.
+        """
         model = PowerMLP(**model_config)
+        model.build((None, 16))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'model_via_method.keras')
@@ -360,13 +366,41 @@ class TestPowerMLPSerialization:
 
             assert os.path.exists(filepath)
 
-            # Verify it can be loaded
+            # Verify it can be loaded WITH its weights
             loaded_model = keras.models.load_model(filepath)
             assert isinstance(loaded_model, PowerMLP)
+            original = model.get_weights()
+            restored = loaded_model.get_weights()
+            assert len(original) > 0, "the source model held no weights"
+            assert len(restored) == len(original), (
+                f"round trip restored {len(restored)} weight arrays, "
+                f"saved {len(original)}"
+            )
+            for index, (before, after) in enumerate(zip(original, restored)):
+                np.testing.assert_allclose(
+                    before, after, rtol=0, atol=0,
+                    err_msg=f"weight array {index} changed across the round trip"
+                )
+
+    def test_saving_an_unbuilt_power_mlp_is_refused(
+        self, model_config: Dict[str, Any]
+    ) -> None:
+        """`PowerMLP.__init__` takes no input shape, so it cannot self-build."""
+        model = PowerMLP(**model_config)
+        assert not model.built
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'empty.keras')
+            with pytest.raises(ValueError, match="unbuilt PowerMLP"):
+                model.save_model(filepath)
+            assert not os.path.exists(filepath), (
+                "an empty archive was written before the refusal"
+            )
 
     def test_load_model_method(self, model_config: Dict[str, Any]) -> None:
         """Test the load_model class method."""
         model = PowerMLP(**model_config)
+        model.build((None, 16))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'model_for_loading.keras')
@@ -375,6 +409,7 @@ class TestPowerMLPSerialization:
             loaded_model = PowerMLP.load_model(filepath)
             assert isinstance(loaded_model, PowerMLP)
             assert loaded_model.hidden_units == model.hidden_units
+            assert len(loaded_model.get_weights()) == len(model.get_weights())
 
 
 class TestPowerMLPConfiguration:

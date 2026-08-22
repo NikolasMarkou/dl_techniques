@@ -704,11 +704,40 @@ class CapsNet(keras.Model):
         used to forward was removed in Keras 3 and RAISES for any path Keras
         cannot classify, so passing it turned an "unknown extension" error into
         a deprecation error naming the wrong cause.
+
+        An UNBUILT model is built first from the `input_shape` given to
+        `__init__`. Without that, `self.save()` writes a syntactically valid
+        `.keras` archive holding ZERO weights, and `load_model()` hands back a
+        zero-weight model -- silently, behind one `UserWarning`.
+
+        Raises:
+            ValueError: if the model is unbuilt and was constructed without an
+                `input_shape`, so there is nothing to build from.
         """
         # Ensure directory exists
         directory = os.path.dirname(filepath)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-053
+        # Do NOT drop this build and go straight to `self.save()`. MEASURED
+        # 2026-08-22: `CapsNet(num_classes=5, input_shape=(28,28,1)).save(path)`
+        # writes a 31,587-byte archive whose reload has `built=False` and
+        # `len(trainable_weights) == 0`, against 12 for the same model built --
+        # an empty archive that looks like a model. The only signal was Keras'
+        # "You are saving a model that has not yet been built" UserWarning, and
+        # the two tests covering this path asserted only that the file existed.
+        # `__init__` already stored `_input_shape`, so the shape is known here.
+        # See decisions.md D-053.
+        if not self.built:
+            if self._input_shape is None:
+                raise ValueError(
+                    "Cannot save an unbuilt CapsNet that was constructed "
+                    "without `input_shape`: the archive would contain zero "
+                    "weights. Call the model on a batch, or call "
+                    "`model.build((None, height, width, channels))`, first."
+                )
+            self.build((None, *self._input_shape))
 
         # Save model
         self.save(filepath, overwrite=overwrite)

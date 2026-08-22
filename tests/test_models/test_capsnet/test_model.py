@@ -1073,7 +1073,11 @@ class TestCapsNet:
         capsnet.summary()
 
     def test_save_model_method(self, num_classes, mnist_input_shape):
-        """Test the save_model method."""
+        """The archive must contain the WEIGHTS, not just exist.
+
+        Before D-053 this test asserted only ``os.path.exists`` and passed
+        against a 31,587-byte archive holding zero weights.
+        """
         capsnet = CapsNet(
             num_classes=num_classes,
             input_shape=mnist_input_shape
@@ -1082,14 +1086,28 @@ class TestCapsNet:
         with tempfile.TemporaryDirectory() as tmpdirname:
             model_path = os.path.join(tmpdirname, "test_model.keras")
 
-            # Should not raise an error
+            # `save_model` builds an unbuilt model from its own `input_shape`.
             capsnet.save_model(model_path)
 
-            # File should exist
             assert os.path.exists(model_path)
+            assert capsnet.built, "save_model must leave the model built"
+            assert len(capsnet.trainable_weights) > 0
+
+    def test_saving_an_unbuildable_capsnet_is_refused(self, num_classes):
+        """No `input_shape` anywhere means no weights to save -- say so."""
+        capsnet = CapsNet(num_classes=num_classes, reconstruction=False)
+        assert not capsnet.built
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "empty.keras")
+            with pytest.raises(ValueError, match="unbuilt CapsNet"):
+                capsnet.save_model(model_path)
+            assert not os.path.exists(model_path), (
+                "an empty archive was written before the refusal"
+            )
 
     def test_load_model_method(self, num_classes, mnist_input_shape):
-        """Test the load_model class method."""
+        """The round trip must carry the weight VALUES, not just the class."""
         capsnet = CapsNet(
             num_classes=num_classes,
             input_shape=mnist_input_shape,
@@ -1107,6 +1125,19 @@ class TestCapsNet:
 
             assert isinstance(loaded_capsnet, CapsNet)
             assert loaded_capsnet.num_classes == num_classes
+
+            original = capsnet.get_weights()
+            restored = loaded_capsnet.get_weights()
+            assert len(original) > 0, "the source model held no weights"
+            assert len(restored) == len(original), (
+                f"round trip restored {len(restored)} weight arrays, "
+                f"saved {len(original)}"
+            )
+            for index, (before, after) in enumerate(zip(original, restored)):
+                np.testing.assert_allclose(
+                    before, after, rtol=0, atol=0,
+                    err_msg=f"weight array {index} changed across the round trip"
+                )
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

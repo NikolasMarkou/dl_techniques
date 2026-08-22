@@ -686,18 +686,45 @@ class PowerMLP(keras.Model):
         Convenience method that ensures the directory exists before saving.
         Uses the standard Keras save format (.keras) by default.
 
+        An UNBUILT model is refused rather than written: `self.save()` would
+        produce a syntactically valid `.keras` archive holding ZERO weights, and
+        `load_model()` would hand it back as a zero-weight model.
+
         Args:
             filepath: Path where to save the model. Should end with '.keras'.
             overwrite: Whether to overwrite existing file. Defaults to True.
-            save_format: Format to save the model in. Defaults to "keras".
+            save_format: Accepted for backwards compatibility and IGNORED. Keras 3
+                selects the format from the file extension; `saving_api.save_model`
+                pops this kwarg and never forwards it.
+
+        Raises:
+            ValueError: if the model has not been built. Unlike `CapsNet`,
+                `PowerMLP.__init__` takes no input shape, so this method has
+                nothing to build from.
         """
         # Ensure directory exists
         directory = os.path.dirname(filepath)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
 
-        # Save model
-        self.save(filepath, overwrite=overwrite, save_format=save_format)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-053
+        # Do NOT restore a silent `self.save()` on an unbuilt model. MEASURED
+        # 2026-08-22: `PowerMLP(hidden_units=[8,4]).save(path)` writes a
+        # 9,997-byte archive whose reload has `built=False` and
+        # `len(trainable_weights) == 0`, against 2 for the same model built.
+        # The only signal was a UserWarning, and the two tests on this path
+        # asserted only that the file existed and that loading returned an
+        # object. See decisions.md D-053.
+        if not self.built:
+            raise ValueError(
+                "Cannot save an unbuilt PowerMLP: the archive would contain "
+                "zero weights. Call the model on a batch, or call "
+                "`model.build((None, input_dim))`, before saving."
+            )
+
+        # `save_format` is deliberately NOT forwarded: Keras 3 picks the format
+        # from the extension and `saving_api.save_model` discards the kwarg.
+        self.save(filepath, overwrite=overwrite)
         logger.info(f"PowerMLP model saved to {filepath}")
 
     @classmethod
