@@ -403,6 +403,21 @@ class VAE(keras.Model):
         # through our compile() so the vmf jit_compile=False opt-out survives reload.
         config = keras.saving.deserialize_keras_object(config)
         self.compile(**config)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-014: these two lines are the
+        # tail of Keras' own `Trainer.compile_from_config`
+        # (keras/src/trainers/trainer.py:973-975). Overriding the method without
+        # them silently DROPPED the whole saved optimizer state on every reload:
+        # measured 2026-08-22 on a VAE fitted for one epoch, the archive held 122
+        # optimizer variables and the reloaded model's optimizer held 2, so
+        # `BaseOptimizer.load_own_variables` warned ("Skipping variable loading
+        # for optimizer 'adam' ...") and restored NOTHING. A checkpoint resumed
+        # that way restarts Adam from zeroed moments with a zeroed step count.
+        # Do NOT "simplify" this back to `self.compile(**config); return self` --
+        # the override exists only for the D-009 vmf jit_compile opt-out and must
+        # otherwise reproduce the base method exactly. Guarded by
+        # tests/test_models/test_vae/test_the_optimizer_state_survives_reload.py.
+        if hasattr(self, "optimizer") and self.built:
+            self.optimizer.build(self.trainable_variables)
         return self
 
     def _build_model(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:

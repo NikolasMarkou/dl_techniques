@@ -290,8 +290,29 @@ def exact_enumeration_accuracy(
 
 
 def roundtrip_check(model: keras.Model, X: np.ndarray, save_path: str) -> float:
+    """Save + reload + re-predict; return the max-abs prediction diff.
+
+    :param model: A built model. It may or may not be compiled.
+    :param X: Inputs to compare predictions on.
+    :param save_path: Where to write the intermediate ``.keras`` archive.
+    :returns: ``max|predict(model, X) - predict(reloaded, X)|``.
+    """
     model.save(save_path)
-    reloaded = keras.models.load_model(save_path)
+    # DECISION plan-2026-08-22T035419-a11304c8/D-015: `compile=False` is REQUIRED,
+    # not an optimization. Every builder in this package (`build_circuit`,
+    # `build_image_circuit`, `build_model`, `build_cnn_baseline`) returns a
+    # COMPILED model, and Keras allocates an optimizer's slot variables lazily on
+    # the first gradient application -- so a model that has not been fitted yet
+    # saves an optimizer holding 2 variables while the reload rebuilds one holding
+    # `2 + 2*len(trainable_variables)`. `load_own_variables` then emits
+    # `UserWarning: Skipping variable loading for optimizer ...`, which is a fatal
+    # error under `-W error::UserWarning`. This function compares PREDICTIONS, so
+    # it does not want the optimizer at all. Do NOT "fix" this by fitting the model
+    # first (that changes what is being round-tripped) and do NOT reach for
+    # `model.save(..., include_optimizer=False)`: measured 2026-08-22, that kwarg
+    # is popped and then DISCARDED on the `.keras` path (keras/src/saving/
+    # saving_api.py:56 and :105), so it is a silent no-op.
+    reloaded = keras.models.load_model(save_path, compile=False)
     p1 = model.predict(X, verbose=0)
     p2 = reloaded.predict(X, verbose=0)
     return float(np.max(np.abs(p1 - p2)))
