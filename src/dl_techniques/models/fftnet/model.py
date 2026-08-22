@@ -307,6 +307,9 @@ class FFTNetBlock(keras.layers.Layer):
         dropout_p: Dropout probability. Default: 0.0.
         ffn_type: Type of FFN from factory. Default: 'mlp'.
         normalization_type: Type of normalization from factory. Default: 'layer_norm'.
+        use_bias_in_modrelu: Whether the block's ``FFTMixer`` uses a learnable
+            bias in modReLU. Forwarded verbatim; defaults to ``FFTMixer``'s own
+            default (``True``) so existing configurations are unchanged.
         **kwargs: Additional keyword arguments for the Layer base class.
     """
 
@@ -318,6 +321,7 @@ class FFTNetBlock(keras.layers.Layer):
             dropout_p: float = 0.0,
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
+            use_bias_in_modrelu: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -328,14 +332,27 @@ class FFTNetBlock(keras.layers.Layer):
         self.dropout_p = dropout_p
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
+        self.use_bias_in_modrelu = use_bias_in_modrelu
 
         # Create sub-layers using factories
         self.norm1 = create_normalization_layer(normalization_type, name='norm1')
 
+        # DECISION plan-2026-08-22T035419-a11304c8/D-011
+        # ``use_bias_in_modrelu`` MUST be forwarded here. It is a fully wired
+        # ``FFTMixer`` knob -- it decides whether ``modrelu_bias`` is created in
+        # ``FFTMixer.build`` and whether ``_apply_modrelu`` adds it -- but for as
+        # long as this constructor omitted the keyword, ``FFTMixer``'s own
+        # default was the only value ANY ``FFTNetBlock``/``FFTNet``/
+        # ``create_fftnet_*`` caller could reach, and the knob was serialized at
+        # the mixer level while being unreachable from every shipped entry
+        # point. Do not "simplify" this back to a positional-only construction.
+        # The default is pinned to ``FFTMixer``'s own (``True``) so no existing
+        # config changes meaning. See D-011 in decisions.md.
         self.fft_mixer = FFTMixer(
             embed_dim=embed_dim,
             mlp_hidden_dim=mlp_hidden_dim,
             dropout_p=dropout_p,
+            use_bias_in_modrelu=use_bias_in_modrelu,
             name='fft_mixer'
         )
 
@@ -386,6 +403,7 @@ class FFTNetBlock(keras.layers.Layer):
             'dropout_p': self.dropout_p,
             'ffn_type': self.ffn_type,
             'normalization_type': self.normalization_type,
+            'use_bias_in_modrelu': self.use_bias_in_modrelu,
         })
         return config
 
@@ -439,6 +457,8 @@ class FFTNet(keras.Model):
         dropout_p: Dropout probability. Default: 0.1.
         ffn_type: Type of FFN from factory. Default: 'mlp'.
         normalization_type: Type of normalization from factory. Default: 'layer_norm'.
+        use_bias_in_modrelu: Whether each block's ``FFTMixer`` uses a learnable
+            bias in modReLU. Default: True (``FFTMixer``'s own default).
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -516,6 +536,7 @@ class FFTNet(keras.Model):
             dropout_p: float = DEFAULT_DROPOUT,
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
+            use_bias_in_modrelu: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -535,6 +556,7 @@ class FFTNet(keras.Model):
         self.dropout_p = dropout_p
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
+        self.use_bias_in_modrelu = use_bias_in_modrelu
 
         # Calculate number of patches
         self.num_patches = (image_size // patch_size) ** 2
@@ -599,6 +621,7 @@ class FFTNet(keras.Model):
                 dropout_p=self.dropout_p,
                 ffn_type=self.ffn_type,
                 normalization_type=self.normalization_type,
+                use_bias_in_modrelu=self.use_bias_in_modrelu,
                 name=f'block_{i}'
             ) for i in range(self.num_layers)
         ]
@@ -731,6 +754,7 @@ class FFTNet(keras.Model):
             "dropout_p": self.dropout_p,
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
+            "use_bias_in_modrelu": self.use_bias_in_modrelu,
         })
         return config
 
