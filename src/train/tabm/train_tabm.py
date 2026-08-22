@@ -506,7 +506,11 @@ def example_ensemble_analysis():
 
         plt.tight_layout()
         plt.savefig('ensemble_analysis.png', dpi=150, bbox_inches='tight')
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore `plt.show()`. This repo mandates MPLBACKEND=Agg for
+        # headless safety, so the call cannot render; it only warned and leaked
+        # the figure. The figure is already on disk one line above.
+        plt.close()
 
     return model, trainer, results
 

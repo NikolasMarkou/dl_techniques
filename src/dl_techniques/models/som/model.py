@@ -712,8 +712,9 @@ class SOMModel(keras.Model):
             self,
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis',
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Visualize the learned SOM grid showing neuron prototype memories.
 
@@ -733,9 +734,16 @@ class SOMModel(keras.Model):
             cmap: Matplotlib colormap name for visualization. Used for image
                 grids ('gray' for grayscale images) or heatmaps ('viridis').
                 Defaults to 'viridis'.
-            save_path: Optional file path to save the visualization. If None,
-                displays interactively. Supports formats like .png, .pdf, .svg.
-                Defaults to None.
+            save_path: Optional file path to save the visualization.
+                Supports formats like .png, .pdf, .svg. Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -765,7 +773,7 @@ class SOMModel(keras.Model):
         weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, input_dim = weights.shape
 
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         # Check if input dimension is a perfect square (likely images)
         side_length_f = np.sqrt(input_dim)
@@ -800,7 +808,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def visualize_class_distribution(
             self,
@@ -810,8 +831,9 @@ class SOMModel(keras.Model):
             cmap: str = 'tab10',
             alpha: float = 0.5,
             marker_size: int = 100,
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Visualize how different classes distribute across the SOM grid topology.
 
@@ -840,6 +862,14 @@ class SOMModel(keras.Model):
                 Defaults to 100.
             save_path: Optional file path to save visualization.
                 Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -870,7 +900,7 @@ class SOMModel(keras.Model):
         """
         bmu_indices = self._bmu_indices_in_batches(x_data)
 
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         # Convert one-hot encoded labels to class indices if needed
         if len(y_data.shape) > 1 and y_data.shape[1] > 1:
@@ -920,14 +950,28 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def visualize_u_matrix(
             self,
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis_r',
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Visualize the Unified Distance Matrix (U-Matrix) revealing cluster boundaries.
 
@@ -947,6 +991,14 @@ class SOMModel(keras.Model):
                 'hot', 'plasma_r', etc. Defaults to 'viridis_r'.
             save_path: Optional file path to save visualization.
                 Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -1002,7 +1054,7 @@ class SOMModel(keras.Model):
                     u_matrix[i, j] = avg_distance
 
         # Visualize
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
         plt.imshow(u_matrix, cmap=cmap, interpolation='nearest')
         plt.colorbar(label='Average Distance to Neighbors')
         plt.title('U-Matrix: Memory Cluster Boundaries')
@@ -1012,7 +1064,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def visualize_hit_histogram(
             self,
@@ -1020,8 +1085,9 @@ class SOMModel(keras.Model):
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis',
             log_scale: bool = False,
-            save_path: Optional[str] = None
-    ) -> np.ndarray:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> Tuple[np.ndarray, "plt.Figure"]:
         """
         Visualize activation frequency across the SOM grid (hit histogram).
 
@@ -1038,15 +1104,21 @@ class SOMModel(keras.Model):
             log_scale: Whether to use logarithmic color scaling. Useful when
                 activation frequencies vary by orders of magnitude. Defaults to False.
             save_path: Optional file path to save visualization. Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
 
         Returns:
-            Array of shape (grid_height, grid_width) containing hit counts for
-            each neuron. Useful for quantitative analysis of map utilization.
+            A ``(hit_histogram, figure)`` tuple. ``hit_histogram`` is an array of
+            shape (grid_height, grid_width) containing hit counts for each
+            neuron, useful for quantitative analysis of map utilization; the
+            ``matplotlib`` ``Figure`` is already closed when ``show=False``.
 
         Example:
             ```python
             # Basic hit histogram
-            hits = som.visualize_hit_histogram(x_train)
+            hits, fig = som.visualize_hit_histogram(x_train)
 
             # With log scale for large variance
             som.visualize_hit_histogram(x_train, log_scale=True)
@@ -1075,7 +1147,7 @@ class SOMModel(keras.Model):
             hit_histogram[bmu[0], bmu[1]] += 1
 
         # Visualize
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         if log_scale and np.max(hit_histogram) > 0:
             # Use log scale for better visualization of varying frequencies
@@ -1094,9 +1166,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
-        return hit_histogram
+        return hit_histogram, fig
 
     def visualize_memory_recall(
             self,
@@ -1106,8 +1189,9 @@ class SOMModel(keras.Model):
             y_train: Optional[np.ndarray] = None,
             figsize: Tuple[int, int] = (15, 3),
             cmap: str = 'gray',
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Demonstrate associative memory recall for a query sample.
 
@@ -1135,6 +1219,14 @@ class SOMModel(keras.Model):
             cmap: Matplotlib colormap for visualization. Use 'gray' for grayscale
                 images. Defaults to 'gray'.
             save_path: Optional file path to save visualization. Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -1206,7 +1298,7 @@ class SOMModel(keras.Model):
             side_length = int(side_length_f)
 
         # Create visualization
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         # Plot test sample (query)
         plt.subplot(1, n_similar + 2, 1)
@@ -1248,7 +1340,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def get_config(self) -> Dict[str, Any]:
         """
