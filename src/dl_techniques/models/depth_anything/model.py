@@ -106,15 +106,18 @@ feeding `self._loss_tracker`, which the default `compute_loss` does *not* do; se
 `_finalize_train_step`. Do not treat this file as precedent for an ordinary
 single-batch model.
 
-Serialization overrides `save_own_variables` / `load_own_variables` to write the
-entire ordered `self.weights` list into flat numeric slots at the top level.
-Keras 3's default behaviour recurses into child models and maps weights by
-attribute path, and for a `keras.Model` nested as an attribute of another
-`keras.Model` that path mapping was measured to drift between save and load —
-55 of 172 weights restored re-initialized, moving the forward output by 1 to 2.8.
-Writing one flat, path-free record bypasses the framework's path walking
-entirely; `load_own_variables` force-builds via a dummy forward first so the
-weight list it indexes matches the one that was written.
+Serialization overrides `load_own_variables` for one reason: to materialize the
+nested sub-Models before the framework restores into them. Keras 3 recurses into
+child models and maps weights by attribute path, but it calls the outer model's
+`load_own_variables` first, and at that moment `self.encoder`/`self.decoder`
+exist while their own sub-layers — and therefore their variables — do not. Left
+alone, 55 of 172 weights restored re-initialized and the forward output moved by
+1 to 2.8. A dummy forward under the saved `image_shape` builds the full tree, and
+the restore itself is then the ordinary path-based one. This override used to
+carry a `save_own_variables` twin that dumped the whole `self.weights` list into
+flat numeric slots; it did not replace the framework's recursive save as its
+comment claimed, it ran alongside it and doubled every archive, so it was removed
+(see the D-009 anchor above `load_own_variables`).
 
 References:
     - Yang et al., 2024. Depth Anything: Unleashing the Power of Large-Scale
@@ -1062,45 +1065,50 @@ class DepthAnything(keras.Model):
         return cls(**cfg)
 
     # ------------------------------------------------------------------
-    # Save / load delegation for nested sub-Models.
+    # Load-time materialization of the nested sub-Models.
     # ------------------------------------------------------------------
-    # DECISION plan_2026-05-10_bd098beb/D-004
-    # Keras 3 walks weight paths inside `.keras` archives via attribute
-    # tracking on the outer `keras.Model` subclass. When `self.encoder`
-    # is itself a Functional/subclassed `keras.Model` (here, ViT), the
-    # path mapping for its inner FFN/attention Dense kernels can drift
-    # between save and load — 55/172 weights round-trip with
-    # re-initialised values (forward diff ≈ 1-2.8). The MLM serialization
-    # pattern fixes topology round-trip but not weight-path round-trip.
-    # The canonical Keras-3 fix is to override `save_own_variables` /
-    # `load_own_variables` and persist the full ordered weight list of
-    # each sub-Model into a deterministic keyed slot in the store. This
-    # bypasses Keras' path-walking for these sub-Models entirely.
-    def save_own_variables(self, store: Any) -> None:  # type: ignore[override]
-        """Persist all of DepthAnything's variables in one flat store.
-
-        The default Keras 3 implementation only persists ``self``'s own
-        direct variables and lets the framework recurse into children. For
-        ViT-as-encoder that recursion has been observed to drop kernel
-        arrays during load (see D-004). We instead serialize the full,
-        ordered ``self.weights`` list under flat numeric keys at the
-        DepthAnything level. ``self.weights`` already includes every
-        variable of every nested layer (encoder, frozen_encoder, decoder,
-        augmentation), so this is one canonical, path-free record.
-        """
-        all_vars = list(self.weights)
-        for i, v in enumerate(all_vars):
-            store[str(i)] = keras.ops.convert_to_numpy(v)
-
+    # DECISION plan-2026-08-22T035419-a11304c8/D-009
+    # (supersedes the save-side half of plan_2026-05-10_bd098beb/D-004)
+    #
+    # D-004 fixed a real defect: restoring a saved DepthAnything left
+    # 55/172 weights at their freshly-initialised values (forward diff
+    # ~1-2.8), because Keras' path-walking `_load_state` recursion reaches
+    # `self.encoder`/`self.decoder` before anything has materialized their
+    # sub-layers. It fixed it by ALSO overriding `save_own_variables` to
+    # dump `list(self.weights)` under flat `vars/N` keys, on the stated
+    # premise that this "bypasses Keras' path-walking for these sub-Models
+    # entirely". That premise is FALSE, measured 2026-08-22: Keras' own
+    # recursive attribute-tracked save still runs alongside the override,
+    # so every `.keras` archive held BOTH families for the same tensors —
+    # `vit_l`/384: 610 live weights vs 1220 HDF5 datasets, exactly 2.00x,
+    # 4,882,763,410 bytes. `load_own_variables` only ever read the flat
+    # family back, so the path-based half was write-only dead weight.
+    #
+    # Bisected here: the load-bearing half of D-004 is the FORCE-BUILD
+    # below, not the flat store. Measured, `vit_s`/96, seeded, two full
+    # round trips (save->load->save->load):
+    #   * both overrides removed        -> max|delta| 4.5575 then 3.7332
+    #   * force-build only (this shape) -> 0.0 then 0.0, 322 datasets for
+    #     322 weights, 178,724,298 bytes (exactly half)
+    #
+    # Do NOT re-add a `save_own_variables` that writes `self.weights` into
+    # the store: it does not replace Keras' recursion, it duplicates it,
+    # and it silently doubles every checkpoint. Do NOT delete this method
+    # either — without the force-build the path-based restore lands on an
+    # unbuilt tree and the weights come back re-initialised, which is the
+    # 2026-05-10 defect returning with a green shape-only round trip.
     def load_own_variables(self, store: Any) -> None:  # type: ignore[override]
-        """Restore all of DepthAnything's variables from the flat store.
+        """Materialize the nested sub-Models before Keras restores them.
 
-        Mirrors :meth:`save_own_variables` — assigns ``self.weights[i]``
-        from ``store[str(i)]`` in deterministic order. If sub-layers
-        haven't been built yet (Keras 3 may call ``load_own_variables``
-        before recursing into children), force-build by running a
-        single dummy forward pass under the saved ``image_shape`` so
-        ``self.weights`` matches what was written at save time.
+        Keras 3 calls ``load_own_variables`` on the outer model *before* it
+        recurses into ``encoder`` / ``frozen_encoder`` / ``decoder``. Those
+        sub-Models are constructed in :meth:`build` but their own sub-layers
+        (and therefore their variables) only exist once something has run a
+        forward pass through them, so the recursion would otherwise restore
+        into an empty tree. A single dummy forward under the saved
+        ``image_shape`` materializes the full variable set first; the actual
+        restore is then the ordinary path-based one, delegated to
+        ``keras.Model``.
         """
         if not self.built or any(
             sub is not None and not sub.built
@@ -1109,15 +1117,7 @@ class DepthAnything(keras.Model):
             dummy = keras.ops.zeros((1,) + tuple(self.image_shape))
             _ = self(dummy, training=False)
 
-        all_vars = list(self.weights)
-        n_store = len(store.keys()) if hasattr(store, "keys") else len(all_vars)
-        if n_store != len(all_vars):
-            raise ValueError(
-                f"DepthAnything.load_own_variables: store has {n_store} "
-                f"entries but model has {len(all_vars)} weights."
-            )
-        for i, v in enumerate(all_vars):
-            v.assign(store[str(i)])
+        super().load_own_variables(store)
 
 # ---------------------------------------------------------------------
 

@@ -5,7 +5,10 @@ Covers:
   `encoder_kind='placeholder'` (legacy Conv-BN-ReLU).
 - DPTDecoder default activation is `'linear'`.
 - Save/load round-trip equality (the SC-6 fix from
-  `plan_2026-05-10_bd098beb` — D-004 save_own_variables override).
+  `plan_2026-05-10_bd098beb` — D-004, since narrowed to the
+  `load_own_variables` force-build alone by D-009; the archive layout it
+  leaves behind is guarded by
+  `test_the_archive_holds_each_weight_once.py`).
 - `compile(loss=None)` installs an affine-invariant objective (asserted
   behaviourally, with a liveness arm on `MeanSquaredError`).
 - `train_step` labeled-only smoke (1-step CPU `model.fit`).

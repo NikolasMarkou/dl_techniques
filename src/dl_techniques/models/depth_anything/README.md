@@ -119,13 +119,21 @@ DepthAnything(
 > kwarg. `input_shape` is accepted as a deprecated alias for one cycle so
 > previously-saved configs continue to load.
 
-**Save/load — D-004 override.** `DepthAnything` overrides Keras 3's
-`save_own_variables` / `load_own_variables` to persist `self.weights` as a
-flat numeric-keyed store at the model level. This bypasses the framework's
-path-walking, which (with a wrapped `ViT` sub-Model) was dropping 55/172
-kernel arrays during load. The override force-builds nested sub-Models on
-load when needed so `self.weights` matches the saved store. See
-`# DECISION plan_2026-05-10_bd098beb/D-004` in `model.py`.
+**Save/load — D-009 (was D-004).** `DepthAnything` overrides Keras 3's
+`load_own_variables` to force-build the nested sub-Models with a dummy
+forward before the framework restores into them; without it the path-based
+restore lands on a tree whose sub-layers do not exist yet and (with a
+wrapped `ViT` sub-Model) 55/172 kernel arrays come back re-initialized.
+The save side is the stock Keras recursive save. The matching
+`save_own_variables` override that D-004 added — a flat numeric-keyed dump
+of `self.weights` — was removed on 2026-08-22: it did **not** bypass the
+framework's path-walking as its comment claimed, it ran alongside it, so
+every archive held both families and was exactly 2x its necessary size
+(`vit_l`/384: 610 weights, 1220 HDF5 datasets, 4.88 GB → 2.44 GB after
+removal, round-trip delta unchanged at exactly 0.0 over two full round
+trips). See `# DECISION plan-2026-08-22T035419-a11304c8/D-009` in
+`model.py` and the guard
+`tests/test_models/test_depth_anything/test_the_archive_holds_each_weight_once.py`.
 
 **EMA teacher.** `update_teacher_ema(decay=0.999)` advances the frozen
 teacher's weights toward the student via in-place EMA. Call this from a
@@ -333,7 +341,7 @@ folded into the work below. Item numbers are kept stable for traceability.
   with `AffineInvariantLoss` and the masked-L1 + gradient loss.
 * **#7** — Real ViT encoder is constructed in `__init__`, not `build()`,
   for the real path; serialization is verified by SC-6 (max-abs-diff = 0.0)
-  via the D-004 `save_own_variables` / `load_own_variables` override.
+  via the `load_own_variables` force-build (D-004, narrowed by D-009).
 * **#8** — Dead `if X is not None` guards and `_create_fallback_decoder`
   removed.
 * **#10** — `encoder_type` now actually selects ViT scale
