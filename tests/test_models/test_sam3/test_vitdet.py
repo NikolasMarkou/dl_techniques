@@ -361,14 +361,26 @@ class TestWindowedVersusGlobal:
         """
         assert self._near_token_response(self._block(TINY["window_size"])) > 1e-4
 
+    # DECISION plan-2026-08-22T035419-a11304c8/D-036
+    # The response is bounded in ULP of the output, NOT pinned at `== 0.0`.
+    # The exact-zero form was RED at baseline
+    # (`assert 1.7881393432617188e-07 == 0.0`) and is unsatisfiable: the
+    # mean-centring is exact in real arithmetic and only sub-ulp-exact in fp32.
+    # Measured over 20 freshly initialized blocks: the residual is
+    # 5.960464e-08 .. 2.980232e-07, which is **0.25 .. 2.50 ulp** of the output
+    # amplitude at that seed -- it never reached 0.0 in any of the 20. Over the
+    # same 20 blocks the SINGLE-CHANNEL bump this trap is contrasted with moves
+    # the distant token by 5.393e-03 .. 3.937e-02, four to five orders of
+    # magnitude more, so an 8-ulp budget (3.2x over the worst residual observed)
+    # cannot swallow the real signal and the vacuity claim survives intact.
     def test_a_uniform_across_channel_bump_is_mean_centred_away(self):
         """MEASURED: the naive form of the probe above is VACUOUS.
 
         A perturbation applied to every channel of one token is removed by
         `norm1`'s per-token mean subtraction, so a global block's distant-token
-        response measures exactly 0.0 -- indistinguishable from a windowed
-        block's. This test pins that trap permanently so the probe above cannot
-        silently regress to the vacuous form.
+        response collapses to fp32 rounding -- indistinguishable from a windowed
+        block's exact zero. This test pins that trap permanently so the probe
+        above cannot silently regress to the vacuous form.
         """
         block = self._block(0)
         x = np.random.RandomState(3).randn(
@@ -378,7 +390,16 @@ class TestWindowedVersusGlobal:
         uniform = x.copy()
         uniform[0, TINY_GRID - 1, TINY_GRID - 1] += 25.0
         moved = keras.ops.convert_to_numpy(block(uniform, training=False))
-        assert float(np.max(np.abs(moved[0, 0, 0] - base[0, 0, 0]))) == 0.0
+
+        response = float(np.max(np.abs(moved[0, 0, 0] - base[0, 0, 0])))
+        amplitude = float(np.max(np.abs(base[0, 0, 0])))
+        ulp = float(np.spacing(np.float32(amplitude)))
+        assert response <= 8 * ulp, (
+            f"a uniform across-channel bump moved the distant token by "
+            f"{response:.6e} = {response / ulp:.2f} ulp of the output amplitude "
+            f"{amplitude:.4f}; `norm1` is no longer mean-centring it away, so "
+            "the single-channel form of this probe is no longer necessary"
+        )
 
     def test_backbone_assigns_windows_and_globals_as_configured(self, tiny_trunk):
         for i, block in enumerate(tiny_trunk.blocks):
