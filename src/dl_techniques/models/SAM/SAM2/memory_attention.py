@@ -85,6 +85,21 @@ from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
 # "simplification" to 1.0.
 _INPUT_POS_ENC_SCALE = 0.1
 
+# DECISION plan-2026-08-22T035419-a11304c8/D-090
+#: The SHIPPED memory-attention dropout rate, and the single home of the
+#: number. Every class below takes it as its constructor default and
+#: ``SAM2.MODEL_VARIANTS`` reads it from here rather than restating ``0.1``.
+#: Do NOT write a bare ``0.1`` into the variant table or into any of the three
+#: signatures below: a rate restated in two homes drifts silently, and this
+#: file already had one hard-wired copy per class with no way to reach it. The
+#: model-level knob (``SAM2.from_variant(dropout_rate=...)``, D-090) overrides
+#: this per construction; the default stays 0.1 so shipped behaviour is
+#: bit-identical. NOTE: the constructor PARAMETER is still called ``dropout``
+#: here, not ``dropout_rate`` -- renaming it is a separate, checkpoint-aware
+#: step of this same plan (the `*_dropout_rate` convention wave); this
+#: constant deliberately carries the target name already.
+DEFAULT_DROPOUT_RATE: float = 0.1
+
 # ---------------------------------------------------------------------
 
 
@@ -165,7 +180,7 @@ class _SAM2RoPEAttention(keras.layers.Layer):
             embedding_dim: int = 256,
             num_heads: int = 1,
             downsample_rate: int = 1,
-            dropout: float = 0.1,
+            dropout: float = DEFAULT_DROPOUT_RATE,
             kv_in_dim: Optional[int] = None,
             rope_theta: float = 10000.0,
             feat_sizes: Sequence[int] = (64, 64),
@@ -476,7 +491,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             self,
             d_model: int = 256,
             dim_feedforward: int = 2048,
-            dropout: float = 0.1,
+            dropout: float = DEFAULT_DROPOUT_RATE,
             activation: str = "relu",
             pos_enc_at_attn: bool = False,
             pos_enc_at_cross_attn_queries: bool = False,
@@ -800,7 +815,7 @@ class SAM2MemoryAttention(keras.layers.Layer):
             num_layers: int = 4,
             pos_enc_at_input: bool = True,
             dim_feedforward: int = 2048,
-            dropout: float = 0.1,
+            dropout: float = DEFAULT_DROPOUT_RATE,
             activation: str = "relu",
             pos_enc_at_attn: bool = False,
             pos_enc_at_cross_attn_queries: bool = False,

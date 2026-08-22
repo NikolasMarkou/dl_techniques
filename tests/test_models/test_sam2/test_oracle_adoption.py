@@ -42,11 +42,12 @@ skip list that silently absorbs a new dead weight.
 
 A HARD-WIRED DROPOUT RATE, AND WHY THE MEASUREMENT PINS IT
 -----------------------------------------------------------
-SAM 2's memory attention hard-wires ``dropout=0.1`` (``memory_attention.py``
-lines 168 and 479) and **no constructor path exposes it**: neither
-``SAM2.from_variant`` nor ``create_sam2`` takes a dropout argument, and the
-``tiny`` variant table has no entry for one. A training-mode measurement on a
-stock SAM 2 is therefore a DRAW -- the same hazard that made a BeiT arm in
+SAM 2's memory attention ships ``dropout=0.1`` (the single home of the number
+is ``memory_attention.DEFAULT_DROPOUT_RATE``). Since D-090 it IS reachable --
+``SAM2.from_variant(dropout_rate=...)``, ``create_sam2(dropout_rate=...)`` and
+a ``dropout_rate`` key in every variant table -- but the SHIPPED default is
+unchanged at 0.1, which is what these models are built with. A training-mode
+measurement on a stock SAM 2 is therefore still a DRAW -- the same hazard that made a BeiT arm in
 batch A report a whole dead encoder block 1 run in 4. Every model measured here
 runs through :func:`_pin_dropout_to_zero`, and
 ``test_the_hard_wired_memory_attention_dropout_is_really_there`` pins the
@@ -123,15 +124,17 @@ def _one_adam_step(model: keras.Model, inputs) -> None:
 
 
 #: MEASURED 2026-08-21 and worth stating plainly: SAM 2's memory attention
-#: hard-wires ``dropout=0.1`` (``memory_attention.py:168`` and ``:479``) and NO
-#: constructor path exposes it -- neither ``SAM2.from_variant`` nor
-#: ``create_sam2`` accepts a dropout argument, and the ``tiny`` variant table
-#: has no entry for one. So a training-mode measurement on a stock SAM 2 is a
-#: DRAW, which is the exact hazard that made a BeiT arm in batch A flaky 1 run
+#: ships ``dropout=0.1``. Since plan-2026-08-22T035419-a11304c8 D-090 the rate
+#: IS configurable (``SAM2.from_variant(dropout_rate=...)``), but the shipped
+#: default these models are built with is still 0.1, so a training-mode
+#: measurement on a stock SAM 2 is a DRAW, which is the exact hazard that made a BeiT arm in batch A flaky 1 run
 #: in 4. Since the rate cannot be configured, it is pinned here by assignment
 #: on the built layers, and ``test_no_layer_is_stochastic`` then asserts that
 #: nothing stochastic survived. Do NOT drop this: without it, every number in
-#: this file's docstring is one sample of a distribution.
+#: this file's docstring is one sample of a distribution. (Building the fixture
+#: with ``dropout_rate=0.0`` would be the tidier route now that the knob
+#: exists, but the trainer fixture is constructed elsewhere; the pinning below
+#: also covers stochastic depth, which no dropout knob reaches.)
 def _pin_dropout_to_zero(model: keras.Model) -> int:
     pinned = 0
     for layer in model._flatten_layers(include_self=False):
@@ -143,6 +146,14 @@ def _pin_dropout_to_zero(model: keras.Model) -> int:
 
 
 def _built(**overrides) -> SAM2TrainingModel:
+    # Since D-090 the rate is a CONSTRUCTOR argument, so it is killed at the
+    # source rather than only on the built `Dropout` layers. This is not
+    # cosmetic: `SAM2.dropout_rate` is a property over the memory-attention
+    # stack's configured rate, so a model built at 0.1 and pinned afterwards
+    # still REPORTS 0.1 and `test_no_layer_is_stochastic` correctly rejects it.
+    # `_pin_dropout_to_zero` is still called below -- it covers the stochastic
+    # depth in the Hiera trunk, which no dropout knob reaches.
+    overrides.setdefault("dropout_rate", 0.0)
     keras.utils.set_random_seed(11)
     model = trainer(**overrides)
     _pin_dropout_to_zero(model)
@@ -154,9 +165,12 @@ class TestSAM2GradientFlow:
     def test_the_hard_wired_memory_attention_dropout_is_really_there(self):
         """The premise of ``_pin_dropout_to_zero``, asserted before it is used.
 
-        If SAM 2 ever grows a dropout knob (or drops the rate to 0.0), this
-        goes red and the pinning helper can be deleted rather than left as
-        dead ceremony.
+        What it pins is the SHIPPED RATE, not the absence of a knob: D-090 gave
+        SAM 2 a ``dropout_rate`` knob and deliberately left the default at 0.1,
+        so this stayed green through that change -- correctly, because the
+        fixture is still built at the default and still draws. If the shipped
+        default ever moves to 0.0, this goes red and the pinning helper can be
+        deleted rather than left as dead ceremony.
         """
         keras.utils.set_random_seed(11)
         stock = trainer()
@@ -165,8 +179,8 @@ class TestSAM2GradientFlow:
                  if isinstance(getattr(layer, "rate", None), float)
                  and layer.rate > 0.0]
         assert rates, (
-            "no non-zero dropout rate found on a stock SAM 2 -- the rate is "
-            "now configurable or zero, so _pin_dropout_to_zero is obsolete"
+            "no non-zero dropout rate found on a stock SAM 2 -- the shipped "
+            "default is now zero, so _pin_dropout_to_zero is obsolete"
         )
         assert all(rate == 0.1 for _, rate in rates), rates
 

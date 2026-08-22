@@ -115,7 +115,10 @@ from dl_techniques.models.SAM.SAM1.mask_decoder import _build_mlp_head
 from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
 from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
-from dl_techniques.models.SAM.SAM2.memory_attention import SAM2MemoryAttention
+from dl_techniques.models.SAM.SAM2.memory_attention import (
+    DEFAULT_DROPOUT_RATE,
+    SAM2MemoryAttention,
+)
 from dl_techniques.models.SAM.SAM2.memory_bank import SAM2MemoryBank
 from dl_techniques.models.SAM.SAM2.memory_encoder import SAM2MemoryEncoder
 from dl_techniques.models.SAM.SAM2.neck import SAM2ImageEncoder
@@ -308,6 +311,7 @@ class SAM2(keras.Model):
             "decoder_num_heads": 2,
             "decoder_mlp_dim": 64,
             "prompt_mask_in_chans": 16,
+            "dropout_rate": DEFAULT_DROPOUT_RATE,
         },
         "hiera_l": {
             "mem_dim": 64,
@@ -320,6 +324,7 @@ class SAM2(keras.Model):
             "decoder_num_heads": 8,
             "decoder_mlp_dim": 2048,
             "prompt_mask_in_chans": 16,
+            "dropout_rate": DEFAULT_DROPOUT_RATE,
         },
     }
 
@@ -435,6 +440,30 @@ class SAM2(keras.Model):
         """
         return self.image_size // MEMORY_STRIDE
 
+    # DECISION plan-2026-08-22T035419-a11304c8/D-090
+    # DERIVED, deliberately: `dropout_rate` is NOT an `__init__` parameter and
+    # NOT a `get_config()` key. Every live `Dropout` in a SAM 2 belongs to
+    # `memory_attention`, which already stores and serializes the rate in its
+    # own config; a second copy on the outer model would be a number with two
+    # homes -- and one that can silently DISAGREE, because a caller may pass an
+    # already-constructed `memory_attention` whose rate differs from whatever
+    # the outer `__init__` was told. This property can never disagree, and it
+    # round-trips for free through the nested config, so no pre-existing
+    # `.keras` file gains a required key. Do NOT "complete" this by adding a
+    # stored `self.dropout_rate` + config key. See decisions.md D-090.
+    @property
+    def dropout_rate(self) -> float:
+        """Dropout rate actually in force on the memory-attention stack.
+
+        :return: The rate carried by :attr:`memory_attention`.
+        :rtype: float
+        """
+        rate = getattr(
+            self.memory_attention, "dropout_rate",
+            getattr(self.memory_attention, "dropout", None),
+        )
+        return float(rate)
+
     def _validate_component_agreement(self) -> None:
         """Refuse every component mismatch that is silent downstream.
 
@@ -507,13 +536,15 @@ class SAM2(keras.Model):
         :type variant: str
         :param kwargs: Explicit overrides. Any value given here wins over the
             variant table (S-3); passing ``None`` explicitly is the same as
-            omitting the argument.
+            omitting the argument. ``dropout_rate`` is one of these: it is a
+            table key, so ``from_variant('tiny', dropout_rate=0.0)`` reaches
+            every ``Dropout`` in the memory-attention stack.
         :type kwargs: Any
         :return: The configured model.
         :rtype: SAM2
-        :raises ValueError: If ``variant`` is unknown, or if ``image_size`` is
-            overridden here — it belongs to ``Hiera.MODEL_VARIANTS``, which is
-            its single home.
+        :raises ValueError: If ``variant`` is unknown, if ``dropout_rate`` is
+            outside ``[0.0, 1.0)``, or if ``image_size`` is overridden here —
+            it belongs to ``Hiera.MODEL_VARIANTS``, which is its single home.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -538,6 +569,12 @@ class SAM2(keras.Model):
         overrides = {k: v for k, v in kwargs.items() if v is not None}
         table.update({k: v for k, v in overrides.items() if k in table})
         model_kwargs = {k: v for k, v in overrides.items() if k not in table}
+
+        dropout_rate = float(table["dropout_rate"])
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(
+                f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}"
+            )
 
         image_encoder = SAM2ImageEncoder.from_variant(variant)
         hidden_dim = int(image_encoder.neck.d_model)
@@ -572,6 +609,16 @@ class SAM2(keras.Model):
             downsample_rate=table["memory_attention_downsample_rate"],
             feat_sizes=(grid, grid),
             kv_in_dim=table["mem_dim"],
+            # DECISION plan-2026-08-22T035419-a11304c8/D-090
+            # The ONLY path by which a caller-chosen dropout rate reaches the
+            # 12 (tiny) / 24 (hiera_l) live `Dropout` layers. Deleting this
+            # keyword does not fail any shape, any count or any round trip --
+            # the layer default silently takes over and the knob goes dead
+            # exactly as it was before this step. The keyword is spelled
+            # `dropout=` because that is still the LAYER's parameter name; the
+            # model-level name is `dropout_rate` per the `*_dropout_rate`
+            # convention. See decisions.md D-090.
+            dropout=dropout_rate,
         )
         memory_encoder = SAM2MemoryEncoder(
             in_dim=hidden_dim,
@@ -1387,6 +1434,7 @@ def create_sam2(
         memory_temporal_stride_for_eval: Optional[int] = None,
         max_obj_ptrs_in_encoder: Optional[int] = None,
         mem_dim: Optional[int] = None,
+        dropout_rate: Optional[float] = None,
         **kwargs: Any,
 ) -> SAM2:
     """Build a SAM 2 model from a variant name with optional overrides.
@@ -1410,6 +1458,10 @@ def create_sam2(
     :type max_obj_ptrs_in_encoder: Optional[int]
     :param mem_dim: Override the memory token width.
     :type mem_dim: Optional[int]
+    :param dropout_rate: Override the memory-attention dropout rate. ``None``
+        defers to the variant table, whose shipped value is
+        ``DEFAULT_DROPOUT_RATE`` (0.1) for both variants.
+    :type dropout_rate: Optional[float]
     :param kwargs: Further overrides forwarded to :meth:`SAM2.from_variant`.
     :type kwargs: Any
     :return: The configured model.
@@ -1423,6 +1475,7 @@ def create_sam2(
         memory_temporal_stride_for_eval=memory_temporal_stride_for_eval,
         max_obj_ptrs_in_encoder=max_obj_ptrs_in_encoder,
         mem_dim=mem_dim,
+        dropout_rate=dropout_rate,
         **kwargs,
     )
 
