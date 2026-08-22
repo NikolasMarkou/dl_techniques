@@ -462,23 +462,53 @@ class TestFNetEncoderBlock:
         assert layer.ffn_layer.built
         assert layer.output_layer_norm.built
 
-    def test_ffn_fallback_mechanism(self, sample_input):
-        """Test FFN fallback mechanism when factory creation fails."""
-        # This test assumes the fallback mechanism is implemented as shown in the code
-        # Create a configuration that might cause FFN creation to fail
-        config = {
-            'intermediate_dim': 128,
-            'ffn_type': 'mlp',
-            'ffn_kwargs': {'invalid_parameter': 'invalid_value'}  # Invalid parameter
-        }
+    # DECISION plan-2026-08-22T035419-a11304c8/D-034
+    # This test used to be `test_ffn_fallback_mechanism` and asserted that a
+    # misconfigured FFN SILENTLY falls back to an `mlp` ("The layer should still
+    # work due to fallback mechanism"). That behaviour was deliberately deleted
+    # by `f10ce4b5b`, whose replacement comment at
+    # `layers/fnet_encoder_block.py:252-256` says why in the source: the caller
+    # who asked for `swiglu` and mistyped a parameter got a completely DIFFERENT
+    # FFN architecture, with only a log line to say so -- "logs are not a
+    # failure channel: the model trained, converged, and was never the model
+    # that was asked for." The test was therefore permanently RED BY DESIGN, and
+    # a passing version of it would be a demand to reinstate the defect. It is
+    # rewritten here to assert the loud raise, with a control that no
+    # substitution happens on the healthy path.
+    def test_a_misconfigured_ffn_raises_instead_of_silently_substituting_mlp(
+            self, sample_input
+    ):
+        """`f10ce4b5b`: no silent fallback. A bad FFN parameter is a caller error."""
+        for ffn_type in ('mlp', 'swiglu'):
+            layer = FNetEncoderBlock(
+                intermediate_dim=128,
+                ffn_type=ffn_type,
+                ffn_kwargs={'invalid_parameter': 'invalid_value'},
+            )
+            with pytest.raises(ValueError) as excinfo:
+                layer(sample_input)
+            message = str(excinfo.value)
+            # The message must name BOTH the type that was asked for and the
+            # parameter that killed it -- a bare "failed to build" would leave
+            # the caller no better off than the log line it replaced.
+            assert f"type '{ffn_type}'" in message, message
+            assert 'invalid_parameter' in message, message
 
-        # The layer should still work due to fallback mechanism
-        layer = FNetEncoderBlock(**config)
-        output = layer(sample_input)
+    def test_a_well_formed_ffn_type_is_not_substituted(self, sample_input):
+        """Anti-vacuity control for the raise above.
 
-        # Should still produce valid output despite invalid FFN config
-        assert output.shape == sample_input.shape
-        assert layer.ffn_layer is not None
+        Without this, the raise test would be satisfied by a block that refuses
+        every FFN type. `swiglu` is the type `f10ce4b5b`'s commit message names
+        as the one that was silently becoming an `mlp`, so it is the one checked
+        by class identity here.
+        """
+        swiglu_block = FNetEncoderBlock(intermediate_dim=128, ffn_type='swiglu')
+        assert swiglu_block(sample_input).shape == sample_input.shape
+        assert type(swiglu_block.ffn_layer).__name__ == 'SwiGLUFFN'
+
+        mlp_block = FNetEncoderBlock(intermediate_dim=128, ffn_type='mlp')
+        assert mlp_block(sample_input).shape == sample_input.shape
+        assert type(mlp_block.ffn_layer).__name__ == 'MLPBlock'
 
     def test_edge_cases_validation(self):
         """Test error conditions and edge cases."""
