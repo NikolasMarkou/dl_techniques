@@ -168,6 +168,21 @@ class PositionalEmbedding(keras.layers.Layer):
             # Use custom scale for string specification
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
 
+        # DECISION plan-2026-08-22T035419-a11304c8/D-055
+        # `Y_i = X_i + P_i` is position-wise: the value at step i depends on the
+        # input at step i and nothing else, so a Keras mask survives this layer
+        # unchanged and declaring it here is simply TRUE. Do NOT read this flag
+        # as a masking repair. MEASURED 2026-08-22 on a `TextEncoder` fed
+        # `[[5, 7, 0, 0]]` with no explicit `attention_mask`: the gap between
+        # `f([5,7,0,0])[:, :2]` and `f([5,7])` is 1.290977e-02 with the flag
+        # False and 1.290977e-02 with it True -- IDENTICAL. Setting it does not
+        # stop attention seeing padding; it only moves Keras' "will destroy the
+        # mask" warning downstream to `TransformerLayer` / `MultiHeadAttention`
+        # / `MultiHeadCrossAttention`, none of which support masking either.
+        # The working mask in that stack is the EXPLICIT `attention_mask=`
+        # argument (same probe: 2.384186e-07). See decisions.md D-055.
+        self.supports_masking = True
+
         # CREATE sub-layer in __init__ (modern Keras 3 pattern)
         self.dropout = keras.layers.Dropout(self.dropout_rate, name="pos_dropout")
 

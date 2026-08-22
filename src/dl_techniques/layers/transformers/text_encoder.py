@@ -492,10 +492,28 @@ class TextEncoder(keras.layers.Layer):
 
     def _create_word_embeddings(self) -> None:
         """Create word embedding layer(s) based on the specified strategy."""
+        # DECISION plan-2026-08-22T035419-a11304c8/D-055
+        # `mask_zero` defaults to FALSE, not True. Do NOT flip it back. This
+        # encoder threads an EXPLICIT `attention_mask` into every
+        # `TransformerLayer` and into `SequencePooling`; the Keras auto-mask an
+        # `Embedding(mask_zero=True)` attaches is consumed by NOTHING in the
+        # chain, because `PositionalEmbedding`, `TransformerLayer`,
+        # `MultiHeadAttention` and `MultiHeadCrossAttention` each drop it.
+        # MEASURED 2026-08-22, `[[5, 7, 0, 0]]` with no `attention_mask`:
+        # `max|f([5,7,0,0])[:, :2] - f([5,7])|` = 1.290977e-02, i.e. attention
+        # DOES see the padding, and it reads the same whether or not
+        # `PositionalEmbedding` declares `supports_masking`. With the explicit
+        # `attention_mask=[[1,1,0,0]]` the same gap is 2.384186e-07. And the
+        # flag is numerically inert: forward output is bit-identical, max abs
+        # diff 0.0, at True vs False. So `mask_zero=True` advertised a masking
+        # mechanism this stack does not implement and whose only observable
+        # effect was Keras' "will destroy the mask information" UserWarning.
+        # Same finding, same repair, as `models/distilbert/model.py` (D-018).
+        # Callers who want the flag can still pass `embedding_args`.
         base_args = {
             'embeddings_initializer': initializers.TruncatedNormal(stddev=self.initializer_range),
             'embeddings_regularizer': self.kernel_regularizer,
-            'mask_zero': True,
+            'mask_zero': False,
         }
         base_args.update(self.embedding_args)
 
@@ -519,7 +537,10 @@ class TextEncoder(keras.layers.Layer):
                 output_dim=factorized_dim,
                 embeddings_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
                 embeddings_regularizer=self.kernel_regularizer,
-                mask_zero=True,
+                # DECISION plan-2026-08-22T035419-a11304c8/D-055 -- see the
+                # `base_args` comment above; the factorized path drops the same
+                # unconsumed auto-mask.
+                mask_zero=False,
                 name='factorized_embed'
             )
             self.embed_projection_layer = layers.Dense(
