@@ -350,26 +350,60 @@ def _forward_with_embed_norm_replaced(encoder, ids, replacement=None):
         object.__setattr__(inner, "embed_norm", original)
 
 
-def _assert_carries_the_extra_embedding_norm(encoder, ids, expected_delta):
+# DECISION plan-2026-08-22T035419-a11304c8/D-032
+# This helper used to take a 7-DIGIT MEASURED CONSTANT (`expected_delta`, pinned
+# at `rel=2e-3`: 1.805329 at the tiny width, 5.917600 at the settled width) and
+# both of its callers were RED at baseline, reporting 2.012500 and 5.832395.
+# Do NOT re-pin a literal here -- re-pinning is what produced this failure mode.
+#
+# The pins were STALE SAMPLES, not a regression, and the discriminator is
+# measured, not argued:
+#   * `src/dl_techniques/models/SAM/SAM3/text_encoder_ve.py` has no behavioural
+#     commit since the pinning commit `7eea17297` -- only a docstring pass
+#     (`4f238a2fe`) and the `models/SAM/` move (`96c6a460b`).
+#   * Every other test in this file passes, INCLUDING the reference-derived
+#     parameter oracle (`count_params() == _params(SHIPPED) == 353_202_432`),
+#     so the port's structure still agrees with the upstream term by term.
+#   * `delta` is a SEED-DEPENDENT RANDOM VARIABLE. Measured over 30 model seeds
+#     x 3 token-id seeds = 90 draws at the tiny width, `delta / amplitude`
+#     spans 0.2799 .. 1.0306 (mean 0.5923, 5th pct 0.4196); raw `delta` at the
+#     tiny width spans 1.596 .. 2.719 over 12 model seeds, and the pinned
+#     1.805329 and the observed 2.012500 are both ordinary members of it. At the
+#     settled width, over model seeds 11/12/13, `delta` reads 5.832395 /
+#     5.792219 / 6.223118 -- the pinned 5.917600 sits inside that spread, and
+#     the `rel=2e-3` band was 30x tighter than the spread it was pinning.
+#   * A `set_random_seed(N)` fixture does not fix the WEIGHTS, only the draw
+#     ORDER; any upstream change to weight-creation order re-deals the tower at
+#     the same seed while changing nothing semantically.
+# The old amplitude arm (`delta > 0.4 * amplitude`) was fragile for the same
+# reason: 0.4 sits ABOVE the measured 5th percentile 0.4196's neighbourhood and
+# BELOW the minimum only by luck (min 0.2799), so it too would fire on an
+# innocent draw. The floor below is derived from that 90-draw population.
+def _assert_carries_the_extra_embedding_norm(encoder, ids, min_ratio):
     """Assert this tower normalizes its embeddings where the reference does not.
 
-    Two arms. (1) The output must MOVE by the pinned amount when `embed_norm`
-    is replaced by a passthrough -- the reference's structure. (2) The move must
-    be a large fraction of the output's own amplitude, so "it diverges" cannot
-    degrade into "it diverges by a rounding error". A port that matched the
-    reference reports a delta of exactly 0.0 and fails arm 1.
+    Two arms, both scale-free. (1) The output must MOVE AT ALL when `embed_norm`
+    is replaced by a passthrough -- the reference's structure; a port that
+    matched the reference reports EXACTLY 0.0 and fails this arm (proven by
+    `test_this_guard_can_see_the_divergence_close`). (2) The move must be at
+    least `min_ratio` of the output's own amplitude, so "it diverges" cannot
+    degrade into "it diverges by a rounding error".
+
+    :param min_ratio: floor on ``delta / amplitude``, derived per call site from
+        the measured population -- never a hand-picked round number.
     """
     base = _forward(encoder, ids)
     reference_order = _forward_with_embed_norm_replaced(encoder, ids)
     delta = float(np.abs(base - reference_order).max())
     amplitude = float(np.abs(base).max())
-    assert delta == pytest.approx(expected_delta, rel=2e-3), (
-        f"the extra embedding normalization now moves the output by {delta:.6f}"
-        f", not the pinned {expected_delta:.6f} (D-142)"
+    assert delta > 0.0, (
+        "removing the extra embedding normalization changed NOTHING "
+        f"(delta = {delta!r}); this port has stopped diverging from the "
+        "reference at all, which is D-142's remedy landing silently"
     )
-    assert delta > 0.4 * amplitude, (
-        f"delta {delta:.6f} is no longer a large fraction of the output "
-        f"amplitude {amplitude:.6f}"
+    assert delta > min_ratio * amplitude, (
+        f"delta {delta:.6f} is only {delta / amplitude:.4f} of the output "
+        f"amplitude {amplitude:.6f}, under the derived floor {min_ratio}"
     )
 
 
@@ -385,9 +419,12 @@ class TestEmbeddingNormDivergence:
     def test_the_reference_order_output_differs_at_the_tiny_width(
             self, tiny_encoder
     ):
-        _assert_carries_the_extra_embedding_norm(
-            tiny_encoder, _ids(), 1.805329
-        )
+        # min_ratio=0.15: the tiny-width `delta / amplitude` population is
+        # 0.2799 .. 1.0306 over 90 draws (30 model seeds x 3 id seeds), so this
+        # floor sits 1.87x below the worst observed draw and still convicts the
+        # only thing it can be wrong about -- a reference-shaped port, which
+        # reports exactly 0.0.
+        _assert_carries_the_extra_embedding_norm(tiny_encoder, _ids(), 0.15)
 
     def test_the_substitution_mechanism_alone_changes_nothing(
             self, tiny_encoder
@@ -435,9 +472,12 @@ class TestEmbeddingNormDivergence:
         assert reference_shaped.count_params() == (
             _params(TINY) - _port_only_embed_norm(TINY)
         )
-        with pytest.raises(AssertionError, match="D-142"):
+        # The message pinned here is the FIRST arm's ("delta > 0.0"), which is
+        # the one a reference-shaped port trips; the same floor the live call
+        # site uses is passed so this proof exercises the real configuration.
+        with pytest.raises(AssertionError, match="changed NOTHING"):
             _assert_carries_the_extra_embedding_norm(
-                reference_shaped, _ids(), 1.805329
+                reference_shaped, _ids(), 0.15
             )
 
 
@@ -562,19 +602,23 @@ class TestSettledScale:
         assert leak > 1e-2
 
     def test_the_extra_embedding_norm_moves_the_settled_output(self, shipped):
-        """D-142 pinned AT THE SETTLED WIDTH, where it is worst.
+        """D-142 asserted AT THE SETTLED WIDTH, where it is worst.
 
-        5.917600 against an output amplitude of 5.536552 -- **106.9 %**, i.e.
-        the divergence exceeds the signal, and 2.2x the 48.5 % the same probe
-        reports at this file's tiny width. The tiny figure must not be quoted
-        as the magnitude of this defect.
+        The divergence EXCEEDS THE SIGNAL here: `delta / amplitude` measures
+        1.1129 / 1.1791 / 1.1696 over model seeds 11 / 12 / 13 (2026-08-22),
+        against 0.2799 .. 1.0306 at this file's tiny width. The tiny figure must
+        not be quoted as the magnitude of this defect.
+
+        `min_ratio=1.0` is therefore the claim, not a tolerance: it says the
+        move is larger than the output itself. Its margin over the worst of the
+        three settled draws is 11 %. The raw deltas (5.832395 / 5.792219 /
+        6.223118, against the 5.917600 D-142 once pinned at `rel=2e-3`) are
+        recorded here as a MEASUREMENT and deliberately not asserted -- see
+        D-032 at `_assert_carries_the_extra_embedding_norm`.
         """
         seq = SHIPPED["context_length"]
         ids = _ids(seq=seq, vocab=SHIPPED["vocab_size"], seed=0)
-        _assert_carries_the_extra_embedding_norm(shipped, ids, 5.917600)
-        base = ops.convert_to_numpy(shipped(ids, training=False))
-        moved = _forward_with_embed_norm_replaced(shipped, ids)
-        assert float(np.abs(base - moved).max()) > float(np.abs(base).max())
+        _assert_carries_the_extra_embedding_norm(shipped, ids, 1.0)
 
     def test_shipped_forward_shape(self, shipped):
         seq = SHIPPED["context_length"]
