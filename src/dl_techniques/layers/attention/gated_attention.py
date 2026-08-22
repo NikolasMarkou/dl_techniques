@@ -107,6 +107,7 @@ from dl_techniques.layers.attention.common import apply_attention_mask, compute_
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from ..activations import ProbabilityOutput, resolve_activation_layer
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -361,11 +362,18 @@ class GatedAttention(keras.layers.Layer):
         # Following the Golden Rule: Create in __init__, Build in build()
 
         # Input linear projection
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
+        # projection. Do NOT "simplify" this back to a bare
+        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE reused
+        # across same-shape weights yields BIT-IDENTICAL tensors (MEASURED here:
+        # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
+        # key projections started life equal and the attention logits started
+        # symmetric. `seed=` is NOT the discriminator -- instance identity is.
         self.input_linear = layers.Dense(
             self.dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="input_linear"
@@ -375,8 +383,8 @@ class GatedAttention(keras.layers.Layer):
         self.q_linear = layers.Dense(
             self.attention_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="q_linear"
@@ -391,8 +399,8 @@ class GatedAttention(keras.layers.Layer):
         self.k_linear = layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="k_linear"
@@ -400,8 +408,8 @@ class GatedAttention(keras.layers.Layer):
         self.v_linear = layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="v_linear"
@@ -447,8 +455,8 @@ class GatedAttention(keras.layers.Layer):
             self.output_proj = layers.Dense(
                 self.dim,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="output_proj"
@@ -460,8 +468,8 @@ class GatedAttention(keras.layers.Layer):
         self.output_gate_linear = layers.Dense(
             self.dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="output_gate_linear"

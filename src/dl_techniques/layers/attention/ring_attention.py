@@ -69,6 +69,7 @@ from .common import (
     validate_head_divisibility,
 )
 from ..norms.factory import create_normalization_layer
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -255,11 +256,18 @@ class RingAttention(keras.layers.Layer):
         self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
+        # projection. Do NOT "simplify" this back to a bare
+        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE reused
+        # across same-shape weights yields BIT-IDENTICAL tensors (MEASURED here:
+        # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
+        # key projections started life equal and the attention logits started
+        # symmetric. `seed=` is NOT the discriminator -- instance identity is.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='w_q'
@@ -268,8 +276,8 @@ class RingAttention(keras.layers.Layer):
         self.w_k = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='w_k'
@@ -278,8 +286,8 @@ class RingAttention(keras.layers.Layer):
         self.w_v = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='w_v'
@@ -288,8 +296,8 @@ class RingAttention(keras.layers.Layer):
         self.w_o = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='w_o'

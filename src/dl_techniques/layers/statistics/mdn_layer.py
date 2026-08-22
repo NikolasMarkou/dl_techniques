@@ -45,6 +45,7 @@ from typing import Dict, Optional, Tuple, Union, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 # Constants
@@ -165,21 +166,26 @@ class MDNLayer(keras.layers.Layer):
         # This follows the "Create vs. Build" golden rule.
 
         # --- Intermediate processing layers ---
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per head.
+        # Do NOT collapse these back to the shared instance: MEASURED, mdn_mus.kernel ==
+        # mdn_sigmas.kernel and all three intermediate heads were bit-identical
+        # (max|delta| = 0.0), so the mixture mean, scale and weight pathways were one
+        # pathway at initialization.
         self.intermediate_mu_dense = keras.layers.Dense(
             self.intermediate_units, use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='intermediate_mu_dense'
         )
         self.intermediate_sigma_dense = keras.layers.Dense(
             self.intermediate_units, use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='intermediate_sigma_dense'
         )
         self.intermediate_pi_dense = keras.layers.Dense(
             self.intermediate_units, use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='intermediate_pi_dense'
         )
@@ -196,14 +202,14 @@ class MDNLayer(keras.layers.Layer):
         # --- Final output layers ---
         self.mdn_mus = keras.layers.Dense(
             self.num_mix * self.output_dim, use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='mdn_mus'
         )
         self.mdn_sigmas = keras.layers.Dense(
             self.num_mix * self.output_dim, use_bias=self.use_bias,
             activation=lambda x: keras.activations.softplus(x) + self.min_sigma,
-            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='mdn_sigmas'
         )
@@ -216,7 +222,7 @@ class MDNLayer(keras.layers.Layer):
         # the mixture logits and degraded the weights. See decisions.md D-004.
         self.mdn_pi = keras.layers.Dense(
             self.num_mix, use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='mdn_pi'
         )
