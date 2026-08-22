@@ -7,6 +7,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestSqueezeExcitation:
@@ -536,6 +537,10 @@ class TestSqueezeExcitation:
             model_path = os.path.join(tmpdir, 'model.keras')
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load without custom_objects (thanks to registration decorator)

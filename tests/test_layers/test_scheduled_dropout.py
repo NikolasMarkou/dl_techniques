@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.scheduled_dropout import ScheduledDropout
+from tests.optimizer_state import build_optimizer_state
 
 B, D = 8, 16
 
@@ -200,6 +201,10 @@ class TestScheduledDropout:
         y0 = keras.ops.convert_to_numpy(model(sample, training=False))
 
         path = os.path.join(tmp_path, "sd.keras")
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(path)
         loaded = keras.models.load_model(path)
 

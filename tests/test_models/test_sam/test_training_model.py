@@ -59,6 +59,7 @@ from .dead_component_oracle import (
     variable_labels,
     zeroed_variables,
 )
+from tests.optimizer_state import build_optimizer_state
 
 # ---------------------------------------------------------------------------
 # A toy model with three branches of KNOWN liveness.
@@ -941,6 +942,10 @@ class TestSAMTrainingModelSerialization:
         n_before = len(model.weights)
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "sam_training_model.keras")
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(path)
             restored = keras.models.load_model(path)
             n_after = len(restored.weights)
@@ -1672,6 +1677,10 @@ class TestRefinementSerialization:
         model, x, _ = _refined(3)
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "refining.keras")
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(path)
             restored = keras.models.load_model(path)
             reference = np.asarray(
@@ -1697,6 +1706,10 @@ class TestRefinementSerialization:
         model, x, _ = _refined(3)
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "refining.keras")
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(path)
             restored = keras.models.load_model(path)
             reference = np.asarray(

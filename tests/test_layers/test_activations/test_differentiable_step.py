@@ -19,6 +19,7 @@ from dl_techniques.layers.activations.differentiable_step import DifferentiableS
 
 # TensorFlow for gradient testing
 import tensorflow as tf
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestDifferentiableStep:
@@ -257,6 +258,10 @@ class TestDifferentiableStepIntegration:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'complete_model.keras')
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(filepath)
 
             loaded_model = keras.models.load_model(filepath)
