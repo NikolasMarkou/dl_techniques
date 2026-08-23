@@ -879,6 +879,38 @@ class TransformerLayer(keras.layers.Layer):
         # is precisely the defect class this parameter was added to remove.
         # See decisions.md D-160.
         params = {**default_params, **self.attention_args}
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-600
+        # The block's `kernel_initializer` is forwarded HERE, once, gated on the
+        # chosen type's OWN registry declaration -- not by a line repeated in
+        # each branch above. Before this, exactly ONE of the nine branches
+        # ('multi_head') forwarded it, while EIGHT of the nine attention types
+        # DECLARE `kernel_initializer` in their registry entry. The consequence
+        # was silent, because the attention layer then falls back to its own
+        # `glorot_uniform`: MEASURED on `models/beit`, whose whole point is
+        # `TruncatedNormal(stddev=initializer_range)`, the attention q/k/v/proj
+        # kernels drew at realized std 0.125238 (glorot at dim=64) while every
+        # other kernel in the same model drew at 0.017609 (= 0.02 * 0.87964).
+        # A dropped initializer raises nothing and shows up only as a training
+        # curve, so do NOT "simplify" this back into the branches: a tenth
+        # attention type added without its line would silently rejoin the defect.
+        # `setdefault` AFTER the `attention_args` merge is deliberate -- an
+        # explicit `attention_args={'kernel_initializer': ...}` still wins.
+        # `clone_initializer` is REQUIRED, not defensive: a seedless Keras
+        # initializer instance REPLAYS its draw, and callers hand ONE instance
+        # to every block (models/beit/model.py:409), so forwarding it raw would
+        # make all N blocks bit-identical -- the D-540/D-560 defect, traded for
+        # this one. The 'multi_head' branch keeps its own uncloned line: it is
+        # pre-existing behaviour whose consumers' seeded draws are pinned, and
+        # `setdefault` leaves it untouched.
+        # See decisions.md D-600.
+        if 'kernel_initializer' in ATTENTION_REGISTRY[self.attention_type].get(
+            'optional_params', {}
+        ):
+            params.setdefault(
+                'kernel_initializer', clone_initializer(self.kernel_initializer)
+            )
+
         if self.residual_output_kernel_initializer is not None:
             params.setdefault(
                 'output_kernel_initializer',

@@ -514,14 +514,29 @@ class TestTransformerLayerExtendedAttention:
         catastrophic checkpoint-break failure mode). Asserts the param dict
         produced by ``_get_attention_params`` for each legacy type.
         """
+        # D-600: every type that DECLARES `kernel_initializer` now receives the
+        # block's, as a CLONE, so it is compared by class+config and popped
+        # rather than written into each literal below. `is not` is asserted on
+        # purpose: an identity match would mean one instance is shared across
+        # blocks, which REPLAYS one draw (the D-540/D-560 defect).
+        def _pop_forwarded_init(layer, params, *, expect_clone=True):
+            init = params.pop('kernel_initializer')
+            assert type(init) is type(layer.kernel_initializer)
+            assert init.get_config() == layer.kernel_initializer.get_config()
+            if expect_clone:
+                assert init is not layer.kernel_initializer
+            return params
+
         layer_mh = TransformerLayer(64, 4, 128, attention_type='multi_head')
         p = layer_mh._get_attention_params('attn')
+        # 'multi_head' is the ONE branch that already forwarded it, uncloned, and
+        # D-600 deliberately left that alone (`setdefault` does not override).
         assert p == {'dim': 64, 'num_heads': 4, 'dropout_rate': 0.1,
                      'use_bias': True, 'kernel_initializer': layer_mh.kernel_initializer,
                      'name': 'attn'}
 
         layer_win = TransformerLayer(64, 4, 128, attention_type='window', window_size=4)
-        p = layer_win._get_attention_params('attn')
+        p = _pop_forwarded_init(layer_win, layer_win._get_attention_params('attn'))
         # `qkv_bias`/`proj_bias` added by D-005 (see TestWindowBranchForwardsUseBias
         # at the bottom of this file): the branch used to forward NOTHING for
         # bias, so the registry's two `True` defaults silently won and
@@ -531,12 +546,12 @@ class TestTransformerLayerExtendedAttention:
                      'name': 'attn'}
 
         layer_gqa = TransformerLayer(64, 4, 128, attention_type='group_query', n_kv_head=2)
-        p = layer_gqa._get_attention_params('attn')
+        p = _pop_forwarded_init(layer_gqa, layer_gqa._get_attention_params('attn'))
         assert p == {'dim': 64, 'num_heads': 4, 'num_kv_heads': 2,
                      'dropout_rate': 0.1, 'use_bias': True, 'name': 'attn'}
 
         layer_diff = TransformerLayer(64, 4, 128, attention_type='differential')
-        p = layer_diff._get_attention_params('attn')
+        p = _pop_forwarded_init(layer_diff, layer_diff._get_attention_params('attn'))
         assert p == {'dim': 64, 'num_heads': 4, 'head_dim': 16,
                      'dropout_rate': 0.1, 'lambda_init': 0.8, 'name': 'attn'}
 

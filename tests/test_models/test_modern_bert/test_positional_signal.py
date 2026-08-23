@@ -51,6 +51,19 @@ def all_global_model():
     2 or 3 the interleaved ``window`` layers contribute their own (synthetic,
     grid-shaped) order signal, so a whole-model probe could pass with the global
     layers still position-blind.
+
+    ``initializer_range=0.2`` is an INSTRUMENT setting, not the shipped 0.02, for
+    the reason spelled out in ``test_oracle_adoption.py``'s rope-theta probe.
+    The only positional signal in this stack is RoPE inside global attention --
+    MEASURED, the embedding stage alone is EXACTLY permutation-equivariant
+    (max|delta| = 0.0) -- so the whole-model defect scales with the attention
+    branch's share of the residual stream. Since D-600 delivered ModernBERT's
+    ``TruncatedNormal(0.02)`` to those projections (they previously drew at
+    ``glorot_uniform``, ten times wider), the same probe MEASURES
+    ``initializer_range`` -> defect: 0.02 -> 7.27e-05, 0.1 -> 4.63e-02,
+    0.2 -> **4.46e-01**. At the shipped 0.02 the assertion below would read a
+    live positional signal as absent -- an untrained network's branch being
+    quiet, not a defect.
     """
     keras.utils.set_random_seed(1234)
     return ModernBERT(
@@ -63,6 +76,7 @@ def all_global_model():
         max_position_embeddings=128,
         hidden_dropout_rate=0.0,
         attention_probs_dropout_rate=0.0,
+        initializer_range=0.2,
     )
 
 

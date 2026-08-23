@@ -219,13 +219,30 @@ class TestModernBERTKnobSensitivity:
         blocks. It changes NO weight shape -- both settings hold bit-identical
         weights under a fixed seed, which the oracle asserts first -- so a
         shape-only sweep cannot see it and a build that never routed the
-        argument into the rotary embedding would pass one. Measured
-        ``max|delta| = 1.487e-01`` between the two shipped-ish values, four
-        orders of magnitude above the instrument's 1e-5 floor.
+        argument into the rotary embedding would pass one.
+
+        ``initializer_range=0.2`` is an INSTRUMENT setting, not the shipped
+        value, and it is load-bearing. RoPE rotates q and k, so the knob's effect
+        on the output is carried entirely by the attention branch, whose
+        contribution to the residual stream scales with the projection weight
+        scale. Before D-600, ``TransformerLayer`` dropped the block's
+        ``kernel_initializer`` on the way to 'window'/'group_query', so these
+        projections drew at ``glorot_uniform`` (realized std 0.177 at dim=32)
+        rather than at ModernBERT's ``TruncatedNormal(0.02)`` (0.0176) -- ten
+        times wider -- and this probe read ``max|delta| = 1.487e-01``. With the
+        knob correctly delivered the SAME probe MEASURES **2.29e-05**, barely
+        twice the oracle's 1e-5 floor: the original threshold was calibrated
+        against a defect. Re-measured across the scale
+        (``initializer_range`` -> ``max|delta|``): 0.02 -> 2.29e-05,
+        0.1 -> 1.37e-02, 0.2 -> **2.46e-01**, 0.5 -> 8.93e-01. 0.2 restores the
+        original four-orders margin over the floor while probing the identical
+        code path. Do NOT "restore" 0.02 here -- that reads a live knob as
+        near-inert and the next initializer correction would turn it red.
         """
         x = _inputs()
         builders = {
-            theta: (lambda theta=theta: _bert(global_rope_theta=theta))
+            theta: (lambda theta=theta: _bert(
+                global_rope_theta=theta, initializer_range=0.2))
             for theta in (1e4, 1.6e5)
         }
         deltas = assert_value_knob_changes_output(

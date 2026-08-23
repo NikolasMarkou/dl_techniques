@@ -146,6 +146,10 @@ _MSFT_SWIN = (
 _FAIR_DINO = (
     "https://github.com/facebookresearch/dino/blob/main/vision_transformer.py"
 )
+_HF_BEIT = (
+    "https://github.com/huggingface/transformers/blob/main/"
+    "src/transformers/models/beit/configuration_beit.py"
+)
 
 # Keras' own defaults, asserted as the NEGATIVE control: a row whose expected
 # value equals the Keras default cannot distinguish "ported correctly" from
@@ -507,6 +511,41 @@ def _built_dino_v1_head():
     return head, "last_layer"
 
 
+def _built_beit():
+    """The site D-600 fixed. BEiT declares ``initializer_range=0.02`` and hands
+    one ``TruncatedNormal`` to every block, but ``TransformerLayer``'s ``'beit'``
+    branch never forwarded it, so q/k/v/proj fell back to ``BeitAttention``'s own
+    ``glorot_uniform``. MEASURED pre-fix on exactly this model: attention kernels
+    at realized std **0.125238** (glorot at dim=64) beside 0.017609 for every
+    other kernel in the SAME model. That within-model split is why a whole-model
+    probe would have missed it -- ``other`` alone passes."""
+    from dl_techniques.models.beit.model import BeitModel
+
+    keras.utils.set_random_seed(3)
+    model = BeitModel(
+        input_shape=(32, 32, 3), patch_size=8, hidden_size=64,
+        num_layers=4, num_heads=4, intermediate_size=128,
+    )
+    model(np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32"))
+    return model, "\x00"
+
+
+def _built_beit_attention_only():
+    """The same model, restricted to the attention subtree -- the ONLY part the
+    dropped knob could reach. Kept separate from ``_built_beit`` on purpose: the
+    whole-model row is diluted by 9 correct kernels against 16 defective ones and
+    was MEASURED to still pass at rel=0.05 pre-fix if the split were averaged."""
+    model, exclude = _built_beit()
+    return _AttentionSubtree(model), exclude
+
+
+class _AttentionSubtree:
+    """Adapter exposing only ``.../attention/...`` weights as ``.weights``."""
+
+    def __init__(self, model):
+        self.weights = [w for w in model.weights if "/attention/" in w.path]
+
+
 def _built_dino_v1_classifier():
     from dl_techniques.models.dino.dino_v1 import DINOv1
 
@@ -533,6 +572,11 @@ def _built_dino_v1_classifier():
             "dino/dino_v1.py classifier head",
             _built_dino_v1_classifier, "classifier/kernel", 0.10, _FAIR_DINO,
         ),
+        ("beit/model.py (every kernel)", _built_beit, None, 0.05, _HF_BEIT),
+        (
+            "beit/model.py attention q/k/v/proj ONLY (D-600)",
+            _built_beit_attention_only, None, 0.05, _HF_BEIT,
+        ),
     ],
 )
 def test_the_initializer_draw_reaches_the_graph(site, builder, only, rel, url):
@@ -552,6 +596,143 @@ def test_the_initializer_draw_reaches_the_graph(site, builder, only, rel, url):
         f"{site} draws at std {realized:.6f}; the reference's 0.02 realizes as "
         f"{REALIZED_TARGET:.6f} after truncation. Re-verify at: {url}"
     )
+
+
+#: The distinctive stddev the per-branch reachability probe below asks for. Far
+#: from every fallback in the tree (glorot at dim=64 realizes 0.125, and the
+#: MEASURED pre-fix fallbacks ranged 0.058 to 0.131), so "the knob arrived" and
+#: "the layer used its own default" cannot be confused.
+_PROBE_STDDEV = 0.5
+#: ``TransformerLayer``'s nine self-attention branches. ``fnet`` is here on
+#: purpose: it is parameter-free (a 2-D DFT), declares no initializer, and must
+#: be EXCLUDED BY THE REGISTRY rather than by a hand-kept skip list.
+_TRANSFORMER_ATTENTION_TYPES = {
+    "multi_head": {},
+    "window": {"window_size": 4},
+    "beit": {"window_size": (4, 4)},
+    "group_query": {"n_kv_head": 2},
+    "differential": {"lambda_init": 0.8},
+    "multi_head_latent": {},
+    "anchor": {},
+    "lighthouse": {},
+    "fnet": {},
+}
+#: ``LighthouseAttention`` requires seq_len divisible by pooling_factor**(levels-1).
+_PROBE_SEQ_LEN = {"lighthouse": 32}
+
+
+def _attention_types_declaring_a_kernel_initializer():
+    from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY
+
+    return sorted(
+        t for t in _TRANSFORMER_ATTENTION_TYPES
+        if "kernel_initializer" in ATTENTION_REGISTRY[t].get("optional_params", {})
+    )
+
+
+def test_the_registry_split_of_the_attention_branches_is_what_it_was_measured_to_be():
+    """Anti-vacuity for the row below. If a refactor stopped declaring
+    ``kernel_initializer`` anywhere, the parametrization would silently shrink to
+    nothing and the reachability test would pass by having no cases."""
+    declaring = _attention_types_declaring_a_kernel_initializer()
+    assert len(declaring) == 8, declaring
+    assert "fnet" not in declaring
+    assert set(declaring) == set(_TRANSFORMER_ATTENTION_TYPES) - {"fnet"}
+
+
+@pytest.mark.parametrize("attention_type", _attention_types_declaring_a_kernel_initializer())
+def test_the_blocks_kernel_initializer_reaches_its_attention_layer(attention_type):
+    """D-600. Every attention type that DECLARES ``kernel_initializer`` must
+    actually receive ``TransformerLayer``'s.
+
+    Pre-fix MEASURED realized std with the block asking for stddev=0.5
+    (target 0.439813): multi_head 0.441372 (the only branch that forwarded),
+    window 0.099118, beit 0.124754, group_query 0.131345, differential 0.123712,
+    multi_head_latent 0.058167, anchor 0.123712, lighthouse 0.123712. Eight of
+    nine branches dropped it; nothing raised, because each layer falls back to
+    its own ``glorot_uniform``.
+
+    This is parametrized off the REGISTRY, not off a literal list, so a tenth
+    attention type that declares the parameter joins this guard automatically.
+    """
+    from dl_techniques.layers.transformers.transformer import TransformerLayer
+
+    dim, heads = 64, 4
+    seq = _PROBE_SEQ_LEN.get(attention_type, 17)
+    x = np.random.RandomState(0).randn(2, seq, dim).astype("float32")
+
+    keras.utils.set_random_seed(7)
+    block = TransformerLayer(
+        hidden_size=dim, num_heads=heads, intermediate_size=2 * dim,
+        attention_type=attention_type,
+        kernel_initializer=keras.initializers.TruncatedNormal(stddev=_PROBE_STDDEV),
+        **_TRANSFORMER_ATTENTION_TYPES[attention_type],
+    )
+    block(x)
+
+    kernels = [
+        np.asarray(w) for w in block.attention.weights
+        if np.asarray(w).ndim >= 2 and w.path.endswith("kernel")
+    ]
+    assert kernels, (
+        f"{attention_type}: the probe found no 2-D attention kernels, so it "
+        f"cannot see the initializer at all -- fix the probe, not the assertion"
+    )
+    realized = float(np.concatenate([k.ravel() for k in kernels]).std())
+    expected = _PROBE_STDDEV * TRUNCATION_FACTOR
+    assert realized == pytest.approx(expected, rel=0.05), (
+        f"attention_type='{attention_type}': the block asked for "
+        f"TruncatedNormal(stddev={_PROBE_STDDEV}) (realizing {expected:.6f}) but "
+        f"its {len(kernels)} attention kernels drew at std {realized:.6f}. "
+        f"_get_attention_params dropped kernel_initializer and the layer fell "
+        f"back to its own default. See decisions.md D-600."
+    )
+
+
+def test_the_forwarded_initializer_is_cloned_not_shared():
+    """The trade this fix must not make. Forwarding ONE seedless instance to N
+    blocks would replay one draw -- the D-540/D-560 defect. Callers really do
+    hand a single instance to every block (``models/beit/model.py:409``)."""
+    from dl_techniques.layers.transformers.transformer import TransformerLayer
+
+    shared = keras.initializers.TruncatedNormal(stddev=_PROBE_STDDEV)
+    x = np.random.RandomState(0).randn(2, 17, 64).astype("float32")
+    # Seeded ONCE, outside the loop, and that is load-bearing. A seedless clone
+    # draws its seed from the global RNG at CONSTRUCTION, so re-seeding before
+    # each block hands both clones the same seed and they collide even with the
+    # fix in place -- MEASURED while writing this test. Real models build their
+    # blocks in one uninterrupted sequence, which is what is reproduced here.
+    keras.utils.set_random_seed(7)
+    blocks = []
+    for i in range(2):
+        b = TransformerLayer(
+            hidden_size=64, num_heads=4, intermediate_size=128,
+            attention_type="beit", window_size=(4, 4),
+            kernel_initializer=shared, name=f"probe_{i}",
+        )
+        b(x)
+        blocks.append(b)
+
+    def kernels(b):
+        return {
+            w.path.split("/attention/")[1]: np.asarray(w)
+            for w in b.attention.weights
+            if np.asarray(w).ndim >= 2 and w.path.endswith("kernel")
+        }
+
+    a, c = kernels(blocks[0]), kernels(blocks[1])
+    assert set(a) == set(c) and len(a) == 4, sorted(a)
+    for name in a:
+        assert np.abs(a[name] - c[name]).max() > 0.0, (
+            f"two blocks handed the SAME initializer instance drew identical "
+            f"{name}; clone_initializer was dropped from _get_attention_params"
+        )
+    within = sorted(a)
+    for i in range(len(within)):
+        for j in range(i + 1, len(within)):
+            assert np.abs(a[within[i]] - a[within[j]]).max() > 0.0, (
+                f"{within[i]} == {within[j]} within one block"
+            )
 
 
 def test_the_bare_truncated_normal_string_is_keras_own_scale():

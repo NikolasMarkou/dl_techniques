@@ -158,7 +158,19 @@ class TestBeitAttentionParams:
 
     def test_exact_param_dict(self):
         block = _beit_block(attention_dropout_rate=0.3)
-        assert block._get_attention_params('attn') == {
+        params = block._get_attention_params('attn')
+        # D-600: `kernel_initializer` is now forwarded to this branch. It was
+        # ABSENT here, which is exactly the defect -- BEiT's
+        # TruncatedNormal(stddev=initializer_range) never reached q/k/v/proj and
+        # they drew at BeitAttention's own glorot_uniform (MEASURED: realized
+        # std 0.125238 vs 0.017609 for every other kernel in the same model).
+        # It is a CLONE, not the block's own instance: one shared instance
+        # replays a single draw across blocks.
+        forwarded = params.pop('kernel_initializer')
+        assert type(forwarded) is type(block.kernel_initializer)
+        assert forwarded.get_config() == block.kernel_initializer.get_config()
+        assert forwarded is not block.kernel_initializer
+        assert params == {
             'dim': HIDDEN,
             'num_heads': HEADS,
             'window_size': (WH, WW),
