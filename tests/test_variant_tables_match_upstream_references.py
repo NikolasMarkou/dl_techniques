@@ -1,0 +1,83 @@
+"""Pin every model variant that impersonates a published config to the published numbers.
+
+A variant named after an upstream checkpoint makes a claim. When a package presents
+itself as a faithful port and names its variant with the upstream's own identity
+(matching dims, the upstream's variant name), the numbers in that row are not a
+tunable of this repo -- they are quoted data, and quoted data that drifts is a false
+citation. Five packages were caught drifting by fetching the upstream sources; this
+module is the instrument that keeps them from drifting again.
+
+Scope, stated because the absence of a row here is meaningful: only variants with a
+real upstream counterpart appear below. Repo-invented size tiers (HRM's
+micro/tiny/base/large/xlarge, sd3_mmdit's "tiny", ...) are deliberately NOT pinned --
+there is nothing to pin them to, and asserting them here would manufacture the very
+false-citation impression this file exists to prevent.
+
+Each row carries the URL its values were fetched from, so a future reader can
+re-verify a number without re-doing the search that found it.
+
+References:
+    - HRM: https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml
+"""
+
+from typing import Any, Callable, Dict
+
+import pytest
+
+
+def _hrm_variants() -> Dict[str, Dict[str, Any]]:
+    from dl_techniques.models.hierarchical_reasoning_model.model import (
+        HierarchicalReasoningModel,
+    )
+
+    return HierarchicalReasoningModel.MODEL_VARIANTS
+
+
+# package -> zero-arg loader for that package's variant table.
+# Loaders are lazy so one package failing to import cannot mask the others.
+VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
+    "hierarchical_reasoning_model": _hrm_variants,
+}
+
+# (package, variant, field, expected_value, source_url)
+# Every tuple is a quoted upstream number. Changing one requires changing the source.
+UPSTREAM_PINS = [
+    # sapientinc/HRM config/arch/hrm_v1.yaml -- the ONLY official HRM architecture
+    # config. hidden_size -> embed_dim, H_* -> h_*, L_* -> l_*.
+    ("hierarchical_reasoning_model", "small", "embed_dim", 512,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+    ("hierarchical_reasoning_model", "small", "num_heads", 8,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+    ("hierarchical_reasoning_model", "small", "h_layers", 4,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+    ("hierarchical_reasoning_model", "small", "l_layers", 4,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+    ("hierarchical_reasoning_model", "small", "h_cycles", 2,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+    ("hierarchical_reasoning_model", "small", "l_cycles", 2,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+    ("hierarchical_reasoning_model", "small", "halt_max_steps", 16,
+     "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
+]
+
+
+@pytest.mark.parametrize(
+    "package,variant,field,expected,url",
+    UPSTREAM_PINS,
+    ids=[f"{p}-{v}-{f}" for p, v, f, _e, _u in UPSTREAM_PINS],
+)
+def test_variant_field_matches_upstream(
+    package: str, variant: str, field: str, expected: Any, url: str
+) -> None:
+    """The named field of the named variant must equal the value published upstream."""
+    table = VARIANT_TABLES[package]()
+    assert variant in table, (
+        f"{package}: variant '{variant}' vanished from the variant table; it is the row "
+        f"that quotes {url} and cannot be renamed away silently"
+    )
+    actual = table[variant][field]
+    assert actual == expected, (
+        f"{package}['{variant}']['{field}'] is {actual!r} but upstream publishes "
+        f"{expected!r}. Source: {url}. Either restore the upstream value or stop "
+        f"naming this variant after the upstream config."
+    )

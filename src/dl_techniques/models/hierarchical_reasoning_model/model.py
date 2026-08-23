@@ -245,7 +245,19 @@ class HierarchicalReasoningModel(keras.Model):
         you need full control over the reasoning loop or prefer automatic execution.
     """
 
-    # Model variant configurations
+    # Model variant configurations.
+    #
+    # Only "small" has an upstream counterpart: it is the sole official config,
+    # sapientinc/HRM `config/arch/hrm_v1.yaml`, and its fields are pinned to that file
+    # verbatim (hidden_size 512, num_heads 8, H_cycles 2, L_cycles 2, H_layers 4,
+    # L_layers 4, halt_max_steps 16). Source, re-verifiable without searching:
+    #   https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml
+    # The class __init__ defaults below carry the same numbers, which is why "small"
+    # is the row that claims fidelity. Every OTHER row (micro/tiny/base/large/xlarge)
+    # is a repo-invented size tier with NO published counterpart -- the paper and the
+    # official repo publish exactly one architecture, so those rows must not be read
+    # as reproducing anything. Pinned by
+    # tests/test_variant_tables_match_upstream_references.py.
     MODEL_VARIANTS = {
         "micro": {
             "embed_dim": 256,
@@ -265,14 +277,20 @@ class HierarchicalReasoningModel(keras.Model):
             "num_heads": 6,
             "halt_max_steps": 6
         },
+        # DECISION plan-2026-08-23T091307-9a110062/D-460
+        # hrm_v1.yaml verbatim -- do not "scale" these to fit a size ladder, and do
+        # NOT resolve a future mismatch by renaming this row (e.g. to "small_compact"):
+        # the class __init__ defaults already carry these same official numbers, so
+        # this package's fidelity claim is structural, not just nominal. Correct the
+        # numbers, never the name.
         "small": {
             "embed_dim": 512,
-            "h_layers": 6,
-            "l_layers": 6,
+            "h_layers": 4,
+            "l_layers": 4,
             "h_cycles": 2,
-            "l_cycles": 3,
+            "l_cycles": 2,
             "num_heads": 8,
-            "halt_max_steps": 8
+            "halt_max_steps": 16
         },
         "base": {
             "embed_dim": 768,
