@@ -8,9 +8,14 @@ exist; this file is the new floor for the bit-exact preservation
 invariant in Pre-Mortem #2 of the rms_variants_train Phase 3 refinement
 plan):
 
-1. Default-off plumbing (`normalization_kwargs=None`) is byte-identical
-   to the pre-plumbing factory call shape: the stem and every block's
-   internal norm receive `**{}`.
+1. Default-off plumbing (`normalization_kwargs=None`) resolves to `{}`
+   for every normalization type EXCEPT `batch_norm`, where
+   plan-2026-08-23T091307-9a110062/D-480 injects the reference
+   `momentum=0.9` (torchvision `BatchNorm2d`'s `momentum=0.1`; the two
+   frameworks define momentum oppositely, `keras = 1 - torch`). That
+   injection is training-only: it changes no weight shape and does not
+   enter the `training=False` forward pass, so the bit-exactness
+   invariant this file was written to protect still holds.
 2. Explicit `normalization_kwargs={"use_scale": False}` propagates to
    the stem and all in-block norm layers when paired with a norm class
    that supports the kwarg (e.g. `rms_norm`).
@@ -52,21 +57,43 @@ def _small_resnet18(**overrides):
 
 
 class TestResNetNormKwargsDefault:
-    def test_default_off_stores_empty_dict(self):
+    def test_batch_norm_default_injects_the_reference_momentum(self):
+        """D-480: `batch_norm` with no explicit kwargs gets `momentum=0.9`.
+
+        0.9 is torchvision `BatchNorm2d`'s `momentum=0.1` expressed in Keras'
+        opposite convention (`keras_momentum = 1 - torch_momentum`); Keras'
+        own bare default is 0.99. This assertion replaced an
+        `== {}` one, which pinned the pre-D-480 behaviour.
+        """
         model = _small_resnet18()
+        assert model.normalization_kwargs == {"momentum": 0.9}
+
+    def test_the_injection_is_conditional_on_batch_norm(self):
+        """The negative arm: `momentum` is not an accepted kwarg of the other
+        factory types, so a non-`batch_norm` default must still be `{}`."""
+        model = _small_resnet18(normalization_type="rms_norm")
         assert model.normalization_kwargs == {}
+
+    def test_an_explicit_momentum_wins_over_the_injection(self):
+        model = _small_resnet18(normalization_kwargs={"momentum": 0.99})
+        assert model.normalization_kwargs == {"momentum": 0.99}
 
     def test_default_off_stem_bn_factory_call(self):
         """stem_bn was created with no extra kwargs — get_config('name') == 'stem_bn'."""
         model = _small_resnet18()
         assert model.stem_bn.name == "stem_bn"
 
-    def test_default_off_blocks_have_empty_kwargs(self):
-        """Every BasicBlock in the stages stores `{}` for normalization_kwargs."""
+    def test_default_off_blocks_receive_the_resolved_kwargs(self):
+        """Every block gets the SAME resolved dict the stem does — the
+        injection happens once, in `__init__`, not per construction site."""
         model = _small_resnet18()
         for stage_blocks in model.stages:
             for blk in stage_blocks:
                 assert isinstance(blk, (BasicBlock, BottleneckBlock))
+                assert blk.normalization_kwargs == {"momentum": 0.9}
+        rms = _small_resnet18(normalization_type="rms_norm")
+        for stage_blocks in rms.stages:
+            for blk in stage_blocks:
                 assert blk.normalization_kwargs == {}
 
     def test_default_off_forward_pass(self):
@@ -153,13 +180,19 @@ class TestResNetNormKwargsSerialization:
         restored = ResNet.from_config(cfg)
         assert restored.normalization_kwargs == {"use_scale": False}
 
-    def test_default_empty_dict_round_trips(self):
+    def test_the_resolved_default_round_trips(self):
+        """The RESOLVED dict is what `get_config` reports, so a reloaded model
+        keeps the momentum the artifact was saved with rather than re-deriving
+        it from whatever the current default happens to be."""
         model = _small_resnet18()
         cfg = model.get_config()
-        # `normalization_kwargs` was stored as `{}` and the config exposes it.
-        assert cfg["normalization_kwargs"] == {}
+        assert cfg["normalization_kwargs"] == {"momentum": 0.9}
         restored = ResNet.from_config(cfg)
-        assert restored.normalization_kwargs == {}
+        assert restored.normalization_kwargs == {"momentum": 0.9}
+
+        rms = _small_resnet18(normalization_type="rms_norm")
+        assert rms.get_config()["normalization_kwargs"] == {}
+        assert ResNet.from_config(rms.get_config()).normalization_kwargs == {}
 
 
 # ---------------------------------------------------------------------

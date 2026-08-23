@@ -62,10 +62,17 @@ Two reproduction caveats are worth stating as choices. The constructor's
 directly constructed `CliffordNet(...)` is not initialized like a
 `from_variant(...)` one, and because the block's output is quadratic in its
 activations, initialization scale matters more here than in a linear-in-`x`
-block. Separately, this model leaves the block's context normalization at its
+block. Separately, this model leaves the *block's* context normalization at its
 image-mode default (`BatchNormalization`), which reaches the layer with Keras'
 `momentum=0.99` and the norm factory's `epsilon=1e-6` rather than the reference's
-`0.9`/`1e-5`; pass `normalization_kwargs` through to change that.
+`0.9`/`1e-5`; pass `normalization_kwargs` through to change that. The *stem*'s
+three `BatchNormalization` sites no longer share that gap: they are pinned to the
+reference's `momentum=0.9` via `_STEM_BN_MOMENTUM`. Note that Keras and PyTorch
+define momentum oppositely (`keras_momentum = 1 - torch_momentum`), so a
+torch-side `0.1` is this `0.9` — see the constant's comment before "correcting"
+it. Momentum is a training-time tracking constant only; it changes no weight
+shape and does not enter the `training=False` forward pass, so checkpoints saved
+before this pin still load and infer bit-identically.
 
 No pretrained weights are distributed. `_download_weights` raises
 `NotImplementedError`, and `from_variant`'s fallback only catches `IOError`,
@@ -114,6 +121,28 @@ from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 # Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
+
+# DECISION plan-2026-08-23T091307-9a110062/D-480
+# Stem BatchNorm momentum. Do NOT drop this kwarg and let
+# `keras.layers.BatchNormalization` supply its own default: that default is
+# `0.99`, and the reference (Ji 2026, https://arxiv.org/abs/2601.06793 — the
+# same citation this module's docstring already carried) uses `0.9`. The
+# docstring named 0.9 as the target before the code did; this constant is what
+# finally makes the code follow it.
+#
+# THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY -- do not "correct" 0.9 to 0.1.
+#   Keras: moving = momentum * moving + (1 - momentum) * batch
+#          https://keras.io/api/layers/normalization_layers/batch_normalization/
+#   torch: moving = (1 - momentum) * moving + momentum * batch
+#          https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html
+# so `keras_momentum = 1 - torch_momentum` and a torch-side 0.1 is 0.9 here.
+#
+# Training-only: momentum governs how fast `moving_mean`/`moving_variance`
+# track the batch statistics under `training=True`. It does not appear in the
+# `training=False` forward pass and does not change any weight shape, so every
+# existing checkpoint loads and infers bit-identically.
+# See decisions.md D-480.
+_STEM_BN_MOMENTUM = 0.9
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +290,9 @@ class CliffordNet(keras.Model):
                 name="stem_conv1",
                 **_conv_kw,
             )
-            self.stem_bn1 = keras.layers.BatchNormalization(name="stem_bn1")
+            self.stem_bn1 = keras.layers.BatchNormalization(
+                name="stem_bn1", momentum=_STEM_BN_MOMENTUM
+            )
             self.stem_conv2 = keras.layers.Conv2D(
                 filters=self.channels,
                 kernel_size=3,
@@ -293,7 +324,9 @@ class CliffordNet(keras.Model):
                 name="stem_conv1",
                 **_conv_kw,
             )
-            self.stem_bn1 = keras.layers.BatchNormalization(name="stem_bn1")
+            self.stem_bn1 = keras.layers.BatchNormalization(
+                name="stem_bn1", momentum=_STEM_BN_MOMENTUM
+            )
             self.stem_conv2 = keras.layers.Conv2D(
                 filters=self.channels,
                 kernel_size=3,
@@ -316,7 +349,9 @@ class CliffordNet(keras.Model):
             )
 
         # Final BatchNorm applied to every stem variant (matches GeometricStem.norm).
-        self.stem_norm = keras.layers.BatchNormalization(name="stem_norm")
+        self.stem_norm = keras.layers.BatchNormalization(
+            name="stem_norm", momentum=_STEM_BN_MOMENTUM
+        )
 
     def _build_blocks(self) -> None:
         """Build and assign the CliffordNet block list with linear drop-path schedule."""

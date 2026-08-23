@@ -170,6 +170,26 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 # `clone_initializer(...)`. Do NOT pass this object straight to a sub-layer, and
 # do NOT "simplify" the clones away. See decisions.md D-072.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
+
+# DECISION plan-2026-08-23T091307-9a110062/D-480
+# Vision-stem BatchNorm momentum. This stem mirrors
+# `CliffordNet.model._build_stem`, and it inherited that stem's defect along
+# with its semantics: omitting `momentum` hands the layer Keras' `0.99`, while
+# the shared reference (Ji 2026, https://arxiv.org/abs/2601.06793) specifies
+# `0.9`. Do NOT drop this kwarg; the two modules are ONE root cause and must
+# stay in step -- see `models/cliffordnet/model.py:_STEM_BN_MOMENTUM`.
+#
+# THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY -- do not "correct" 0.9 to 0.1.
+#   Keras: moving = momentum * moving + (1 - momentum) * batch
+#          https://keras.io/api/layers/normalization_layers/batch_normalization/
+#   torch: moving = (1 - momentum) * moving + momentum * batch
+#          https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html
+# so `keras_momentum = 1 - torch_momentum`.
+#
+# Training-only: it does not enter the `training=False` forward pass and changes
+# no weight shape, so pre-existing checkpoints load and infer bit-identically.
+# See decisions.md D-480.
+_VISION_STEM_BN_MOMENTUM = 0.9
 _LN_EPS: float = 1e-6
 
 
@@ -649,7 +669,7 @@ class CliffordCLIP(keras.Model):
                 **_conv_kw,
             )
             self.vision_stem_bn1 = keras.layers.BatchNormalization(
-                name="vision_stem_bn1"
+                name="vision_stem_bn1", momentum=_VISION_STEM_BN_MOMENTUM
             )
             self.vision_stem_conv2 = keras.layers.Conv2D(
                 filters=stem_channels,
@@ -683,7 +703,7 @@ class CliffordCLIP(keras.Model):
                 **_conv_kw,
             )
             self.vision_stem_bn1 = keras.layers.BatchNormalization(
-                name="vision_stem_bn1"
+                name="vision_stem_bn1", momentum=_VISION_STEM_BN_MOMENTUM
             )
             self.vision_stem_conv2 = keras.layers.Conv2D(
                 filters=stem_channels,
@@ -708,7 +728,7 @@ class CliffordCLIP(keras.Model):
             self._vision_stem_kind = "single"
 
         self.vision_stem_norm = keras.layers.BatchNormalization(
-            name="vision_stem_norm"
+            name="vision_stem_norm", momentum=_VISION_STEM_BN_MOMENTUM
         )
 
         # --- Staged CliffordNet blocks + PatchMerging downsamples ---

@@ -50,8 +50,13 @@ index 0 alone.
 Normalization and activation are supplied through factories rather than
 hard-coded, and an optional `normalization_kwargs` dict is forwarded to every
 construction site in both the stem and each block. Its default of `None` resolves
-to an empty dict, leaving all factory calls byte-identical to the pre-plumbing
-version so existing checkpoints remain bit-exact.
+to an empty dict, except that for `normalization_type='batch_norm'` a
+`momentum=0.9` is injected unless the caller supplies one: Keras' bare default is
+`0.99`, while torchvision's `BatchNorm2d` — the canonical He et al.
+reimplementation — uses `momentum=0.1`, and the two frameworks define momentum
+oppositely (`keras_momentum = 1 - torch_momentum`), so `0.1` there is `0.9` here.
+This is a training-time tracking constant only: it changes neither weight shapes
+nor the `training=False` forward pass, so existing checkpoints remain bit-exact.
 
 No pretrained weights are distributed with this package. `pretrained=True` raises
 `NotImplementedError` rather than warning and returning a randomly initialized
@@ -69,6 +74,9 @@ References:
       (https://arxiv.org/abs/1409.5185)
     - Veit et al., 2016. Residual Networks Behave Like Ensembles of Relatively
       Shallow Networks. (https://arxiv.org/abs/1605.06431)
+    - torchvision `nn.BatchNorm2d` (`momentum=0.1`), the de facto reference
+      reimplementation this port's BatchNorm momentum is matched against.
+      (https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html)
 """
 
 import os
@@ -189,8 +197,11 @@ class ResNet(keras.Model):
     :type normalization_type: str
     :param normalization_kwargs: Optional kwargs forwarded to every
         normalization factory call in the stem and in every block. ``None``
-        resolves to ``{}``, keeping all calls byte-identical to the
-        pre-plumbing version so existing checkpoints stay bit-exact.
+        resolves to ``{}``. When ``normalization_type == 'batch_norm'`` and no
+        ``momentum`` is supplied, ``momentum=0.9`` is injected to match
+        torchvision's ``BatchNorm2d`` (see the class body); pass an explicit
+        ``momentum`` to override. Weight shapes and the inference forward pass
+        are unaffected, so existing checkpoints stay bit-exact.
     :type normalization_kwargs: Optional[Dict[str, Any]]
     :param activation_type: Activation identifier passed to
         ``create_activation_layer``. Defaults to ``'relu'``.
@@ -321,6 +332,31 @@ class ResNet(keras.Model):
         # gamma-removal contrast in the headline E2 result becomes a
         # pure 1-vs-d parameter-count confound rather than a norm choice.
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-480
+        # Inject the reference BatchNorm momentum. Do NOT delete this and fall
+        # back to Keras' bare default: `keras.layers.BatchNormalization`
+        # defaults to `momentum=0.99`, while the canonical He-et-al.
+        # reimplementation -- torchvision's `nn.BatchNorm2d` -- defaults to
+        # `momentum=0.1`.
+        #
+        # THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY. Do not "correct" 0.9
+        # back to 0.1; that would be a 10x-too-slow tracking constant, not a
+        # port fix. Keras:  moving = momentum * moving + (1 - momentum) * batch
+        #                   (https://keras.io/api/layers/normalization_layers/batch_normalization/)
+        #             torch:  moving = (1 - momentum) * moving + momentum * batch
+        #                   (https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html)
+        # Hence `keras_momentum = 1 - torch_momentum`, and torch's 0.1 is
+        # Keras' 0.9.
+        #
+        # Conditional on 'batch_norm' because `momentum` is not an accepted
+        # kwarg of the other factory types (layer_norm, rms_norm, ...), which
+        # `validate_normalization_config` rejects. `setdefault` semantics: an
+        # explicit caller-supplied `momentum` always wins.
+        # See decisions.md D-480.
+        if self.normalization_type == "batch_norm":
+            self.normalization_kwargs.setdefault("momentum", 0.9)
+
         self.activation_type = activation_type
         self.include_top = include_top
         self.enable_deep_supervision = enable_deep_supervision
