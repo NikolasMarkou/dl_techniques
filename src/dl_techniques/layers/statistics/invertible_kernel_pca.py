@@ -294,10 +294,18 @@ class InvertibleKernelPCA(keras.layers.Layer):
         )
 
         # Random phase vector b ~ Uniform(0, 2π)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-304 -- the guard is
+        # `is not None`, NOT truthiness. `random_seed=0` is a legitimate,
+        # widely-used seed and it is FALSY, so a bare `if initializer_seed`
+        # silently dropped the phase draw back to unseeded while the frequency
+        # draw above stayed seeded. The layer was then HALF-seeded at exactly
+        # the seed its own tests use: 60 builds at `random_seed=0` produced 60
+        # DISTINCT sklearn correlations spanning 0.1244..0.9958. Do NOT
+        # "simplify" this back to a truthiness test.
         phase_initializer = initializers.RandomUniform(
             minval=0.0,
             maxval=2 * np.pi,
-            seed=initializer_seed + 1 if initializer_seed else None
+            seed=initializer_seed + 1 if initializer_seed is not None else None
         )
 
         self.phases = self.add_weight(

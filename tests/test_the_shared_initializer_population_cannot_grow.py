@@ -188,6 +188,15 @@ class TestSharedInitializerPopulationIsPinned:
             f"{sorted(set(collision_groups) )[:20]}"
         )
 
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-303. Same shape as
+    # the norm-factory census guard's opt-out (D-251): this test REPORTS the
+    # 57-entry triage list through `warnings.warn` on purpose, so that the
+    # residue D-200 closed by documented default is re-stated on every run and
+    # cannot rot silently. Step 5 later landed a repo-wide `error::UserWarning`
+    # (D-252), which turned that deliberate report into a failure -- this ONE
+    # test opts back out. Do NOT silence the warning itself: the report IS the
+    # instrument that keeps the 57 visible.
+    @pytest.mark.filterwarnings("always::UserWarning")
     def test_the_role_suspect_subset_has_not_grown(self, collision_groups):
         suspects = _role_suspects(collision_groups)
         if suspects:
