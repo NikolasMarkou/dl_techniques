@@ -32,6 +32,11 @@ from dl_techniques.models.darkir.model import (
 # array while `model.inputs` is a one-element LIST, which Keras flags and then
 # handles correctly. The advisory is about the probe's calling convention, not
 # about darkir.
+# MEASURED 2026-08-23: fires twice, in
+# `TestDegenerateMiddleSection::test_a_real_middle_residual_is_not_a_doubling`.
+# The paired positive arm lives in
+# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
+# anywhere needs one there in the same commit.
 pytestmark = [
     pytest.mark.filterwarnings(
         "ignore:The structure of `inputs` doesn't match:UserWarning"),

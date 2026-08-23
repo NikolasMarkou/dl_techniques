@@ -64,6 +64,11 @@ from train.sam3.data import (
 # ends. Padding the corpus to match would change what the test measures (the
 # config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
 # starved input in any other module still fails under `error::UserWarning`.
+# MEASURED 2026-08-23: fires in 1 of the 55 tests here,
+# `TestEndToEnd::test_a_stock_fit_step_completes_on_this_dataset`.
+# The paired positive arm lives in
+# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
+# anywhere needs one there in the same commit.
 pytestmark = [
     pytest.mark.filterwarnings(
         "ignore:Your input ran out of data:UserWarning"),
