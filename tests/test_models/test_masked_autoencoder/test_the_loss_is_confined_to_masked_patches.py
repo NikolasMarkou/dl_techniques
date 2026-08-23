@@ -38,6 +38,8 @@ import pytest
 
 from dl_techniques.models.masked_autoencoder.mae import MaskedAutoencoder
 
+from .conftest import tiny_encoder
+
 BATCH, IMAGE_SIZE, PATCH_SIZE, CHANNELS = 1, 32, 16, 3
 GRID = IMAGE_SIZE // PATCH_SIZE          # 2
 NUM_PATCHES = GRID * GRID                # 4
@@ -53,11 +55,7 @@ def PATCH_ROWCOL(p):
 
 def _tiny_encoder():
     """Smallest 16x-downsampling encoder MAE's decoder_depth=4 contract accepts."""
-    inp = keras.Input(shape=(IMAGE_SIZE, IMAGE_SIZE, CHANNELS))
-    x = inp
-    for _ in range(4):
-        x = keras.layers.Conv2D(16, 3, strides=2, padding="same")(x)
-    return keras.Model(inp, x)
+    return tiny_encoder(image_size=IMAGE_SIZE, channels=CHANNELS)
 
 
 def _mae(non_mask_value=0.0):

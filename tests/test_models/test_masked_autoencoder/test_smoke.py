@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from ..smoke_contract_oracle import assert_finite
+from .conftest import tiny_encoder
 
 BATCH, IMAGE_SIZE, PATCH_SIZE, CHANNELS = 2, 32, 16, 3
 NUM_PATCHES = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 4
@@ -50,12 +51,13 @@ def _tiny_conv_encoder(input_shape=(IMAGE_SIZE, IMAGE_SIZE, CHANNELS)):
     Downsamples by 16x, matching the default `decoder_depth=4`. It was /4 until
     2026-08-15, which the constructor now rejects outright.
     """
-    inp = keras.Input(shape=input_shape)
-    x = keras.layers.Conv2D(8, 3, strides=2, padding="same", activation="relu")(inp)
-    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(x)
-    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(x)
-    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu")(x)
-    return keras.Model(inp, x, name="tiny_mae_encoder")
+    return tiny_encoder(
+        image_size=input_shape[0],
+        channels=input_shape[2],
+        filters=(8, 16, 16, 16),
+        activation="relu",
+        name="tiny_mae_encoder",
+    )
 
 
 def _inputs():

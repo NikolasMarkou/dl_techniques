@@ -161,7 +161,7 @@ hence scoping pytest to the modules you changed rather than running `make test` 
 
 Mirrors `src/` — `tests/test_models/test_mobilenet/`, `tests/test_layers/test_attention/`. Under
 `tests/test_models/` a directory is the norm; under `tests/test_layers/` a loose `test_<name>.py` is
-(81 loose modules against 21 subdirectories, 2026-08-19), so a missing directory there means nothing.
+(84 loose modules against 20 subdirectories, 2026-08-23), so a missing directory there means nothing.
 `REPO_MAP.md` § Tests lists the named exceptions.
 
 | File kind | Convention |

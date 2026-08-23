@@ -42,16 +42,20 @@ import pytest
 
 from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
 
+from .conftest import tiny_encoder
+
 # ---------------------------------------------------------------------
 
 
 def _tiny_encoder() -> keras.Model:
-    """A 4x stride-2 conv stack: 32x32 -> 2x2, matching `decoder_depth=4`."""
-    inp = keras.Input(shape=(32, 32, 3))
-    x = inp
-    for filters in (16, 32, 64, 128):
-        x = keras.layers.Conv2D(filters, 3, strides=2, padding="same")(x)
-    return keras.Model(inp, x, name="tiny_encoder")
+    """A 4x stride-2 conv stack: 32x32 -> 2x2, matching `decoder_depth=4`.
+
+    The widths RISE (16/32/64/128) rather than staying flat, so no two weight
+    tensors share a shape and a mis-ordered restore cannot pass by coincidence.
+    """
+    return tiny_encoder(
+        image_size=32, channels=3, filters=(16, 32, 64, 128), name="tiny_encoder"
+    )
 
 
 def _build_mae() -> MaskedAutoencoder:

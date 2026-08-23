@@ -29,16 +29,14 @@ import pytest
 
 from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
 
+from .conftest import tiny_encoder
+
 IMAGE_SIZE, PATCH_SIZE, CHANNELS = 32, 16, 3
 SEED = 20260821
 
 
 def _tiny_encoder():
-    inp = keras.Input(shape=(IMAGE_SIZE, IMAGE_SIZE, CHANNELS))
-    x = inp
-    for _ in range(4):
-        x = keras.layers.Conv2D(16, 3, strides=2, padding="same")(x)
-    return keras.Model(inp, x)
+    return tiny_encoder(image_size=IMAGE_SIZE, channels=CHANNELS)
 
 
 @pytest.fixture(scope="module")
