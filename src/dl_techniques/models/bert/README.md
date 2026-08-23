@@ -465,10 +465,13 @@ from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 bert_encoder = BERT.from_variant("base", pretrained=True)
 
 # 2. Define your own downstream model that uses BERT's outputs
+# `name=` is not decoration: an unnamed `keras.Input` inside a dict makes Keras
+# auto-name it `keras_tensor_N`, which is what the model then expects as a data
+# key. Omitting it emits a UserWarning and breaks `fit`/`predict` on a dict.
 inputs = {
-    "input_ids": keras.Input(shape=(None,), dtype="int32"),
-    "attention_mask": keras.Input(shape=(None,), dtype="int32"),
-    "token_type_ids": keras.Input(shape=(None,), dtype="int32")
+    "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+    "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
+    "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
 }
 bert_outputs = bert_encoder(inputs)
 sequence_output = bert_outputs["last_hidden_state"] # Shape: (batch, seq_len, 768)
@@ -487,34 +490,94 @@ feature_model.summary()
 
 Share a single BERT encoder across multiple tasks to improve performance and efficiency.
 
+> ⚠️ **The heads do not read `last_hidden_state`.** Every head in
+> `layers/heads/nlp/` reads `inputs['hidden_states']`, while `BERT` emits
+> `last_hidden_state`. You must build the rename yourself — step 4 below —
+> exactly as `create_bert_with_head` does internally (`bert.py:1205-1208`).
+> Feeding the encoder's dict straight into a head builds a graph that looks
+> fine and raises **at forward time**, because the heads' `build()` and
+> `compute_output_shape()` use `.get(..., default)` and never touch the missing
+> key. MEASURED: `keras.Model(...)` construction succeeds, then `predict()`
+> raises `KeyError: hidden_states ... inputs={'last_hidden_state': ...,
+> 'attention_mask': ...}` from `factory.py:468`. Pinned by
+> `tests/test_models/test_bert/test_the_head_wiring_needs_the_rename.py`.
+
 ```python
 import keras
+import numpy as np
 from dl_techniques.models.bert import BERT
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
+)
 
-# 1. Create one shared BERT encoder
-bert_encoder = BERT.from_variant("base", pretrained=True)
-bert_encoder.trainable = True # Fine-tune the encoder
+# 1. Create one shared BERT encoder ("base" needs a local checkpoint path or
+#    `pretrained=False`; `pretrained=True` raises NotImplementedError)
+bert_encoder = BERT.from_variant("tiny", pretrained=False)
+bert_encoder.trainable = True  # Fine-tune the encoder
 
-# 2. Define inputs
-inputs = { ... } # Same as above
+# 2. Define inputs -- same shape as Pattern 1, `name=` included
+inputs = {
+    "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+    "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
+    "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
+}
 
-# 3. Get shared features
-bert_outputs = bert_encoder(inputs)
+# 3. Get shared features: keys are {"last_hidden_state", "attention_mask"}
+encoder_outputs = bert_encoder(inputs)
 
-# 4. Create two different heads
-sentiment_head = TextClassificationHead(num_classes=2, name="sentiment")
-ner_head = TokenClassificationHead(num_classes=9, name="ner")
+# 4. THE RENAME. Heads read "hidden_states"; the encoder emits
+#    "last_hidden_state". Without this line the graph still builds and
+#    `predict()` raises KeyError: 'hidden_states'.
+head_inputs = {
+    "hidden_states": encoder_outputs["last_hidden_state"],
+    "attention_mask": encoder_outputs["attention_mask"],
+}
 
-# 5. Get task-specific outputs
-sentiment_output = sentiment_head(bert_outputs)
-ner_output = ner_head(bert_outputs)
+# 5. Create two different heads. They take a `task_config` and an `input_dim`,
+#    not a bare `num_classes`.
+sentiment_head = TextClassificationHead(
+    task_config=NLPTaskConfig(
+        name="sentiment",
+        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+        num_classes=2,
+    ),
+    input_dim=bert_encoder.hidden_size,
+    name="sentiment",
+)
+ner_head = TokenClassificationHead(
+    task_config=NLPTaskConfig(
+        name="ner",
+        task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        num_classes=9,
+    ),
+    input_dim=bert_encoder.hidden_size,
+    name="ner",
+)
 
-# 6. Build the multi-output model
+# 6. Get task-specific outputs. A head returns a DICT -- the classification
+#    head `{"logits", "probabilities"}`, the token head `{"logits",
+#    "predictions"}` -- so select the tensor you want to train on. (This is the
+#    same derived-duplicate shape `create_bert_with_head` collapses for you.)
+sentiment_output = sentiment_head(head_inputs)
+ner_output = ner_head(head_inputs)
+
+# 7. Build the multi-output model
 multi_task_model = keras.Model(
     inputs=inputs,
-    outputs={"sentiment": sentiment_output, "ner": ner_output}
+    outputs={"sentiment": sentiment_output["logits"], "ner": ner_output["logits"]},
 )
+
+ids = np.random.randint(0, 100, (2, 16)).astype("int32")
+predictions = multi_task_model.predict(
+    {
+        "input_ids": ids,
+        "attention_mask": np.ones_like(ids),
+        "token_type_ids": np.zeros_like(ids),
+    },
+    verbose=0,
+)
+# {'sentiment': (2, 2), 'ner': (2, 16, 9)}  -- MEASURED, this snippet was run
+print({key: value.shape for key, value in predictions.items()})
 ```
 
 ---
