@@ -60,6 +60,13 @@ References:
     -   He et al., "Deep Residual Learning for Image Recognition" (2015)
         (for the bypass connection concept).
         https://arxiv.org/abs/1512.03385
+    -   Official SqueezeNet Caffe prototxts (the source of this port's kernel
+        initializers: `xavier` on conv1 and every fire convolution, gaussian
+        std=0.01 on conv10). Caffe's `xavier` normalizes by fan_in, so its
+        Keras equivalent is `lecun_uniform`, NOT `glorot_uniform` -- see
+        `caffe_reference_init.py`.
+        https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.0/train_val.prototxt
+        https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.1/train_val.prototxt
 """
 
 import keras
@@ -73,6 +80,10 @@ from typing import Optional, Tuple, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from .spatial_guard import validate_spatial_extent
+from .caffe_reference_init import (
+    CAFFE_HEAD_INITIALIZER,
+    CAFFE_XAVIER_INITIALIZER,
+)
 
 # ---------------------------------------------------------------------
 
@@ -111,7 +122,7 @@ class FireModule(keras.layers.Layer):
             e1x1: int,
             e3x3: int,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -301,8 +312,21 @@ class SqueezeNetV1(keras.Model):
     }
 
     # Architecture constants
-    STEM_INITIALIZER = "glorot_uniform"
-    HEAD_INITIALIZER = "glorot_uniform"
+    # DECISION plan-2026-08-23T091307-9a110062/D-481
+    # Transcribed from the official Caffe prototxt, NOT inherited from Keras.
+    # `STEM_INITIALIZER` is `conv1`'s `weight_filler { type: "xavier" }` and
+    # `HEAD_INITIALIZER` is `conv10`'s
+    # `weight_filler { type: "gaussian" mean: 0.0 std: 0.01 }`.
+    # https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.0/train_val.prototxt
+    #
+    # Do NOT collapse these two to one value and do NOT put `glorot_uniform`
+    # back. They are DIFFERENT fillers in the reference -- 25 convolutions
+    # xavier, `conv10` alone gaussian -- and Caffe's xavier normalizes by
+    # `fan_in`, which is `lecun_uniform` here, not `glorot_uniform`. The full
+    # measured derivation is in `caffe_reference_init.py`'s docstring.
+    # See decisions.md D-481.
+    STEM_INITIALIZER = CAFFE_XAVIER_INITIALIZER
+    HEAD_INITIALIZER = CAFFE_HEAD_INITIALIZER
 
     def __init__(
             self,
@@ -311,7 +335,7 @@ class SqueezeNetV1(keras.Model):
             use_bypass: Optional[Union[bool, str]] = None,
             dropout_rate: float = 0.5,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             include_top: bool = True,
             input_shape: Tuple[int, int, int] = (224, 224, 3),
             **kwargs: Any

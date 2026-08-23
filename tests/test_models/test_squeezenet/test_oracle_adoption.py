@@ -17,7 +17,15 @@ the instrument convicts a perfectly healthy model. D-059 measured that on
 **Measured here 2026-08-21: the trap does NOT fire on a randomly-initialised
 SqueezeNet.** With the shipped initializers the head's softmax is only NEARLY
 uniform, and the symmetric loss reports **0 dead of 52** (V1) and **0 of 36**
-(V2). That is the same reading batch B took on ``mobilenet``. It is pinned
+(V2). That is the same reading batch B took on ``mobilenet``.
+
+The shipped initializers CHANGED under this reading on 2026-08-23
+(plan-2026-08-23T091307-9a110062/D-481 replaced ``glorot_uniform`` with the
+prototxt's ``xavier``/gaussian-0.01 fillers, which narrows ``conv10`` and so
+pushes the softmax CLOSER to uniform -- toward the trap). Re-measured on the new
+initializers: still **0 dead** in both arms, and the weight counts are unmoved at
+52 / 36. The assertion at ``test_a_random_squeezenet_is_not_on_the_saddle``
+re-derives the count at runtime rather than trusting this paragraph. It is pinned
 anyway, on a zeroed head where the output is EXACTLY ``1/C`` and both halves are
 asserted, so a reader who measures ``0.0`` on a converged model has a test
 naming the reason instead of a defect report to file. Every gradient assertion
