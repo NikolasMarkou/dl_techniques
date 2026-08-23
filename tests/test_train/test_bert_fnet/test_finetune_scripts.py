@@ -55,7 +55,13 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "train_fn": "finetune_sentiment_model",
         "model_name": "bert_sentiment_analyzer",
         "encoder_layer_name": "bert",
-        "encoder_params": 2_244_608,
+        # 3,295,232 = 2,244,608 + 1,050,624. The BERT `tiny` variant's
+        # intermediate_size was corrected 512 -> 1024 to match the released
+        # google/bert_uncased_L-4_H-256_A-4 config it names. The delta is
+        # 4 layers x (256*1024 + 1024 + 1024*256 + 256
+        #             - 256*512 - 512 - 512*256 - 256) = 1,050,624 exactly.
+        # FNet is unaffected: it has no attention FFN of this shape.
+        "encoder_params": 3_295_232,
         "head_params": 67_330,
         "layer_names": [
             "attention_mask", "input_ids", "token_type_ids",

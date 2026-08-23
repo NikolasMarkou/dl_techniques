@@ -48,8 +48,10 @@ SPECS: Dict[str, Dict[str, Any]] = {
         "train_fn": "train_bert_mlm",
         "variant_field": "bert_variant",
         # Built from the script's own default TrainingConfig().
-        "total_params": 53_650_613,
-        "encoder_params": 27_813_120,
+        # 54,701,237 = 53,650,613 + 1,050,624 -- the same BERT `tiny`
+        # intermediate_size 512 -> 1024 correction; see test_finetune_scripts.py.
+        "total_params": 54_701_237,
+        "encoder_params": 28_863_744,   # +1,050,624, same cause as total_params above
         "model_layer_names": ["bert", "mlm_dense", "mlm_dropout", "mlm_norm", "mlm_output"],
         "encoder_layer_names": [
             "embeddings", "encoder_layer_0", "encoder_layer_1",
