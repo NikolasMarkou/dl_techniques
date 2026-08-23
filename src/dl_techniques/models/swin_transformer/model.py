@@ -93,6 +93,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 # Local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.patch_merging import PatchMerging
@@ -493,10 +494,21 @@ class SwinTransformer(keras.Model):
         self.patch_embed = create_embedding_layer(
             embedding_type="patch_2d",
             patch_size=self.patch_size,
+        # DECISION plan-2026-08-23T091307-9a110062/D-540
+        # Each consumer gets its OWN `clone_initializer(...)` copy. Do NOT pass
+        # `self.kernel_initializer` directly: one seedless initializer INSTANCE
+        # replays its draw, so every same-shape kernel it reaches is
+        # bit-identical. MEASURED at HEAD before this change, on a seeded
+        # 4-stage/2-block-per-stage Swin: all 16 same-shape kernel pairs inside a
+        # stage were `max|delta| = 0.0` -- including
+        # `stage_N_block_0/attn/.../qkv/kernel` vs `stage_N_block_1/...`, whose
+        # blocks differ by `shift_size` (regular vs SHIFTED window) and so play
+        # different architectural roles. `seed=` is not the discriminator;
+        # instance identity is. See decisions.md D-540 and initializers/clone.py.
             embed_dim=self.embed_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="patch_embed"
@@ -543,8 +555,8 @@ class SwinTransformer(keras.Model):
         patch_merge = PatchMerging(
             dim=input_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name=f"patch_merge_{stage_idx}"
@@ -591,8 +603,8 @@ class SwinTransformer(keras.Model):
                 stochastic_depth_rate=current_drop_path_rate,
                 activation="gelu",
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"stage_{stage_idx}_block_{block_idx}"
@@ -624,8 +636,8 @@ class SwinTransformer(keras.Model):
             classifier = layers.Dense(
                 units=self.num_classes,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="classifier"

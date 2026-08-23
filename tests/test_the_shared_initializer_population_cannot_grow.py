@@ -27,6 +27,22 @@ branch, a mu head vs a sigma head) are a training pathology. That judgement
 cannot be automated, which is why this file pins **population ceilings** instead
 of asserting a per-site verdict.
 
+What this static census CANNOT see
+==================================
+
+The sweep below groups by ``(file, function scope, initializer expression)`` and
+keeps groups with **2+ syntactic call sites**. A ``for`` loop that hands ONE
+instance to N blocks is a single syntactic site, so it scores 1 and is invisible
+here -- no matter how many weights it collides. MEASURED 2026-08-23: 96 such
+loop-carried sites in 40 files, including the three this step fixed. ``vit`` was
+visible only through its three *unrolled* ``__init__`` sites; ``swin_transformer``
+and ``dino_v3`` never appeared in this census at all, yet a seeded build of each
+showed 16 and 6 bit-identical same-shape kernel pairs respectively.
+
+That is why ``TestPortedViTsDoNotShareOneInitializerInstance`` below is a
+**runtime** guard: it reads the built weights, which is the only instrument that
+sees a loop. Do NOT treat the ceilings above as coverage.
+
 The remedy, already shipped and DRY, is
 ``dl_techniques.initializers.clone.clone_initializer`` -- do not write a second
 one.
@@ -48,21 +64,28 @@ SRC_ROOT = os.path.join(
 
 #: Ceiling on *collision groups*: one bound name or ``self.<x>_initializer``
 #: attribute passed to 2+ weight-creating calls inside a single function scope.
-#: MEASURED at HEAD 2026-08-22 after step 19.1's eight fixes: **159** groups /
-#: 539 participating call sites / 100 files, down from 175/609/108 before them.
+#: MEASURED at HEAD 2026-08-23 after this plan's step 9: **157** groups / 533
+#: participating call sites / 99 files, down from 159/539/100 (which was itself
+#: down from 175/609/108 before step 19.1's eight fixes). Step 9 cloned
+#: ``models/vit/model.py``'s two ``__init__`` groups away; ``swin_transformer``
+#: and ``dino_v3`` were fixed in the same step but never appeared here at all --
+#: see the loop blind spot noted below.
 #:
 #: The carried census figure of "378 sites / 118 files" does **not** reproduce
 #: under this instrument, nor under either of the two instruments D-144 already
 #: tried, nor under the 178/565/102 variant recorded in
 #: ``findings/initializer-and-norm-census.md``. Do not re-quote 378/118.
-_COLLISION_GROUP_CEILING = 159
+_COLLISION_GROUP_CEILING = 157
 
 #: Ceiling on the *defect-shaped* subset: a collision group in which 2+ of the
 #: colliding calls have the SAME callee AND the SAME size expression (so their
 #: weights have the same shape, so they really are bit-identical) but are
 #: assigned to DIFFERENT attributes (so they plausibly play different roles).
-#: This is the triage list. MEASURED at HEAD 2026-08-22: **57**, down from **79**
-#: before step 19.1 (the eight fixes removed 22 of them).
+#: This is the triage list. MEASURED at HEAD 2026-08-23: **57**, down from **79**
+#: before step 19.1 (the eight fixes removed 22 of them). Step 9's three fixes
+#: did NOT move this number: none of the six colliding groups it removed was
+#: same-callee-same-size-different-target, which is precisely the blind spot the
+#: runtime guard below exists to cover.
 #: Every new entry needs a per-site role probe before it is called benign.
 _ROLE_SUSPECT_CEILING = 57
 
@@ -229,4 +252,141 @@ class TestSharedInitializerPopulationIsPinned:
             "bit-identical weights (max|delta| = 0.0) between weights of "
             "different architectural roles in this module and fixed them by "
             "cloning the initializer per site. Unwrapping restores the defect."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Runtime guard -- the instrument that sees a loop (D-540)
+# ---------------------------------------------------------------------------
+
+import itertools
+
+import numpy as np
+
+
+def _tiny_vit():
+    import keras
+
+    from dl_techniques.models.vit.model import ViT
+
+    keras.utils.set_random_seed(1234)
+    model = ViT(
+        input_shape=(32, 32, 3), num_classes=10, scale="tiny", patch_size=8,
+        include_top=True, name="vit",
+    )
+    model.build((None, 32, 32, 3))
+    return model
+
+
+def _tiny_swin():
+    import keras
+
+    from dl_techniques.models.swin_transformer.model import SwinTransformer
+
+    keras.utils.set_random_seed(1234)
+    return SwinTransformer(
+        num_classes=10, embed_dim=24, depths=(2, 2, 2, 2),
+        num_heads=(2, 2, 2, 2), window_size=2, patch_size=2,
+        input_shape=(32, 32, 3), name="swin",
+    )
+
+
+def _tiny_dino_v3():
+    import keras
+
+    from dl_techniques.models.dino.dino_v3 import DINOv3
+
+    keras.utils.set_random_seed(1234)
+    model = DINOv3(
+        image_size=32, patch_size=8, embed_dim=48, depth=3, num_heads=4,
+        num_classes=10, include_top=True, name="dino3",
+    )
+    model.build((None, 32, 32, 3))
+    return model
+
+
+#: ``(builder, minimum number of SAME-SHAPE kernel pairs the model must expose)``.
+#: The second element is the ANTI-VACUITY floor: a guard that compares kernels of
+#: different shapes proves nothing, and a guard whose model stopped exposing any
+#: same-shape pair at all would pass while measuring NOTHING. These floors are the
+#: pair counts MEASURED 2026-08-23 (vit 264, swin 44, dino_v3 12), so a config or
+#: architecture change that stops producing them fails loudly instead of silently
+#: going green.
+_RUNTIME_SUBJECTS = (
+    ("vit", _tiny_vit, 264),
+    ("swin_transformer", _tiny_swin, 44),
+    ("dino_v3", _tiny_dino_v3, 12),
+)
+
+
+def _identical_same_shape_kernel_pairs(model):
+    """Return ``(identical_pairs, total_same_shape_pairs)`` for a built model.
+
+    Only weights with ``ndim >= 2`` and a non-zero maximum are considered: a
+    1-D vector is a bias/gain (``zeros``/``ones`` initialized, legitimately
+    identical everywhere), and an all-zero tensor is a deliberate constant.
+    Comparison is strictly WITHIN a shape group, so no pair is ever judged on
+    the strength of a shape difference.
+    """
+    by_shape: Dict[Tuple[int, ...], List[Tuple[str, "np.ndarray"]]] = defaultdict(list)
+    for weight in model.weights:
+        array = np.array(weight)
+        if array.ndim >= 2 and np.abs(array).max() > 0:
+            by_shape[array.shape].append((weight.path, array))
+
+    identical: List[str] = []
+    total = 0
+    for members in by_shape.values():
+        for (path_a, a), (path_b, b) in itertools.combinations(members, 2):
+            total += 1
+            if float(np.abs(a - b).max()) == 0.0:
+                identical.append(f"{path_a} == {path_b}")
+    return identical, total
+
+
+class TestPortedViTsDoNotShareOneInitializerInstance:
+    """No two same-shape kernels of a freshly built port may be bit-identical.
+
+    MEASURED at HEAD before this guard landed (seeded builds, CPU):
+
+    ==================  =========================================
+    model               bit-identical same-shape kernel pairs
+    ==================  =========================================
+    ``vit``             **132** of 264 (all 12 blocks' qkv, all 12 proj)
+    ``swin_transformer``  **16** of 44 (both blocks of every stage)
+    ``dino_v3``            **6** of 12 (all 3 encoder layers)
+    ==================  =========================================
+
+    Every one of those pairs spans DIFFERENT blocks, i.e. the model started as N
+    copies of one block. For ``swin_transformer`` the two colliding blocks of a
+    stage additionally differ by ``shift_size`` (regular vs shifted window), so
+    they play different architectural roles outright.
+
+    Not covered by this guard, and deliberately: Q vs K vs V. All three ports use
+    a FUSED ``qkv`` Dense, so one draw supplies all three roles and they were
+    MEASURED distinct (``max|delta|`` 0.073..0.080) even before the fix.
+    """
+
+    @pytest.mark.parametrize("name,builder,min_pairs", _RUNTIME_SUBJECTS)
+    def test_no_two_same_shape_kernels_are_bit_identical(self, name, builder, min_pairs):
+        model = builder()
+        identical, total = _identical_same_shape_kernel_pairs(model)
+
+        # Anti-vacuity FIRST: prove the guard had same-shape pairs to judge.
+        assert total >= min_pairs, (
+            f"{name} exposed only {total} same-shape kernel pairs, below the "
+            f"measured floor of {min_pairs}. This guard is now weaker than when "
+            "it was written -- it cannot detect a shared initializer instance in "
+            "kernels it never compares. Fix the subject config, do not lower the "
+            "floor."
+        )
+
+        assert not identical, (
+            f"{name}: {len(identical)} of {total} same-shape kernel pairs are "
+            f"BIT-IDENTICAL (max|delta| = 0.0). One seedless "
+            "keras.initializers.Initializer INSTANCE reaches them all and "
+            "replays its draw -- seed= is NOT the discriminator, instance "
+            "identity is. Wrap each consumer in "
+            "dl_techniques.initializers.clone_initializer. Colliding pairs: "
+            f"{identical[:10]}"
         )

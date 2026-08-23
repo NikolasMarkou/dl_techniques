@@ -97,6 +97,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
@@ -359,11 +360,21 @@ class DINOv3(keras.Model):
 
     def _build_patch_embedding(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Creates the patch embedding layer."""
+        # DECISION plan-2026-08-23T091307-9a110062/D-540
+        # Each consumer gets its OWN `clone_initializer(...)` copy. Do NOT hand
+        # `self.kernel_initializer` straight to a sub-layer: one seedless
+        # initializer INSTANCE replays its draw, so every same-shape kernel it
+        # reaches is bit-identical. MEASURED at HEAD before this change, on a
+        # seeded 3-layer DINOv3: all 3 `encoder_layer_*/attention/cross_attention
+        # /qkv/kernel` were pairwise `max|delta| = 0.0`, likewise `.../proj/kernel`
+        # -- the depth-3 encoder started as 3 COPIES of one layer. `seed=` is not
+        # the discriminator; instance identity is. See decisions.md D-540 and
+        # initializers/clone.py.
         self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='patch_embedding'
@@ -475,8 +486,8 @@ class DINOv3(keras.Model):
                 use_stochastic_depth=dpr[i] > 0.0,
                 stochastic_depth_rate=dpr[i],
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f'encoder_layer_{i}'

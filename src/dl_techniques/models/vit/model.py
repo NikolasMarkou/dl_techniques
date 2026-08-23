@@ -86,6 +86,7 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
@@ -487,12 +488,23 @@ class ViT(keras.Model):
         # knob, and is recorded as one in
         # tests/test_models/test_package_api_contract.py::_NAME_COLLISIONS.
         # See D-022 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
+        # DECISION plan-2026-08-23T091307-9a110062/D-540
+        # Every sub-layer gets its OWN `clone_initializer(...)` copy. Do NOT
+        # "simplify" this back to passing `self.kernel_initializer` directly:
+        # a single seedless initializer INSTANCE replays its draw, so every
+        # same-shape kernel it reaches is bit-identical. MEASURED at HEAD
+        # before this change, on a seeded ViT-tiny/12L: all 12
+        # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
+        # pairwise `max|delta| = 0.0` (66 pairs), likewise the 12 `.../proj/kernel`
+        # (66 pairs) -- i.e. the 12 blocks started as 12 COPIES of one block.
+        # `seed=` is not the discriminator; instance identity is. See
+        # decisions.md D-540 and initializers/clone.py.
         self.patch_embed = create_embedding_layer(
             'patch_2d',
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="patch_embed"
@@ -524,8 +536,8 @@ class ViT(keras.Model):
                 attention_dropout_rate=self.attention_dropout_rate,
                 activation=self.activation,
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 use_layer_scale=self.use_layer_scale,
@@ -550,8 +562,8 @@ class ViT(keras.Model):
 
             self.head = keras.layers.Dense(
                 self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="head"
