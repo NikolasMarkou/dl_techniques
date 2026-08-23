@@ -27,8 +27,14 @@ tractable. Five preset variants span the standard family, from ResNet-18
 (`[2, 2, 2, 2]`, basic) through ResNet-152 (`[3, 8, 36, 3]`, bottleneck), all over
 the same `[64, 128, 256, 512]` filter progression.
 
-Architecturally the model is a 7x7 stride-2 stem with max pooling, followed by
-four stages that each halve resolution and double width. Shortcut projections are
+Architecturally the model is a stem followed by four stages that each halve
+resolution and double width. The stem is selectable: `stem_type='imagenet'`
+(the default) is the published 7x7 stride-2 convolution plus a 3x3 stride-2 max
+pool, and `stem_type='cifar'` is He et al.'s own CIFAR configuration from
+section 4.2 -- a single 3x3 stride-1 convolution with no pooling. The
+difference is not cosmetic on small inputs: the ImageNet stem downsamples by 4x
+before stage 1, so a 32x32 input reaches the global average pool at 1x1 and the
+last two stages stride an already-collapsed map. Shortcut projections are
 inserted only where the identity cannot be taken verbatim: at the first block of
 every stage after the first, where the stride-2 shortcut changes spatial shape,
 and additionally at stage 0's first block under the bottleneck design, where the
@@ -107,8 +113,10 @@ class ResNet(keras.Model):
 
     Implements the ResNet family, in which each block learns a residual
     ``F(x)`` added to an identity shortcut (``y = F(x) + x``) so that depth does
-    not obstruct optimization. A 7x7 stride-2 stem feeds four stages that each
-    halve spatial resolution and double channel width, built from either
+    not obstruct optimization. A stem -- 7x7 stride-2 plus max pool by default,
+    or a 3x3 stride-1 CIFAR stem via ``stem_type='cifar'`` -- feeds four stages
+    that each halve spatial resolution and double channel width, built from
+    either
     ``BasicBlock`` (two 3x3 convolutions) or ``BottleneckBlock`` (1x1 reduce,
     3x3, 1x1 expand). Shortcut projections are inserted only where the identity
     cannot be taken verbatim: at the first block of every stage after the first
@@ -130,6 +138,8 @@ class ResNet(keras.Model):
         ┌──────────────────────────────────────┐
         │  Stem: Conv 7×7 /2 → Norm → Act      │
         │        → MaxPool 3×3 /2              │
+        │  (stem_type='cifar': Conv 3×3 /1,    │
+        │   no MaxPool)                        │
         └───────────────┬──────────────────────┘
                         │
                         ▼
@@ -217,11 +227,23 @@ class ResNet(keras.Model):
     :param input_shape: Input shape ``(height, width, channels)`` excluding the
         batch dimension. Defaults to ``(224, 224, 3)``.
     :type input_shape: Tuple[int, ...]
+    :param stem_type: Which input stem to build. ``'imagenet'`` (default) is the
+        published 7x7 stride-2 convolution followed by a 3x3 stride-2 max pool,
+        downsampling by 4x before stage 1; it is bit-identical to the model
+        before this argument existed. ``'cifar'`` is He et al.'s own CIFAR
+        configuration -- a single 3x3 stride-1 convolution and **no** pooling --
+        which preserves the input resolution into stage 1. Use it for small
+        inputs: on ``(32, 32, 3)`` the ImageNet stem leaves ``resnet18`` with a
+        ``(1, 1, 1, 512)`` feature map before the global average pool, so the
+        last two stages stride an already-collapsed map. Both stems take their
+        width from ``filters_per_stage[0]``.
+    :type stem_type: Literal['imagenet', 'cifar']
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
     :raises ValueError: If ``blocks_per_stage`` and ``filters_per_stage`` differ
-        in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, or
-        if ``input_shape`` is not 3D.
+        in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, if
+        ``stem_type`` is not ``'imagenet'`` or ``'cifar'``, or if
+        ``input_shape`` is not 3D.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``.
@@ -292,6 +314,7 @@ class ResNet(keras.Model):
             include_top: bool = True,
             enable_deep_supervision: bool = False,
             input_shape: Tuple[int, ...] = (224, 224, 3),
+            stem_type: Literal["imagenet", "cifar"] = "imagenet",
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -310,6 +333,11 @@ class ResNet(keras.Model):
                 f"block_type must be 'basic' or 'bottleneck', got '{block_type}'"
             )
 
+        if stem_type not in ["imagenet", "cifar"]:
+            raise ValueError(
+                f"stem_type must be 'imagenet' or 'cifar', got '{stem_type}'"
+            )
+
         if input_shape is None:
             input_shape = (224, 224, 3)
         if len(input_shape) != 3:
@@ -319,6 +347,7 @@ class ResNet(keras.Model):
         self.blocks_per_stage = blocks_per_stage
         self.filters_per_stage = filters_per_stage
         self.block_type = block_type
+        self.stem_type = stem_type
         self.kernel_regularizer = kernel_regularizer
         self.normalization_type = normalization_type
         # DECISION plan_2026-05-18_6776f8ba/D-003
@@ -400,11 +429,32 @@ class ResNet(keras.Model):
         This is checkpoint-safe by construction: it changes the stem's weight
         SHAPE only for configurations that previously RAISED.
         See decisions.md D-041.
+
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-019
+        ``stem_type`` exists because the ImageNet stem below downsamples by 4x
+        before stage 1 even starts, which on a 32x32 input leaves stage 4 with
+        a 1x1 feature map: MEASURED, ``resnet18`` on ``(32, 32, 3)`` reaches
+        the global-average pool at ``(1, 1, 1, 512)``, i.e. the last two stages
+        stride a map that has already collapsed. The README's own flagship
+        CIFAR-10 example walked the reader straight into it. He et al. did not
+        use this stem on CIFAR either -- section 4.2 of the paper uses a single
+        3x3 stride-1 convolution and no pooling -- and there was previously no
+        way to express that configuration at all.
+        Do NOT implement the CIFAR stem by rescaling the input, by making the
+        stem stride depend on ``input_shape``, or by adding a second model
+        class. An input-shape-derived stride would silently change the weight
+        tree of every existing small-input checkpoint; this knob changes
+        nothing unless it is asked for. ``'imagenet'`` is the default and is
+        bit-identical to the pre-knob model.
+        The D-041 rule above applies to BOTH stems: each takes its width from
+        ``filters_per_stage[0]``, never a literal 64.
+        See decisions.md D-019 (plan-2026-08-23T203721-009b7ccf -- note
+        `_build_supervision_heads` carries a DIFFERENT plan's D-019).
         """
         self.stem_conv = keras.layers.Conv2D(
             filters=self.filters_per_stage[0],
-            kernel_size=7,
-            strides=2,
+            kernel_size=7 if self.stem_type == "imagenet" else 3,
+            strides=2 if self.stem_type == "imagenet" else 1,
             padding="same",
             use_bias=False,
             kernel_initializer="he_normal",
@@ -425,7 +475,7 @@ class ResNet(keras.Model):
             strides=2,
             padding="same",
             name="stem_pool"
-        )
+        ) if self.stem_type == "imagenet" else None
 
     def _build_stage(self, stage_idx: int) -> None:
         """Build a residual stage.
@@ -559,7 +609,8 @@ class ResNet(keras.Model):
         x = self.stem_conv(inputs)
         x = self.stem_bn(x, training=training)
         x = self.stem_act(x)
-        x = self.stem_pool(x)
+        if self.stem_pool is not None:
+            x = self.stem_pool(x)
 
         stage_features = []
         for stage_blocks in self.stages:
@@ -794,6 +845,7 @@ class ResNet(keras.Model):
             "blocks_per_stage": self.blocks_per_stage,
             "filters_per_stage": self.filters_per_stage,
             "block_type": self.block_type,
+            "stem_type": self.stem_type,
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
             "normalization_type": self.normalization_type,

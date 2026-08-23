@@ -1107,6 +1107,14 @@ Benefits (qualitative, from the deep-supervision literature — not measured her
 
 Train ResNet on a custom dataset from scratch.
 
+**`stem_type='cifar'` is load-bearing here, not decoration.** The default
+ImageNet stem (7x7 stride 2, then a 3x3 stride-2 max pool) downsamples by 4x
+before stage 1 begins, so a 32x32 input reaches the global average pool at
+`(1, 1, 512)` -- MEASURED -- and the last two stages stride a feature map that
+has already collapsed to a single pixel. `stem_type='cifar'` is He et al.'s own
+CIFAR configuration (section 4.2: one 3x3 stride-1 convolution, no pooling) and
+leaves a `(4, 4, 512)` map for the head.
+
 ```python
 import keras
 import tensorflow as tf
@@ -1123,11 +1131,12 @@ x_test = x_test.astype('float32') / 255.0
 y_train = keras.utils.to_categorical(y_train, 10)
 y_test = keras.utils.to_categorical(y_test, 10)
 
-# 2. Create model (ResNet-18 for smaller images)
+# 2. Create model (ResNet-18 with the CIFAR stem, for 32x32 images)
 model = ResNet.from_variant(
     'resnet18',
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
+    stem_type='cifar'
 )
 
 # 3. Compile
