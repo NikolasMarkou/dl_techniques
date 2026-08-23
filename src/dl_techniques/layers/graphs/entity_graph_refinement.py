@@ -88,6 +88,10 @@ from typing import Optional, Tuple, List, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -211,7 +215,7 @@ class EntityGraphRefinement(keras.layers.Layer):
         self.initial_density = initial_density
         self.attention_heads = attention_heads
         self.dropout_rate = dropout_rate
-        self.refinement_activation = refinement_activation
+        self.refinement_activation = deserialize_activation(refinement_activation)
         self.entity_activity_threshold = entity_activity_threshold
         self.use_positional_encoding = use_positional_encoding
         self.max_sequence_length = max_sequence_length
@@ -674,7 +678,7 @@ class EntityGraphRefinement(keras.layers.Layer):
             'initial_density': self.initial_density,
             'attention_heads': self.attention_heads,
             'dropout_rate': self.dropout_rate,
-            'refinement_activation': self.refinement_activation,
+            'refinement_activation': serialize_activation(self.refinement_activation),
             'entity_activity_threshold': self.entity_activity_threshold,
             'use_positional_encoding': self.use_positional_encoding,
             'max_sequence_length': self.max_sequence_length,

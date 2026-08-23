@@ -83,6 +83,10 @@ from dl_techniques.layers.mothnet_blocks import (
     MushroomBodyLayer,
     HebbianReadoutLayer
 )
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -278,8 +282,8 @@ class MothNet(keras.Model):
         self.connection_sparsity = connection_sparsity
         self.hebbian_learning_rate = hebbian_learning_rate
         self.inhibition_strength = inhibition_strength
-        self.al_activation = al_activation
-        self.mb_activation = mb_activation
+        self.al_activation = deserialize_activation(al_activation)
+        self.mb_activation = deserialize_activation(mb_activation)
 
         # Sub-layers will be initialized in build()
         self.antennal_lobe = None
@@ -549,8 +553,8 @@ class MothNet(keras.Model):
             'connection_sparsity': self.connection_sparsity,
             'hebbian_learning_rate': self.hebbian_learning_rate,
             'inhibition_strength': self.inhibition_strength,
-            'al_activation': self.al_activation,
-            'mb_activation': self.mb_activation,
+            'al_activation': serialize_activation(self.al_activation),
+            'mb_activation': serialize_activation(self.mb_activation),
         })
         return config
 

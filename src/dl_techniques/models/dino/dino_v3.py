@@ -105,6 +105,10 @@ from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedd
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.models.dino.common import reject_input_shape
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -299,7 +303,7 @@ class DINOv3(keras.Model):
         self.positional_embedding_type = positional_embedding_type
         self.rope_theta = rope_theta
         self.rope_percentage = rope_percentage
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -613,7 +617,7 @@ class DINOv3(keras.Model):
             'positional_embedding_type': self.positional_embedding_type,
             'rope_theta': self.rope_theta,
             'rope_percentage': self.rope_percentage,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),

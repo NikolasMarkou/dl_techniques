@@ -111,6 +111,10 @@ from keras import ops, layers, initializers, regularizers
 
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.layers.activations import create_activation_layer, ActivationType
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -312,7 +316,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.use_squeeze_excitation = use_squeeze_excitation
         self.se_ratio = se_ratio
-        self.se_activation = se_activation
+        self.se_activation = deserialize_activation(se_activation)
         self.use_bias = use_bias
         self.padding = padding
         self.block_type = block_type
@@ -690,7 +694,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "use_squeeze_excitation": self.use_squeeze_excitation,
             "se_ratio": self.se_ratio,
-            "se_activation": self.se_activation,
+            "se_activation": serialize_activation(self.se_activation),
             "use_bias": self.use_bias,
             "padding": self.padding,
             "block_type": self.block_type,

@@ -73,6 +73,10 @@ from .common import apply_attention_mask
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -287,7 +291,7 @@ class SingleWindowAttention(keras.layers.Layer):
         self.proj_bias = proj_bias
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
-        self.kan_activation = kan_activation
+        self.kan_activation = deserialize_activation(kan_activation)
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -792,7 +796,7 @@ class SingleWindowAttention(keras.layers.Layer):
                 "proj_bias": self.proj_bias,
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
-                "kan_activation": self.kan_activation,
+                "kan_activation": serialize_activation(self.kan_activation),
                 "probability_type": self.probability_type,
                 "probability_config": self.probability_config,
                 "qk_norm_type": self.qk_norm_type,

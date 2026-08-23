@@ -182,7 +182,7 @@ class ConvUNextStem(keras.layers.Layer):
         super().__init__(**kwargs)
         self.filters = filters
         self.kernel_size = kernel_size
-        self.activation_name = activation
+        self.activation_name = deserialize_activation(activation)
         self.use_bias = use_bias
         self.stem_normalization = stem_normalization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -279,8 +279,7 @@ class ConvUNextStem(keras.layers.Layer):
             # activation so LeakyReLU(alpha) round-trips through .keras; the string path
             # stays raw for backward-compat. Mirrors the block fix (D-001). Do NOT emit a
             # dict for a plain string activation — that would break existing 'gelu' configs.
-            'activation': keras.layers.serialize(self.activation_name) if isinstance(
-                self.activation_name, keras.layers.Layer) else self.activation_name,
+            'activation': serialize_activation(self.activation_name),
             'use_bias': self.use_bias,
             'stem_normalization': self.stem_normalization,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
@@ -1789,4 +1788,8 @@ def create_convunext_variant(
 # (`training_model.output` / `.input`), which is what a functional ConvUNext needs.
 from dl_techniques.utils.deep_supervision import (  # noqa: F401
     create_inference_model_from_training_model,
+)
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
 )

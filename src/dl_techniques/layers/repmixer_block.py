@@ -87,6 +87,10 @@ from keras import layers, initializers, regularizers, activations
 
 from ..utils.logger import logger
 from .mobile_one_block import MobileOneBlock
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -445,7 +449,7 @@ class ConvolutionalStem(keras.layers.Layer):
         # Store configuration
         self.out_channels = out_channels
         self.use_se = use_se
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.kernel_initializer = kernel_initializer
         self.kernel_regularizer = kernel_regularizer
 
@@ -557,7 +561,7 @@ class ConvolutionalStem(keras.layers.Layer):
         config.update({
             'out_channels': self.out_channels,
             'use_se': self.use_se,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': initializers.serialize(
                 initializers.get(self.kernel_initializer)
             ),

@@ -62,6 +62,10 @@ diversity comes from elsewhere, and a silent degeneracy if it is not.
 import keras
 from keras import ops
 from typing import Dict, List, Literal, Optional, Tuple, Union, Any
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -854,7 +858,7 @@ class TabMBackbone(keras.layers.Layer):
         self.ensemble_scaling_in = ensemble_scaling_in
         self.ensemble_scaling_out = ensemble_scaling_out
         self.init_distribution = init_distribution
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -926,7 +930,7 @@ class TabMBackbone(keras.layers.Layer):
             "ensemble_scaling_in": self.ensemble_scaling_in,
             "ensemble_scaling_out": self.ensemble_scaling_out,
             "init_distribution": self.init_distribution,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),

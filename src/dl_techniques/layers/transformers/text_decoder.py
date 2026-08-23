@@ -95,6 +95,10 @@ from dl_techniques.utils.masking import create_mask, MaskConfig, combine_masks
 from ..embedding import create_embedding_layer
 from ..norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, FFNType, NormalizationPositionType
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -295,7 +299,7 @@ class TextDecoder(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
@@ -642,7 +646,7 @@ class TextDecoder(keras.layers.Layer):
             'normalization_type': self.normalization_type,
             'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,

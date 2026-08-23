@@ -52,6 +52,10 @@ from .layer_scale import LearnableMultiplier
 from .norms.global_response_norm import GlobalResponseNormalization
 from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -231,7 +235,7 @@ class ConvNextV2Block(keras.layers.Layer):
         # Store configuration parameters
         self.kernel_size = kernel_size
         self.filters = filters
-        self.activation_name = activation
+        self.activation_name = deserialize_activation(activation)
         self.kernel_regularizer = kernel_regularizer
         self.use_bias = use_bias
         self.dropout_rate = dropout_rate
@@ -517,7 +521,7 @@ class ConvNextV2Block(keras.layers.Layer):
             # via keras.layers.serialize so LeakyReLU(alpha) round-trips through .keras; the
             # string path (e.g. "gelu") stays the raw string for backward-compat with existing
             # checkpoints. Do NOT serialize strings to dicts. See decisions.md D-001.
-            "activation": keras.layers.serialize(self.activation_name) if isinstance(self.activation_name, keras.layers.Layer) else self.activation_name,
+            "activation": serialize_activation(self.activation_name),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
             "dropout_rate": self.dropout_rate,

@@ -48,6 +48,10 @@ from typing import Tuple, Optional, Union, Any, Dict, Callable
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -164,7 +168,7 @@ class KANvolution(keras.layers.Layer):
         self.strides = self._normalize_tuple(strides, 2, 'strides')
         self.padding = padding.lower()
         self.dilation_rate = self._normalize_tuple(dilation_rate, 2, 'dilation_rate')
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
 
         # Store serializable initializers and regularizers
@@ -497,7 +501,7 @@ class KANvolution(keras.layers.Layer):
             'strides': self.strides,
             'padding': self.padding,
             'dilation_rate': self.dilation_rate,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),

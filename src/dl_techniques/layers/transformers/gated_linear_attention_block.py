@@ -62,6 +62,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import MaskFactory
 from ..ffn.factory import create_ffn_from_config, FFNType, FFN_REGISTRY
 from ..norms import create_normalization_layer, NormalizationType
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -346,7 +350,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.conv_kernel_size = conv_kernel_size
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.normalization_type = normalization_type
         self.q_norm_args = q_norm_args or (
             {"epsilon": 1e-5, "use_scale": True}
@@ -1379,7 +1383,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
                 "head_dim": self.head_dim,
                 "conv_kernel_size": self.conv_kernel_size,
                 "dropout_rate": self.dropout_rate,
-                "activation": self.activation,
+                "activation": serialize_activation(self.activation),
                 "normalization_type": self.normalization_type,
                 "q_norm_args": self.q_norm_args,
                 "k_norm_args": self.k_norm_args,

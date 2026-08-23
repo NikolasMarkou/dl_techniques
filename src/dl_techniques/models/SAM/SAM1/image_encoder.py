@@ -77,6 +77,10 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -428,7 +432,7 @@ class ViTBlock(layers.Layer):
         self.input_size = input_size
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
 
         # CREATE all sub-layers in __init__
         self.norm1 = create_normalization_layer(normalization_type, name="norm1")
@@ -604,7 +608,7 @@ class ViTBlock(layers.Layer):
             "input_size": self.input_size,
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 
@@ -737,7 +741,7 @@ class ImageEncoderViT(keras.Model):
         self.global_attn_indexes = global_attn_indexes
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.grid_size = img_size // patch_size
 
         # CREATE all sub-layers in __init__.
@@ -881,7 +885,7 @@ class ImageEncoderViT(keras.Model):
             "global_attn_indexes": self.global_attn_indexes,
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 

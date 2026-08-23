@@ -79,6 +79,10 @@ from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # module-private helpers
@@ -525,7 +529,7 @@ class Sam3ViTDetBlock(keras.layers.Layer):
         self.drop_path_rate = float(drop_path_rate)
         self.dropout_rate = float(dropout_rate)
         self.norm_epsilon = float(norm_epsilon)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.init_values = init_values
         self.use_rope = bool(use_rope)
         self.rope_theta = float(rope_theta)
@@ -687,7 +691,7 @@ class Sam3ViTDetBlock(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
             "dropout_rate": self.dropout_rate,
             "norm_epsilon": self.norm_epsilon,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "init_values": self.init_values,
             "use_rope": self.use_rope,
             "rope_theta": self.rope_theta,
@@ -904,7 +908,7 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
         self.drop_path_rate = float(drop_path_rate)
         self.dropout_rate = float(dropout_rate)
         self.norm_epsilon = float(norm_epsilon)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.init_values = init_values
         self.pretrain_img_size = int(pretrain_img_size)
         self.pretrain_use_cls_token = bool(pretrain_use_cls_token)
@@ -1147,7 +1151,7 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
             "dropout_rate": self.dropout_rate,
             "norm_epsilon": self.norm_epsilon,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "init_values": self.init_values,
             "pretrain_img_size": self.pretrain_img_size,
             "pretrain_use_cls_token": self.pretrain_use_cls_token,

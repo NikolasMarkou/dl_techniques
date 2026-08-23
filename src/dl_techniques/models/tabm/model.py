@@ -109,6 +109,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.one_hot_encoding import OneHotEncoding
 from dl_techniques.layers.tabm_blocks import ScaleEnsemble, NLinear, TabMBackbone
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -390,7 +394,7 @@ class TabMModel(keras.Model):
         self.hidden_dims = list(hidden_dims)
         self.arch_type = arch_type
         self.k = k
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.share_training_batches = share_training_batches
@@ -772,7 +776,7 @@ class TabMModel(keras.Model):
             "hidden_dims": self.hidden_dims,
             "arch_type": self.arch_type,
             "k": self.k,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "share_training_batches": self.share_training_batches,

@@ -78,6 +78,10 @@ from dl_techniques.layers.norms import create_normalization_layer
 # imports must name the submodule directly -- exactly as `train_sam.py` does.
 from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
 from dl_techniques.models.SAM.SAM1.mask_decoder import _build_mlp_head
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -259,8 +263,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
         self.dynamic_multimask_stability_delta = dynamic_multimask_stability_delta
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
         self.normalization_type = normalization_type
-        self.activation = activation
-        self.mlp_activation = mlp_activation
+        self.activation = deserialize_activation(activation)
+        self.mlp_activation = deserialize_activation(mlp_activation)
 
         self.num_mask_tokens = num_multimask_outputs + 1
 
@@ -751,8 +755,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
             "dynamic_multimask_stability_delta": self.dynamic_multimask_stability_delta,
             "dynamic_multimask_stability_thresh": self.dynamic_multimask_stability_thresh,
             "normalization_type": self.normalization_type,
-            "activation": self.activation,
-            "mlp_activation": self.mlp_activation,
+            "activation": serialize_activation(self.activation),
+            "mlp_activation": serialize_activation(self.mlp_activation),
         })
         return config
 

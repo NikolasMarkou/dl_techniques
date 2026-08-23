@@ -106,6 +106,10 @@ from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.time_series.nbeats_blocks import (
     GenericBlock, TrendBlock, SeasonalityBlock
 )
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -273,7 +277,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.theta_regularizer = regularizers.get(theta_regularizer)
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -619,7 +623,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'theta_regularizer': regularizers.serialize(self.theta_regularizer),
             'dropout_rate': self.dropout_rate,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,

@@ -92,6 +92,10 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking.strategies import apply_mlm_masking
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 
 # ---------------------------------------------------------------------
@@ -201,7 +205,7 @@ class MaskedLanguageModel(keras.Model):
         self.random_token_ratio = random_token_ratio
         self.unchanged_ratio = unchanged_ratio
         self.special_token_ids = special_token_ids or []
-        self.mlm_head_activation = mlm_head_activation
+        self.mlm_head_activation = deserialize_activation(mlm_head_activation)
         self.initializer_range = initializer_range
         self.mlm_head_dropout_rate = mlm_head_dropout_rate
         self.layer_norm_eps = layer_norm_eps
@@ -536,7 +540,7 @@ class MaskedLanguageModel(keras.Model):
                 "random_token_ratio": self.random_token_ratio,
                 "unchanged_ratio": self.unchanged_ratio,
                 "special_token_ids": self.special_token_ids,
-                "mlm_head_activation": self.mlm_head_activation,
+                "mlm_head_activation": serialize_activation(self.mlm_head_activation),
                 "initializer_range": self.initializer_range,
                 "mlm_head_dropout_rate": self.mlm_head_dropout_rate,
                 "layer_norm_eps": self.layer_norm_eps,

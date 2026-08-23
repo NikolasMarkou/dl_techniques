@@ -115,6 +115,10 @@ from dl_techniques.models.dino.common import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -233,7 +237,7 @@ class DINOHead(keras.layers.Layer):
         self.hidden_dim = hidden_dim
         self.bottleneck_dim = bottleneck_dim
         self.normalization_type = normalization_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.dropout_rate = dropout_rate
         self.kernel_initializer = kernel_initializer
 
@@ -455,7 +459,7 @@ class DINOHead(keras.layers.Layer):
             "hidden_dim": self.hidden_dim,
             "bottleneck_dim": self.bottleneck_dim,
             "normalization_type": self.normalization_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "dropout_rate": self.dropout_rate,
             "kernel_initializer": self.kernel_initializer,
         })

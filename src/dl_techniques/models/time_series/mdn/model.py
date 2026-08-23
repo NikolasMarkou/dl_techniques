@@ -103,6 +103,10 @@ from dl_techniques.layers.statistics.mdn_layer import (
     get_point_estimate,
     get_prediction_intervals
 )
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -241,7 +245,7 @@ class MDNModel(keras.Model):
         self.hidden_layers_sizes = hidden_layers
         self.output_dim = output_dimension
         self.num_mix = num_mixtures
-        self.hidden_activation = hidden_activation
+        self.hidden_activation = deserialize_activation(hidden_activation)
         self.use_batch_norm = use_batch_norm
         self.dropout_rate = dropout_rate
 
@@ -655,7 +659,7 @@ class MDNModel(keras.Model):
             "hidden_layers": self.hidden_layers_sizes,
             "output_dimension": self.output_dim,
             "num_mixtures": self.num_mix,
-            "hidden_activation": self.hidden_activation,
+            "hidden_activation": serialize_activation(self.hidden_activation),
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_batch_norm": self.use_batch_norm,

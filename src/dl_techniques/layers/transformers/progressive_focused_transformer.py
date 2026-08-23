@@ -51,6 +51,10 @@ from ..ffn.factory import create_ffn_layer
 from ..norms import create_normalization_layer
 from ..stochastic_depth import StochasticDepth
 from ..attention.progressive_focused_attention import ProgressiveFocusedAttention
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -176,7 +180,7 @@ class PFTBlock(keras.layers.Layer):
         self._norm_kwargs = norm_kwargs or {}
         self._ffn_type = ffn_type
         self._ffn_kwargs = ffn_kwargs or {}
-        self._ffn_activation = ffn_activation
+        self._ffn_activation = deserialize_activation(ffn_activation)
         self._use_lepe = use_lepe
 
         # ============ Validate Configuration ============
@@ -531,7 +535,7 @@ class PFTBlock(keras.layers.Layer):
             "norm_kwargs": self._norm_kwargs,
             "ffn_type": self._ffn_type,
             "ffn_kwargs": self._ffn_kwargs,
-            "ffn_activation": self._ffn_activation,
+            "ffn_activation": serialize_activation(self._ffn_activation),
             "use_lepe": self._use_lepe,
         })
         return config

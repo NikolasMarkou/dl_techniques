@@ -92,6 +92,10 @@ from keras import ops, layers, initializers, regularizers
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
 from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock, TrendBlock, SeasonalityBlock
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -243,7 +247,7 @@ class NBeatsXNet(keras.Model):
         # `use_target_normalization`: that breaks every stored config in the tree.
         self.use_block_normalization = use_block_normalization
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -481,7 +485,7 @@ class NBeatsXNet(keras.Model):
             'use_normalization': self.use_normalization,
             'use_block_normalization': self.use_block_normalization,
             'dropout_rate': self.dropout_rate,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),

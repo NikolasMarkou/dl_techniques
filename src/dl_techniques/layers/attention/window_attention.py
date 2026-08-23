@@ -208,6 +208,10 @@ from typing import Any, Dict, Literal, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from .single_window_attention import SingleWindowAttention
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Probability types not supported in window attention (score-level routing
@@ -400,7 +404,7 @@ class WindowAttention(keras.layers.Layer):
         self.proj_bias = proj_bias
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
-        self.kan_activation = kan_activation
+        self.kan_activation = deserialize_activation(kan_activation)
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -800,7 +804,7 @@ class WindowAttention(keras.layers.Layer):
                 "proj_bias": self.proj_bias,
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
-                "kan_activation": self.kan_activation,
+                "kan_activation": serialize_activation(self.kan_activation),
                 "probability_type": self.probability_type,
                 "probability_config": self.probability_config,
                 "qk_norm_type": self.qk_norm_type,

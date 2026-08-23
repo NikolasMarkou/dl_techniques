@@ -57,6 +57,10 @@ from ..attention import create_attention_layer, AttentionType
 from ..attention.factory import ATTENTION_REGISTRY, assemble_attention_config
 from ..norms import create_normalization_layer, NormalizationType
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # DECISION plan-2026-08-17T183311-79c63e38/D-011
 # Caller-supplied `attention_args` keys this block is allowed to SCOPE to the
@@ -218,7 +222,7 @@ class MixedSequentialBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.attention_type = attention_type
         self.ffn_type = ffn_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.normalization_args = normalization_args or {}
         self.attention_args = attention_args or {}
         self.ffn_args = ffn_args or {}
@@ -640,7 +644,7 @@ class MixedSequentialBlock(keras.layers.Layer):
             "normalization_type": self.normalization_type,
             "attention_type": self.attention_type,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "normalization_args": self.normalization_args,
             "attention_args": self.attention_args,
             "ffn_args": self.ffn_args,

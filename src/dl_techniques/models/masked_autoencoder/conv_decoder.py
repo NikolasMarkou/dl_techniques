@@ -15,6 +15,10 @@ Architecture:
 
 import keras
 from typing import Optional, Tuple, List, Dict, Any, Sequence
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -80,9 +84,9 @@ class ConvDecoder(keras.layers.Layer):
         self.decoder_dims = list(decoder_dims)
         self.output_channels = output_channels
         self.kernel_size = kernel_size
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_batch_norm = use_batch_norm
-        self.final_activation = final_activation
+        self.final_activation = deserialize_activation(final_activation)
 
         # CREATE all sub-layers in __init__.
         #
@@ -268,9 +272,9 @@ class ConvDecoder(keras.layers.Layer):
             "decoder_dims": self.decoder_dims,
             "output_channels": self.output_channels,
             "kernel_size": self.kernel_size,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "use_batch_norm": self.use_batch_norm,
-            "final_activation": self.final_activation,
+            "final_activation": serialize_activation(self.final_activation),
         })
         return config
 

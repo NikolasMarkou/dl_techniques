@@ -26,6 +26,10 @@ from typing import Optional, Union, Tuple, List, Any, Dict, Literal
 
 from ..ffn import create_ffn_layer
 from ..norms import create_normalization_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -138,7 +142,7 @@ class sLSTMCell(keras.layers.Layer):
                 f"`forget_gate_activation` must be 'sigmoid' or 'exp', "
                 f"but got {forget_gate_activation}"
             )
-        self.forget_gate_activation = forget_gate_activation
+        self.forget_gate_activation = deserialize_activation(forget_gate_activation)
 
         # Store initializers and regularizers
         self.kernel_initializer = initializers.get(kernel_initializer)
@@ -298,7 +302,7 @@ class sLSTMCell(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'units': self.units,
-            'forget_gate_activation': self.forget_gate_activation,
+            'forget_gate_activation': serialize_activation(self.forget_gate_activation),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
@@ -387,7 +391,7 @@ class sLSTMLayer(keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.units = units
-        self.forget_gate_activation = forget_gate_activation
+        self.forget_gate_activation = deserialize_activation(forget_gate_activation)
         self.return_sequences = return_sequences
         self.return_state = return_state
         self.go_backwards = go_backwards
@@ -481,7 +485,7 @@ class sLSTMLayer(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'units': self.units,
-            'forget_gate_activation': self.forget_gate_activation,
+            'forget_gate_activation': serialize_activation(self.forget_gate_activation),
             'return_sequences': self.return_sequences,
             'return_state': self.return_state,
             'go_backwards': self.go_backwards,
@@ -1171,7 +1175,7 @@ class sLSTMBlock(keras.layers.Layer):
         self.ffn_expansion_factor = ffn_expansion_factor
         self.normalization_type = normalization_type
         self.normalization_kwargs = normalization_kwargs or {}
-        self.forget_gate_activation = forget_gate_activation
+        self.forget_gate_activation = deserialize_activation(forget_gate_activation)
         self.dropout_rate = dropout_rate
         self.kernel_initializer = kernel_initializer
         self.recurrent_initializer = recurrent_initializer
@@ -1279,7 +1283,7 @@ class sLSTMBlock(keras.layers.Layer):
             'ffn_expansion_factor': self.ffn_expansion_factor,
             'normalization_type': self.normalization_type,
             'normalization_kwargs': self.normalization_kwargs,
-            'forget_gate_activation': self.forget_gate_activation,
+            'forget_gate_activation': serialize_activation(self.forget_gate_activation),
             'dropout_rate': self.dropout_rate,
             'kernel_initializer': keras.initializers.serialize(
                 initializers.get(self.kernel_initializer)

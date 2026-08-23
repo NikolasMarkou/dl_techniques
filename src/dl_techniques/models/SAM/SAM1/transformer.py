@@ -58,6 +58,10 @@ from typing import Optional, Tuple, Any, Dict, Literal
 
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -192,7 +196,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.mlp_dim = mlp_dim
         self.skip_first_layer_pe = skip_first_layer_pe
         self.normalization_type = normalization_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.attention_dropout_rate = attention_dropout_rate
         self.attention_downsample_rate = attention_downsample_rate
 
@@ -427,7 +431,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
             "mlp_dim": self.mlp_dim,
             "skip_first_layer_pe": self.skip_first_layer_pe,
             "normalization_type": self.normalization_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "attention_dropout_rate": self.attention_dropout_rate,
             "attention_downsample_rate": self.attention_downsample_rate,
         })
@@ -577,7 +581,7 @@ class TwoWayTransformer(layers.Layer):
         self.num_heads = num_heads
         self.mlp_dim = mlp_dim
         self.normalization_type = normalization_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.attention_dropout_rate = attention_dropout_rate
         self.attention_downsample_rate = attention_downsample_rate
 
@@ -759,7 +763,7 @@ class TwoWayTransformer(layers.Layer):
             "num_heads": self.num_heads,
             "mlp_dim": self.mlp_dim,
             "normalization_type": self.normalization_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "attention_dropout_rate": self.attention_dropout_rate,
             "attention_downsample_rate": self.attention_downsample_rate,
         })

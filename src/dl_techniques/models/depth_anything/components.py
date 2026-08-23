@@ -52,6 +52,10 @@ low-dimensional, interpretable, pixel-wise output map.
 
 import keras
 from typing import Dict, Tuple, Optional, Any, List, Union
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -146,8 +150,8 @@ class DPTDecoder(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
-        self.activation = activation
-        self.output_activation = output_activation
+        self.activation = deserialize_activation(activation)
+        self.output_activation = deserialize_activation(output_activation)
         self.upsample_factor = int(upsample_factor)
 
         # Validate upsample_factor: must be a power of 2 and <= 2**len(dims).
@@ -338,8 +342,8 @@ class DPTDecoder(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
+            "activation": serialize_activation(self.activation),
+            "output_activation": serialize_activation(self.output_activation),
             "upsample_factor": self.upsample_factor,
         })
         return config

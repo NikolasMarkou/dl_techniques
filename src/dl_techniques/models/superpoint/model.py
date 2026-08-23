@@ -101,6 +101,10 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -212,7 +216,7 @@ class SuperPoint(keras.Model):
         self.descriptor_dim = descriptor_dim
         self.drop_path_rate = drop_path_rate
         self.kernel_size = kernel_size
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.kernel_regularizer = kernel_regularizer
 
@@ -388,7 +392,7 @@ class SuperPoint(keras.Model):
             "descriptor_dim": self.descriptor_dim,
             "drop_path_rate": self.drop_path_rate,
             "kernel_size": self.kernel_size,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })

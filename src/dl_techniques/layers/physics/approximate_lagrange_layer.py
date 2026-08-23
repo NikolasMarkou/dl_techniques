@@ -32,6 +32,10 @@ The computation flow is:
 import keras
 from keras import ops, layers
 from typing import List, Dict, Any, Tuple, Optional
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -97,7 +101,7 @@ class ApproximatedLNNLayer(keras.layers.Layer):
             )
 
         self.hidden_dims = hidden_dims
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
 
         # Create all three MLP approximators in __init__ (modern Keras pattern)
         # Each MLP will be completed with appropriate output layers in build()
@@ -288,7 +292,7 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "hidden_dims": self.hidden_dims,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 

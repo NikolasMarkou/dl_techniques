@@ -45,6 +45,10 @@ from typing import Optional, Any, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -200,7 +204,7 @@ class NBeatsBlock(keras.layers.Layer):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.use_normalization = use_normalization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -431,7 +435,7 @@ class NBeatsBlock(keras.layers.Layer):
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
             'dropout_rate': self.dropout_rate,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'use_normalization': self.use_normalization,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),

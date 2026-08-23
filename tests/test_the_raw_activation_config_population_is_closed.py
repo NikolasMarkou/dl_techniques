@@ -1,51 +1,45 @@
-"""Ceiling gate on the raw-``activation``-in-``get_config`` family (N-1).
+"""The raw-``activation``-in-``get_config`` family (N-1) is CLOSED, not capped.
 
-The defect
-==========
+What the defect was
+===================
 
-A class whose constructor accepts ``activation: Union[str, Callable]`` and whose
-``get_config`` stores that value **raw** is broken for every non-string value.
-MEASURED by step 12 on ``vit_siglip`` and reproduced on ``vit`` / ``vit_hmlp``:
+A class that accepts ``activation: Union[str, Callable]`` and stores that value
+**raw** in ``get_config()`` is broken for every non-string value. MEASURED:
 
-* the default ``"gelu"`` round-trips bit-identically, so the defect is latent for
-  every shipped config;
-* a **registered** callable also already round-trips, because Keras's generic
-  object encoder resolves it -- **a guard written against a registered callable
-  is vacuous and passes with and without the fix**;
+* the default ``"gelu"`` round-trips bit-identically, so the defect is latent
+  for every shipped config;
+* a **registered** callable round-trips too on forward output -- Keras' generic
+  encoder resolves it -- but leaves ``get_config()`` non-JSON-serializable and
+  ``.activation`` a raw dict. **A guard written with a registered callable is
+  vacuous**;
 * an **UNREGISTERED** callable saves fine and then raises at load with
   ``ValueError: Could not interpret activation function identifier: {...}``;
-  supplied with ``custom_objects`` it loads, but leaves ``.activation`` a raw
-  dict which ``get_config`` then propagates.
+  supplied with ``custom_objects`` it loads but leaves ``.activation`` a raw
+  dict which ``get_config`` propagates onward.
 
-The repair is a symmetric pair -- ``keras.activations.serialize`` in
-``get_config`` and ``keras.activations.deserialize`` in ``from_config``. One side
-alone breaks the other direction, which is why both are RED-proven separately for
-each fixed class.
+The repair is a symmetric pair, centralised by D-400 in
+``dl_techniques/utils/activation_serialization.py``: ``serialize_activation``
+in ``get_config`` and ``deserialize_activation`` in ``__init__``. Its behavioural
+guard, including the two separate RED-proofs, is
+``tests/test_utils/test_activation_serialization.py``.
 
-The carried "47 sites" does not reproduce
+Why this file no longer carries a ceiling
 =========================================
 
-AST at HEAD 2026-08-23 under three instruments:
+Its predecessor (``..._cannot_grow.py``) pinned a **ceiling** of 69 loose sites
+and 14 ``Callable``-annotated ones and declared the rest
+CLOSED-by-documented-default. That ruling was rejected, and the ``Callable``
+filter it rested on does not survive contact with the tree: **Python does not
+enforce annotations**, and the ``str``-annotated sites hand the value to
+``keras.layers.Dense``, ``keras.layers.Activation``, ``keras.activations.get``
+or ``resolve_activation_layer`` -- every one of which accepts a callable. The
+14 was a subset of the annotation vocabulary, not of the reachable defect.
 
-============================================================  =====  =====
-instrument                                                    sites  files
-============================================================  =====  =====
-any ``get_config`` dict key containing "activation", no
-``serialize`` in the value                                    120     67
-key matching ``(^|_)activation$`` whose value is a **bare**
-``self.X``                                                     69     51
-...and whose ``__init__`` types that argument as accepting
-a **Callable** -- the actual defect precondition                14     12
-============================================================  =====  =====
-
-**None of the three is 47.** The third row is the defect-shaped one and the only
-one worth acting on: a ``self.activation_type`` / ``self.activation_args`` entry
-is a factory key or a kwargs dict, and storing it raw is correct.
-
-Terminal state (decisions.md D-205): ``vit`` and ``vit_hmlp`` SHIPPED, joining
-``vit_siglip`` (D-012). The remaining 14 are CLOSED-by-documented-default and
-listed by name in ``_KNOWN_RAW_ACTIVATION_SITES`` below, so the residue is a
-roster rather than a number.
+Re-derived at HEAD 2026-08-23: **72 sites / 54 files** (69 with a bare
+``self.X`` value plus 3 that already special-cased ``keras.layers.Layer`` but
+let a plain callable through raw). 65 were repaired. The 7 below are
+**provably** unreachable, pinned by name with the evidence that makes them so --
+not by a count.
 """
 
 import ast
@@ -61,53 +55,36 @@ SRC_ROOT = os.path.join(
 )
 
 _ACTIVATION_KEY = re.compile(r"(^|_)activation$")
-_BARE_SELF_ATTR = re.compile(r"self\.\w+")
 
-#: Ceiling on the LOOSE population: a ``get_config`` entry whose key ends in
-#: ``activation`` and whose value is a bare ``self.X`` with no ``serialize``.
-#: MEASURED 2026-08-23 after D-205's two fixes: **69 sites / 51 files** (was
-#: 71/53). Most are string factory keys and are NOT defects; this ceiling exists
-#: so a genuinely new one cannot appear unnoticed.
-_RAW_ACTIVATION_ENTRY_CEILING = 69
-
-#: Ceiling on the DEFECT-SHAPED subset: the same, restricted to classes whose
-#: ``__init__`` types that argument as accepting a ``Callable``. Those are the
-#: ones where a non-string value is reachable and therefore breakable.
-#: MEASURED 2026-08-23 after D-205: **14** (was 16).
-_CALLABLE_TYPED_RAW_CEILING = 14
-
-#: The 14 by name. A roster, not a number: "the count happens to match" and "the
-#: same sites are still the ones defaulting" are different claims, and only the
-#: second is what a documented default asserts.
-_KNOWN_RAW_ACTIVATION_SITES = {
-    "dl_techniques/layers/attention/non_local_attention.py::NonLocalAttention::intermediate_activation",
-    "dl_techniques/layers/attention/non_local_attention.py::NonLocalAttention::output_activation",
-    "dl_techniques/layers/convolutional_kan.py::KANvolution::activation",
-    "dl_techniques/layers/hierarchical_mlp_stem.py::HierarchicalMLPStem::activation",
-    "dl_techniques/layers/repmixer_block.py::ConvolutionalStem::activation",
-    "dl_techniques/layers/time_series/mixed_sequential_block.py::MixedSequentialBlock::activation",
-    "dl_techniques/layers/time_series/nbeats_blocks.py::NBeatsBlock::activation",
-    "dl_techniques/layers/transformers/gated_linear_attention_block.py::GatedLinearAttentionBlock::activation",
-    "dl_techniques/layers/transformers/text_decoder.py::TextDecoder::activation",
-    "dl_techniques/models/depth_anything/components.py::DPTDecoder::activation",
-    "dl_techniques/models/depth_anything/components.py::DPTDecoder::output_activation",
-    "dl_techniques/models/dino/dino_v3.py::DINOv3::activation",
-    "dl_techniques/models/time_series/nbeats/nbeats.py::NBeatsNet::activation",
-    "dl_techniques/models/time_series/nbeats/nbeatsx.py::NBeatsXNet::activation",
-}
-
-#: The three classes already repaired. Named so an unwrap is loud.
-_FIXED_SITES = {
-    "dl_techniques/models/vit/model.py": "ViT",
-    "dl_techniques/models/vit_hmlp/model.py": "ViTHMLP",
-    "dl_techniques/models/vit_siglip/model.py": "SigLIPVisionTransformer",
+#: The residue, by name, each with the expression that makes a callable
+#: unreachable. These are NOT "defaulted": in every one of them the attribute
+#: placed in ``get_config`` is provably a ``str`` or a ``bool`` at every
+#: reachable assignment, so there is nothing for
+#: ``serialize_activation`` to serialize and adding the call would be pure
+#: noise. The evidence string is re-checked against the source below, so the
+#: ruling rots loudly if someone drops the coercion.
+_PROVABLY_NOT_AN_ACTIVATION_OBJECT = {
+    "dl_techniques/layers/yolo12_blocks.py::ConvBlock::activation":
+        "activation: bool = True",
+    "dl_techniques/layers/transformers/energy_transformer.py::HopfieldNetwork::activation":
+        "self.activation = str(activation)",
+    "dl_techniques/layers/transformers/energy_transformer.py::EnergyTransformer::hopfield_activation":
+        "self.hopfield_activation = str(hopfield_activation)",
+    "dl_techniques/models/SAM/SAM3/decoder.py::Sam3DecoderLayer::activation":
+        "self.activation = str(activation)",
+    "dl_techniques/models/SAM/SAM3/decoder.py::Sam3TransformerDecoder::activation":
+        "self.activation = str(activation)",
+    "dl_techniques/models/energy_transformer/model.py::EnergyTransformerBackbone::hopfield_activation":
+        "self.hopfield_activation = str(hopfield_activation)",
+    "dl_techniques/models/graph_energy_transformer/model.py::GraphEnergyTransformerBackbone::hopfield_activation":
+        "self.hopfield_activation = str(hopfield_activation)",
 }
 
 
-def _sweep() -> Dict[str, List[dict]]:
-    """Return ``{"loose": [...], "callable_typed": [...]}``."""
-    loose: List[dict] = []
-    callable_typed: List[dict] = []
+def _sweep() -> List[dict]:
+    """Every ``get_config`` entry keyed ``*activation`` that is NOT routed
+    through ``serialize_activation``."""
+    found: List[dict] = []
     for dirpath, dirnames, filenames in os.walk(SRC_ROOT):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         for filename in sorted(filenames):
@@ -117,20 +94,12 @@ def _sweep() -> Dict[str, List[dict]]:
             rel = os.path.relpath(path, SRC_ROOT)
             with open(path, encoding="utf-8") as handle:
                 source = handle.read()
-            # No `except SyntaxError: continue` -- a silent skip shrinks both
-            # ceilings silently (D-070).
+            # No `except SyntaxError: continue` -- a silent skip shrinks the
+            # population silently (D-070).
             tree = ast.parse(source, filename=path)
             for cls in ast.walk(tree):
                 if not isinstance(cls, ast.ClassDef):
                     continue
-                annotations = {}
-                for member in cls.body:
-                    if not (isinstance(member, ast.FunctionDef)
-                            and member.name == "__init__"):
-                        continue
-                    for arg in list(member.args.args) + list(member.args.kwonlyargs):
-                        if arg.annotation is not None:
-                            annotations[arg.arg] = ast.unparse(arg.annotation)
                 for member in cls.body:
                     if not (isinstance(member, ast.FunctionDef)
                             and member.name == "get_config"):
@@ -145,69 +114,81 @@ def _sweep() -> Dict[str, List[dict]]:
                             if not _ACTIVATION_KEY.search(key.value):
                                 continue
                             expr = ast.unparse(value)
-                            if "serialize" in expr:
+                            # `serialize_activation` is D-400's shared helper.
+                            # `activations.serialize` is the canonical Keras
+                            # idiom used by 60 OTHER classes in this tree that
+                            # normalise with `keras.activations.get` in
+                            # `__init__` and were never part of N-1: measured at
+                            # HEAD, 52 pair it with an `activations.get(...)`
+                            # assignment and the other 8 inline the `get(...)`
+                            # inside the `serialize(...)` call, so both
+                            # directions are already symmetric there.
+                            if ("serialize_activation" in expr
+                                    or "activations.serialize" in expr):
                                 continue
-                            if not _BARE_SELF_ATTR.fullmatch(expr):
+                            if "self." not in expr:
                                 continue
-                            record = {
+                            found.append({
                                 "id": f"{rel}::{cls.name}::{key.value}",
                                 "file": rel,
                                 "line": value.lineno,
-                            }
-                            loose.append(record)
-                            annotation = annotations.get(key.value, "")
-                            if "allable" in annotation:
-                                callable_typed.append(record)
-    return {"loose": loose, "callable_typed": callable_typed}
+                                "expr": expr,
+                            })
+    return found
 
 
 @pytest.fixture(scope="module")
-def population() -> Dict[str, List[dict]]:
+def population() -> List[dict]:
     return _sweep()
 
 
-class TestTheRawActivationPopulationIsPinned:
+class TestTheRawActivationFamilyIsClosed:
 
-    def test_the_loose_population_has_not_grown(self, population):
-        loose = population["loose"]
-        assert len(loose) <= _RAW_ACTIVATION_ENTRY_CEILING, (
-            f"raw activation-keyed get_config entries grew from "
-            f"{_RAW_ACTIVATION_ENTRY_CEILING} to {len(loose)}. Check whether the "
-            "new one's constructor can receive a CALLABLE; if it can, it needs "
-            "keras.activations.serialize in get_config AND deserialize in "
-            "from_config. See decisions.md D-205."
-        )
-
-    def test_the_defect_shaped_subset_has_not_grown(self, population):
-        typed = population["callable_typed"]
-        assert len(typed) <= _CALLABLE_TYPED_RAW_CEILING, (
-            f"the CALLABLE-typed raw-activation population grew from "
-            f"{_CALLABLE_TYPED_RAW_CEILING} to {len(typed)}. Every entry here "
-            "accepts a callable activation and stores it raw, so an unregistered "
-            "callable will fail at load with 'Could not interpret activation "
-            f"function identifier'. New: {sorted({r['id'] for r in typed} - _KNOWN_RAW_ACTIVATION_SITES)}"
+    def test_nothing_outside_the_provable_residue_stores_a_raw_activation(
+            self, population):
+        observed = {record["id"] for record in population}
+        extra = sorted(observed - set(_PROVABLY_NOT_AN_ACTIVATION_OBJECT))
+        assert not extra, (
+            "a `get_config` entry keyed *activation* stores its value without "
+            "`serialize_activation`. An UNREGISTERED callable will then fail at "
+            "load with 'Could not interpret activation function identifier'.\n"
+            f"  new: {extra}\n"
+            "Fix: call `serialize_activation` in `get_config` and "
+            "`deserialize_activation` in `__init__` "
+            "(dl_techniques.utils.activation_serialization). See D-400. Adding "
+            "the site to _PROVABLY_NOT_AN_ACTIVATION_OBJECT is only legitimate "
+            "if the stored value is a str/bool at EVERY reachable assignment."
         )
 
-    def test_the_defaulted_residue_is_still_the_same_sites(self, population):
-        observed = {record["id"] for record in population["callable_typed"]}
-        assert observed == _KNOWN_RAW_ACTIVATION_SITES, (
-            "the roster of sites CLOSED-by-documented-default under D-205 no "
-            "longer matches what the tree contains.\n"
-            f"  appeared: {sorted(observed - _KNOWN_RAW_ACTIVATION_SITES)}\n"
-            f"  gone:     {sorted(_KNOWN_RAW_ACTIVATION_SITES - observed)}\n"
-            "A site that disappeared was probably fixed -- move it to "
-            "_FIXED_SITES. A site that appeared has never been ruled."
-        )
+    def test_the_provable_residue_is_still_provable(self, population):
+        """The roster is only as good as its evidence.
 
-    @pytest.mark.parametrize("relpath,classname", sorted(_FIXED_SITES.items()))
-    def test_a_fixed_class_still_serializes_and_deserializes(self, relpath, classname):
-        with open(os.path.join(SRC_ROOT, relpath), encoding="utf-8") as handle:
-            source = handle.read()
-        assert "activations.serialize(self.activation)" in source, (
-            f"{classname} no longer serializes its activation in get_config. "
-            "An unregistered callable now fails at load again."
-        )
-        assert "activations.deserialize(" in source, (
-            f"{classname} no longer deserializes its activation in from_config. "
-            "The pair is symmetric: one side alone breaks the other direction."
-        )
+        A name-only exemption rots the moment someone deletes the ``str()``
+        coercion that justified it, and the exemption would then silently cover
+        a live defect. Each entry therefore re-greps for the expression it
+        claims.
+        """
+        observed = {record["id"]: record for record in population}
+        for site, evidence in sorted(_PROVABLY_NOT_AN_ACTIVATION_OBJECT.items()):
+            relpath = site.split("::", 1)[0]
+            with open(os.path.join(SRC_ROOT, relpath), encoding="utf-8") as handle:
+                source = handle.read()
+            assert evidence in source, (
+                f"{site} is exempt because of `{evidence}`, which is no longer "
+                "in the file. Either restore it or repair the site with "
+                "serialize_activation/deserialize_activation."
+            )
+            assert site in observed, (
+                f"{site} is listed as a provable non-activation but no longer "
+                "appears in the sweep -- it was probably repaired. Drop it from "
+                "_PROVABLY_NOT_AN_ACTIVATION_OBJECT."
+            )
+
+    def test_the_residue_has_not_grown(self, population):
+        """A count assertion, kept only as a second, cheaper signal.
+
+        The roster test above is the real gate: 'the count still matches' and
+        'the same sites are still the ones exempt' are different claims and only
+        the second is what an exemption asserts.
+        """
+        assert len(population) == len(_PROVABLY_NOT_AN_ACTIVATION_OBJECT) == 7

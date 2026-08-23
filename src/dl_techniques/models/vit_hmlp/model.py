@@ -61,6 +61,10 @@ from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -655,25 +659,17 @@ class ViTHMLP(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            # DECISION plan-2026-08-22T035419-a11304c8/D-205
-            # A callable activation MUST be serialized here, and `from_config`
-            # below MUST deserialize it -- the pair is symmetric and a one-sided
-            # fix breaks the other direction. Storing the raw value makes
-            # `get_config()` non-JSON-serializable for a callable, and an
-            # UNREGISTERED callable then fails `keras.models.load_model` outright
-            # with `ValueError: Could not interpret activation function
-            # identifier: {...}`. With `custom_objects` supplied it loads but
-            # leaves `self.activation` a raw dict, which `get_config` propagates.
-            # Strings are passed through unchanged rather than routed through
-            # `activations.serialize`, which REJECTS a bare string ("Unknown
-            # activation function 'gelu' cannot be serialized"), and because
-            # passing them through is exactly today's shipped behaviour for every
-            # stock config. Same fix as `vit_siglip` (D-012). See D-205.
-            "activation": (
-                self.activation
-                if isinstance(self.activation, str)
-                else keras.activations.serialize(self.activation)
-            ),
+            # DECISION plan-2026-08-23T091307-9a110062/D-400
+            # D-205 inlined this as a 17-line `isinstance(str)`-guarded
+            # expression at three sites. It is now the single shared pair in
+            # `dl_techniques.utils.activation_serialization`, which ~50 other
+            # classes in this tree also call. Do NOT re-inline it: the string
+            # passthrough is load-bearing (`keras.activations.serialize` REJECTS
+            # a bare string, and many callers store a dl_techniques
+            # activation-factory key such as 'mish' that is not a Keras
+            # activation at all), and a second copy of that rule is exactly the
+            # kind of hand-maintained lockstep this centralisation removes.
+            "activation": serialize_activation(self.activation),
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
@@ -714,7 +710,7 @@ class ViTHMLP(keras.Model):
                 config[key] = regularizers.deserialize(config[key])
         activation = config.get("activation")
         if activation is not None and not isinstance(activation, str):
-            config["activation"] = keras.activations.deserialize(
+            config["activation"] = deserialize_activation(
                 activation, custom_objects=custom_objects
             )
         return cls(**config)

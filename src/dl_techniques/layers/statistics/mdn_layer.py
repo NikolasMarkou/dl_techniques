@@ -46,6 +46,10 @@ from typing import Dict, Optional, Tuple, Union, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Constants
@@ -155,7 +159,7 @@ class MDNLayer(keras.layers.Layer):
         self.diversity_regularizer_strength = diversity_regularizer_strength
         self.intermediate_units = intermediate_units
         self.use_batch_norm = use_batch_norm
-        self.intermediate_activation = intermediate_activation
+        self.intermediate_activation = deserialize_activation(intermediate_activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -478,7 +482,7 @@ class MDNLayer(keras.layers.Layer):
             "diversity_regularizer_strength": self.diversity_regularizer_strength,
             "intermediate_units": self.intermediate_units,
             "use_batch_norm": self.use_batch_norm,
-            "intermediate_activation": self.intermediate_activation,
+            "intermediate_activation": serialize_activation(self.intermediate_activation),
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),

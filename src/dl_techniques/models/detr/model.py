@@ -104,6 +104,10 @@ from typing import Optional, Dict, Any, List, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers import TransformerLayer, TransformerDecoderLayer, FFNType, NormalizationType
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import PositionEmbeddingSine2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Transformer Components
@@ -183,7 +187,7 @@ class DetrTransformer(layers.Layer):
         self.num_decoder_layers = num_decoder_layers
         self.ffn_dim = ffn_dim
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
 
@@ -325,7 +329,7 @@ class DetrTransformer(layers.Layer):
             "num_decoder_layers": self.num_decoder_layers,
             "ffn_dim": self.ffn_dim,
             "dropout_rate": self.dropout_rate,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
         })

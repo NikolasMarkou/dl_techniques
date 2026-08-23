@@ -129,6 +129,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import create_sampling_layer, vmf_kl_divergence
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Supported VAE sampling modes
@@ -319,8 +323,8 @@ class VAE(keras.Model):
         self.use_batch_norm = use_batch_norm
         self.use_bias = use_bias
         self.dropout_rate = dropout_rate
-        self.activation = activation
-        self.final_activation = final_activation
+        self.activation = deserialize_activation(activation)
+        self.final_activation = deserialize_activation(final_activation)
 
         # Validate input dimensions
         height, width, channels = input_shape
@@ -1257,8 +1261,8 @@ class VAE(keras.Model):
             "use_batch_norm": self.use_batch_norm,
             "use_bias": self.use_bias,
             "dropout_rate": self.dropout_rate,
-            "activation": self.activation,
-            "final_activation": self.final_activation,
+            "activation": serialize_activation(self.activation),
+            "final_activation": serialize_activation(self.final_activation),
         })
         return config
 

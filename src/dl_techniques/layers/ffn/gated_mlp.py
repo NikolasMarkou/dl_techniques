@@ -73,6 +73,10 @@ originally proposed in:
 
 import keras
 from typing import Optional, Union, Tuple, Literal, Any, Callable
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -186,8 +190,8 @@ class GatedMLP(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-        self.attention_activation = attention_activation
-        self.output_activation = output_activation
+        self.attention_activation = deserialize_activation(attention_activation)
+        self.output_activation = deserialize_activation(output_activation)
         self.data_format = data_format or keras.backend.image_data_format()
 
         # Validate data format
@@ -372,8 +376,8 @@ class GatedMLP(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-            "attention_activation": self.attention_activation,
-            "output_activation": self.output_activation,
+            "attention_activation": serialize_activation(self.attention_activation),
+            "output_activation": serialize_activation(self.output_activation),
             "data_format": self.data_format,
         })
         return config

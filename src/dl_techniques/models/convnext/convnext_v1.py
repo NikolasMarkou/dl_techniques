@@ -88,6 +88,10 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.stochastic_gradient import StochasticGradient
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 
 # ---------------------------------------------------------------------
@@ -214,7 +218,7 @@ class ConvNeXtV1(keras.Model):
         self.drop_path_rate = drop_path_rate
         self.stochastic_mode = stochastic_mode
         self.kernel_size = kernel_size
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.kernel_regularizer = kernel_regularizer
         self.dropout_rate = dropout_rate
@@ -721,7 +725,7 @@ class ConvNeXtV1(keras.Model):
             "drop_path_rate": self.drop_path_rate,
             "stochastic_mode": self.stochastic_mode,
             "kernel_size": self.kernel_size,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "dropout_rate": self.dropout_rate,

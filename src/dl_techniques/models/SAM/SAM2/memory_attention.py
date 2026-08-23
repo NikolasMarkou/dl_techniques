@@ -65,6 +65,10 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -516,7 +520,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
         self.d_model = int(d_model)
         self.dim_feedforward = int(dim_feedforward)
         self.dropout_rate = float(dropout_rate)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.pos_enc_at_attn = bool(pos_enc_at_attn)
         self.pos_enc_at_cross_attn_queries = bool(pos_enc_at_cross_attn_queries)
         self.pos_enc_at_cross_attn_keys = bool(pos_enc_at_cross_attn_keys)
@@ -721,7 +725,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             "d_model": self.d_model,
             "dim_feedforward": self.dim_feedforward,
             "dropout_rate": self.dropout_rate,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "pos_enc_at_attn": self.pos_enc_at_attn,
             "pos_enc_at_cross_attn_queries": self.pos_enc_at_cross_attn_queries,
             "pos_enc_at_cross_attn_keys": self.pos_enc_at_cross_attn_keys,
@@ -840,7 +844,7 @@ class SAM2MemoryAttention(keras.layers.Layer):
         self.pos_enc_at_input = bool(pos_enc_at_input)
         self.dim_feedforward = int(dim_feedforward)
         self.dropout_rate = float(dropout_rate)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.pos_enc_at_attn = bool(pos_enc_at_attn)
         self.pos_enc_at_cross_attn_queries = bool(pos_enc_at_cross_attn_queries)
         self.pos_enc_at_cross_attn_keys = bool(pos_enc_at_cross_attn_keys)
@@ -976,7 +980,7 @@ class SAM2MemoryAttention(keras.layers.Layer):
             "pos_enc_at_input": self.pos_enc_at_input,
             "dim_feedforward": self.dim_feedforward,
             "dropout_rate": self.dropout_rate,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "pos_enc_at_attn": self.pos_enc_at_attn,
             "pos_enc_at_cross_attn_queries": self.pos_enc_at_cross_attn_queries,
             "pos_enc_at_cross_attn_keys": self.pos_enc_at_cross_attn_keys,
