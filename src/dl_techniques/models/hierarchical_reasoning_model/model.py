@@ -125,7 +125,7 @@ class HierarchicalReasoningModel(keras.Model):
     steps based on input complexity, using Q-learning to determine optimal halting
     decisions while maintaining hierarchical processing capabilities.
 
-    **Intent**: Provide a production-ready adaptive computation model that can
+    **Intent**: Provide a configurable adaptive computation model that can
     efficiently handle reasoning tasks of varying complexity by learning to allocate
     computational resources dynamically, combining the benefits of hierarchical
     processing with adaptive computation time.

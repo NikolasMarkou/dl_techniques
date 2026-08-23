@@ -130,7 +130,7 @@ class NanoVLM(keras.Model):
     combines configurable vision_heads encoding, flexible multi-modal fusion, and robust
     text processing through a unified, serializable architecture.
 
-    **Intent**: Provide a production-ready, configurable vision_heads-language model that
+    **Intent**: Provide a configurable vision_heads-language model that
     demonstrates proper integration of existing framework components while following
     modern Keras 3 design patterns for robust serialization and deployment.
 

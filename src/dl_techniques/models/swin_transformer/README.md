@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Swin Transformer** in **Keras 3**, based on the foundational paper ["Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"](https://arxiv.org/abs/2103.14030) by Liu et al. (2021).
+An implementation of the **Swin Transformer** in **Keras 3**, based on the foundational paper ["Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"](https://arxiv.org/abs/2103.14030) by Liu et al. (2021).
 
 The architecture introduces a hierarchical structure and shifted window attention, making it a highly efficient and effective backbone for a wide range of computer vision tasks.
 

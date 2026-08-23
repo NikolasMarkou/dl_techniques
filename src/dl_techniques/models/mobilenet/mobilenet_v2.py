@@ -103,7 +103,7 @@ class MobileNetV2(keras.Model):
     applications. It utilizes `UniversalInvertedBottleneck` (UIB) layers configured
     to replicate the original's inverted residuals and linear bottlenecks.
 
-    **Intent**: To provide a production-ready, configurable, and easily
+    **Intent**: To provide a configurable and easily
     serializable implementation of the MobileNetV2 model. This serves as a
     best-practice example for building complex custom models in Keras 3,
     leveraging a flexible and unified building block (UIB).

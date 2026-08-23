@@ -6,9 +6,9 @@
 [![dl_techniques](https://img.shields.io/badge/dl__techniques-Standard-green.svg)](https://github.com/your-repo/dl_techniques)
 [![arXiv](https://img.shields.io/badge/arXiv-2412.09871-b31b1b.svg)](https://arxiv.org/abs/2412.09871)
 
-A production-ready, fully-featured implementation of the **Byte Latent Transformer (BLT)** built on the **dl_techniques** framework using **Keras 3**. This architecture represents a paradigm shift in Large Language Models (LLMs), moving away from fragile tokenizers to a robust, dynamic, byte-level processing pipeline.
+An implementation of the **Byte Latent Transformer (BLT)** built on the **dl_techniques** framework using **Keras 3**. This architecture represents a paradigm shift in Large Language Models (LLMs), moving away from fragile tokenizers to a robust, dynamic, byte-level processing pipeline.
 
-This implementation leverages `dl_techniques` factories to provide state-of-the-art stability features, including **Zero-Centered RMSNorm**, **SwiGLU FFNs**, and **Grouped Query Attention**, matching the performance of token-based models (like Llama 3) while offering superior robustness. (The **50% inference-efficiency** figure the paper reports has not been reproduced or measured here; it is quoted from the paper.)
+This implementation leverages `dl_techniques` factories to provide modern stability components, including **Zero-Centered RMSNorm**, **SwiGLU FFNs**, and **Grouped Query Attention**. Meta's BLT paper reports parity with token-based models (like Llama 3) alongside greater robustness to input noise; none of that — nor the **50% inference-efficiency** figure — has been reproduced or measured here. Every number in this section is quoted from the paper, and no performance claim is made for this port.
 
 > ### Implementation status — patching IS entropy-based; read this for how it differs
 >

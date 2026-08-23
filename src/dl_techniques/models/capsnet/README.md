@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **Capsule Networks (CapsNet)**, as proposed by Sabour, Frosst, and Hinton. This architecture introduces a novel approach to feature representation that preserves hierarchical spatial relationships, making it inherently more robust to rotation, translation, and other affine transformations compared to traditional Convolutional Neural Networks (CNNs).
+A Keras 3 implementation of **Capsule Networks (CapsNet)**, as proposed by Sabour, Frosst, and Hinton. This architecture introduces a novel approach to feature representation that preserves hierarchical spatial relationships, making it inherently more robust to rotation, translation, and other affine transformations compared to traditional Convolutional Neural Networks (CNNs).
 
 ---
 

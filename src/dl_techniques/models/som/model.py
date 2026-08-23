@@ -95,7 +95,7 @@ class SOMModel(keras.Model):
     nearby neurons, forming a structured memory system suitable for clustering,
     visualization, and associative recall tasks.
 
-    **Intent**: Provide a complete, production-ready implementation of Self-Organizing
+    **Intent**: Provide a complete implementation of Self-Organizing
     Maps that can function as an associative memory system for data visualization,
     clustering, dimensionality reduction, and classification tasks while maintaining
     topological relationships in the learned representation.

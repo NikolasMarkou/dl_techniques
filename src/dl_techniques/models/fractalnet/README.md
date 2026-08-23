@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **FractalNet**, a self-similar deep neural network that achieves great depths without using residual connections. Instead, it relies on a recursive fractal expansion rule that creates an exponential number of paths through the network, regularized by a "drop-path" training scheme.
+A Keras 3 implementation of **FractalNet**, a self-similar deep neural network that achieves great depths without using residual connections. Instead, it relies on a recursive fractal expansion rule that creates an exponential number of paths through the network, regularized by a "drop-path" training scheme.
 
 The architecture is constructed from recursive `FractalBlock` layers, providing a powerful alternative to standard ResNet-like designs.
 

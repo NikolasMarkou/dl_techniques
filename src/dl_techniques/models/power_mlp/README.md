@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **PowerMLP**, a highly efficient deep learning architecture designed as a practical and powerful alternative to Kolmogorov-Arnold Networks (KANs). PowerMLP achieves a superior balance of performance, speed, and resource usage by replacing the computationally expensive B-spline activations of KANs with a novel dual-branch design powered by efficient `ReLU-k` activations.
+A Keras 3 implementation of **PowerMLP**, a highly efficient deep learning architecture designed as a practical and powerful alternative to Kolmogorov-Arnold Networks (KANs). PowerMLP achieves a superior balance of performance, speed, and resource usage by replacing the computationally expensive B-spline activations of KANs with a novel dual-branch design powered by efficient `ReLU-k` activations.
 
 The architecture is built from `PowerMLPLayer` blocks, offering a significant speedup (~40x faster training) and resource reduction (~10x fewer FLOPs) compared to equivalent KANs, while delivering equal or better accuracy.
 

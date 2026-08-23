@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An advanced, production-ready Keras 3 implementation of **ModernBERT**, a successor to the classic BERT architecture. This model is based on the paper "[Smarter, Better, Faster, Longer: A Modern Bidirectional Encoder for Fast, Memory Efficient, and Long Context Finetuning and Inference](https://arxiv.org/abs/2412.13663)". ModernBERT integrates a suite of contemporary deep learning techniques to deliver superior performance, faster processing for long contexts, and enhanced training stability.
+A Keras 3 implementation of **ModernBERT**, a successor to the classic BERT architecture. This model is based on the paper "[Smarter, Better, Faster, Longer: A Modern Bidirectional Encoder for Fast, Memory Efficient, and Long Context Finetuning and Inference](https://arxiv.org/abs/2412.13663)". ModernBERT integrates a suite of contemporary deep learning techniques to deliver superior performance, faster processing for long contexts, and enhanced training stability.
 
 ---
 

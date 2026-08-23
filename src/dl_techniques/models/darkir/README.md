@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, Keras 3 implementation of **DarkIR**, presented at CVPR 2025. DarkIR is an efficient, all-in-one image restoration network designed to handle multiple degradations simultaneously: low-light, noise, and blur.
+A Keras 3 implementation of **DarkIR**, presented at CVPR 2025. DarkIR is an efficient, all-in-one image restoration network designed to handle multiple degradations simultaneously: low-light, noise, and blur.
 
 Unlike many modern restoration networks that rely on computationally heavy Vision Transformers, DarkIR utilizes efficient CNNs augmented with frequency-domain processing (`FreMLP`) and multi-scale dilated attention mechanisms to achieve state-of-the-art performance with lower latency.
 

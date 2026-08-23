@@ -99,7 +99,7 @@ class RELGT(keras.Model):
     long-range dependencies in relational databases. It establishes Graph Transformers
     as a powerful architecture for Relational Deep Learning.
 
-    **Intent**: Provide state-of-the-art predictive modeling on relational data by
+    **Intent**: Provide predictive modeling on relational data by
     combining the expressiveness of graph transformers with relational-specific
     innovations in tokenization and attention mechanisms.
 

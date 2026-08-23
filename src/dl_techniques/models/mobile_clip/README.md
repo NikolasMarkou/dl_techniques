@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of Apple's **MobileCLIP** family — efficient vision-language models that adapt CLIP's zero-shot capabilities to the latency, memory and power limits of mobile and edge hardware. This package ships **two** models that share a text tower and a class structure but differ on the image side: `MobileClipModel` (v1) and `MobileClipV2Model` (v2, the faithful port).
+A Keras 3 implementation of Apple's **MobileCLIP** family — efficient vision-language models that adapt CLIP's zero-shot capabilities to the latency, memory and power limits of mobile and edge hardware. This package ships **two** models that share a text tower and a class structure but differ on the image side: `MobileClipModel` (v1) and `MobileClipV2Model` (v2, the faithful port).
 
 Neither model ships pretrained weights, and v2 makes **no accuracy claim** — it is architecture only. Read [§16](#16-deviations-from-the-reference-implementation-v2) before comparing it against any published number, and [§17](#17-v1-vs-v2-which-should-i-use) to choose between the two.
 

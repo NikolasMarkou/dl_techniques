@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **ACC-UNet**, based on the paper ["ACC-UNet: A Completely Convolutional UNet model for the 2020s"](https://arxiv.org/abs/2308.13680) by Ibtehaz & Kihara (MICCAI 2023).
+A Keras 3 implementation of **ACC-UNet**, based on the paper ["ACC-UNet: A Completely Convolutional UNet model for the 2020s"](https://arxiv.org/abs/2308.13680) by Ibtehaz & Kihara (MICCAI 2023).
 
 The architecture integrates several key innovations, including **HANC Blocks** for transformer-like context modeling, **MLFC Layers** for advanced feature fusion in skip connections, and **ResPath** for bridging the semantic gap, all within a purely convolutional framework.
 

@@ -6,7 +6,7 @@
 [![NumPy](https://img.shields.io/badge/NumPy-1.23%2B-blueviolet.svg)](https://numpy.org/)
 [![Matplotlib](https://img.shields.io/badge/Matplotlib-3.7%2B-informational.svg)](https://matplotlib.org/)
 
-A production-ready Keras 3 implementation of a **Self-Organizing Map (SOM)**, framed as a powerful associative memory system. This model provides a complete toolkit for unsupervised learning, clustering, classification, and, most importantly, for visualizing how high-dimensional data can be organized into a meaningful low-dimensional topological structure.
+A Keras 3 implementation of a **Self-Organizing Map (SOM)**, framed as a powerful associative memory system. This model provides a complete toolkit for unsupervised learning, clustering, classification, and, most importantly, for visualizing how high-dimensional data can be organized into a meaningful low-dimensional topological structure.
 
 This implementation wraps a core `SOM2dLayer` into a full-featured `SOMModel`, providing an intuitive API for training, prediction, and an extensive suite of visualization methods. It is designed to be a practical tool for data scientists and an educational resource for understanding the principles of competitive learning and topological memory. The code adheres to modern Keras best practices, ensuring it is modular, well-documented, and fully serializable.
 

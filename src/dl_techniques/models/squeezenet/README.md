@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of the **SqueezeNet V1** and **SqueezeNodule-Net (V2)** architectures. SqueezeNet models are pioneering, efficient convolutional networks (ConvNets) designed to achieve high accuracy with a dramatically reduced parameter count and model size.
+A Keras 3 implementation of the **SqueezeNet V1** and **SqueezeNodule-Net (V2)** architectures. SqueezeNet models are pioneering, efficient convolutional networks (ConvNets) designed to achieve high accuracy with a dramatically reduced parameter count and model size.
 
 This implementation includes the original SqueezeNet V1 with its innovative **Fire Module**, and SqueezeNodule-Net, an evolution optimized for medical imaging tasks that uses a **Simplified Fire Module** and supports 3D convolutions.
 

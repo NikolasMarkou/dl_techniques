@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of a **Variational Autoencoder (VAE)** in **Keras 3**, based on the foundational paper ["Auto-Encoding Variational Bayes"](https://arxiv.org/abs/1312.6114) by Kingma & Welling (2013).
+An implementation of a **Variational Autoencoder (VAE)** in **Keras 3**, based on the foundational paper ["Auto-Encoding Variational Bayes"](https://arxiv.org/abs/1312.6114) by Kingma & Welling (2013).
 
 The architecture uses robust **ResNet-based** encoder and decoder networks and incorporates a custom training loop to correctly handle the two-part VAE loss (reconstruction and KL divergence).
 

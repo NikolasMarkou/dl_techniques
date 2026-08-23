@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the **Tiny Recursive Model (TRM)**, a highly parameter-efficient architecture designed for complex reasoning tasks. TRM challenges the "bigger is better" paradigm by using a small, shared neural network that is applied recursively to refine its solution over a variable number of steps.
+A Keras 3 implementation of the **Tiny Recursive Model (TRM)**, a highly parameter-efficient architecture designed for complex reasoning tasks. TRM challenges the "bigger is better" paradigm by using a small, shared neural network that is applied recursively to refine its solution over a variable number of steps.
 
 This implementation adapts the original PyTorch model from the paper "[Less is More: Recursive Reasoning with Tiny Networks](https://arxiv.org/abs/2510.04871)" to Keras 3. It incorporates the principles of **Adaptive Computation Time (ACT)**, allowing the model to dynamically learn how many "thinking" steps are needed for a given problem. The code adheres to modern Keras best practices, ensuring it is modular, well-documented, and fully serializable.
 

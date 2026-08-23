@@ -149,7 +149,7 @@ This implementation leverages the latest Keras 3 features and best practices:
 
 ✅ **Component Reusability**
 - Uses `TransformerLayer` from dl_techniques framework
-- Leverages battle-tested components
+- Leverages components shared with the rest of this repository
 - Reduces code duplication by ~150 lines
 
 ✅ **Full Serialization Support**

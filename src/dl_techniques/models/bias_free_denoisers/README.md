@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of robust, **Bias-Free** neural networks designed for blind image denoising. This collection includes a standard ResNet-style denoiser (**BFCNN**), a U-Net architecture (**BF-UNet**), and a modern U-Net incorporating ConvNeXt V2 blocks (**ConvUNext**).
+A Keras 3 implementation of robust, **Bias-Free** neural networks designed for blind image denoising. This collection includes a standard ResNet-style denoiser (**BFCNN**), a U-Net architecture (**BF-UNet**), and a modern U-Net incorporating ConvNeXt V2 blocks (**ConvUNext**).
 
 These models are architected to generalize across different noise levels, solving a common limitation in standard CNN denoisers.
 
@@ -81,7 +81,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 
 ### 3.3 ConvUNext (Modern Backbone)
 **ConvUNext** combines the U-Net macro-architecture with **ConvNeXt V2** micro-architecture (inverted bottlenecks, large kernels, Global Response Normalization).
--   **Best for**: State-of-the-art performance, capturing long-range dependencies.
+-   **Best for**: the strongest of the three backbones here, capturing long-range dependencies.
 -   **Innovations**:
     -   **7x7 Kernels**: Larger receptive field than standard U-Net (3x3).
     -   **GRN (Global Response Norm)**: Enhances channel contrast for better feature learning.

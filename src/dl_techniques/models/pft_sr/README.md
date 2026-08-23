@@ -5,7 +5,7 @@
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 [![CVPR 2025](https://img.shields.io/badge/CVPR-2025-blue.svg)](https://cvpr.thecvf.com/)
 
-A production-ready, fully-featured implementation of the **Progressive Focused Transformer (PFT-SR)** architecture in **Keras 3**. This implementation is based on the CVPR 2025 paper by Long et al. and achieves state-of-the-art performance on single image super-resolution benchmarks.
+An implementation of the **Progressive Focused Transformer (PFT-SR)** architecture in **Keras 3**. This implementation is based on the CVPR 2025 paper by Long et al., who report state-of-the-art performance for the PFT-SR architecture on single image super-resolution benchmarks. This port has not been independently trained or benchmarked, and no performance claim is made for it.
 
 The architecture's core innovation is the **Progressive Focused Attention (PFA)** mechanism, which allows attention maps to be inherited and refined across layers. This enables the network to progressively focus on informative features while suppressing redundancy, leading to better reconstruction quality and computational efficiency.
 

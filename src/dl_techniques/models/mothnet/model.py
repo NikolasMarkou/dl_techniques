@@ -103,7 +103,7 @@ class MothNet(keras.Model):
     classifier or as a feature extractor to augment other ML models in the
     "insect cyborg" paradigm.
 
-    **Intent**: Provide a complete, production-ready implementation of the moth
+    **Intent**: Provide a complete implementation of the moth
     olfactory network for few-shot learning applications. The model extracts
     features that standard ML methods struggle to find, particularly effective
     when training data is scarce (1-100 samples per class).

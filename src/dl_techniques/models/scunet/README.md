@@ -3,7 +3,7 @@
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 
-A production-ready, Keras 3 implementation of **SCUNet**, a high-performance, U-Net-style architecture designed for image restoration tasks such as denoising, deblurring, and artifact removal. Its primary innovation is the `SwinConvBlock`, a hybrid layer that synergistically combines the strengths of Swin Transformers and convolutional neural networks.
+A Keras 3 implementation of **SCUNet**, a high-performance, U-Net-style architecture designed for image restoration tasks such as denoising, deblurring, and artifact removal. Its primary innovation is the `SwinConvBlock`, a hybrid layer that synergistically combines the strengths of Swin Transformers and convolutional neural networks.
 
 This implementation provides a modular, fully serializable `keras.Model` that faithfully reproduces the SCUNet architecture. By leveraging the local feature extraction power of CNNs and the long-range dependency modeling of Swin Transformers, SCUNet achieves state-of-the-art results in various image restoration benchmarks.
 

@@ -506,7 +506,7 @@ where the score ∇_x log p_t(x) is provided by the denoiser. This enables gener
 - Vision: 24 layers, 1024 dim
 - Text: 24 layers, 1024 dim
 - Denoisers: 16 layers
-- Use case: State-of-the-art results
+- Use case: the largest configuration provided here (untrained, unbenchmarked)
 
 ---
 
@@ -545,7 +545,7 @@ where the score ∇_x log p_t(x) is provided by the denoiser. This enables gener
 This implementation represents a fundamental re-imagination of Vision-Language Models through the lens of score-based generative modeling. By treating VLMs as learners of score fields rather than deterministic predictors, we gain:
 
 1. **Theoretical Elegance**: Unified framework grounded in probability theory
-2. **Practical Power**: State-of-the-art generation quality
+2. **Practical Power**: a generative formulation rather than a deterministic one (this implementation is untrained and unbenchmarked, so no quality claim is made)
 3. **Interpretability**: Explicit semantic landscapes
 4. **Flexibility**: Natural extension to new tasks and modalities
 

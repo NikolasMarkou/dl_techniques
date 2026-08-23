@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of **LatentGMMRegistration**, a robust semi-supervised framework for rigid point cloud registration. This model learns to align two point clouds by mapping them into a shared latent Gaussian Mixture Model (GMM) space, handling noise, outliers, and large transformations effectively without expensive iterative optimization during inference.
+A Keras 3 implementation of **LatentGMMRegistration**, a robust semi-supervised framework for rigid point cloud registration. This model learns to align two point clouds by mapping them into a shared latent Gaussian Mixture Model (GMM) space, handling noise, outliers, and large transformations effectively without expensive iterative optimization during inference.
 
 ---
 

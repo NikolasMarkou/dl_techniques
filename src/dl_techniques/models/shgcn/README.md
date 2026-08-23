@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Graph Learning](https://img.shields.io/badge/Task-Hyperbolic%20Graph%20Learning-purple)](https://arxiv.org/abs/2104.06942)
 
-A production-ready, fully-featured implementation of **Simplified Hyperbolic Graph Convolutional Networks (sHGCN)** in **Keras 3**. This architecture leverages the expressive power of hyperbolic geometry to model hierarchical graph structures (like trees, taxonomies, and biological networks) while maintaining the computational efficiency of Euclidean operations.
+An implementation of **Simplified Hyperbolic Graph Convolutional Networks (sHGCN)** in **Keras 3**. This architecture leverages the expressive power of hyperbolic geometry to model hierarchical graph structures (like trees, taxonomies, and biological networks) while maintaining the computational efficiency of Euclidean operations.
 
 sHGCN simplifies standard Hyperbolic GCNs by performing neighbor aggregation in the tangent (Euclidean) space, using hyperbolic geometry specifically for bias operations. This results in a faster, more stable model that still captures the exponential expansion of hierarchical data.
 

@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **BERT (Bidirectional Encoder Representations from Transformers)** architecture in **Keras 3**. This implementation is based on the original paper by Devlin et al., providing a pure foundation model that separates the core encoding logic from task-specific heads for maximum flexibility.
+An implementation of the **BERT (Bidirectional Encoder Representations from Transformers)** architecture in **Keras 3**. This implementation is based on the original paper by Devlin et al., providing a pure foundation model that separates the core encoding logic from task-specific heads for maximum flexibility.
 
 The architecture's key feature is its stack of **Transformer Encoder Layers**, designed to produce rich, contextualized token embeddings. It includes built-in support for loading standard model variants (`base`, `large`, etc.) with or without pretrained weights.
 

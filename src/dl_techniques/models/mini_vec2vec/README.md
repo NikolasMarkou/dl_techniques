@@ -1,6 +1,6 @@
 # Mini-Vec2Vec: Unsupervised Embedding Space Alignment
 
-A production-ready Keras 3 implementation of the **mini-vec2vec** algorithm for aligning two embedding spaces without parallel data using a single linear transformation.
+A Keras 3 implementation of the **mini-vec2vec** algorithm for aligning two embedding spaces without parallel data using a single linear transformation.
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Keras Version](https://img.shields.io/badge/Keras-3.0-red.svg)](https://keras.io/)

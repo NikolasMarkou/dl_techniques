@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Hierarchical Reasoning Model (HRM)** with **Adaptive Computation Time (ACT)** in **Keras 3**. This architecture mimics human cognitive processes by dynamically allocating "thinking time" based on problem complexity.
+An implementation of the **Hierarchical Reasoning Model (HRM)** with **Adaptive Computation Time (ACT)** in **Keras 3**. This architecture mimics human cognitive processes by dynamically allocating "thinking time" based on problem complexity.
 
 HRM addresses the limitations of fixed-depth transformers by using a reinforcement learning mechanism (Q-Learning) to decide when to halt computation, combined with a dual-system (High/Low level) recurrent core for deep reasoning.
 

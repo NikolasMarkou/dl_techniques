@@ -126,8 +126,10 @@ class PFTSR(keras.Model):
     """
     Progressive Focused Transformer for Single Image Super-Resolution.
 
-    A state-of-the-art transformer-based super-resolution model that achieves
-    excellent performance through progressive focused attention mechanism.
+    The PFT-SR architecture of Long et al. (CVPR 2025), which the authors report
+    as state-of-the-art on single image super-resolution benchmarks through its
+    progressive focused attention mechanism. This Keras port has not been trained
+    or benchmarked here; no performance claim is made for it.
 
     The architecture consists of:
     1. Shallow feature extraction (single conv layer)

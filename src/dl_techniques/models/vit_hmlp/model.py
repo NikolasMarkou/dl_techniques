@@ -90,7 +90,7 @@ class ViTHMLP(keras.Model):
     dl-techniques framework's factory system for consistent component creation and follows modern
     Keras 3 best practices for robust serialization and deployment.
 
-    **Intent**: Provide a production-ready Vision Transformer implementation with hMLP stem that
+    **Intent**: Provide a configurable Vision Transformer implementation with hMLP stem that
     leverages the dl-techniques framework's modular components while following modern Keras 3 best
     practices for robust serialization and deployment. The hMLP stem provides superior performance
     for both supervised learning and masked self-supervised learning approaches.

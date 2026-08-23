@@ -122,7 +122,7 @@ class CLIP(keras.Model):
     and a standard Transformer for text encoding, projecting both into a
     shared embedding space for contrastive learning.
 
-    **Intent**: Provide a production-ready CLIP implementation that follows
+    **Intent**: Provide a complete CLIP implementation that follows
     modern Keras 3 best practices for robust serialization and deployment.
 
     **Architecture**:

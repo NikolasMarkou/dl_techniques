@@ -91,7 +91,7 @@ class PowerMLP(keras.Model):
     performance across various tasks. The dual-branch architecture combines the
     expressiveness of nonlinear transformations with computational efficiency.
 
-    **Intent**: Provide a production-ready, efficient alternative to KAN that can be
+    **Intent**: Provide an efficient alternative to KAN that can be
     easily integrated into existing Keras workflows while offering significant
     computational advantages for practical deep learning applications. The model is
     designed to be drop-in compatible with standard Keras workflows while providing

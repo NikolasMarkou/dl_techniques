@@ -1,6 +1,6 @@
 # Masked Language Model (MLM) Pre-training Framework
 
-A production-ready, model-agnostic framework for pre-training NLP foundation models using the Masked Language Modeling (MLM) objective. Fully integrated with the `dl_techniques` framework and compatible with your BERT implementation.
+A model-agnostic framework for pre-training NLP foundation models using the Masked Language Modeling (MLM) objective. Fully integrated with the `dl_techniques` framework and compatible with your BERT implementation.
 
 ## Table of Contents
 
@@ -28,7 +28,7 @@ The Masked Language Model framework provides a self-supervised learning approach
 
 - **Model-Agnostic**: Works with any encoder implementing the standard interface
 - **Framework-Compliant**: Follows all `dl_techniques` conventions
-- **Production-Ready**: Comprehensive testing, serialization support, and error handling
+- **Tested**: Unit-tested construction, serialization round-trips, and explicit error handling
 - **Fully Documented**: Type hints and Sphinx-compatible documentation
 
 ### Key Features

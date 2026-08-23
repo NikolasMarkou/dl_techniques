@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the **Mamba V1 and Mamba V2** architectures. This implementation provides pure foundation models, separating the core sequence modeling logic from task-specific heads for maximum flexibility.
+A Keras 3 implementation of the **Mamba V1 and Mamba V2** architectures. This implementation provides pure foundation models, separating the core sequence modeling logic from task-specific heads for maximum flexibility.
 
 The architecture's key feature is its **Selective State Space Model (SSM)** core, designed to capture long-range dependencies with **linear-time complexity**. Mamba V2 introduces the **State Space Duality (SSD)** framework, resulting in a refined core layer that is **2-8x faster** and more competitive with highly optimized attention mechanisms.
 

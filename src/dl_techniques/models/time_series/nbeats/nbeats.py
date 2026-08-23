@@ -121,7 +121,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
     This implementation follows modern Keras 3 patterns with proper normalization
     and serialization. It fully supports multivariate inputs and outputs.
 
-    **Intent**: Provide a production-ready N-BEATS implementation for time series
+    **Intent**: Provide a complete N-BEATS implementation for time series
     forecasting with proper residual connections, normalization, and serialization
     support following modern Keras 3 best practices.
 

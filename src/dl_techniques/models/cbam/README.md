@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **CBAMNet**, a convolutional neural network enhanced with the **Convolutional Block Attention Module (CBAM)**. This lightweight and effective attention mechanism refines features at each stage of the network, allowing the model to learn *what* and *where* to focus in the feature maps.
+A Keras 3 implementation of **CBAMNet**, a convolutional neural network enhanced with the **Convolutional Block Attention Module (CBAM)**. This lightweight and effective attention mechanism refines features at each stage of the network, allowing the model to learn *what* and *where* to focus in the feature maps.
 
 The architecture consists of standard convolutional blocks, each followed by a `CBAM` layer that sequentially applies channel and spatial attention.
 

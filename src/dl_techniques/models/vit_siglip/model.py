@@ -78,7 +78,7 @@ class SigLIPVisionTransformer(keras.Model):
     encoder whose patch embedding is split into two strided convolutions, with every
     sub-component created through the dl_techniques factories.
 
-    **Intent**: Provide a production-ready SigLIP Vision Transformer implementation that leverages
+    **Intent**: Provide a configurable SigLIP Vision Transformer implementation that leverages
     the dl_techniques framework's modular components while following modern Keras 3 best
     practices for robust serialization and deployment.
 

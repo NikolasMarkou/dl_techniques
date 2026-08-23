@@ -126,7 +126,7 @@ class TabMModel(keras.Model):
     offers competitive performance with gradient boosting while maintaining neural
     network flexibility and end-to-end differentiability.
 
-    **Intent**: Provide a production-ready tabular learning solution that combines
+    **Intent**: Provide a tabular learning solution that combines
     the performance benefits of ensemble methods with the efficiency of batched
     training, offering both high accuracy and principled uncertainty estimation
     for critical tabular ML applications.

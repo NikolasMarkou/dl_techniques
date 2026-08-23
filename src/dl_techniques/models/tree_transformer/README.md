@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Tree Transformer** in **Keras 3**. This implementation is based on the paper "Tree Transformer: Integrating Tree Structures into Self-Attention," which introduces a novel attention mechanism capable of learning soft constituency trees from raw text without explicit syntactic supervision.
+An implementation of the **Tree Transformer** in **Keras 3**. This implementation is based on the paper "Tree Transformer: Integrating Tree Structures into Self-Attention," which introduces a novel attention mechanism capable of learning soft constituency trees from raw text without explicit syntactic supervision.
 
 The architecture's key innovation is its **Hierarchical Group Attention** mechanism, which enables the model to infer syntactic structure as a byproduct of standard language modeling.
 

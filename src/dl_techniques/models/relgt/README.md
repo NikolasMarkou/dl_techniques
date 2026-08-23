@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Graph Learning](https://img.shields.io/badge/Task-Graph%20Learning-green)](https://github.com/topics/graph-neural-networks)
 
-A production-ready, fully-featured implementation of the **Modern Relational Graph Transformer (RELGT)** in **Keras 3**. This architecture integrates multi-element tokenization with a hybrid local-global attention mechanism, designed specifically for complex predictive modeling on relational databases and heterogeneous graphs.
+An implementation of the **Modern Relational Graph Transformer (RELGT)** in **Keras 3**. This architecture integrates multi-element tokenization with a hybrid local-global attention mechanism, designed specifically for complex predictive modeling on relational databases and heterogeneous graphs.
 
 RELGT addresses the limitations of standard Graph Neural Networks (GNNs) by decoupling structural information from feature processing using learnable global centroids, allowing for the capture of long-range dependencies without the quadratic cost of standard transformers.
 

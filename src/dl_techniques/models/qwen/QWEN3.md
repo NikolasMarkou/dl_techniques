@@ -1,6 +1,6 @@
 # Qwen3: Scalable Transformer Language Model
 
-A production-ready implementation of the Qwen3 architecture, featuring a robust, standard decoder-only transformer stack integrated with Grouped Query Attention (GQA), SwiGLU Feed-Forward Networks, and optional Mixture of Experts (MoE) specialization, as seen in the Qwen3-Coder series.
+An implementation of the Qwen3 architecture, featuring a robust, standard decoder-only transformer stack integrated with Grouped Query Attention (GQA), SwiGLU Feed-Forward Networks, and optional Mixture of Experts (MoE) specialization, as seen in the Qwen3-Coder series.
 
 ## Overview
 

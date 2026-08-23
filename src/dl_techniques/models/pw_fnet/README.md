@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Pyramid Wavelet-Fourier Network (PW-FNet)** in **Keras 3**, based on the paper ["Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration"](https://arxiv.org/abs/2407.13663) by Jiang et al. (2024).
+An implementation of the **Pyramid Wavelet-Fourier Network (PW-FNet)** in **Keras 3**, based on the paper ["Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration"](https://arxiv.org/abs/2407.13663) by Jiang et al. (2024).
 
 The architecture replaces expensive self-attention mechanisms with a highly efficient Fourier Transform-based token mixer within a hierarchical U-Net structure, delivering state-of-the-art performance with a fraction of the computational cost. This implementation is built with modern Keras best practices, ensuring it is robust, easy to understand, and fully serializable.
 

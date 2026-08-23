@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the entire **MobileNet** family of models, from **V1 to V4**. These models represent a lineage of highly efficient convolutional neural networks designed specifically for on-device and mobile vision applications where computational resources are limited.
+A Keras 3 implementation of the entire **MobileNet** family of models, from **V1 to V4**. These models represent a lineage of highly efficient convolutional neural networks designed specifically for on-device and mobile vision applications where computational resources are limited.
 
 The implementations for V2, V3, and V4 leverage a flexible `UniversalInvertedBottleneck` layer, showcasing how a unified building block can be configured to create a wide range of modern architectures.
 

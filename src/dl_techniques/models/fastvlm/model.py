@@ -50,9 +50,9 @@ class FastVLM(keras.Model):
     and transformer-based attention for high-performance vision_heads tasks while
     maintaining computational efficiency.
 
-    **Intent**: Provide a state-of-the-art vision_heads model that achieves excellent
-    performance on image classification and other vision_heads tasks while being
-    suitable for both research and production deployment scenarios.
+    **Intent**: Provide a configurable hybrid convolution/transformer vision model
+    for image classification and other vision tasks. The model has not been trained
+    or benchmarked in this repository; no performance claim is made for it.
 
     **Architecture**:
     ```

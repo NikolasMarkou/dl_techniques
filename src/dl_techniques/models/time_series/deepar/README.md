@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of **DeepAR** in **Keras 3**. DeepAR is a methodology for producing accurate probabilistic forecasts based on training an autoregressive recurrent network on multiple related time series.
+An implementation of **DeepAR** in **Keras 3**. DeepAR is a methodology for producing accurate probabilistic forecasts based on training an autoregressive recurrent network on multiple related time series.
 
 This implementation provides a unified framework for handling real-valued data (Gaussian likelihood) and count data (Negative Binomial likelihood), solving the "cold start" and scaling problems often found in traditional forecasting.
 

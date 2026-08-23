@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of **CoShNet** (Complex Shearlet Network). CoShNet is a hybrid neural network architecture that combines mathematically rigorous, fixed geometric transforms (Shearlets) with the learning capacity of deep complex-valued neural networks (CVNNs).
+A Keras 3 implementation of **CoShNet** (Complex Shearlet Network). CoShNet is a hybrid neural network architecture that combines mathematically rigorous, fixed geometric transforms (Shearlets) with the learning capacity of deep complex-valued neural networks (CVNNs).
 
 By leveraging the physics-inspired properties of shearlets and the phase-preserving nature of complex algebra, CoShNet achieves high classification accuracy with significantly fewer parameters and faster convergence than traditional CNNs.
 

@@ -5,7 +5,7 @@
 [![Scikit-learn](https://img.shields.io/badge/scikit--learn-compatible-blue)](https://scikit-learn.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-A production-ready, Keras 3 implementation of **MothNet**, a computational model of the insect olfactory network designed to excel at machine learning tasks with **limited training data**. Its primary function is to serve as a powerful, automatic feature generator that can be prepended to any standard ML classifier, creating a hybrid "insect cyborg" model with significantly enhanced performance.
+A Keras 3 implementation of **MothNet**, a computational model of the insect olfactory network designed to excel at machine learning tasks with **limited training data**. Its primary function is to serve as a powerful, automatic feature generator that can be prepended to any standard ML classifier, creating a hybrid "insect cyborg" model with significantly enhanced performance.
 
 This implementation provides a modular, fully serializable `keras.Model` that faithfully reproduces the three key stages of insect olfaction: the Antennal Lobe, the Mushroom Body, and a Hebbian Readout. The model is trained using a biologically plausible, local Hebbian learning rule instead of backpropagation, making it a unique tool for data-scarce environments.
 

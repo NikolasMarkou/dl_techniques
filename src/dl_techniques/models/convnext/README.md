@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks (ConvNets) that were modernized to compete with and often outperform Vision Transformers (ViTs) by progressively incorporating architectural decisions from ViTs into a standard ResNet.
+A Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks (ConvNets) that were modernized to compete with and often outperform Vision Transformers (ViTs) by progressively incorporating architectural decisions from ViTs into a standard ResNet.
 
 The implementation includes both ConvNeXt V1 and the improved ConvNeXt V2, which introduces Global Response Normalization (GRN).
 

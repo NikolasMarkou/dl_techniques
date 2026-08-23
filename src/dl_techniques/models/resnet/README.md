@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of **Deep Residual Networks (ResNet)** in **Keras 3**, based on the groundbreaking paper ["Deep Residual Learning for Image Recognition"](https://arxiv.org/abs/1512.03385) by He et al. (2015).
+An implementation of **Deep Residual Networks (ResNet)** in **Keras 3**, based on the groundbreaking paper ["Deep Residual Learning for Image Recognition"](https://arxiv.org/abs/1512.03385) by He et al. (2015).
 
 This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices, featuring pretrained weight support, deep supervision training, and full serialization capabilities that work seamlessly across TensorFlow, PyTorch, and JAX backends.
 

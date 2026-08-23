@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Vision Transformer (ViT)** in **Keras 3**, based on the paper ["An Image Is Worth 16x16 Words: Transformers for Image Recognition at Scale"](https://arxiv.org/abs/2010.11929) by Dosovitskiy et al. (2020).
+An implementation of the **Vision Transformer (ViT)** in **Keras 3**, based on the paper ["An Image Is Worth 16x16 Words: Transformers for Image Recognition at Scale"](https://arxiv.org/abs/2010.11929) by Dosovitskiy et al. (2020).
 
 The architecture supports multiple standard scales (`Tiny`, `Small`, `Base`, `Large`, `Huge`) and is highly configurable, allowing for easy experimentation with different normalization techniques, feed-forward networks, and attention mechanisms.
 
@@ -529,7 +529,7 @@ finetune_model.compile(
 
 ### Pattern 1: Using Modern Components
 
-This implementation makes it easy to experiment with state-of-the-art components.
+This implementation makes it easy to experiment with modern components.
 
 ```python
 # Create a ViT with RMS Normalization and a SwiGLU FFN

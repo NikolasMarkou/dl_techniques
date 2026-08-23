@@ -125,7 +125,7 @@ class Gemma3(keras.Model):
     best practices. It features token embeddings with scaling, a series of
     transformer blocks, and a final projection head.
 
-    **Intent**: To provide a production-ready Gemma 3 implementation that is
+    **Intent**: To provide a complete Gemma 3 implementation that is
     robust, serializable, and easily integrated with the dl_techniques framework
     for training, optimization, and analysis.
 

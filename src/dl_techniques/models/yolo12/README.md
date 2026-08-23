@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of a **YOLOv12-based multi-task learning model**. This framework is designed to simultaneously perform object detection, instance segmentation, and image classification using a shared, efficient feature extraction backbone. It is built for flexibility, allowing any combination of tasks to be enabled or disabled, and supports separate class configurations for each task.
+A Keras 3 implementation of a **YOLOv12-based multi-task learning model**. This framework is designed to simultaneously perform object detection, instance segmentation, and image classification using a shared, efficient feature extraction backbone. It is built for flexibility, allowing any combination of tasks to be enabled or disabled, and supports separate class configurations for each task.
 
 This implementation uses the Keras Functional API with named dictionary outputs, providing a clean and interpretable interface for complex multi-task scenarios. It is fully serializable and works seamlessly across TensorFlow, PyTorch, and JAX backends.
 
