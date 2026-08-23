@@ -1,5 +1,15 @@
 """
-Guard: BERT's default activation is the ORIGINAL RELEASE's tanh-approximate GELU.
+Guard: BERT's tanh-GELU default is live, serializable, and still escapable.
+
+The reference claim itself -- *which* GELU form the built graph runs, measured
+against an independently transcribed tanh formula -- has ONE home, and it is not
+this file: ``tests/test_the_ported_numeric_defaults_match_their_references.py``
+(rows ``bert``/``gemma`` of ``test_the_gelu_form_in_use_is_the_tanh_approximation``
+plus the ``BERT.DEFAULT_HIDDEN_ACT`` scalar row). What remains here is the
+BEHAVIOUR around that choice, which is BERT-specific and belongs with BERT: that
+the choice moves the forward pass end to end, that ``hidden_act`` still
+round-trips as a plain string, and that the exact form stays reachable for the
+HuggingFace-tracking siblings.
 
 Reference (the release ``bert.py``'s own References section cites, Devlin et al. 2018):
     https://github.com/google-research/bert/blob/master/modeling.py
@@ -12,24 +22,16 @@ Keras' bare ``"gelu"`` string is ``approximate=False`` -- the exact/erf form
 This is **inference-changing**: it alters the forward pass of every token in
 every layer, not merely how training converges. See decisions.md D-500.
 
-These assertions deliberately probe the callable that the BUILT GRAPH holds,
-and compare it against an independently written-out tanh formula. A test that
-only asserted ``model.hidden_act == "gelu_tanh"`` could not see which form the
-graph actually runs.
+Nothing here re-asserts the form itself; see the module named above for that.
 """
 
 import keras
 import numpy as np
 import pytest
-from keras import ops
-
 from dl_techniques.layers.activations import gelu_tanh
 from dl_techniques.models.bert.bert import BERT
 
 # ---------------------------------------------------------------------
-
-#: max|exact-erf GELU - tanh GELU|, float64, x in [-6, 6]. Attained at x ~= 2.699.
-EXPECTED_FORM_SEPARATION: float = 4.7324e-04
 
 _KW = dict(
     vocab_size=64, hidden_size=32, num_layers=2, num_heads=2,
@@ -46,41 +48,7 @@ def _inputs():
     }
 
 
-def _reference_tanh_gelu(x: np.ndarray) -> np.ndarray:
-    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
-
-
 # ---------------------------------------------------------------------
-
-
-def test_default_hidden_act_names_the_approximation() -> None:
-    assert BERT.DEFAULT_HIDDEN_ACT == "gelu_tanh"
-
-
-def test_every_encoder_ffn_runs_the_tanh_form_not_the_erf_form() -> None:
-    """The load-bearing assertion: which function the graph calls."""
-    keras.utils.set_random_seed(1234)
-    model = BERT(**_KW)
-    model(_inputs(), training=False)
-
-    grid = np.linspace(-6.0, 6.0, 20001).astype("float32")
-    expected_tanh = _reference_tanh_gelu(grid.astype("float64")).astype("float32")
-    exact_erf = np.asarray(keras.activations.gelu(ops.convert_to_tensor(grid)))
-
-    assert len(model.encoder_layers) == _KW["num_layers"]
-    for i, layer in enumerate(model.encoder_layers):
-        fn = layer.ffn_layer.activation_fn
-        got = np.asarray(fn(ops.convert_to_tensor(grid)))
-        assert np.abs(got - expected_tanh).max() < 1e-5, (
-            f"encoder_layer_{i}'s FFN activation is not the "
-            "google-research/bert tanh approximation"
-        )
-        separation = float(np.abs(got - exact_erf).max())
-        assert separation == pytest.approx(EXPECTED_FORM_SEPARATION, rel=0.05), (
-            f"encoder_layer_{i}'s FFN activation sits {separation:.6e} from the "
-            "exact/erf GELU; 0.0 would mean BERT has silently reverted to Keras' "
-            "approximate=False default"
-        )
 
 
 def test_the_choice_actually_moves_the_forward_pass() -> None:

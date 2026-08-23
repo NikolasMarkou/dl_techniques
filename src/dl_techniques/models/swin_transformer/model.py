@@ -101,6 +101,30 @@ from dl_techniques.layers.transformers.swin_transformer_block import SwinTransfo
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-08-23T091307-9a110062/D-502
+#: Kernel initializer for every Dense/projection in the model, matching the
+#: official implementation's ``_init_weights``, which applies
+#: ``trunc_normal_(m.weight, std=.02)`` to every ``nn.Linear``:
+#:   https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
+#: Do NOT revert to ``"glorot_uniform"`` (Keras' Dense default, and what this
+#: parameter used to be): that is a DIFFERENT distribution AND a different
+#: scale, fan-dependent rather than fixed. TRAINING-ONLY -- an initializer is
+#: overwritten by any weight load, so no checkpoint changes meaning.
+#:
+#: This is a config DICT, not an ``Initializer`` instance, and that is
+#: load-bearing: a seedless instance bakes its seed at construction and REPLAYS
+#: the identical draw on every call (MEASURED: two calls of one instance at the
+#: same shape differ by exactly 0.0), so an instance used as a default argument
+#: -- evaluated once at import -- would hand every model in the process the same
+#: weights. ``keras.initializers.get`` resolves this dict to a fresh instance
+#: per consumer. Same hazard as D-072 / D-481. See decisions.md D-502.
+REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
+    "class_name": "TruncatedNormal",
+    "config": {"stddev": 0.02},
+}
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class SwinTransformer(keras.Model):
     """
@@ -179,7 +203,10 @@ class SwinTransformer(keras.Model):
             Must be positive. Determines initial downsampling. Defaults to 4.
         use_bias: Boolean, whether to use bias terms in linear layers.
             False can reduce parameters. Defaults to True.
-        kernel_initializer: String or Initializer, weight initialization strategy.
+        kernel_initializer: String, config dict or Initializer, weight
+            initialization strategy. Defaults to ``TruncatedNormal(stddev=0.02)``,
+            the official implementation's ``_init_weights`` convention
+            (https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py).
             Controls model parameter initialization. Defaults to "glorot_uniform".
         bias_initializer: String or Initializer, bias initialization strategy.
             Only used when use_bias=True. Defaults to "zeros".
@@ -296,7 +323,7 @@ class SwinTransformer(keras.Model):
             drop_path_rate: float = 0.1,
             patch_size: int = 4,
             use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = REFERENCE_KERNEL_INITIALIZER,
             bias_initializer: Union[str, initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
             bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,

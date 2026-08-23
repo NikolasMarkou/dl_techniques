@@ -32,6 +32,44 @@ Caffe's ``weight_filler { type: "xavier" }`` normalizes by ``fan_in`` by default
 ``lecun_uniform``. The full measured derivation lives at
 ``models/squeezenet/caffe_reference_init.py``; this file asserts the outcome.
 
+THE BARE-STRING-INITIALIZER TRAP
+--------------------------------
+``kernel_initializer="truncated_normal"`` names the right *distribution family*
+and silently carries Keras' own scale: ``TruncatedNormal(mean=0.0, stddev=0.05)``
+(``keras/src/initializers/random_initializers.py``), 2.5x wider than the
+``std=.02`` every ViT-family reference specifies. That is how the ``dino`` rows
+below survived review — the string looks correct. Two further facts the
+initializer rows depend on, both MEASURED rather than assumed:
+
+* Keras' ``TruncatedNormal`` resamples outside +-2 sigma, so the REALIZED
+  standard deviation is ``stddev * 0.87964``, not ``stddev``. A test asserting
+  the nominal 0.02 on drawn weights would be red for a correct implementation.
+* A seedless ``RandomInitializer`` resolves ``seed=None`` to a concrete seed at
+  CONSTRUCTION time, so one instance REPLAYS the identical draw on every call
+  (two calls of one instance at the same shape differ by exactly ``0.0``). The
+  reference constants are therefore inert config DICTS, never instances: an
+  instance used as a default argument is evaluated once at import and would hand
+  every model in the process the same weights.
+
+WHY THE GELU ROWS ARE NOT SCALAR ROWS
+-------------------------------------
+``bert`` and ``gemma`` name references that specify the **tanh approximation** of
+GELU, while Keras' ``"gelu"`` string is ``approximate=False`` — the exact/erf
+form. There is no scalar to compare: the defect is *which function the graph
+runs*, and a string assertion cannot see that (both forms are spelled "gelu"
+somewhere). ``test_the_gelu_form_in_use_is_the_tanh_approximation`` therefore
+evaluates the callable the BUILT MODEL holds against an independently written-out
+tanh formula. That formula is transcribed here a second time on purpose: the
+other transcription (``tests/test_layers/test_activations/test_gelu_tanh.py``)
+checks a different subject — whether ``gelu_tanh`` implements it — and an oracle
+that imports its expectation from the thing it is judging is not an oracle.
+
+Unlike every other row in this file, the two GELU rows are **INFERENCE-CHANGING**:
+they alter the forward pass of an already-trained model. Every initializer and
+momentum row is TRAINING-ONLY, which
+``test_a_loaded_checkpoint_ignores_the_initializer`` demonstrates rather than
+asserts.
+
 WHAT THIS GUARD DOES NOT DO
 ---------------------------
 It does not assert that these numerics are *good*, only that they are the
@@ -42,6 +80,12 @@ for them would manufacture a citation that does not exist.
 
 RED-proof: each row was reverted to the pre-fix value in turn and this module
 failed naming that exact site (recorded in the plan's decision log, D-482).
+The rows added by D-500..D-504 were RED-proven the same way: ``vit``'s stddev
+reverted to Keras' 0.05 failed
+``test_the_shipped_numeric_is_the_reference_value[vit/model.py ...]`` and the
+realized-draw row beside it; ``dino``'s reverted likewise; the ``bert`` and
+``gemma`` GELU defaults reverted to ``"gelu"`` failed the form test naming the
+package.
 
 References:
     - torchvision ``nn.BatchNorm2d``:
@@ -53,11 +97,26 @@ References:
       https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.1/train_val.prototxt
     - Caffe ``XavierFiller``:
       https://github.com/BVLC/caffe/blob/master/include/caffe/filler.hpp
+    - original BERT ``gelu`` (tanh approximation):
+      https://github.com/google-research/bert/blob/master/modeling.py
+    - HuggingFace ``Gemma3TextConfig.hidden_activation = "gelu_pytorch_tanh"``:
+      https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/configuration_gemma3.py
+    - HuggingFace ``ViTConfig.initializer_range = 0.02``:
+      https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py
+    - Swin ``_init_weights``: ``trunc_normal_(m.weight, std=.02)``:
+      https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
+    - DINO ``_init_weights``: ``trunc_normal_(m.weight, std=.02)``:
+      https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
+    - DINOv3, same ViT/Mlp convention:
+      https://github.com/facebookresearch/dinov3/blob/main/dinov3/models/vision_transformer.py
 """
 
 from typing import Any, Callable, List, Tuple
 
+import keras
+import numpy as np
 import pytest
+from keras import ops
 
 _TORCHVISION_BN = (
     "https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html"
@@ -71,12 +130,34 @@ _SQUEEZENET_V11 = (
     "https://github.com/forresti/SqueezeNet/blob/master/"
     "SqueezeNet_v1.1/train_val.prototxt"
 )
+_GOOGLE_BERT = "https://github.com/google-research/bert/blob/master/modeling.py"
+_HF_GEMMA3 = (
+    "https://github.com/huggingface/transformers/blob/main/"
+    "src/transformers/models/gemma3/configuration_gemma3.py"
+)
+_HF_VIT = (
+    "https://github.com/huggingface/transformers/blob/main/"
+    "src/transformers/models/vit/configuration_vit.py"
+)
+_MSFT_SWIN = (
+    "https://github.com/microsoft/Swin-Transformer/blob/main/"
+    "models/swin_transformer.py"
+)
+_FAIR_DINO = (
+    "https://github.com/facebookresearch/dino/blob/main/vision_transformer.py"
+)
 
 # Keras' own defaults, asserted as the NEGATIVE control: a row whose expected
 # value equals the Keras default cannot distinguish "ported correctly" from
 # "never ported at all", and would be a vacuous pin.
 _KERAS_BN_MOMENTUM_DEFAULT = 0.99
 _KERAS_CONV_INITIALIZER_DEFAULT = "glorot_uniform"
+#: What the bare string ``"truncated_normal"`` resolves to. A real rival: the
+#: pre-fix ``dino`` sites named the right family and got this scale.
+_KERAS_TRUNCATED_NORMAL_STDDEV = 0.05
+#: The Keras activation string whose ``approximate=False`` default is the defect
+#: the two GELU rows pin.
+_KERAS_EXACT_GELU_STRING = "gelu"
 
 
 # --- readers -----------------------------------------------------------------
@@ -132,6 +213,32 @@ def _squeezenet_v2_head_stddev() -> float:
     from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 
     return SqueezeNoduleNetV2.HEAD_INITIALIZER["config"]["stddev"]
+
+
+def _vit_initializer_stddev() -> float:
+    from dl_techniques.models.vit.model import REFERENCE_KERNEL_INITIALIZER
+
+    return REFERENCE_KERNEL_INITIALIZER["config"]["stddev"]
+
+
+def _swin_initializer_stddev() -> float:
+    from dl_techniques.models.swin_transformer.model import (
+        REFERENCE_KERNEL_INITIALIZER,
+    )
+
+    return REFERENCE_KERNEL_INITIALIZER["config"]["stddev"]
+
+
+def _dino_initializer_stddev() -> float:
+    from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
+
+    return DINO_KERNEL_INITIALIZER["config"]["stddev"]
+
+
+def _bert_default_hidden_act() -> str:
+    from dl_techniques.models.bert.bert import BERT
+
+    return BERT.DEFAULT_HIDDEN_ACT
 
 
 # (site, reader, expected, the-value-that-means-unported, source url)
@@ -191,6 +298,39 @@ REFERENCE_PINS: List[Tuple[str, Callable[[], Any], Any, Any, str]] = [
         None,
         _SQUEEZENET_V11,
     ),
+    # --- ViT-family kernel initializers. All three references say std=.02.
+    (
+        "vit/model.py REFERENCE_KERNEL_INITIALIZER stddev (every layer)",
+        _vit_initializer_stddev,
+        0.02,
+        None,  # the pre-fix rival was he_normal, which has no stddev at all
+        _HF_VIT,
+    ),
+    (
+        "swin_transformer/model.py REFERENCE_KERNEL_INITIALIZER stddev "
+        "(every layer)",
+        _swin_initializer_stddev,
+        0.02,
+        None,  # the pre-fix rival was glorot_uniform, which has no stddev
+        _MSFT_SWIN,
+    ),
+    (
+        "dino/reference_init.py DINO_KERNEL_INITIALIZER stddev "
+        "(dino_v1 head + classifier, dino_v3 model + classifier)",
+        _dino_initializer_stddev,
+        0.02,
+        _KERAS_TRUNCATED_NORMAL_STDDEV,
+        _FAIR_DINO,
+    ),
+    # --- GELU form. The scalar here is only the NAME; the form actually in use
+    # --- is pinned by test_the_gelu_form_in_use_is_the_tanh_approximation.
+    (
+        "bert/bert.py BERT.DEFAULT_HIDDEN_ACT (every encoder FFN)",
+        _bert_default_hidden_act,
+        "gelu_tanh",
+        _KERAS_EXACT_GELU_STRING,
+        _GOOGLE_BERT,
+    ),
 ]
 
 _IDS = [row[0] for row in REFERENCE_PINS]
@@ -223,3 +363,257 @@ def test_the_pin_is_not_vacuous(site, reader, expected, unported, url):
         f"{site}: the pinned value {expected!r} IS the framework default, so this "
         f"row cannot fail on an unported package and pins nothing."
     )
+
+
+# --- non-scalar rows ---------------------------------------------------------
+# Two of the five cells this plan shipped cannot be expressed as "reader() ==
+# expected": an activation FORM has no scalar, and an initializer's declared
+# stddev does not by itself prove the draw reaches the graph. They live here, in
+# the same file, rather than in a rival guard module.
+
+#: Keras resamples outside +-2 sigma, so a TruncatedNormal's REALIZED std is this
+#: fraction of its nominal ``stddev``. ONE home for the factor. Never assert the
+#: nominal 0.02 against drawn weights.
+TRUNCATION_FACTOR = 0.87964
+REALIZED_TARGET = 0.02 * TRUNCATION_FACTOR   # ~= 0.017593
+
+#: max|exact-erf GELU - tanh GELU|, float64, over x in [-6, 6]; attained at
+#: x ~= 2.699, interior to the realistic post-LayerNorm activation range.
+EXPECTED_GELU_FORM_SEPARATION = 4.7324e-04
+
+
+def _reference_tanh_gelu(x):
+    """The tanh approximation, transcribed from google-research/bert modeling.py.
+
+    Deliberately written out rather than imported: this is the oracle for
+    whether the shipped ports use that form, and an oracle that imports its
+    expectation from the code under test proves nothing.
+    """
+    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
+
+
+def _grid():
+    return np.linspace(-6.0, 6.0, 20001).astype("float32")
+
+
+def _built_bert_ffn_activations():
+    from dl_techniques.models.bert.bert import BERT
+
+    ids = np.random.RandomState(0).randint(0, 64, size=(2, 8))
+    inputs = {
+        "input_ids": ids,
+        "attention_mask": np.ones_like(ids),
+        "token_type_ids": np.zeros_like(ids),
+    }
+    keras.utils.set_random_seed(1234)
+    model = BERT(
+        vocab_size=64, hidden_size=32, num_layers=2, num_heads=2,
+        intermediate_size=64, max_position_embeddings=16, type_vocab_size=2,
+    )
+    model(inputs, training=False)
+    return [layer.ffn_layer.activation_fn for layer in model.encoder_layers]
+
+
+def _built_gemma_ffn_activations():
+    from dl_techniques.models.gemma.components import Gemma3TransformerBlock
+
+    keras.utils.set_random_seed(7)
+    block = Gemma3TransformerBlock(
+        hidden_size=32, num_attention_heads=2, num_key_value_heads=1,
+        ffn_hidden_size=64, max_seq_len=16,
+    )
+    block(np.random.RandomState(1).randn(2, 8, 32).astype("float32"), training=False)
+    return [block.ffn.activation]
+
+
+@pytest.mark.parametrize(
+    "package, reader, url",
+    [
+        ("bert (every encoder FFN)", _built_bert_ffn_activations, _GOOGLE_BERT),
+        ("gemma (the GeGLU gate)", _built_gemma_ffn_activations, _HF_GEMMA3),
+    ],
+    ids=["bert", "gemma"],
+)
+def test_the_gelu_form_in_use_is_the_tanh_approximation(package, reader, url):
+    """INFERENCE-CHANGING rows: which function the BUILT GRAPH actually calls.
+
+    A string assertion cannot answer this — Keras' ``"gelu"`` and the tanh
+    approximation are both spelled "gelu" somewhere. So the callable held by the
+    built model is evaluated and compared against ``_reference_tanh_gelu``.
+    """
+    grid = _grid()
+    expected_tanh = _reference_tanh_gelu(grid.astype("float64")).astype("float32")
+    exact_erf = np.asarray(keras.activations.gelu(ops.convert_to_tensor(grid)))
+
+    activations = reader()
+    assert activations, package
+    for i, fn in enumerate(activations):
+        got = np.asarray(fn(ops.convert_to_tensor(grid)))
+        assert np.abs(got - expected_tanh).max() < 1e-5, (
+            f"{package}, site {i}: the activation in use is not the tanh "
+            f"approximation the reference specifies. Re-verify at: {url}"
+        )
+        separation = float(np.abs(got - exact_erf).max())
+        assert separation == pytest.approx(
+            EXPECTED_GELU_FORM_SEPARATION, rel=0.05
+        ), (
+            f"{package}, site {i}: sits {separation:.6e} from the exact/erf GELU; "
+            f"0.0 means the port reverted to Keras' approximate=False default"
+        )
+
+
+def _built_vit():
+    from dl_techniques.models.vit.model import ViT
+
+    keras.utils.set_random_seed(3)
+    model = ViT(input_shape=(32, 32, 3), num_classes=4, scale="pico", patch_size=8)
+    model(np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32"))
+    return model, "\x00"
+
+
+def _built_swin():
+    from dl_techniques.models.swin_transformer.model import SwinTransformer
+
+    keras.utils.set_random_seed(3)
+    model = SwinTransformer(
+        num_classes=4, embed_dim=16, depths=[2, 2, 2, 2], num_heads=[1, 2, 4, 8],
+        window_size=2, patch_size=4, input_shape=(64, 64, 3),
+    )
+    model(np.random.RandomState(0).randn(2, 64, 64, 3).astype("float32"))
+    return model, "\x00"
+
+
+def _built_dino_v3():
+    from dl_techniques.models.dino.dino_v3 import DINOv3
+
+    keras.utils.set_random_seed(3)
+    model = DINOv3(
+        image_size=(32, 32), patch_size=(8, 8), embed_dim=32, depth=2,
+        num_heads=2, num_classes=4,
+    )
+    model(np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32"))
+    return model, "\x00"
+
+
+def _built_dino_v1_head():
+    from dl_techniques.models.dino.dino_v1 import DINOHead
+
+    keras.utils.set_random_seed(3)
+    head = DINOHead(in_dim=64, out_dim=32, hidden_dim=256, bottleneck_dim=64)
+    head(np.random.RandomState(1).randn(8, 64).astype("float32"))
+    # ``last_layer`` carries a UnitNorm(axis=0) constraint that rescales its
+    # columns to unit norm, so its post-build std reports the CONSTRAINT, not
+    # the initializer.
+    return head, "last_layer"
+
+
+def _built_dino_v1_classifier():
+    from dl_techniques.models.dino.dino_v1 import DINOv1
+
+    keras.utils.set_random_seed(3)
+    model = DINOv1(
+        image_size=32, patch_size=8, embed_dim=64, depth=2, num_heads=2,
+        num_classes=64, include_top=True,
+    )
+    model(np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32"))
+    return model, "\x00"
+
+
+@pytest.mark.parametrize(
+    "site, builder, only, rel, url",
+    [
+        ("vit/model.py (every kernel)", _built_vit, None, 0.05, _HF_VIT),
+        ("swin_transformer/model.py (every kernel)", _built_swin, None, 0.05, _MSFT_SWIN),
+        ("dino/dino_v3.py (every kernel)", _built_dino_v3, None, 0.05, _FAIR_DINO),
+        (
+            "dino/dino_v1.py DINOHead (excl. UnitNorm last_layer)",
+            _built_dino_v1_head, None, 0.05, _FAIR_DINO,
+        ),
+        (
+            "dino/dino_v1.py classifier head",
+            _built_dino_v1_classifier, "classifier/kernel", 0.10, _FAIR_DINO,
+        ),
+    ],
+)
+def test_the_initializer_draw_reaches_the_graph(site, builder, only, rel, url):
+    """A declared constant is not a draw. This asserts the REALIZED std of the
+    weights a built model actually holds — ``0.02 * 0.87964``, never 0.02."""
+    obj, exclude = builder()
+    kernels = [
+        np.asarray(w)
+        for w in obj.weights
+        if (w.path == only if only else w.path.endswith("kernel"))
+        and np.asarray(w).ndim >= 2
+        and exclude not in w.path
+    ]
+    assert kernels, f"{site}: probe found no kernels -- the model did not build"
+    realized = float(np.concatenate([k.ravel() for k in kernels]).std())
+    assert realized == pytest.approx(REALIZED_TARGET, rel=rel), (
+        f"{site} draws at std {realized:.6f}; the reference's 0.02 realizes as "
+        f"{REALIZED_TARGET:.6f} after truncation. Re-verify at: {url}"
+    )
+
+
+def test_the_bare_truncated_normal_string_is_keras_own_scale():
+    """The trap the dino rows exist to close: right family, wrong scale."""
+    bare = keras.initializers.get("truncated_normal")
+    assert bare.stddev == _KERAS_TRUNCATED_NORMAL_STDDEV
+    assert bare.stddev == pytest.approx(2.5 * 0.02)
+
+
+def test_the_reference_initializers_are_inert_dicts_not_shared_instances():
+    """A seedless instance bakes its seed at construction and REPLAYS its draw,
+    so one shared as a default argument would hand every model in the process
+    identical weights. Both halves are measured here, not assumed."""
+    from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
+    from dl_techniques.models.swin_transformer.model import (
+        REFERENCE_KERNEL_INITIALIZER as SWIN_INIT,
+    )
+    from dl_techniques.models.vit.model import (
+        REFERENCE_KERNEL_INITIALIZER as VIT_INIT,
+    )
+
+    for config in (VIT_INIT, SWIN_INIT, DINO_KERNEL_INITIALIZER):
+        assert isinstance(config, dict), config
+
+    one = keras.initializers.TruncatedNormal(stddev=0.02)
+    assert np.abs(np.asarray(one((8, 8))) - np.asarray(one((8, 8)))).max() == 0.0, (
+        "Keras stopped replaying a seedless instance; the dict form can be revisited"
+    )
+    a = keras.initializers.get(dict(VIT_INIT))
+    b = keras.initializers.get(dict(VIT_INIT))
+    assert np.abs(np.asarray(a((8, 8))) - np.asarray(b((8, 8)))).max() > 0.0
+
+
+def test_a_loaded_checkpoint_ignores_the_initializer(tmp_path):
+    """Why every initializer row here is TRAINING-ONLY and the two GELU rows are
+    not. An artifact written under the OLD initializer is reproduced exactly by a
+    model built with the NEW one, because loading overwrites what was drawn."""
+    from dl_techniques.models.vit.model import ViT
+
+    x = np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
+    keras.utils.set_random_seed(11)
+    old = ViT(
+        input_shape=(32, 32, 3), num_classes=4, scale="pico", patch_size=8,
+        kernel_initializer="he_normal",
+    )
+    old(x)
+    reference = [np.asarray(w) for w in old.weights]
+    path = tmp_path / "vit_old_init.keras"
+    old.save(path)
+
+    keras.utils.set_random_seed(99)
+    fresh = ViT(input_shape=(32, 32, 3), num_classes=4, scale="pico", patch_size=8)
+    fresh(x)
+    # Non-vacuity: the two DISAGREE before the load, so the assertion after it is
+    # not passing on an accident of seeding.
+    before = max(
+        float(np.abs(np.asarray(a) - b).max()) for a, b in zip(fresh.weights, reference)
+    )
+    assert before > 1e-3
+
+    fresh.load_weights(path)
+    after = max(
+        float(np.abs(np.asarray(a) - b).max()) for a, b in zip(fresh.weights, reference)
+    )
+    assert after == 0.0, "a weight load no longer overrides the initializer"

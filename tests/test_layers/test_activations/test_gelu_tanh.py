@@ -26,8 +26,11 @@ from dl_techniques.layers.activations import gelu_tanh, resolve_activation
 
 # ---------------------------------------------------------------------
 
-#: max|exact-erf GELU - tanh GELU|, float64, x in [-6, 6]. Attained at x ~= 2.699.
-EXPECTED_FORM_SEPARATION: float = 4.7324e-04
+# The exact SIZE of the gap between the two forms (4.7324e-04) is pinned once, in
+# ``tests/test_the_ported_numeric_defaults_match_their_references.py``, where it
+# judges the two PORTS. This module's subject is narrower -- whether ``gelu_tanh``
+# itself computes the tanh formula -- and that is settled below against an
+# independent transcription, so only the gap's non-zero-ness is needed here.
 
 
 def _reference_tanh_gelu(x: np.ndarray) -> np.ndarray:
@@ -57,10 +60,9 @@ def test_gelu_tanh_is_not_the_exact_erf_form(grid: np.ndarray) -> None:
     got = np.asarray(gelu_tanh(ops.convert_to_tensor(grid)))
     exact = np.asarray(keras.activations.gelu(ops.convert_to_tensor(grid)))
     separation = float(np.abs(got - exact).max())
-    assert separation == pytest.approx(EXPECTED_FORM_SEPARATION, rel=0.05), (
-        f"separation from the exact/erf GELU is {separation:.6e}, expected "
-        f"~{EXPECTED_FORM_SEPARATION:.6e}; a separation of 0.0 means gelu_tanh "
-        "has silently become the exact form"
+    assert separation > 1e-5, (
+        f"separation from the exact/erf GELU is {separation:.6e}; a separation of "
+        "0.0 means gelu_tanh has silently become the exact form"
     )
 
 

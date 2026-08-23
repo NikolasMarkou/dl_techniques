@@ -105,6 +105,7 @@ from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedd
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.models.dino.common import reject_input_shape
+from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -185,7 +186,9 @@ class DINOv3(keras.Model):
             Defaults to 1.0.
         activation: Activation function for the FFN layers. Defaults to 'gelu'.
         kernel_initializer: Initializer for kernel weights. Defaults to
-            'glorot_uniform'.
+            ``TruncatedNormal(stddev=0.02)``, DINO's published
+            ``trunc_normal_(std=.02)``
+            (https://github.com/facebookresearch/dinov3/blob/main/dinov3/models/vision_transformer.py).
         bias_initializer: Initializer for bias weights. Defaults to 'zeros'.
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
@@ -247,7 +250,13 @@ class DINOv3(keras.Model):
         rope_theta: float = 10000.0,
         rope_percentage: float = 1.0,
         activation: Union[str, Callable] = 'gelu',
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
+        # DECISION plan-2026-08-23T091307-9a110062/D-504
+        # NOT 'glorot_uniform' (Keras' Dense default) and NOT the bare string
+        # "truncated_normal" (Keras' stddev=0.05, 2.5x too wide). DINOv3 carries
+        # the same ViT/Mlp trunc_normal_(std=.02) convention as dino/dinov2:
+        #   https://github.com/facebookresearch/dinov3/blob/main/dinov3/models/vision_transformer.py
+        # TRAINING-ONLY. See decisions.md D-504.
+        kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = DINO_KERNEL_INITIALIZER,
         bias_initializer: Union[str, initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
         bias_regularizer: Optional[regularizers.Regularizer] = None,
@@ -491,9 +500,12 @@ class DINOv3(keras.Model):
         # Add classification head if requested
         if self.include_top:
             if self.num_classes > 0:
+                # DECISION plan-2026-08-23T091307-9a110062/D-504
+                # The bare string is Keras' stddev=0.05, not DINO's 0.02.
+                # See decisions.md D-504.
                 self.classifier = layers.Dense(
                     units=self.num_classes,
-                    kernel_initializer="truncated_normal",
+                    kernel_initializer=initializers.get(DINO_KERNEL_INITIALIZER),
                     kernel_regularizer=self.kernel_regularizer,
                     bias_regularizer=self.bias_regularizer,
                     name='classifier'

@@ -71,6 +71,13 @@ DELIBERATELY_NOT_EXPORTED = {
     # would advertise a construction-time-only operation that DESTROYS a trained
     # teacher if a caller runs it later.
     "sync_teacher_to_student",
+    # `reference_init.DINO_KERNEL_INITIALIZER` / `DINO_INITIALIZER_STDDEV`
+    # (D-504) are the package's own fetched reference constants, imported by
+    # dino_v1 and dino_v3 so the published `trunc_normal_(std=.02)` has ONE
+    # home. They are a shared internal, not model API: a caller passes
+    # `kernel_initializer=` or takes the default, and never needs the constant.
+    "DINO_KERNEL_INITIALIZER",
+    "DINO_INITIALIZER_STDDEV",
 }
 
 
@@ -82,7 +89,7 @@ def test_every_public_submodule_name_is_exported_or_explicitly_excluded():
 
     exported = set(pkg.__all__)
     unaccounted = {}
-    for sub in ("dino_v1", "dino_v2", "dino_v3", "common"):
+    for sub in ("dino_v1", "dino_v2", "dino_v3", "common", "reference_init"):
         mod = importlib.import_module(f"dl_techniques.models.dino.{sub}")
         for name, value in vars(mod).items():
             if name.startswith("_"):

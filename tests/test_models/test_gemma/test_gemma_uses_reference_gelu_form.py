@@ -1,5 +1,13 @@
 """
-Guard: Gemma 3's GeGLU gate runs the tanh-approximate GELU, per HuggingFace.
+Guard: Gemma 3's tanh-GELU gate is live and serializable.
+
+The reference claim -- *which* GELU form the built block runs -- has ONE home,
+and it is not this file:
+``tests/test_the_ported_numeric_defaults_match_their_references.py``, row
+``gemma`` of ``test_the_gelu_form_in_use_is_the_tanh_approximation``. What
+remains here is the behaviour around that choice: that it moves the block output,
+and that a registered function (unlike the lambda or ``functools.partial`` that
+would otherwise express it) survives a ``.keras`` round trip.
 
 Reference:
     https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/configuration_gemma3.py
@@ -12,23 +20,16 @@ Keras' bare ``"gelu"`` string is ``approximate=False`` -- the exact/erf form
 ran a DIFFERENT function from the reference. This is **inference-changing**, not
 training-only. See decisions.md D-501.
 
-The assertions probe the callable held by the built block and compare it against
-an independently written-out tanh formula; a string check could not tell which
-form the graph runs.
+Nothing here re-asserts the form itself; see the module named above for that.
 """
 
 import keras
 import numpy as np
 import pytest
-from keras import ops
-
 from dl_techniques.layers.activations import gelu_tanh
 from dl_techniques.models.gemma.components import Gemma3TransformerBlock
 
 # ---------------------------------------------------------------------
-
-#: max|exact-erf GELU - tanh GELU|, float64, x in [-6, 6]. Attained at x ~= 2.699.
-EXPECTED_FORM_SEPARATION: float = 4.7324e-04
 
 _KW = dict(
     hidden_size=32, num_attention_heads=2, num_key_value_heads=1,
@@ -36,35 +37,11 @@ _KW = dict(
 )
 
 
-def _reference_tanh_gelu(x: np.ndarray) -> np.ndarray:
-    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
-
-
 def _x() -> np.ndarray:
     return np.random.RandomState(1).randn(2, 8, 32).astype("float32")
 
 
 # ---------------------------------------------------------------------
-
-
-def test_the_geglu_gate_runs_the_tanh_form_not_the_erf_form() -> None:
-    keras.utils.set_random_seed(7)
-    block = Gemma3TransformerBlock(**_KW)
-    block(_x(), training=False)
-
-    grid = np.linspace(-6.0, 6.0, 20001).astype("float32")
-    got = np.asarray(block.ffn.activation(ops.convert_to_tensor(grid)))
-    expected_tanh = _reference_tanh_gelu(grid.astype("float64")).astype("float32")
-    exact_erf = np.asarray(keras.activations.gelu(ops.convert_to_tensor(grid)))
-
-    assert np.abs(got - expected_tanh).max() < 1e-5, (
-        "the Gemma GeGLU gate is not the gelu_pytorch_tanh approximation"
-    )
-    separation = float(np.abs(got - exact_erf).max())
-    assert separation == pytest.approx(EXPECTED_FORM_SEPARATION, rel=0.05), (
-        f"the Gemma GeGLU gate sits {separation:.6e} from the exact/erf GELU; "
-        "0.0 would mean it has reverted to Keras' approximate=False default"
-    )
 
 
 def test_the_choice_actually_moves_the_block_output() -> None:

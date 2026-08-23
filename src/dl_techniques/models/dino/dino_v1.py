@@ -109,6 +109,7 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
 from dl_techniques.models.dino.common import (
     reject_input_shape,
     sync_teacher_to_student,
@@ -157,7 +158,10 @@ class DINOHead(keras.layers.Layer):
         normalization_type: String, type of normalization to use.
         activation: String or callable, activation function to use.
         dropout_rate: Float, dropout rate for regularization.
-        kernel_initializer: String or initializer, weight initialization scheme.
+        kernel_initializer: String, config dict or initializer, weight
+            initialization scheme. Defaults to ``TruncatedNormal(stddev=0.02)``,
+            DINO's published ``trunc_normal_(std=.02)``
+            (https://github.com/facebookresearch/dino/blob/main/vision_transformer.py).
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -213,7 +217,15 @@ class DINOHead(keras.layers.Layer):
             normalization_type: str = "batch_norm",
             activation: str = "gelu",
             dropout_rate: float = 0.0,
-            kernel_initializer: str = "truncated_normal",
+            # DECISION plan-2026-08-23T091307-9a110062/D-504
+            # NOT the bare string "truncated_normal". That string resolves to
+            # Keras' TruncatedNormal(stddev=0.05) -- 2.5x wider than DINO's
+            # published trunc_normal_(std=.02):
+            #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
+            # The string names the right distribution family and the wrong
+            # scale, which is why it survived review. TRAINING-ONLY.
+            # See decisions.md D-504.
+            kernel_initializer: Union[str, Dict[str, Any]] = DINO_KERNEL_INITIALIZER,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -775,9 +787,12 @@ class DINOv1(keras.Model):
             outputs = self.head(features)
         elif self.include_top and self.num_classes > 0:
             # Standard classification head
+            # DECISION plan-2026-08-23T091307-9a110062/D-504
+            # Same trap as the DINOHead default above: the bare string is
+            # Keras' stddev=0.05, not DINO's 0.02. See decisions.md D-504.
             self.head = keras.layers.Dense(
                 units=self.num_classes,
-                kernel_initializer="truncated_normal",
+                kernel_initializer=keras.initializers.get(DINO_KERNEL_INITIALIZER),
                 name="classifier"
             )
             outputs = self.head(features)

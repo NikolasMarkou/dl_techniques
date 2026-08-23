@@ -107,6 +107,30 @@ NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-08-23T091307-9a110062/D-503
+#: Kernel initializer for every layer, matching the ViT convention this port
+#: follows: HuggingFace's ``ViTConfig.initializer_range`` defaults to ``0.02``
+#: and is applied as ``TruncatedNormal(std=0.02)`` to every weight matrix:
+#:   https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py
+#: Do NOT revert to ``"he_normal"`` (what this parameter used to be):
+#: ``he_normal`` is ``VarianceScaling(scale=2.0, mode='fan_in')``, i.e. a
+#: FAN-DEPENDENT scale, so it disagrees with the reference by a different factor
+#: in every layer rather than by a constant. TRAINING-ONLY -- an initializer is
+#: overwritten by any weight load, so no checkpoint changes meaning.
+#:
+#: A config DICT, not an ``Initializer`` instance: a seedless instance bakes its
+#: seed at construction and REPLAYS the identical draw (MEASURED: two calls of
+#: one instance at the same shape differ by exactly 0.0), so an instance used as
+#: a default argument -- evaluated once at import -- would hand every model in
+#: the process the same weights. Same hazard as D-072 / D-481.
+#: See decisions.md D-503.
+REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
+    "class_name": "TruncatedNormal",
+    "config": {"stddev": 0.02},
+}
+
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class ViT(keras.Model):
@@ -174,8 +198,10 @@ class ViT(keras.Model):
             Applied within attention mechanisms. Defaults to 0.0.
         pos_dropout_rate: Float, dropout rate after positional embeddings.
             Defaults to 0.0.
-        kernel_initializer: Union[str, Initializer], weight initializer for all layers.
-            Defaults to 'he_normal'.
+        kernel_initializer: Union[str, dict, Initializer], weight initializer for
+            all layers. Defaults to ``TruncatedNormal(stddev=0.02)``, the ViT
+            convention (HuggingFace ``ViTConfig.initializer_range = 0.02``,
+            https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py).
         kernel_regularizer: Optional[Regularizer], weight regularizer for all layers.
             Defaults to None.
         bias_initializer: Union[str, Initializer], bias initializer for all layers.
@@ -318,7 +344,7 @@ class ViT(keras.Model):
             dropout_rate: float = 0.0,
             attention_dropout_rate: float = 0.0,
             pos_dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = REFERENCE_KERNEL_INITIALIZER,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -1044,7 +1070,7 @@ def create_vit(
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = REFERENCE_KERNEL_INITIALIZER,
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -1077,7 +1103,8 @@ def create_vit(
         dropout_rate: Dropout rate for general regularization.
         attention_dropout_rate: Dropout rate for attention weights.
         pos_dropout_rate: Dropout rate for positional embeddings.
-        kernel_initializer: Weight initializer for all layers.
+        kernel_initializer: Weight initializer for all layers. Defaults to
+            ``TruncatedNormal(stddev=0.02)`` -- see :data:`REFERENCE_KERNEL_INITIALIZER`.
         kernel_regularizer: Weight regularizer for all layers.
         bias_initializer: Bias initializer for all layers.
         bias_regularizer: Bias regularizer for all layers.
