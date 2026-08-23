@@ -63,6 +63,20 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 
+# DECISION plan-2026-08-23T091307-9a110062/D-601
+#: The SHIPPED attention-dropout rate of SAM 1's mask-decoder transformer, and
+#: the single home of the number. Both classes below take it as their
+#: constructor default and ``SAM.MODEL_VARIANTS`` reads it from here rather than
+#: restating ``0.0``. Mirrors ``SAM2/memory_attention.DEFAULT_DROPOUT_RATE``
+#: (D-090), including the fact that the number, not just the knob, has one home.
+#: It is ``0.0`` on purpose and that is what makes the SAM 1 knob a
+#: behaviour-preserving addition: MEASURED, ``TwoWayTransformer(depth=2)``
+#: builds **7** ``keras.layers.Dropout`` layers at ``.rate == 0.0``, so the rate
+#: SAM 1 shipped was inert -- unlike SAM 2, whose unreachable default was 0.1.
+#: Do NOT "simplify" a bare ``0.0`` back into either signature or into the
+#: variant rows. See decisions.md D-601.
+DEFAULT_ATTENTION_DROPOUT_RATE: float = 0.0
+
 # ---------------------------------------------------------------------
 
 
@@ -156,7 +170,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         skip_first_layer_pe: bool = False,
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
         activation: str = 'relu',
-        attention_dropout_rate: float = 0.0,
+        attention_dropout_rate: float = DEFAULT_ATTENTION_DROPOUT_RATE,
         attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
@@ -541,7 +555,7 @@ class TwoWayTransformer(layers.Layer):
         mlp_dim: int = 2048,
         normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
         activation: str = 'relu',
-        attention_dropout_rate: float = 0.0,
+        attention_dropout_rate: float = DEFAULT_ATTENTION_DROPOUT_RATE,
         attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:

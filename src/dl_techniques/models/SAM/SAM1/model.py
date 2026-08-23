@@ -107,7 +107,7 @@ from typing import Tuple, List, Any, Dict, Optional, Literal, Sequence
 from .mask_decoder import MaskDecoder
 from .prompt_encoder import PromptEncoder
 from .image_encoder import ImageEncoderViT
-from .transformer import TwoWayTransformer
+from .transformer import DEFAULT_ATTENTION_DROPOUT_RATE, TwoWayTransformer
 
 # ---------------------------------------------------------------------
 
@@ -254,18 +254,21 @@ class SAM(keras.Model):
             "encoder_depth": 32,
             "encoder_num_heads": 16,
             "encoder_global_attn_indexes": [7, 15, 23, 31],
+            "dropout_rate": DEFAULT_ATTENTION_DROPOUT_RATE,
         },
         "vit_l": {
             "encoder_embed_dim": 1024,
             "encoder_depth": 24,
             "encoder_num_heads": 16,
             "encoder_global_attn_indexes": [5, 11, 17, 23],
+            "dropout_rate": DEFAULT_ATTENTION_DROPOUT_RATE,
         },
         "vit_b": {
             "encoder_embed_dim": 768,
             "encoder_depth": 12,
             "encoder_num_heads": 12,
             "encoder_global_attn_indexes": [2, 5, 8, 11],
+            "dropout_rate": DEFAULT_ATTENTION_DROPOUT_RATE,
         },
     }
 
@@ -645,6 +648,27 @@ class SAM(keras.Model):
 
         return masks
 
+    # DECISION plan-2026-08-23T091307-9a110062/D-601
+    # DERIVED, deliberately, exactly as SAM 2's is (D-090): `dropout_rate` is
+    # NOT an `__init__` parameter and NOT a `get_config()` key. Every
+    # `Dropout` a SAM 1 owns belongs to the mask decoder's `TwoWayTransformer`,
+    # which already stores and serializes `attention_dropout_rate` in its own
+    # config; a second copy on the outer model would be a number with two homes
+    # -- and one that can silently DISAGREE, because a caller may pass an
+    # already-constructed `mask_decoder` whose rate differs from whatever the
+    # outer `__init__` was told. This property can never disagree, and it round
+    # trips for free through the nested config, so no pre-existing `.keras` file
+    # gains a required key. Do NOT "complete" this by adding a stored
+    # `self.dropout_rate` + config key. See decisions.md D-601.
+    @property
+    def dropout_rate(self) -> float:
+        """Attention-dropout rate actually in force on the mask decoder.
+
+        :return: The rate carried by ``mask_decoder.transformer``.
+        :rtype: float
+        """
+        return float(self.mask_decoder.transformer.attention_dropout_rate)
+
     @classmethod
     def from_variant(
         cls,
@@ -667,13 +691,19 @@ class SAM(keras.Model):
                 - 'vit_l': Large model (1024 dim, 24 layers, ~300M params)
                 - 'vit_h': Huge model (1280 dim, 32 layers, ~630M params)
             **kwargs: Additional arguments to pass to SAM constructor
-                (e.g., mask_threshold, pixel_mean, pixel_std).
+                (e.g., mask_threshold, pixel_mean, pixel_std). One key is
+                intercepted rather than forwarded: ``dropout_rate`` is a variant
+                table key that reaches every ``Dropout`` in the mask decoder's
+                ``TwoWayTransformer``. It defaults to
+                ``DEFAULT_ATTENTION_DROPOUT_RATE`` (0.0), so omitting it
+                reproduces the shipped model bit for bit.
 
         Returns:
             Configured SAM model instance.
 
         Raises:
-            ValueError: If variant is not one of the supported options.
+            ValueError: If variant is not one of the supported options, or if
+                ``dropout_rate`` is outside ``[0.0, 1.0)``.
 
         Example:
             ```python
@@ -697,6 +727,23 @@ class SAM(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant]
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-601
+        # `dropout_rate` is popped out of `kwargs` HERE rather than passed
+        # through to `cls(...)` with the rest: it is a variant-table key that
+        # configures a SUB-LAYER, not a `SAM.__init__` parameter (see the
+        # `dropout_rate` property for why the outer model deliberately does not
+        # store it). Only this one key is intercepted -- the encoder-geometry
+        # keys stay non-overridable from here, unchanged from before this step.
+        # An explicit `None` means "use the variant's value", matching SAM 2.
+        dropout_rate = kwargs.pop("dropout_rate", None)
+        if dropout_rate is None:
+            dropout_rate = config["dropout_rate"]
+        dropout_rate = float(dropout_rate)
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(
+                f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}"
+            )
 
         # Common configuration across all variants
         prompt_embed_dim = 256
@@ -727,26 +774,28 @@ class SAM(keras.Model):
             mask_in_chans=16,
         )
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-091
-        # `attention_dropout_rate` is deliberately NOT threaded here, and this is
-        # the opposite ruling to SAM 2's (D-090) for one measured reason: this
-        # transformer's `attention_dropout_rate` default is 0.0, so the rate that
-        # `from_variant` cannot reach is a rate that does NOTHING. MEASURED
-        # 2026-08-22 on `vit_b`: 0 live `keras.layers.Dropout`, 7
-        # `MultiHeadAttention` all at `dropout=0.0`. SAM 2 got a knob because
-        # its unreachable default was 0.1 -- regularization no caller could
-        # switch off. Adding one here would buy a variant-table key, a
-        # `get_config` surface and two guards, all to make a no-op
-        # configurable. COST, stated so it is not rediscovered as a bug: a
-        # caller who wants SAM 1 attention dropout must build the transformer
-        # themselves -- `SAM(mask_decoder=MaskDecoder(transformer=
-        # TwoWayTransformer(..., attention_dropout_rate=r), ...), ...)` -- rather
-        # than passing it to `from_variant`. See decisions.md D-091.
+        # DECISION plan-2026-08-23T091307-9a110062/D-601
+        # The ONLY path by which a caller-chosen attention-dropout rate reaches
+        # the 7 `keras.layers.Dropout` layers this transformer builds (MEASURED
+        # at depth=2; they are nested inside the custom `MultiHeadAttention`, not
+        # direct children, which is why an earlier survey reported "0 live
+        # Dropout"). Deleting this keyword fails no shape, no count and no round
+        # trip -- the layer default silently takes over and the knob goes dead,
+        # exactly as it was before this step. The keyword is spelled
+        # `attention_dropout_rate=` because that is the LAYER's parameter name;
+        # the model-level name is `dropout_rate`, mirroring SAM 2 (D-090). This
+        # REPLACES D-091, which ruled the knob unnecessary because the rate it
+        # could not reach was 0.0 and therefore inert -- true, and still true:
+        # the default here is that same 0.0, so shipped behaviour is
+        # bit-identical. What D-091 got wrong is that "inert at the default" is
+        # a reason to keep a knob cheap, not a reason to have none.
+        # See decisions.md D-601.
         transformer = TwoWayTransformer(
             depth=2,
             embedding_dim=prompt_embed_dim,
             num_heads=8,
             mlp_dim=2048,
+            attention_dropout_rate=dropout_rate,
         )
 
         # Create mask decoder
