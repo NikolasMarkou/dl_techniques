@@ -325,6 +325,12 @@ class SqueezeNoduleNetV2(keras.Model):
     # xavier, `conv10` alone gaussian -- and Caffe's xavier normalizes by
     # `fan_in`, which is `lecun_uniform` here, not `glorot_uniform`. The full
     # measured derivation is in `caffe_reference_init.py`'s docstring.
+    # `HEAD_INITIALIZER` is a serialized CONFIG dict, not an `Initializer`
+    # instance: Keras resolves a config to a FRESH instance per consumer, while
+    # one shared seedless instance replays its draw (D-072). Consumers copy it
+    # with `dict(...)` at the call site -- a class attribute aliasing a
+    # module-level mutable is the same object under two names, which is what
+    # `test_package_api_contract.py::TestNoMutableDefaults` exists to catch.
     # See decisions.md D-481.
     STEM_INITIALIZER = CAFFE_XAVIER_INITIALIZER
     HEAD_INITIALIZER = CAFFE_HEAD_INITIALIZER
@@ -523,7 +529,7 @@ class SqueezeNoduleNetV2(keras.Model):
             kernel_size=1,
             activation='relu',
             kernel_regularizer=self.kernel_regularizer,
-            kernel_initializer=self.HEAD_INITIALIZER,
+            kernel_initializer=dict(self.HEAD_INITIALIZER),
             name='conv10'
         )
         x = conv10(x)
