@@ -238,19 +238,33 @@ model = PFTSR(
 #### `create_pft_sr(scale, variant)`
 The recommended way to instantiate models.
 -   `scale`: 2, 3, or 4.
--   `variant`: `'light'`, `'base'`, or `'large'`.
+-   `variant`: `'light'`, `'base'`, or `'repo_medium'`.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-We provide three standard configurations based on the paper.
+Two of the three configurations are the paper's own, quoted field for field from
+the official training YAMLs in [CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/PFT-SR)
+(`options/train/001_PFT_SRx2_scratch.yml` and `.../101_PFT_light_SRx2_scratch.yml`).
+The third is this repository's own and is named so it does not read as a published
+size: the official repo ships exactly two configs, PFT and PFT_light.
 
-| Variant | Embed Dim | Blocks Per Stage | Heads | Params | Use Case |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`light`** | 48 | `[4, 4, 4, 4]` | 6 | ~0.8M | Mobile/Edge |
-| **`base`** | 60 | `[4, 4, 4, 6, 6, 6]` | 6 | ~1.1M | General Purpose |
-| **`large`** | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | ~1.8M | High-Quality Benchmarks |
+| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Trainable params (4x) |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | 636,691 |
+| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 18,656,163 |
+| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 2,744,483 |
+
+Parameter counts are MEASURED at `scale=4` on a `(1, 32, 32, 3)` input. Quote the
+*trainable* count: `count_params()` also counts each shifted block's
+`(1, window^2, window^2)` non-trainable attention-mask buffer, which at window 32
+dominates the total (13,219,603 for `light`, 34,384,803 for `base`) while adding no
+model capacity.
+
+`repo_medium` was called `large` until 2026-08-23, when `base` was corrected from a
+60-wide model to the paper's 240-wide one; at that point an 80-wide variant sitting
+*between* the two published sizes could no longer honestly be called "large".
 
 ---
 
@@ -352,7 +366,7 @@ PFT-SR benefits significantly from mixed precision on modern GPUs (Volta/Ampere/
 
 ```python
 keras.mixed_precision.set_global_policy('mixed_float16')
-model = create_pft_sr(scale=4, variant='large')
+model = create_pft_sr(scale=4, variant='repo_medium')
 ```
 
 ### XLA Compilation

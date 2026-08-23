@@ -9,9 +9,10 @@ asserted only finiteness -- so a forward returning the scalar `0.0` passed. It
 now asserts the upsampled image's shape, which for a super-resolution model is
 the whole point of the model.
 
-`create_pft_sr(scale, variant)` verified from source (model.py:376). Permuted
-self-attention super-resolution model with ``window_size=8`` (model.py:438), so
-input H/W are kept divisible by 8 (32x32).
+`create_pft_sr(scale, variant)` verified from source. Permuted self-attention
+super-resolution model; the paper-sourced ``light``/``base`` variants carry
+``window_size=32`` in ``MODEL_VARIANTS`` (D-463), so input H/W are kept divisible
+by 32 (32x32 -- one window).
 
 MEASURED at ``scale=2``: a single output tensor ``(B, 2H, 2W, 3)``. A model that
 forgot to upsample would return ``(B, H, W, 3)`` -- finite, correctly ranked, and

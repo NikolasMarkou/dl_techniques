@@ -22,6 +22,8 @@ References:
       (community re-upload; the canonical `stabilityai/stable-diffusion-3-medium-diffusers`
       is gated and returns 401 unauthenticated)
     - NTM: https://arxiv.org/abs/1410.5401 (Graves et al. 2014), Tables 1 and 2
+    - PFT-SR: https://raw.githubusercontent.com/CVL-UESTC/PFT-SR/master/options/train/001_PFT_SRx2_scratch.yml
+      and .../101_PFT_light_SRx2_scratch.yml (`network_g` block of each)
 """
 
 from typing import Any, Callable, Dict
@@ -49,13 +51,29 @@ def _ntm_variants() -> Dict[str, Dict[str, Any]]:
     return NTMModel.NTM_VARIANTS
 
 
+def _pft_sr_variants() -> Dict[str, Dict[str, Any]]:
+    from dl_techniques.models.pft_sr.model import PFTSR
+
+    return PFTSR.MODEL_VARIANTS
+
+
 # package -> zero-arg loader for that package's variant table.
 # Loaders are lazy so one package failing to import cannot mask the others.
 VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
     "hierarchical_reasoning_model": _hrm_variants,
     "sd3_mmdit": _sd3_variants,
     "ntm": _ntm_variants,
+    "pft_sr": _pft_sr_variants,
 }
+
+_PFT_BASE_URL = (
+    "https://raw.githubusercontent.com/CVL-UESTC/PFT-SR/master/options/train/"
+    "001_PFT_SRx2_scratch.yml"
+)
+_PFT_LIGHT_URL = (
+    "https://raw.githubusercontent.com/CVL-UESTC/PFT-SR/master/options/train/"
+    "101_PFT_light_SRx2_scratch.yml"
+)
 
 _NTM_URL = "https://arxiv.org/abs/1410.5401"  # Graves et al. 2014, Tables 1 & 2
 
@@ -108,6 +126,19 @@ UPSTREAM_PINS = [
     ("ntm", "base", "memory_dim", 20, _NTM_URL),
     ("ntm", "base", "num_read_heads", 1, _NTM_URL),
     ("ntm", "base", "num_write_heads", 1, _NTM_URL),
+
+    # CVL-UESTC/PFT-SR `network_g`. Name mapping: depths -> num_blocks.
+    # "repo_medium" is repo-original and is deliberately NOT pinned.
+    ("pft_sr", "base", "embed_dim", 240, _PFT_BASE_URL),
+    ("pft_sr", "base", "num_blocks", [4, 4, 4, 6, 6, 6], _PFT_BASE_URL),
+    ("pft_sr", "base", "num_heads", 6, _PFT_BASE_URL),
+    ("pft_sr", "base", "mlp_ratio", 2.0, _PFT_BASE_URL),
+    ("pft_sr", "base", "window_size", 32, _PFT_BASE_URL),
+    ("pft_sr", "light", "embed_dim", 52, _PFT_LIGHT_URL),
+    ("pft_sr", "light", "num_blocks", [2, 4, 6, 6, 6], _PFT_LIGHT_URL),
+    ("pft_sr", "light", "num_heads", 4, _PFT_LIGHT_URL),
+    ("pft_sr", "light", "mlp_ratio", 1.0, _PFT_LIGHT_URL),
+    ("pft_sr", "light", "window_size", 32, _PFT_LIGHT_URL),
 ]
 
 

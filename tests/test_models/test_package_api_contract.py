@@ -1876,8 +1876,11 @@ class TestModelVariantsArePresent:
              ["base", "large", "mini"]),
             ("dl_techniques.models.nano_vlm_world_model.model", "ScoreBasedNanoVLM",
              ["base", "large", "mini"]),
+            # "repo_medium", not "large": the row was renamed on 2026-08-23 (D-463)
+            # when `base` was corrected from 60 channels to the paper's 240, which
+            # left an 80-channel variant sitting BETWEEN the two published sizes.
             ("dl_techniques.models.pft_sr.model", "PFTSR",
-             ["base", "large", "light"]),
+             ["base", "light", "repo_medium"]),
             ("dl_techniques.models.depth_anything.model", "DepthAnything",
              ["vit_b", "vit_l", "vit_s"]),
         ],

@@ -1,8 +1,9 @@
 """
 Test suite for PFTSR (permuted self-attention super-resolution).
 
-create_pft_sr(scale, variant) builds the model; window_size=8 so input H/W are
-kept divisible by 8. NHWC float32 input (B, H, W, 3); at scale=2 the output is
+create_pft_sr(scale, variant) builds the model; the paper-sourced variants use
+window_size=32 (repo_medium keeps 8), so input H/W are
+kept divisible by 32. NHWC float32 input (B, H, W, 3); at scale=2 the output is
 the upsampled image (B, 2H, 2W, 3). Covers a forward pass and the M2 full
 .keras save -> load -> identical-output round-trip.
 """
@@ -198,8 +199,25 @@ class TestPFTSRGradientFlow:
 # was byte-identical to the constructor's own default, which is why the three
 # variants' parameter counts are UNCHANGED by the repair (measured before and
 # after: light 1_025_027, base 2_180_283, large 4_120_739).
+#
+# Those three numbers were superseded on 2026-08-23 (D-463): `light` and `base`
+# were corrected to the paper's own two released configs and `large` was renamed
+# `repo_medium`. The derivation of each new number, MEASURED at scale=4 on a
+# (1, 32, 32, 3) input:
+#   light  52-wide, [2,4,6,6,6], 4 heads, mlp 1.0, window 32 -> 13_219_603 total
+#          (  636_691 trainable; the rest is 12 shifted blocks x a (1,1024,1024)
+#          non-trainable attention_mask buffer, which count_params() includes)
+#   base   240-wide, [4,4,4,6,6,6], 6 heads, mlp 2.0, window 32 -> 34_384_803 total
+#          (18_656_163 trainable, same mask-buffer inflation)
+#   repo_medium  unchanged in every field from the old `large` -> 4_120_739 total
+#          (2_744_483 trainable), which is the point of asserting it here: the
+#          rename moved no number.
 # ---------------------------------------------------------------------------
-_PFT_VARIANT_PARAMS = {"light": 1_025_027, "base": 2_180_283, "large": 4_120_739}
+_PFT_VARIANT_PARAMS = {
+    "light": 13_219_603,
+    "base": 34_384_803,
+    "repo_medium": 4_120_739,
+}
 
 
 @pytest.mark.parametrize("variant, expected_params", sorted(_PFT_VARIANT_PARAMS.items()))
@@ -211,7 +229,9 @@ def test_the_variant_parameter_counts_did_not_move(variant, expected_params):
 
 
 @pytest.mark.parametrize("key, value, default", [
-    ("window_size", 16, 8),
+    # 32, not the constructor's 8: `base` quotes the paper's PFT config, which is a
+    # 32x32-window model, so MODEL_VARIANTS["base"] supplies window_size (D-463).
+    ("window_size", 16, 32),
     ("upsampler", "pixelshuffledirect", "pixelshuffle"),
     ("norm_type", "rms_norm", "layer_norm"),
     ("use_lepe", False, True),
@@ -237,4 +257,4 @@ def test_a_factory_override_does_not_write_back_into_the_variant_table():
     before = list(PFTSR.MODEL_VARIANTS["base"]["num_blocks"])
     create_pft_sr(4, "base", num_blocks=[1, 1])
     assert PFTSR.MODEL_VARIANTS["base"]["num_blocks"] == before
-    assert PFTSR.MODEL_VARIANTS["base"]["embed_dim"] == 60
+    assert PFTSR.MODEL_VARIANTS["base"]["embed_dim"] == 240

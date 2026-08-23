@@ -146,7 +146,9 @@ class PFTSR(keras.Model):
         num_blocks: List of integers, number of PFT blocks in each stage.
             Default: [4, 4, 4, 6, 6, 6].
         num_heads: Integer, number of attention heads. Default: 6.
-        window_size: Integer, size of the attention window. Default: 8.
+        window_size: Integer, size of the attention window. Default: 8. Note the
+            two paper-sourced variants override this to 32 (see MODEL_VARIANTS);
+            8 is only this constructor's own fallback.
         mlp_ratio: Float, expansion ratio for MLP. Default: 2.0.
         qkv_bias: Boolean, whether to use bias in QKV projections. Default: True.
         attention_dropout_rate: Float, dropout rate for attention. Default: 0.0.
@@ -178,8 +180,9 @@ class PFTSR(keras.Model):
         >>> print(sr_image.shape)
         (1, 192, 192, 3)
         >>>
-        >>> # Create lightweight variant
-        >>> model_light = PFTSR(scale=4, embed_dim=48, num_blocks=[4, 4, 4, 4])
+        >>> # The paper's PFT_light config, spelled out explicitly
+        >>> model_light = PFTSR(scale=4, embed_dim=52, num_blocks=[2, 4, 6, 6, 6],
+        ...                     num_heads=4, mlp_ratio=1.0, window_size=32)
         >>> sr_image_light = model_light(lr_image)
     """
 
@@ -190,24 +193,52 @@ class PFTSR(keras.Model):
     #: (``window_size``, ``upsampler``, the dropout rates, ...) are IDENTICAL
     #: across all three variants and stay in the factory rather than being
     #: restated three times here.
+    #: DECISION plan-2026-08-23T091307-9a110062/D-463
+    #: ``light`` and ``base`` are the paper's own two released configs, quoted field
+    #: for field from the official training YAMLs so this package's "based on the
+    #: CVPR 2025 paper" claim is true of its numbers and not just its mechanism:
+    #:   base  <- options/train/001_PFT_SRx2_scratch.yml       (network_g)
+    #:   light <- options/train/101_PFT_light_SRx2_scratch.yml (network_g)
+    #:   https://github.com/CVL-UESTC/PFT-SR
+    #: ``window_size`` is listed HERE, not left to the constructor default of 8,
+    #: because 32 is part of what those two rows quote -- the published models are
+    #: 32x32-window models and an 8x8 window is a different architecture wearing
+    #: their name. Note the consequence before "fixing" it back: at window_size 32
+    #: every shifted block materializes a (1, 1024, 1024) non-trainable
+    #: ``attention_mask`` buffer, so ``count_params()`` reports ~13.2M for ``light``
+    #: and ~34.4M for ``base`` while the TRAINABLE counts are 636,691 and 18,656,163
+    #: (MEASURED). The inflated total is a mask-buffer artifact, not model size.
+    #: ``repo_medium`` is this repo's own tier and has NO upstream counterpart --
+    #: the official repo publishes exactly two configs, PFT and PFT_light, with no
+    #: third size. It was called ``large`` while ``base`` was (wrongly) 60-wide; at
+    #: the published 240 that name became false in this table's own terms, since 80
+    #: now sits BETWEEN the two published sizes rather than above them.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        # PFT_light, 101_PFT_light_SRx2_scratch.yml network_g
         'light': {
-            'embed_dim': 48,
-            'num_blocks': [4, 4, 4, 4],
-            'num_heads': 6,
-            'mlp_ratio': 2.0,
+            'embed_dim': 52,
+            'num_blocks': [2, 4, 6, 6, 6],
+            'num_heads': 4,
+            'mlp_ratio': 1.0,
+            'window_size': 32,
         },
+        # PFT, 001_PFT_SRx2_scratch.yml network_g
         'base': {
-            'embed_dim': 60,
+            'embed_dim': 240,
             'num_blocks': [4, 4, 4, 6, 6, 6],
             'num_heads': 6,
             'mlp_ratio': 2.0,
+            'window_size': 32,
         },
-        'large': {
+        # Repo-original. Not in the paper, not in the official repo, not a rung
+        # above ``base``. Kept because it is a cheap mid-size model, not because
+        # anything published looks like it.
+        'repo_medium': {
             'embed_dim': 80,
             'num_blocks': [6, 6, 6, 8, 8, 8],
             'num_heads': 8,
             'mlp_ratio': 2.0,
+            'window_size': 8,
         }
     }
 
@@ -556,7 +587,7 @@ class PFTSR(keras.Model):
 
 def create_pft_sr(
         scale: int = 4,
-        variant: Literal['base', 'light', 'large'] = 'base',
+        variant: Literal['base', 'light', 'repo_medium'] = 'base',
         **kwargs: Any,
 ) -> PFTSR:
     """
@@ -565,9 +596,13 @@ def create_pft_sr(
     Args:
         scale: Integer, upsampling scale factor (2, 3, or 4).
         variant: String, model variant:
-            - 'light': Lightweight model (48 channels, [4, 4, 4, 4] blocks)
-            - 'base': Base model (60 channels, [4, 4, 4, 6, 6, 6] blocks)
-            - 'large': Large model (80 channels, [6, 6, 6, 8, 8, 8] blocks)
+            - 'light': the paper's PFT_light (52 channels, [2, 4, 6, 6, 6] blocks,
+              4 heads, mlp_ratio 1.0, window 32)
+            - 'base': the paper's PFT (240 channels, [4, 4, 4, 6, 6, 6] blocks,
+              6 heads, mlp_ratio 2.0, window 32)
+            - 'repo_medium': repo-original mid-size tier (80 channels,
+              [6, 6, 6, 8, 8, 8] blocks, window 8). No published counterpart --
+              the official repo ships only the two configs above.
         **kwargs: Any :class:`PFTSR` constructor argument, overriding the variant
             table. This is the only route to ``window_size``, ``drop_path_rate``,
             ``upsampler``, ``norm_type``, ``use_lepe`` and the dropout knobs.
@@ -582,8 +617,8 @@ def create_pft_sr(
         >>> # Create lightweight model for 2x SR
         >>> model_light = create_pft_sr(scale=2, variant='light')
         >>>
-        >>> # Create large model for 4x SR
-        >>> model_large = create_pft_sr(scale=4, variant='large')
+        >>> # Create the repo-original mid-size model for 4x SR
+        >>> model_medium = create_pft_sr(scale=4, variant='repo_medium')
     """
     if variant not in PFTSR.MODEL_VARIANTS:
         raise ValueError(
