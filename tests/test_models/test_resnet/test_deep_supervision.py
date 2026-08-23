@@ -26,12 +26,16 @@ from dl_techniques.optimization.deep_supervision import schedule_builder
 
 
 BLOCKS = [1, 1, 1, 1]
-# 64 at stage 0 matches the stem's fixed 64-channel output. A narrower stage 0
-# under ``block_type="basic"`` needs a shortcut projection that BasicBlock
-# creates lazily inside ``call``, which Keras 3 refuses once the model is built
-# ("You cannot add new elements of state ... that is already built"). That is a
-# pre-existing ResNet defect, independent of deep supervision (it reproduces at
-# ``enable_deep_supervision=False``); it is dodged here, not fixed.
+# 64 at stage 0 is the shipped width of every ResNet variant. It is NOT a dodge
+# any more: this comment used to say a narrower stage 0 under
+# ``block_type="basic"`` was a pre-existing defect "dodged here, not fixed", and
+# that reading is stale. D-041 (plan-2026-08-19T163559-499b6f0e) made the stem
+# width follow ``filters_per_stage[0]``, and the full 2x5x2 grid -- widths
+# [8, 16, 32, 64, 128] x deep supervision on/off x both ``stem_type`` values --
+# was re-measured OK in all 20 cells. The deep-supervised half of that grid is
+# pinned by ``test_basic_blocks_with_deep_supervision.py`` and the base case by
+# ``test_basic_blocks_work_at_any_stage0_width.py``. 64 stays here only because
+# this file is about the GRADIENT property below, not about widths.
 FILTERS = [64, 128, 256, 512]
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 5
