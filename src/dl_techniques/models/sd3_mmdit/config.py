@@ -86,7 +86,17 @@ class SD3MMDiTConfig:
     joint_attention_dim: int = 4096
     pooled_projection_dim: int = 2048
     pos_embed_max_size: int = 192
-    sample_size: int = 64
+    # DECISION plan-2026-08-23T091307-9a110062/D-461
+    # Every default in this block is quoted from the official
+    # ``SD3Transformer2DModel`` config.json, so ``sample_size`` is quoted data too and
+    # must stay 128 (diffusers ``sample_size: 128``). It was 64 -- exactly half -- which
+    # silently halved ``_pos_base_size`` (= sample_size // patch_size) in
+    # transformer.py, i.e. the positional-grid scale the port is supposed to mirror.
+    # Do NOT lower it back to fit a local VRAM budget: use the ``tiny`` preset, or pass
+    # ``sample_size=`` explicitly, which is what the training script already does.
+    # Source (canonical repo is gated; community re-upload of the same config):
+    #   https://huggingface.co/v2ray/stable-diffusion-3-medium-diffusers/raw/main/transformer/config.json
+    sample_size: int = 128
     dual_attention_layers: Tuple[int, ...] = ()
     qk_norm: bool = True
     eps: float = 1e-6
@@ -202,7 +212,7 @@ def _validate_vae_groupnorm(ae: AutoEncoderParams) -> None:
 
 PRESETS: Dict[str, Dict[str, Any]] = {
     # The SD3-medium-ish full-scale model. Defined but NOT run locally.
-    # head_dim = 1536 // 24 = 64. token_grid = 64 // 2 = 32 <= 192 OK.
+    # head_dim = 1536 // 24 = 64. token_grid = 128 // 2 = 64 <= 192 OK.
     # dual_attention_layers = range(13) (SD3.5-medium), all < depth=24 OK.
     # VAE: ch=128, ch_mult=(1,2,4,4) -> stages 128,256,512,512 all /32 OK.
     "full": {
@@ -217,7 +227,8 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             joint_attention_dim=4096,
             pooled_projection_dim=2048,
             pos_embed_max_size=192,
-            sample_size=64,
+            # Official SD3Transformer2DModel config.json: sample_size 128 (D-461).
+            sample_size=128,
             dual_attention_layers=tuple(range(13)),
             qk_norm=True,
             eps=1e-6,
