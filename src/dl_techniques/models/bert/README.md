@@ -379,12 +379,36 @@ Every row is traced to a **released public checkpoint config**, fetched and comp
 Turc et al. 2019, *Well-Read Students Learn Better* (https://arxiv.org/abs/1908.08962), which
 released a checkpoint for every `(L, H)` pair.
 
-| Variant | Hidden Size | Layers | Heads | Intermediate | Parameters | Upstream config (fetched) |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| **`tiny`** | 256 | 4 | 4 | 1024 | ~15M | `google/bert_uncased_L-4_H-256_A-4` |
-| **`small`**| 512 | 6 | 8 | 2048 | ~40M | `google/bert_uncased_L-6_H-512_A-8` |
-| **`base`** | 768 | 12 | 12 | 3072 | ~110M | `bert-base-uncased` |
-| **`large`** | 1024| 24 | 16 | 4096 | ~340M | `bert-large-uncased` |
+| Variant | Hidden Size | Layers | Heads | Intermediate | Parameters (measured) | Upstream config (fetched) |
+|:---:|:---:|:---:|:---:|:---:|---:|:---|
+| **`tiny`** | 256 | 4 | 4 | 1024 | 11,104,768 | `google/bert_uncased_L-4_H-256_A-4` |
+| **`small`**| 512 | 6 | 8 | 2048 | 34,805,760 | `google/bert_uncased_L-6_H-512_A-8` |
+| **`base`** | 768 | 12 | 12 | 3072 | 108,891,648 | `bert-base-uncased` |
+| **`large`** | 1024| 24 | 16 | 4096 | 334,092,288 | `bert-large-uncased` |
+
+The Parameters column is **measured against the shipped code**, not quoted from a paper. Re-derive
+it rather than trusting this table -- it went stale once already (see below):
+
+```python
+from dl_techniques.models.bert import BERT
+
+for variant in ["tiny", "small", "base", "large"]:
+    model = BERT.from_variant(variant)
+    model.build((1, 16))          # subclassed: no weights exist until built
+    print(variant, f"{model.count_params():,}")
+```
+
+Last re-derived 2026-08-24 at commit `1765a73f9`. These are **encoder-only** counts at this
+package's defaults (`vocab_size=30522`, `max_position_embeddings=512`, `type_vocab_size=2`), and
+this `BERT` owns **no pooler and no task head** (see the module docstring). So they are not
+directly comparable to a published `BertModel` total, which includes a pooler `Dense` -- 768x768 +
+768 = 590,592 parameters at `base`. Add the head's own parameters when sizing a
+`create_bert_with_head(...)` model.
+
+This column previously read `~15M` / `~40M` / `~110M` / `~340M`. The first two were **35% and 15%
+overstatements** -- literature-shaped round numbers that had never been run. The table's config
+columns were re-derived from upstream checkpoints on 2026-08-22 while the Parameters column was
+left untouched, which is the failure mode the runnable snippet above exists to prevent.
 
 All four rows AGREE with their upstream `config.json` on `hidden_size`, `num_hidden_layers`,
 `num_attention_heads` and `intermediate_size`. `tiny`'s `intermediate_size` was **512 until

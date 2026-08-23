@@ -35,7 +35,9 @@ the file. The embedding layer is likewise the shared
 felt by three packages.
 
 Four preset variants span the usual capacity range, from BERT-Tiny (4 layers,
-256 hidden) through BERT-Large (24 layers, 1024 hidden, 340M parameters).
+256 hidden) through BERT-Large (24 layers, 1024 hidden). Parameter counts are
+not restated here; `README.md` section 7 holds the single measured table and
+the one-liner that re-derives it.
 
 No pretrained weights are distributed with this package. `pretrained=True`
 raises `NotImplementedError` rather than warning and returning a randomly
@@ -243,14 +245,14 @@ class BERT(keras.Model):
             "num_layers": 24,
             "num_heads": 16,
             "intermediate_size": 4096,
-            "description": "BERT-Large: 340M parameters, maximum performance"
+            "description": "BERT-Large: maximum performance"
         },
         "base": {
             "hidden_size": 768,
             "num_layers": 12,
             "num_heads": 12,
             "intermediate_size": 3072,
-            "description": "BERT-Base: 110M parameters, suitable for most applications"
+            "description": "BERT-Base: suitable for most applications"
         },
         "small": {
             "hidden_size": 512,
