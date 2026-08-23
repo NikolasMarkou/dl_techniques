@@ -563,6 +563,12 @@ count, run `find src -name '*.py' -exec cat {} + | wc -l` yourself and treat the
 valid for that instant only. The FILE-count rows below are kept: they move only when a
 file is added or deleted, which is a reviewable event rather than a side effect of typing.
 
+> **The `tests/` file-count row was re-derived on 2026-08-23** (1026 -> 1036: ten guard
+> modules added by `plan-2026-08-22-a11304c8`). At that same re-derivation ALL 66
+> enforceable rows in this table were re-run with their OWN commands and every other row
+> reproduced unchanged — notably `Python files under src/` held at 1007, which is the
+> mechanical statement that that plan added ZERO files under `src/`.
+>
 > **The `.py` FILE-COUNT rows were re-derived on 2026-08-11**, after the `models/beit/` +
 > `src/train/beit/` package landed (and on 2026-08-10, after the multi-package deletion pass) — see the boxed note in Part A § "src/dl_techniques/ — the 13
 > subpackages". They are one row-group with that section's prose and its per-subpackage
@@ -572,7 +578,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1007 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1026 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1036 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
