@@ -4,6 +4,13 @@ Oracle adoption for ``models/resnet`` -- Phase 5 batch B.
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
 
+Extended 2026-08-24 (``plan-2026-08-23T203721-009b7ccf`` step 3) with the FOURTH
+shared instrument, ``lazy_build_contract_oracle``, which had no adopter here --
+see ``TestResNetLazyBuildContract`` at the foot of this file. The R-088 / R-141
+mixed-precision arm lives beside this file in ``test_precision_arm.py`` rather
+than here, because it judges the DEEP-SUPERVISED multi-output configuration that
+none of the subjects in this file exercise.
+
 Measured 2026-08-21 (GPU 1), ``ResNet(num_classes=10, blocks_per_stage=[1, 1],
 filters_per_stage=[16, 32], block_type='basic', input_shape=(32, 32, 3))`` after
 one real Adam step: **20** trainable weights, **0** dead, **0** disconnected.
@@ -34,6 +41,7 @@ from ..gradient_flow_oracle import (
     stop_all_gradients,
 )
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
 from ..smoke_contract_oracle import (
     assert_contract_rejects_a_broken_forward,
     assert_finite,
@@ -169,3 +177,101 @@ class TestResNetSmokeContract:
         assert set(rejections) == {
             "collapse_to_scalar", "slice_leading_axis", "append_trailing_axis",
         }
+
+
+class TestResNetLazyBuildContract:
+    """``lazy_build_contract_oracle`` -- does ResNet's lazy build cost anything?
+
+    The oracle does NOT assert the contract ("is it built after ``build()``?").
+    It asserts the CONSEQUENCE: perturb every float weight, prove the
+    perturbation MOVED the output, then save/load and require an EXACT match at
+    ``atol=0.0``. Both real lazy-build defects this tree has ever found (D-029
+    ``SHGCNLinkPredictor``, D-049 ``BERT``) were found by that value comparison
+    and by nothing else.
+
+    Two configurations, because they materialize differently: the single-output
+    ``basic`` model this file already uses everywhere, and the DEEP-SUPERVISED
+    ``bottleneck`` model, whose four heads are built in a second pass over
+    ``stage_features`` and are therefore the part a partial materialization
+    would drop first.
+
+    MEASURED 2026-08-24, GPU 1 (RTX 4070), TF32 on by default:
+
+    ============================  ===========  ==========================
+                                  basic, 1 out  bottleneck, deep sup, 4 out
+    ============================  ===========  ==========================
+    weights after one call        32           93
+    weights after ``.build()``    32           93
+    materialization ratio         1.0          1.0
+    weights perturbed             20           59
+    perturbation liveness         4.586e+00    8.537e+00
+    round-trip ``max|delta|``     0.000e+00    0.000e+00
+    ============================  ===========  ==========================
+    """
+
+    #: Measured 2026-08-24 on GPU 1; see the class docstring.
+    N_WEIGHTS_BASIC = 32
+    N_WEIGHTS_DEEP_SUPERVISED = 93
+
+    @staticmethod
+    def _unbuilt_basic() -> ResNet:
+        """The file's standard subject, WITHOUT ``_model()``'s forward pass.
+
+        ``_model()`` calls the model before returning it, which would hand the
+        oracle an already-materialized instance and delete the one thing its
+        materialization arm measures.
+        """
+        return ResNet(
+            num_classes=NUM_CLASSES,
+            blocks_per_stage=[1, 1],
+            filters_per_stage=[16, 32],
+            block_type="basic",
+            input_shape=INPUT_SHAPE,
+        )
+
+    @staticmethod
+    def _unbuilt_deep_supervised() -> ResNet:
+        return ResNet(
+            num_classes=NUM_CLASSES,
+            blocks_per_stage=[1, 1, 1, 1],
+            filters_per_stage=[8, 16, 32, 64],
+            block_type="bottleneck",
+            enable_deep_supervision=True,
+            input_shape=INPUT_SHAPE,
+        )
+
+    def test_the_single_output_lazy_build_costs_nothing(self):
+        report = assert_lazy_build_costs_nothing(
+            build=self._unbuilt_basic,
+            make_inputs=lambda: _images(1),
+            input_shape=(None,) + INPUT_SHAPE,
+        )
+        assert report["n_weights"] == self.N_WEIGHTS_BASIC
+        assert report["roundtrip_max_delta"] == 0.0
+        assert report["perturb_liveness"] > 1e-3
+        assert report["materialization"]["ratio"] == 1.0
+        assert (
+            report["materialization"]["n_weights_after_build"]
+            == self.N_WEIGHTS_BASIC
+        ), (
+            "ResNet.build() no longer materializes every weight; a PARTIAL "
+            "materialization is the D-049 shape and a `> 0` assertion would "
+            "pass against exactly that"
+        )
+
+    def test_the_deep_supervision_heads_survive_a_round_trip_exactly(self):
+        """The four auxiliary heads are the part a partial build drops first."""
+        report = assert_lazy_build_costs_nothing(
+            build=self._unbuilt_deep_supervised,
+            make_inputs=lambda: _images(1),
+            input_shape=(None,) + INPUT_SHAPE,
+        )
+        assert report["n_outputs"] == 4, (
+            f"the deep-supervised subject returned {report['n_outputs']} "
+            f"outputs, not 4; this arm is no longer measuring the auxiliary "
+            f"heads it exists for"
+        )
+        assert report["n_weights"] == self.N_WEIGHTS_DEEP_SUPERVISED
+        assert report["n_weights_reloaded"] == self.N_WEIGHTS_DEEP_SUPERVISED
+        assert report["roundtrip_max_delta"] == 0.0
+        assert report["materialization"]["ratio"] == 1.0
