@@ -1,14 +1,20 @@
 """
-R-002 / R-070 lazy-build rows for ``video_jepa``, settled by measurement.
+R-002 / R-070 lazy-build rows for ``video_jepa`` -- the partial build is CLOSED.
 
 Batch 6 charged ``VideoJEPA.build()`` with materializing **36 of 86 tensors /
 10,673 of 16,980 params**, leaving 6,307 params (37.1% of the model) to appear
-only on the first call, with a Keras ``UserWarning``.
+only on the first call, with a Keras ``UserWarning``. D-056 closed that as a
+contract row rather than a defect row, by pinning the round trip instead of
+adding a ``build()``, and this module's own assertion invited the update:
+"if a later change adds a materialising build() this line fails and should be
+updated to the new ratio".
 
-The contract failure reproduces. **The consequence does not**: a save/load cycle
-on a perturbed model is exact to 0.000000e+00 with a live perturbation arm. See
-decisions.md D-056 -- this is a contract row, not a defect row, and it is closed
-by pinning the round trip rather than by adding a ``build()``.
+That change landed (plan ``plan-2026-08-23T091307-9a110062``, D-425). The model
+now hand-walks its weight-bearing sub-layers in ``build()``, so the ratio is
+**1.0** and the ``UserWarning`` is gone. The round-trip arm is UNCHANGED and
+still measures exactly 0.000000e+00, which is the point: the build was never
+what made the round trip safe, and the round trip is still what proves the
+build did not break anything.
 """
 
 import numpy as np
@@ -25,12 +31,18 @@ def _inputs():
     return {"pixels": np.random.RandomState(0).randn(1, 2, 32, 32, 3).astype("float32")}
 
 
-def test_video_jepas_partial_build_costs_nothing_across_a_round_trip():
+def test_video_jepas_build_is_now_total_and_still_costs_nothing():
     """
-    MEASURED (GPU 1): 161 weights after one call, **66 after ``.build()``
-    alone** (count_params 81,505); 149 perturbed; perturbation liveness
-    **3.009824e-01**; reload weights 161; round trip **max|delta| exactly
-    0.000000e+00** at ``atol=0.0``.
+    MEASURED 2026-08-23 (CPU): 161 weights after one call and **161 after
+    ``.build()`` alone**, ratio 1.0; 149 perturbed; round trip **max|delta|
+    exactly 0.000000e+00** at ``atol=0.0``.
+
+    The previous reading on this line was "**66 after ``.build()`` alone**"
+    (GPU 1, perturbation liveness 3.009824e-01). It is recorded here rather than
+    deleted because it did not reproduce even before the fix: the same
+    partial-build side effect measured **158** of 161 on 2026-08-23. Whatever
+    the 66 was, it is not what this instrument reads today, and the number that
+    replaces it is a TOTAL, which is the only value that cannot drift.
     """
     report = assert_lazy_build_costs_nothing(
         build=_build,
@@ -39,7 +51,7 @@ def test_video_jepas_partial_build_costs_nothing_across_a_round_trip():
     )
     assert report["roundtrip_max_delta"] == 0.0
     assert report["perturb_liveness"] > 1e-3
-    # The contract failure itself, pinned as a NUMBER. If a later change adds a
-    # materialising build() this line fails and should be updated to the new
-    # ratio -- it is a record of what was measured, not a target.
-    assert report["materialization"]["n_weights_after_build"] < report["n_weights"]
+    # The inverse of the old assertion: `build()` must now materialize the WHOLE
+    # model. `<` would pass on a build that lost a sub-layer; `==` cannot.
+    assert report["materialization"]["n_weights_after_build"] == report["n_weights"]
+    assert report["materialization"]["ratio"] == 1.0

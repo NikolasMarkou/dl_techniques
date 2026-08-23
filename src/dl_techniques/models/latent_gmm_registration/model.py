@@ -217,6 +217,50 @@ class LatentGMMRegistration(keras.Model):
             name="chamfer_loss"
         )
 
+    def build(self, input_shape: Any) -> None:
+        """Materialize every weight-bearing sub-layer.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-423
+        This walks the two stateful sub-layers by hand instead of tracing
+        `call`, because `call` cannot be traced symbolically at all: it ends in
+        `compute_rigid_transform`, whose `tf.linalg.svd` is a raw-backend op
+        that rejects a `KerasTensor` outright (`ValueError: A KerasTensor
+        cannot be used as input to a TensorFlow function`). That op is kept
+        deliberately for its `(s, u, v)` tuple order -- see the D-001/D-083
+        block on `compute_rigid_transform` -- so the trace cannot be repaired
+        from the other side.
+
+        The walk is short and total: `self.autoencoder` and
+        `self.correspondence_net` are the ONLY sub-layers that own state
+        (`self.chamfer_loss_fn` owns none), both are invoked before `call`
+        reaches the SVD, and `compute_gmm_params`/`compute_rigid_transform`
+        carry no weights. MEASURED: 26 weights here, 26 after a real forward
+        call -- and `test_the_explicit_build_materializes_the_model.py` pins
+        that equality so this second encoding of the topology cannot drift
+        silently.
+
+        The batch axis is made concrete (`1`) for the same reason
+        `materialize_sublayers` retries with a concrete batch: no weight shape
+        depends on it.
+
+        Args:
+            input_shape: `(source_shape, target_shape)`, each
+                `(batch, num_points, 3)`.
+        """
+        if self.built:
+            return
+        source_shape, target_shape = input_shape
+        source = keras.KerasTensor((1,) + tuple(source_shape[1:]))
+        target = keras.KerasTensor((1,) + tuple(target_shape[1:]))
+
+        _, (local_x, local_y), (global_x, global_y) = self.autoencoder(
+            (source, target)
+        )
+        self.correspondence_net((local_x, global_x))
+        self.correspondence_net((local_y, global_y))
+
+        super().build(input_shape)
+
     def call(
             self,
             inputs: Tuple[keras.KerasTensor, keras.KerasTensor],

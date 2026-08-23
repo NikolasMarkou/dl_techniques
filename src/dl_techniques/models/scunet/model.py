@@ -65,6 +65,7 @@ from typing import List, Optional, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
 
 # ---------------------------------------------------------------------
@@ -423,6 +424,45 @@ class SCUNet(keras.Model):
                 )
             )
         return blocks
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from an explicit `build` call.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-422
+        The spatial axes are coerced to `self.input_resolution` before the
+        trace, and only when they arrive as `None`. `materialize_sublayers`
+        invokes `self.call` DIRECTLY on `KerasTensor` placeholders; on that
+        path `ops.shape(x)[1]` is the Python value `None`, not the scalar
+        tensor the D-004 block below correctly describes for a real graph
+        trace, so `(-h) % 64` dies with `TypeError: bad operand type for unary
+        -: 'NoneType'`.
+
+        This is a BUILD-TIME probe and nothing else. The model stays fully
+        convolutional at call time: `Layer.__call__` -> `compute_output_spec`
+        traces `call` with genuine graph placeholders where the same
+        expressions are dynamic. MEASURED: build at `(None, 64, 64, 3)` ->
+        148 weights, then call at `(1, 96, 96, 3)` -> succeeds, output
+        `(1, 96, 96, 3)`, still 148 weights. `test_dynamic_spatial_dims.py`
+        remains the contract for the call-time behaviour.
+
+        `self.input_resolution` rather than an arbitrary constant: it is
+        already the number every stage's `input_res` is derived from
+        (`__init__` above), so the window/shift geometry the probe exercises
+        is the geometry the sub-layers were configured for.
+
+        Args:
+            input_shape: Shape of `call`'s `x`, `(B, H, W, C)`.
+        """
+        if self.built:
+            return
+        materialize_sublayers(
+            self,
+            concretize_axes(
+                input_shape,
+                {1: self.input_resolution, 2: self.input_resolution},
+            ),
+        )
+        super().build(input_shape)
 
     def call(self,
              x: keras.KerasTensor,

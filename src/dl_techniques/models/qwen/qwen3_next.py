@@ -100,6 +100,7 @@ from typing import Optional, Union, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
@@ -473,6 +474,44 @@ class Qwen3Next(keras.Model):
             ),
             name='lm_head'
         )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from an explicit `build` call.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-421
+        The sequence axis is coerced to a concrete `1` before the trace, and
+        that is the whole fix. `materialize_sublayers` invokes `self.call`
+        DIRECTLY on `KerasTensor` placeholders, and on that path
+        `keras.ops.shape(hidden_states)[1]` is the Python value `None`, which
+        `build_causal_attention_mask` rejects with `ValueError: seq_len
+        required for causal mask`. Real callers hit exactly this: both
+        `create_qwen3_next_*` factories embed the backbone in a functional
+        graph built from `keras.Input(shape=(None,))`, so `build` is entered
+        with a `None` sequence axis. The subsequent functional trace goes
+        through `Layer.__call__` -> `compute_output_spec`, which under the
+        TensorFlow backend traces `call` with real graph placeholders where
+        `ops.shape(...)[1]` is a dynamic scalar tensor, so the dynamic sequence
+        length survives untouched.
+
+        `1` is safe because NO weight shape here depends on `seq_len`: the RoPE
+        tables are sized from `self.max_seq_len` (config), not from the traced
+        input. MEASURED: build at the coerced `seq_len=1`, then call at
+        `seq_len=20` -> 97 weights both times, output `(2, 20, 64)`.
+
+        WHAT NOT TO DO: do not push this substitution into
+        `materialize_sublayers` as a generic "retry with a concrete sequence
+        axis". It is safe HERE because the seq-independence of every weight
+        shape was measured HERE; the other 20 models on that helper have not
+        been checked and one of them sizing a positional table from the traced
+        length would be silently mis-built. See `decisions.md` D-421.
+
+        Args:
+            input_shape: Shape, or nest of shapes, of `call`'s `inputs`.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, concretize_axes(input_shape, {1: 1}))
+        super().build(input_shape)
 
     def call(
             self,

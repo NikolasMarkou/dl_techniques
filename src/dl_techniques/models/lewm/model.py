@@ -184,6 +184,85 @@ class LeWM(keras.Model):
     # Training forward
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _require_pixels_and_action(mapping: Any) -> Any:
+        """Return ``(mapping["pixels"], mapping["action"])``, or raise.
+
+        Interface contract (call sites: :meth:`build` and :meth:`call`). Shared
+        because both take the SAME dict-shaped argument -- one a nest of shapes,
+        one a nest of tensors -- and both must fail with the same named
+        ``ValueError``. ``build`` runs FIRST for an explicit ``model.build(...)``
+        and for ``.keras`` deserialization, so a ``build`` that indexed the dict
+        directly would turn this ``ValueError`` into a bare ``TypeError``.
+
+        :param mapping: The dict passed to ``build`` or ``call``.
+        :return: The values under ``"pixels"`` and ``"action"``.
+        :raises ValueError: If ``mapping`` is not a dict.
+        """
+        # DECISION plan-2026-08-23T091307-9a110062/D-426
+        # Do NOT inline this back into `call` and index the dict directly in
+        # `build`. `build` runs FIRST on `model(...)`, so a direct index turns
+        # this named `ValueError` into a bare `TypeError`. The identical
+        # regression was MEASURED on `video_jepa` on 2026-08-23. One validator,
+        # two callers -- not two copies of the message. See decisions.md D-426.
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                f"LeWM expects `inputs` to be a dict with 'pixels' and 'action' "
+                f"keys. Got type={type(mapping)}."
+            )
+        return mapping["pixels"], mapping["action"]
+
+    def build(self, input_shape: Dict[str, Any]) -> None:
+        """Materialize every weight-bearing sub-layer.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-424
+        This repeats `call`'s forward shape math instead of tracing `call`,
+        because `call` cannot be traced: `self.add_loss(pred_loss)` below
+        raises ``ValueError: add_loss() can only be called from inside build()
+        or call(), on a tensor input`` when `call` is invoked directly on
+        `KerasTensor` placeholders. `materialize_sublayers` invokes `.call`
+        deliberately (`.__call__` would recurse into `build` forever), so it
+        can never enter the tracking context `add_loss` demands.
+
+        The duplication is kept as small as it can be: every line below goes
+        through the SAME `encode_pixels` / `encode_actions` / `predict_next`
+        helpers `call` uses, so only the four lines of action zero-padding are
+        a second encoding of the topology, and the SIGReg transpose is copied
+        verbatim from `call`. What is skipped is exactly the loss tail --
+        `add_loss` and the two trackers -- which owns no weights.
+
+        A hand walk of a forward graph drifts silently; that is why
+        `materialize_sublayers` prefers a trace. The mitigation is a shipped
+        assertion, not a comment: `test_the_explicit_build_materializes_the_
+        model.py` pins that this build materializes exactly the population a
+        real call does (MEASURED: 188 both ways), so a sub-layer added to
+        `call` and not here fails loudly.
+
+        The batch axis is made concrete (`1`): `encode_pixels` multiplies
+        `B * T`, which is a `TypeError` on `None`, and no weight shape depends
+        on the batch.
+
+        :param input_shape: dict with keys ``pixels`` (B, T, H, W, C) and
+            ``action`` (B, T-1, A).
+        """
+        if self.built:
+            return
+        cfg = self.config
+        pixels_shape, action_shape = self._require_pixels_and_action(input_shape)
+        pixels = keras.KerasTensor((1,) + tuple(pixels_shape[1:]))
+        action = keras.KerasTensor((1,) + tuple(action_shape[1:]))
+
+        emb = self.encode_pixels(pixels)
+
+        zero_pad = ops.zeros((1, 1, cfg.action_dim), dtype=action.dtype)
+        action_padded = ops.concatenate([action, zero_pad], axis=1)
+        act_emb = self.encode_actions(action_padded)
+
+        self.predict_next(emb, act_emb)
+        self.sigreg(ops.transpose(emb, (1, 0, 2)))
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Dict[str, keras.KerasTensor],
@@ -196,13 +275,7 @@ class LeWM(keras.Model):
         :param training: passed to submodules.
         :return: ``pred_emb`` of shape (B, T, D).
         """
-        if not isinstance(inputs, dict):
-            raise ValueError(
-                f"LeWM expects `inputs` to be a dict with 'pixels' and 'action' "
-                f"keys. Got type={type(inputs)}."
-            )
-        pixels = inputs["pixels"]
-        action = inputs["action"]
+        pixels, action = self._require_pixels_and_action(inputs)
 
         # Target encoder is live (no EMA, no stop_gradient).
         # Upstream LeWM uses the same encoder for both context and target.

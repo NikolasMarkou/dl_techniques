@@ -48,17 +48,35 @@ symbolic trace cannot), but it also executes ``add_loss()`` calls and
 ``BatchNormalization`` updates for real, leaving accumulated losses and moved
 moving statistics on a model that has merely been built. A model whose
 ``call()`` cannot be traced symbolically raises here rather than being built
-with side effects; the caller is expected NOT to implement ``build()`` at all in
-that case, so Keras' own eager auto-build stays in charge.
+with side effects.
+
+What such a model should do instead
+-----------------------------------
+Not "nothing". Leaving ``build()`` unimplemented leaves Keras' defaulted
+``Layer.build`` in charge, and that is the marked-built-while-unbuilt state
+above -- ``model.build(shape)`` and ``.keras`` ``build_from_config`` both land
+on it. Three models here (``latent_gmm_registration``, ``lewm``,
+``video_jepa``) reach a raw-backend op or an ``add_loss()`` inside ``call()``
+and CANNOT use this helper; each writes a ``build()`` that walks its own
+weight-bearing sub-layers, reusing its own forward helpers wherever it can. The
+hand-walk hazard named above is real and is answered with an assertion rather
+than a promise: ``tests/test_models/test_the_explicit_build_materializes_the_
+model.py`` pins that each such ``build()`` materializes exactly the population a
+real forward call does, so drift fails loudly. Prefer this helper; hand-walk
+only when the trace provably cannot run, and pin the result.
+
+Two more (``qwen``, ``scunet``) DO use this helper, after coercing a ``None``
+axis to a concrete probe extent with :func:`concretize_axes` -- their blocker is
+the trace mechanism, not their design.
 """
 
-from typing import Any
+from typing import Any, Mapping
 
 import keras
 
 # ---------------------------------------------------------------------
 
-__all__ = ["materialize_sublayers"]
+__all__ = ["concretize_axes", "materialize_sublayers"]
 
 # ---------------------------------------------------------------------
 
@@ -68,6 +86,61 @@ def _rebatch(input_shape: Any, batch_size: int) -> Any:
     return keras.tree.map_shape_structure(
         lambda shape: (batch_size,) + tuple(shape[1:]), input_shape
     )
+
+
+def concretize_axes(
+        input_shape: Any,
+        replacements: Mapping[int, int],
+) -> Any:
+    """Substitute a concrete extent for named ``None`` axes of a shape nest.
+
+    Interface contract (call sites: ``Qwen3Next.build``, ``SCUNet.build``).
+    Returns a NEW nest of the same structure; the input is not mutated. For
+    every ``axis: value`` pair, an axis that is ``None`` becomes ``value``; an
+    axis that already carries a concrete extent is left ALONE, and an axis a
+    given shape is too short to have is ignored. Negative axes are not
+    supported -- pass a non-negative index.
+
+    This is a shape transform only. It deliberately does NOT live inside
+    :func:`materialize_sublayers`: which axis may be substituted, and with what
+    probe value, is a per-model fact (``Qwen3Next`` may use any ``seq_len``
+    because no weight shape depends on it; ``SCUNet`` must use its own
+    ``input_resolution``), and a blanket "retry with concrete axes" inside the
+    shared helper would apply that reasoning to the 20 models for which it has
+    not been checked. See ``decisions.md`` D-420.
+
+    :param input_shape: A shape tuple, or any nest (dict / list / tuple) of
+        shape tuples.
+    :param replacements: Mapping of axis index to the extent to substitute when
+        that axis is ``None``.
+    :return: The nest with the requested ``None`` axes made concrete.
+    :raises ValueError: If any axis index is negative.
+    """
+    # DECISION plan-2026-08-23T091307-9a110062/D-420
+    # A SHAPE TRANSFORM, not a build strategy. Do NOT "simplify" this by moving
+    # the substitution into `materialize_sublayers` as a third retry attempt:
+    # the retry would then apply to all 25 models on the helper, and for a model
+    # whose weight shapes DO depend on the substituted axis (a positional table
+    # sized from the traced sequence length is the obvious case) it would build
+    # the wrong tensor silently -- the failure this whole module exists to
+    # prevent. Two call sites justify the shared helper; the JUDGEMENT stays at
+    # each call site. See decisions.md D-420.
+    for axis in replacements:
+        if axis < 0:
+            raise ValueError(
+                f"concretize_axes needs non-negative axis indices, got {axis}"
+            )
+
+    def one(shape: Any) -> Any:
+        out = list(shape)
+        for axis, value in replacements.items():
+            if axis < len(out) and out[axis] is None:
+                out[axis] = value
+        return tuple(out)
+
+    return keras.tree.map_shape_structure(one, input_shape)
+
+# ---------------------------------------------------------------------
 
 
 def materialize_sublayers(

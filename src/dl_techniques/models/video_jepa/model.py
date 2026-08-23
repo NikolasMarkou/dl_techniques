@@ -420,6 +420,110 @@ class VideoJEPA(keras.Model):
         self.ema_divergence_tracker.update_state(self._compute_ema_divergence())
 
     # ------------------------------------------------------------------
+    # Explicit build
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _require_pixels(mapping: Any) -> Any:
+        """Return ``mapping["pixels"]``, or raise the model's own contract error.
+
+        Interface contract (call sites: :meth:`build` and :meth:`call`). Shared
+        because both take the SAME dict-shaped argument -- one a nest of shapes,
+        one a nest of tensors -- and both must fail with the same named
+        ``ValueError``. ``build`` runs FIRST for an explicit
+        ``model.build(...)`` and for ``.keras`` deserialization, so a ``build``
+        that indexed the dict directly would convert this ``ValueError`` into a
+        bare ``KeyError`` and defeat ``test_rejects_missing_pixels_key``
+        (MEASURED: it did, 2026-08-23).
+
+        :param mapping: The dict passed to ``build`` or ``call``.
+        :return: The value under ``"pixels"``.
+        :raises ValueError: If ``mapping`` is not a dict, or has no ``"pixels"``.
+        """
+        # DECISION plan-2026-08-23T091307-9a110062/D-426
+        # Do NOT inline this back into `call` and index the dict directly in
+        # `build`. `build` runs FIRST on `model(...)`, so a direct index turns
+        # this named `ValueError` into a bare `KeyError` and defeats
+        # `test_rejects_missing_pixels_key` (MEASURED 2026-08-23). One validator,
+        # two callers -- not two copies of the message. See decisions.md D-426.
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                "VideoJEPA expects inputs as a dict with key 'pixels'. "
+                f"Got type={type(mapping)}."
+            )
+        if "pixels" not in mapping:
+            raise ValueError(
+                "VideoJEPA inputs dict must contain key 'pixels'. "
+                f"Got keys: {list(mapping.keys())}"
+            )
+        return mapping["pixels"]
+
+    def build(self, input_shape: Dict[str, Any]) -> None:
+        """Materialize every weight-bearing sub-layer.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-425
+        This walks the sub-layers by hand instead of tracing `call`, because
+        `call` cannot be traced: `self.add_loss(cfg.lambda_next_frame *
+        h_loss)` raises ``ValueError: add_loss() can only be called from inside
+        build() or call(), on a tensor input`` when `call` is invoked directly
+        on `KerasTensor` placeholders, which is exactly what
+        `materialize_sublayers` does (`.call`, never `.__call__`, to avoid
+        recursing into `build`).
+
+        The walk reuses `encode_frames` / `encode_frames_target` rather than
+        re-deriving their reshapes, and touches every stateful sub-layer:
+        `encoder`, `target_encoder`, `predictor`, EVERY entry of `pred_heads`,
+        and `sigreg`. `mask_gen` is skipped because `TubeMaskGenerator` owns
+        no weights (pure `keras.random.uniform` + `argsort`), and `mask_token`
+        is an `__init__`-time `add_weight` that exists before any build.
+
+        Two deliberate differences from `call`, neither of which changes a
+        weight shape:
+
+        * `pred_heads[i]` is applied to the FULL `pred`, not to the causal
+          slice `pred[:, :-h]`. These are `Dense` layers whose kernel depends
+          only on the last axis, and `call` SKIPS a horizon when
+          ``h >= T`` -- so slicing here would leave a head unbuilt for any
+          probe shape shorter than the largest horizon. Building all of them
+          unconditionally is the property that survives a short clip.
+        * The masking branch is not taken. It is training-only by D-001 above
+          and introduces no weights.
+
+        `target_encoder.trainable = False` is set in `__init__` and is NOT
+        touched here; the encoder is invoked exactly as `encode_frames_target`
+        invokes it.
+
+        A hand walk drifts from `call` silently, so the mitigation is a shipped
+        assertion rather than a comment: `test_the_explicit_build_materializes_
+        the_model.py` pins that this build materializes exactly the population
+        a real call does (MEASURED: 161 both ways).
+
+        The batch axis is made concrete (`1`): `encode_frames` multiplies
+        `B * T`, a `TypeError` on `None`, and no weight shape depends on it.
+
+        :param input_shape: dict with key ``pixels`` (B, T, H, W, C).
+        """
+        if self.built:
+            return
+        cfg = self.config
+        pixels_shape = tuple(self._require_pixels(input_shape)[1:])
+        pixels = keras.KerasTensor((1,) + pixels_shape)
+
+        z_online = self.encode_frames(pixels)
+        self.encode_frames_target(pixels)
+
+        pred = self.predictor(z_online)
+        for head in self.pred_heads:
+            head(pred)
+
+        t_probe = pixels_shape[0]
+        hp = cfg.patches_per_side
+        self.sigreg(
+            ops.reshape(z_online, (t_probe, hp * hp, cfg.embed_dim))
+        )
+
+        super().build(input_shape)
+
+    # ------------------------------------------------------------------
     # Training forward
     # ------------------------------------------------------------------
     def call(
@@ -433,17 +537,7 @@ class VideoJEPA(keras.Model):
         :param training: forwarded.
         :return: ``pred`` of shape (B, T, H_p, W_p, D).
         """
-        if not isinstance(inputs, dict):
-            raise ValueError(
-                "VideoJEPA expects inputs as a dict with key 'pixels'. "
-                f"Got type={type(inputs)}."
-            )
-        if "pixels" not in inputs:
-            raise ValueError(
-                "VideoJEPA inputs dict must contain key 'pixels'. "
-                f"Got keys: {list(inputs.keys())}"
-            )
-        pixels = inputs["pixels"]
+        pixels = self._require_pixels(inputs)
 
         cfg = self.config
         # Online (gradient-carrying) encoder — feeds the predictor and

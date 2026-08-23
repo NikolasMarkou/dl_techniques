@@ -26,12 +26,42 @@ is bit-identical to the before-fix table, including those two numbers.
 
 What the fix DID change is the thing the warning names: ``.build(shape)`` alone
 went from materializing **0** weights to materializing all of them (e.g.
-``mobilenet`` 0 -> 267, ``pw_fnet`` 0 -> 100, ``power_mlp`` 0 -> 5), and
-``video_jepa``/``latent_gmm_registration``/``lewm``/``qwen``/``scunet`` are
-NOT here --
-see :data:`UNFIXED` for the measured reason on each.
+``mobilenet`` 0 -> 267, ``pw_fnet`` 0 -> 100, ``power_mlp`` 0 -> 5).
 
-See ``decisions.md`` D-013.
+The waiver is retired (plan ``plan-2026-08-23T091307-9a110062``)
+-------------------------------------------------------------
+``video_jepa``, ``latent_gmm_registration``, ``lewm``, ``qwen`` and ``scunet``
+used to sit in an ``UNFIXED`` table here, pinned by name as un-materializable.
+They are all five in :data:`FIXED` now (97 / 148 / 26 / 188 / 161 weights from
+``.build(shape)`` alone, each equal to what a real forward call materializes),
+and :data:`UNFIXED` is empty. The reasons the waiver gave were real failures but
+none of them was a property of the model:
+
+* ``qwen`` / ``scunet`` -- the blocker was the TRACE MECHANISM, not the design.
+  ``materialize_sublayers`` calls ``.call`` directly on ``KerasTensor``
+  placeholders, where ``ops.shape(x)[i]`` is the Python value ``None``; the
+  functional path real callers use goes through ``Layer.__call__`` ->
+  ``compute_output_spec``, where the same expression is a dynamic scalar tensor.
+  Each model's ``build`` now substitutes a concrete probe extent for its own
+  ``None`` axis and nothing else. The waiver's claim that this would break
+  dynamic-extent callers is refuted by
+  :func:`test_a_coerced_build_probe_does_not_pin_the_call_shape`, which builds
+  at the fully-``None`` shape and then calls at two OTHER shapes.
+* ``latent_gmm_registration`` / ``lewm`` / ``video_jepa`` -- ``call`` really
+  cannot be traced (a raw ``tf.linalg.svd``; ``add_loss`` outside a tracking
+  context), so each got a hand-written walk of its weight-bearing sub-layers.
+  A hand walk is a second encoding of the forward topology and drifts silently,
+  which is exactly what ``materialize_sublayers``' own docstring warns about;
+  the mitigation is the second half of
+  :func:`test_explicit_build_materializes_everything_a_call_does`, which asserts
+  the built population equals the population after a real call, so drift fails
+  loudly rather than quietly under-building.
+
+One number the waiver carried did NOT reproduce: ``video_jepa`` "66/161" was
+measured at **158/161** for the same failed-trace side effect on 2026-08-23.
+It is recorded here as refuted rather than repeated.
+
+See ``decisions.md`` D-013, D-420..D-425.
 """
 
 import os
@@ -57,43 +87,50 @@ FIXED = {
     "gemma": 15,
     "gpt2": 18,
     "ideogram4": 45,
+    "latent_gmm_registration": 26,
+    "lewm": 188,
     "mamba": 14,
     "masked_language_model": 23,
     "mobilenet": 267,
     "modern_bert": 13,
     "power_mlp": 5,
     "pw_fnet": 100,
+    "qwen": 97,
     "relgt": 49,
     "resnet": 32,
+    "scunet": 148,
     "sd3_mmdit": 124,
     "tabm": 5,
     "tree_transformer": 28,
+    "video_jepa": 161,
     "vq_vae": 9,
     "vq_vae_rotation": 9,
 }
 
-#: The three RD-1 classes deliberately left unfixed, and why. ``build()`` is NOT
-#: implemented for these: ``materialize_sublayers`` refuses to fall back to an
-#: eager forward pass, which is the only trace that succeeds here and which
-#: would execute their ``add_loss()`` calls and BatchNorm updates for real.
-UNFIXED = {
-    "latent_gmm_registration": "raw-tf op in call(); a KerasTensor cannot enter it",
-    "lewm": "call() does integer arithmetic on the batch axis, then add_loss()",
-    "video_jepa": "same as lewm; also the only partially-built subject (66/161)",
-    # Not a trace limitation of the helper but of the SHAPE real callers use:
-    # `create_qwen3_next_*` builds the backbone inside a functional graph whose
-    # SEQUENCE axis is None, and `call()` needs a concrete `seq_len` for its
-    # causal mask. The batch-axis retry deliberately does not substitute other
-    # None axes -- a concrete seq_len would size the positional table wrongly.
-    # Measured: a build() here turns 7 qwen node ids RED, all one cause,
-    # `ValueError: seq_len required for causal mask`.
-    "qwen": "call() needs a concrete seq_len; real callers build at seq_len=None",
-    # SCUNet is DESIGNED for dynamic spatial extents -- it owns a whole
-    # test file for it (`test_dynamic_spatial_dims.py`). Tracing from an
-    # input_shape whose H/W are None reaches `-None` in the padding
-    # arithmetic. Measured: 2 node ids RED, `TypeError: bad operand type
-    # for unary -: 'NoneType'` at `models/scunet/model.py:521`.
-    "scunet": "call() does padding arithmetic on None spatial dims by design",
+#: RD-1 classes with a live waiver: ``build()`` deliberately NOT implemented.
+#: **EMPTY, and that is the assertion** -- see
+#: :func:`test_the_waiver_table_is_empty_and_every_retired_entry_has_a_build`.
+#: A future class that genuinely cannot be materialized belongs here with its
+#: measured reason; adding one re-arms the per-name arm automatically.
+UNFIXED: dict = {}
+
+#: The five names that used to live in :data:`UNFIXED`, mapped to the waiver
+#: text that no longer holds. This is the anti-rot arm's subject list: with
+#: :data:`UNFIXED` empty, "each unfixed class still inherits the base build" is
+#: vacuously true, so the arm asserts the OPPOSITE for exactly these five --
+#: each must now OVERRIDE ``build``. Deleting one of the five ``build()``
+#: methods fails here by name, which is the property the old table provided.
+RETIRED_WAIVER = {
+    "latent_gmm_registration":
+        "raw-tf op in call(); a KerasTensor cannot enter it",
+    "lewm":
+        "call() does integer arithmetic on the batch axis, then add_loss()",
+    "qwen":
+        "call() needs a concrete seq_len; real callers build at seq_len=None",
+    "scunet":
+        "call() does padding arithmetic on None spatial dims by design",
+    "video_jepa":
+        "same as lewm; also the only partially-built subject (66/161)",
 }
 
 
@@ -222,11 +259,18 @@ def test_the_cliffordnet_lm_build_materializes_all_nineteen():
 
 
 @pytest.mark.parametrize("name", sorted(UNFIXED))
-def test_the_three_unfixed_subjects_are_pinned_by_name(name):
+def test_a_waived_subject_is_pinned_by_name(name):
     """The waiver is not a blanket: each unfixed class is named with its reason.
 
     A class that GAINS a working ``build()`` fails here and must be moved into
     :data:`FIXED`, so the waiver cannot outlive its own justification.
+
+    :data:`UNFIXED` is currently EMPTY, so this arm collects zero cases. It is
+    kept live rather than deleted because it is the thing that makes adding a
+    new waiver cost something. The emptiness itself is asserted by
+    :func:`test_the_waiver_table_is_empty_and_every_retired_entry_has_a_build`,
+    which is NOT parameterized over ``UNFIXED`` and therefore cannot vanish
+    with it.
     """
     build, make_inputs, kwargs = roundtrip_subject(name)
     keras.utils.set_random_seed(0)
@@ -234,3 +278,110 @@ def test_the_three_unfixed_subjects_are_pinned_by_name(name):
     assert type(model).build is keras.layers.Layer.build, (
         f"{name} now implements build(); move it from UNFIXED to FIXED "
         f"(waiver was: {UNFIXED[name]})")
+
+
+@pytest.mark.parametrize("name", sorted(RETIRED_WAIVER))
+def test_the_waiver_table_is_empty_and_every_retired_entry_has_a_build(name):
+    """The retired waiver, asserted in the direction that can now fail.
+
+    Two claims, both of which go RED on a regression:
+
+    1. :data:`UNFIXED` is empty. Re-waiving one of these five by deleting its
+       ``build()`` and re-listing it here fails on this line.
+    2. Each of the five names an object whose class OVERRIDES ``build``.
+       Deleting a ``build()`` without touching this file also fails, by name.
+
+    Claim 2 is the exact inverse of the assertion the old
+    ``test_the_three_unfixed_subjects_are_pinned_by_name`` made about these
+    same five, so the file's total coverage of them did not drop when the
+    waiver was retired.
+    """
+    assert UNFIXED == {}, (
+        f"UNFIXED regrew: {sorted(UNFIXED)}. Every RD-1 class was measured "
+        f"materializable on 2026-08-23; a new waiver needs its own measured "
+        f"reason, not a restored one.")
+
+    build, make_inputs, kwargs = roundtrip_subject(name)
+    keras.utils.set_random_seed(0)
+    model = build()
+    assert type(model).build is not keras.layers.Layer.build, (
+        f"{name} lost its build() and fell back to the defaulted "
+        f"keras.layers.Layer.build, which marks the model built while it "
+        f"holds zero materialized state. The retired waiver said: "
+        f"{RETIRED_WAIVER[name]}")
+    assert name in FIXED, (
+        f"{name} implements build() but is missing from FIXED, so no arm "
+        f"pins what that build() materializes")
+
+
+@pytest.mark.parametrize(
+    "name,build_shape,call_shapes,pinned",
+    [
+        # `input_ids` / `attention_mask`, sequence axis genuinely None -- the
+        # shape `create_qwen3_next_generation` and `_classification` build the
+        # backbone at. Called afterwards at TWO other sequence lengths.
+        pytest.param(
+            "qwen",
+            {"input_ids": (None, None), "attention_mask": (None, None)},
+            [(2, 20), (3, 7)],
+            97,
+            id="qwen",
+        ),
+        # H/W genuinely None -- the fully-convolutional build the SCUNet module
+        # docstring advertises. Called at a larger square and at a non-square.
+        pytest.param(
+            "scunet",
+            (None, None, None, 3),
+            [(1, 96, 96, 3), (1, 64, 128, 3)],
+            148,
+            id="scunet",
+        ),
+    ],
+)
+def test_a_coerced_build_probe_does_not_pin_the_call_shape(
+        name, build_shape, call_shapes, pinned):
+    """The property the ``qwen``/``scunet`` waiver claimed was unobtainable.
+
+    Both of these ``build()`` methods substitute a concrete extent for a
+    ``None`` axis. That substitution is a BUILD-TIME probe: it must materialize
+    the weights and then constrain nothing. The waiver's objection -- "a
+    concrete seq_len would size the positional table wrongly", "SCUNet is
+    DESIGNED for dynamic spatial extents" -- is precisely the claim measured
+    here, so this test, not a comment, is what licenses the coercion.
+
+    Built at the fully-``None`` shape, then called at two DIFFERENT concrete
+    shapes: the forward must run, produce the shape the input asked for, and
+    move the weight population not at all.
+    """
+    build, make_inputs, kwargs = roundtrip_subject(name)
+    keras.utils.set_random_seed(0)
+    model = build()
+
+    model.build(build_shape)
+    after_build = _paths(model)
+    assert len(after_build) == pinned, (
+        f"{name}: build() at the None-axis shape materialized "
+        f"{len(after_build)} weights, pinned at {pinned}")
+
+    for shape in call_shapes:
+        if isinstance(build_shape, dict):
+            # `attention_mask` is ONES, not zeros: a zero mask marks every
+            # position as padding, and a fully-masked row is a softmax over
+            # nothing -- a NaN forward would be read here as a shape defect.
+            inputs = {
+                key: (np.ones if key == "attention_mask" else np.zeros)(
+                    shape, dtype="int32")
+                for key in build_shape
+            }
+        else:
+            inputs = np.zeros(shape, dtype="float32")
+        outputs = model(inputs)
+        # `qwen` appends a vocab axis, `scunet` returns the input rank, so the
+        # comparison is over the axes the INPUT names.
+        assert tuple(outputs.shape[:len(shape)]) == shape, (
+            f"{name}: call at {shape} returned {tuple(outputs.shape)}; the "
+            f"build-time probe leaked into the call shape")
+        assert _paths(model) == after_build, (
+            f"{name}: calling at {shape} changed the weight population that "
+            f"build() at the None-axis shape produced: "
+            f"{sorted(set(_paths(model)) ^ set(after_build))}")
