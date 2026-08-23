@@ -285,7 +285,7 @@ print("🚀 Creating BERT-base model with a sentiment analysis head...")
 model = create_bert_with_head(
     bert_variant="base",
     task_config=sentiment_config,
-    pretrained=False  # Set to True to download pretrained weights
+    pretrained=False  # or a local ".keras" path; `True` raises NotImplementedError
 )
 
 # 3. Compile the model
@@ -308,12 +308,23 @@ dummy_inputs = {
 dummy_labels = np.random.randint(0, 3, size=(BATCH_SIZE,))
 
 # The model is ready for training
-# model.fit(dummy_inputs, dummy_labels, epochs=1)
+model.fit(dummy_inputs, dummy_labels, epochs=1)
 
-# Make a prediction
+# Make a prediction. The model's output is the bare logits tensor: the factory
+# drops the head's `probabilities` entry, which is exactly `softmax(logits)`,
+# because a dict output cannot be compiled with a string loss or ANY metric.
 predictions = model.predict(dummy_inputs)
 print(f"\nOutput predictions shape: {predictions.shape}") # (4, 3)
 ```
+
+> **Output contract.** `create_bert_with_head` returns a **bare tensor** whenever the
+> head produces a single informative tensor -- which is every classification-style
+> head. Keys that are pure functions of `logits` (`probabilities` = `softmax(logits)`,
+> `predictions` = `argmax(logits)`) are dropped, because no loss can consume them and
+> a dict output cannot be compiled with a string loss or ANY metric.
+> A head emitting genuinely independent tensors keeps a dict:
+> `QuestionAnsweringHead` returns `{"start_logits", "end_logits"}`, and there you
+> compile with a per-key `loss` dict.
 
 ---
 
@@ -402,6 +413,8 @@ model = BERT.from_variant("base", pretrained="/path/to/my/bert_weights.keras")
 NER is a token-level classification task. The factory handles this seamlessly.
 
 ```python
+import keras
+
 from dl_techniques.models.bert import create_bert_with_head
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
@@ -412,18 +425,27 @@ ner_config = NLPTaskConfig(
     num_classes=9  # e.g., O, B-PER, I-PER, B-LOC, I-LOC, etc.
 )
 
-# 2. Create the full model with a pretrained BERT encoder
+# 2. Create the full model (pass a local ".keras" path to `pretrained` to
+#    warm-start from a checkpoint; `pretrained=True` raises NotImplementedError)
 ner_model = create_bert_with_head(
     bert_variant="base",
     task_config=ner_config,
-    pretrained=True
+    pretrained=False
 )
 
 # 3. Inspect the model
 ner_model.summary()
 
-# The output shape will be (batch_size, sequence_length, num_classes)
-# perfect for training on a token-level objective.
+# `TokenClassificationHead` emits `logits` plus a `predictions` entry that is
+# exactly `argmax(logits, axis=-1)`; the factory drops that derived duplicate,
+# so the model's output is the logits tensor bare -- shape
+# (batch_size, sequence_length, num_classes) -- not a dict. That is what lets
+# you compile it on a token-level objective directly:
+ner_model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=2e-5),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
 ```
 
 ---

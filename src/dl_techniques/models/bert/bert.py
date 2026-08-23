@@ -1100,7 +1100,18 @@ def create_bert_with_head(
     :param head_config_overrides: Optional dictionary to override default head
         configuration. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete `keras.Model` ready for the specified task.
+    :return: A complete `keras.Model` ready for the specified task. The model's
+        output is a **bare tensor** whenever the head produces a single
+        informative tensor -- which is every classification-style head, since
+        their `probabilities` entry is exactly `softmax(logits)` and a token
+        head's `predictions` entry is exactly `argmax(logits, axis=-1)`; both
+        are dropped here as derived duplicates of `logits`, which is the only
+        one a loss can consume. A head that emits genuinely independent
+        tensors keeps a dict output; `QuestionAnsweringHead` is the example,
+        returning `{"start_logits": ..., "end_logits": ...}`. The bare-tensor
+        form is what makes `loss="sparse_categorical_crossentropy"` and
+        `metrics=["accuracy"]` compile, and what makes
+        `model.predict(x).shape` read.
     :rtype: keras.Model
 
     Example:
@@ -1165,10 +1176,46 @@ def create_bert_with_head(
     }
     task_outputs = task_head(head_inputs)
 
+    # DECISION plan-2026-08-23T203721-009b7ccf/D-018
+    # A head's `probabilities` entry is exactly `softmax(logits)` and its
+    # `predictions` entry is exactly `argmax(logits, axis=-1)`, so exposing
+    # either beside `logits` makes the model's output a dict for no information
+    # gain -- and a dict output is what made this factory impossible to
+    # compile: MEASURED,
+    # `metrics=['accuracy']`, `metrics={'logits': ...}` and the dict+list forms
+    # ALL raise, `loss='sparse_categorical_crossentropy'` raises `KeyError:
+    # The path: ('logits',)`, and `model.predict(x).shape` raises
+    # `AttributeError: 'dict' object has no attribute 'shape'`. Only
+    # `loss={'logits': ...}` with NO metrics compiled, i.e. there was no way to
+    # attach a metric at all. Do NOT "fix" this by editing
+    # `layers/heads/nlp/factory.py` to stop emitting `probabilities`: that file
+    # is HIGH blast radius (~20 model packages) and the heads' own dict
+    # contract is used directly by callers that never go through this factory.
+    # Do NOT collapse unconditionally either -- `QuestionAnsweringHead` emits
+    # `{'start_logits', 'end_logits'}` and `TextSimilarityHead` emits three
+    # independent tensors; those keep their dicts. The two names below are the
+    # complete derived set, RE-DERIVED by an AST walk over every `call()` in
+    # `layers/heads/nlp/factory.py` rather than assumed: only
+    # `TextClassificationHead` / `MultipleChoiceHead` (`probabilities`) and
+    # `TokenClassificationHead` (`predictions`, an int32 argmax no loss can
+    # consume) put a pure function of `logits` beside it.
+    derived_from_logits = ("probabilities", "predictions")
+
+    model_outputs = task_outputs
+    if isinstance(model_outputs, dict):
+        if "logits" in model_outputs:
+            model_outputs = {
+                key: value
+                for key, value in model_outputs.items()
+                if key not in derived_from_logits
+            }
+        if len(model_outputs) == 1:
+            model_outputs = next(iter(model_outputs.values()))
+
     model_name = f"bert_{bert_variant}_with_{task_config.name}_head"
     model = keras.Model(
         inputs=inputs,
-        outputs=task_outputs,
+        outputs=model_outputs,
         name=model_name
     )
 

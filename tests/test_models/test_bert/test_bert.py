@@ -318,10 +318,14 @@ class TestBERTIntegrationFactory:
             'token_type_ids': keras.ops.zeros((2, 32), 'int32'),
         }
         outputs = model(inputs, training=False)
-        assert isinstance(outputs, dict)
-        assert "logits" in outputs
-        assert "probabilities" in outputs
-        assert outputs["logits"].shape == (2, 3)
+        # The factory drops the head's `probabilities` entry -- it is exactly
+        # `softmax(logits)` -- and exposes the one surviving tensor bare. That
+        # is what makes the model compilable; see
+        # `test_the_head_model_output_is_compilable.py`, which owns the full
+        # contract. These assertions pinned the dict-output defect until
+        # 2026-08-24.
+        assert not isinstance(outputs, dict)
+        assert outputs.shape == (2, 3)
 
     def test_create_with_token_classification_head(self):
         """Test creating a BERT model for token classification."""
@@ -337,9 +341,10 @@ class TestBERTIntegrationFactory:
             'token_type_ids': keras.ops.zeros((2, 32), 'int32'),
         }
         outputs = model(inputs, training=False)
-        assert isinstance(outputs, dict)
-        assert "logits" in outputs
-        assert outputs["logits"].shape == (2, 32, 9)
+        # `TokenClassificationHead` emits `{'logits'}` alone, so the single
+        # surviving key is likewise exposed bare.
+        assert not isinstance(outputs, dict)
+        assert outputs.shape == (2, 32, 9)
 
 
 class TestBERTIntegration:
@@ -387,7 +392,7 @@ class TestBERTIntegration:
         def loss_fn(outputs):
             return keras.ops.mean(
                 keras.losses.categorical_crossentropy(
-                    targets, outputs['logits'], from_logits=True
+                    targets, outputs, from_logits=True
                 )
             )
 
@@ -439,7 +444,7 @@ class TestBERTIntegration:
                 outputs = classification_model(inputs, training=True)
                 loss = keras.ops.mean(
                     keras.losses.sparse_categorical_crossentropy(
-                        labels, outputs['logits'], from_logits=True
+                        labels, outputs, from_logits=True
                     )
                 )
             loss_value = float(loss)
