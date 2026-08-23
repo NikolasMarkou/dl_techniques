@@ -3,10 +3,6 @@
 A reference for writing Keras 3 custom layers and models that are correct, serializable, and
 verifiably do what they claim.
 
-**Version 3.** v2 was written from an audit of what the code does. v3 adds what a later audit found
-when it attacked the *instruments* as hard as the code, plus a defect surface v2 barely covered: the
-save/load path, reachability, and provenance.
-
 ## Scope
 
 Making a layer construct and serialize is the easy half, and it is not where the defects are. Three
@@ -33,7 +29,10 @@ is easy to test.** Sections 1–13 are what to write. Sections 14–15 are how t
 optional polish — a guard that cannot fail is the most likely outcome of writing a new test, and the
 audits measured that outcome repeatedly, including in tests written *during* the audits.
 
-### What v3 adds over v2
+### The four surfaces where the defects actually are
+
+Most Keras guidance covers construction and serialization. These four are where the audits found
+shipped, green-suite defects, and they are the reason this document is as long as it is:
 
 - **§7 The Save/Load Path** — archive layout, optimizer state, unbuilt saves, and why a symmetric
   override pair is usually two independent decisions wearing one name.
@@ -43,7 +42,7 @@ audits measured that outcome repeatedly, including in tests written *during* the
 - **§15 Warnings as a Defect Channel** — the framework is already telling you, the default
   instrument under-reports by 5×, and most teams never turn it on.
 - **§14.6 Pin the property, not the sample** — five of nine long-standing RED tests in one audit
-  were one defect class: an exact literal pinned against a seed-dealt or sub-ULP quantity.
+  were a single defect class: an exact literal pinned against a seed-dealt or sub-ULP quantity.
 
 ## How to read this
 
@@ -690,8 +689,8 @@ measurement shows the cache matters.
 
 ## 7. The Save/Load Path
 
-New in v3. Four separate real defects in one audit lived here, and **not one was visible to a
-round-trip value check**. This is the least-tested surface in most Keras codebases, because the
+Four separate real defects in one audit lived here, and **not one was visible to a round-trip
+value check**. This is the least-tested surface in most Keras codebases, because the
 obvious test — save, load, compare outputs — passes through all four.
 
 ### 7.1 The Round-Trip Test, on VALUES, and Twice
@@ -1451,8 +1450,8 @@ boundary.
 
 ## 13. Reachability and Provenance
 
-New in v3. These defects are invisible to every behavioural test, because the code under test is
-never reached, or is reached and computes something simpler than its name.
+These defects are invisible to every behavioural test, because the code under test is never
+reached, or is reached and computes something simpler than its name.
 
 ### 13.1 The Unreachable Knob
 
@@ -1820,8 +1819,8 @@ the global dtype policy, `floatx`, and TF32 flags.
 
 ### 14.10 An Instrument Can Report a Lower Bound
 
-See §15.1. This is the single highest-yield item in v3: the obvious instrument for a warning census
-under-reports by **5×**, and every count derived from it is wrong.
+See §15.1. This is the single highest-yield item in this document: the obvious instrument for a
+warning census under-reports by **5×**, and every count derived from it is wrong.
 
 ### 14.11 Why Guards Fail
 
@@ -1967,9 +1966,9 @@ runs; a node-id set is.
 
 ## 15. Warnings as a Defect Channel
 
-New in v3, and the cheapest large-scale audit available. The framework is already telling you where
-the defects are; most codebases never turn the channel on, and the obvious way to turn it on
-under-reports by 5×.
+The cheapest large-scale audit available. The framework is already telling you where the defects
+are; most codebases never turn the channel on, and the obvious way to turn it on under-reports by
+5×.
 
 ### 15.1 The Default Instrument Reports a Lower Bound
 
@@ -2488,8 +2487,8 @@ falsified by measurement.
 | A weight-path set is stable across a round trip | **Not always.** A `clone_model` teacher inherits the student's path strings live and separates on reload — 172 paths before, 322 after, harmlessly (§7.8) |
 | A single `-W error::UserWarning` run measures the warning population | **False — it is a lower bound.** It aborts each test at the first warning: 58 node ids against 310 (§15.1) |
 
-**The meta-lesson, restated for v3.** Across three audits the dominant failure mode was not a wrong
-fix — it was **a real symptom with a wrong explanation**:
+**The meta-lesson.** Across every audit that produced this document, the dominant failure mode was
+not a wrong fix — it was **a real symptom with a wrong explanation**:
 
 - a doubled archive whose own override comment claimed the opposite;
 - a "dead" head that trains in the loop written for it;
@@ -2498,7 +2497,7 @@ fix — it was **a real symptom with a wrong explanation**:
 - a "linear-algebra" bug that was a linear *layer*;
 - a "test-order" flake that was one unrestored global seed.
 
-In the last audit roughly **one carried premise in five died on measurement**, and **six of the
+In the most recent audit roughly **one carried premise in five died on measurement**, and **six of the
 author's own prescriptions were falsified before they shipped** — one of which would have divided 189
 layers' epsilon by 1000, and another of which would have made a correct fix fail its own guard.
 
