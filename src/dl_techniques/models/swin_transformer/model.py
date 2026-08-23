@@ -324,7 +324,7 @@ class SwinTransformer(keras.Model):
             drop_path_rate: float = 0.1,
             patch_size: int = 4,
             use_bias: bool = True,
-            kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = REFERENCE_KERNEL_INITIALIZER,
+            kernel_initializer: Optional[Union[str, Dict[str, Any], initializers.Initializer]] = None,
             bias_initializer: Union[str, initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
             bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
@@ -435,6 +435,11 @@ class SwinTransformer(keras.Model):
         self._input_shape = input_shape
 
         # Store serializable initializers and regularizers
+        # A module-level dict is a MUTABLE DEFAULT: bound once at def time and
+        # shared by every caller. Resolved from a None sentinel instead, which
+        # also keeps `initializers.get` producing a FRESH instance per model.
+        if kernel_initializer is None:
+            kernel_initializer = REFERENCE_KERNEL_INITIALIZER
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)

@@ -345,7 +345,7 @@ class ViT(keras.Model):
             dropout_rate: float = 0.0,
             attention_dropout_rate: float = 0.0,
             pos_dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = REFERENCE_KERNEL_INITIALIZER,
+            kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]] = None,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -421,6 +421,11 @@ class ViT(keras.Model):
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
+        # A module-level dict is a MUTABLE DEFAULT: bound once at def time and shared
+        # by every caller. Resolved from a None sentinel instead, which also keeps
+        # `initializers.get` producing a FRESH instance per model.
+        if kernel_initializer is None:
+            kernel_initializer = REFERENCE_KERNEL_INITIALIZER
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -1082,7 +1087,7 @@ def create_vit(
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
-        kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = REFERENCE_KERNEL_INITIALIZER,
+        kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]] = None,
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
