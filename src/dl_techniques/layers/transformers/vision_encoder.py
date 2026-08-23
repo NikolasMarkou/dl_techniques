@@ -75,6 +75,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, get_arg
 # local imports
 # ---------------------------------------------------------------------
 
+from ...initializers import clone_initializer
 from ..embedding import create_embedding_layer
 from ..norms import create_normalization_layer
 from .transformer import (
@@ -431,8 +432,20 @@ class VisionEncoder(keras.layers.Layer):
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. MEASURED at HEAD before this change,
+                # on a seeded depth-4 encoder: 12 of 24 same-shape kernel pairs at
+                # `max|delta| = 0.0` (all 4 `.../cross_attention/qkv/kernel`
+                # pairwise identical, likewise all 4 `.../proj/kernel`). This is a
+                # SHARED layer: `nano_vlm`, `nano_vlm_world_model` and `clip` all
+                # build their vision tower from it, so the defect was theirs too.
+                # `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
@@ -475,8 +488,10 @@ class VisionEncoder(keras.layers.Layer):
         :rtype: keras.layers.Layer
         """
         base_args = {
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
+            # D-560: a clone per patch-embed stack -- 'hybrid'/'overlapping'
+            # build SEVERAL convs from this one dict.
+            'kernel_initializer': clone_initializer(self.kernel_initializer),
+            'bias_initializer': clone_initializer(self.bias_initializer),
             'kernel_regularizer': self.kernel_regularizer,
             'bias_regularizer': self.bias_regularizer,
             'use_bias': self.use_bias

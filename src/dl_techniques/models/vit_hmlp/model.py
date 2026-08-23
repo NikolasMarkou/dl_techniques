@@ -55,6 +55,7 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
@@ -457,9 +458,20 @@ class ViTHMLP(keras.Model):
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. MEASURED at HEAD before this change,
+                # on a seeded 12-layer build: 132 of 264 same-shape kernel
+                # pairs at `max|delta| = 0.0` -- all 12
+                # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
+                # pairwise identical (66 pairs), likewise the 12 `.../proj/kernel`.
+                # `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
@@ -481,8 +493,8 @@ class ViTHMLP(keras.Model):
 
             self.head = layers.Dense(
                 self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="head"

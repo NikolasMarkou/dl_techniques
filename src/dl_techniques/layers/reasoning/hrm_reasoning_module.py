@@ -44,6 +44,7 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 # local imports
 # ---------------------------------------------------------------------
 
+from ...initializers import clone_initializer
 from ..transformers import (
     TransformerLayer,
     AttentionType,
@@ -236,7 +237,19 @@ class HierarchicalReasoningModule(keras.layers.Layer):
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.dropout_rate,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. At the DEFAULT `attention_type=
+                # 'group_query'` this site is currently masked -- `GroupedQueryAttention`
+                # already clones per projection -- but the masking is another layer's
+                # property, not this one's. MEASURED at HEAD on a seeded 4-layer
+                # module with the declared `attention_type='multi_head'`: 12 of 24
+                # same-shape kernel pairs at `max|delta| = 0.0` (all 4 qkv, all 4
+                # proj). `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"transformer_layer_{i}"
             )

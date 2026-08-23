@@ -98,6 +98,7 @@ from keras import ops
 # local imports
 # ---------------------------------------------------------------------
 
+from ...initializers import clone_initializer
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
@@ -259,14 +260,29 @@ class BeitAttention(keras.layers.Layer):
         )
 
         # Sub-layers are created unconditionally in __init__ and built in build().
-        dense_kwargs = dict(
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-        )
+        # DECISION plan-2026-08-23T091307-9a110062/D-560
+        # This is a CALLABLE, not a dict, so each of the four projections gets its
+        # OWN `clone_initializer(...)` copy. Do NOT "simplify" it back to a shared
+        # `dense_kwargs = dict(...)`: one seedless initializer INSTANCE replays its
+        # draw, so every same-shape kernel it reaches is bit-identical. All four
+        # kernels here are `(dim, dim)`. MEASURED at HEAD before this change, on a
+        # seeded 4-block BEiT: `q/kernel == k/kernel == v/kernel == proj/kernel` at
+        # `max|delta| = 0.0` inside EVERY block (24 pairs). `Q == K` makes the
+        # pre-softmax score matrix `x W W^T x^T` exactly SYMMETRIC at step 0, and
+        # `V == proj` makes the output projection the transpose-partner of its own
+        # value path -- the sharp form of this defect, not the weaker
+        # same-role-different-depth form. Same rationale and same remedy as
+        # `group_query_attention.py`. `seed=` is not the discriminator; instance
+        # identity is. See decisions.md D-560.
+        def dense_kwargs() -> Dict[str, Any]:
+            return dict(
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+            )
         self.q_dense = keras.layers.Dense(
-            self.dim, use_bias=self.qv_bias, name="q", **dense_kwargs
+            self.dim, use_bias=self.qv_bias, name="q", **dense_kwargs()
         )
         # DECISION plan-2026-08-11T012340-f63796dc/D-001
         # `use_bias=False` here is BEiT's ARCHITECTURE, not an oversight and not a
@@ -293,13 +309,13 @@ class BeitAttention(keras.layers.Layer):
         # Pinned by `TestBeitAttentionNoKBias` (exact bias-parameter count, not `> 0`).
         # See decisions.md D-001 (plan-2026-08-11T012340-f63796dc).
         self.k_dense = keras.layers.Dense(
-            self.dim, use_bias=False, name="k", **dense_kwargs
+            self.dim, use_bias=False, name="k", **dense_kwargs()
         )
         self.v_dense = keras.layers.Dense(
-            self.dim, use_bias=self.qv_bias, name="v", **dense_kwargs
+            self.dim, use_bias=self.qv_bias, name="v", **dense_kwargs()
         )
         self.proj = keras.layers.Dense(
-            self.dim, use_bias=self.use_proj_bias, name="proj", **dense_kwargs
+            self.dim, use_bias=self.use_proj_bias, name="proj", **dense_kwargs()
         )
         self.attn_dropout = keras.layers.Dropout(
             self.attn_dropout_rate, name="attn_dropout"
