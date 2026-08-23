@@ -263,8 +263,10 @@ class TestBlockChaining:
         **The ratio GROWS with depth**, so checking block 0 is not enough: the
         across-token std decays block over block while the injected RMS is
         pinned at the scale by the LayerNorm. This runs at
-        ``num_transformer_blocks=4`` — the largest shipped preset
-        (``create_relgt_model("large")``) — and asserts on EVERY block. Re-derived
+        ``num_transformer_blocks=4`` — the DEEPEST shipped preset
+        (``create_relgt_model("repo_medium")``, renamed from ``"large"`` on
+        2026-08-23 when ``base`` took the published 512 channels; its block count
+        is unchanged at 4) — and asserts on EVERY block. Re-derived
         here at scale 0.1, 20 unseeded draws, per-block ratio (min / max):
 
         ====== =============== ================================
@@ -286,7 +288,7 @@ class TestBlockChaining:
         as such at the constant; do not raise ``num_transformer_blocks`` past 4
         without re-measuring.
         """
-        num_blocks = 4  # the largest shipped preset: create_relgt_model("large")
+        num_blocks = 4  # the deepest shipped preset: create_relgt_model("repo_medium")
         model, tokens = self._probe_model(num_blocks=num_blocks)
         x = _inputs()
         _ = model(x, training=False)  # build seed_encoder and every block

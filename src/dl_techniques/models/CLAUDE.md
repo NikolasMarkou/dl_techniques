@@ -398,6 +398,26 @@ because `plans/` is gitignored — a note that lives only in a decision log does
 No such checkpoint exists under `results/` on the author's machine (checked read-only). If you hold
 one elsewhere, re-train or convert rather than forcing a load.
 
+## Checkpoint- and API-affecting changes, 2026-08-23
+
+`plan-2026-08-23T091307-9a110062` corrected five variant tables that named a published config
+while carrying different numbers, after fetching each upstream source. Recorded here for the same
+reason as the block above: `plans/` is gitignored and does not ship.
+
+| Package | Variant | Change | Consequence |
+|---|---|---|---|
+| `hierarchical_reasoning_model` | `small` | `h_layers`/`l_layers` 6 -> 4, `l_cycles` 3 -> 2, `halt_max_steps` 8 -> 16 (`sapientinc/HRM` `config/arch/hrm_v1.yaml`) | different weight tree; a pre-fix `"small"` checkpoint will not load |
+| `sd3_mmdit` | `full` + dataclass default | `sample_size` 64 -> 128 (official `SD3Transformer2DModel`) | no weight-shape change; the positional grid scale doubles |
+| `ntm` | `base` | `memory_dim` 32 -> 20 (Graves et al. 2014, Tables 1-2 use 128x20 in every row) | memory matrix reshapes; a pre-fix `"base"` checkpoint will not load |
+| `pft_sr` | `light`, `base` | corrected to the paper's own two released configs (`CVL-UESTC/PFT-SR`), incl. `window_size` 8 -> 32; `large` **renamed** `repo_medium` | pre-fix `light`/`base` checkpoints will not load; `create_pft_sr(..., variant="large")` now raises |
+| `relgt` | `base` | `embedding_dim` 128 -> 512, `num_global_centroids` 32 -> 4096, `num_transformer_blocks` 2 -> 1 (`snap-stanford/relgt` argparse defaults); `large` **renamed** `repo_medium`; `size_configs` hoisted to `RELGT.MODEL_VARIANTS` | pre-fix `base` checkpoints will not load; `create_relgt_model(..., model_size="large")` now raises |
+
+No pretrained weights are distributed for any of these packages, and no checkpoint for them exists
+under `results/` (checked read-only). Every corrected row is pinned, with its source URL, by
+`tests/test_variant_tables_match_upstream_references.py`; rows with no upstream counterpart are
+deliberately NOT pinned there, and both renames exist because a repo-invented row that had been
+called "large" ended up *smaller* than the corrected `base` beside it.
+
 **D-002 ruling (2026-08-19): CARRY.** The 25 packages with no consumer outside their own tests —
 `cbam detr distilbert fastvlm fftnet fractalnet gemma latent_gmm_registration mamba memory_bank
 mini_vec2vec mothnet nano_vlm_world_model pft_sr pw_fnet qwen relgt scunet shgcn som squeezenet

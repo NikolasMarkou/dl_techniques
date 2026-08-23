@@ -127,7 +127,7 @@ class RELGT(keras.Model):
         gnn_pe_layers: Integer, number of GNN PE layers. Defaults to 2.
         num_transformer_blocks: Integer, number of transformer blocks to stack.
             Defaults to 2. **Bounded above by measurement at ~4** (the depth
-            `create_relgt_model("large")` ships): each block broadcast-adds its
+            `create_relgt_model("repo_medium")` ships): each block broadcast-adds its
             summary onto every token at `SUMMARY_BROADCAST_SCALE`, and that
             token-invariant component grows relative to the token-varying signal
             with every block (measured untrained at `embedding_dim=32`: ratio
@@ -171,6 +171,59 @@ class RELGT(keras.Model):
         )
         ```
     """
+
+    #: DECISION plan-2026-08-23T091307-9a110062/D-464
+    #: ``base`` is the official default configuration of snap-stanford/relgt, the
+    #: paper authors' own release, quoted from its argparse defaults:
+    #:   --channels 512  --num_heads 4  --num_centroids 4096  --num_layers 1
+    #:   https://raw.githubusercontent.com/snap-stanford/relgt/main/main_node_ddp.py
+    #: This file's References block heads with Dwivedi et al. 2025 and carries no
+    #: "inspired by" disclaimer, so these numbers are a citation and must stay one.
+    #: What is quoted and what is NOT:
+    #:   quoted     embedding_dim (channels), num_heads, num_global_centroids
+    #:              (num_centroids), num_transformer_blocks (num_layers -- 1 is the
+    #:              argparse DEFAULT; the official expts/ scripts sweep it over
+    #:              {1, 4, 8}, so it is a default rather than a single canonical depth)
+    #:   NOT quoted ffn_dim: the official argparse defines no FFN width, so 1024
+    #:              preserves this table's own 2x-embedding_dim ratio and is a repo
+    #:              choice. Also unresolved: the constructor's gnn_pe_dim=32 sits
+    #:              opposite an official `--pos_enc_dim 128`, but that mapping was
+    #:              never verified against the upstream code, so it is flagged here
+    #:              rather than silently "corrected".
+    #: ``small`` and ``repo_medium`` have NO upstream counterpart: the official repo
+    #: publishes no model-size ladder at all (its own "small"/"large" scripts name
+    #: RelBench DATASET-size categories, not model sizes). ``repo_medium`` was called
+    #: ``large`` until 2026-08-23; at the published 512-wide ``base`` a 256-wide row
+    #: could no longer be called large in this table's own terms.
+    #: Pinned by tests/test_variant_tables_match_upstream_references.py.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        # Repo-original. Smallest tier; used by the package's own smoke tests.
+        "small": {
+            "embedding_dim": 64,
+            "num_heads": 2,
+            "num_global_centroids": 16,
+            "ffn_dim": 128,
+            "num_transformer_blocks": 1,
+        },
+        # snap-stanford/relgt main_node_ddp.py argparse defaults.
+        "base": {
+            "embedding_dim": 512,
+            "num_heads": 4,
+            "num_global_centroids": 4096,
+            "ffn_dim": 1024,
+            "num_transformer_blocks": 1,
+        },
+        # Repo-original. Deeper (4 blocks) but narrower than `base`; the 4-block
+        # depth is the ceiling documented at SUMMARY_BROADCAST_SCALE, do not raise
+        # it without re-measuring.
+        "repo_medium": {
+            "embedding_dim": 256,
+            "num_heads": 8,
+            "num_global_centroids": 64,
+            "ffn_dim": 512,
+            "num_transformer_blocks": 4,
+        },
+    }
 
     def __init__(
             self,
@@ -362,36 +415,14 @@ def create_relgt_model(
     Args:
         output_dim: Dimension of final output.
         problem_type: 'classification' or 'regression'.
-        model_size: 'small', 'base', or 'large' for predefined configurations.
+        model_size: 'small', 'base', or 'repo_medium'. Only 'base' has an
+            upstream counterpart; see RELGT.MODEL_VARIANTS.
         **kwargs: Additional arguments to override defaults.
 
     Returns:
         Configured RELGT model.
     """
-    # Predefined configurations
-    size_configs = {
-        "small": {
-            "embedding_dim": 64,
-            "num_heads": 2,
-            "num_global_centroids": 16,
-            "ffn_dim": 128,
-            "num_transformer_blocks": 1,
-        },
-        "base": {
-            "embedding_dim": 128,
-            "num_heads": 4,
-            "num_global_centroids": 32,
-            "ffn_dim": 256,
-            "num_transformer_blocks": 2,
-        },
-        "large": {
-            "embedding_dim": 256,
-            "num_heads": 8,
-            "num_global_centroids": 64,
-            "ffn_dim": 512,
-            "num_transformer_blocks": 4,
-        }
-    }
+    size_configs = RELGT.MODEL_VARIANTS
 
     if model_size not in size_configs:
         raise ValueError(f"model_size must be one of {list(size_configs.keys())}, got {model_size}")

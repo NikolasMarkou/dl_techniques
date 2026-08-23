@@ -24,6 +24,8 @@ References:
     - NTM: https://arxiv.org/abs/1410.5401 (Graves et al. 2014), Tables 1 and 2
     - PFT-SR: https://raw.githubusercontent.com/CVL-UESTC/PFT-SR/master/options/train/001_PFT_SRx2_scratch.yml
       and .../101_PFT_light_SRx2_scratch.yml (`network_g` block of each)
+    - RELGT: https://raw.githubusercontent.com/snap-stanford/relgt/main/main_node_ddp.py
+      (argparse defaults)
 """
 
 from typing import Any, Callable, Dict
@@ -57,6 +59,12 @@ def _pft_sr_variants() -> Dict[str, Dict[str, Any]]:
     return PFTSR.MODEL_VARIANTS
 
 
+def _relgt_variants() -> Dict[str, Dict[str, Any]]:
+    from dl_techniques.models.relgt.model import RELGT
+
+    return RELGT.MODEL_VARIANTS
+
+
 # package -> zero-arg loader for that package's variant table.
 # Loaders are lazy so one package failing to import cannot mask the others.
 VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
@@ -64,7 +72,12 @@ VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
     "sd3_mmdit": _sd3_variants,
     "ntm": _ntm_variants,
     "pft_sr": _pft_sr_variants,
+    "relgt": _relgt_variants,
 }
+
+_RELGT_URL = (
+    "https://raw.githubusercontent.com/snap-stanford/relgt/main/main_node_ddp.py"
+)
 
 _PFT_BASE_URL = (
     "https://raw.githubusercontent.com/CVL-UESTC/PFT-SR/master/options/train/"
@@ -139,6 +152,15 @@ UPSTREAM_PINS = [
     ("pft_sr", "light", "num_heads", 4, _PFT_LIGHT_URL),
     ("pft_sr", "light", "mlp_ratio", 1.0, _PFT_LIGHT_URL),
     ("pft_sr", "light", "window_size", 32, _PFT_LIGHT_URL),
+
+    # snap-stanford/relgt argparse defaults. Name mapping: channels ->
+    # embedding_dim, num_centroids -> num_global_centroids, num_layers ->
+    # num_transformer_blocks. ffn_dim is NOT pinned (no upstream counterpart), and
+    # "small"/"repo_medium" are repo-original tiers and are not pinned.
+    ("relgt", "base", "embedding_dim", 512, _RELGT_URL),
+    ("relgt", "base", "num_heads", 4, _RELGT_URL),
+    ("relgt", "base", "num_global_centroids", 4096, _RELGT_URL),
+    ("relgt", "base", "num_transformer_blocks", 1, _RELGT_URL),
 ]
 
 
