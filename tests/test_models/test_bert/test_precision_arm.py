@@ -1,5 +1,5 @@
 """
-R-088 / R-141 mixed-precision arm for ``models/bert`` -- and the defect it found.
+R-088 / R-141 mixed-precision arm for ``models/bert`` -- and the defect it found and fixed.
 
 Why this file exists at all, re-derived rather than carried
 -----------------------------------------------------------
@@ -15,10 +15,10 @@ What the family subject does not reach is ``create_bert_with_head`` -- the
 package's flagship factory, the one every README example uses and the one this
 plan's step 4 is about to change. Pointing the arm at it found a real defect.
 
-THE FINDING (MEASURED, GPU 1 / RTX 4070, TF32 on by default)
--------------------------------------------------------------
+THE FINDING (MEASURED, GPU 1 / RTX 4070, TF32 on by default) -- NOW FIXED
+--------------------------------------------------------------------------
 ``create_bert_with_head("tiny", NLPTaskConfig(SENTIMENT_ANALYSIS, num_classes=3))``
-under ``mixed_float16`` RAISES, verbatim::
+under ``mixed_float16`` RAISED, verbatim::
 
     TypeError: Exception encountered when calling GELU.call().
 
@@ -31,10 +31,15 @@ Its float32 control is green, and the bare encoder at the SAME config is green
 under ``mixed_float16`` too (``test_the_encoder_is_green_which_localises_the_defect``),
 so the fault is in the head path and not in ``models/bert``'s own encoder.
 
-Root cause, isolated at the layer::
+Root cause, isolated at the layer -- the PRE-FIX line::
 
-    # layers/activations/expanded_activations.py:174
+    # layers/activations/expanded_activations.py (pre-fix)
     return 0.5 * inputs * (1 + keras.ops.erf(inputs / keras.ops.sqrt(2.0)))
+
+and the repaired one, which is what ships::
+
+    root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
+    return 0.5 * inputs * (1 + keras.ops.erf(inputs / root_two))
 
 ``keras.ops.sqrt(2.0)`` returns **float32 regardless of the active dtype
 policy** (MEASURED below), so it meets a float16 autocast tensor and TensorFlow
@@ -42,22 +47,58 @@ refuses the divide. This is the same shape as the ``qwen`` MoE defect
 (``ops.one_hot`` ignoring the policy, decisions.md D-064 of
 ``plan-2026-08-19T163559-499b6f0e``), and it hits exactly 2 of the 6 concrete
 activations in that module -- ``GELU`` and ``xGELU``, both of which divide by
-``ops.sqrt(2.0)``. ``SiLU``, ``xSiLU``, ``xATLU`` and ``EluPlusOne`` are all
-green at float16.
+``ops.sqrt(2.0)``. ``SiLU``, ``xSiLU``, ``xATLU`` and ``EluPlusOne`` were all
+green at float16 even before the repair.
 
-DISPOSITION -- pre-registered in decisions.md D-011, BEFORE any number was seen
--------------------------------------------------------------------------------
-The cause is ``src/dl_techniques/layers/activations/expanded_activations.py``,
-which is OUTSIDE ``models/bert/`` and ``models/resnet/`` and is reached by every
-consumer of the activation factory's ``'gelu'`` / ``'xgelu'`` keys, not just
-BERT. The pre-registered rule for a RED whose cause is outside these two
-packages is: do NOT fix it here, pin it ``xfail(strict=True)`` with the measured
-cause, record the measurement in ``decisions.md``, and report it as a scope
-question. That is what this file does. The bound was not relaxed, the oracle
-call was not deleted, and the arm is ``strict=True`` so the pin FAILS the moment
-the shared layer is repaired -- which is what stops it becoming cargo.
+DISPOSITION -- escalated under D-011/D-016, then RESOLVED as step 3.1
+---------------------------------------------------------------------
+Step 3 pinned this ``xfail(strict=True)`` and escalated it, because the cause
+lives in ``src/dl_techniques/layers/activations/expanded_activations.py``, which
+is outside ``models/bert/`` and ``models/resnet/`` and is reached by every
+consumer of the activation factory's ``'gelu'`` / ``'xgelu'`` keys. The
+orchestrator resolved the escalation: BERT's flagship factory failing under
+``mixed_float16`` is not a shippable state, so step 3.1 REPAIRED the shared
+layer and this arm is now a plain, green, four-part assertion.
 
-See ``decisions.md`` D-016.
+The affected set was RE-DERIVED at step 3.1 rather than carried from step 3's
+"2 of 6": every class in that module was swept under BOTH ``mixed_float16`` and
+``mixed_bfloat16``, with a float32 and a half-precision input each. The measured
+set MATCHED -- exactly ``GELU`` and ``xGELU``, the only two that divide by the
+float32 tensor ``keras.ops.sqrt(2.0)``. ``SiLU``, ``xATLU``, ``xSiLU`` and
+``EluPlusOne`` were green in all four cells, and the float32 forward through
+``GELU``/``xGELU`` is BITWISE identical before and after the repair
+(``max|delta| = 0.0``, and the ``uint32`` views compare equal element-wise).
+
+RED proof of the repaired assertions (fix reverted, then restored) --
+ACTUAL observed text, recorded rather than predicted::
+
+    reverted `expanded_activations.py` -> 4 failed, 2 passed:
+
+      FAILED test_the_gelu_layers_carry_the_input_dtype_onto_their_sqrt2[GELU]
+      FAILED test_the_gelu_layers_carry_the_input_dtype_onto_their_sqrt2[xGELU]
+      FAILED test_every_expanded_activation_is_green_at_float16
+      FAILED test_create_bert_with_head_runs_under_mixed_float16
+
+    with, in all four, the SAME exception rather than an assertion message --
+    recorded because it is not what was predicted: the layer RAISES before
+    arm 2's `assert "float16" in str(out.dtype)` can evaluate, so the message
+    that fires is the framework's, not this file's::
+
+      TypeError: Exception encountered when calling GELU.call().
+
+      `x` and `y` must have the same dtype, got tf.float16 != tf.float32.
+
+      Arguments received by GELU.call():
+        - inputs=tf.Tensor(shape=(2, 4), dtype=float16)
+
+      src/dl_techniques/layers/activations/expanded_activations.py:176: TypeError
+
+    (`xGELU.call()` at :444 gives the identical text with its own class name;
+    `test_every_expanded_activation_is_green_at_float16` dies in its FIRST cell,
+    `GELU` on a float32 input, which is why it names all six rather than
+    trusting the loop to reach them.)
+
+See ``decisions.md`` D-016 (the pin) and D-017 (the repair).
 """
 
 from typing import Any, Dict
@@ -121,16 +162,28 @@ def _build_with_head() -> keras.Model:
 
 
 @pytest.mark.parametrize("activation_class", [GELU, xGELU])
-def test_the_gelu_layers_divide_by_a_float32_constant(activation_class) -> None:
-    """The RED half: the mechanism, pinned where it lives.
+def test_the_gelu_layers_carry_the_input_dtype_onto_their_sqrt2(activation_class) -> None:
+    """The repaired half: the mechanism is still live, the layers no longer trip on it.
 
-    If ``keras.ops.sqrt`` ever follows the compute dtype, this fails and the
-    ``xfail`` below becomes removable -- which is the point of pinning the
-    mechanism separately from the symptom.
+    Three arms, because the middle one alone would be satisfied by a layer that
+    stopped using ``sqrt(2)`` at all, and the first alone proves nothing about
+    this repository's code:
+
+    1. ``keras.ops.sqrt(2.0)`` STILL returns a float32 tensor under
+       ``mixed_float16`` -- the framework behaviour that caused the defect is a
+       fact about Keras 3.8, not something the fix removed. If Keras ever makes
+       it follow the compute dtype this arm fails, and the cast at
+       ``expanded_activations.py`` becomes removable.
+    2. The layer now returns a ``float16`` tensor on a ``float16`` input. This
+       is the arm that goes RED the moment the cast is reverted.
+    3. The naive expression -- a float16 tensor divided by that raw float32
+       tensor -- STILL raises. This is the anti-vacuity arm: without it, arm 2
+       would be indistinguishable from "float16 and float32 mix freely here",
+       and the repair would be unearned.
 
     MEASURED (GPU 1): ``ops.sqrt(2.0).dtype`` is ``float32`` inside a
-    ``mixed_float16`` policy; both ``GELU`` and ``xGELU`` raise ``TypeError``;
-    casting the constant to the input's dtype returns a float16 tensor.
+    ``mixed_float16`` policy; both ``GELU`` and ``xGELU`` return ``float16``;
+    the raw divide raises ``TypeError``.
     """
     with precision_policy("mixed_float16"):
         root_two = ops.sqrt(2.0)
@@ -143,35 +196,56 @@ def test_the_gelu_layers_divide_by_a_float32_constant(activation_class) -> None:
             ops.convert_to_tensor(np.random.RandomState(0).randn(2, 4).astype("float32")),
             "float16",
         )
+
+        out = activation_class()(half)
+        assert "float16" in str(out.dtype), (
+            f"{activation_class.__name__} returned {out.dtype} on a float16 "
+            f"input under mixed_float16; the sqrt(2) constant is not carrying "
+            f"the input's dtype"
+        )
+
         with pytest.raises(TypeError, match="same dtype"):
-            _ = activation_class()(half)
-
-        repaired = half / ops.cast(root_two, half.dtype)
-        assert "float16" in str(repaired.dtype)
+            _ = half / root_two
 
 
-def test_the_other_expanded_activations_are_green_at_float16() -> None:
-    """Anti-vacuity twin: the module is not uniformly broken, so the pin is specific.
+def test_every_expanded_activation_is_green_at_float16() -> None:
+    """After the repair the correct assertion is that ALL SIX are green.
 
-    MEASURED (GPU 1): of the six concrete activations in
-    ``expanded_activations.py``, exactly ``GELU`` and ``xGELU`` raise; ``SiLU``,
-    ``xSiLU``, ``xATLU`` and ``EluPlusOne`` all return float16. Without this
-    arm, "GELU raises under fp16" would be indistinguishable from "nothing in
-    this module runs under fp16", and the diagnosis above would be unearned.
+    Before step 3.1 this arm named four and existed to prove the module was not
+    uniformly broken. That framing is now the wrong one: the pin is gone, so the
+    discriminating question is whether any activation in the module still fails
+    to carry the compute dtype. Naming all six keeps it RED against a partial
+    repair -- fixing ``GELU`` and forgetting ``xGELU``, say.
+
+    It does not become vacuous, because it is paired with arm 3 of
+    ``test_the_gelu_layers_carry_the_input_dtype_onto_their_sqrt2`` above, which
+    pins that a float32 constant genuinely DOES still raise in this regime.
+
+    MEASURED (GPU 1, step 3.1): all six return ``float16`` under
+    ``mixed_float16`` and ``bfloat16`` under ``mixed_bfloat16``, for both a
+    float32 and a half-precision input. Before the repair, ``GELU`` and
+    ``xGELU`` raised in all four of those cells.
     """
     from dl_techniques.layers.activations.expanded_activations import (
         EluPlusOne, SiLU, xATLU, xSiLU,
     )
 
+    every_activation = (GELU, SiLU, xATLU, xGELU, xSiLU, EluPlusOne)
+    assert len(every_activation) == 6, (
+        "this arm claims to cover every concrete activation in "
+        "expanded_activations.py; update it when one is added"
+    )
+
     with precision_policy("mixed_float16"):
-        x = ops.convert_to_tensor(np.random.RandomState(0).randn(2, 4).astype("float32"))
-        for activation_class in (SiLU, xSiLU, xATLU, EluPlusOne):
-            out = activation_class()(x)
-            assert "float16" in str(out.dtype), (
-                f"{activation_class.__name__} returned {out.dtype} under "
-                f"mixed_float16; the float32-constant defect is wider than the "
-                f"two activations this file names"
-            )
+        x32 = ops.convert_to_tensor(np.random.RandomState(0).randn(2, 4).astype("float32"))
+        for activation_class in every_activation:
+            for label, x in (("float32", x32), ("float16", ops.cast(x32, "float16"))):
+                out = activation_class()(x)
+                assert "float16" in str(out.dtype), (
+                    f"{activation_class.__name__} returned {out.dtype} on a "
+                    f"{label} input under mixed_float16; a float32 constant in "
+                    f"its call() is not carrying the compute dtype"
+                )
 
 
 # ---------------------------------------------------------------------
@@ -221,45 +295,29 @@ def test_the_head_model_is_green_under_float32() -> None:
 
 
 # ---------------------------------------------------------------------
-# the arm itself -- pinned RED, cause outside these two packages
+# the arm itself -- was pinned RED at step 3, repaired at step 3.1
 # ---------------------------------------------------------------------
 
 
 # DECISION plan-2026-08-23T203721-009b7ccf/D-016
-# This arm is RED and is PINNED, not fixed. Do NOT "just fix it" here.
+# DECISION plan-2026-08-23T203721-009b7ccf/D-017
+# This arm WAS `xfail(strict=True)` under D-016, escalated as a scope question,
+# and the escalation was resolved by repairing the shared layer (D-017). The
+# `xfail` mark is deliberately GONE, not merely satisfied.
 #
 # WHAT NOT TO DO:
-#   * Do NOT delete the xfail and edit
-#     `layers/activations/expanded_activations.py` from this plan. That file is
-#     outside `models/bert/` and `models/resnet/` and is shared by every
-#     consumer of the activation factory's 'gelu'/'xgelu' keys; this plan's
-#     declared blast radius does not include it, and the fix needs its own
-#     measured consumer survey.
-#   * Do NOT drop `strict=True`. A non-strict xfail goes quietly green when the
-#     shared layer is repaired and the pin becomes cargo.
-#   * Do NOT widen the arm's tolerances or pass `expected_compute_dtype=None`
-#     to make it pass. The failure is a RAISE, not a numeric disagreement, and
-#     part 2 of the arm is the part most often silently dropped.
-#
-# The diagnosis is confirmed by repair, not asserted: casting `ops.sqrt(2.0)`
-# to `inputs.dtype` at expanded_activations.py:174 makes this arm XPASS(strict)
-# on all four parts. See decisions.md D-016.
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED GPU 1: create_bert_with_head under mixed_float16 raises "
-        "TypeError '`x` and `y` must have the same dtype, got tf.float16 != "
-        "tf.float32' inside GELU.call(). Cause is "
-        "layers/activations/expanded_activations.py:174 -- keras.ops.sqrt(2.0) "
-        "is float32 under every policy -- which is OUTSIDE models/bert/ and "
-        "models/resnet/ and is shared by every 'gelu'/'xgelu' activation-factory "
-        "consumer. Pre-registered rule (decisions.md D-011/D-016): pin, do not "
-        "fix, do not relax. strict=True so this FAILS when the shared layer is "
-        "repaired and the pin must be removed."
-    ),
-)
+#   * Do NOT restore the `xfail`. It was `strict=True` precisely so it would
+#     FAIL as XPASS once the shared layer was repaired; re-adding it now would
+#     turn a green four-part arm into a permanent red one.
+#   * Do NOT revert `keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)` in
+#     `layers/activations/expanded_activations.py`. That is the whole repair,
+#     and this arm is its model-level detector.
+#   * Do NOT widen the arm's tolerances or pass `expected_compute_dtype=None`.
+#     Part 2 of the arm is the part most often silently dropped, and the
+#     original failure was a RAISE, not a numeric disagreement.
+# See decisions.md D-016 (the pin) and D-017 (the repair).
 def test_create_bert_with_head_runs_under_mixed_float16() -> None:
-    """All four parts of the arm on the flagship factory. Currently RED."""
+    """All four parts of the arm on the flagship factory. GREEN since step 3.1."""
     reports = assert_precision_arm(
         build=_build_with_head,
         make_inputs=_inputs,

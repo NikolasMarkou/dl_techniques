@@ -173,7 +173,27 @@ class GELU(BaseActivation):
         :return: Output tensor after applying the GELU activation.
         :rtype: keras.KerasTensor
         """
-        return 0.5 * inputs * (1 + keras.ops.erf(inputs / keras.ops.sqrt(2.0)))
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-017
+        # ``sqrt(2)`` is cast to the INPUT's dtype. ``keras.ops.sqrt(2.0)``
+        # returns a float32 TENSOR regardless of the active dtype policy
+        # (MEASURED under both ``mixed_float16`` and ``mixed_bfloat16``), so it
+        # met the float16 autocast tensor here and the divide raised
+        # ``TypeError: `x` and `y` must have the same dtype, got tf.float16 !=
+        # tf.float32`` on ANY mixed-precision forward through this layer --
+        # found via ``create_bert_with_head``, whose float32 control was green.
+        #
+        # WHAT NOT TO DO:
+        #   * Do NOT write the bare ``keras.ops.sqrt(2.0)``. A Python float
+        #     would be fine (weak-typed, promotes to the tensor's dtype); the
+        #     op's RESULT is a strongly-typed float32 tensor and is not.
+        #   * Do NOT cast ``inputs`` to float32 instead. That opts every
+        #     consumer of this activation out of mixed precision, which is the
+        #     defect this repairs, not a repair.
+        # Same defect class as D-064 (``ops.one_hot`` in ``layers/moe/``), and
+        # the same idiom: cast the policy-blind constant, not the tensor.
+        # See decisions.md D-017.
+        root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
+        return 0.5 * inputs * (1 + keras.ops.erf(inputs / root_two))
 
 
 # ---------------------------------------------------------------------
@@ -441,7 +461,13 @@ class xGELU(ExpandedActivation):
         :return: The output tensor after applying xGELU activation.
         :rtype: keras.KerasTensor
         """
-        gate = 0.5 * (1 + keras.ops.erf(inputs / keras.ops.sqrt(2.0)))
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-017
+        # Same policy-blind constant as ``GELU.call`` above, same repair: the
+        # float32 tensor returned by ``keras.ops.sqrt(2.0)`` must adopt the
+        # input's dtype or this divide raises under any mixed-precision policy.
+        # Do NOT revert to the bare ``keras.ops.sqrt(2.0)``. See decisions.md D-017.
+        root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
+        gate = 0.5 * (1 + keras.ops.erf(inputs / root_two))
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
 
 
