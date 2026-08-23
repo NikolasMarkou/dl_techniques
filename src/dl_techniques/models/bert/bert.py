@@ -1060,12 +1060,13 @@ def create_bert(
         ``True`` will raise ``NotImplementedError``. If a string path, loads
         local weights from that path. If ``False`` (default), random init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset identifier for pretrained weights
-        (``"uncased"``, ``"cased"``, ...). Only meaningful when ``pretrained``
-        is True (currently raises). Defaults to ``"uncased"``.
+    :param weights_dataset: UNREACHABLE. Forwarded to ``BERT.from_variant``,
+        which forwards it to ``_download_weights``, which raises
+        ``NotImplementedError`` before reading it -- and ``pretrained=True`` is
+        the only route there. No value of this argument does anything. Kept for
+        signature stability. Defaults to ``"uncased"``.
     :type weights_dataset: str
-    :param cache_dir: Directory for cached weights downloads. Currently unused
-        because no public weights are distributed.
+    :param cache_dir: UNREACHABLE for the same reason. Defaults to ``None``.
     :type cache_dir: Optional[str]
     :param kwargs: Additional keyword arguments forwarded to
         :meth:`BERT.from_variant` (e.g. ``dropout_rate``, ``max_position_embeddings``).
@@ -1124,9 +1125,11 @@ def create_bert_with_head(
         If True, raises ``NotImplementedError`` -- no public BERT weights ship
         with ``dl_techniques``. If False (default), random init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset for pretrained weights ("uncased", "cased", etc.).
+    :param weights_dataset: UNREACHABLE. See ``create_bert``: it reaches
+        ``_download_weights``, which raises ``NotImplementedError`` before
+        reading it. No value does anything.
     :type weights_dataset: str
-    :param cache_dir: Directory to cache downloaded weights.
+    :param cache_dir: UNREACHABLE for the same reason.
     :type cache_dir: Optional[str]
     :param bert_config_overrides: Optional dictionary to override default BERT
         configuration for the chosen variant. Defaults to None.

@@ -571,6 +571,19 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > `tests/` is **1042** (+8 guards). The +4 is the mechanical statement that THIS plan did add
 > files under `src/` — deliberately, each one collapsing a rule that previously had many homes.
 >
+> **Superseded 2026-08-24** by `plan-2026-08-23-009b7ccf` (BERT + ResNet doc/API repair). ALL 66
+> enforceable rows were re-run with their OWN commands; exactly ONE moved. `tests/` is now
+> **1055** (+13), and every other row — including `Python files under src/` at **1011** — held
+> unchanged, which is the mechanical statement that this plan added ZERO files under `src/`; it
+> edited four existing ones. The +13 reconciles exactly to the guard modules the plan landed:
+> five under `test_models/test_bert/`, five under `test_models/test_resnet/`, and three
+> (including `__init__.py`) in the new `tests/test_train/test_resnet/` package.
+>
+> The row was GREEN at that plan's base commit `1a3a6e7e3` — `git ls-tree -r --name-only
+> 1a3a6e7e3 tests | grep '\.py$' | wc -l` gives exactly 1042 — so all thirteen are that plan's
+> own, and no earlier work was owed. (A carried claim that the row was already stale at 1048 was
+> checked against the base tree and did not survive.)
+>
 > **The `.py` FILE-COUNT rows were re-derived on 2026-08-11**, after the `models/beit/` +
 > `src/train/beit/` package landed (and on 2026-08-10, after the multi-package deletion pass) — see the boxed note in Part A § "src/dl_techniques/ — the 13
 > subpackages". They are one row-group with that section's prose and its per-subpackage
@@ -580,7 +593,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1011 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1042 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1055 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 297 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |

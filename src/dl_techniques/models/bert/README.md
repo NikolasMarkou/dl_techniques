@@ -291,7 +291,9 @@ model = create_bert_with_head(
 # 3. Compile the model
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=2e-5),
-    loss="sparse_categorical_crossentropy",
+    # The head's `classifier`/`token_classifier` is a Dense with NO activation,
+    # so the model output is LOGITS. from_logits=True is not optional here.
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 print("✅ BERT model created and compiled successfully!")
@@ -485,7 +487,9 @@ ner_model.summary()
 # you compile it on a token-level objective directly:
 ner_model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=2e-5),
-    loss="sparse_categorical_crossentropy",
+    # The head's `classifier`/`token_classifier` is a Dense with NO activation,
+    # so the model output is LOGITS. from_logits=True is not optional here.
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 ```

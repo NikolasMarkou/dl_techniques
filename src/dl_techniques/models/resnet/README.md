@@ -550,9 +550,14 @@ from dl_techniques.models.resnet import ResNet
 model = ResNet.from_variant('resnet50', num_classes=1000)
 print("✓ ResNet-50 created successfully!")
 
-# 2. Check model summary
+# 2. Check model summary. `count_params()` needs the model to be BUILT --
+#    ResNet is subclassed, so no weights exist until a shape is known:
+#       ValueError: You tried to call `count_params` on layer 'res_net', but
+#       the layer isn't built.
+model.build((1, 224, 224, 3))
 print(f"\nModel: {model.name}")
 print(f"Total parameters: {model.count_params():,}")
+# Total parameters: 25,610,152   (see section 17 for the full table)
 
 # 3. Test with random input
 test_input = keras.random.normal(shape=(1, 224, 224, 3))
@@ -560,15 +565,27 @@ output = model(test_input, training=False)
 
 print(f"\nInput shape: {test_input.shape}")
 print(f"Output shape: {output.shape}")
+
+# The classifier is a bare Dense with NO activation, so `output` holds LOGITS.
+# Apply softmax before reading anything as a probability.
+probabilities = keras.ops.softmax(output, axis=-1)
 print(f"Output predictions (top-5):")
-top5_indices = np.argsort(output[0])[-5:][::-1]
+top5_indices = np.argsort(np.asarray(output[0]))[-5:][::-1]
 for i, idx in enumerate(top5_indices, 1):
-    print(f"  {i}. Class {idx}: {output[0, idx]:.4f}")
+    print(f"  {i}. Class {idx}: logit {output[0, idx]:.4f}, "
+          f"p={probabilities[0, idx]:.4f}")
 ```
+
+> **The model emits logits.** Every head in this package -- the primary
+> classifier and every deep-supervision head -- is a `Dense` with no
+> activation. Compile with `from_logits=True`, and softmax yourself before
+> displaying a confidence.
 
 ### Load Pretrained Model
 
 ```python
+import keras
+import numpy as np
 from dl_techniques.models.resnet import ResNet
 
 # Load ResNet-50 with ImageNet pretrained weights
@@ -584,9 +601,11 @@ print("✓ Pretrained model loaded!")
 image = load_and_preprocess_image('elephant.jpg')  # Your image
 predictions = model(image, training=False)
 
-# Get top prediction
-top_class = np.argmax(predictions[0])
-confidence = predictions[0, top_class]
+# Get top prediction. `predictions` are LOGITS -- softmax first, or the
+# "confidence" printed below is an unbounded score that can be negative.
+probabilities = keras.ops.softmax(predictions, axis=-1)
+top_class = np.argmax(np.asarray(probabilities[0]))
+confidence = probabilities[0, top_class]
 print(f"Predicted class: {top_class} (confidence: {confidence:.2%})")
 ```
 
@@ -632,13 +651,13 @@ ResNet comes in 5 standard sizes, each optimized for different compute/accuracy 
 
 ### Variant Comparison Table
 
-| Variant | Blocks | Type | Params | Use Case |
+| Variant | Blocks | Type | `count_params()` | Use Case |
 |---------|--------|------|--------|----------|
 | **ResNet-18** | [2,2,2,2] | Basic | 11.7M | Mobile, embedded |
 | **ResNet-34** | [3,4,6,3] | Basic | 21.8M | Edge devices |
 | **ResNet-50** | [3,4,6,3] | Bottleneck | 25.6M | **Most popular** |
-| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.5M | High accuracy |
-| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.2M | Best accuracy |
+| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.7M | High accuracy |
+| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.3M | Best accuracy |
 
 > **No accuracy numbers are quoted anywhere in this README, and that is deliberate.**
 > This table used to carry `Top-1 Acc*` and `Top-5 Acc*` columns footnoted "*ImageNet
@@ -653,10 +672,22 @@ ResNet comes in 5 standard sizes, each optimized for different compute/accuracy 
 > paper (linked at the end of this file); to obtain numbers for *this* code, train it
 > and measure.
 >
-> The `Params` column is architectural, not measured on a checkpoint, and is
-> re-derivable with `create_resnet(variant, num_classes=1000).count_params()`.
+> The parameter column is architectural, not measured on a checkpoint. It is
+> `count_params()` at `num_classes=1000`, re-derivable with
+> `m = create_resnet(variant, num_classes=1000); m.build((1, 224, 224, 3));
+> m.count_params()` — the `build` is required, and without it the call raises
+> `ValueError: You tried to call count_params on layer 'res_net', but the layer
+> isn't built`. **Section 17 has the exact figures**, split into trainable and
+> non-trainable; the last two rows here read 44.7M / 60.3M rather than the
+> 44.5M / 60.2M they used to, because those two were the *trainable* subtotals
+> while the first three rows were `count_params()`. One column, one meaning.
 
 ### Detailed Variant Specifications
+
+> The `Initial: Conv 7×7 + MaxPool` line in each block below describes the
+> **default** `stem_type='imagenet'`. With `stem_type='cifar'` the stem is a
+> single 3×3 stride-1 convolution and there is no max pool, so the whole
+> network downsamples by 8× instead of 32×. See section 8 Example 1.
 
 #### ResNet-18 (Lightweight)
 
@@ -1384,6 +1415,7 @@ predictions = inference_model.predict(test_images)
 Create a custom ResNet variant for your specific needs.
 
 ```python
+import keras
 from dl_techniques.models.resnet import ResNet
 
 # Custom architecture for specific use case
@@ -1401,16 +1433,18 @@ custom_resnet = ResNet(
     include_top=True
 )
 
-# Compile and train
+# Compile and train. The head is a bare Dense, so from_logits=True.
 custom_resnet.compile(
     optimizer='adam',
-    loss='categorical_crossentropy',
+    loss=keras.losses.CategoricalCrossentropy(from_logits=True),
     metrics=['accuracy']
 )
 
+custom_resnet.build((1, 512, 512, 3))   # required before count_params()
 print(f"Custom ResNet created:")
 print(f"  Total blocks: {sum([4, 6, 12, 4])}")
 print(f"  Parameters: {custom_resnet.count_params():,}")
+# Output: Parameters: 8,894,693
 ```
 
 ### Example 6: Progressive Resizing
@@ -2068,51 +2102,63 @@ callbacks = [
 
 ### Discriminative Learning Rates
 
-Different layers need different learning rates:
+> **Measured correction.** The version of this section that used to stand here
+> grouped layers by hard-coded index ranges (`model.layers[10:40]`,
+> `[40:80]`, ... `[180:]`) as if `ResNet` exposed ~180 flat layers. It does
+> not. `ResNet` is subclassed and `model.layers` lists its **direct children**
+> only -- MEASURED, `resnet50` has **22**:
+> `['stem_conv', 'stem_bn', 'stem_act', 'stem_pool', 'stage1_block1', ...,
+> 'stage4_block3', 'global_avg_pool', 'classifier']`.
+> Those index ranges therefore produced `{'stem': 10, 'stage1': 12,
+> 'stage2': 0, 'stage3': 0, 'stage4': 0, 'head': 0}` -- four of the six groups
+> EMPTY, and 'stem' silently swallowing six residual blocks. The old snippet
+> also finished by assigning `layer._custom_lr`, an attribute nothing in this
+> repository reads, under a comment admitting it "requires custom optimizer
+> implementation".
+
+Group by NAME, never by index -- the names are stable and the counts are not:
 
 ```python
-# Create layer groups with different LRs
+from dl_techniques.models.resnet import ResNet
+
+
 def create_layer_groups(model):
-    """Group layers by depth."""
-    groups = {
-        'stem': model.layers[0:10],      # Initial layers
-        'stage1': model.layers[10:40],   # Early stage
-        'stage2': model.layers[40:80],   # Mid stage  
-        'stage3': model.layers[80:140],  # Late stage
-        'stage4': model.layers[140:180], # Final stage
-        'head': model.layers[180:],      # Classification
-    }
+    """Group a ResNet's direct child layers by the stage they belong to."""
+    groups = {'stem': [], 'stage1': [], 'stage2': [],
+              'stage3': [], 'stage4': [], 'head': []}
+    for layer in model.layers:
+        if layer.name.startswith('stem'):
+            groups['stem'].append(layer)
+        elif layer.name.startswith('stage'):
+            groups[layer.name.split('_')[0]].append(layer)
+        else:                                    # global_avg_pool, classifier
+            groups['head'].append(layer)
     return groups
 
-def set_discriminative_lrs(model, base_lr=1e-5):
-    """Set different LRs for different layer groups."""
-    groups = create_layer_groups(model)
-    
-    # Earlier layers: lower LR (more general features)
-    # Later layers: higher LR (more task-specific)
-    lrs = {
-        'stem': base_lr * 0.1,
-        'stage1': base_lr * 0.3,
-        'stage2': base_lr * 0.5,
-        'stage3': base_lr * 0.8,
-        'stage4': base_lr * 1.0,
-        'head': base_lr * 2.0,
-    }
-    
-    # Apply learning rates
-    for group_name, layers in groups.items():
-        lr = lrs[group_name]
-        for layer in layers:
-            if hasattr(layer, 'kernel'):
-                # Set custom LR for this layer
-                # Note: Requires custom optimizer implementation
-                layer._custom_lr = lr
-    
-    return model
 
-# Usage
-model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
-model = set_discriminative_lrs(model, base_lr=1e-5)
+model = ResNet.from_variant('resnet50', num_classes=10, input_shape=(224, 224, 3))
+model.build((1, 224, 224, 3))
+print({name: len(layers) for name, layers in create_layer_groups(model).items()})
+# Output: {'stem': 4, 'stage1': 3, 'stage2': 4, 'stage3': 6, 'stage4': 3, 'head': 2}
+```
+
+**Keras 3 has no per-layer learning rate.** There is no supported attribute to
+set, which is why the old snippet's `layer._custom_lr` did nothing. Two routes
+actually work:
+
+```python
+# Route 1 (recommended): staged unfreezing. Freeze the early groups, train,
+# then unfreeze and re-compile at a lower LR -- see section 8 Example 3, which
+# runs end to end. `trainable` is the flag Keras really honours, and a
+# re-compile is REQUIRED for a change to it to take effect.
+groups = create_layer_groups(model)
+for name in ('stem', 'stage1', 'stage2'):
+    for layer in groups[name]:
+        layer.trainable = False
+
+# Route 2: two optimizers over disjoint variable sets, applied in a custom
+# training loop. Note this repository's convention is to AVOID a custom
+# `train_step`; prefer Route 1 unless you genuinely need per-group LRs.
 ```
 
 ### Gradual Unfreezing
