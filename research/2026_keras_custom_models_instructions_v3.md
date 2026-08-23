@@ -1822,6 +1822,47 @@ the global dtype policy, `floatx`, and TF32 flags.
 See §15.1. This is the single highest-yield item in this document: the obvious instrument for a
 warning census under-reports by **5×**, and every count derived from it is wrong.
 
+### 14.10a The Instrument That Closed the Item Was Blind to the Defect
+
+The lower-bound case above is one instance of the most expensive failure in this document, because it
+does not produce a wrong number — it produces a **confident, documented, wrong conclusion**, and the
+item is then closed and stops being looked at.
+
+Five measured instances, each of which had already closed an audit item before it was caught:
+
+| The instrument | What it could not see | The real number |
+|---|---|---|
+| `-W error::UserWarning` as a census | aborts each test at its FIRST warning | 58 node ids reported, **310** real |
+| A "was this pre-existing?" run at a mid-effort baseline commit | the baseline already contained the causing fix | 2 failures ruled "not ours" were **ours**; green at the true base |
+| A static census requiring 2+ *syntactic* sites per scope | a `for` loop handing one initializer to N blocks scores **1** | two models with 16 and 6 real collisions were **absent from the census entirely**; 119 loop-carried sites in 44 files |
+| "Strip the suppression, re-run, observe green" | a suppressed warning produces no failure and no output, so green is the expected result either way | 2 marks ruled "empirically dead" were **live**; flipping `ignore:`→`error:` turned 79 passed into 5 failed |
+| An AST filter keyed on `__init__` annotations containing `Callable` | Python does not enforce annotations, and the `str`-annotated sites accept a callable too | 14 sites reported, **72** real |
+
+**The common shape**: the instrument answers a question that is *adjacent* to the one being asked.
+"Does the suite pass without this mark?" is not "does this warning fire". "Are there two assignment
+sites in this scope?" is not "does one instance reach two weights". "Is this annotated `Callable`?" is
+not "can a callable arrive here".
+
+**The discipline**, applied before an instrument is allowed to close anything:
+
+1. **State the question the instrument actually answers**, in one sentence, and compare it word by word
+   with the question you care about. The gap is where the blindness lives.
+2. **Prove the instrument can see a known-present instance.** Plant one and confirm it is reported. An
+   instrument that has never been shown to fire is not evidence.
+3. **Prefer runtime to static** when the defect is about what the *built object* looks like. A static
+   pass sees syntax; a collision, a dead weight, a suppressed warning and an unbuilt sub-layer are all
+   properties of the constructed model, not of the source text.
+4. **When an instrument reports a population, ask what shape it cannot count.** The loop-carried case
+   was invisible *by construction*, and the ceiling gate built on that census could never have bounded
+   the family it was capping. A ceiling is only as good as the census under it.
+5. **Report the population the honest instrument finds, even when it is much larger.** Tuning until the
+   number looks small is how the item gets closed a second time.
+
+**The tell that you are inside this failure**: an item closes with a *ruling* rather than a
+measurement, and the ruling's justification is a property of the instrument ("a static check cannot
+validate these", "the suite is green without it") rather than a property of the code. That sentence is
+where to point the next probe.
+
 ### 14.11 Why Guards Fail
 
 #### 14.11.1 One mutation per assertion, and check which one fired
@@ -2486,6 +2527,11 @@ falsified by measurement.
 | An exact-zero pin on a numerical residual is a strict test | **Broken.** `7.45e-09` is exactly one float32 ULP at 0.1 — the assertion can never pass, so it measures nothing (§14.6) |
 | A weight-path set is stable across a round trip | **Not always.** A `clone_model` teacher inherits the student's path strings live and separates on reload — 172 paths before, 322 after, harmlessly (§7.8) |
 | A single `-W error::UserWarning` run measures the warning population | **False — it is a lower bound.** It aborts each test at the first warning: 58 node ids against 310 (§15.1) |
+| A suppression can be tested for liveness by removing it and re-running | **False.** A suppressed warning produces no failure and no output, so "green" is the expected result whether the mark is live or dead. Two marks ruled dead this way were live; flipping `ignore:`→`error:` turned 79 passed into 5 failed. Wrap `warnings.warn` ahead of the filter machinery instead |
+| A static census bounds a shared-initializer population | **False for the commonest shape.** Requiring 2+ syntactic sites per scope scores a `for` loop over N blocks as **1**; two models with 16 and 6 real collisions never appeared in the census, and the ceiling gate built on it could not bound the family it capped. 119 loop-carried sites in 44 files |
+| Q/K/V drawn from one shared initializer are identical to each other | **Usually false — check the layout first.** A fused `qkv` Dense supplies all three roles from different column blocks of one draw (`\|Q−K\| = 0.0796`). The real defect there is by DEPTH: 12 transformer blocks initialized as 12 copies of one block, 132 of 264 same-shape pairs bit-identical. Where `q`/`k`/`v` ARE separate Denses, the collision is real and makes the score matrix exactly symmetric at step 0 |
+| A save/load forward-delta guard detects a raw activation in `get_config` | **Vacuous.** The forward `max\|delta\|` is `0.0` in every configuration, including the fully-broken one. The discriminating observables are JSON-safety and post-load callability |
+| An annotation is a reliable filter for "can a callable arrive here" | **False.** Python does not enforce annotations, and the `str`-annotated sites hand their value to `Dense`/`Activation`/`activations.get`, all of which accept a callable: 14 sites reported against **72** real |
 
 **The meta-lesson.** Across every audit that produced this document, the dominant failure mode was
 not a wrong fix — it was **a real symptom with a wrong explanation**:
@@ -2496,6 +2542,13 @@ not a wrong fix — it was **a real symptom with a wrong explanation**:
 - a "momentum" defect that was an epsilon defect;
 - a "linear-algebra" bug that was a linear *layer*;
 - a "test-order" flake that was one unrestored global seed.
+
+And a second-order variant that is worse, because it closes the item rather than merely mis-explaining
+it: **the instrument that closed the item was blind to the defect** (§14.10a). Five measured instances,
+each of which had produced a confident, documented, wrong conclusion — a census that under-reported 5×,
+a baseline commit that already contained the causing fix, a static pass that scored a loop as one site,
+a liveness test that could not observe a suppressed warning, and an annotation filter that missed 58 of
+72 sites. The tell is a closure justified by a property of the *instrument* rather than of the code.
 
 In the most recent audit roughly **one carried premise in five died on measurement**, and **six of the
 author's own prescriptions were falsified before they shipped** — one of which would have divided 189
