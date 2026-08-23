@@ -28,6 +28,28 @@ from .lazy_build_contract_oracle import (
     perturb_weights,
 )
 
+# DECISION plan-2026-08-23T091307-9a110062/D-602
+# The Keras "`build()` was called on layer X, however the layer does not have a
+# `build()` method implemented" family, scoped to THIS FILE because this file is
+# the only place in the tree that was MEASURED still to provoke it. It used to
+# be a tree-wide ignore in `pyproject.toml`; both spellings were deleted from
+# there when the five model classes that produced 69 of the family's 76 node ids
+# gained real `build()` methods (`test_the_explicit_build_materializes_the_model
+# .py`'s `UNFIXED` table is now empty). What survives is exactly the shape the
+# ini file's own rule says belongs here: a warning provoked by ONE test file's
+# own deliberately-defective fixture. `_HealthyLazyModel` HAS no `build()` ON
+# PURPOSE -- that is the R-002 subject -- so this is not a defect to fix, and
+# `materialization_report` reports the raise rather than swallowing it.
+# Do NOT widen this back to `pyproject.toml`: that would re-hide the family
+# across ~11,200 layer tests that are now MEASURED clean of it.
+# See decisions.md D-602.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:`build\\(\\)` was called on layer:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:Layer .* looks like it has unbuilt state:UserWarning"),
+]
+
 
 @keras.saving.register_keras_serializable(package="lazy_build_oracle_tests")
 class _HealthyLazyModel(keras.Model):
