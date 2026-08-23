@@ -970,114 +970,134 @@ Inference: Use only Output 0 (primary)
 
 ### Using Deep Supervision
 
+> Every line below was **extracted from this file and executed** before it was committed.
+> Each `# Output:` comment is the program's own stdout, not a description of it.
+
 ```python
-from dl_techniques.models.resnet import ResNet
 import keras
+import numpy as np
+from dl_techniques.models.resnet import ResNet
+from dl_techniques.utils.deep_supervision import get_model_output_info
 
 # 1. Create model with deep supervision
 model = ResNet.from_variant(
-    'resnet50',
+    'resnet18',
     num_classes=10,
-    enable_deep_supervision=True  # Enable deep supervision
+    input_shape=(32, 32, 3),
+    stem_type='cifar',
+    enable_deep_supervision=True,
 )
 
-# 2. Check outputs
-print(f"Number of outputs: {len(model.output)}")
+# 2. Check outputs.
+#    `model.output` RAISES here. ResNet is a subclassed keras.Model, so Keras
+#    never populates `.output` / `.input` / `.output_names`:
+#       AttributeError: The layer res_net has never been called and thus has
+#                       no defined output.
+#    -- and it says that even after you have called the model. Ask the helper
+#    instead, passing the per-sample input_shape it needs to trace `call()`.
+info = get_model_output_info(model, input_shape=(32, 32, 3))
+num_outputs = info['num_outputs']
+print(f"Number of outputs: {num_outputs}")
 # Output: Number of outputs: 4
 
-# 3. Define losses for each output
-losses = {
-    'output_0': 'categorical_crossentropy',  # Primary output
-    'output_1': 'categorical_crossentropy',  # Stage 3 aux
-    'output_2': 'categorical_crossentropy',  # Stage 2 aux
-    'output_3': 'categorical_crossentropy',  # Stage 1 aux
-}
+# 3. Losses: ONE PER OUTPUT, POSITIONALLY, in a LIST.
+#    There are no output names to key a dict on -- see the note under step 7.
+#    The heads emit LOGITS (a bare Dense, no activation), hence from_logits=True.
+losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
 
-# 4. Define loss weights (primary output has highest weight)
-loss_weights = {
-    'output_0': 1.0,   # Primary output (most important)
-    'output_1': 0.3,   # Stage 3 auxiliary
-    'output_2': 0.2,   # Stage 2 auxiliary
-    'output_3': 0.1,   # Stage 1 auxiliary
-}
+# 4. Loss weights, same order. Index 0 is the primary (deepest) head; indices
+#    1..n-1 are the auxiliary heads, deepest first.
+loss_weights = [1.0, 0.3, 0.2, 0.1]
 
-# 5. Compile with multiple outputs
+# 5. Metrics are per-output too. Give the primary head its metrics and the
+#    auxiliary heads an empty list -- an aux head's accuracy is not a number
+#    anyone acts on, and NAMING the metric is what makes it monitorable below.
+metrics = [[keras.metrics.SparseCategoricalAccuracy(name='primary_accuracy')]]
+metrics += [[] for _ in range(num_outputs - 1)]
+
 model.compile(
     optimizer='adam',
     loss=losses,
     loss_weights=loss_weights,
-    metrics=['accuracy']
+    metrics=metrics,
 )
 
-# 6. Prepare data
-# Each batch should have labels for all outputs
-def prepare_deep_supervision_data(x, y):
-    """Replicate labels for each output."""
-    return x, {
-        'output_0': y,  # Primary
-        'output_1': y,  # Aux outputs get same labels
-        'output_2': y,
-        'output_3': y
-    }
+# 6. Replicate the labels once per output -- again a LIST, not a dict.
+x_train = np.random.rand(8, 32, 32, 3).astype('float32')
+y_train = np.random.randint(0, 10, (8,)).astype('int32')
 
-# Apply to dataset
-train_dataset = train_dataset.map(prepare_deep_supervision_data)
+# With a tf.data pipeline the same shape applies:
+#     train_dataset.map(lambda x, y: (x, tuple([y] * num_outputs)))
 
 # 7. Train
 history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=100
+    x_train,
+    [y_train] * num_outputs,
+    validation_data=(x_train, [y_train] * num_outputs),
+    epochs=1,
+    verbose=0,
 )
+print(sorted(history.history.keys()))
+# Output: ['loss', 'primary_accuracy', 'sparse_categorical_crossentropy_loss',
+#          'val_loss', 'val_primary_accuracy',
+#          'val_sparse_categorical_crossentropy_loss']
+#
+# Note what is NOT there: no 'output_0_accuracy', and no per-output loss keys.
+# This model has no output names at all, so a ModelCheckpoint has to monitor a
+# metric name YOU chose -- 'val_primary_accuracy' above.
 
-# 8. Convert to inference model (single output)
+# 8. Convert to inference model (single output). `input_shape` is required for
+#    the same reason as in step 2.
 from dl_techniques.models.resnet import create_inference_model_from_training_model
 
-inference_model = create_inference_model_from_training_model(model)
+inference_model = create_inference_model_from_training_model(
+    model, input_shape=(32, 32, 3)
+)
 print(f"Inference model outputs: {inference_model.output.shape}")
 # Output: Inference model outputs: (None, 10)
 
 # 9. Use for inference
-predictions = inference_model(test_images, training=False)
+predictions = inference_model(x_train, training=False)
+print(predictions.shape)
+# Output: (8, 10)
 ```
+
+> **Why lists and not `{'output_0': ...}`?** The dict-keyed form that used to
+> stand here is not merely unidiomatic -- it cannot run. Keras resolves a
+> dict-keyed `loss`/`fit` spec against `model.output_names`, and on a subclassed
+> model that attribute does not exist. MEASURED, `compile(loss={'output_0': ...})`
+> followed by `fit(x, {'output_0': y, ...})` raises
+> `TypeError: 'NoneType' object is not iterable`.
+> `tests/test_models/test_resnet/test_the_readme_deep_supervision_pattern_runs.py`
+> pins both halves: the list form trains, the dict form raises.
 
 ### Loss Weighting Strategies
 
+Every strategy is a LIST in output order: index 0 is the primary (deepest)
+head, the rest are auxiliary heads from deep to shallow.
+
 ```python
 # Strategy 1: Equal weights
-loss_weights = {
-    'output_0': 1.0,
-    'output_1': 1.0,
-    'output_2': 1.0,
-    'output_3': 1.0,
-}
+loss_weights = [1.0, 1.0, 1.0, 1.0]
 
-# Strategy 2: Decay from shallow to deep
-loss_weights = {
-    'output_0': 1.0,   # Deepest (most important)
-    'output_1': 0.3,
-    'output_2': 0.1,
-    'output_3': 0.03,  # Shallowest (least important)
-}
+# Strategy 2: Decay from deep to shallow
+loss_weights = [1.0, 0.3, 0.1, 0.03]
+#               ^ deepest / primary        ^ shallowest (least important)
 
 # Strategy 3: Curriculum learning (change over time)
-def get_loss_weights(epoch):
+def get_loss_weights(epoch, num_outputs):
     """Gradually reduce auxiliary loss weights."""
     aux_weight = max(0.5 - epoch * 0.01, 0.0)
-    return {
-        'output_0': 1.0,
-        'output_1': aux_weight,
-        'output_2': aux_weight,
-        'output_3': aux_weight,
-    }
+    return [1.0] + [aux_weight] * (num_outputs - 1)
 
-# Apply in training loop
+# Apply in training loop. Re-compiling is what makes the new weights take
+# effect -- mutating the list in place does nothing.
 for epoch in range(num_epochs):
-    weights = get_loss_weights(epoch)
     model.compile(
         optimizer=optimizer,
         loss=losses,
-        loss_weights=weights
+        loss_weights=get_loss_weights(epoch, num_outputs),
+        metrics=metrics,
     )
     model.fit(train_dataset, epochs=1)
 ```
@@ -1218,117 +1238,121 @@ print(f"✓ Feature extraction training complete!")
 
 Unfreeze and fine-tune the pretrained model.
 
-```python
-import keras
-from dl_techniques.models.resnet import ResNet
-
-# 1. Start with pretrained model
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    num_classes=1000  # Original ImageNet classes
-)
-
-# 2. Replace top layer for your task
-# Remove last layer
-model.layers.pop()
-
-# Add new classification head
-x = model.layers[-1].output
-x = keras.layers.Dense(100, activation='softmax', name='new_predictions')(x)
-
-model = keras.Model(inputs=model.input, outputs=x)
-
-# 3. Freeze early layers, train only late layers initially
-for layer in model.layers[:-20]:  # Freeze all but last 20 layers
-    layer.trainable = False
-
-# 4. Compile with lower learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-4),  # Lower LR for fine-tuning
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# 5. Train with frozen layers
-print("Stage 1: Training with frozen layers")
-history1 = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=10
-)
-
-# 6. Unfreeze all layers
-for layer in model.layers:
-    layer.trainable = True
-
-# 7. Continue training with very low learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-5),  # Even lower LR
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-print("Stage 2: Fine-tuning all layers")
-history2 = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=30
-)
-
-print("✓ Fine-tuning complete!")
-```
-
-### Example 4: Training with Deep Supervision
+> `ResNet` is a **subclassed** `keras.Model`, so the "pop the top layer and
+> re-wire from `model.input`" idiom that used to stand here cannot work.
+> MEASURED: `model.layers` is a freshly computed property, so
+> `model.layers.pop()` mutates a throwaway list -- it raises nothing,
+> `len(model.layers)` is *unchanged* afterwards, and `model(x)` still runs the
+> classifier with `max|delta| == 0.0`. It is a silent no-op, which is worse than
+> an error. `model.input` does raise:
+> `AttributeError: The layer res_net has never been called and thus has no
+> defined input.` Ask for `include_top=False` and wrap, exactly as Example 2 does.
 
 ```python
 import keras
 import numpy as np
 from dl_techniques.models.resnet import ResNet
 
+# 1. Start from the pretrained backbone WITHOUT its classification head.
+base_model = ResNet.from_variant(
+    'resnet18',
+    pretrained='/path/to/resnet18_weights.keras',  # pretrained=True raises -- see section 9
+    include_top=False,
+    input_shape=(32, 32, 3),
+    stem_type='cifar',
+)
+
+# 2. Attach the new head by WRAPPING. The Functional graph starts from a
+#    keras.Input you own, because the backbone has no `.input` to borrow.
+inputs = keras.Input(shape=(32, 32, 3))
+x = base_model(inputs)
+x = keras.layers.GlobalAveragePooling2D()(x)
+outputs = keras.layers.Dense(100, activation='softmax', name='new_predictions')(x)
+
+model = keras.Model(inputs, outputs)
+
+# 3. Freeze the early layers, train the late ones first.
+#    Slice `base_model.layers` -- NOT `model.layers`, which holds the entire
+#    backbone as ONE layer alongside the wrapper's own:
+print(len(model.layers), [l.name for l in model.layers])
+# Output: 4 ['input_layer', 'res_net', 'global_average_pooling2d', 'new_predictions']
+# (Keras appends a numeric suffix to auto-generated names when other models
+#  were built earlier in the same process -- the LENGTH is the point: 4, not
+#  the backbone's own 13.)
+for layer in base_model.layers[:-4]:
+    layer.trainable = False
+
+# 4. Compile with a lower learning rate
+model.compile(
+    optimizer=keras.optimizers.Adam(1e-4),
+    loss='categorical_crossentropy',
+    metrics=['accuracy'],
+)
+
+# 5. Stage 1: train with the early layers frozen
+x_train = np.random.rand(8, 32, 32, 3).astype('float32')
+y_train = keras.utils.to_categorical(np.random.randint(0, 100, (8,)), 100)
+history1 = model.fit(x_train, y_train, epochs=1, verbose=0)
+
+# 6. Unfreeze everything. Set the flag on the backbone AND re-set the per-layer
+#    flags -- `base_model.trainable = True` alone does not undo step 3.
+base_model.trainable = True
+for layer in base_model.layers:
+    layer.trainable = True
+
+# 7. Stage 2: continue at a much lower learning rate. Re-compiling is REQUIRED
+#    for the changed trainable flags to take effect.
+model.compile(
+    optimizer=keras.optimizers.Adam(1e-5),
+    loss='categorical_crossentropy',
+    metrics=['accuracy'],
+)
+history2 = model.fit(x_train, y_train, epochs=1, verbose=0)
+print(f"{len(model.trainable_weights)} trainable weight tensors after unfreezing")
+# Output: 62 trainable weight tensors after unfreezing
+```
+
+### Example 4: Training with Deep Supervision
+
+Section 7 covers this end to end; this is the same recipe at ImageNet scale.
+Note the list-indexed `loss` / `loss_weights` / `metrics` and the list of
+replicated labels -- the dict-keyed form raises, see the note in section 7.
+
+```python
+import keras
+from dl_techniques.models.resnet import ResNet
+from dl_techniques.utils.deep_supervision import get_model_output_info
+
 # 1. Create model with deep supervision
 model = ResNet.from_variant(
     'resnet50',
     num_classes=100,
-    enable_deep_supervision=True
+    input_shape=(224, 224, 3),
+    enable_deep_supervision=True,
 )
+num_outputs = get_model_output_info(model, input_shape=(224, 224, 3))['num_outputs']
 
-# 2. Define multi-output losses
-losses = {
-    'output_0': 'categorical_crossentropy',  # Primary
-    'output_1': 'categorical_crossentropy',  # Auxiliary
-    'output_2': 'categorical_crossentropy',
-    'output_3': 'categorical_crossentropy',
-}
+# 2. One loss per output, in order. The heads emit logits.
+losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
+loss_weights = [1.0, 0.3, 0.2, 0.1]
 
-loss_weights = {
-    'output_0': 1.0,   # Primary (most important)
-    'output_1': 0.3,
-    'output_2': 0.2,
-    'output_3': 0.1,
-}
+# 3. Metrics on the primary head only; auxiliary heads get an empty list.
+metrics = [[keras.metrics.SparseCategoricalAccuracy(name='primary_accuracy')]]
+metrics += [[] for _ in range(num_outputs - 1)]
 
-# 3. Compile
 model.compile(
     optimizer=keras.optimizers.SGD(0.1, momentum=0.9, nesterov=True),
     loss=losses,
     loss_weights=loss_weights,
-    metrics=['accuracy']
+    metrics=metrics,
 )
 
-# 4. Prepare dataset with replicated labels
-def prepare_batch(x, y):
-    return x, {
-        'output_0': y,
-        'output_1': y,
-        'output_2': y,
-        'output_3': y
-    }
+# 4. Replicate the labels once per output -- a tuple/list, never a dict.
+train_ds = train_ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
+val_ds = val_ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
 
-train_ds = train_ds.map(prepare_batch)
-val_ds = val_ds.map(prepare_batch)
-
-# 5. Train
+# 5. Train. The checkpoint monitors the metric NAME chosen above; there is no
+#    'val_output_0_accuracy' because this model has no output names.
 history = model.fit(
     train_ds,
     validation_data=val_ds,
@@ -1340,14 +1364,16 @@ history = model.fit(
         keras.callbacks.ModelCheckpoint(
             'best_model_ds.keras',
             save_best_only=True,
-            monitor='val_output_0_accuracy'  # Monitor primary output
-        )
-    ]
+            monitor='val_primary_accuracy',
+        ),
+    ],
 )
 
 # 6. Create inference model (single output)
 from dl_techniques.models.resnet import create_inference_model_from_training_model
-inference_model = create_inference_model_from_training_model(model)
+inference_model = create_inference_model_from_training_model(
+    model, input_shape=(224, 224, 3)
+)
 
 # 7. Use for inference
 predictions = inference_model.predict(test_images)
