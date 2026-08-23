@@ -75,6 +75,7 @@ from dl_techniques.layers.transformers import (
     NormalizationType,
     NormalizationPositionType,
 )
+from dl_techniques.layers.activations import resolve_activation
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 
@@ -133,7 +134,14 @@ class BERT(keras.Model):
         (feed-forward) layer. Defaults to 3072.
     :type intermediate_size: int
     :param hidden_act: The non-linear activation function in the encoder.
-        Defaults to "gelu".
+        Defaults to ``"gelu_tanh"``, the **tanh approximation** used by the
+        original release this class ports
+        (https://github.com/google-research/bert/blob/master/modeling.py).
+        Pass ``"gelu"`` for the exact/erf form instead; the two differ by up to
+        4.732e-04 per activation call, so this is a forward-pass choice, not a
+        training-only one. Resolution goes through
+        :func:`dl_techniques.layers.activations.resolve_activation`, which
+        understands the extended names on top of the Keras vocabulary.
     :type hidden_act: str
     :param hidden_dropout_rate: Dropout probability for all fully connected
         layers in embeddings and encoder. Defaults to 0.1. Upstream this field is
@@ -270,7 +278,18 @@ class BERT(keras.Model):
     DEFAULT_TYPE_VOCAB_SIZE = 2
     DEFAULT_INITIALIZER_RANGE = 0.02
     DEFAULT_LAYER_NORM_EPSILON = 1e-12
-    DEFAULT_HIDDEN_ACT = "gelu"
+    # DECISION plan-2026-08-23T091307-9a110062/D-500
+    # The default is the TANH APPROXIMATION, not the bare string "gelu".
+    # Keras' "gelu" resolves to keras.activations.gelu with approximate=False,
+    # i.e. the exact/erf form, while the original release this class ports
+    # computes 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))):
+    #   https://github.com/google-research/bert/blob/master/modeling.py
+    # Do NOT "simplify" this back to "gelu" -- that is inference-changing
+    # (max|erf - tanh| = 4.732e-04 per call, compounding over 12-24 layers),
+    # not a cosmetic rename. The sibling ports distilbert/modern_bert track
+    # HuggingFace, whose configs DO specify the exact form, so this must stay
+    # BERT-specific and must not be propagated to them. See decisions.md D-500.
+    DEFAULT_HIDDEN_ACT = "gelu_tanh"
     DEFAULT_PAD_TOKEN_ID = 0
 
     def __init__(
@@ -496,7 +515,7 @@ class BERT(keras.Model):
                 attention_dropout_rate=self.attention_probs_dropout_rate,
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=self.stochastic_depth_rate,
-                activation=self.hidden_act,
+                activation=resolve_activation(self.hidden_act),
                 use_bias=True,
                 kernel_initializer=keras.initializers.TruncatedNormal(
                     stddev=self.initializer_range

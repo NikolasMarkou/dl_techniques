@@ -14,6 +14,7 @@ from .differentiable_step import DifferentiableStep
 from .expanded_activations import (
     GELU, SiLU, xATLU, xGELU, xSiLU, EluPlusOne
 )
+from .gelu_tanh import gelu_tanh, resolve_activation
 from .golu import GoLU
 from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
@@ -34,6 +35,10 @@ __all__ = [
     "resolve_activation_layer",
     "validate_activation_config",
     "create_activation_from_config",
+
+    # Activation Functions (serializable, registered)
+    "gelu_tanh",
+    "resolve_activation",
 
     # Layer Classes
     "AdaptiveTemperatureSoftmax",

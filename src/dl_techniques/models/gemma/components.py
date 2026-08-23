@@ -60,6 +60,7 @@ from keras import initializers, ops
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.activations import gelu_tanh
 
 # ---------------------------------------------------------------------
 
@@ -193,11 +194,22 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         )
 
         # Create GeGLU FFN using framework factory
+        # DECISION plan-2026-08-23T091307-9a110062/D-501
+        # The activation is the TANH APPROXIMATION, not the string "gelu".
+        # HuggingFace's Gemma3TextConfig.hidden_activation defaults to
+        # "gelu_pytorch_tanh" (= functools.partial(F.gelu, approximate="tanh")):
+        #   https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/configuration_gemma3.py
+        # Keras' "gelu" string is approximate=False (exact/erf), so the bare
+        # string was silently the WRONG form. Do NOT revert to "gelu": that is
+        # inference-changing (max|erf - tanh| = 4.732e-04 per call), not a
+        # cosmetic difference. The callable is a registered serializable, so
+        # GeGLUFFN.get_config()'s keras.activations.serialize round-trips it.
+        # See decisions.md D-501.
         self.ffn = create_ffn_layer(
             "geglu",
             hidden_dim=self.ffn_hidden_size,
             output_dim=self.hidden_size,
-            activation="gelu",
+            activation=gelu_tanh,
             dropout_rate=self.dropout_rate,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
