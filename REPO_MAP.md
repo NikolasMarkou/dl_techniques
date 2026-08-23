@@ -393,16 +393,12 @@ anchors rot. Everything else stays there: restating it here is how a map goes st
 
 `tests/` mirrors `src/dl_techniques/`: package `x` is tested by `tests/test_<x>/`,
 for example `tests/test_layers/`.
-Three named places break that rule, and each has cost someone a search:
+Two named places break that rule, and each has cost someone a search:
 
 - **`src/dl_techniques/visualization/` has no test directory at all.** It has a
   `CLAUDE.md`; it has no tests, and no test module anywhere imports it. The trap
   is that `tests/test_utils/test_visualization.py` exists and is a zero-byte
   file, so a name-based search finds something and learns nothing.
-- **`tests/test_analysis/` is a vestigial empty directory** — it holds nothing but an
-  empty init module and 0 test files, and its name shadows the real, populated
-  `tests/test_analyzer/` (2 files). Searching for "analysis tests" lands you in
-  the wrong one.
 - **`tests/test_models/test_lewm.py` is a loose file**, where every other model
   gets a `tests/test_models/test_<name>/` directory — e.g.
   `tests/test_models/test_vit/`. Any directory-to-directory comparison
@@ -578,7 +574,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1007 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1036 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1034 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 296 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -601,7 +597,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Model packages under `src/dl_techniques/models/` | 73 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/train/` | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/applications/` | 1 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Top-level dirs under `tests/` | 17 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
+| Top-level dirs under `tests/` | 15 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Size of `results/` (local) | 4.5M | `LC_ALL=C du -sh results \| cut -f1` |
 
 > **A `Run dirs under \`results/\` (local)` row stood here and was DELETED on 2026-08-17.**
@@ -653,5 +649,5 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 73 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
 | Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
 | Lines in the mandatory authoring guide | 2698 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
-| Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
 | Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |
+| Test directories holding an init module and **no** `test_*.py` (orphans of a deleted subject) | 0 | `for d in $(find tests -mindepth 1 -type d ! -name __pycache__); do [ -z "$(find $d -maxdepth 1 -name 'test_*.py')" ] && [ -z "$(find $d -mindepth 1 -maxdepth 1 -type d ! -name __pycache__)" ] && echo $d; done \| wc -l` |
