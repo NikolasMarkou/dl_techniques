@@ -172,6 +172,18 @@ class BERT(keras.Model):
         mean 4.0e-07, i.e. ~6e-07 relative).
     :type layer_norm_eps: float
     :param pad_token_id: ID of padding token. Defaults to 0.
+        **ADVISORY ONLY -- nothing in this model reads it.** It is stored and
+        serialized for tokenizer/config round-tripping and for nothing else. In
+        particular NO attention mask is derived from it: if you call the model
+        without an ``attention_mask``, padding tokens are attended to exactly
+        like real tokens. Supply ``attention_mask`` yourself. MEASURED at
+        ``hidden_size=32, num_layers=2`` on a batch padded with token id 5: two
+        models differing only in ``pad_token_id`` (0 vs 5) give
+        ``max|delta| = 0.0``, a mask-less call equals an all-ones-mask call
+        exactly, and the real ``(ids != 5)`` mask moves the output by 0.0216 --
+        i.e. masking works, it is just never inferred. See ``decisions.md``
+        D-007 (plan-2026-08-23T203721-009b7ccf) and
+        ``tests/test_models/test_bert/test_pad_token_id_is_advisory_only.py``.
     :type pad_token_id: int
     :param position_embedding_type: ``'learned'`` (default) or
         ``'sinusoidal'``; forwarded to :class:`BertEmbeddings`, which raises on
@@ -342,7 +354,10 @@ class BERT(keras.Model):
         :type initializer_range: float
         :param layer_norm_eps: Epsilon for normalization layers.
         :type layer_norm_eps: float
-        :param pad_token_id: ID of the padding token.
+        :param pad_token_id: ID of the padding token. ADVISORY ONLY: it is
+            stored and serialized but never read, and no attention mask is
+            derived from it -- without an explicit ``attention_mask`` padding is
+            fully attended to. See the class docstring for the full rule.
         :type pad_token_id: int
         :param position_embedding_type: ``'learned'`` or ``'sinusoidal'``;
             ``'absolute'`` is the legacy spelling of ``'learned'``.
@@ -382,6 +397,23 @@ class BERT(keras.Model):
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-007
+        # pad_token_id is stored and serialized but DELIBERATELY never read.
+        # Do NOT "fix" this by deriving `attention_mask = input_ids !=
+        # pad_token_id` in call() when no mask is supplied. Three reasons, and
+        # the first is measured: that mutation moves the output of every
+        # mask-less forward pass that exists today by max|delta| = 0.0216 at a
+        # 2-layer config -- silently, with no error and no shape change.
+        # Second, upstream HF BERT does not do it either (it defaults the mask
+        # to all-ones), so wiring it would be a divergence from the reference,
+        # not a fidelity fix. Third, the natural home for such a derivation is
+        # the shared `BertEmbeddings`, which `fnet`, `distilbert` and
+        # `modern_bert` also use -- a HIGH-blast-radius edit for a knob nobody
+        # has asked to work. The footgun is documented in the class docstring
+        # instead, exactly as `distilbert` documents its own under D-003
+        # (plan-2026-08-10T183739-b007f435), and pinned by
+        # tests/test_models/test_bert/test_pad_token_id_is_advisory_only.py.
+        # See decisions.md D-007 (plan-2026-08-23T203721-009b7ccf).
         self.pad_token_id = pad_token_id
         # DECISION plan-2026-08-17T183311-79c63e38/D-015
         # `'absolute'` was this model's default while the value was never
