@@ -139,7 +139,12 @@ class TestNTMModelFromVariant:
         )
 
         assert model.config_obj.memory_size == 128
-        assert model.config_obj.memory_dim == 32
+        # 20, not 32: 'base' is the one preset that quotes Graves et al. 2014
+        # (arXiv:1410.5401), whose Tables 1 and 2 use a 128 x 20 memory in every one
+        # of their ten experiment rows -- the paper never varies N or M, only the
+        # controller width and head count. memory_size=128 above is the other half of
+        # that same quoted pair.
+        assert model.config_obj.memory_dim == 20
         assert model.config_obj.controller_dim == 256
 
     def test_large_variant(self):

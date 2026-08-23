@@ -115,6 +115,17 @@ class NTMModel(keras.Model):
         **kwargs: Additional arguments for Model base class.
     """
 
+    # Only 'base' has a published counterpart. Graves et al. 2014
+    # (https://arxiv.org/abs/1410.5401) Table 1 and Table 2 state the memory shape
+    # for EVERY experiment in the paper, and it is 128 x 20 in every single row --
+    # the paper varies controller width and head count by task, never N or M. So
+    # 'base' quotes memory_size=128, memory_dim=20 from those tables, and its
+    # controller_dim=256 does NOT come from them (no LSTM-controller row uses 256;
+    # Table 2 uses 100, or 2x100 for Priority Sort) -- it is this repo's choice, kept
+    # because a 20-wide memory read by a 100-wide LSTM is not a size the rest of the
+    # ladder can be built around. 'tiny' and 'large' are repo-invented tiers with no
+    # published counterpart at all; do not read them as reproducing anything.
+    # Pinned by tests/test_variant_tables_match_upstream_references.py.
     NTM_VARIANTS = {
         'tiny': {
             'memory_size': 32,
@@ -126,8 +137,14 @@ class NTMModel(keras.Model):
             'controller_type': 'lstm'
         },
         'base': {
+            # DECISION plan-2026-08-23T091307-9a110062/D-462
+            # 128 x 20 is the paper's memory shape in all 10 experiment rows across
+            # Tables 1 and 2. Do NOT "round up" memory_dim to 32 for a tidier ladder:
+            # memory_size here is already the paper's 128, so the two numbers are one
+            # quoted pair and changing half of it makes the row cite a shape that
+            # appears nowhere in the paper.
             'memory_size': 128,
-            'memory_dim': 32,
+            'memory_dim': 20,
             'controller_dim': 256,
             'num_read_heads': 1,
             'num_write_heads': 1,

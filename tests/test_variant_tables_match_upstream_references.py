@@ -21,6 +21,7 @@ References:
     - SD3 MMDiT: https://huggingface.co/v2ray/stable-diffusion-3-medium-diffusers/raw/main/transformer/config.json
       (community re-upload; the canonical `stabilityai/stable-diffusion-3-medium-diffusers`
       is gated and returns 401 unauthenticated)
+    - NTM: https://arxiv.org/abs/1410.5401 (Graves et al. 2014), Tables 1 and 2
 """
 
 from typing import Any, Callable, Dict
@@ -42,12 +43,21 @@ def _sd3_variants() -> Dict[str, Dict[str, Any]]:
     return {k: v["config"] for k, v in PRESETS.items()}
 
 
+def _ntm_variants() -> Dict[str, Dict[str, Any]]:
+    from dl_techniques.models.ntm.model import NTMModel
+
+    return NTMModel.NTM_VARIANTS
+
+
 # package -> zero-arg loader for that package's variant table.
 # Loaders are lazy so one package failing to import cannot mask the others.
 VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
     "hierarchical_reasoning_model": _hrm_variants,
     "sd3_mmdit": _sd3_variants,
+    "ntm": _ntm_variants,
 }
+
+_NTM_URL = "https://arxiv.org/abs/1410.5401"  # Graves et al. 2014, Tables 1 & 2
 
 _SD3_URL = (
     "https://huggingface.co/v2ray/stable-diffusion-3-medium-diffusers/raw/main/"
@@ -88,6 +98,16 @@ UPSTREAM_PINS = [
     ("sd3_mmdit", "full", "pooled_projection_dim", 2048, _SD3_URL),
     ("sd3_mmdit", "full", "pos_embed_max_size", 192, _SD3_URL),
     ("sd3_mmdit", "full", "sample_size", 128, _SD3_URL),
+
+    # Graves et al. 2014, Tables 1 and 2: EVERY experiment row uses a 128 x 20
+    # memory and the paper never varies N or M. num_read/write_heads=1 matches 4 of
+    # the 5 LSTM-controller rows in Table 2. controller_dim is deliberately NOT
+    # pinned: no LSTM row uses 256, so that field is a repo choice, not a quote.
+    # 'tiny' and 'large' have no published counterpart and are not pinned.
+    ("ntm", "base", "memory_size", 128, _NTM_URL),
+    ("ntm", "base", "memory_dim", 20, _NTM_URL),
+    ("ntm", "base", "num_read_heads", 1, _NTM_URL),
+    ("ntm", "base", "num_write_heads", 1, _NTM_URL),
 ]
 
 
