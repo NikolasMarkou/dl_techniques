@@ -76,6 +76,74 @@ markers = [
     "integration: exercises several components together rather than one unit",
 ]
 
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-250.
+#
+# `error::UserWarning` is the DEFAULT, and it is the point: a UserWarning this
+# repo did not deliberately provoke is a defect, and the nine root causes that
+# R-038 measured (missing `build()`, save-before-optimizer-built, Keras-2
+# `input_shape=` kwargs, `plt.show()` in library code, a Q-head that never
+# trained, a KAN whose control points were decorative, ...) were all invisible
+# until this line existed.
+#
+# THE RULE FOR ADDING AN ENTRY BELOW. A warning our own code emits, or that a
+# single test provokes, does NOT belong here. It belongs either in a
+# `pytest.warns(...)` block (when the warning IS the subject) or behind a
+# module-scoped `pytestmark = [pytest.mark.filterwarnings("ignore:...")]` in the
+# provoking test file, with a comment naming the family -- that keeps the rest
+# of the tree loud. Roughly 45 test modules carry such a mark; grep
+# `filterwarnings` under `tests/` to see them.
+#
+# An entry is only allowed here when the family is genuinely tree-wide AND a
+# STRICTLY STRONGER standing instrument already covers what the warning would
+# have told us. Both of those must be stated in the entry's comment.
+filterwarnings = [
+    "error::UserWarning",
+
+    # Keras `optimizers/base_optimizer.py:774`, 70 node ids over 18+ packages.
+    # "Gradients do not exist for variables [...]". MEASURED (R-038 step 3):
+    # 62 of the 70 are components that are inert BY DESIGN under the mode the
+    # test runs -- SAM's prompt-conditional mask encoder, SAM2's memory bank on
+    # the image path, SAM3's segmentation head under `include_masks=False`,
+    # BEiT's MIM mask token inside a classifier, video-JEPA's tube mask token
+    # outside training, BLT's entropy model when patch ids are supplied -- each
+    # carrying an in-source ALWAYS CREATE / CONDITIONALLY USE comment. The
+    # STRONGER instrument is `tests/test_models/gradient_flow_oracle.py`
+    # (`assert_gradients_reach_every_trainable_weight`), adopted by 62 model
+    # packages: it convicts identically-ZERO gradients the warning cannot see,
+    # its `expect_zero=` waivers are pinned BY NAME, and an obsolete or stale
+    # waiver fails loudly. Do NOT read this entry as "dead weights are fine" --
+    # read it as "the oracle, not the warning, is what proves they are not".
+    "ignore:Gradients do not exist for variables:UserWarning",
+
+    # Keras `layers/layer.py:393` and `:1387`, 76 node ids. "`build()` was
+    # called on layer X, however the layer does not have a `build()` method
+    # implemented and it looks like it has unbuilt state". 69 of the 76 are the
+    # FIVE model classes that step 4a measured as un-materializable from their
+    # own `input_shape` because a NON-BATCH axis is legitimately dynamic
+    # (`video_jepa`, `lewm`, `latent_gmm_registration`, `qwen`, `scunet`); the
+    # rest are test-local mocks and an oracle's own injected-defect fixtures.
+    # The STRONGER instrument is
+    # `tests/test_models/test_the_explicit_build_materializes_the_model.py`,
+    # whose `FIXED`/`UNFIXED` tables pin that population BY NAME and whose
+    # anti-rot arm fails the day an UNFIXED class gains a real `build()`.
+    'ignore:`build\(\)` was called on layer:UserWarning',
+    "ignore:Layer .* looks like it has unbuilt state:UserWarning",
+
+    # tensorflow `python/data/ops/structured_function.py:258`, 3 node ids
+    # (`tests/test_regularizers/`). TensorFlow states outright that
+    # `run_functions_eagerly` cannot apply to tf.data functions. The tests set
+    # it deliberately; no repo-side setting both keeps eager execution and
+    # silences this. Unfixable here.
+    "ignore:Even though the .tf.config.experimental_run_functions_eagerly. option is set:UserWarning",
+
+    # tensorflow `python/data/ops/dataset_ops.py:2341`, 1 node id
+    # (`tests/test_train/test_bfunet/test_convunext_self_iterate.py`). Fires
+    # when a seeded outer graph wraps an unseeded map fn; TF cannot tell whether
+    # the capture was intended. Silencing it at the call site would mean seeding
+    # a lambda whose determinism the test does not depend on. Unfixable here.
+    "ignore:Seed .* from outer graph might be getting used by function:UserWarning",
+]
+
 [tool.pylint.main]
 recursive = true
 ignore = "CVS"

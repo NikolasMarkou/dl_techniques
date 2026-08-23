@@ -62,6 +62,19 @@ from train.sam2.train_sam2 import (
 )
 
 
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
+# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
+# shipped config, so the iterator is legitimately exhausted before the epoch
+# ends. Padding the corpus to match would change what the test measures (the
+# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
+# starved input in any other module still fails under `error::UserWarning`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Your input ran out of data:UserWarning"),
+]
+
+
 # ---------------------------------------------------------------------------
 # Sentinels
 # ---------------------------------------------------------------------------

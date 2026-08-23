@@ -427,9 +427,16 @@ class TestSaveLoadRoundTrip:
 
         path = str(tmp_path / "m_post_train.keras")
         m.save(path)
-        loaded = keras.models.load_model(
-            path, custom_objects=memory_llm_custom_objects(),
-        )
+        # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This model
+        # overrides `compile()` (two optimizers), so Keras deliberately declines
+        # to re-run it on load (`saving/serialization_lib.py:734`) and says so.
+        # ASSERTED rather than suppressed: the whole point of the round trip
+        # below is that the RESTORED model is not recompiled, so if Keras ever
+        # started restoring a custom compile silently this test must notice.
+        with pytest.warns(UserWarning, match=r"`compile\(\)` was not called"):
+            loaded = keras.models.load_model(
+                path, custom_objects=memory_llm_custom_objects(),
+            )
         after = np.asarray(loaded(probe, training=False)["logits"])
 
         np.testing.assert_allclose(before, after, atol=1e-5, rtol=1e-5)

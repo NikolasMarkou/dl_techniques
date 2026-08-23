@@ -31,6 +31,17 @@ from dl_techniques.layers.transformers import TransformerLayer
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Our own advisory at `layers/transformers/transformer.py:620`: `moe_config`
+# supersedes `ffn_type` / `ffn_args`. This module drives exactly that
+# combination on purpose. Pinned live by
+# `tests/test_the_deliberate_advisories_still_fire.py`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:moe_config is provided:UserWarning"),
+]
+
 class TestQwen3ModelBasic:
     """Test basic Qwen3 model functionality with standard transformer blocks."""
 

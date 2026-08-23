@@ -49,7 +49,18 @@ from tests.numerics import reassociation_atol
 # `tests/test_layers/test_transformers/test_gated_linear_attention_block.py`
 # (`test_chunked_matches_sequential_float32_without_tf32`). Do NOT restore the top-level
 # call.
-pytestmark = pytest.mark.usefixtures("tf32_disabled")
+pytestmark = [
+    pytest.mark.usefixtures("tf32_disabled"),
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+    # Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
+    # exactly 1.0. Every site in this module feeds that axis a size of 1 ON PURPOSE
+    # -- single class, single token, single head, single anchor, single cluster,
+    # minimum sequence length -- so the advisory describes the test's own input, not
+    # a defect. Suppressed HERE rather than in `pyproject.toml` so an ACCIDENTAL
+    # size-1 softmax anywhere else still fails under `error::UserWarning`.
+    pytest.mark.filterwarnings(
+        "ignore:You are using a softmax over axis:UserWarning"),
+]
 
 from dl_techniques.layers.attention.energy_attention import EnergyAttention
 from dl_techniques.layers.attention.factory import create_attention_layer

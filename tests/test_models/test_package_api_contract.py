@@ -1024,6 +1024,13 @@ class TestFactoryKnobsAreForwarded:
             "sites, which means the AST walk stopped seeing the tree"
         )
 
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This test
+    # REPORTS a census through `warnings.warn` on purpose -- the inventory is
+    # non-fatal by design, and turning it into an assertion would make a
+    # growth report indistinguishable from the ceiling breach the sibling
+    # test convicts. Under the repo-wide `error::UserWarning` that report
+    # would become a failure, so this ONE test opts back out.
+    @pytest.mark.filterwarnings("always::UserWarning")
     def test_dynamic_call_sites_are_reported(self):
         """Non-fatal: list the call sites this guard structurally cannot check.
 
@@ -1458,6 +1465,13 @@ class TestNormalizationKnobsAreForwarded:
         assert n_literal == 1, "the fixture must still be reached"
         assert dropped == [], dropped
 
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This test
+    # REPORTS a census through `warnings.warn` on purpose -- the inventory is
+    # non-fatal by design, and turning it into an assertion would make a
+    # growth report indistinguishable from the ceiling breach the sibling
+    # test convicts. Under the repo-wide `error::UserWarning` that report
+    # would become a failure, so this ONE test opts back out.
+    @pytest.mark.filterwarnings("always::UserWarning")
     def test_dynamic_call_sites_are_reported(self):
         """Non-fatal inventory of what this predicate structurally cannot check.
 
@@ -2177,6 +2191,13 @@ class TestRegistryKeysDoNotCollide:
             f"an inversion means the sweep is reading something else: {counts}"
         )
 
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This test
+    # REPORTS a census through `warnings.warn` on purpose -- the inventory is
+    # non-fatal by design, and turning it into an assertion would make a
+    # growth report indistinguishable from the ceiling breach the sibling
+    # test convicts. Under the repo-wide `error::UserWarning` that report
+    # would become a failure, so this ONE test opts back out.
+    @pytest.mark.filterwarnings("always::UserWarning")
     def test_registration_blind_spots_are_still_empty(self):
         """Non-fatal: the three registration shapes this predicate cannot key.
 

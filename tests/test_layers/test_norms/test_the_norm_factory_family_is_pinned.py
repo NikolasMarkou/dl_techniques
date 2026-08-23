@@ -111,6 +111,13 @@ def norm_call_sites() -> Tuple[Counter, List[str], List[str]]:
 class TestTheNormFactoryCallSitePopulationIsPinned:
     """Growth is the only residual risk, so growth is what is pinned."""
 
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This test
+    # REPORTS a census through `warnings.warn` on purpose -- the inventory is
+    # non-fatal by design, and turning it into an assertion would make a
+    # growth report indistinguishable from the ceiling breach the sibling
+    # test convicts. Under the repo-wide `error::UserWarning` that report
+    # would become a failure, so this ONE test opts back out.
+    @pytest.mark.filterwarnings("always::UserWarning")
     def test_the_statically_uncheckable_population_has_not_grown(self, norm_call_sites):
         counts, dynamic, _ = norm_call_sites
         if dynamic:

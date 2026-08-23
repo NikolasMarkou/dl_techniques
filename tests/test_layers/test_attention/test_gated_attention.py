@@ -694,6 +694,19 @@ if __name__ == "__main__":
 
 from dl_techniques.layers.attention.common import MASK_BIAS_VALUE
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
+# exactly 1.0. Every site in this module feeds that axis a size of 1 ON PURPOSE
+# -- single class, single token, single head, single anchor, single cluster,
+# minimum sequence length -- so the advisory describes the test's own input, not
+# a defect. Suppressed HERE rather than in `pyproject.toml` so an ACCIDENTAL
+# size-1 softmax anywhere else still fails under `error::UserWarning`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:You are using a softmax over axis:UserWarning"),
+]
+
 _MP_B, _MP_N, _MP_D, _MP_H = 2, 64, 64, 4
 _MP_KEEP = _MP_N // 2            # first half kept, second half masked (padding mask)
 _MP_DEG_ROW = 5                  # the query row the 'degenerate' mask blanks entirely

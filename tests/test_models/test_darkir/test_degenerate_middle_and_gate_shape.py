@@ -25,6 +25,18 @@ from dl_techniques.models.darkir.model import (
     DarkIRDecoderBlock,
 )
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `models/functional.py:237`. The probes here build throwaway
+# `keras.Model(model.inputs, <intermediate>)` views and call them with a bare
+# array while `model.inputs` is a one-element LIST, which Keras flags and then
+# handles correctly. The advisory is about the probe's calling convention, not
+# about darkir.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:The structure of `inputs` doesn't match:UserWarning"),
+]
+
 TINY = dict(img_channels=3, width=8, enc_blk_nums=[1], dec_blk_nums=[1], dilations=[1])
 
 

@@ -44,6 +44,7 @@ import keras
 
 from .precision_arm_subjects import roundtrip_subject
 from .roundtrip_instrument_oracle import _call, relative_path
+from tests.optimizer_state import build_optimizer_state
 
 #: Every package whose model class gained a ``build()`` in step 4a-1, with the
 #: weight count ``.build(shape)`` alone MUST now materialize. Pinned exactly: a
@@ -176,12 +177,22 @@ def test_two_keras_round_trips_preserve_the_weight_population(name):
     with tempfile.TemporaryDirectory() as tmp:
         first = os.path.join(tmp, "a.keras")
         second = os.path.join(tmp, "b.keras")
+        # R-038 / D-016: several of these builders COMPILE, and Keras allocates
+        # the optimizer's slot variables lazily -- on the first gradient
+        # application, which a round-trip test never performs. Saving first
+        # would write an optimizer section holding only `iteration` and the
+        # learning rate, and `load_model` would then warn and silently skip the
+        # optimizer restore. `build_optimizer_state` allocates the slots the
+        # archive is about to claim to contain; it moves no weight and consumes
+        # no RNG draw, so the population assertions below are unaffected.
+        build_optimizer_state(model)
         model.save(first)
         reloaded = keras.models.load_model(first)
         _call(reloaded, inputs, call_fn, training)
         assert (len(reloaded.weights), _shapes(reloaded)) == donor, (
             f"{name}: round trip 1 changed the weight population")
 
+        build_optimizer_state(reloaded)
         reloaded.save(second)
         again = keras.models.load_model(second)
         _call(again, inputs, call_fn, training)

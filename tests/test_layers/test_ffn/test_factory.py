@@ -1214,6 +1214,31 @@ class TestOutputDimParamRegistryField:
 import ast as _sweep_ast
 from pathlib import Path as _SweepPath
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# This module drives `OrthogonalHypersphereInitializer` (the DEFAULT
+# `kernel_initializer` of `OrthoBlock` / `OrthoGLUFFN` / `NeuroGrid`) at shapes
+# where more orthogonal vectors are requested than the space has dimensions --
+# which is the ORDINARY case for a dimension-reducing projection. The advisory
+# at `initializers/hypersphere_orthogonal_initializer.py:190` is ours, it is
+# correct, and it reports a fallback that is the designed behaviour. Suppressed
+# HERE rather than in `pyproject.toml` so that a module which starts tripping
+# the fallback UNEXPECTEDLY still fails under `error::UserWarning`. The advisory
+# is pinned live (message text included) by
+# `tests/test_the_deliberate_advisories_still_fire.py`.
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Our own advisory at `layers/transformers/transformer.py:620`: `moe_config`
+# supersedes `ffn_type` / `ffn_args`. This module drives exactly that
+# combination on purpose. Pinned live by
+# `tests/test_the_deliberate_advisories_still_fire.py`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Orthogonality constraint violation:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:moe_config is provided:UserWarning"),
+]
+
 _SWEEP_SRC_ROOT = _SweepPath(__file__).resolve().parents[3] / "src" / "dl_techniques"
 _SWEEP_CALL_NAMES = frozenset({"create_ffn_layer", "create_ffn_from_config"})
 

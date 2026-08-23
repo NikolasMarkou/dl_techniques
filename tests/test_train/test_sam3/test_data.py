@@ -56,6 +56,19 @@ from train.sam3.data import (
     synthetic_prompt_samples,
 )
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
+# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
+# shipped config, so the iterator is legitimately exhausted before the epoch
+# ends. Padding the corpus to match would change what the test measures (the
+# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
+# starved input in any other module still fails under `error::UserWarning`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Your input ran out of data:UserWarning"),
+]
+
 #: The shipped geometry the learnability run will use (`small`): 224 px images,
 #: a 64x64 mask grid, `context_length=32`.
 IMAGE_SIZE = 224

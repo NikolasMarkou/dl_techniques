@@ -17,6 +17,19 @@ from dl_techniques.layers.transformers.text_encoder import (
 )
 
 
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
+# exactly 1.0. Every site in this module feeds that axis a size of 1 ON PURPOSE
+# -- single class, single token, single head, single anchor, single cluster,
+# minimum sequence length -- so the advisory describes the test's own input, not
+# a defect. Suppressed HERE rather than in `pyproject.toml` so an ACCIDENTAL
+# size-1 softmax anywhere else still fails under `error::UserWarning`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:You are using a softmax over axis:UserWarning"),
+]
+
+
 # --- Test Class ---
 class TestTextEncoder:
     """
