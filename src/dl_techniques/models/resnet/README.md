@@ -574,7 +574,7 @@ from dl_techniques.models.resnet import ResNet
 # Load ResNet-50 with ImageNet pretrained weights
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000
 )
 
@@ -596,7 +596,7 @@ print(f"Predicted class: {top_class} (confidence: {confidence:.2%})")
 # Load pretrained ResNet as feature extractor
 base_model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     include_top=False  # Remove classification head
 )
 
@@ -814,7 +814,7 @@ resnet152 = ResNet.from_variant('resnet152', num_classes=1000)
 # With pretrained weights
 resnet50_pretrained = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000
 )
 
@@ -1169,7 +1169,7 @@ from dl_techniques.models.resnet import ResNet
 # 1. Load pretrained model without top
 base_model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     include_top=False,  # Remove classification head
     input_shape=(224, 224, 3)
 )
@@ -1216,7 +1216,7 @@ from dl_techniques.models.resnet import ResNet
 # 1. Start with pretrained model
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000  # Original ImageNet classes
 )
 
@@ -1395,7 +1395,7 @@ def train_progressive_resize(initial_size=128, final_size=224, num_stages=3):
     # Create model for final size
     model = ResNet.from_variant(
         'resnet50',
-        pretrained=True,
+        pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
         num_classes=100,
         input_shape=(final_size, final_size, 3)
     )
@@ -1441,7 +1441,7 @@ from dl_techniques.models.resnet import ResNet
 # 1. Load large teacher model
 teacher = ResNet.from_variant(
     'resnet152',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000
 )
 teacher.trainable = False  # Freeze teacher
@@ -1569,69 +1569,74 @@ print("✓ Mixed precision training complete!")
 
 ## 9. Pretrained Weights & Transfer Learning
 
+> WARNING: **`pretrained=True` raises `NotImplementedError`. There are no ResNet
+> weights to download, from this repository or anywhere else in a format this
+> package loads.** `ResNet._download_weights` raises by design (`model.py`), and
+> that raise replaced an earlier table of placeholder URLs pointing at a
+> non-existent host, whose failure was caught and turned into a warning -- so
+> `pretrained=True` used to hand back a randomly-initialized model that *looked*
+> pretrained. Every runnable example in this README -- 14 of them, across sections
+> 5, 6, 9 and 12 -- has been rewritten to the only form that works, a local
+> checkpoint path:
+>
+> ```python
+> model = ResNet.from_variant('resnet50', pretrained='/path/to/your.keras')
+> ```
+>
+> The transfer-learning techniques those examples demonstrate are real and
+> correct; what was wrong was the claim that the weights arrive by themselves.
+>
+> Verified 2026-08-23: `ResNet.from_variant('resnet50', pretrained=True)` ->
+> `NotImplementedError: No pretrained ResNet weights are distributed with
+> dl_techniques ...`. The same is true of nine sibling packages (`bert`,
+> `distilbert`, `gpt2`, `modern_bert`, `mobilenet`, `tree_transformer`, `vit`,
+> `wave_field`, `bias_free_denoisers`), each of which says so in its own README.
+
 ### Why Use Pretrained Weights?
 
-Pretrained weights offer significant advantages:
+Transfer learning from a checkpoint trained on a large dataset generally needs
+less data, less compute and less tuning than training the same architecture from
+scratch, and converges more stably. That is why the strategies below are worth
+the trouble -- once you have a checkpoint.
 
-```
-Training from Scratch:
-┌─────────────────────────────────────────┐
-│ • Requires large dataset (100K+ images) │
-│ • Takes days/weeks to train             │
-│ • May not converge well                 │
-│ • Needs careful hyperparameter tuning   │
-│ • Results: 70-80% accuracy on           │
-│   custom datasets                       │
-└─────────────────────────────────────────┘
-
-Using Pretrained Weights:
-┌─────────────────────────────────────────┐
-│ • Works with small datasets (1K images) │
-│ • Trains in hours instead of days       │
-│ • More stable convergence               │
-│ • Less tuning needed                    │
-│ • Results: 85-95% accuracy on           │
-│   custom datasets                       │
-└─────────────────────────────────────────┘
-
-Benefit: 10-25% better accuracy, 100× faster training!
-```
+> **No accuracy numbers are quoted here, and that is deliberate.** This section
+> used to draw two boxes comparing "Results: 70-80% accuracy" from scratch
+> against "Results: 85-95% accuracy" pretrained, and to conclude "Benefit: 10-25%
+> better accuracy, 100x faster training!". Those figures described neither this
+> implementation nor any measurement taken in this repository -- nothing here has
+> ever been trained or evaluated -- and they advertised the payoff of a path that
+> raises. Same rule as the variant table in section 5: for reference numbers read
+> the paper; for numbers about *this* code, train it and measure.
 
 ### Loading Pretrained Models
 
 ```python
 from dl_techniques.models.resnet import ResNet
 
-# Method 1: Load from URL (if weights are hosted)
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained=True,
-    weights_dataset='imagenet',
-    num_classes=1000
-)
-
-# Method 2: Load from local file
+# Method 1: from a local checkpoint -- THE ONLY WORKING FORM.
 model = ResNet.from_variant(
     'resnet50',
     pretrained='/path/to/resnet50_weights.keras',
     num_classes=1000
 )
 
-# Method 3: Load with different number of classes
-# (will skip classifier weights)
+# Method 2: a local checkpoint with a different number of classes.
+# The incompatible classifier layer is skipped rather than refused.
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
-    num_classes=100  # Different from pretrained (1000)
+    pretrained='/path/to/resnet50_weights.keras',
+    num_classes=100  # Different from the checkpoint's 1000
 )
-# Automatically skips incompatible classification layer
 
-# Method 4: Load as feature extractor
+# Method 3: as a feature extractor.
 feature_extractor = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',
     include_top=False  # Remove classification head
 )
+
+# DOES NOT WORK -- raises NotImplementedError, no download exists:
+#   ResNet.from_variant('resnet50', pretrained=True, weights_dataset='imagenet')
 ```
 
 ### Transfer Learning Strategies
@@ -1644,7 +1649,7 @@ Best for: Small datasets (< 1000 images per class)
 # Load pretrained model without top
 base_model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     include_top=False
 )
 
@@ -1679,7 +1684,7 @@ Best for: Medium datasets (1000-10000 images per class)
 # Load pretrained model
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=num_classes
 )
 
@@ -1705,7 +1710,7 @@ Best for: Large datasets (> 10000 images per class)
 # Load pretrained model
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=num_classes
 )
 
@@ -1768,7 +1773,7 @@ def progressive_unfreeze(model, train_dataset, val_dataset):
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=10)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
 model = progressive_unfreeze(model, train_ds, val_ds)
 ```
 
@@ -1852,7 +1857,7 @@ def domain_adaptation_strategy(
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=5)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=5)
 model = domain_adaptation_strategy(
     model,
     imagenet_medical_subset,  # Similar medical images from ImageNet
@@ -2071,7 +2076,7 @@ def set_discriminative_lrs(model, base_lr=1e-5):
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=10)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
 model = set_discriminative_lrs(model, base_lr=1e-5)
 ```
 
@@ -2116,7 +2121,7 @@ def gradual_unfreeze(model, train_dataset, val_dataset, stages=4):
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=10)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
 model = gradual_unfreeze(model, train_ds, val_ds, stages=4)
 ```
 

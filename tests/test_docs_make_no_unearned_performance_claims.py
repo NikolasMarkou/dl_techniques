@@ -167,6 +167,122 @@ def test_no_doc_uses_unverifiable_maturity_puffery():
     )
 
 
+# --- rule 3: a README may not advertise a weight-loading path that raises -----
+
+# DECISION plan-2026-08-23T091307-9a110062/D-603
+# `resnet/README.md` section 9 quoted "70-80% accuracy from scratch" against
+# "85-95% pretrained" and showed 14 runnable `pretrained=True` examples -- while
+# `ResNet._download_weights` raises `NotImplementedError` by design (the
+# fake-weight-URL family). It advertised the payoff of a path that cannot run.
+# MEASURED 2026-08-23 across all 23 model READMEs: 18 carry a transfer-learning
+# or fine-tuning section, 10 of those name `pretrained=True`, and NINE of the
+# ten already carried a disclaimer in prose. `resnet` was the only offender --
+# and its README did carry a disclaimer, 900 lines earlier in section 5, which
+# is why a "does the file mention it anywhere" check would have called it clean.
+# So the rule is PER-OCCURRENCE-CONTEXT: a `pretrained=True` in a fenced code
+# block must be within DISCLAIMER_WINDOW lines of a disclaimer.
+#
+# `detr` is NOT an offender and must not be "fixed": its backbone is
+# `keras.applications.ResNet50(weights="imagenet")`, a real download that really
+# works, which is why the rule keys on the phrase, not on the package.
+DISCLAIMER_RE = re.compile(
+    # `[#>*\s]*` absorbs a line-wrap through a code comment or a blockquote:
+    # `masked_autoencoder` wraps as "raises\n# `NotImplementedError`".
+    r"(raises?\s+[#>*\s]*`?NotImplementedError|raises?\b[^\n]*\bsee\s+section|"
+    r"\bis\s+a\s+hard\s+error|no\s+(public\s+)?pretrained\s+weights|"
+    r"nothing\s+is\s+downloadable|no\s+weights\s+are\s+downloadable|"
+    r"no\s+trained\s+weights\s+ship|does\s+not\s+work|no\s+download\s+exists)",
+    re.IGNORECASE,
+)
+
+PRETRAINED_TRUE_RE = re.compile(r"pretrained\s*=\s*True")
+
+#: How far from a `pretrained=True` a disclaimer may sit and still be read as
+#: attached to it. 60 lines is roughly one screen of README plus a code block.
+DISCLAIMER_WINDOW = 60
+
+#: A top-of-file banner covers the whole document, and is how `bert`, `gpt2`,
+#: `distilbert` and `wave_field` handle this -- each opens with a blockquote
+#: saying the `pretrained=True` examples below will raise. That is honest and
+#: must not be flagged, so a disclaimer in the first BANNER_LINES lines counts
+#: for every occurrence in the file. `resnet`'s pre-fix disclaimer was neither:
+#: it sat at line 647, inside section 5's variant table, ~900 lines above the
+#: section-9 transfer-learning box that showed 14 `pretrained=True` examples and
+#: quoted an accuracy benefit for using them.
+BANNER_LINES = 40
+
+
+def _pretrained_true_without_disclaimer(path: Path) -> List[Tuple[int, str]]:
+    """Lines using ``pretrained=True`` with no disclaimer within the window."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    hits = []
+    for i, line in enumerate(lines):
+        if not PRETRAINED_TRUE_RE.search(line):
+            continue
+        # Searched over JOINED text, not line by line, and that is load-bearing:
+        # both `dino` and `masked_autoencoder` wrap their disclaimer exactly at
+        # "`pretrained=True` raises / `NotImplementedError`", so a per-line search
+        # reports two files that are already correct.
+        if DISCLAIMER_RE.search(" ".join(lines[:BANNER_LINES])):
+            continue
+        window = lines[max(0, i - DISCLAIMER_WINDOW):i + DISCLAIMER_WINDOW]
+        if DISCLAIMER_RE.search(" ".join(window)):
+            continue
+        hits.append((i + 1, line.strip()[:160]))
+    return hits
+
+
+def test_no_readme_advertises_a_pretrained_path_that_raises():
+    """Every ``pretrained=True`` in the docs sits next to the fact that it raises.
+
+    Not "somewhere in the file": ``resnet`` had a correct disclaimer in section 5
+    and a section-9 transfer-learning box, 900 lines later, that showed 14
+    ``pretrained=True`` examples and quoted an accuracy benefit for taking them.
+    """
+    offenders = []
+    for path in _iter_doc_files():
+        if path.suffix != ".md":
+            continue
+        for lineno, line in _pretrained_true_without_disclaimer(path):
+            offenders.append(f"{path}:{lineno}: {line}")
+    assert not offenders, (
+        "A README shows `pretrained=True` with no nearby statement that it raises "
+        "NotImplementedError. No model package in this repository ships or can "
+        "download weights; say so beside the example, or use the working form "
+        "`pretrained='/path/to/file.keras'`:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_pretrained_rule_is_not_vacuous():
+    """Anti-vacuity: the regexes must actually match the shapes they name."""
+    assert PRETRAINED_TRUE_RE.search("model = M.from_variant('x', pretrained=True)")
+    assert PRETRAINED_TRUE_RE.search("    pretrained = True,")
+    assert DISCLAIMER_RE.search("`pretrained=True` raises `NotImplementedError`")
+    assert DISCLAIMER_RE.search("No public pretrained weights are distributed")
+    assert not DISCLAIMER_RE.search("Load ResNet-50 with ImageNet pretrained weights")
+    # The pre-fix resnet shape: an example with nothing nearby to qualify it.
+    assert _pretrained_true_without_disclaimer.__doc__
+
+
+def test_the_population_the_rule_was_derived_from_is_still_the_population():
+    """MEASURED 2026-08-23 and pinned, so a new offender is a diff, not a surprise.
+
+    Counts READMEs, not occurrences: an occurrence count would churn on every
+    example added. If this fails because a package gained a transfer-learning
+    section, re-derive the numbers here rather than widening the window above.
+    """
+    readmes = [p for p in _iter_doc_files() if p.name == "README.md"]
+    assert len(readmes) >= 20, len(readmes)
+    with_pretrained_true = [
+        p for p in readmes if PRETRAINED_TRUE_RE.search(p.read_text(encoding="utf-8"))
+    ]
+    assert {p.parent.name for p in with_pretrained_true} == {
+        "bert", "bias_free_denoisers", "dino", "distilbert", "gpt2",
+        "masked_autoencoder", "mobilenet", "modern_bert", "resnet",
+        "tree_transformer", "vit", "wave_field",
+    }, sorted(p.parent.name for p in with_pretrained_true)
+
+
 @pytest.mark.parametrize("rel", PENDING_PUFFERY)
 def test_pending_puffery_entries_are_still_needed(rel):
     """When a PENDING entry is cleaned up, this fails so the entry gets deleted."""
