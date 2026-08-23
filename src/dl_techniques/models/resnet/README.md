@@ -2476,25 +2476,101 @@ A:
 
 ## 17. Technical Details
 
-### Parameter Counts
+### Parameter Counts and FLOPs
 
-```
-ResNet-18:  11,689,512 parameters
-ResNet-34:  21,797,672 parameters
-ResNet-50:  25,557,032 parameters
-ResNet-101: 44,549,160 parameters
-ResNet-152: 60,192,808 parameters
+**MEASURED on this implementation**, 2026-08-24, `num_classes=1000`,
+`input_shape=(224, 224, 3)`, `include_top=True`, default `stem_type='imagenet'`.
+Not quoted from a paper -- re-derive them with the two snippets below.
+
+| Variant | Trainable params | Non-trainable (BN stats) | `count_params()` | MACs | FLOPs (2xMACs) |
+|:---|---:|---:|---:|---:|---:|
+| ResNet-18  | 11,689,512 |   9,600 | 11,699,112 |  1.818 G |  3.636 G |
+| ResNet-34  | 21,797,672 |  17,024 | 21,814,696 |  3.669 G |  7.338 G |
+| ResNet-50  | 25,557,032 |  53,120 | 25,610,152 |  4.104 G |  8.208 G |
+| ResNet-101 | 44,549,160 | 105,344 | 44,654,504 |  7.823 G | 15.646 G |
+| ResNet-152 | 60,192,808 | 151,424 | 60,344,232 | 11.544 G | 23.088 G |
+
+**Read the unit before comparing.** "ResNet-50 is 4.1 GFLOPs" in the
+literature is a count of multiply-**accumulates**; the profiler used here
+counts the multiply and the add separately, so it reports 8.208 G for the same
+network. The **MACs** column is the one to compare against a published figure.
+On that column this implementation agrees with the usual quoted values
+(1.8 / 3.6 / 4.1 / 7.8 / 11.6) to within rounding.
+
+**The Trainable column also reconciles exactly** with the widely quoted
+torchvision counts -- all five match to the digit. This README previously
+printed those same figures under the heading "parameters", which is *not* what
+`model.count_params()` returns here: Keras counts BatchNorm's `moving_mean` and
+`moving_variance` and PyTorch does not, and that difference is the entire
+Non-trainable column (e.g. ResNet-18: 11,689,512 + 9,600 = 11,699,112).
+Both numbers are now printed so neither can be mistaken for the other.
+
+Re-derive the parameter columns:
+
+```python
+import numpy as np
+from dl_techniques.models.resnet import ResNet
+
+for variant in ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]:
+    model = ResNet.from_variant(variant, num_classes=1000, input_shape=(224, 224, 3))
+    model.build((1, 224, 224, 3))
+    trainable = sum(int(np.prod(w.shape)) for w in model.trainable_weights)
+    non_trainable = sum(int(np.prod(w.shape)) for w in model.non_trainable_weights)
+    print(f"{variant}: {trainable:,} + {non_trainable:,} = {model.count_params():,}")
 ```
 
-### FLOPs (for 224×224 input)
+Re-derive the FLOPs column:
 
+```python
+import tensorflow as tf
+from tensorflow.python.framework.convert_to_constants import (
+    convert_variables_to_constants_v2,
+)
+from dl_techniques.models.resnet import ResNet
+
+
+def profile_flops(model, input_shape):
+    """Total float ops of one forward pass, counted on the FROZEN GRAPH.
+
+    Counting on the frozen graph is what makes this trustworthy for this
+    package: a layer-tree walk stops at a custom subclassed layer and silently
+    undercounts, whereas tracing dissolves ResNet's BasicBlock/BottleneckBlock
+    into primitive ops before anything is counted.
+    """
+    fn = tf.function(lambda x: model(x, training=False))
+    concrete = fn.get_concrete_function(tf.TensorSpec([1, *input_shape], tf.float32))
+    graph_def = convert_variables_to_constants_v2(concrete).graph.as_graph_def()
+
+    opts = tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
+    opts["output"] = "none"
+    with tf.Graph().as_default() as graph:
+        tf.graph_util.import_graph_def(graph_def, name="")
+        result = tf.compat.v1.profiler.profile(
+            graph=graph, run_meta=tf.compat.v1.RunMetadata(), cmd="scope", options=opts
+        )
+    return result.total_float_ops
+
+
+model = ResNet.from_variant("resnet50", num_classes=1000, input_shape=(224, 224, 3))
+flops = profile_flops(model, (224, 224, 3))
+print(f"{flops / 1e9:.3f} GFLOPs = {flops / 2e9:.3f} GMACs")
+# Output: 8.208 GFLOPs = 4.104 GMACs
 ```
-ResNet-18:  1.8 GFLOPs
-ResNet-34:  3.6 GFLOPs
-ResNet-50:  4.1 GFLOPs
-ResNet-101: 7.8 GFLOPs
-ResNet-152: 11.6 GFLOPs
-```
+
+**Why these numbers are trusted.** Two arms ran before any model was profiled,
+and both are kept as permanent tests in
+`tests/test_models/test_resnet/test_the_readme_flops_table_reproduces.py`:
+
+1. **Calibration.** A single `Conv2D(64, 7, strides=2, use_bias=False)` on a
+   224x224x3 input has an analytically known 112x112x64x3x7x7 = 118,013,952
+   MACs. The profiler returned **236,027,904 = exactly 2x that, 0.0000% error**
+   -- which is also how the unit above was established rather than assumed.
+2. **Descent.** A two-convolution `keras.layers.Layer` subclass profiles to
+   **exactly** the same total as the identical two convolutions written
+   flat in a Functional model, and both equal the analytic value. This repo has
+   a recorded case of a layer-tree MAC walk reaching only 2 convolutions and
+   reporting a **~50x undercount**, so "the instrument descends" is measured
+   here, not assumed.
 
 ---
 
