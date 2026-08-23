@@ -231,7 +231,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     )
     model.summary()
 
-    model_info = get_model_output_info(model)
+    model_info = get_model_output_info(model, input_shape=input_shape)
     has_multiple_outputs = model_info['has_deep_supervision']
     num_outputs = model_info['num_outputs']
     logger.info(f"Model: {num_outputs} output(s)")
@@ -260,8 +260,15 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     if has_multiple_outputs:
         loss_fns = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
         initial_weights = [1.0 / num_outputs] * num_outputs
-        primary_output_name = model.output[0].name.split('/')[0]
-        metrics = {primary_output_name: [PrimaryOutputAccuracy(), PrimaryOutputTopKAccuracy(k=5, name='primary_top5_accuracy')]}
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-002
+        # Do NOT go back to the dict-keyed form
+        # (`{model.output[0].name.split('/')[0]: [...]}`).
+        # `model` is a subclassed keras.Model: `model.output_names` is None and
+        # `model.output` raises, so a dict-keyed metrics spec cannot be built.
+        # Use the list-indexed form already used for loss/loss_weights above:
+        # metrics on the primary output only, none on the auxiliary heads.
+        metrics = [[PrimaryOutputAccuracy(), PrimaryOutputTopKAccuracy(k=5, name='primary_top5_accuracy')]]
+        metrics += [[] for _ in range(num_outputs - 1)]
     else:
         loss_fns = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         initial_weights = None
@@ -291,7 +298,9 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Save inference model
     if config.enable_deep_supervision and has_multiple_outputs:
-        inference_model = create_inference_model_from_training_model(model)
+        inference_model = create_inference_model_from_training_model(
+            model, input_shape=input_shape
+        )
         inference_model.save(output_dir / "inference_model.keras")
         logger.info("Inference model saved")
 
