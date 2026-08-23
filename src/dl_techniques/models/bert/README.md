@@ -326,6 +326,24 @@ print(f"\nOutput predictions shape: {predictions.shape}") # (4, 3)
 > `QuestionAnsweringHead` returns `{"start_logits", "end_logits"}`, and there you
 > compile with a per-key `loss` dict.
 
+> **Input contract: all THREE keys are required.** The Functional wrapper
+> declares one `keras.Input` for each of `input_ids`, `attention_mask` and
+> `token_type_ids`, and Keras matches your data dict against that declaration
+> exactly. MEASURED — omitting `token_type_ids` raises
+> `ValueError: Missing data for input "token_type_ids". You passed a data
+> dictionary with keys ['input_ids', 'attention_mask']. Expected the following
+> keys: ['attention_mask', 'input_ids', 'token_type_ids']`. For a
+> single-segment task pass `np.zeros_like(input_ids)`, as the snippet above
+> does.
+>
+> This is stricter than the encoder it wraps, and stricter than HuggingFace.
+> `BERT` itself needs only `input_ids` — MEASURED,
+> `BERT.from_variant("tiny")({"input_ids": ids})` forwards fine and returns
+> `['last_hidden_state', 'attention_mask']`. Use the encoder directly (§9
+> Pattern 1) when you want the shorter call; the factory's signature is NOT
+> relaxed, because loosening a public factory's inputs is a breaking change for
+> a convenience gap.
+
 ---
 
 ## 6. Component Reference

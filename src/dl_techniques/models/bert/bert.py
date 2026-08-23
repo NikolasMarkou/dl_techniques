@@ -1132,7 +1132,29 @@ def create_bert_with_head(
     :param head_config_overrides: Optional dictionary to override default head
         configuration. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete `keras.Model` ready for the specified task. The model's
+    :return: A complete `keras.Model` ready for the specified task.
+
+        **All THREE inputs are required**, by name:
+        ``input_ids``, ``attention_mask`` and ``token_type_ids``. The
+        Functional wrapper declares one ``keras.Input`` per key, and Keras
+        matches a data dict against that declaration exactly. MEASURED --
+        ``predict({"input_ids": ..., "attention_mask": ...})`` raises
+        ``ValueError: Missing data for input "token_type_ids". You passed a
+        data dictionary with keys ['input_ids', 'attention_mask']. Expected the
+        following keys: ['attention_mask', 'input_ids', 'token_type_ids']``.
+        For a single-segment task pass ``np.zeros_like(input_ids)``.
+
+        This is STRICTER than the encoder it wraps, deliberately.
+        :class:`BERT` itself treats both of the other two as optional --
+        MEASURED, ``BERT.from_variant("tiny")({"input_ids": ids})`` forwards
+        fine and returns ``['last_hidden_state', 'attention_mask']`` -- and
+        upstream HuggingFace treats ``token_type_ids`` as optional too. The
+        difference is not fixed here because relaxing a public factory's input
+        signature is a breaking change for a convenience gap; see
+        ``decisions.md`` D-009 (plan-2026-08-23T203721-009b7ccf). Call the
+        encoder directly when you want the two-key form.
+
+        The model's
         output is a **bare tensor** whenever the head produces a single
         informative tensor -- which is every classification-style head, since
         their `probabilities` entry is exactly `softmax(logits)` and a token

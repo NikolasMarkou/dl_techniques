@@ -298,3 +298,61 @@ def test_a_genuinely_multi_output_head_keeps_its_dict() -> None:
         assert outputs[key].shape == (BATCH_SIZE, SEQ_LENGTH), (
             f"{key}: {outputs[key].shape}"
         )
+
+
+def test_all_three_inputs_are_required_but_the_encoder_needs_only_one() -> None:
+    """(e) F-11 / D-009: the factory's INPUT contract, and why it is stricter.
+
+    Not a vacuous pin. It is two-sided: the factory must REJECT the two-key
+    dict, and the bare encoder must ACCEPT the one-key dict. A change that
+    relaxed the factory reds the first half; a change that tightened `BERT`
+    reds the second. A one-sided "it raises" assertion would be satisfied by
+    any breakage at all, which is why the exact missing-key name is matched.
+
+    MEASURED (this is the ACTUAL text, not a prediction)::
+
+        ValueError: Missing data for input "token_type_ids". You passed a data
+        dictionary with keys ['input_ids', 'attention_mask']. Expected the
+        following keys: ['attention_mask', 'input_ids', 'token_type_ids']
+
+    RED proofs, one per half, ACTUAL text:
+
+    * **Delete the `token_type_ids` `keras.Input`** from the factory's
+      Functional wrapper -- literally the relaxation D-009 refuses. This arm
+      alone: ``Failed: DID NOT RAISE <class 'ValueError'>``. (Run over the
+      whole file it is 6 failed / 0 passed: every other arm feeds all three
+      keys, so the relaxation breaks them too. That is why the isolating
+      figure above is quoted from the single-node run.)
+    * **Make `BERT.call` require `token_type_ids`** (``raise ValueError`` when
+      it is None): 1 failed, 5 passed -- ONLY this arm, by its second half::
+
+          ValueError: Exception encountered when calling BERT.call().
+          token_type_ids is required
+    """
+    task_config = NLPTaskConfig(
+        name="sentiment",
+        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+        num_classes=NUM_CLASSES,
+    )
+    model = create_bert_with_head(
+        "tiny", task_config, bert_config_overrides=SMALL
+    )
+
+    full = _inputs()
+    assert set(full) == {"input_ids", "attention_mask", "token_type_ids"}
+
+    without_segments = {
+        key: value for key, value in full.items() if key != "token_type_ids"
+    }
+    with pytest.raises(ValueError, match=r"token_type_ids"):
+        model.predict(without_segments, verbose=0)
+
+    # The paired half. `BERT` alone forwards on `input_ids` ALONE -- so the
+    # factory's strictness is the wrapper's, not the model's, and D-009's
+    # "document, do not relax" only makes sense if this half holds.
+    encoder = BERT.from_variant("tiny", **SMALL)
+    outputs = encoder({"input_ids": full["input_ids"]}, training=False)
+    assert set(outputs) == {"last_hidden_state", "attention_mask"}
+    assert outputs["last_hidden_state"].shape == (
+        BATCH_SIZE, SEQ_LENGTH, SMALL["hidden_size"],
+    )
