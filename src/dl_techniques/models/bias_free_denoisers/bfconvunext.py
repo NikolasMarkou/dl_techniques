@@ -294,15 +294,3 @@ def create_convunext_variant(
         enable_deep_supervision=enable_deep_supervision,
         **kwargs
     )
-
-
-# ---------------------------------------------------------------------
-# Utility Functions for Deep Supervision
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.deep_supervision import (  # noqa: F401
-    get_model_output_info,
-    create_inference_model_from_training_model,
-)
-
-# ---------------------------------------------------------------------
