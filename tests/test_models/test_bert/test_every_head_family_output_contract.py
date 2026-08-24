@@ -61,7 +61,7 @@ from dl_techniques.layers.heads.nlp.factory import (
     TextGenerationHead,
     get_head_class,
 )
-from dl_techniques.models.bert.bert import create_bert_with_head
+from dl_techniques.models.bert import create_bert_with_head
 
 VARIANT = "tiny"
 NUM_CLASSES = 3

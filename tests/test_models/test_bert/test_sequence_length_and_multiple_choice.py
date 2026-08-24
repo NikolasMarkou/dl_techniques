@@ -66,7 +66,7 @@ from dl_techniques.layers.heads.nlp import (
     NLPTaskType,
     create_nlp_head,
 )
-from dl_techniques.models.bert.bert import BERT, create_bert_with_head
+from dl_techniques.models.bert import BERT, create_bert_with_head
 
 MAX_POS = 16
 NUM_CLASSES = 3

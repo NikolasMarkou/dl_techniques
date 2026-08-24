@@ -10,7 +10,7 @@ model, invisible to every shape/count assertion. See decisions.md D-007
 import numpy as np
 import pytest
 
-from dl_techniques.models.bert.bert import BERT
+from dl_techniques.models.bert import BERT
 from tests.norm_epsilon_oracle import (
     assert_epsilon_tracks_the_knob,
     assert_every_block_norm_uses,

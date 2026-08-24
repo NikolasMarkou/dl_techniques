@@ -28,96 +28,6 @@ the work at linear cost, while the periodic global layers stitch the windows
 together so information still crosses the whole sequence -- a token pair `L`
 apart is connected after one global layer, not after `L / window` local ones.
 
-**That cost argument does not hold for this implementation, and the direction
-of the error is the opposite of an approximation.** The windowed attention
-layer this package reuses is a spatial one: it folds the sequence into a
-synthetic `ceil(sqrt(L))`-square grid and then pads that grid up to a multiple
-of `window_size`, so every window is padded to exactly `window_size**2` token
-slots. Two consequences, both mechanical:
-
-* Whenever `L <= window_size**2` the padded grid is a single window and the
-  local layer is **dense attention**, not windowed attention. At the
-  `window_size=128` that `base` and `large` ship, the threshold is 16384 --
-  above `DEFAULT_MAX_POSITION_EMBEDDINGS = 8192`, so **no admissible sequence
-  length is ever windowed for those two variants**. `tiny` (`window_size=64`,
-  threshold 4096) is the only variant where windowing engages at all, and only
-  for `4097 <= L <= 8192`, where the padded grid really does partition into
-  four windows (a 2x2 grid, no cross-window information flow).
-* The score matrix in a local layer is `window_size**2 x window_size**2`
-  *independent of `L`* -- roughly `2.7e8` entries per head per sample at
-  `window_size=128`. That is ~16,384x the cost of dense attention at `L=128`
-  and still ~4x dense attention at `L=8192`. The local layers are the
-  expensive ones here, not the cheap ones.
-
-So the hybrid schedule as built buys no affordability -- but the failure is
-per-variant, not uniform, and both convenient summaries of it are wrong.
-Measured 2026-08-18 by sweeping `L` over the admissible range against the real
-grid-formation/padding/partition code:
-
-* `base` and `large` (`window_size=128`) partition into exactly **one** window
-  at every admissible `L`. Their local layers are dense attention over a
-  padded 16384-slot window: padding cost and no RoPE, for exactly zero
-  locality benefit.
-* `tiny` (`window_size=64`) partitions into **one** window for `L <= 4096` and
-  into **four** for `4097 <= L <= 8192`. In that band the windowing is real.
-
-AMENDED 2026-08-21 (plan-2026-08-19T163559-499b6f0e/D-135). The two bullets
-above describe the variant table as it was SHIPPED UNTIL 2026-08-21, and they
-remain the correct account of what a `window` local layer does at
-`window_size=128` -- but they understated the consequence. Measured on a 12 GB
-GPU at a sequence length of EIGHT, `from_variant("base")` and
-`from_variant("large")` did not merely pay for padding: both raised
-`ResourceExhaustedError` inside `SingleWindowAttention.call`. Two of the three
-shipped variants were DEAD ON FORWARD. `base` and `large` therefore now ship
-`global_attention_interval = 1`, i.e. every layer global, which preserves the
-all-to-all connectivity their padded single window already had, adds the RoPE
-those local layers lacked, and runs. `tiny` is unchanged and remains the
-variant where the hybrid schedule is real. The knob is not deleted:
-`from_variant("base", global_attention_interval=3)` restores the hybrid
-schedule for anyone who wants it, with the cost above.
-
-Do not write "windowing always degenerates" (false for `tiny` above 4096) and
-do not write "windowing delivers linear cost" (false for `base` and `large` at
-every admissible length). Where a local layer is dense it additionally carries
-no RoPE (only `is_global` layers receive `rope_theta`) and gets its order
-signal from a relative position bias over the synthetic grid instead. That bias
-is weak at its initialization scale but genuinely wired: injecting `N(0, 1)`
-into the table moves the output by `4.82e-03` (one window) and `3.68e-01`
-(multi-window) against a zeroed table, measured 2026-08-18 in float64. This is
-documented rather than fixed because no 1-D sliding-window attention layer
-exists in `layers/attention/`; writing one is the real fix, and it is an open
-decision. Pinned by
-`tests/test_models/test_modern_bert/test_shipped_window_size.py`.
-
-Positional information lives entirely in the attention layers, as in the
-paper: the embedding stage sums word and token-type embeddings and adds no
-positional term at all. The global layers therefore apply rotary position
-embeddings to their queries and keys, which is what makes them position-aware;
-without that they would be exactly permutation-equivariant, and a
-permutation-equivariant encoder is not a language model at all.
-
-GeGLU replaces the plain GELU feed-forward. Gating gives the FFN a
-multiplicative interaction its linear-then-activate predecessor lacks, which
-buys quality at equal parameter count. Bias terms are removed from most linear
-and normalization layers: they contribute little at this scale, and the freed
-budget is spent on width instead.
-
-The class is a pure foundation model. It emits `{"last_hidden_state",
-"attention_mask"}`, owns no pooler and no task head, and keeps BERT's API so
-the two are interchangeable at call sites. Its embedding stage is its own
-`layers.embedding.modern_bert_embeddings.ModernBertEmbeddings` rather than the
-`BertEmbeddings` that `bert/` and `distilbert/` share, because the token-type
-table BERT carries is not part of this design. Three preset variants span tiny,
-base (150M) and large (280M), each pinning its own
-`global_attention_interval` and `local_attention_window_size`.
-
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful load. Pass
-a local `.keras` path to `pretrained` instead.
-
 References:
     - Warner et al., 2024. Smarter, Better, Faster, Longer: A Modern
       Bidirectional Encoder. (https://arxiv.org/abs/2412.13663)
@@ -168,7 +78,7 @@ class ModernBERT(keras.Model):
     containing the 'last_hidden_state' and the forwarded 'attention_mask'.
 
     **Where the positional signal comes from.** The embedding stage carries
-    none — it sums word and token-type embeddings only. Global layers get
+    none -- it sums word and token-type embeddings only. Global layers get
     theirs from RoPE, applied to queries and keys inside the attention layer
     (``group_query`` with ``num_kv_heads == num_heads``, i.e. plain multi-head
     attention plus RoPE). Local layers get theirs from a learnable relative
@@ -189,34 +99,72 @@ class ModernBERT(keras.Model):
 
     .. code-block:: text
 
-        Input(input_ids, attention_mask, token_type_ids)
-               │
-               ▼
-        ModernBertEmbeddings -> Dropout
-               │
-               ▼
-        TransformerLayer₁ (Pre-LN, Windowed Attention -> GeGLU FFN)
-               │
-               ▼
-              ... (Layers with windowed attention)
-               │
-               ▼
-        TransformerLayerₖ (Pre-LN, Global Attention + RoPE -> GeGLU FFN)
-               │
-               ▼
-              ... (Alternating local and global attention)
-               │
-               ▼
-        TransformerLayerₙ
-               │
-               ▼
-        Final Layer Normalization
-               │
-               ▼
-        Output Dictionary {
-            "last_hidden_state": [batch, seq_len, hidden_size],
-            "attention_mask": [batch, seq_len]
-        }
+        ┌──────────────────────────────────────┐
+        │  Input dict                          │
+        │  input_ids       [B, L]    (required)│
+        │  attention_mask  [B, L]    (optional)│
+        │  token_type_ids  [B, L]    (optional)│
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  ModernBertEmbeddings                │
+        │    Word ⊕ TokenType → Norm → Dropout │
+        │    NO positional term here           │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayer₁  (Pre-LN)         │
+        │    window attention → GeGLU FFN      │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  ...                                 │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayerₖ  (Pre-LN)         │
+        │    global attention + RoPE → GeGLU   │
+        │    every global_attention_interval-th│
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  ...  alternating local / global     │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayerₙ                   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  final_layer_norm (LayerNorm)        │
+        │  center=use_bias                     │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output dict                         │
+        │    "last_hidden_state"  [B, L, H]    │
+        │    "attention_mask"     [B, L]       │
+        │  Mask echoed; ones_like(input_ids)   │
+        │  when no attention_mask is supplied  │
+        └──────────────────────────────────────┘
+
+    **Variants:**
+
+    .. code-block:: text
+
+        variant   hidden  layers  heads  interm.  interval  window
+        tiny        256      4      4      384       2        64
+        base        768     22     12     1152       1       128
+        large      1024     28     16     2624       1       128
+
+        base 160.6M / large 409.5M parameters (measured).
+        interval == 1 at base and large is a REPAIR, not a tuning
+        choice: at the inherited 3 both raised ResourceExhaustedError
+        at a sequence length of EIGHT. See the D-135 anchor.
+        `tiny` keeps the hybrid schedule and a real 4x saving above
+        L = 4096.
 
     :param vocab_size: Size of the vocabulary. Defaults to 50368.
     :type vocab_size: int
@@ -261,7 +209,9 @@ class ModernBERT(keras.Model):
         Defaults to False.
     :type use_bias: bool
     :param global_attention_interval: Interval for inserting a global attention
-        layer. E.g., 3 means every 3rd layer is global. Defaults to 3.
+        layer. E.g., 3 means every 3rd layer is global. Defaults to 3. Note the
+        shipped ``base`` and ``large`` presets override this to 1; see the
+        D-135 anchor in ``_build_architecture``.
     :type global_attention_interval: int
     :param local_attention_window_size: Window size for local (windowed)
         attention layers. This is the edge length of a **square spatial**
@@ -276,7 +226,23 @@ class ModernBERT(keras.Model):
     :type global_rope_theta: float
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
+    :ivar embeddings: The embedding layer instance.
+    :vartype embeddings: dl_techniques.layers.embedding.modern_bert_embeddings.ModernBertEmbeddings
+    :ivar encoder_layers: The ``num_layers`` ``TransformerLayer`` instances.
+    :vartype encoder_layers: List[TransformerLayer]
+    :ivar final_norm: LayerNormalization applied after the stack.
+    :vartype final_norm: keras.layers.LayerNormalization
+
     :raises ValueError: If invalid configuration parameters are provided.
+
+    Input shape:
+        Mapping with ``input_ids`` of shape ``(batch_size, seq_len)``, plus the
+        optional ``attention_mask`` and ``token_type_ids`` at the same shape.
+
+    Output shape:
+        Mapping with ``last_hidden_state`` at
+        ``(batch_size, seq_len, hidden_size)`` and ``attention_mask`` at
+        ``(batch_size, seq_len)``.
 
     Example:
         .. code-block:: python
@@ -292,6 +258,12 @@ class ModernBERT(keras.Model):
             outputs = model(inputs)
             print(outputs["last_hidden_state"].shape)
             # (2, 256, 768)
+
+    Note:
+        No pretrained ModernBERT weights are distributed with
+        ``dl_techniques``. ``pretrained=True`` raises ``NotImplementedError``;
+        pass a local checkpoint via
+        ``pretrained='/path/to/weights.keras'`` instead.
     """
 
     MODEL_VARIANTS = {
@@ -382,6 +354,43 @@ class ModernBERT(keras.Model):
             global_rope_theta: float = DEFAULT_GLOBAL_ROPE_THETA,
             **kwargs: Any,
     ) -> None:
+        """Initialize the ModernBERT model instance.
+
+        :param vocab_size: Size of the vocabulary.
+        :type vocab_size: int
+        :param hidden_size: Dimensionality of encoder layers.
+        :type hidden_size: int
+        :param num_layers: Number of hidden transformer layers.
+        :type num_layers: int
+        :param num_heads: Number of attention heads.
+        :type num_heads: int
+        :param intermediate_size: Dimensionality of the FFN layer.
+        :type intermediate_size: int
+        :param hidden_act: Activation function inside the GeGLU FFN.
+        :type hidden_act: str
+        :param hidden_dropout_rate: Dropout probability for embeddings/encoder.
+        :type hidden_dropout_rate: float
+        :param attention_probs_dropout_rate: Dropout for attention scores.
+        :type attention_probs_dropout_rate: float
+        :param type_vocab_size: Vocabulary size for token type IDs.
+        :type type_vocab_size: int
+        :param initializer_range: Stddev for weight initialization.
+        :type initializer_range: float
+        :param layer_norm_eps: Epsilon for every normalization layer.
+        :type layer_norm_eps: float
+        :param use_bias: Whether linear layers carry bias vectors.
+        :type use_bias: bool
+        :param global_attention_interval: Every k-th layer is global.
+        :type global_attention_interval: int
+        :param local_attention_window_size: Square window edge length.
+        :type local_attention_window_size: int
+        :param max_position_embeddings: RoPE precomputation length.
+        :type max_position_embeddings: int
+        :param global_rope_theta: RoPE base frequency for global layers.
+        :type global_rope_theta: float
+        :param kwargs: Additional keyword arguments for ``keras.Model``.
+        :raises ValueError: If any configuration value is invalid.
+        """
         super().__init__(**kwargs)
 
         # Validate configuration parameters
@@ -429,7 +438,26 @@ class ModernBERT(keras.Model):
             max_position_embeddings: int,
             global_rope_theta: float
     ) -> None:
-        """Validate model configuration parameters."""
+        """Validate model configuration parameters.
+
+        :param hidden_size: Dimensionality of encoder layers.
+        :type hidden_size: int
+        :param num_layers: Number of transformer layers.
+        :type num_layers: int
+        :param num_heads: Number of attention heads.
+        :type num_heads: int
+        :param hidden_dropout_rate: Dropout probability for hidden layers.
+        :type hidden_dropout_rate: float
+        :param attention_probs_dropout_rate: Dropout for attention scores.
+        :type attention_probs_dropout_rate: float
+        :param global_attention_interval: Every k-th layer is global.
+        :type global_attention_interval: int
+        :param max_position_embeddings: RoPE precomputation length.
+        :type max_position_embeddings: int
+        :param global_rope_theta: RoPE base frequency.
+        :type global_rope_theta: float
+        :raises ValueError: If any configuration value is invalid.
+        """
         if hidden_size <= 0 or num_layers <= 0 or num_heads <= 0:
             raise ValueError("Sizes and layer/head counts must be positive.")
         if hidden_size % num_heads != 0:
@@ -459,7 +487,13 @@ class ModernBERT(keras.Model):
             )
 
     def _build_architecture(self) -> None:
-        """Build all model components (embeddings, encoder layers, final norm)."""
+        """Build all model components: embeddings, encoder layers, final norm.
+
+        The attention type of layer ``i`` is decided here from
+        ``global_attention_interval``; the anchors in the body record why the
+        two branches are spelled the way they are and what must not be
+        "simplified".
+        """
         self.embeddings = ModernBertEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
@@ -475,136 +509,6 @@ class ModernBERT(keras.Model):
         for i in range(self.num_layers):
             # Every k-th layer uses global attention, others use windowed.
             is_global = (i + 1) % self.global_attention_interval == 0
-
-            # DECISION plan-2026-08-14T233721-d4f9beb2/D-007
-            # Global layers are 'group_query' with `num_kv_heads == num_heads`
-            # (arithmetically plain MHA) because that is the ONLY registry entry
-            # that reaches plain self-attention AND carries RoPE.
-            #
-            # WHAT NOT TO DO: do NOT "simplify" this back to
-            # `attention_type="multi_head"` with `attention_args={"use_rope":
-            # True}`. `MultiHeadAttention` declares no RoPE parameter, and
-            # `create_attention_layer` USED TO FILTER kwargs to the registry's
-            # declared names and DROP the rest SILENTLY — so that spelling
-            # constructed, logged, tested and serialized cleanly while doing
-            # nothing. HISTORICAL as of 2026-08-17
-            # (plan-2026-08-17T183311-79c63e38/D-011): the factory now RAISES on
-            # an undeclared key, so the shortcut fails loudly instead. The
-            # instruction is unchanged — `'group_query'` is still the only entry
-            # that is plain self-attention AND carries RoPE. That was the defect:
-            # with no positional term anywhere in
-            # the embeddings either, every global layer was exactly
-            # permutation-equivariant. Measured 2026-08-15 on CPU with
-            # `global_attention_interval=1`: `max|P f(x) - f(P x)| = 1.19e-07`
-            # (float32 noise) before, `4.06e-01` after. See decisions.md D-007.
-            #
-            # SUPERSEDE-NOTE 2026-08-18
-            # (plan-2026-08-18T140459-7991552f/D-019): a proposal to widen this
-            # ruling to EVERY layer -- delete the local branch so the whole
-            # stack is 'group_query' and RoPE reaches all of it ("Option B") --
-            # was evaluated, MEASURED and CANCELLED. The ruling above is
-            # unchanged and still applies to the global layers only; the
-            # measurement that killed the widening is in the D-019 anchor
-            # below.
-            #
-            # Local layers stay 'window', which is a SPATIAL layer: it reshapes
-            # a `(B, L, D)` text sequence into a synthetic `ceil(sqrt(L))^2` grid
-            # and attends inside `window_size`-square blocks of it, so its
-            # neighbourhood is not a 1-D token window and, whenever
-            # `L <= window_size^2`, is the whole (padded) sequence. Its order
-            # information is the Swin-convention relative position bias over
-            # that synthetic grid. This is documented, not fixed: no 1-D
-            # sliding-window attention exists in `layers/attention/`.
-            #
-            # DECISION plan-2026-08-17T183311-79c63e38/D-027
-            # The local branch is kept as 'window' even though its COST claim is
-            # not merely approximate but INVERTED. Windows are padded to
-            # `window_size**2` slots, so a local layer's score matrix is
-            # `window_size**2 x window_size**2` INDEPENDENT of L: ~2.7e8 entries
-            # per head per sample at the shipped `window_size=128`, i.e. ~16,384x
-            # dense attention at L=128 and ~4x at L=8192. With
-            # DEFAULT_MAX_POSITION_EMBEDDINGS = 8192 < 128**2, base and large can
-            # never window an admissible length at all.
-            #
-            # WHAT NOT TO DO, and why:
-            #   * Do NOT "fix" this by lowering `local_attention_window_size`
-            #     until windowing engages. Below `L = window_size**2` the layer is
-            #     dense over a padded grid; above it, the neighbourhood is a set
-            #     of STRIDED token runs over a synthetic square grid, not the
-            #     paper's contiguous 1-D window. A smaller window buys a
-            #     different wrong adjacency, not the paper's.
-            #   * Do NOT write a 1-D sliding-window path inline here. It is new
-            #     architecture and belongs in `layers/attention/`, behind the
-            #     factory, with its own tests — not in a model's builder.
-            #   * Do NOT re-describe the local layers as the cheap ones. They are
-            #     the expensive ones in this implementation.
-            # Implement-or-delete is an OPEN decision: see decisions.md D-027.
-            # Pinned by tests/test_models/test_modern_bert/test_shipped_window_size.py.
-            #
-            # SUPERSEDE-NOTE 2026-08-18
-            # (plan-2026-08-18T140459-7991552f/D-019): the "delete" half of the
-            # open decision above was taken up, measured, and CLOSED as
-            # CANCELLED. Everything above still stands as written -- including
-            # "base and large can never window an admissible length at all",
-            # which the sweep confirmed -- except that it must NOT be read as
-            # "windowing degenerates everywhere". See the D-019 anchor
-            # immediately below for the per-variant numbers.
-            #
-            # DECISION plan-2026-08-18T140459-7991552f/D-019
-            # Emitting 'window' for `base`/`large` is a MEASURED no-op. Swept
-            # 2026-08-18 over the real grid/pad/partition code, L in 8..8192
-            # against DEFAULT_MAX_POSITION_EMBEDDINGS = 8192:
-            #     window_size=128 (base, large) -> 1 window at EVERY admissible L
-            #     window_size=64  (tiny)        -> 1 window for L <= 4096,
-            #                                      4 windows for 4097..8192
-            # So base and large pay the 16384-slot padding on two thirds of
-            # their layers, and forgo RoPE there, for exactly zero locality
-            # benefit -- while tiny above 4096 tokens really does partition
-            # into a 2x2 grid with no cross-window information flow.
-            #
-            # WHAT NOT TO DO, and why:
-            #   * Do NOT delete `local_attention_window_size` or
-            #     `global_attention_interval`. That was "Option B" and it was
-            #     CANCELLED on 2026-08-18 BECAUSE OF the numbers above: its
-            #     premise was "the window path degenerates at every shipped
-            #     variant size", and that is false for `tiny` above 4096. At
-            #     `tiny` the knob buys a real 4x attention saving, so deleting
-            #     it removes a capability rather than cleaning up a no-op.
-            #   * Do NOT quietly stop emitting 'window' for base/large here
-            #     either. It is the right fix, but it is a PER-VARIANT
-            #     CONFIGURATION change with a weight-tree consequence -- a
-            #     local layer is a 5-tensor fused-QKV subtree (qkv, proj,
-            #     relative_position_bias_table) while a global one is 4
-            #     projections plus 2 RoPE caches, so EVERY parameter name under
-            #     a swapped layer changes, not just the bias table. It is
-            #     deferred to a follow-up plan with the measurement attached.
-            #
-            # SUPERSEDE-NOTE 2026-08-21
-            # (plan-2026-08-19T163559-499b6f0e/D-135): the second bullet above
-            # ("Do NOT quietly stop emitting 'window' for base/large here
-            # either ... deferred to a follow-up plan with the measurement
-            # attached") HAS NOW BEEN TAKEN UP, and the measurement is attached.
-            # It was not done "here" -- this expression is untouched. It was done
-            # in MODEL_VARIANTS, by setting `global_attention_interval = 1` for
-            # `base` and `large`, so `is_global` is true at every layer and this
-            # line simply never selects 'window' for them. The measurement that
-            # forced it: at the inherited interval of 3, `from_variant("base")`
-            # and `from_variant("large")` raised `ResourceExhaustedError` inside
-            # `SingleWindowAttention.call` at a sequence length of EIGHT on a
-            # 12 GB GPU -- not a cost inefficiency, an unrunnable model. The
-            # FIRST bullet is unaffected and still binds: `tiny` keeps its knobs
-            # and its real 4x saving. The window-shrink alternative the carried
-            # ledger proposed remains FORBIDDEN by the bullet above it, for the
-            # strided-adjacency reason given there. See decisions.md D-135.
-            #
-            #   * Do NOT re-derive any of this by reading. Two readings failed
-            #     here already: "the local layers have no positional term at
-            #     all" is FALSE (injecting `N(0,1)` into the relative-position
-            #     bias table moves the output 4.82e-03 one-window / 3.68e-01
-            #     multi-window against a zeroed table, float64), and the
-            #     "degenerate everywhere" premise was equally a reading.
-            # Pinned by tests/test_models/test_modern_bert/test_shipped_window_size.py
-            # (TestShippedWindowSizeIsDenseAttention). See decisions.md D-019.
             attention_type = "group_query" if is_global else "window"
             attention_args = (
                 {
@@ -665,6 +569,7 @@ class ModernBERT(keras.Model):
         gets called.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -769,7 +674,7 @@ class ModernBERT(keras.Model):
             weights_path: str,
             skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained weights into the model from a local checkpoint.
 
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
@@ -875,6 +780,8 @@ class ModernBERT(keras.Model):
         :type weights_dataset: str
         :param cache_dir: Directory to cache downloaded weights.
         :type cache_dir: Optional[str]
+        :param kwargs: Additional arguments overriding the variant's defaults.
+        :type kwargs: Any
         :return: A configured ModernBERT instance.
         :rtype: ModernBERT
         :raises ValueError: If the variant is not recognized.
@@ -917,7 +824,11 @@ class ModernBERT(keras.Model):
         return model
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the model's configuration for serialization."""
+        """Return the model's configuration for serialization.
+
+        :return: A dictionary containing the model's configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "vocab_size": self.vocab_size,
@@ -941,11 +852,20 @@ class ModernBERT(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ModernBERT":
-        """Create a model instance from its configuration."""
+        """Create a model instance from its configuration.
+
+        :param config: A dictionary containing the model's configuration.
+        :type config: Dict[str, Any]
+        :return: A new ModernBERT model instance.
+        :rtype: ModernBERT
+        """
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
-        """Print the model summary with additional ModernBERT-specific information."""
+        """Print the model summary with additional ModernBERT-specific information.
+
+        :param kwargs: Additional arguments passed to ``keras.Model.summary``.
+        """
         super().summary(**kwargs)
         logger.info("ModernBERT Foundation Model Configuration:")
         logger.info(
@@ -974,6 +894,36 @@ def create_modern_bert_with_head(
 ) -> keras.Model:
     """Factory function to create a ModernBERT model with a task-specific head.
 
+    **Head integration:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  keras.Input × 3 (ALL required)      │
+        │    input_ids / attention_mask /      │
+        │    token_type_ids                    │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  ModernBERT encoder (from_variant)   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  cast attention_mask → float         │
+        │  (some heads, e.g. QA, need it)      │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  NLP task head (create_nlp_head)     │
+        │    {hidden_states, attention_mask}   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  head output returned AS IS          │
+        │  (no logits/derived-key collapse     │
+        │   here, unlike create_bert_with_head)│
+        └──────────────────────────────────────┘
+
     :param bert_variant: The ModernBERT variant to use (e.g., "base", "large").
     :type bert_variant: str
     :param task_config: An `NLPTaskConfig` object defining the task.
@@ -992,7 +942,11 @@ def create_modern_bert_with_head(
     :param head_config_overrides: Optional dictionary to override default head
         configuration.
     :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete `keras.Model` ready for the specified task.
+    :return: A complete `keras.Model` ready for the specified task. All three
+        inputs are required by name; the Functional wrapper declares one
+        ``keras.Input`` per key and Keras matches a data dict against that
+        declaration exactly. For a single-segment task pass
+        ``np.zeros_like(input_ids)`` as ``token_type_ids``.
     :rtype: keras.Model
     """
     bert_config_overrides = bert_config_overrides or {}

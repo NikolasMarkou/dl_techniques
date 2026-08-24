@@ -71,12 +71,6 @@ matching loss pressures each layer to already be producing a usable detection se
 which measurably speeds convergence for a model that is otherwise slow to train.
 Inference consumes `pred_logits` and `pred_boxes` alone.
 
-Both `DetrTransformer` and `DETR` build all of their sub-layers explicitly rather
-than letting Keras build them lazily. This is required for `.keras` round-trip:
-weight restore calls `load_own_variables` on each sub-layer, and an unbuilt
-sub-layer has no variables to receive the saved arrays, so lazy construction
-fails at load time with a weight-count mismatch rather than at save time.
-
 References:
     - Carion et al., 2020. End-to-End Object Detection with Transformers.
       (https://arxiv.org/abs/2005.12872)
@@ -660,3 +654,5 @@ def create_detr(
 
     logger.info(f"Created DETR model with {num_queries} queries for {num_classes} classes.")
     return detr_model
+
+# ---------------------------------------------------------------------

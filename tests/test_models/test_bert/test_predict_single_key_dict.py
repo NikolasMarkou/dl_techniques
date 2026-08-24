@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.bert.bert import BERT
+from dl_techniques.models.bert import BERT
 
 VOCAB = 100
 SEQ = 12

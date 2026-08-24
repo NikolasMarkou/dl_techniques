@@ -20,7 +20,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.bert.bert import BERT, create_bert_with_head
+from dl_techniques.models.bert import BERT, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights

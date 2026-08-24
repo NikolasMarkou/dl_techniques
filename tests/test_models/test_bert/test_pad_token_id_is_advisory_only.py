@@ -64,7 +64,7 @@ equally-dead forwards -- and ONLY the anti-vacuity arm fires. Result:
 import keras
 import numpy as np
 
-from dl_techniques.models.bert.bert import BERT
+from dl_techniques.models.bert import BERT
 
 # ---------------------------------------------------------------------
 

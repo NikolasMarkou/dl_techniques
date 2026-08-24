@@ -46,22 +46,6 @@ Three preset variants trade capacity against cost: tiny (`[64, 128]`), small
 spatial resolution, depth is bounded below by input size; a 32x32 input supports
 at most five stages before the feature map degenerates.
 
-The implementation follows the Keras 3 subclassed-model contract. All sub-layers
-are instantiated in `__init__` so that they exist before the first call and are
-therefore captured correctly by serialization; no custom `build()` is required
-because Keras builds sub-layers on the first invocation. `get_config` carries
-every constructor argument, and `from_config` deserializes the initializer and
-regularizer objects, so a saved model round-trips without reconstruction code.
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful load.
-`from_variant(pretrained="<path>.keras")` loads a local checkpoint and
-tolerates a classifier shape mismatch by name-matching and skipping the head,
-which is the common case when fine-tuning an ImageNet checkpoint onto a
-different label set.
-
 References:
     - Woo et al., 2018. CBAM: Convolutional Block Attention Module. ECCV 2018.
       (https://arxiv.org/abs/1807.06521)
@@ -520,14 +504,6 @@ class CBAMNet(keras.Model):
 
         return model
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
-    # a non-existent host; `from_variant` caught the download failure, logged a
-    # warning and continued with random initialization, so `pretrained=True`
-    # silently returned an untrained model.
-    # Do NOT reinstate a warn-and-return branch here or in `from_variant`. No
-    # public CBAMNet weights are distributed with dl_techniques; pass a local
-    # path via `pretrained="/path/to/file.keras"` or use `pretrained=False`.
     @staticmethod
     def _download_weights(variant: str, dataset: str = "imagenet") -> str:
         """

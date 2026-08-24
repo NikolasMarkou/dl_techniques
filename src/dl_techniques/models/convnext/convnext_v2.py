@@ -15,14 +15,14 @@ computes each channel's L2 norm over the spatial dimensions, divides those norms
 by their mean across channels to get a relative measure of how active each
 channel is compared with its peers, and rescales each channel by that ratio.
 Channels that are globally quiet relative to the rest are suppressed further and
-channels that carry signal are amplified — an explicit competition between
+channels that carry signal are amplified -- an explicit competition between
 channels that increases their contrast and prevents the collapse. Because it is
 computed from a global spatial statistic rather than a local window, it costs
 almost nothing and adds only two learnable per-channel parameters.
 
 Everything else is V1: a depthwise `KxK` convolution (default 7), a 1x1
 expansion to `4F`, one GELU, now GRN, a 1x1 reduction back to `F`, and a
-learnable `gamma` layer scale. As in V1 the block is TRANSFORM-ONLY — it returns
+learnable `gamma` layer scale. As in V1 the block is TRANSFORM-ONLY -- it returns
 `F(x)`, and the residual plus drop-path wiring is the caller's responsibility,
 which this model performs in `call`. The drop-path ramp is global across the
 network rather than per stage, and DOWNSAMPLING is a separate LayerNorm +
@@ -72,52 +72,192 @@ from dl_techniques.utils.activation_serialization import (
 
 @keras.saving.register_keras_serializable()
 class ConvNeXtV2(keras.Model):
-    """ConvNeXt V2 model implementation with pretrained support.
+    """ConvNeXt V2: ConvNeXt plus Global Response Normalization.
 
-    A modern ConvNet architecture that incorporates Global Response Normalization
-    for enhanced inter-channel feature competition, achieving superior performance
-    in both supervised learning and self-supervised masked autoencoder training.
+    A modern ConvNet that adds Global Response Normalization inside the
+    inverted bottleneck, an explicit inter-channel competition that prevents
+    the feature collapse V1 exhibits under masked-autoencoder pretraining. GRN
+    is the ONLY structural change from :class:`ConvNeXtV1`: a patchify stem
+    feeds ``len(depths)`` stages of :class:`ConvNextV2Block` -- depthwise
+    ``KxK`` convolution, LayerNorm, ``F -> 4F`` expansion, GELU, GRN, ``4F ->
+    F`` reduction, and a learnable ``gamma`` -- separated by LayerNorm +
+    strided-convolution downsample layers. The block is TRANSFORM-ONLY: it
+    returns ``F(x)``, and the residual add plus the optional drop-path are
+    owned by :meth:`call`. The drop-path ramp is global across ``sum(depths)``
+    blocks, not per stage. The model is fully convolutional and global-pools
+    before the head, so the spatial dims of ``input_shape`` may be ``None``.
 
-    Args:
-        num_classes: Integer, number of output classes for classification.
-            Only used if include_top=True.
-        depths: List of integers, number of ConvNext blocks in each stage.
-            Default is [3, 3, 9, 3] for ConvNeXt-Tiny.
-        dims: List of integers, number of channels in each stage.
-            Default is [96, 192, 384, 768] for ConvNeXt-Tiny.
-        drop_path_rate: Float, stochastic depth rate. Linearly increases
-            from 0 to this value across all blocks.
-        kernel_size: Integer or tuple, kernel size for ConvNext blocks.
-            Default is 7 following the original paper.
-        activation: String or callable, activation function for blocks.
-            Default is "gelu" as used in the original paper.
-        use_bias: Boolean, whether to use bias in convolutions.
-        kernel_regularizer: Regularizer function applied to kernels.
-        dropout_rate: Float, dropout rate applied within blocks.
-        spatial_dropout_rate: Float, spatial dropout rate for blocks.
-        strides: int, Strides for downsampling.
-        use_gamma: Boolean, whether to use learnable scaling in blocks.
-        use_softorthonormal_regularizer: Boolean, whether to use soft
-            orthonormal regularization in blocks.
-        include_top: Boolean, whether to include the classification head.
-        input_shape: Tuple, input shape. ``None`` resolves to ``(None, None, 3)``
-            -- the model is fully convolutional and global-pools before the head,
-            so a concrete spatial size is optional. It is required only where a
-            downstream consumer needs static spatial dims; a checkpoint load with
-            unspecified spatial dims materializes weights at
-            ``PRETRAINED_BUILD_SPATIAL`` (224).
-        **kwargs: Additional keyword arguments for the Model base class.
+    **Architecture Overview:**
 
-    Raises:
-        ValueError: If depths and dims have different lengths.
-        ValueError: If invalid model configuration is provided.
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │       Input [B, H, W, C_in]          │
+        │  (H, W may be None: fully conv)      │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stem: Conv S×S /S → LayerNorm       │
+        │  padding "valid" (S > 1)             │
+        │          "same"  (S == 1)            │
+        │  S = strides (default 4, patchify)   │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stage 0: D₀ × Block(dim₀)           │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Downsample: LayerNorm → Conv S×S /S │
+        │  padding "same" (never 0×0)          │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stage 1: D₁ × Block(dim₁)           │
+        └───────────────┬──────────────────────┘
+                        ▼
+                  Downsample
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stage 2: D₂ × Block(dim₂)           │
+        └───────────────┬──────────────────────┘
+                        ▼
+                  Downsample
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stage 3: D₃ × Block(dim₃)           │
+        └───────────────┬──────────────────────┘
+                        │
+            ┌───────────┴──────────────────────┐
+            │  Residual wiring (owned HERE,    │
+            │  not by the block)               │
+            │    residual = x                  │
+            │    x = ConvNextV2Block(x)   F(x) │
+            │    x = DropPath(x)     if rate>0 │
+            │    x = add([residual, x])        │
+            └───────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  GAP → LayerNorm → Dense(num_classes)│
+        │  (if include_top)                    │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output: [B, num_classes]            │
+        │   include_top=False → [B, H', W', d₃]│
+        │   num_classes=0     → [B, d₃] pooled │
+        └──────────────────────────────────────┘
+
+    **Variants:**
+
+    .. code-block:: text
+
+        cifar10   [5, 5]         [96, 192]
+        atto      [2, 2, 6, 2]   [40, 80, 160, 320]
+        femto     [2, 2, 6, 2]   [48, 96, 192, 384]
+        pico      [2, 2, 6, 2]   [64, 128, 256, 512]
+        nano      [2, 2, 8, 2]   [80, 160, 320, 640]
+        tiny      [3, 3, 9, 3]   [96, 192, 384, 768]
+        base      [3, 3, 27, 3]  [128, 256, 512, 1024]
+        large     [3, 3, 27, 3]  [192, 384, 768, 1536]
+        huge      [3, 3, 27, 3]  [352, 704, 1408, 2816]
+
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``. A value of 0 returns pooled, normalized features
+        from the head. Defaults to 1000.
+    :type num_classes: int
+    :param depths: Number of ConvNeXt blocks in each stage. Must have the same
+        length as ``dims``. ``None`` resolves to ``[3, 3, 9, 3]``
+        (ConvNeXt-Tiny). A length other than 4 is permitted but logs a warning.
+    :type depths: Optional[List[int]]
+    :param dims: Channel count per stage. ``None`` resolves to
+        ``[96, 192, 384, 768]``.
+    :type dims: Optional[List[int]]
+    :param drop_path_rate: Terminal stochastic-depth rate. The per-block rate
+        ramps linearly from 0.0 at the first block of stage 0 to this value at
+        the last block of the last stage, indexed GLOBALLY over
+        ``sum(depths)`` blocks. Defaults to 0.0 (disabled).
+    :type drop_path_rate: float
+    :param stochastic_mode: What the per-block regularizer does. ``'depth'``
+        (default) is standard stochastic depth and drops the whole residual
+        branch at training time; ``'gradient'`` is forward-identity and only
+        perturbs the backward pass. ``'depth'`` is behaviour-preserving.
+    :type stochastic_mode: str
+    :param kernel_size: Depthwise kernel size inside each block. Defaults to 7,
+        following the original paper.
+    :type kernel_size: Union[int, Tuple[int, int]]
+    :param activation: Activation used inside each block, resolved through
+        :func:`deserialize_activation`. Defaults to ``"gelu"``.
+    :type activation: str
+    :param use_bias: Whether convolutions and the classifier use a bias, and
+        whether every LayerNormalization centers. Defaults to True.
+    :type use_bias: bool
+    :param kernel_regularizer: Optional regularizer applied to all convolution
+        and dense kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param dropout_rate: Dropout rate applied within blocks. Defaults to 0.0.
+    :type dropout_rate: float
+    :param spatial_dropout_rate: Spatial dropout rate applied within blocks.
+        Defaults to 0.0.
+    :type spatial_dropout_rate: float
+    :param strides: Patchify factor. Used as BOTH the kernel size and the
+        stride of the stem convolution and of every inter-stage downsample
+        convolution. Defaults to 4.
+    :type strides: int
+    :param use_gamma: Whether blocks apply the learnable per-channel layer
+        scale. Defaults to True.
+    :type use_gamma: bool
+    :param use_softorthonormal_regularizer: Whether blocks use soft orthonormal
+        regularization. Defaults to False.
+    :type use_softorthonormal_regularizer: bool
+    :param include_top: Whether to include the GAP + LayerNorm + Dense
+        classification head. When False the final stage's feature maps are
+        returned. Defaults to True.
+    :type include_top: bool
+    :param input_shape: Input shape ``(height, width, channels)`` excluding the
+        batch dimension. ``None`` resolves to ``(None, None, 3)`` -- the model
+        is fully convolutional and global-pools before the head, so a concrete
+        spatial size is optional. It is required only where a downstream
+        consumer needs static spatial dims; a checkpoint load with unspecified
+        spatial dims materializes weights at ``PRETRAINED_BUILD_SPATIAL`` (224).
+    :type input_shape: Tuple[int, ...]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base
+        class.
+
+    :raises ValueError: If ``depths`` and ``dims`` differ in length, if
+        ``strides`` is not positive, if ``stochastic_mode`` is not ``'depth'``
+        or ``'gradient'``, or if ``input_shape`` is not 3D.
+
+    Input shape:
+        4D tensor with shape ``(batch_size, height, width, channels)``.
+
+    Output shape:
+        - ``include_top=True``: 2D tensor ``(batch_size, num_classes)``.
+        - ``include_top=True, num_classes=0``: 2D tensor
+          ``(batch_size, dims[-1])`` of pooled, normalized features.
+        - ``include_top=False``: 4D tensor ``(batch_size, H', W', dims[-1])``.
 
     Example:
-        >>> # Create ConvNeXt V2-Tiny model for CIFAR-10
-        >>> model = ConvNeXtV2.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+        >>> # ConvNeXt V2-Tiny for CIFAR-10
+        >>> model = ConvNeXtV2.from_variant("tiny", num_classes=10,
+        ...                                 input_shape=(32, 32, 3))
         >>>
-        >>> # Load pretrained ImageNet model
+        >>> # Feature extractor
         >>> model = ConvNeXtV2.from_variant("base", include_top=False)
+        >>>
+        >>> # Warm start from a local checkpoint
+        >>> model = ConvNeXtV2.from_variant("large",
+        ...                                 pretrained="/path/to.keras")
+
+    Note:
+        No pretrained ConvNeXt V2 weights are distributed with
+        ``dl_techniques``. ``pretrained=True`` raises ``NotImplementedError``
+        rather than warning and returning a randomly-initialized model; pass a
+        local checkpoint via ``pretrained='/path/to/weights.keras'`` instead.
     """
 
     # Model variant configurations
@@ -227,8 +367,13 @@ class ConvNeXtV2(keras.Model):
             f"with {sum(depths)} blocks"
         )
 
-    def _build_stem(self):
-        """Build and assign stem layers."""
+    def _build_stem(self) -> None:
+        """Build and assign the patchify stem.
+
+        A ``strides x strides`` convolution at stride ``strides`` followed by
+        LayerNorm. The padding rule is deliberately NOT the downsample layers'
+        unconditional ``"same"``; see the D-125 anchor in the body.
+        """
         stem_kernel_size = self.strides
         stem_stride = self.strides
         self.stem_conv = keras.layers.Conv2D(
@@ -259,8 +404,14 @@ class ConvNeXtV2(keras.Model):
             name="stem_norm"
         )
 
-    def _build_downsample_layer(self, stage_idx: int):
-        """Build and assign a downsample layer."""
+    def _build_downsample_layer(self, stage_idx: int) -> None:
+        """Build and assign the LayerNorm + strided convolution before a stage.
+
+        :param stage_idx: Index of the stage this downsample layer feeds. Must
+            be greater than 0; the pair is stored at ``stage_idx - 1`` in
+            ``downsample_layers_list``.
+        :type stage_idx: int
+        """
         downsample_kernel_size, downsample_stride = self.strides, self.strides
         downsample_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
@@ -285,8 +436,16 @@ class ConvNeXtV2(keras.Model):
         )
         self.downsample_layers_list.append([downsample_norm, downsample_conv])
 
-    def _build_stage(self, stage_idx: int):
-        """Build and assign a stage of ConvNeXt V2 blocks."""
+    def _build_stage(self, stage_idx: int) -> None:
+        """Build and assign one stage of ConvNeXt V2 blocks.
+
+        Each entry appended to ``stages_list`` is a
+        ``{"block": ..., "drop_path": ...}`` mapping; ``drop_path`` is ``None``
+        when this block's ramped rate is 0.
+
+        :param stage_idx: Index of the stage to build.
+        :type stage_idx: int
+        """
         stage_blocks = []
         depth = self.depths[stage_idx]
         dim = self.dims[stage_idx]
@@ -314,13 +473,6 @@ class ConvNeXtV2(keras.Model):
                 use_softorthonormal_regularizer=self.use_softorthonormal_regularizer,
                 name=f"stage_{stage_idx}_block_{block_idx}"
             )
-            # DECISION plan_2026-06-03_943569ad/D-001
-            # Use the repo's dedicated StochasticDepth/StochasticGradient layers
-            # (gated by self.stochastic_mode), NOT a hand-rolled
-            # keras.layers.Dropout(noise_shape=(None,1,1,1)). Do NOT pass rate= or
-            # noise_shape=: both layers take drop_path_rate= and compute per-sample
-            # noise internally. 'depth' is the behavior-preserving default; 'gradient'
-            # is an opt-in forward-identity grad-only regularizer. See decisions.md D-001.
             drop_path_cls = StochasticDepth if self.stochastic_mode == 'depth' else StochasticGradient
             drop_path = drop_path_cls(
                 drop_path_rate=drop_rate,
@@ -329,8 +481,12 @@ class ConvNeXtV2(keras.Model):
             stage_blocks.append({"block": block, "drop_path": drop_path})
         self.stages_list.append(stage_blocks)
 
-    def _build_head(self):
-        """Build and assign head layers."""
+    def _build_head(self) -> None:
+        """Build and assign the GAP + LayerNorm + classifier head.
+
+        ``self.classifier`` is ``None`` when ``num_classes == 0``, in which case
+        the head returns pooled, normalized features.
+        """
         self.gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
         self.head_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
@@ -349,9 +505,14 @@ class ConvNeXtV2(keras.Model):
         else:
             self.classifier = None
 
-    def build(self, input_shape):
-        """Builds the model and its layers."""
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer by tracing ``call`` on a symbolic input.
 
+        :param input_shape: Shape of the input to ``call``, with or without the
+            batch dimension. A 3D shape (as ``summary()`` may pass) is given a
+            dummy batch axis so sub-layers build correctly.
+        :type input_shape: Any
+        """
         # The summary() method might call build with a 3D shape (without batch dim).
         # We add a dummy batch dimension if that's the case to ensure layers build correctly.
         if len(input_shape) == 3:
@@ -364,17 +525,26 @@ class ConvNeXtV2(keras.Model):
 
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Defines the forward pass of the model.
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Forward pass of the model.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean or None, whether the model is in training mode.
+        The residual add and the drop-path are applied HERE, not inside the
+        block: :class:`ConvNextV2Block` is transform-only and returns ``F(x)``.
 
-        Returns:
-            Output tensor. Shape depends on include_top:
-                - If include_top=True: (batch_size, num_classes)
-                - If include_top=False: (batch_size, H', W', channels)
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor. ``(batch_size, num_classes)`` with
+            ``include_top=True``, ``(batch_size, dims[-1])`` when additionally
+            ``num_classes == 0``, otherwise the final stage's feature maps
+            ``(batch_size, H', W', dims[-1])``.
+        :rtype: keras.KerasTensor
         """
         x = self.stem_conv(inputs)
         x = self.stem_norm(x)
@@ -409,16 +579,22 @@ class ConvNeXtV2(keras.Model):
     PRETRAINED_BUILD_SPATIAL = 224
 
     def _pretrained_build_shape(self) -> Tuple[int, ...]:
-        """Concrete `(H, W, C)` for the pre-load dummy forward.
+        """Resolve a concrete ``(H, W, C)`` for the pre-load dummy forward.
 
         DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve the None spatial
-        dims instead of passing `self.input_shape` through. Do NOT go back to
-        `keras.random.normal((1,) + tuple(self.input_shape))`: the DEFAULT
-        `input_shape` is `(None, None, 3)`, so that built `(1, None, None, 3)`
-        and made the factories' own documented `pretrained=<local path>` call
-        fail for every caller who did not also pass a concrete `input_shape`.
-        The channel count is never defaulted -- a `None` there is a real
-        configuration error and is raised as one. See decisions.md D-067.
+        dims instead of passing ``self.input_shape`` through. Do NOT go back to
+        ``keras.random.normal((1,) + tuple(self.input_shape))``: the DEFAULT
+        ``input_shape`` is ``(None, None, 3)``, so that built ``(1, None, None,
+        3)`` and made the factories' own documented ``pretrained=<local path>``
+        call fail for every caller who did not also pass a concrete
+        ``input_shape``. The channel count is never defaulted -- a ``None``
+        there is a real configuration error and is raised as one. See
+        decisions.md D-067.
+
+        :return: ``(height, width, channels)`` with any ``None`` spatial dim
+            replaced by ``PRETRAINED_BUILD_SPATIAL``.
+        :rtype: Tuple[int, ...]
+        :raises ValueError: If ``input_shape`` has no channel count.
         """
         height, width, channels = self.input_shape
         if channels is None:
@@ -438,30 +614,29 @@ class ConvNeXtV2(keras.Model):
             weights_path: str,
             skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained weights into the model from a local checkpoint.
 
-        This method handles loading weights with smart mismatch handling,
-        particularly useful when the number of classes differs or when
-        loading weights without the top classifier.
-
+        Handles mismatches gracefully, which is what makes a checkpoint usable
+        when the number of classes differs or when only the backbone is wanted.
         Weights are transferred layer-by-layer via
         :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
         the canonical replacement for ``self.load_weights(by_name=True)`` (which
         raises on ``.keras`` files in Keras 3.8+).
 
-        Args:
-            weights_path: String, path to the weights file (.keras format).
-            skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-                Useful when loading weights with different num_classes. Maps to
-                ``strict=not skip_mismatch``.
-
-        Raises:
-            FileNotFoundError: If weights_path doesn't exist.
-            ValueError: If weights cannot be loaded.
+        :param weights_path: Path to the weights file (``.keras`` format).
+        :type weights_path: str
+        :param skip_mismatch: Whether to skip layers with mismatched shapes.
+            Useful when loading weights with a different ``num_classes``. Maps
+            to ``strict=not skip_mismatch``.
+        :type skip_mismatch: bool
+        :raises FileNotFoundError: If ``weights_path`` does not exist.
+        :raises ValueError: If weights cannot be loaded. The original exception
+            is chained with ``from e``.
 
         Example:
             >>> model = ConvNeXtV2.from_variant("tiny", num_classes=10)
-            >>> model.load_pretrained_weights("convnext_v2_tiny_imagenet.keras", skip_mismatch=True)
+            >>> model.load_pretrained_weights(
+            ...     "convnext_v2_tiny_imagenet.keras", skip_mismatch=True)
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -500,12 +675,6 @@ class ConvNeXtV2(keras.Model):
                 f"{type(e).__name__}: {e}"
             ) from e
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on a
-    # non-existent host; `from_variant` caught the download failure, logged a
-    # warning and returned a randomly-initialized model, so `pretrained=True`
-    # silently produced untrained weights. Do NOT reinstate a warn-and-return
-    # branch here or in `from_variant`.
     @staticmethod
     def _download_weights(
             variant: str,
@@ -519,13 +688,13 @@ class ConvNeXtV2(keras.Model):
         recipe (see ``models/resnet/model.py``) and to give an explicit failure
         mode instead of a silent random-init fallback.
 
-        Args:
-            variant: Variant name (unused).
-            dataset: Dataset name (unused).
-            cache_dir: Cache directory (unused).
-
-        Raises:
-            NotImplementedError: Always.
+        :param variant: Variant name (unused).
+        :type variant: str
+        :param dataset: Dataset name (unused).
+        :type dataset: str
+        :param cache_dir: Cache directory (unused).
+        :type cache_dir: Optional[str]
+        :raises NotImplementedError: Always.
         """
         raise NotImplementedError(
             f"No pretrained ConvNeXt V2 weights are distributed with dl_techniques "
@@ -548,46 +717,53 @@ class ConvNeXtV2(keras.Model):
     ) -> "ConvNeXtV2":
         """Create a ConvNeXt V2 model from a predefined variant.
 
-        Args:
-            variant: String, one of "atto", "femto", "pico", "nano",
-                "tiny", "base", "large", "huge"
-            num_classes: Integer, number of output classes
-            input_shape: Tuple, input shape. None resolves to (None, None, 3);
-                a pretrained load then materializes weights at 224x224.
-            pretrained: Boolean or string. If True, loads pretrained weights from
-                default URL. If string, treats it as a path to local weights file.
-            weights_dataset: String, dataset for pretrained weights.
-                Options: "imagenet", "imagenet22k".
-            weights_input_shape: Tuple, input shape used during weight pretraining.
-                Only needed if loading pretrained weights with different input_shape.
-                Defaults to (224, 224, 3) for ImageNet weights.
-            cache_dir: Optional string, directory to cache downloaded weights.
-            **kwargs: Additional arguments passed to the constructor
-
-        Returns:
-            ConvNeXtV2 model instance
-
-        Raises:
-            ValueError: If variant is not recognized
-            NotImplementedError: If pretrained is True
+        :param variant: One of ``"cifar10"``, ``"atto"``, ``"femto"``,
+            ``"pico"``, ``"nano"``, ``"tiny"``, ``"base"``, ``"large"``,
+            ``"huge"``.
+        :type variant: str
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param input_shape: Input shape. ``None`` resolves to
+            ``(None, None, 3)``; a pretrained load then materializes weights at
+            224x224.
+        :type input_shape: Optional[Tuple[int, ...]]
+        :param pretrained: If a string, a path to a local weights file to load.
+            If True, raises ``NotImplementedError`` -- no public ConvNeXt V2
+            weights ship with ``dl_techniques``. If False (default), returns a
+            randomly-initialized model.
+        :type pretrained: Union[bool, str]
+        :param weights_dataset: Dataset the checkpoint was trained on, one of
+            ``"imagenet"`` or ``"imagenet22k"``. Selects the class count
+            (1000 / 21841) that ``num_classes`` is compared against when
+            deciding whether to skip the classifier.
+        :type weights_dataset: str
+        :param weights_input_shape: Input shape used during weight pretraining.
+            Only needed when loading pretrained weights at a different
+            ``input_shape``; a mismatch sets ``skip_mismatch``.
+        :type weights_input_shape: Optional[Tuple[int, ...]]
+        :param cache_dir: Directory to cache downloaded weights.
+        :type cache_dir: Optional[str]
+        :param kwargs: Additional arguments passed to the constructor.
+        :return: ConvNeXtV2 model instance.
+        :rtype: ConvNeXtV2
+        :raises ValueError: If ``variant`` is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is True.
 
         Example:
-            >>> # Load pretrained ImageNet model
+            >>> # Feature extractor for fine-tuning
             >>> model = ConvNeXtV2.from_variant("base", include_top=False)
             >>>
-            >>> # Load pretrained as feature extractor for fine-tuning
-
-            >>>
-            >>> # Fine-tune on custom dataset with different input size
+            >>> # Fine-tune on a custom dataset at a different input size
             >>> model = ConvNeXtV2.from_variant(
             ...     "pico",
             ...     num_classes=10,
             ...     input_shape=(32, 32, 3),
-                ...     weights_input_shape=(224, 224, 3)
+            ...     weights_input_shape=(224, 224, 3)
             ... )
             >>>
-            >>> # Load from local weights file
-            >>> model = ConvNeXtV2.from_variant("large", pretrained="path/to/weights.keras")
+            >>> # Load from a local weights file
+            >>> model = ConvNeXtV2.from_variant("large",
+            ...                                 pretrained="path/to/weights.keras")
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -658,14 +834,15 @@ class ConvNeXtV2(keras.Model):
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """Compute the output shape of the model.
 
-        This method is crucial for using the subclassed model within the Keras
-        Functional API or anywhere static shape inference is needed.
+        Crucial for using this subclassed model within the Keras Functional API
+        or anywhere static shape inference is needed. The blocks inside a stage
+        are shape-preserving, so only the stem, the inter-stage downsamples and
+        the head move the shape.
 
-        Args:
-            input_shape: Tuple representing the input shape.
-
-        Returns:
-            Tuple representing the output shape.
+        :param input_shape: Input shape, channels-last.
+        :type input_shape: Tuple[int, ...]
+        :return: The corresponding output shape.
+        :rtype: Tuple[int, ...]
         """
         # This assumes channels_last data format
         current_shape = input_shape
@@ -694,10 +871,10 @@ class ConvNeXtV2(keras.Model):
         return current_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
+        """Return the model configuration for serialization.
 
-        Returns:
-            Configuration dictionary
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = {
             "num_classes": self.num_classes,
@@ -722,13 +899,12 @@ class ConvNeXtV2(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ConvNeXtV2":
-        """Create model from configuration.
+        """Create a model instance from its configuration.
 
-        Args:
-            config: Configuration dictionary
-
-        Returns:
-            ConvNeXtV2 model instance
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: ConvNeXtV2 model instance.
+        :rtype: ConvNeXtV2
         """
         if config.get("kernel_regularizer"):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
@@ -737,8 +913,14 @@ class ConvNeXtV2(keras.Model):
 
         return cls(**config)
 
-    def summary(self, **kwargs):
-        """Print model summary with additional information."""
+    def summary(self, **kwargs) -> None:
+        """Print the model summary with additional ConvNeXt-specific information.
+
+        Builds the model first if it is not already built, so the summary is
+        never printed against an unmaterialized weight tree.
+
+        :param kwargs: Additional arguments passed to ``keras.Model.summary``.
+        """
         if not self.built:
             dummy_input = keras.KerasTensor(self.input_shape)
             self.build(dummy_input.shape)
@@ -746,7 +928,7 @@ class ConvNeXtV2(keras.Model):
         super().summary(**kwargs)
 
         total_blocks = sum(self.depths)
-        logger.info(f"ConvNeXt V2 configuration:")
+        logger.info("ConvNeXt V2 configuration:")
         logger.info(f"  - Input shape: ({self.input_height}, {self.input_width}, {self.input_channels})")
         logger.info(f"  - Stages: {len(self.depths)}")
         logger.info(f"  - Depths: {self.depths}")
@@ -773,40 +955,53 @@ def create_convnext_v2(
 ) -> ConvNeXtV2:
     """Convenience function to create ConvNeXt V2 models.
 
-    Args:
-        variant: String, model variant ("atto", "femto", "pico", "nano",
-            "tiny", "base", "large", "huge")
-        num_classes: Integer, number of output classes
-        input_shape: Tuple, input shape.
-        pretrained: Boolean or string. If True, loads pretrained weights from
-            default URL. If string, treats it as a path to local weights file.
-        weights_dataset: String, dataset for pretrained weights.
-            Options: "imagenet", "imagenet22k".
-        weights_input_shape: Tuple, input shape used during weight pretraining.
-            Only needed if loading pretrained weights with different input_shape.
-        cache_dir: Optional string, directory to cache downloaded weights.
-        **kwargs: Additional arguments passed to the model constructor
+    Thin wrapper around :meth:`ConvNeXtV2.from_variant` exposing the most
+    common construction arguments at module level.
 
-    Returns:
-        ConvNeXtV2 model instance
+    :param variant: Model variant, one of ``"cifar10"``, ``"atto"``,
+        ``"femto"``, ``"pico"``, ``"nano"``, ``"tiny"``, ``"base"``,
+        ``"large"``, ``"huge"``.
+    :type variant: str
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param input_shape: Input shape. Defaults to ``(None, None, 3)``.
+    :type input_shape: Optional[Tuple[int, ...]]
+    :param pretrained: If a string, a path to a local weights file. If True,
+        raises ``NotImplementedError`` -- no public ConvNeXt V2 weights ship
+        with ``dl_techniques``. If False (default), random initialization.
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset for pretrained weights, ``"imagenet"`` or
+        ``"imagenet22k"``.
+    :type weights_dataset: str
+    :param weights_input_shape: Input shape used during weight pretraining.
+        Only needed when loading pretrained weights at a different
+        ``input_shape``.
+    :type weights_input_shape: Optional[Tuple[int, ...]]
+    :param cache_dir: Directory to cache downloaded weights.
+    :type cache_dir: Optional[str]
+    :param kwargs: Additional arguments passed to the model constructor.
+    :return: ConvNeXtV2 model instance.
+    :rtype: ConvNeXtV2
+    :raises NotImplementedError: If ``pretrained`` is True.
+    :raises ValueError: If ``variant`` is not recognized.
 
     Example:
-        >>> # Create ConvNeXt V2-Tiny with pretrained ImageNet weights
+        >>> # Create ConvNeXt V2-Tiny (randomly initialized; no weights ship here)
         >>> model = create_convnext_v2("tiny")
         >>>
         >>> # Create ConvNeXt V2-Base as feature extractor
         >>> model = create_convnext_v2("base", include_top=False)
         >>>
-        >>> # Fine-tune on CIFAR-10 with pretrained backbone
+        >>> # Fine-tune on CIFAR-10 from a local checkpoint
         >>> model = create_convnext_v2(
         ...     "pico",
         ...     num_classes=10,
         ...     input_shape=(32, 32, 3),
+        ...     pretrained="path/to/weights.keras",
         ...     weights_input_shape=(224, 224, 3)
         ... )
         >>>
-        >>> # Load from local weights
-        >>> model = create_convnext_v2("large", pretrained="path/to/weights.keras")
+        >>> # `pretrained=True` raises NotImplementedError -- pass a local path.
     """
     model = ConvNeXtV2.from_variant(
         variant,

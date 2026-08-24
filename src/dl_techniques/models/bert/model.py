@@ -103,25 +103,99 @@ class BERT(keras.Model):
 
     .. code-block:: text
 
-        Input(input_ids, attention_mask, token_type_ids)
-               │
-               ▼
-        Embeddings(Word + Position + Token Type) -> LayerNorm -> Dropout
-               │
-               ▼
-        TransformerLayer₁ (Self-Attention -> FFN)
-               │
-               ▼
-              ...
-               │
-               ▼
-        TransformerLayerₙ (Self-Attention -> FFN)
-               │
-               ▼
-        Output Dictionary {
-            "last_hidden_state": [batch, seq_len, hidden_size],
-            "attention_mask": [batch, seq_len]
-        }
+        ┌──────────────────────────────────────┐
+        │  Input dict                          │
+        │  input_ids       [B, S]    (required)│
+        │  attention_mask  [B, S]    (optional)│
+        │  token_type_ids  [B, S]    (optional)│
+        │  position_ids    [B, S]    (optional)│
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  BertEmbeddings                      │
+        │    Word ⊕ Position ⊕ TokenType       │
+        │    → Norm(layer_norm_eps) → Dropout  │
+        │    (learned | sinusoidal positions)  │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayer₁ (Self-Attn → FFN) │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+                       ...
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayerₙ (Self-Attn → FFN) │
+        └───────────────┬──────────────────────┘
+                        │
+        ┌───────────────┴──────────────────────┐
+        │  TransformerLayer internals          │
+        │    x ──► Attn ──► (+) ──► Norm       │
+        │    └──── residual ──┘                │
+        │    x ──► FFN  ──► (+) ──► Norm       │
+        │    └──── residual ──┘                │
+        │  'pre' puts each Norm before its     │
+        │  sublayer instead of after           │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output dict                         │
+        │    "last_hidden_state"  [B, S, H]    │
+        │    "attention_mask"     [B, S]       │
+        │  Mask echoed; ones_like(input_ids)   │
+        │  when no attention_mask is supplied  │
+        └──────────────────────────────────────┘
+
+    **Variants:**
+
+    .. code-block:: text
+
+        variant    layers   hidden   heads   intermediate
+        tiny         4        256      4        1024
+        small        6        512      8        2048
+        base        12        768     12        3072
+        large       24       1024     16        4096
+
+    **Head integration (create_bert_with_head):**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  keras.Input × 3 (ALL required)      │
+        │    input_ids / attention_mask /      │
+        │    token_type_ids                    │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  BERT encoder (BERT.from_variant)    │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  NLP task head (create_nlp_head)     │
+        │    {hidden_states, attention_mask}   │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  drop 'probabilities'/'predictions'  │
+        │  when 'logits' is present, then      │
+        │  unwrap any 1-key dict → tensor      │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  21 of 23 tasks → bare tensor        │
+        │  QA / SPAN_EXTRACTION → dict of      │
+        │    {start_logits, end_logits}        │
+        │  MULTIPLE_CHOICE → ValueError        │
+        └──────────────────────────────────────┘
 
     :param vocab_size: Size of the vocabulary. Defaults to 30522.
     :type vocab_size: int
