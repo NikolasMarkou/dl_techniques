@@ -32,10 +32,6 @@ References:
       Image Segmentation. (https://arxiv.org/abs/1505.04597)
     - Miyasawa, 1961 / Robbins, 1956. The empirical-Bayes identity behind the
       residual-as-score reading named above.
-
-    The architecture itself is documented once, on
-    ``dl_techniques.models.convunext.model``; this module is wrappers and the
-    Keras registrar.
 """
 
 import keras
@@ -45,11 +41,6 @@ from typing import Any, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-# REGISTRAR imports (contract H-4). `applications/bias_free_denoiser/denoiser_prior.py`
-# and the two bfunet eval tools import THIS module purely so `keras.models.load_model`
-# can resolve every custom class a saved bias-free ConvUNext graph names. None of these
-# are USED below any more (the builder itself moved to `models/convunext/model.py`);
-# they are imported for their registration side effect. Do NOT "clean up" as unused.
 # DECISION plan-2026-08-19T163559-499b6f0e/D-080: every import in this block
 # carries `# noqa: F401` because this module is a REGISTRAR. Twelve of its
 # imports are bound for their side effect -- importing them REGISTERS the Keras
@@ -84,13 +75,10 @@ from dl_techniques.utils.logger import logger
 # Do NOT delete this re-export, and do NOT re-home the class's `package=` string.
 from dl_techniques.models.convunext.model import ConvUNextStem  # noqa: F401
 
-# Re-exported from the merged home so this module stays the ONE import path the bf
-# test suite, the bfunet trainer and `utils/multiplicative_miyasawa.py` use, and so it
-# keeps REGISTERING `SpatialLinearAttention` (registrar contract H-4). The class moved
-# with a BARE `@keras.saving.register_keras_serializable()`, whose key
-# `Custom>SpatialLinearAttention` was MEASURED to be module-independent on Keras 3.8.0
-# (decisions.md D-008), so the move did not change it. Do NOT add a `package=` argument
-# "for symmetry" with `ConvUNextStem` — that WOULD change the key.
+# `SpatialLinearAttention` moved with a BARE `@keras.saving.register_keras_serializable()`,
+# whose key `Custom>SpatialLinearAttention` was MEASURED to be module-independent on
+# Keras 3.8.0 (decisions.md D-008), so the move did not change it. Do NOT add a
+# `package=` argument "for symmetry" with `ConvUNextStem` — that WOULD change the key.
 from dl_techniques.models.convunext.model import (  # noqa: F401
     SpatialLinearAttention,
     CONVUNEXT_CONFIGS,
