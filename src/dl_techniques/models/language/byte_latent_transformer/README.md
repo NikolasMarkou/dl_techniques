@@ -172,7 +172,7 @@ Initialize a standard BLT model using the configuration-driven pattern.
 
 ```python
 import keras
-from dl_techniques.models.blt import create_blt_from_config
+from dl_techniques.models.language.byte_latent_transformer import create_blt_model
 
 # 1. Define Configuration
 blt_config = {
@@ -187,7 +187,7 @@ blt_config = {
 }
 
 # 2. Create Model
-model = create_blt_from_config(blt_config)
+model = create_blt_model(**blt_config)
 
 # 3. Compile (using framework standard)
 model.compile(
@@ -215,7 +215,7 @@ print(f"Generated: {generated}")
 The main model class integrates `dl_techniques` factories.
 
 ```python
-from dl_techniques.models.blt import ByteLatentTransformer
+from dl_techniques.models.language.byte_latent_transformer import ByteLatentTransformer
 from dl_techniques.layers.norms import create_normalization_layer
 
 # Manual instantiation (advanced)
@@ -259,14 +259,14 @@ Use the `dl_techniques.optimization` module for proper scheduling and weight dec
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.blt import create_blt_from_config
+from dl_techniques.models.language.byte_latent_transformer import create_blt_model
 from dl_techniques.optimization import (
     optimizer_builder, 
     learning_rate_schedule_builder
 )
 
 # 1. Setup Model
-model = create_blt_from_config({"variant": "small"})
+model = create_blt_model(variant="small")
 
 # 2. Configure Optimization (Standard Transformer Setup)
 lr_config = {
@@ -322,6 +322,20 @@ print(f"Patch Lengths: {patch_lengths[0].numpy()}")
 
 ## 9. Advanced Usage Patterns
 
+> **Accuracy warning (measured 2026-08-24).** The nested configuration keys used
+> in the examples below and in § 5 / § 6.1 — `global_transformer_args`,
+> `moe_config`, `global_attention_config`, `global_norm_type` — are **not**
+> accepted by `ByteLatentTransformer.__init__`, which takes flat scalar
+> parameters only (`vocab_size`, `local_dim`, `global_dim`, `num_local_layers`,
+> `num_global_layers`, `num_heads_local`, `num_heads_global`,
+> `max_sequence_length`, `max_patches`, `entropy_threshold`,
+> `cross_attention_queries`, `dropout_rate`, `patch_pooling_method`,
+> `entropy_model`). Passing any of them raises
+> `ValueError: Unrecognized keyword arguments passed to ByteLatentTransformer`.
+> Only the flat-parameter forms in this document are executable. This is
+> pre-existing documentation rot, recorded here rather than silently deleted;
+> repairing the examples is not in scope of the path repair that found it.
+
 ### Pattern 1: Using Mixture of Experts (MoE)
 
 You can replace the Global Transformer's FFN with an MoE layer via configuration.
@@ -337,7 +351,7 @@ blt_config = {
         }
     }
 }
-model = create_blt_from_config(blt_config)
+model = create_blt_model(**blt_config)
 ```
 
 ### Pattern 2: Custom Normalization
@@ -403,7 +417,7 @@ Run consistency checks to ensure dynamic patching logic works on your backend.
 
 ```python
 def test_blt_forward():
-    model = create_blt_from_config({"variant": "micro", "max_sequence_length": 128})
+    model = create_blt_model(variant="micro", max_sequence_length=128)
     x = keras.random.randint((1, 128), 4, 260)
     
     # Forward pass

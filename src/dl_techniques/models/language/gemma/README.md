@@ -194,7 +194,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.gemma3.gemma3 import create_gemma3
+from dl_techniques.models.language.gemma.gemma3 import create_gemma3
 
 # 1. Create a tiny Gemma 3 model using a pre-configured variant
 # This factory function handles all the setup.
@@ -366,7 +366,7 @@ import numpy as np
 import keras
 import tempfile
 import os
-from dl_techniques.models.gemma3.gemma3 import Gemma3
+from dl_techniques.models.language.gemma.gemma3 import Gemma3
 
 def test_gemma3_serialization_cycle():
     """CRITICAL TEST: Ensures a model can be saved and loaded."""

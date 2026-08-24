@@ -119,7 +119,7 @@ pip install keras>=3.0 tensorflow>=2.16 numpy
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.latent_gmm import LatentGMMRegistration
+from dl_techniques.models.point_cloud.latent_gmm_registration import LatentGMMRegistration
 
 # 1. Initialize the model
 # num_gaussians=32 is a good starting point for moderate complexity

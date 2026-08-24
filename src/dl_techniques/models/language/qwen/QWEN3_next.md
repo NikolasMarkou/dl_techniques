@@ -72,7 +72,7 @@ pip install dl-techniques keras>=3.8.0 tensorflow>=2.18.0
 ### Basic Usage
 
 ```python
-from dl_techniques.models.qwen3_next import Qwen3Next
+from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 
 # Create a small model for experimentation
 model = Qwen3Next.from_variant("small")
@@ -89,7 +89,7 @@ model.summary()
 ### Text Generation
 
 ```python
-from dl_techniques.models.qwen3_next import create_qwen3_next
+from dl_techniques.models.language.qwen.qwen3_next import create_qwen3_next
 
 # Create optimized generation model
 model = create_qwen3_next("small", task_type="generation")
@@ -132,7 +132,7 @@ classifier.compile(
 ### Custom Model Configuration
 
 ```python
-from dl_techniques.models.qwen3_next import Qwen3Next
+from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 # Create custom MoE configuration

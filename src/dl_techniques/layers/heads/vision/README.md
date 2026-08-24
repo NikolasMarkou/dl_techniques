@@ -241,16 +241,23 @@ seg_output = segmenter(images)
 # seg_output shape: (4, 518, 518, 21)
 ```
 
-### Example 4: Depth Estimation with EfficientNet
+### Example 4: Depth Estimation with a ResNet backbone
+
+> Corrected 2026-08-24: this example used to import an `EfficientNetB4` from a
+> top-level `efficientnet` model package. **No EfficientNet exists anywhere in
+> this repository** (`find src/dl_techniques -iname '*efficientnet*'` returns
+> nothing) and it never did; the example is re-pointed at
+> `models.vision.resnet`, which does exist and whose backbone form is verified
+> to build at this input shape.
 
 ```python
-from dl_techniques.models.efficientnet import EfficientNetB4
+from dl_techniques.models.vision.resnet import create_resnet
 from dl_techniques.layers.heads.vision import DepthEstimationHead
 
-# Step 1: Create EfficientNet backbone
-efficientnet = EfficientNetB4(
+# Step 1: Create the backbone (`include_top=False` -> feature map, no classifier)
+backbone = create_resnet(
+    variant='resnet50',
     include_top=False,
-    weights='imagenet',
     input_shape=(384, 384, 3)
 )
 
@@ -269,7 +276,7 @@ depth_head = DepthEstimationHead(
 class DepthEstimator(keras.Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.backbone = efficientnet
+        self.backbone = backbone
         self.head = depth_head
     
     def call(self, images, training=None):

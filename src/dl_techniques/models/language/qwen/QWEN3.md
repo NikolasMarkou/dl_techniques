@@ -71,7 +71,7 @@ pip install dl-techniques keras>=3.8.0 tensorflow>=2.18.0
 ### Basic Usage
 
 ```python
-from dl_techniques.models.qwen3.model import Qwen3
+from dl_techniques.models.language.qwen.qwen3 import Qwen3
 
 # Create a small MoE-enabled backbone model
 config = Qwen3.MODEL_VARIANTS["small"].copy()
@@ -91,7 +91,7 @@ backbone.summary()
 Use the factory function to create a complete model with a language modeling head.
 
 ```python
-from dl_techniques.models.qwen3.model import create_qwen3
+from dl_techniques.models.language.qwen.qwen3 import create_qwen3
 
 # Create optimized generation model using the 'medium' variant
 model = create_qwen3("medium", task_type="generation", use_weight_tying=True)
@@ -111,7 +111,7 @@ logits = model({"input_ids": input_ids, "attention_mask": attention_mask})
 ### Classification Fine-tuning
 
 ```python
-from dl_techniques.models.qwen3.model import create_qwen3
+from dl_techniques.models.language.qwen.qwen3 import create_qwen3
 
 # Create classification model using the 'small' variant
 classifier = create_qwen3(
@@ -136,7 +136,7 @@ classifier.compile(
 ### Custom Model Configuration
 
 ```python
-from dl_techniques.models.qwen3.model import Qwen3
+from dl_techniques.models.language.qwen.qwen3 import Qwen3
 
 # Custom configuration for a dense model (no MoE)
 model = Qwen3(
@@ -159,7 +159,7 @@ model.summary()
 To build a model matching the MoE setup of Qwen3, ensure `moe_layers` lists the indices where MoE replaces the standard FFN.
 
 ```python
-from dl_techniques.models.qwen3.model import Qwen3
+from dl_techniques.models.language.qwen.qwen3 import Qwen3
 
 # Custom MoE setup (MoE every 4th layer)
 custom_moe_model = Qwen3(
@@ -271,7 +271,7 @@ $$
 ## Model Serialization
 
 ```python
-from dl_techniques.models.qwen3.model import create_qwen3
+from dl_techniques.models.language.qwen.qwen3 import create_qwen3
 import keras
 
 # Save model (includes MoE components if present)

@@ -23,8 +23,11 @@ Variants
 - **V5_2stage_aggressive_stem** -- patch-stem stride 4, 2 stages 128-256,
   depthwise-separable strided downsampler.
 
-The accompanying report lives at
-``src/dl_techniques/models/vision/cliffordnet/DOWNSAMPLING.md``.
+The accompanying report, ``src/train/cliffordnet/DOWNSAMPLING.md``, no longer
+exists -- it was deleted in ``46bf5cdf0`` along with the dead cliffordnet
+denoiser/routing/unet models. Recover it from git history
+(``git show d4a8b9c63:src/train/cliffordnet/DOWNSAMPLING.md``) if you need the
+11-variant CIFAR-100 numbers; nothing in the tree reproduces them.
 
 Usage
 -----

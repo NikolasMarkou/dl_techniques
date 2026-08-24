@@ -231,7 +231,7 @@ The generator integrates seamlessly with the dl-techniques framework:
 
 ```python
 # Use with forecasting models
-from dl_techniques.models.nbeats import NBeatsNet
+from dl_techniques.models.time_series.nbeats import NBeatsNet
 from dl_techniques.utils.time_series_generator import TimeSeriesGenerator
 
 # Generate training data

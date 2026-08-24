@@ -375,7 +375,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Local imports from your project structure
-from dl_techniques.models.statistics.mdn import MDNModel
+from dl_techniques.models.time_series.mdn import MDNModel
 
 # 1. Generate multi-modal training data
 X_train = np.random.uniform(-10, 10, 2000)
@@ -421,10 +421,10 @@ plt.show()
 
 **Purpose**: An end-to-end Keras model combining a feature extractor with an `MDNLayer`.
 
-**Location**: `dl_techniques.models.statistics.mdn.MDNModel`
+**Location**: `dl_techniques.models.time_series.mdn.MDNModel`
 
 ```python
-from dl_techniques.models.statistics.mdn import MDNModel
+from dl_techniques.models.time_series.mdn import MDNModel
 
 model = MDNModel(
     hidden_layers=[64, 32],
