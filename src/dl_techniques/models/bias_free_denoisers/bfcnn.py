@@ -75,6 +75,140 @@ BFCNN_CONFIGS: Dict[str, Dict[str, Any]] = {
 }
 
 # ---------------------------------------------------------------------
+# Builder helpers
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-24T174647-07af0659/D-002: the `_validate_bfcnn_args` /
+# `_build_bfcnn_backbone` helpers below are a PURE DECOMPOSITION of `create_bfcnn_denoiser`,
+# extracted verbatim. Same three-part extraction contract as the bfunet helpers in this
+# package (see the D-002 anchor in bfunet.py for the measurements behind it):
+# (1) NOT ONE LAYER IS RENAMED and no `name=` string is edited -- this builder is functional
+#     (`keras.Model(inputs, outputs)`), so layer/weight NAMES are the checkpoint contract for
+#     every stored `.keras` under `results/`, and a rename breaks them silently at
+#     `load_model` time, not at build time. MEASURED for this plan on the sibling builder: a
+#     one-word layer rename moved the name arms while weight VALUES and the forward pass
+#     stayed bit-identical -- the forward pass CANNOT see this defect class.
+# (2) LAYER CREATION ORDER IS PRESERVED EXACTLY (stem -> `num_blocks` residual blocks ->
+#     final 1x1 projection). Keras auto-generates names from creation order for any layer
+#     built without `name=`, and name scopes are uniquified against a process-global counter.
+# (3) THE CALLER'S `kernel_initializer` / `kernel_regularizer` OBJECT IS FORWARDED AS-IS. Do
+#     NOT construct, clone, or re-resolve one inside a helper: that changes the number of RNG
+#     draws, so every downstream layer initializes differently while every name and shape
+#     still matches (the trap recorded for the BEiT restructure as D-017).
+# The stem, the residual stack and the final projection live in ONE helper on purpose: they
+# always co-change (same filters/kernel/activation/initializer) and the projection is two
+# statements, so splitting it out would be a pass-through helper -- an Ousterhout red flag.
+# Do NOT collapse the explicitly-forwarded parameters into a shared params object or a
+# `**kwargs` bag; that was designed and deliberately rejected (decisions.md D-001). See
+# decisions.md D-002.
+
+def _validate_bfcnn_args(
+        input_shape: Tuple[int, int, int],
+        num_blocks: int,
+        filters: int,
+        normalization_type: str,
+) -> str:
+    """
+    Validate the builder arguments and resolve the block normalization.
+
+    Args mirror the identically-named parameters of `create_bfcnn_denoiser`. The checks run
+    in the order written and that order is part of the contract: when two arguments are
+    invalid at once, which message a caller sees is observable behaviour.
+
+    Returns:
+        String, the RESOLVED normalization name. This -- not the raw `normalization_type`
+        argument -- is what every residual block must receive.
+
+    Raises:
+        ValueError: If num_blocks is negative or filters is zero or negative.
+        TypeError: If input_shape is not a tuple of 3 integers.
+    """
+    # Input validation
+    if not isinstance(input_shape, tuple) or len(input_shape) != 3:
+        raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
+
+    if num_blocks < 0:
+        raise ValueError(f"num_blocks must be non-negative, got {num_blocks}")
+
+    if filters <= 0:
+        raise ValueError(f"filters must be positive, got {filters}")
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
+    # BiasFreeBatchNorm inside a bias-free denoiser. Do NOT pass `normalization_type`
+    # straight through to BiasFreeResidualBlock -- that reaches stock BatchNormalization,
+    # whose moving_mean subtraction breaks f(a*x)=a*f(x) once training has moved it off
+    # zero. See decisions.md D-020 and the anchor in layers/bias_free_conv2d.py.
+    block_normalization_type = resolve_denoiser_normalization(normalization_type)
+
+    return block_normalization_type
+
+def _build_bfcnn_backbone(
+        inputs: keras.KerasTensor,
+        num_blocks: int,
+        filters: int,
+        output_channels: int,
+        initial_kernel_size: Union[int, Tuple[int, int]],
+        kernel_size: Union[int, Tuple[int, int]],
+        activation: Union[str, callable],
+        block_normalization_type: str,
+        final_activation: Union[str, callable],
+        kernel_initializer: Union[str, keras.initializers.Initializer],
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+) -> keras.KerasTensor:
+    """
+    Build the whole bias-free backbone: stem, residual stack, final projection.
+
+    Args mirror the identically-named parameters of `create_bfcnn_denoiser`, except
+    `block_normalization_type` (the RESOLVED name returned by `_validate_bfcnn_args`) and
+    `output_channels` (the channel count the final 1x1 projection must emit).
+    `kernel_initializer` / `kernel_regularizer` are forwarded as objects, never re-resolved
+    (see the D-002 anchor above).
+
+    Note:
+        `num_blocks=0` is a permitted degenerate configuration -- `_validate_bfcnn_args`
+        rejects only NEGATIVE block counts -- and the loop below simply never runs, leaving
+        stem -> final projection.
+
+    Returns:
+        KerasTensor, the model output.
+    """
+    # Initial convolution to project to feature space
+    x = BiasFreeConv2D(
+        filters=filters,
+        kernel_size=initial_kernel_size,
+        activation=activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        use_batch_norm=False,  # First layer typically no batch norm
+        name='stem'
+    )(inputs)
+
+    # Stack of bias-free residual blocks
+    for i in range(num_blocks):
+        x = BiasFreeResidualBlock(
+            filters=filters,
+            kernel_size=kernel_size,
+            activation=activation,
+            normalization_type=block_normalization_type,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name=f'residual_block_{i}'
+        )(x)
+
+    # Final convolution to output channels (no activation, no batch norm)
+    outputs = BiasFreeConv2D(
+        filters=output_channels,
+        kernel_size=1,
+        activation=final_activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        use_batch_norm=False,  # Last layer typically no batch norm
+        name='final_conv'
+    )(x)
+
+    return outputs
+
+# ---------------------------------------------------------------------
 # Core Model Creation Function
 # ---------------------------------------------------------------------
 
@@ -144,61 +278,32 @@ def create_bfcnn_denoiser(
         >>> # If input is scaled by α, output is also scaled by α
     """
 
-    # Input validation
-    if not isinstance(input_shape, tuple) or len(input_shape) != 3:
-        raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
-
-    if num_blocks < 0:
-        raise ValueError(f"num_blocks must be non-negative, got {num_blocks}")
-
-    if filters <= 0:
-        raise ValueError(f"filters must be positive, got {filters}")
-
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
-    # BiasFreeBatchNorm inside a bias-free denoiser. Do NOT pass `normalization_type`
-    # straight through to BiasFreeResidualBlock -- that reaches stock BatchNormalization,
-    # whose moving_mean subtraction breaks f(a*x)=a*f(x) once training has moved it off
-    # zero. See decisions.md D-020 and the anchor in layers/bias_free_conv2d.py.
-    block_normalization_type = resolve_denoiser_normalization(normalization_type)
+    block_normalization_type = _validate_bfcnn_args(
+        input_shape=input_shape,
+        num_blocks=num_blocks,
+        filters=filters,
+        normalization_type=normalization_type,
+    )
 
     # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
-    # Initial convolution to project to feature space
-    x = BiasFreeConv2D(
-        filters=filters,
-        kernel_size=initial_kernel_size,
-        activation=activation,
-        kernel_initializer=kernel_initializer,
-        kernel_regularizer=kernel_regularizer,
-        use_batch_norm=False,  # First layer typically no batch norm
-        name='stem'
-    )(inputs)
-
-    # Stack of bias-free residual blocks
-    for i in range(num_blocks):
-        x = BiasFreeResidualBlock(
-            filters=filters,
-            kernel_size=kernel_size,
-            activation=activation,
-            normalization_type=block_normalization_type,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name=f'residual_block_{i}'
-        )(x)
-
-    # Final convolution to output channels (no activation, no batch norm)
     # Output same number of channels as input
     output_channels = input_shape[-1]
-    outputs = BiasFreeConv2D(
-        filters=output_channels,
-        kernel_size=1,
-        activation=final_activation,
+
+    outputs = _build_bfcnn_backbone(
+        inputs=inputs,
+        num_blocks=num_blocks,
+        filters=filters,
+        output_channels=output_channels,
+        initial_kernel_size=initial_kernel_size,
+        kernel_size=kernel_size,
+        activation=activation,
+        block_normalization_type=block_normalization_type,
+        final_activation=final_activation,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,
-        use_batch_norm=False,  # Last layer typically no batch norm
-        name='final_conv'
-    )(x)
+    )
 
     # Create the model
     model = keras.Model(
