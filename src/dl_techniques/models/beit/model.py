@@ -591,7 +591,7 @@ class BeitModel(keras.Model):
         # `_as_pair`; private, because `self.patch_size` stays the serialization field.
         self._patch_size_pair: Tuple[int, int] = (patch_h, patch_w)
 
-        # DECISION plan-2026-08-24T074054-247151fd/D-003
+        # DECISION plan-2026-08-24T074054-247151fd/D-017
         # ONE `TruncatedNormal` instance, deliberately SHARED by `patch_embed` and by
         # every one of the `num_layers` encoder layers. It is hoisted to `self` only so
         # that two helpers can reach the SAME object; the sharing itself is unchanged
@@ -606,7 +606,7 @@ class BeitModel(keras.Model):
         # required to be bitwise inert (`tests/test_models/test_beit/
         # test_the_restructure_moves_no_numbers.py`), so the hardening belongs to a
         # separate, separately-measured change.
-        # See decisions.md D-003.
+        # See decisions.md D-017.
         self._kernel_init = keras.initializers.TruncatedNormal(
             stddev=self.initializer_range
         )
@@ -913,12 +913,16 @@ class BeitModel(keras.Model):
 
     # DECISION plan-2026-08-24T074054-247151fd/D-008
     # This override is NOT a `cls(**config)` pass-through -- it exists for exactly one
-    # measured field. `__init__` coerces `input_shape` to a tuple itself (`:373`), so a
-    # JSON round trip already returns a tuple there and normalising it here would be
-    # dead code. `self.patch_size` is stored RAW (`:375`), so a config that went through
-    # JSON hands `[16, 16]` back and Keras attribute tracking wraps it into a
-    # `TrackedList`: `get_config()` then stops being a fixed point (round 1 emits a
-    # tuple, round 2 a list). WHAT NOT TO DO: do not widen this to normalise every
+    # measured field. Both sites are in `__init__`'s "store ALL configuration" block;
+    # the line numbers below are re-derived at this commit, but read the ATTRIBUTE
+    # NAMES, which cannot rot: the `self.input_shape_config = tuple(int(v) ...)`
+    # statement (`:528`) coerces `input_shape` to a tuple itself, so a JSON round trip
+    # already returns a tuple there and normalising it here would be dead code, while
+    # the bare `self.patch_size = patch_size` two lines below it (`:530`) stores that
+    # field RAW -- so a config that went through JSON hands `[16, 16]` back and Keras
+    # attribute tracking wraps it into a `TrackedList`, and `get_config()` then stops
+    # being a fixed point (round 1 emits a tuple, round 2 a list).
+    # WHAT NOT TO DO: do not widen this to normalise every
     # field "for symmetry" -- an override that restores nothing is the pass-through red
     # flag. An `int` patch_size is deliberately left an `int`, so the emitted config is
     # identical to what a directly-constructed model emits.

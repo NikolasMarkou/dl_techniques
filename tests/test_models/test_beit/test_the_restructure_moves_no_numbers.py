@@ -200,7 +200,7 @@ def pre_restructure_module():
         spec.loader.exec_module(module)
         yield module
     finally:
-        # DECISION plan-2026-08-24T074054-247151fd/D-001
+        # DECISION plan-2026-08-24T074054-247151fd/D-015
         # WHAT NOT TO DO: do not delete this restore, and do not replace it with
         # `keras.saving.custom_object_scope`. `register_keras_serializable` writes
         # into a PROCESS-GLOBAL dict at class-definition time, so a scope manager
@@ -209,7 +209,7 @@ def pre_restructure_module():
         # of the pytest process -- every later `.keras` reload in the same process
         # would then deserialize into the OLD class, turning this instrument into a
         # suite-wide corruption. Nothing fails loudly when that happens.
-        # See decisions.md D-001.
+        # See decisions.md D-015.
         sys.modules.pop("beit_pre_restructure", None)
         object_registration.GLOBAL_CUSTOM_OBJECTS.clear()
         object_registration.GLOBAL_CUSTOM_OBJECTS.update(saved_objects)
@@ -334,8 +334,29 @@ def test_the_forward_output_is_bitwise_unchanged(
 
     This is the arm that sees a shape-preserving change: a reordered sub-layer
     creation (same shapes, different RNG draws), a constant initializer whose value
-    moved, a drop-path ramp that got reversed, a norm epsilon that stopped being
-    passed explicitly. None of those move a single entry of arm 1's signature.
+    moved, a norm epsilon that stopped being passed explicitly. None of those move a
+    single entry of arm 1's signature.
+
+    **This arm is structurally blind to every TRAINING-MODE-ONLY parameter, and the
+    stochastic-depth schedule is one of them.** :func:`_capture` forwards with
+    ``training=False``, at which ``StochasticDepth`` short-circuits to an exact
+    identity -- so no per-block drop-path RATE can reach the digest at any value.
+    MEASURED 2026-08-24, not reasoned about: injecting ``[::-1]`` on the
+    ``linear_drop_path_rates(self.num_layers, self.drop_path_rate)`` call in
+    ``models/beit/model.py`` (i.e. reversing the ramp end for end) left this file at
+    **13 passed / 13 collected, fully green -- both arms**. The same is true of any
+    dropout rate and of any future train-only branch. Do NOT add such a parameter to
+    this file's coverage story; it does not have one.
+
+    The reversed ramp IS caught, one file over, by a test that reads the schedule
+    directly instead of through a forward pass:
+    ``test_architecture_invariants.py::TestBeitArchitectureValidation::
+    test_stochastic_depth_is_the_exact_linear_ramp``. Confirmed RED on the identical
+    injection -- **1 failed, 12 passed / 13 collected**, with the actual text::
+
+        >       assert model.drop_path_rates == expected
+        E       assert [0.1, 0.09090...0.009091, 0.0] == [0.0, 0.00909...0.045455, ...]
+        E         At index 0 diff: 0.1 != 0.0
 
     ``training=False`` is passed EXPLICITLY. ``training=None`` is not inference for
     ``StochasticDepth`` -- it short-circuits only on ``training is False`` -- and every
