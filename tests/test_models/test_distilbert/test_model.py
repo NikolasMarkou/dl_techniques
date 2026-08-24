@@ -34,7 +34,7 @@ import importlib
 import traceback
 import numpy as np
 
-from dl_techniques.models.distilbert.model import DistilBERT
+from dl_techniques.models.language.distilbert.model import DistilBERT
 
 SEED = 20260811
 
@@ -106,21 +106,21 @@ class TestDistilBERT:
 
 
 class TestTopLevelImport:
-    """SC-1. `models/distilbert/__init__.py` was 0 bytes before step 7."""
+    """SC-1. `models/language/distilbert/__init__.py` was 0 bytes before step 7."""
 
     def test_public_symbols_are_importable_from_the_package(self):
-        pkg = importlib.import_module("dl_techniques.models.distilbert")
+        pkg = importlib.import_module("dl_techniques.models.language.distilbert")
 
         assert hasattr(pkg, "DistilBERT"), (
-            "dl_techniques.models.distilbert does not export DistilBERT; "
+            "dl_techniques.models.language.distilbert does not export DistilBERT; "
             "the package __init__ is empty or incomplete"
         )
         assert hasattr(pkg, "create_distilbert_with_head"), (
-            "dl_techniques.models.distilbert does not export "
+            "dl_techniques.models.language.distilbert does not export "
             "create_distilbert_with_head"
         )
         # The exported names must be the real implementations, not shadows.
-        from dl_techniques.models.distilbert.model import (
+        from dl_techniques.models.language.distilbert.model import (
             DistilBERT as _cls,
             create_distilbert_with_head as _fn,
         )
@@ -421,7 +421,7 @@ class TestMaskingContract:
 class TestHeadIntegration:
 
     def test_create_distilbert_with_head_end_to_end(self):
-        from dl_techniques.models.distilbert import create_distilbert_with_head
+        from dl_techniques.models.language.distilbert import create_distilbert_with_head
         from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
         num_classes = 3

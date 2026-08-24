@@ -11,7 +11,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.gpt2.gpt2 import GPT2
+from dl_techniques.models.language.gpt2.gpt2 import GPT2
 
 
 def _model():

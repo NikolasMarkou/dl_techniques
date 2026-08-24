@@ -548,7 +548,7 @@ class MobileClipTextEncoder(keras.layers.Layer):
             # works EAGERLY and fails on every graph path (`tf.function`,
             # `Model.predict`, `.keras` save/load, `jit_compile=True`), for both
             # static and symbolic sequence lengths. The same trap is documented
-            # at `models/sd3_mmdit/text_encoders.py`.
+            # at `models/vision_language/sd3_mmdit/text_encoders.py`.
             #
             # MaskFactory returns the BLOCK polarity (True where a position must
             # be suppressed, i.e. j > i); this layer needs the complementary KEEP

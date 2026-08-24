@@ -206,7 +206,7 @@ inputs = (source_pc, target_pc)
 gamma_x = model.correspondence_net((local_x, global_x))
 
 # Compute the centers of the Gaussian components
-from dl_techniques.models.latent_gmm_registration import compute_gmm_params
+from dl_techniques.models.point_cloud.latent_gmm_registration import compute_gmm_params
 weights, means = compute_gmm_params(source_pc, gamma_x)
 
 # 'means' shape is (B, num_gaussians, 3)

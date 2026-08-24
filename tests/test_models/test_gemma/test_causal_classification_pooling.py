@@ -17,7 +17,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.gemma.gemma3 import create_gemma3_classification
+from dl_techniques.models.language.gemma.gemma3 import create_gemma3_classification
 
 # A `Gemma3` small enough to build on CPU. `layer_types` is spelled out so the
 # probe covers both a sliding-window and a full-attention block; both are

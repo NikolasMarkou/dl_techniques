@@ -56,7 +56,7 @@ from train.common.nlp import (
 )
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss
 

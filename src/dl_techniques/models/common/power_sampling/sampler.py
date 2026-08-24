@@ -16,19 +16,19 @@ proposing alternative continuations and accepting those with higher
 trajectory-level probability under *p^alpha*.
 
 This engine is fully decoupled from any concrete model or tokenizer: it is
-driven by an injected :data:`~dl_techniques.models.power_sampling.protocols.LogitsFn`
+driven by an injected :data:`~dl_techniques.models.common.power_sampling.protocols.LogitsFn`
 closure (built automatically from any callable Keras model via
-:func:`~dl_techniques.models.power_sampling.forward.make_logits_fn`) and any
+:func:`~dl_techniques.models.common.power_sampling.forward.make_logits_fn`) and any
 object satisfying
-:class:`~dl_techniques.models.power_sampling.protocols.TokenizerProtocol`
+:class:`~dl_techniques.models.common.power_sampling.protocols.TokenizerProtocol`
 (``encode``/``decode``). CliffordNetLM + tiktoken is just ONE example — the
 same sampler drives a GPT-2, a generic HF model, or a VLM (via
-:class:`~dl_techniques.models.power_sampling.forward.VLMForwardAdapter`).
+:class:`~dl_techniques.models.common.power_sampling.forward.VLMForwardAdapter`).
 
 Usage::
 
     import numpy as np
-    from dl_techniques.models.power_sampling import (
+    from dl_techniques.models.common.power_sampling import (
         PowerSampler, PowerSamplingConfig,
     )
 
@@ -69,10 +69,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.power_sampling.config import PowerSamplingConfig
-from dl_techniques.models.power_sampling.protocols import TokenizerProtocol, LogitsFn
-from dl_techniques.models.power_sampling.ops import _log_softmax, _nucleus_sample
-from dl_techniques.models.power_sampling.forward import (
+from dl_techniques.models.common.power_sampling.config import PowerSamplingConfig
+from dl_techniques.models.common.power_sampling.protocols import TokenizerProtocol, LogitsFn
+from dl_techniques.models.common.power_sampling.ops import _log_softmax, _nucleus_sample
+from dl_techniques.models.common.power_sampling.forward import (
     make_logits_fn,
     make_batch_logits_fn,
 )

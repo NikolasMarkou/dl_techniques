@@ -22,7 +22,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.mamba import Mamba
+from dl_techniques.models.language.mamba import Mamba
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,

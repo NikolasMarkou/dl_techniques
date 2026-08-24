@@ -6,7 +6,7 @@ problem-specific, and Kohonen defines no named scale family. ``create_som``
 therefore constructs the class directly rather than delegating to a
 ``from_variant``.
 """
-from dl_techniques.models.som.model import SOMModel, create_som
+from dl_techniques.models.memory.som.model import SOMModel, create_som
 
 __all__ = [
     "SOMModel",

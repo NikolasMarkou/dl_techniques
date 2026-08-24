@@ -244,7 +244,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 # 1. Create a model. Every example below that runs a FORWARD pass uses `"tiny"`.
 #    This is not a stylistic choice: because the local layers pad to a single
@@ -316,7 +316,7 @@ Use the factory function to attach a classification head to a ModernBERT encoder
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.modern_bert.model import (
+from dl_techniques.models.language.modern_bert.model import (
     ModernBERT,
     create_modern_bert_with_head,
 )
@@ -358,7 +358,7 @@ written into every checkpoint.
 
 ```python
 import numpy as np
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 # 1. Create a foundation model ("tiny": the only variant that can forward on a
 #    consumer GPU -- see § 4.3 and Example 1's note)
@@ -399,7 +399,7 @@ Two things the mechanism requires, both verified by running this example on 2026
 
 ```python
 import keras
-from dl_techniques.models.modern_bert.model import (
+from dl_techniques.models.language.modern_bert.model import (
     ModernBERT,
     create_modern_bert_with_head,
 )
@@ -512,7 +512,7 @@ You can validate the implementation by ensuring all variants can be created and 
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.modern_bert.model import ModernBERT, create_modern_bert_with_head
+from dl_techniques.models.language.modern_bert.model import ModernBERT, create_modern_bert_with_head
 
 def test_creation_all_variants():
     """Test model creation for all variants.

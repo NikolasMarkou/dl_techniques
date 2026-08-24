@@ -38,32 +38,32 @@ import pytest
 
 
 def _coshnet():
-    from dl_techniques.models.coshnet.model import CoShNet
+    from dl_techniques.models.vision.coshnet.model import CoShNet
     return CoShNet(num_classes=4, input_shape=(32, 32, 3),
                    conv_filters=[4, 8], dense_units=[8, 4])
 
 
 def _fractalnet():
-    from dl_techniques.models.fractalnet.model import FractalNet
+    from dl_techniques.models.vision.fractalnet.model import FractalNet
     return FractalNet(num_classes=4, depths=[1], filters=[8], strides=[1],
                       input_shape=(32, 32, 3))
 
 
 def _relgt():
-    from dl_techniques.models.relgt.model import RELGT
+    from dl_techniques.models.graph.relgt.model import RELGT
     return RELGT(output_dim=2, embedding_dim=16, num_heads=2,
                  num_global_centroids=4, ffn_dim=32,
                  num_transformer_blocks=1, dropout_rate=0.0)
 
 
 def _vae():
-    from dl_techniques.models.vae.model import VAE
+    from dl_techniques.models.vision.vae.model import VAE
     return VAE(latent_dim=4, input_shape=(32, 32, 1), depths=1,
                steps_per_depth=1, filters=[8])
 
 
 def _swin():
-    from dl_techniques.models.swin_transformer.model import SwinTransformer
+    from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
     # `NUM_STAGES` is 4 and validated, so `depths` / `num_heads` must be 4-long.
     return SwinTransformer(num_classes=4, input_shape=(32, 32, 3),
                            embed_dim=16, depths=[1, 1, 1, 1],
@@ -72,7 +72,7 @@ def _swin():
 
 
 def _fastvlm():
-    from dl_techniques.models.fastvlm.model import FastVLM
+    from dl_techniques.models.vision_language.fastvlm.model import FastVLM
     return FastVLM(num_classes=4)
 
 
@@ -85,31 +85,31 @@ def _fastvlm():
 
 
 def _dino_v1():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
     return DINOv1(embed_dim=16, depth=1, num_heads=2, patch_size=14,
                   image_size=28, num_classes=4)
 
 
 def _dino_v2_backbone():
-    from dl_techniques.models.dino.dino_v2 import DINOv2VisionTransformer
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2VisionTransformer
     return DINOv2VisionTransformer(image_size=28, patch_size=14, embed_dim=16,
                                    depth=1, num_heads=2, num_register_tokens=2)
 
 
 def _dino_v2():
-    from dl_techniques.models.dino.dino_v2 import DINOv2
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2
     return DINOv2(image_size=28, patch_size=14, num_classes=4,
                   embed_dim=16, depth=1, num_heads=2)
 
 
 def _dino_v3():
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
     return DINOv3(image_size=28, patch_size=14, num_classes=4, embed_dim=16,
                   depth=1, num_heads=2)
 
 
 def _kan():
-    from dl_techniques.models.kan.model import KAN
+    from dl_techniques.models.general_purpose.kan.model import KAN
     return KAN(layer_configs=[{"features": 8, "grid_size": 5,
                                "activation": "swish"},
                               {"features": 4, "grid_size": 4,

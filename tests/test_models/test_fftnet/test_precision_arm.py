@@ -15,7 +15,7 @@ from ..precision_arm_oracle import assert_precision_arm
 
 
 def _build():
-    from dl_techniques.models.fftnet.model import create_fftnet
+    from dl_techniques.models.language.fftnet.model import create_fftnet
     return create_fftnet("tiny", image_size=32, patch_size=16)
 
 

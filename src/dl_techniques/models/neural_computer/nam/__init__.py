@@ -5,10 +5,10 @@ kept as the module-level name because trainers and tests reference it;
 ``NAM.MODEL_VARIANTS`` is a class-level alias to the same dict, added for the
 house shape. Nothing was renamed and no variant was invented.
 """
-from dl_techniques.models.nam.config import NAMConfig, NAM_VARIANTS
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
-from dl_techniques.models.nam.cell import NAMCell
-from dl_techniques.models.nam.model import NAM, create_nam
+from dl_techniques.models.neural_computer.nam.config import NAMConfig, NAM_VARIANTS
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam.cell import NAMCell
+from dl_techniques.models.neural_computer.nam.model import NAM, create_nam
 
 __all__ = [
     "NAM",

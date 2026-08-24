@@ -37,9 +37,9 @@ import keras
 
 from dl_techniques.layers import complex_layers
 from dl_techniques.layers.complex_layers import ComplexLayer
-from dl_techniques.models.coshnet.model import CoShNet
-from dl_techniques.models.kan import KAN
-from dl_techniques.models.kan.model import create_kan_model
+from dl_techniques.models.vision.coshnet.model import CoShNet
+from dl_techniques.models.general_purpose.kan import KAN
+from dl_techniques.models.general_purpose.kan.model import create_kan_model
 
 
 # ---------------------------------------------------------------------------

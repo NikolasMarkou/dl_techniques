@@ -20,7 +20,7 @@ from train.common.callbacks import best_checkpoint_path
 from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
-from dl_techniques.models.masked_language_model import (
+from dl_techniques.models.language.masked_language_model import (
     MaskedLanguageModel,
     visualize_mlm_predictions,
 )

@@ -16,7 +16,7 @@ import keras
 import scipy.sparse
 import tensorflow as tf
 
-from dl_techniques.models.shgcn.model import SHGCNNodeClassifier
+from dl_techniques.models.graph.shgcn.model import SHGCNNodeClassifier
 
 
 def _tiny_graph(num_nodes: int = 12, input_dim: int = 6):

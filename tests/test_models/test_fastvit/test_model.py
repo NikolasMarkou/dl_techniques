@@ -35,7 +35,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.models.fastvit.model import (
+from dl_techniques.models.vision.fastvit.model import (
     MCI_VARIANTS,
     FastVitImageEncoder,
     _resolve_mci_variant,
@@ -48,7 +48,7 @@ from tests.test_models.test_fastvit.reference_oracle import (
 
 # ---------------------------------------------------------------------
 # The reference tables, transcribed a SECOND time, independently of the module.
-# mci0/mci1/mci2: timm upstream `timm/models/fastvit.py` (no local oracle, H-7)
+# mci0/mci1/mci2: timm upstream `timm/models/vision/fastvit.py` (no local oracle, H-7)
 #   -- for those three rows this transcription is all there is.
 # mci3/mci4: ALSO covered by a real oracle -- see
 #   `test_mci3_mci4_match_supplied_source`, which parses the committed

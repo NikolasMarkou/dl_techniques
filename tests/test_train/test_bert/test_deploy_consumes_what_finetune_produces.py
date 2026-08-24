@@ -44,7 +44,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.models.bert.model import BERT, create_bert_with_head
+from dl_techniques.models.language.bert.model import BERT, create_bert_with_head
 
 import train.bert.finetune as finetune
 from train.bert.deploy import predict_sentiment

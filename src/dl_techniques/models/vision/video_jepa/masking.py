@@ -16,14 +16,14 @@ Decisions anchored here:
 - **D-011**: each sample receives an independently-sampled tube mask.
 
 Implementation reuses the well-tested ``argsort``-of-uniform-noise idiom
-from :mod:`dl_techniques.models.masked_autoencoder.patch_masking` to sample
+from :mod:`dl_techniques.models.vision.masked_autoencoder.patch_masking` to sample
 exactly ``K`` distinct positions per row.
 
 .. note::
 
     This layer is *stateless*: it holds no weights and no persistent
     state. The learned mask token lives on
-    :class:`dl_techniques.models.video_jepa.model.VideoJEPA`.
+    :class:`dl_techniques.models.vision.video_jepa.model.VideoJEPA`.
 """
 
 from __future__ import annotations

@@ -255,7 +255,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         # model. The other three modes hold a layer ONE level deep and were
         # clean in both arms (gcn 16/16, gat 28/28, gin 21/21, all at exactly
         # 0.0). See decisions.md D-091 and D-026 (the same mechanism in
-        # `models/masked_autoencoder/conv_decoder.py`).
+        # `models/vision/masked_autoencoder/conv_decoder.py`).
         self.sage_self_layers = []
         self.sage_neighbor_layers = []
         self.dropout_layers = []

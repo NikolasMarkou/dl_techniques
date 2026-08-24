@@ -17,7 +17,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.tabm.model import TabMModel
+from dl_techniques.models.tabular.tabm.model import TabMModel
 
 
 VARIANT_IDS = sorted(TabMModel.MODEL_VARIANTS.keys())

@@ -8,13 +8,13 @@ them beyond the repo's layer library, and none deprecates the others.
 
 **This package deliberately exports nothing — import from the subpackage.**
 
-    from dl_techniques.models.SAM.SAM2.model import SAM2, create_sam2
+    from dl_techniques.models.vision_language.sam.sam2.model import SAM2, create_sam2
 
 The house convention is a curated `__all__` (see `models/CLAUDE.md` § House
 Model Module Shape, Axis 4), and this package is an explicit, measured exception.
 SAM 2's model CLASS is named `SAM2` and its SUBPACKAGE is also named `SAM2`, so
 re-exporting the class here binds the name `SAM2` in this package's namespace and
-SHADOWS the subpackage. `dl_techniques.models.SAM.SAM2.model` then fails with
+SHADOWS the subpackage. `dl_techniques.models.vision_language.sam.sam2.model` then fails with
 
     ImportError: cannot import name 'model' from 'SAM2' (unknown location)
 

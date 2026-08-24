@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-import dl_techniques.models.superpoint as superpoint_pkg
-from dl_techniques.models.superpoint.model import SuperPoint, create_superpoint
+import dl_techniques.models.vision.keypoints.superpoint as superpoint_pkg
+from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint, create_superpoint
 
 
 # ---------------------------------------------------------------------

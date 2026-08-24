@@ -27,7 +27,7 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from dl_techniques.models.mobilenet.mobilenet_v1 import MobileNetV1, create_mobilenetv1
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1, create_mobilenetv1
 
 
 class TestMobileNetV1:

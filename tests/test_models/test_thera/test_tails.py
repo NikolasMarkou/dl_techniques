@@ -11,7 +11,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.thera.tails import (
+from dl_techniques.models.vision.thera.tails import (
     TheraTailAir,
     TheraTailPlus,
     TheraTailPro,
@@ -56,7 +56,7 @@ def test_plus_first_block_no_projection_when_channels_match():
     tail = TheraTailPlus()
     x = keras.random.normal((1, 8, 8, 64))
     tail(x)  # build
-    from dl_techniques.models.thera.tails import _Projection
+    from dl_techniques.models.vision.thera.tails import _Projection
 
     # 16 ConvNeXt blocks; projections only at the 64->96 and 96->128 boundaries.
     n_proj = sum(isinstance(layer, _Projection) for layer in tail._sublayers)
@@ -238,7 +238,7 @@ def test_builder_invalid_size_raises():
 
 
 def test_import_smoke():
-    from dl_techniques.models.thera.tails import (  # noqa: F401
+    from dl_techniques.models.vision.thera.tails import (  # noqa: F401
         build_thera_tail as _b,
         TheraTailAir as _A,
         TheraTailPlus as _P,

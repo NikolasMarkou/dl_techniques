@@ -100,7 +100,7 @@ References:
 # DOCSTRING STYLE: this module is 100% Sphinx/reST (`:param:` / `:type:` /
 # `:returns:` / `:raises:`), converted wholesale from Google `Args:` on 2026-08-24 on
 # the user's explicit instruction, to match the declared exemplars
-# `models/resnet/model.py` and `models/bert/bert.py`.
+# `models/vision/resnet/model.py` and `models/language/bert/bert.py`.
 # WHAT NOT TO DO: do NOT read this file as drift and convert it back. That override
 # is deliberate and it CONTRADICTS two tracked convention documents, which both still
 # stand for every other file: repo-root `CLAUDE.md` (Core Conventions) says "Match the
@@ -111,8 +111,8 @@ References:
 # package-wide rule. `layers/attention/beit_attention.py` was already Sphinx and is
 # deliberately untouched. New docstrings added HERE must be Sphinx, to keep the file
 # internally consistent.
-# CORRECTION 2026-08-24: `models/bert/bert.py`, named above, was renamed to
-# `models/bert/model.py` by merge `4ed922781`. The exemplar claim is unchanged and still
+# CORRECTION 2026-08-24: `models/language/bert/bert.py`, named above, was renamed to
+# `models/language/bert/model.py` by merge `4ed922781`. The exemplar claim is unchanged and still
 # points at the same file under its new name. The line above is preserved as written
 # because anchor bodies are append-only.
 
@@ -173,7 +173,7 @@ DEFAULT_VOCAB_SIZE = 8192
 # below is timm's, not HF's. Measured (both fetched verbatim, 2026-08-11):
 #   * HF `config.json` for microsoft/beit-base-patch16-224 AND
 #     microsoft/beit-large-patch16-224 both report "layer_scale_init_value": 0.1.
-#   * timm `models/beit.py` uses init_values=0.1 for every `beit_base_patch16_*` and
+#   * timm `models/vision/beit.py` uses init_values=0.1 for every `beit_base_patch16_*` and
 #     init_values=1e-5 for every `beit_large_patch16_*` (and for both BEiTv2 sizes).
 # WHAT NOT TO DO: do NOT "correct" the large entry to 0.1 to make this table agree with
 # HF's config.json field-for-field. The disagreement is between two ports of the SAME

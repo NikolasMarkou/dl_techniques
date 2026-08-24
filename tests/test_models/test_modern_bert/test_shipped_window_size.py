@@ -63,7 +63,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.attention.window_attention import WindowAttention
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 DIM = 4
 HEADS = 2
@@ -177,7 +177,7 @@ class TestShippedWindowSizeIsDenseAttention:
         This also pins the BOUNDARY, which is the fact that killed a proposal
         to delete ``local_attention_window_size`` outright (see the
         ``plan-2026-08-18T140459-7991552f/D-019`` anchor in
-        ``models/modern_bert/model.py``): windowing here is not degenerate
+        ``models/language/modern_bert/model.py``): windowing here is not degenerate
         everywhere, it is degenerate up to 4096 and real from 4097 to 8192, so
         deleting the knob would remove a capability rather than a no-op.
         """

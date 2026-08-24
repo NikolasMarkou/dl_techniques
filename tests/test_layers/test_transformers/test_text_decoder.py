@@ -762,8 +762,8 @@ class TestSharedEmbeddingTypeIsRejected:
     (`call()` returns raw hidden states ``(B, seq, embed_dim)``; the only
     `Dense` in the file is the factorized path's ``embed_projection``, which
     maps ``factorized_dim -> embed_dim``, not ``embed_dim -> vocab_size``).
-    The repo's genuine tying sites -- `models/masked_language_model/clm.py`,
-    `models/gpt2/gpt2.py`, `models/nano_vlm/model.py` -- all tie to an output
+    The repo's genuine tying sites -- `models/language/masked_language_model/clm.py`,
+    `models/language/gpt2/gpt2.py`, `models/vision_language/nano_vlm/model.py` -- all tie to an output
     projection the MODEL owns, which is where tying belongs.
     """
 

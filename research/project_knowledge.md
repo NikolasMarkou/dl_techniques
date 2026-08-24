@@ -622,11 +622,11 @@ class Conv2D(BaseConv):
 
 ### Models
 -   #### `CapsNet`
-    -   **File**: `src/dl_techniques/models/capsnet.py`
+    -   **File**: `src/dl_techniques/models/vision/capsnet.py`
     -   **Type**: Keras Model
     -   **Description**: A complete implementation of the Capsule Network architecture. It integrates the custom `train_step` and `test_step` methods to handle the composite margin loss and optional reconstruction loss, making it fully compatible with the standard Keras `fit` workflow.
 -   #### `CLIPModel`
-    -   **File**: `src/dl_techniques/models/clip.py`
+    -   **File**: `src/dl_techniques/models/vision_language/clip.py`
     -   **Type**: Keras Model
     -   **Description**: A dual-encoder architecture for learning joint image-text embeddings. It contains a `VisionTransformer` and a `TextTransformer`. The `call` method encodes both inputs, normalizes the embeddings, and computes the dot-product similarity matrix.
 -   #### `ConvNeXtV1` & `ConvNeXtV2`
@@ -634,11 +634,11 @@ class Conv2D(BaseConv):
     -   **Type**: Keras Model
     -   **Description**: Full model implementations of the ConvNeXt architectures, composed of their respective `ConvNextV1Block` or `ConvNextV2Block` layers. They include a stem, multiple stages with downsampling, and a classification head.
 -   #### `CoShNet`
-    -   **File**: `src/dl_techniques/models/coshnet.py`
+    -   **File**: `src/dl_techniques/models/vision/coshnet.py`
     -   **Type**: Keras Model
     -   **Description**: A hybrid model that uses a fixed `ShearletTransform` as a feature extraction front-end, followed by a series of learnable `ComplexConv2D` and `ComplexDense` layers.
 -   #### `DepthAnything`
-    -   **File**: `src/dl_techniques/models/depth_anything.py`
+    -   **File**: `src/dl_techniques/models/vision/depth_anything.py`
     -   **Type**: Keras Model
     -   **Description**: An implementation of the Depth Anything model for monocular depth estimation. It uses a DINOv2 encoder and a DPT decoder and is trained with a custom `train_step` that handles a combination of labeled loss, unlabeled loss (using a teacher model), and a feature alignment loss against a frozen encoder.
 -   #### `HolographicMPSNet`
@@ -654,11 +654,11 @@ class Conv2D(BaseConv):
     -   **Type**: Keras Model
     -   **Description**: Implements the MobileNetV4 architecture, composed of `UIB` (Universal Inverted Bottleneck) blocks and an optional `MobileMQA` attention layer in the final stage.
 -   #### `PowerMLP`
-    -   **File**: `src/dl_techniques/models/power_mlp.py`
+    -   **File**: `src/dl_techniques/models/general_purpose/power_mlp.py`
     -   **Type**: Keras Model
     -   **Description**: A full model built by stacking multiple `PowerMLPLayer`s. It serves as an efficient alternative to KANs.
 -   #### `SCUNet`
-    -   **File**: `src/dl_techniques/models/scunet.py`
+    -   **File**: `src/dl_techniques/models/vision/image_restoration/scunet.py`
     -   **Type**: Keras Model
     -   **Description**: A U-Net architecture that uses `SwinConvBlock`s in its encoder and decoder paths, combining the strengths of convolutions and windowed attention for image restoration.
 -   #### `SOMMemory`
@@ -670,7 +670,7 @@ class Conv2D(BaseConv):
     -   **Type**: Keras Model
     -   **Description**: A time-series forecasting model composed of an `PatchEmbedding1d` layer, a series of `MixedSequentialBlock`s, and a `QuantileHead` for probabilistic forecasting.
 -   #### `VAE`
-    -   **File**: `src/dl_techniques/models/vae.py`
+    -   **File**: `src/dl_techniques/models/vision/vae.py`
     -   **Type**: Keras Model
     -   **Description**: A convolutional Variational Autoencoder. It has a custom `train_step` that computes and combines the reconstruction loss (MSE) and the KL divergence loss between the latent distribution and a standard normal prior.
 -   #### `YOLOv12MultiTask`

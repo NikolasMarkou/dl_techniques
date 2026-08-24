@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/fractalnet`` -- Phase 5 batch A.
+Oracle adoption for ``models/vision/fractalnet`` -- Phase 5 batch A.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -32,7 +32,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.fractalnet.model import FractalNet
+from dl_techniques.models.vision.fractalnet.model import FractalNet
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

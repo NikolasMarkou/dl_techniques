@@ -38,8 +38,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.SAM.SAM1.model import SAM
-from dl_techniques.models.SAM.SAM1.transformer import (
+from dl_techniques.models.vision_language.sam.sam1.model import SAM
+from dl_techniques.models.vision_language.sam.sam1.transformer import (
     DEFAULT_ATTENTION_DROPOUT_RATE,
     TwoWayTransformer,
 )
@@ -117,7 +117,7 @@ class TestTheShippedDefault:
         """A number with one home. Both classes in ``transformer.py`` default to it."""
         import inspect
 
-        from dl_techniques.models.SAM.SAM1.transformer import TwoWayAttentionBlock
+        from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayAttentionBlock
 
         for cls in (TwoWayAttentionBlock, TwoWayTransformer):
             default = inspect.signature(

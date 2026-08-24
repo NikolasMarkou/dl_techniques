@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.depth_anything import DepthAnything
+from dl_techniques.models.vision.depth_anything import DepthAnything
 
 
 IMAGE_SHAPE = (32, 32, 3)

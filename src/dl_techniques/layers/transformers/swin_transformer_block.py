@@ -521,7 +521,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         # The mask is built HERE, per call, from the DYNAMIC `(B, H, W)` of the
         # incoming tensor — not in `build()` from static dims.
         #
-        # WHY: `models/thera/tails.py` builds every one of its Swin blocks with
+        # WHY: `models/vision/thera/tails.py` builds every one of its Swin blocks with
         # `(B, None, None, embed_dim)` on purpose, and its `call()` reflect-pads
         # H and W up to a window-size multiple using SYMBOLIC `ops.mod` amounts.
         # The spatial extent is therefore unknown at build time AND varies per
@@ -682,18 +682,18 @@ class SwinTransformerBlock(keras.layers.Layer):
         #     by measurement: `_build_swmsa_keep_mask` is array-equal to two
         #     independent oracles at `(8,8,8,4)` and `(7,7,7,3)`. The guard
         #     rejects provably correct geometry, and it crashed 9 passing tests
-        #     across `models/scunet` (8x8 bottleneck, ws=8) and
-        #     `models/swin_transformer` (7x7 stage 4, ws=7 -- canonical Swin-T
+        #     across `models/vision/image_restoration/scunet` (8x8 bottleneck, ws=8) and
+        #     `models/vision/swin_transformer` (7x7 stage 4, ws=7 -- canonical Swin-T
         #     at 224x224). Because `window_partition` requires `H % ws == 0`, a
         #     static `H < 2*ws` can only ever mean `H == ws`.
         #   * Do NOT region-mask the single full window instead. It is a legal
         #     mask, but it is not what upstream Swin does, and this block is
         #     meant to be checkpoint-compatible with that lineage.
-        #   * Do NOT raise on a dynamic (`None`) dim. `models/thera/tails.py`
+        #   * Do NOT raise on a dynamic (`None`) dim. `models/vision/thera/tails.py`
         #     builds every Swin block with `(B, None, None, C)` on purpose; a
         #     raise there trades a silent correctness bug for a dead model
         #     (D-002, assumption A2).
-        #   * Do NOT push this into `models/scunet` / `models/swin_transformer`
+        #   * Do NOT push this into `models/vision/image_restoration/scunet` / `models/vision/swin_transformer`
         #     by passing `shift_size=0` there. That widens the blast radius and
         #     leaves every future caller exposed to the same trap.
         # ACCEPTED COST: not numerically neutral. `use_relative_position_bias`
@@ -720,7 +720,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         # the shift either way. The CODE is therefore unchanged for every
         # `H >= ws`, and no geometry any shipped consumer reaches resolves to a
         # different shift than it did before (re-verified by executing
-        # `models/scunet`, `models/swin_transformer` and `models/thera`).
+        # `models/vision/image_restoration/scunet`, `models/vision/swin_transformer` and `models/vision/thera`).
         #
         # The `H < ws` RAISE, by contrast, does NOT survive: padding makes such
         # an `H` legally paddable up to exactly `ws`, which is one window, and
@@ -774,9 +774,9 @@ class SwinTransformerBlock(keras.layers.Layer):
         # call on the same tensor dropped both. Measured at
         # `(dim=32, heads=4, ws=4, shift=2)`, `(1,4,4,32)`, seeded weights:
         # 512/512 elements differed, max |diff| 251.4 (97% relative).
-        # `models/thera/tails.py` is the one consumer that builds every block
+        # `models/vision/thera/tails.py` is the one consumer that builds every block
         # with `(B, None, None, C)`, so it took the opposite branch from
-        # `models/swin_transformer` at identical geometry.
+        # `models/vision/swin_transformer` at identical geometry.
         #
         # WHAT NOT TO DO, and why:
         #   * Do NOT "fix" this by making the dynamic path region-mask a single
@@ -897,7 +897,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         #     `test_swin_transformer`, both on divisible geometry) bit-identical.
         #   * Do NOT push the padding out to the callers instead. Three
         #     callers already solve this three different ways
-        #     (`models/scunet` at model level, `models/thera` at stack level,
+        #     (`models/vision/image_restoration/scunet` at model level, `models/vision/thera` at stack level,
         #     `swin_conv_block.py` by refusing at construction); a fourth
         #     convention inside the block is the deliberate cost of making the
         #     block itself total. See decisions.md D-001 for that trade-off.
@@ -991,7 +991,7 @@ class SwinTransformerBlock(keras.layers.Layer):
 
         # Crop back to the caller's unpadded (H, W) BEFORE the residual add --
         # `shortcut` was captured on the unpadded input. Same placement as
-        # `models/thera/tails.py::TheraTailPro.call`'s crop.
+        # `models/vision/thera/tails.py::TheraTailPro.call`'s crop.
         if has_padding:
             x = x[:, :H, :W, :]
 

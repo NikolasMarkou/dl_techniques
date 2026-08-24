@@ -26,7 +26,7 @@ import tensorflow as tf
 import tempfile
 import os
 
-from dl_techniques.models.clip.model import (
+from dl_techniques.models.vision_language.clip.model import (
     CLIP,
     create_clip_model,
     create_clip_variant

@@ -538,7 +538,7 @@ class SAM(keras.Model):
         Raises:
             ValueError: If either spatial extent of `x` exceeds the encoder's
                 `img_size`. This method only PADS; it never resizes. Apply
-                `dl_techniques.models.SAM.SAM1.resize_longest_side` first, exactly as
+                `dl_techniques.models.vision_language.sam.sam1.resize_longest_side` first, exactly as
                 reference SAM's `ResizeLongestSide` transform does.
         """
         img_size = self.image_encoder.img_size
@@ -569,7 +569,7 @@ class SAM(keras.Model):
                         f"shrink an image: input {axis_name}={int(dim)} exceeds "
                         f"image_encoder.img_size={img_size} (input shape "
                         f"{static_shape}). Apply "
-                        f"`dl_techniques.models.SAM.SAM1.resize_longest_side(image, "
+                        f"`dl_techniques.models.vision_language.sam.sam1.resize_longest_side(image, "
                         f"{img_size})` before the model, as reference SAM's "
                         f"ResizeLongestSide transform does, and rescale the "
                         f"prompt coordinates by the same factor."

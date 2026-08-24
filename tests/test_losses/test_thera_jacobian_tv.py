@@ -20,7 +20,7 @@ import tensorflow as tf
 import pytest
 
 from dl_techniques.layers.grid_sample import make_grid
-from dl_techniques.models.thera import (
+from dl_techniques.models.vision.thera import (
     Thera,
     EDSRBackbone,
     build_thera_tail,

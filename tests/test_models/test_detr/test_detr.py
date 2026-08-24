@@ -12,7 +12,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.detr import DETR, DetrTransformer
+from dl_techniques.models.vision.detr import DETR, DetrTransformer
 
 # ---------------------------------------------------------------------------
 # Constants

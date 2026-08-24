@@ -1,7 +1,7 @@
 # `train.ntm` — Neural Turing Machine trainers + MANN benchmark surface
 
 This package holds the training entry points for the NTM models in
-`dl_techniques.models.ntm`, plus a benchmark/metrics surface for
+`dl_techniques.models.neural_computer.ntm`, plus a benchmark/metrics surface for
 memory-augmented neural networks (MANNs) modelled on the NTM/DNC literature.
 
 **Import path.** Everything here lives under `train.ntm`:
@@ -95,7 +95,7 @@ moved to a local parser and now rejects those flags outright.
 One NTM trained on six tasks simultaneously (`copy`, `associative_recall`,
 `repeat_copy`, `priority_access`, `dynamic_ngram`, `insertion_sort`), conditioned
 by a one-hot task vector concatenated onto every input timestep
-(`dl_techniques.models.ntm.model_multitask.NTMMultiTask`).
+(`dl_techniques.models.neural_computer.ntm.model_multitask.NTMMultiTask`).
 
 ```bash
 MPLBACKEND=Agg python -m train.ntm.train_multitask --help
@@ -402,7 +402,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m pytest \
 
 ## See also
 
-- `src/dl_techniques/models/ntm/README.md` — `NTMModel`, `create_ntm_variant`,
+- `src/dl_techniques/models/neural_computer/ntm/README.md` — `NTMModel`, `create_ntm_variant`,
   `NTMMultiTask`.
 - `src/dl_techniques/layers/memory/README.md` — `NTMCell`, `create_ntm`, and the
   underlying Graves addressing math.

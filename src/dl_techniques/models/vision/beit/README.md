@@ -341,7 +341,7 @@ change the architecture with no error.
 
 ```python
 import numpy as np
-from dl_techniques.models.beit import create_beit_classifier
+from dl_techniques.models.vision.beit import create_beit_classifier
 
 model = create_beit_classifier(
     variant="tiny", input_shape=(224, 224, 3), patch_size=16, num_classes=10
@@ -356,7 +356,7 @@ print(logits.shape)          # (2, 10)   -- LOGITS, not probabilities
 
 ```python
 import numpy as np
-from dl_techniques.models.beit import create_beit_mim
+from dl_techniques.models.vision.beit import create_beit_mim
 
 mim = create_beit_mim(
     variant="tiny", input_shape=(64, 64, 3), patch_size=16, vocab_size=512
@@ -375,7 +375,7 @@ print(logits.shape)          # (2, 16, 512)  -- cls position already excluded
 
 ```python
 import keras
-from dl_techniques.models.beit import create_beit_mim, create_beit_classifier
+from dl_techniques.models.vision.beit import create_beit_mim, create_beit_classifier
 
 mim = create_beit_mim("tiny", (64, 64, 3), 16, vocab_size=512)
 mim.build((None, 64, 64, 3))     # OPTIONAL -- lets summary()/count_params() run now
@@ -481,7 +481,7 @@ table rather than trusting the table.
 Re-derive the `Backbone params` column:
 
 ```python
-from dl_techniques.models.beit import create_beit_backbone
+from dl_techniques.models.vision.beit import create_beit_backbone
 
 for scale in ("tiny", "small", "base", "large"):
     model = create_beit_backbone(scale, (224, 224, 3), 16)
@@ -506,7 +506,7 @@ not reproductions of anything.
 `MODEL_VARIANTS` maps the variant spellings onto those scales:
 
 ```python
-from dl_techniques.models.beit import MODEL_VARIANTS, SCALE_CONFIGS
+from dl_techniques.models.vision.beit import MODEL_VARIANTS, SCALE_CONFIGS
 
 print(sorted(MODEL_VARIANTS))   # ['beit_base', 'beit_large', 'beit_small', 'beit_tiny']
 print(sorted(SCALE_CONFIGS))    # ['base', 'large', 'small', 'tiny']
@@ -516,7 +516,7 @@ print(SCALE_CONFIGS["large"]["layer_scale_init_value"])   # 1e-05
 Both spellings are accepted everywhere a variant is taken:
 
 ```python
-from dl_techniques.models.beit import BeitModel, create_beit_backbone
+from dl_techniques.models.vision.beit import BeitModel, create_beit_backbone
 
 a = BeitModel.from_variant("beit_tiny", input_shape=(64, 64, 3), patch_size=16)
 b = create_beit_backbone("tiny", (64, 64, 3), 16)
@@ -528,7 +528,7 @@ print(a.scale, b.scale, a.grid_size, b.num_patches)   # tiny tiny (4, 4) 16
 Any scale field can be overridden individually; `None` means "inherit from the scale".
 
 ```python
-from dl_techniques.models.beit import create_beit_backbone
+from dl_techniques.models.vision.beit import create_beit_backbone
 
 model = create_beit_backbone(
     "base", (224, 224, 3), 16,
@@ -550,7 +550,7 @@ work — the only requirement is divisibility.
 
 ```python
 import numpy as np
-from dl_techniques.models.beit import create_beit_backbone
+from dl_techniques.models.vision.beit import create_beit_backbone
 
 model = create_beit_backbone("tiny", input_shape=(64, 96, 3), patch_size=16)
 model.build((None, 64, 96, 3))
@@ -573,7 +573,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.datasets.vision.beit_masking import make_beit_mim_map_fn
-from dl_techniques.models.beit import create_beit_mim
+from dl_techniques.models.vision.beit import create_beit_mim
 
 GRID, VOCAB = (4, 4), 512
 
@@ -690,7 +690,7 @@ each of which fails silently if violated:
 ```python
 import os, tempfile
 import numpy as np
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME, create_beit_mim, create_beit_classifier,
 )
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
@@ -733,7 +733,7 @@ helper that **raises** on both failure modes.
 
 ```python
 import numpy as np
-from dl_techniques.models.beit import create_beit_classifier
+from dl_techniques.models.vision.beit import create_beit_classifier
 
 clf = create_beit_classifier("tiny", (64, 64, 3), 16, num_classes=10)
 clf.build((None, 64, 64, 3))
@@ -750,7 +750,7 @@ print(clf(np.random.rand(2, 64, 64, 3).astype("float32"), training=False).shape)
 
 ```python
 import numpy as np
-from dl_techniques.models.beit import create_beit_backbone
+from dl_techniques.models.vision.beit import create_beit_backbone
 
 trunk = create_beit_backbone("tiny", (64, 64, 3), 16)
 trunk.build((None, 64, 64, 3))
@@ -764,7 +764,7 @@ print(tokens.shape, cls_feature.shape, patch_mean.shape)
 ### 9.4 Switching to the cls-pooling convention
 
 ```python
-from dl_techniques.models.beit import create_beit_classifier
+from dl_techniques.models.vision.beit import create_beit_classifier
 
 clf = create_beit_classifier(
     "tiny", (64, 64, 3), 16, num_classes=10, use_mean_pooling=False,
@@ -800,7 +800,7 @@ classifier. Keep the flag identical across both stages.
 
 ```python
 import keras, numpy as np
-from dl_techniques.models.beit import create_beit_classifier
+from dl_techniques.models.vision.beit import create_beit_classifier
 
 original = keras.mixed_precision.global_policy()
 keras.mixed_precision.set_global_policy("mixed_float16")
@@ -883,7 +883,7 @@ The two head classes serialize their nested backbone via
 ```python
 import os, tempfile
 import keras, numpy as np
-from dl_techniques.models.beit import create_beit_classifier
+from dl_techniques.models.vision.beit import create_beit_classifier
 
 clf = create_beit_classifier("tiny", (64, 64, 3), 16, num_classes=10)
 clf.build((None, 64, 64, 3))
@@ -910,7 +910,7 @@ needs no such treatment: the constructor already coerces it. Both directions are
 `tests/test_models/test_beit/test_model.py::TestBeitModelSerialization`.
 
 ```python
-from dl_techniques.models.beit import BeitModel
+from dl_techniques.models.vision.beit import BeitModel
 
 a = BeitModel.from_variant("tiny", input_shape=(64, 64, 3), patch_size=16)
 b = BeitModel.from_config(a.get_config())
@@ -1097,7 +1097,7 @@ this repository does not have. This repository has no Gumbel-softmax codebook me
 anywhere and no dVAE.
 
 `src/train/beit/` therefore trains a **`VQVAERotationTrick`**
-(`dl_techniques.models.vq_vae_rotation.model`; that package's `__init__.py` is empty, so
+(`dl_techniques.models.vision.vq_vae_rotation.model`; that package's `__init__.py` is empty, so
 import from the submodule) — hard nearest-neighbour vector quantization — as stage 0, and
 uses its `encode_to_indices` output (a `(B, gh, gw)` int32 code grid) as the MIM target.
 
@@ -1126,7 +1126,7 @@ a citation error, both were fetched verbatim:
 | Source | base | large |
 |:---|:---:|:---:|
 | HF `microsoft/beit-{base,large}-patch16-224/config.json` | **0.1** | **0.1** |
-| timm `timm/models/beit.py` model entrypoints | **0.1** | **1e-5** |
+| timm `timm/models/vision/beit.py` model entrypoints | **0.1** | **1e-5** |
 
 This package adopts **timm's split**: `0.1` for `tiny`/`small`/`base`, `1e-5` for `large`.
 Consequently `SCALE_CONFIGS['large']` does **not** match HF's shipped `config.json`
@@ -1222,7 +1222,7 @@ topology moves them:
 
 ```python
 import numpy as np
-from dl_techniques.models.beit import create_beit_backbone
+from dl_techniques.models.vision.beit import create_beit_backbone
 
 model = create_beit_backbone("base", (224, 224, 3), 16)
 model.build((None, 224, 224, 3))
@@ -1288,7 +1288,7 @@ The architecture facts in this README (the relative-position index construction,
 no-k-bias QKV asymmetry, `layer_norm_eps=1e-12`, `vocab_size=8192`, the masking algorithm,
 the `use_mean_pooling` semantics, and both variant tables) come from directly-fetched
 primary sources: `microsoft/unilm/beit/{modeling_finetune,masking_generator,run_beit_pretraining}.py`,
-`timm/models/beit.py`, and the raw HF `config.json` files. They are high confidence.
+`timm/models/vision/beit.py`, and the raw HF `config.json` files. They are high confidence.
 
 The pre-training/fine-tuning **hyperparameter table in §11.1** is a summary of an
 ar5iv-rendered read of the paper's appendix, not a verbatim table transcription. It is

@@ -11,7 +11,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.resnet.model import ResNet
+from dl_techniques.models.vision.resnet.model import ResNet
 
 
 def _model():

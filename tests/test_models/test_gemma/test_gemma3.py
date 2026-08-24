@@ -19,7 +19,7 @@ from typing import Dict, Any
 
 import keras
 
-from dl_techniques.models.gemma.gemma3 import (
+from dl_techniques.models.language.gemma.gemma3 import (
     Gemma3,
     create_gemma3,
     create_gemma3_generation,

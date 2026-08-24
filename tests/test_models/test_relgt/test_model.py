@@ -13,7 +13,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.relgt.model import RELGT, create_relgt_model
+from dl_techniques.models.graph.relgt.model import RELGT, create_relgt_model
 
 B, N, F = 2, 8, 16
 

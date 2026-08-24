@@ -5,12 +5,12 @@
 ``cls(**config, **kwargs)`` with no ``config.update(kwargs)``. Every variant dict
 already carries the overridable keys, so ANY override of one collides:
 
-    TypeError: dl_techniques.models.qwen.qwen3.Qwen3() got multiple values for
+    TypeError: dl_techniques.models.language.qwen.qwen3.Qwen3() got multiple values for
     keyword argument 'num_layers'
 
 That is the exact call `create_qwen3`'s own docstring advertises
 (``create_qwen3("tiny", num_layers=2)``), so the documented use was dead. Six
-siblings already do it correctly; `models/gpt2/gpt2.py:464-468` is the one copied
+siblings already do it correctly; `models/language/gpt2/gpt2.py:464-468` is the one copied
 here:
 
     config = cls.MODEL_VARIANTS[variant].copy()
@@ -25,8 +25,8 @@ override that is accepted and then ignored is the failure mode a
 
 import pytest
 
-from dl_techniques.models.qwen.qwen3 import Qwen3, create_qwen3
-from dl_techniques.models.qwen.qwen3_next import Qwen3Next
+from dl_techniques.models.language.qwen.qwen3 import Qwen3, create_qwen3
+from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 
 
 class TestQwen3FromVariantOverrides:

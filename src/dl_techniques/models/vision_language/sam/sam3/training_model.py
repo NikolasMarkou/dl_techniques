@@ -28,8 +28,8 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.sam3_image import Sam3Image
-from dl_techniques.models.SAM.SAM3.training_model import (
+from dl_techniques.models.vision_language.sam.sam3.sam3_image import Sam3Image
+from dl_techniques.models.vision_language.sam.sam3.training_model import (
     Sam3TrainingModel, compile_sam3_trainer)
 trainer = Sam3TrainingModel(Sam3Image.from_variant("tiny"), include_masks=True)
 compile_sam3_trainer(trainer)

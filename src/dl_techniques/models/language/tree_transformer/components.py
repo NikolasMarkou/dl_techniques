@@ -12,7 +12,7 @@ Contains the four sub-layer classes used by the top-level
 These classes were extracted from `model.py` to keep the top-level model
 file focused on the model class and its factory functions. The classes
 are re-exported from `model.py` so that callers importing from
-`dl_techniques.models.tree_transformer.model` continue to resolve.
+`dl_techniques.models.language.tree_transformer.model` continue to resolve.
 """
 
 import math
@@ -661,7 +661,7 @@ class TreeTransformerBlock(keras.layers.Layer):
             attention_dropout_rate=attention_dropout_rate,
         )
         # DECISION plan-2026-07-30T140922-8af1028f/D-022
-        # See `models/nam/cell.py` for the full reasoning. In short: this
+        # See `models/neural_computer/nam/cell.py` for the full reasoning. In short: this
         # block's own generic `activation`/`dropout_rate` are pre-filtered
         # against what `ffn_type` accepts, because `create_ffn_layer` now
         # RAISES on a key it would have to drop; and `hidden_act` is DISCARDED

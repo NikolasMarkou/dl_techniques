@@ -1066,7 +1066,7 @@ ISO_LIVE_POS = 0        # perturbed for the mandatory live control
 # round-off in the validity divide, NOT "to the last bit".
 # No shipped consumer is affected: the only two callers that pass
 # `exclude_positions` are `vision_encoder.py:420`/`:424` (one gate, one kwarg)
-# and `models/vit/model.py:442` -- line numbers re-grepped at write time, step
+# and `models/vision/vit/model.py:442` -- line numbers re-grepped at write time, step
 # 15; an earlier revision of this comment carried a stale `vision_encoder.py:396`
 # from a previous HEAD. Both restrict the strategy to `mean`/`max`, and both
 # measure exactly 0.0 movement in the A/B above. It is guarded by
@@ -2070,7 +2070,7 @@ class TestExcludePositionsIsAlsoIsolated:
         by the exclusion), so neither cell above exercises the composition:
         `test_excluded_position_is_isolated_at_mask_none` covers exclusion
         alone and `TestMaskedPositionIsolation` covers the mask alone. This is
-        the configuration `models/vit` would hit if it ever passed a mask
+        the configuration `models/vision/vit` would hit if it ever passed a mask
         (`model.py:442` builds the pool with `exclude_positions=[0]`).
 
         Both suppressed positions are perturbed in the SAME call, so a fix that

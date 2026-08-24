@@ -33,7 +33,7 @@ from dl_techniques.datasets.patch_transforms import (
     PatchGridGenerator, PatchInfo, PatchPrediction, DetectionResult,
     ResultAggregator
 )
-from dl_techniques.models.yolo12.multitask import YOLOv12MultiTask
+from dl_techniques.models.vision.yolo12.multitask import YOLOv12MultiTask
 
 # ---------------------------------------------------------------------
 

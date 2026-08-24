@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 from scipy.stats import ortho_group
 
-from dl_techniques.models.mini_vec2vec.model import (
+from dl_techniques.models.language.mini_vec2vec.model import (
     MiniVec2VecAligner,
     create_mini_vec2vec_aligner,
 )

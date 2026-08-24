@@ -23,8 +23,8 @@ FROZEN PUBLIC SURFACE
 ---------------------
 `ATTENTION_REGISTRY`'s key set, the `AttentionType` literals, and every entry's
 `required_params` / `optional_params` are **public API** consumed by config-driven
-callers (`layers/transformers/adaln_zero.py`, `models/bias_free_denoisers/bfconvunext.py`,
-`models/fastvlm/`, `models/dino/`, `models/gemma/`) and asserted by
+callers (`layers/transformers/adaln_zero.py`, `models/vision/bias_free_denoisers/bfconvunext.py`,
+`models/vision_language/fastvlm/`, `models/vision/dino/`, `models/language/gemma/`) and asserted by
 `tests/test_layers/test_factory_registry_drift.py`. Adding, renaming, or removing any of
 them is a breaking change, not a cleanup. Docstrings and comments in this module may be
 improved freely; the data above may not.

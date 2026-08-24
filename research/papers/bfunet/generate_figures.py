@@ -42,7 +42,7 @@ from train.common import setup_gpu
 # Importing the model module registers every custom Keras layer / initializer the
 # saved denoiser needs (ConvNeXt blocks, Gabor stem, Laplacian pyramid, LayerScale,
 # ...) so ``keras.models.load_model`` resolves them from the serialization registry.
-import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401
+import dl_techniques.models.vision.bias_free_denoisers.bfconvunext  # noqa: F401
 
 # Reuse the paper's exact inference / noise / metric protocol (single source of truth).
 from train.bfunet.eval_psnr_vs_noise import (

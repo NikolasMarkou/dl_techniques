@@ -40,11 +40,11 @@ and `pro` use `hidden_dim=512` (D-009).
 | `initializers/linear_up_initializer.py` | `LinearUpInitializer`: 2D-disk frequency init `r = scale·√U[0,1]` for the heat-field components. |
 | `layers/grid_sample.py` | TF-native `make_grid` (pixel-center grid) + `interpolate_grid` (gather+lerp sampler, order 0/1). |
 | `layers/thera_heat_field.py` | `ThermalActivation` (`sin(w0·x+φ)·exp(-(w0·‖·‖)²·k·t)`) + `HeatField` (per-pixel einsum field). |
-| `models/thera/edsr_backbone.py` | `EDSRBackbone` — no-upsampling EDSR feature extractor. |
-| `models/thera/rdn_backbone.py` | `RDNBackbone` — residual dense feature extractor. |
-| `models/thera/tails.py` | `air`/`plus`/`pro` tail builders (`build_thera_tail`). |
-| `models/thera/hypernetwork.py` | `TheraHypernetwork` — 1×1 phi conv → einsum decode (+ `decode_with_jac`). |
-| `models/thera/model.py` | `Thera` model + `build_thera` + `Thera.from_variant`. |
+| `models/vision/thera/edsr_backbone.py` | `EDSRBackbone` — no-upsampling EDSR feature extractor. |
+| `models/vision/thera/rdn_backbone.py` | `RDNBackbone` — residual dense feature extractor. |
+| `models/vision/thera/tails.py` | `air`/`plus`/`pro` tail builders (`build_thera_tail`). |
+| `models/vision/thera/hypernetwork.py` | `TheraHypernetwork` — 1×1 phi conv → einsum decode (+ `decode_with_jac`). |
+| `models/vision/thera/model.py` | `Thera` model + `build_thera` + `Thera.from_variant`. |
 | `losses/thera_jacobian_tv.py` | `thera_tv_penalty` / `thera_total_loss` — exact Jacobian-TV aliasing penalty. |
 | `train/thera/data.py` | `build_arbitrary_scale_dataset` — pure `tf.data` arbitrary-scale SR pipeline. |
 | `train/thera/train_thera.py` | `TheraTrainingModel` + trainer (nested-tape `train_step`). |
@@ -203,7 +203,7 @@ shapes do not trace under XLA).
 
 ### Build
 ```python
-from dl_techniques.models.thera import build_thera, Thera
+from dl_techniques.models.vision.thera import build_thera, Thera
 
 model = build_thera(out_dim=3, backbone="edsr-baseline", size="pro")
 # or by named variant:
@@ -278,7 +278,7 @@ both THERA and a bicubic baseline.
   > fallback was **static-only** for two commits (`e25d2bac`..`373aa826`), which
   > made this block shape-dependent: at `min(H, W) == window_size` an eager call
   > dropped the shift while a dynamically-shaped trace kept it, so this tail
-  > silently took the opposite branch from `models/swin_transformer` at
+  > silently took the opposite branch from `models/vision/swin_transformer` at
   > identical geometry (measured 512/512 elements, ~97% relative). `7200487b`
   > made the rule runtime-conditional. Measured cost to `TheraTailPro`
   > (`embed_dim=32, depths=(2,2), window_size=8`, seeded weights, dynamic trace):

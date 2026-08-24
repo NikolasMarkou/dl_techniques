@@ -25,7 +25,7 @@ import pytest
 
 from dl_techniques.layers.memory.baseline_ntm import NTMReadHead, NTMWriteHead
 from dl_techniques.layers.memory.ntm_interface import AddressingMode, MemoryState
-from dl_techniques.models.nam.config import NAMConfig
+from dl_techniques.models.neural_computer.nam.config import NAMConfig
 
 
 class TestShiftRangeIsGoneFromNAMConfig:

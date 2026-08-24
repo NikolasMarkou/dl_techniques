@@ -32,7 +32,7 @@ prompt MLP at dropout ``0.1``, clamp ``12.0``.
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.model_misc import Sam3DotProductScoring
+from dl_techniques.models.vision_language.sam.sam3.model_misc import Sam3DotProductScoring
 scorer = Sam3DotProductScoring(d_model=256, d_proj=256, clamp_max_val=12.0)
 ```
 

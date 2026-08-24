@@ -12,7 +12,7 @@ import pytest
 import tensorflow as tf
 from typing import Dict, Any, Optional
 
-from dl_techniques.models.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 
 
 # ---------------------------------------------------------------------

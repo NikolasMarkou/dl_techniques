@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/video_jepa`` -- Phase 5 batch C.
+Oracle adoption for ``models/vision/video_jepa`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -93,8 +93,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.video_jepa.config import VideoJEPAConfig
-from dl_techniques.models.video_jepa.model import VideoJEPA, create_video_jepa
+from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.vision.video_jepa.model import VideoJEPA, create_video_jepa
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

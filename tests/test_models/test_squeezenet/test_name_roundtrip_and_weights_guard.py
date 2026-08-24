@@ -40,8 +40,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1
-from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 

@@ -1,7 +1,7 @@
 """
 `NAMCell`'s reduction scorer must survive `mixed_float16`.
 
-`models/nam/cell.py` masked its reduction scores with
+`models/neural_computer/nam/cell.py` masked its reduction scores with
 
     scores = scores + (1.0 - token_mask_float) * (-1e9)
 
@@ -55,7 +55,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.nam import NAMCell, NAMConfig
+from dl_techniques.models.neural_computer.nam import NAMCell, NAMConfig
 
 
 @pytest.fixture

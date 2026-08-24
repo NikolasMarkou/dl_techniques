@@ -26,7 +26,7 @@ from train.tree_transformer.pretrain import (
     pretrained_encoder_path as _pretrained_encoder_path,
 )
 
-from dl_techniques.models.tree_transformer import TreeTransformer  # noqa: F401  (registry)
+from dl_techniques.models.language.tree_transformer import TreeTransformer  # noqa: F401  (registry)
 
 _PRETRAIN_SAVE_DIR = _PretrainConfig.save_dir
 from dl_techniques.utils.logger import logger

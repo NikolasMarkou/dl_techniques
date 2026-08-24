@@ -26,7 +26,7 @@ import tempfile
 import os
 from typing import Tuple, List
 
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
 
 

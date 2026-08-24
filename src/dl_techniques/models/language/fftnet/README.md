@@ -80,7 +80,7 @@ other resolution, since `W_base` scales with the token count.
 
 ```python
 import numpy as np
-from dl_techniques.models.fftnet import create_fftnet
+from dl_techniques.models.language.fftnet import create_fftnet
 
 model = create_fftnet("tiny", image_size=32, patch_size=16)
 out = model(np.random.rand(2, 32, 32, 3).astype("float32"), training=False)

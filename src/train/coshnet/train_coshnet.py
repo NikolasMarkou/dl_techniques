@@ -12,7 +12,7 @@ from typing import Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.shearlet_transform import ShearletTransform
 from dl_techniques.layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
-from dl_techniques.models.coshnet.model import CoShNet, create_coshnet
+from dl_techniques.models.vision.coshnet.model import CoShNet, create_coshnet
 
 from train.common import (
     setup_gpu,

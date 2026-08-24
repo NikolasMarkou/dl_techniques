@@ -47,7 +47,7 @@ from train.common.run_io import default_experiment_name, prepare_run_dir, save_t
 from train.graph_energy_transformer.common import build_optimizer
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.graphs import build_fraud_subgraph_dataset
-from dl_techniques.models.graph_energy_transformer import create_graph_anomaly_detector
+from dl_techniques.models.graph.graph_energy_transformer import create_graph_anomaly_detector
 
 # Real CARE-GNN fraud benchmarks + the synthetic fallback. `synthetic` routes the loader to a
 # network-free generator; the two real keys download+cache under $GRAPH_CACHE.

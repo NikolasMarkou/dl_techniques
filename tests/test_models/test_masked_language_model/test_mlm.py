@@ -65,7 +65,7 @@ class MockEncoder(keras.Model):
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.masking.strategies import apply_mlm_masking
-from dl_techniques.models.masked_language_model.mlm import MaskedLanguageModel
+from dl_techniques.models.language.masked_language_model.mlm import MaskedLanguageModel
 
 # ---------------------------------------------------------------------
 # Test Fixtures

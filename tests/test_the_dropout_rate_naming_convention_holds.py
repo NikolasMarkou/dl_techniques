@@ -134,8 +134,8 @@ EXEMPT_KEYWORD_CALLS: Set[Tuple[str, str, str]] = {
     ("src/dl_techniques/layers/graphs/graph_neural_network.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/models/nano_vlm_world_model/denoisers.py", "MultiHeadAttention", "dropout"),
-    ("src/dl_techniques/models/SAM/SAM1/transformer.py", "MultiHeadAttention", "dropout"),
-    ("src/dl_techniques/models/video_jepa/predictor.py", "MultiHeadAttention", "dropout"),
+    ("src/dl_techniques/models/vision_language/sam/sam1/transformer.py", "MultiHeadAttention", "dropout"),
+    ("src/dl_techniques/models/vision/video_jepa/predictor.py", "MultiHeadAttention", "dropout"),
     ("tests/test_layers/test_attention/test_shared_weights_cross_attention.py", "MultiHeadAttention", "dropout"),
     # --- stock keras.layers.LSTM / LSTMCell --------------------------------
     ("src/dl_techniques/layers/time_series/deepar_blocks.py", "LSTMCell", "dropout"),

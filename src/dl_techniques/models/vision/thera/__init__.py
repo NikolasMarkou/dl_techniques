@@ -8,16 +8,16 @@ deprecates the other. The backbones, tails and hypernetwork are re-exported for
 convenience (e.g. building a custom-sized ``Thera`` directly for tests).
 """
 
-from dl_techniques.models.thera.model import (
+from dl_techniques.models.vision.thera.model import (
     Thera,
     build_thera,
     create_thera,
     DEFAULT_COMPONENTS_INIT_SCALE,
 )
-from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
-from dl_techniques.models.thera.rdn_backbone import RDNBackbone
-from dl_techniques.models.thera.tails import build_thera_tail
-from dl_techniques.models.thera.hypernetwork import TheraHypernetwork
+from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
+from dl_techniques.models.vision.thera.rdn_backbone import RDNBackbone
+from dl_techniques.models.vision.thera.tails import build_thera_tail
+from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
 
 __all__ = [
     "Thera",

@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/dino`` -- Phase 5 batch A.
+Oracle adoption for ``models/vision/dino`` -- Phase 5 batch A.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -30,7 +30,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.dino.dino_v2 import create_dino_v2
+from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

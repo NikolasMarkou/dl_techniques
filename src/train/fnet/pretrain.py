@@ -21,8 +21,8 @@ from train.common.nlp import (
     evaluate_mlm_model,
 )
 
-from dl_techniques.models.fnet import FNet
-from dl_techniques.models.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.language.fnet import FNet
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------

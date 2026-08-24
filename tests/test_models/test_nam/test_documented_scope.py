@@ -25,12 +25,12 @@ import pathlib
 import numpy as np
 import pytest
 
-from dl_techniques.models.nam import model as nam_model
-from dl_techniques.models.nam import cell as nam_cell
-from dl_techniques.models.nam import tokenizer as nam_tokenizer
-from dl_techniques.models.nam.model import NAM
-from dl_techniques.models.nam.config import NAMConfig
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam import model as nam_model
+from dl_techniques.models.neural_computer.nam import cell as nam_cell
+from dl_techniques.models.neural_computer.nam import tokenizer as nam_tokenizer
+from dl_techniques.models.neural_computer.nam.model import NAM
+from dl_techniques.models.neural_computer.nam.config import NAMConfig
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 
 README = pathlib.Path(nam_model.__file__).parent / "README.md"
 

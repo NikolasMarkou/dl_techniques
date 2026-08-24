@@ -30,7 +30,7 @@ flattened to ``(B, H*W, C)`` for attention.
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
 transformer = TwoWayTransformer(depth=2, embedding_dim=256, num_heads=8,
                                 mlp_dim=2048)
 queries, keys = transformer(image_embedding, image_pe, point_embedding)

@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/pw_fnet`` -- Phase 5 batch B.
+Oracle adoption for ``models/vision/image_restoration/pw_fnet`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.pw_fnet.model import PW_FNet
+from dl_techniques.models.vision.image_restoration.pw_fnet.model import PW_FNet
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

@@ -185,7 +185,7 @@ Both towers return **raw, un-normalized** features from their own `call`. Normal
 ### 4.1 `FastVitImageEncoder` — v2's image tower
 
 -   **Purpose**: to convert an image into a joint-space embedding at minimum cost, and to do so *faithfully* with respect to timm's `FastVit`.
--   **Location**: its own package, [`models/fastvit/`](../fastvit/README.md). It is a standalone `keras.Model` and is usable without any CLIP model around it.
+-   **Location**: its own package, [`models/vision/fastvit/`](../fastvit/README.md). It is a standalone `keras.Model` and is usable without any CLIP model around it.
 -   **Architecture**: a `MobileOneBlock` stem doing a /4 downsample, then 4 or 5 `FastVitStage`s (RepMixer in the shallow ones, global self-attention in the deepest), then a depthwise `final_conv` with squeeze-excitation, global average pooling, and a terminal `Dense`.
 -   **The terminal `Dense` IS the CLIP image projection**: MobileCLIP's open_clip configs set `"timm_pool": "avg"` with `"timm_proj": null`, and in open_clip's `TimmModel` a non-attention pool asserts that the trunk itself does the projecting and instantiates it with `num_classes=embed_dim`. So `embed_dim` is injected as `projection_dim` and the tower's output *is* the image embedding. **Stacking another projection on top would be a second, unfaithful one** — the model rejects a `projection_dim` written into `image_config` for exactly this reason.
 
@@ -212,7 +212,7 @@ Both towers return **raw, un-normalized** features from their own `call`. Normal
 -   **Functionality**:
     1.  **L2 normalization**: both feature sets are normalized, constraining them to a hypersphere so the dot product *is* cosine similarity.
     2.  **Temperature scaling**: scores are multiplied by `clip(exp(logit_scale), 0, logit_scale_max)`, where `logit_scale` is a learnable scalar initialized to `log(1 / 0.07)` following the CLIP paper.
-    3.  **Weight creation**: in v2 that scalar is created in `build()`, not `__init__`, following the `models/clip` precedent.
+    3.  **Weight creation**: in v2 that scalar is created in `build()`, not `__init__`, following the `models/vision_language/clip` precedent.
 
 ---
 
@@ -229,7 +229,7 @@ pip install keras>=3.0 tensorflow>=2.16 numpy
 
 ```python
 import numpy as np
-from dl_techniques.models.mobile_clip import MobileClipV2Model
+from dl_techniques.models.vision_language.mobile_clip import MobileClipV2Model
 
 # 1. Create the smallest faithful variant
 model = MobileClipV2Model.from_variant('mobileclip2_s0')
@@ -254,7 +254,7 @@ print(outputs['image_features'].shape)   # (2, 512)
 print(outputs['logits_per_image'].shape) # (2, 2)
 
 # 4. Or build v1, whose API has the same shape
-from dl_techniques.models.mobile_clip import MobileClipModel
+from dl_techniques.models.vision_language.mobile_clip import MobileClipModel
 v1 = MobileClipModel.from_variant('s0')
 v1.build({'image': (None, 256, 256, 3), 'text': (None, 77)})
 ```
@@ -274,7 +274,7 @@ Neither model ships a tokenizer. Both expect CLIP's byte-pair encoding with a 49
 | **`MobileClipModel`** | `...mobile_clip.mobile_clip_v1.MobileClipModel` | The v1 dual encoder. |
 | **`create_mobile_clip_model`** | `...mobile_clip.mobile_clip_v1.create_mobile_clip_model` | Recommended convenience function for v1 variants. |
 
-All four are re-exported from the package: `from dl_techniques.models.mobile_clip import ...`.
+All four are re-exported from the package: `from dl_techniques.models.vision_language.mobile_clip import ...`.
 
 `MODEL_VARIANTS` is deliberately **not** re-exported at package level. Each model owns its own table as a **class attribute** — `MobileClipModel.MODEL_VARIANTS` and `MobileClipV2Model.MODEL_VARIANTS` — and their key sets are disjoint and not interchangeable. Import each from its own class, explicitly.
 
@@ -363,7 +363,7 @@ Derive the number rather than trusting one written here:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -c "
-from dl_techniques.models.mobile_clip import MobileClipV2Model
+from dl_techniques.models.vision_language.mobile_clip import MobileClipV2Model
 m = MobileClipV2Model.from_variant('mobileclip2_s0')
 m.build({'image': (None,256,256,3), 'text': (None,77)})
 print(m.count_params())
@@ -381,7 +381,7 @@ Classify an image using natural-language prompts, with no fine-tuning.
 ```python
 import numpy as np
 from keras import ops
-from dl_techniques.models.mobile_clip import MobileClipV2Model
+from dl_techniques.models.vision_language.mobile_clip import MobileClipV2Model
 
 model = MobileClipV2Model.from_variant('mobileclip2_s0')
 
@@ -425,7 +425,7 @@ This is the same convention v1 uses, and it keeps "which fields did the caller a
 ### Example 4: Using the Image Tower on Its Own
 
 ```python
-from dl_techniques.models.fastvit import create_fastvit_image_encoder
+from dl_techniques.models.vision.fastvit import create_fastvit_image_encoder
 
 # CLIP embedding — the terminal Dense IS the projection
 tower = create_fastvit_image_encoder('mci0', projection_dim=512)
@@ -569,7 +569,7 @@ A minimal smoke test of your own:
 
 ```python
 import numpy as np
-from dl_techniques.models.mobile_clip import MobileClipV2Model
+from dl_techniques.models.vision_language.mobile_clip import MobileClipV2Model
 
 def test_creation_all_variants():
     """Every variant is constructible (config only — nothing is built)."""
@@ -641,7 +641,7 @@ A: No. Its terminal `Dense` already *is* the CLIP image projection, and the mode
 
 **Q: What are the `mci0`, `mci1` and `mci2` backbones?**
 
-A: Custom efficient hybrid architectures designed by Apple, part of the FastViT family. In v2 they are faithfully ported and live in `models/fastvit/`. In v1 the same strings resolve to `keras.applications` MobileNet substitutes (§4.2) — same name, different network.
+A: Custom efficient hybrid architectures designed by Apple, part of the FastViT family. In v2 they are faithfully ported and live in `models/vision/fastvit/`. In v1 the same strings resolve to `keras.applications` MobileNet substitutes (§4.2) — same name, different network.
 
 **Q: Can I load an official MobileCLIP or MobileCLIP2 checkpoint?**
 
@@ -680,7 +680,7 @@ A causal mask prevents a token from attending to future tokens — standard for 
 | Drop-path schedule | one global linear ramp over `sum(layers)` blocks, sliced stagewise |
 | Text FFN width | `4 * text_config['embed_dim']`, tabulated as a literal |
 
-More image-tower internals — LayerScale, normalization epsilon, the two squeeze-excitation ratios — are in [`models/fastvit/README.md`](../fastvit/README.md) §11.
+More image-tower internals — LayerScale, normalization epsilon, the two squeeze-excitation ratios — are in [`models/vision/fastvit/README.md`](../fastvit/README.md) §11.
 
 ---
 
@@ -688,7 +688,7 @@ More image-tower internals — LayerScale, normalization epsilon, the two squeez
 
 These apply to `MobileClipV2Model` only. v1's single, larger deviation is its backbone substitution (§4.2); it is not part of this numbered list.
 
-Every known divergence carries a stable id — a deviation that is silently absorbed makes the port unauditable. The image-tower deviations **X-1**, **X-2**, **X-3** and **X-5** are stated in full, with their measurements and RED proofs, in [`models/fastvit/README.md` §9](../fastvit/README.md#9-deviations-from-the-reference-implementation); summarized here:
+Every known divergence carries a stable id — a deviation that is silently absorbed makes the port unauditable. The image-tower deviations **X-1**, **X-2**, **X-3** and **X-5** are stated in full, with their measurements and RED proofs, in [`models/vision/fastvit/README.md` §9](../fastvit/README.md#9-deviations-from-the-reference-implementation); summarized here:
 
 | Id | Deviation |
 |---|---|
@@ -696,7 +696,7 @@ Every known divergence carries a stable id — a deviation that is silently abso
 | **X-2** | **One `use_bias` for both qkv and the output projection.** The shared `MultiHeadAttention` cannot express timm's unbiased-qkv + biased-proj split, so each attention block is short exactly one bias vector of length `dim`. MEASURED and pinned. |
 | **X-3** | **`mci0`/`mci1`/`mci2` have no local oracle.** They are transcribed from timm upstream, which is not installed here. `mci3`/`mci4` *do* have a real committed oracle. |
 | **X-4** | **No pretrained weights.** Architecture only; **no accuracy claim**. Any comparison against published MobileCLIP2 numbers is invalid by construction. |
-| **X-5** | **`RepMixerBlock` is a different architecture that shares the name.** `layers/repmixer_block.py::RepMixerBlock` is not FastViT's block; it is consumed by `models/fastvlm/` and deliberately untouched. Use `layers/fastvit/FastVitRepMixerBlock` for anything that must match timm block-for-block. |
+| **X-5** | **`RepMixerBlock` is a different architecture that shares the name.** `layers/repmixer_block.py::RepMixerBlock` is not FastViT's block; it is consumed by `models/vision_language/fastvlm/` and deliberately untouched. Use `layers/fastvit/FastVitRepMixerBlock` for anything that must match timm block-for-block. |
 
 ---
 
@@ -710,7 +710,7 @@ Use **v2** for anything that should correspond to the published architecture, or
 |---|---|---|
 | Module | `mobile_clip_v1.py` | `mobile_clip_v2.py` |
 | Paper | MobileCLIP (Vasu et al., 2024) | MobileCLIP2 (Faghri et al., 2025) |
-| Image tower | `keras.applications` MobileNetV2 / V3 **substitute** | faithful FastViT **MCi**, from [`models/fastvit/`](../fastvit/README.md) |
+| Image tower | `keras.applications` MobileNetV2 / V3 **substitute** | faithful FastViT **MCi**, from [`models/vision/fastvit/`](../fastvit/README.md) |
 | Text tower | `MobileClipTextEncoder` | the same class, shared |
 | Faithful to the reference? | **No**, by its own recorded decision D-001 | Yes, modulo X-1..X-5 |
 | Variant keys | `b`, `s0`, `s1`, `s2` | `mobileclip2_s0/s2/s3/s4`, `mobileclip_s3/s4` |

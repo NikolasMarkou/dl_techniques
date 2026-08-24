@@ -12,15 +12,15 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     Ideogram4Config,
     get_ideogram4_config,
 )
-from dl_techniques.models.ideogram4.constants import (
+from dl_techniques.models.vision_language.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )
-from dl_techniques.models.ideogram4.transformer import (
+from dl_techniques.models.vision_language.ideogram4.transformer import (
     Ideogram4Transformer,
     create_ideogram4_transformer,
 )

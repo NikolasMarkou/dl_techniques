@@ -13,7 +13,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.pft_sr.model import create_pft_sr, PFTSR
+from dl_techniques.models.vision.super_resolution.pft_sr.model import create_pft_sr, PFTSR
 
 SIZE = 32
 SCALE = 2

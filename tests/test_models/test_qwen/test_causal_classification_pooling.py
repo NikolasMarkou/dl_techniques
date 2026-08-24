@@ -18,8 +18,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.qwen.qwen3 import create_qwen3_classification
-from dl_techniques.models.qwen.qwen3_next import (
+from dl_techniques.models.language.qwen.qwen3 import create_qwen3_classification
+from dl_techniques.models.language.qwen.qwen3_next import (
     create_qwen3_next_classification,
 )
 

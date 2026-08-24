@@ -22,7 +22,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.power_mlp.model import (
+from dl_techniques.models.general_purpose.power_mlp.model import (
     PowerMLP,
     create_power_mlp,
     create_power_mlp_regressor,

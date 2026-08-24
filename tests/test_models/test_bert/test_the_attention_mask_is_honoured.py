@@ -25,7 +25,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 
 
 SEQ = 8

@@ -21,11 +21,11 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.mamba.components_v2 import (
+from dl_techniques.models.language.mamba.components_v2 import (
     Mamba2Layer,
     Mamba2ResidualBlock,
 )
-from dl_techniques.models.mamba.mamba_v2 import Mamba2
+from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
 
 D_MODEL = 32
 SEQ = 8

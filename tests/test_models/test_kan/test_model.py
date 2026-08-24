@@ -20,7 +20,7 @@ from keras import ops
 from typing import List, Dict, Any
 
 from dl_techniques.layers.ffn.kan_linear import KANLinear
-from dl_techniques.models.kan.model import KAN, create_kan_model
+from dl_techniques.models.general_purpose.kan.model import KAN, create_kan_model
 from dl_techniques.utils.logger import logger
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights

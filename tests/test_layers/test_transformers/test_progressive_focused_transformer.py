@@ -70,7 +70,7 @@ class TestStochasticDepthKwarg:
     `StochasticDepth.__init__` only accepts `drop_path_rate`, so `drop_rate`
     fell through to `keras.layers.Layer.__init__`, which rejects unknown
     kwargs. Every `drop_path_rate > 0.0` therefore died at CONSTRUCTION -- the
-    whole point of the parameter. `models/pft_sr/model.py` schedules
+    whole point of the parameter. `models/vision/super_resolution/pft_sr/model.py` schedules
     `linspace(0, drop_path_rate, total_blocks)` across its blocks, so the model
     was dead on arrival for any non-zero rate too.
 
@@ -167,12 +167,12 @@ class TestStochasticDepthKwarg:
 
 
 class TestPftSrConsumerSmoke:
-    """`models/pft_sr/model.py` is the live `PFTBlock` consumer (blast radius
+    """`models/vision/super_resolution/pft_sr/model.py` is the live `PFTBlock` consumer (blast radius
     derived by grep, not assumed). It schedules a `linspace` of rates across
     every block, so it was dead on arrival for any `drop_path_rate > 0`."""
 
     def test_pft_sr_builds_and_runs_at_nonzero_drop_path_rate(self) -> None:
-        from dl_techniques.models.pft_sr.model import PFTSR
+        from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
         model = PFTSR(
             scale=2, in_channels=3, embed_dim=16, num_blocks=[1, 1],
             num_heads=4, window_size=8, mlp_ratio=2.0, drop_path_rate=0.1,
@@ -184,7 +184,7 @@ class TestPftSrConsumerSmoke:
 
     def test_pft_sr_schedules_distinct_rates_across_blocks(self) -> None:
         """The linspace schedule must actually reach the blocks."""
-        from dl_techniques.models.pft_sr.model import PFTSR
+        from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
         model = PFTSR(
             scale=2, in_channels=3, embed_dim=16, num_blocks=[2, 2],
             num_heads=4, window_size=8, mlp_ratio=2.0, drop_path_rate=0.4,

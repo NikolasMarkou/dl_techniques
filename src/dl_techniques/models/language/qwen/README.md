@@ -12,7 +12,7 @@ covers what, and what has no document of its own.
 
 ## 1. What this package contains
 
-`src/dl_techniques/models/qwen/`:
+`src/dl_techniques/models/language/qwen/`:
 
 | File | Contents |
 | :--- | :--- |
@@ -22,7 +22,7 @@ covers what, and what has no document of its own.
 | `qwen3_embeddings.py` | `Qwen3EmbeddingLayer`, `Qwen3RerankerLayer`, `Qwen3EmbeddingModel`, `Qwen3RerankerModel`. |
 | `QWEN3.md` | Full document for `Qwen3`: architecture diagram, variants, MoE configuration, training, serialization. |
 | `QWEN3_next.md` | Full document for `Qwen3Next`, including a `Qwen3` vs `Qwen3 Next` comparison section. |
-| `__init__.py` | **A curated re-export module with `__all__`**, since the `1bfe89d08` package-init pass. Import `Qwen3`, `Qwen3Next`, their `create_*` factories and the embedding/reranker pair straight from `dl_techniques.models.qwen`; submodule imports keep working. This row read "**Empty.** There is no curated package API" until 2026-08-17 — the init was populated and neither this line nor `tests/test_readme_claims.py` moved with it. |
+| `__init__.py` | **A curated re-export module with `__all__`**, since the `1bfe89d08` package-init pass. Import `Qwen3`, `Qwen3Next`, their `create_*` factories and the embedding/reranker pair straight from `dl_techniques.models.language.qwen`; submodule imports keep working. This row read "**Empty.** There is no curated package API" until 2026-08-17 — the init was populated and neither this line nor `tests/test_readme_claims.py` moved with it. |
 
 Tests live in `tests/test_models/test_qwen/`: `test_qwen3.py`, `test_qwen3_next.py`,
 `test_components.py`, `test_qwen3_embeddings.py`.
@@ -105,7 +105,7 @@ variant defaults, then a config dict if one is passed, then explicit `**kwargs`.
 ## 4. Quick Start
 
 ```python
-from dl_techniques.models.qwen.qwen3 import create_qwen3
+from dl_techniques.models.language.qwen.qwen3 import create_qwen3
 
 # Autoregressive generation model from a named variant.
 gen_model = create_qwen3("tiny")
@@ -120,7 +120,7 @@ shallow = create_qwen3("tiny", num_layers=2)
 `Qwen3Next` follows the same shape:
 
 ```python
-from dl_techniques.models.qwen.qwen3_next import create_qwen3_next
+from dl_techniques.models.language.qwen.qwen3_next import create_qwen3_next
 
 model = create_qwen3_next("tiny", task_type="generation")
 ```

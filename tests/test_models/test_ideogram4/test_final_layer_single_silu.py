@@ -32,8 +32,8 @@ from dl_techniques.layers.transformers.ideogram4_block import (
     Ideogram4FinalLayer,
     Ideogram4TransformerBlock,
 )
-from dl_techniques.models.ideogram4.config import get_ideogram4_config
-from dl_techniques.models.ideogram4.transformer import Ideogram4Transformer
+from dl_techniques.models.vision_language.ideogram4.config import get_ideogram4_config
+from dl_techniques.models.vision_language.ideogram4.transformer import Ideogram4Transformer
 
 from .test_transformer import _make_batch, BATCH, SEQ_LEN
 

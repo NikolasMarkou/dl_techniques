@@ -19,7 +19,7 @@ produces), yielding the 2-tuple element::
 
 **Views ``0`` and ``1`` are the GLOBAL crops**; views ``2 ...`` are the local
 crops. That ordering, and the number of global views, are the contract stated
-in ``src/dl_techniques/models/dino/training.py`` — batching this element
+in ``src/dl_techniques/models/vision/dino/training.py`` — batching this element
 gives exactly the ``(batch, n_views, H, W, C)`` tensor
 ``DINOTrainingModel.call`` documents. ``N_GLOBAL_VIEWS`` is re-declared here
 rather than imported, so that a ``tf.data`` module does not pull in the whole
@@ -41,7 +41,7 @@ fixed-shape batching then serve every view. A genuinely smaller local
 resolution changes the patch-grid length, which requires interpolating the
 positional-embedding table — deliberately not implemented (it is named as
 the backlog item "Positional-embedding interpolation for smaller local
-crops" in ``src/dl_techniques/models/dino/README.md`` § 7).
+crops" in ``src/dl_techniques/models/vision/dino/README.md`` § 7).
 
 **The cost is real and is not hidden**: local crops are exactly as expensive as
 global ones, in both compute and activation memory. ``local_crop_size !=
@@ -223,7 +223,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 # DINO always uses exactly two global crops. This MUST equal
-# `dl_techniques.models.dino.training.N_GLOBAL_VIEWS`; the equality is
+# `dl_techniques.models.vision.dino.training.N_GLOBAL_VIEWS`; the equality is
 # asserted in tests/test_datasets/test_multi_crop.py rather than created by an
 # import, so that this tf.data module stays free of the Keras model package.
 N_GLOBAL_VIEWS = 2
@@ -465,7 +465,7 @@ def _make_multi_crop_element_fn(
             f"That interpolation is NOT implemented (plan decision D-002; "
             f"named as the backlog item 'Positional-embedding "
             f"interpolation for smaller local crops' in "
-            f"src/dl_techniques/models/dino/README.md § 7). Local views are "
+            f"src/dl_techniques/models/vision/dino/README.md § 7). Local views are "
             f"rendered at the SAME resolution as global views by cropping a "
             f"smaller AREA (see local_scale) and resizing up, so pass "
             f"local_crop_size=None or local_crop_size=global_crop_size."
@@ -706,7 +706,7 @@ def make_multi_crop_map_fn(
             positional-embedding interpolation, which this repository does not
             implement (D-002; the backlog item "Positional-embedding
             interpolation for smaller local crops" in
-            ``src/dl_techniques/models/dino/README.md`` § 7).
+            ``src/dl_techniques/models/vision/dino/README.md`` § 7).
         ValueError: If ``global_crop_size`` is not positive; if
             ``n_local_crops`` is negative; if either scale range is not an
             increasing pair inside ``(0, 1]``; if ``local_scale``'s maximum

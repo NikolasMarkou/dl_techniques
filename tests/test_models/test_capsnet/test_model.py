@@ -14,7 +14,7 @@ import tempfile
 import os
 from typing import Tuple
 
-from dl_techniques.models.capsnet.model import CapsNet, CapsuleAccuracy, create_capsnet
+from dl_techniques.models.vision.capsnet.model import CapsNet, CapsuleAccuracy, create_capsnet
 from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
 from dl_techniques.utils.tensors import length

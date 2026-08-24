@@ -19,7 +19,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hierarchical_reasoning_model.model import (
     HierarchicalReasoningModel,
     create_hierarchical_reasoning_model,
 )

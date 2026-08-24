@@ -28,7 +28,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vit.model import ViT
+from dl_techniques.models.vision.vit.model import ViT
 
 
 @keras.saving.register_keras_serializable(package="dl_techniques_test")

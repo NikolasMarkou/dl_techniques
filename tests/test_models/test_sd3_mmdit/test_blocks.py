@@ -18,7 +18,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
+from dl_techniques.models.vision_language.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
 
 
 # ---------------------------------------------------------------------

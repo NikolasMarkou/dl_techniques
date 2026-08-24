@@ -1,5 +1,5 @@
 """
-Correctness Instruments for SAM (`src/dl_techniques/models/SAM/SAM1/`)
+Correctness Instruments for SAM (`src/dl_techniques/models/vision_language/sam/sam1/`)
 =================================================================
 
 This module is deliberately NOT a second copy of ``test_model.py``. That suite
@@ -47,18 +47,18 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.SAM.SAM1.model import SAM
-from dl_techniques.models.SAM.SAM1.image_encoder import (
+from dl_techniques.models.vision_language.sam.sam1.model import SAM
+from dl_techniques.models.vision_language.sam.sam1.image_encoder import (
     ImageEncoderViT,
     WindowedAttentionWithRelPos,
 )
-from dl_techniques.models.SAM.SAM1.preprocessing import resize_longest_side
-from dl_techniques.models.SAM.SAM1.prompt_encoder import (
+from dl_techniques.models.vision_language.sam.sam1.preprocessing import resize_longest_side
+from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import (
     PromptEncoder,
     PositionEmbeddingRandom,
 )
-from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
-from dl_techniques.models.SAM.SAM1.transformer import (
+from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
+from dl_techniques.models.vision_language.sam.sam1.transformer import (
     TwoWayAttentionBlock,
     TwoWayTransformer,
 )
@@ -699,7 +699,7 @@ class TestRelPosInterpolationBranch:
         It documented a resolved framework triviality as if it were a live
         blocker on the very function this step repairs.
         """
-        import dl_techniques.models.SAM.SAM1.image_encoder as image_encoder_module
+        import dl_techniques.models.vision_language.sam.sam1.image_encoder as image_encoder_module
 
         with open(image_encoder_module.__file__, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -3160,7 +3160,7 @@ class TestRealVariantForwardPass:
         F-R4 --- pin the documented per-variant counts to a MEASUREMENT.
 
         The per-variant table's single home is the ``Model Variants:`` block of
-        ``models/SAM/SAM1/model.py``'s module docstring; ``SAM1/README.md`` §7
+        ``models/vision_language/sam/sam1/model.py``'s module docstring; ``SAM1/README.md`` §7
         points at it rather than restating it. That table previously quoted
         reference-PyTorch figures that two of this iteration's own layout
         changes had falsified (the mask decoder was listed at 3,143,424 against
@@ -3207,7 +3207,7 @@ class TestRealVariantForwardPass:
     def test_prompt_encoder_and_mask_decoder_are_variant_independent(self):
         """
         The other half of the ``Model Variants:`` table in
-        ``models/SAM/SAM1/model.py``'s module docstring: 6,476 and 4,058,340 for
+        ``models/vision_language/sam/sam1/model.py``'s module docstring: 6,476 and 4,058,340 for
         every one of the three variants that table lists, which is what makes
         its per-variant totals add up.
 

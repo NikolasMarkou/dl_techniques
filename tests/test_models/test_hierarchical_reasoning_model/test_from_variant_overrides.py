@@ -5,7 +5,7 @@ It ended in ``cls(vocab_size=..., seq_len=..., num_puzzle_identifiers=...,
 **config, **kwargs)`` with no ``config.update(kwargs)``. Every key in
 `MODEL_VARIANTS` is therefore un-overridable:
 
-    TypeError: dl_techniques.models.hierarchical_reasoning_model.model.
+    TypeError: dl_techniques.models.language.hierarchical_reasoning_model.model.
     HierarchicalReasoningModel() got multiple values for keyword argument
     'halt_max_steps'
 
@@ -20,7 +20,7 @@ variant, purely for build cost.
 
 import pytest
 
-from dl_techniques.models.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hierarchical_reasoning_model.model import (
     HierarchicalReasoningModel,
     create_hierarchical_reasoning_model,
 )

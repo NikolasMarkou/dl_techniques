@@ -4,7 +4,7 @@ Self-supervised video model built on CliffordNet primitives and the JEPA
 (Joint Embedding Predictive Architecture) objective. Currently trained on
 dashcam video (BDD100K); a synthetic dataset is kept for smoke/CI runs.
 
-- **Model package**: `src/dl_techniques/models/video_jepa/`
+- **Model package**: `src/dl_techniques/models/vision/video_jepa/`
 - **Datasets**:
   - `src/dl_techniques/datasets/bdd100k_video.py` — opencv-python loader
     for BDD100K `.mov` files, with deterministic seeded train/val split.
@@ -459,7 +459,7 @@ Headline arc: live target encoder + SIGReg is unable to produce a model that bea
 
 ## Known issues / caveats
 
-- **Reload-check failure ("hires bug") — FIXED in `plan_2026-05-24_ca745a6c`.** Iter-4 reported `max|delta|=8.30` between the in-memory model and the reloaded model at the scaled config and was originally attributed to the EMA `target_encoder` eager dummy-sync interacting with `from_config`. That diagnosis was wrong. The actual root cause is **scale-independent**: `TubeMaskGenerator` calls unseeded `keras.random.uniform`, and tube-mask substitution was running under `training=False`, which made `model(x, training=False)` self-non-deterministic for any `mask_prediction_enabled=True` config (reproduced on a fresh untrained model at small AND scaled configs with `max|delta|≈1.10`; scaled-config trained weights amplify it to ≈8.30). Fix: mask substitution is now gated on `training=True` (the V-JEPA/MAE convention — masks are a pretraining augmentation, not an inference contract). Anchored at `# DECISION plan_2026-05-24_ca745a6c/D-001` in `src/dl_techniques/models/video_jepa/model.py`. Locked in by `test_inference_determinism_with_masking`, `test_serialization_forward_parity_with_masking`, and `test_end_to_end_fit_and_reload_with_masking`. Both encoders are now reload-deterministic — no downstream workaround required.
+- **Reload-check failure ("hires bug") — FIXED in `plan_2026-05-24_ca745a6c`.** Iter-4 reported `max|delta|=8.30` between the in-memory model and the reloaded model at the scaled config and was originally attributed to the EMA `target_encoder` eager dummy-sync interacting with `from_config`. That diagnosis was wrong. The actual root cause is **scale-independent**: `TubeMaskGenerator` calls unseeded `keras.random.uniform`, and tube-mask substitution was running under `training=False`, which made `model(x, training=False)` self-non-deterministic for any `mask_prediction_enabled=True` config (reproduced on a fresh untrained model at small AND scaled configs with `max|delta|≈1.10`; scaled-config trained weights amplify it to ≈8.30). Fix: mask substitution is now gated on `training=True` (the V-JEPA/MAE convention — masks are a pretraining augmentation, not an inference contract). Anchored at `# DECISION plan_2026-05-24_ca745a6c/D-001` in `src/dl_techniques/models/vision/video_jepa/model.py`. Locked in by `test_inference_determinism_with_masking`, `test_serialization_forward_parity_with_masking`, and `test_end_to_end_fit_and_reload_with_masking`. Both encoders are now reload-deterministic — no downstream workaround required.
 - **Multi-horizon head collapse without EMA.** Per-horizon `Dense(D, no bias)` heads on top of a shared causal predictor do NOT break time-invariance symmetry on their own. When the target encoder is live (no EMA), all heads converge to the same numerical value (iter-2: all heads at approximately 0.0046). EMA target encoder is a necessary ingredient, not an optional ablation, when training multi-horizon JEPA at 30 fps. See `plan_2026-05-23_15151c75` and "Why EMA target" above.
 - **I/O is the bottleneck on real runs.** opencv-python random-frame
   seek on BDD100K MOV files saturates 3–4 CPU cores and keeps GPU
@@ -664,7 +664,7 @@ the trainer + dataset loaders + model package end-to-end.
   predictor + SIGReg; target encoder produces the regression target
   for both per-horizon next-frame loss and mask loss. Anchored as
   `# DECISION plan_2026-05-23_15151c75/D-001` in
-  `src/dl_techniques/models/video_jepa/model.py`. New trainer flags
+  `src/dl_techniques/models/vision/video_jepa/model.py`. New trainer flags
   `--ema-momentum`, `--ema-schedule`; the cosine step counter is a
   non-trainable weight so schedule progress survives `.keras` reload.
   Also (sub-decision D-002): SIGReg input switched from `pred` to
@@ -707,7 +707,7 @@ the trainer + dataset loaders + model package end-to-end.
   conditioning described there has been removed.
 - **Consolidated cross-plan summaries**: `plans/DECISIONS.md`,
   `plans/FINDINGS.md`, `plans/LESSONS.md`.
-- **Model package CLAUDE.md**: `src/dl_techniques/models/video_jepa/`
+- **Model package CLAUDE.md**: `src/dl_techniques/models/vision/video_jepa/`
   and module docstrings.
 - **Callbacks reused**:
   `src/dl_techniques/callbacks/training_curves.py`,

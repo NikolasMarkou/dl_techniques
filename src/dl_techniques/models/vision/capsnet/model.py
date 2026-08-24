@@ -261,7 +261,7 @@ class CapsNet(keras.Model):
 
         QUALIFICATION -- this mechanism is NECESSARY BUT NOT SUFFICIENT, and it
         is NOT a general law that "overriding `build` loses your weights".
-        Counterexample in this same repo: `models/pft_sr/model.py::PFTSR` also
+        Counterexample in this same repo: `models/vision/super_resolution/pft_sr/model.py::PFTSR` also
         overrides `keras.Model.build`, also creates every sub-layer inside
         `build()`, and never calls `.build()` on any of them -- yet it
         round-trips with 22 weights BEFORE the first `call()` and an output

@@ -32,7 +32,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM2 import SAM2MemoryBank
+from dl_techniques.models.vision_language.sam.sam2 import SAM2MemoryBank
 bank = SAM2MemoryBank(num_maskmem=7, mem_dim=64)
 memory, memory_pos, num_obj_ptr_tokens = bank.assemble(frame_index=3)
 ```

@@ -7,7 +7,7 @@ encoder/decoder is parameterized continuously by ``hidden_channels``,
 ``create_vq_vae_rotation`` therefore constructs the class directly rather than
 delegating to a ``from_variant``.
 """
-from dl_techniques.models.vq_vae_rotation.model import (
+from dl_techniques.models.vision.vq_vae_rotation.model import (
     VQVAERotationTrick,
     create_vq_vae_rotation,
 )

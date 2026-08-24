@@ -39,8 +39,8 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM2 import SAM2, SAM2MemoryBank, create_sam2
-from dl_techniques.models.SAM.SAM2.hiera import Hiera
+from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
+from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
 model = create_sam2("tiny")
 outputs = model({"image": images, "points": (coords, labels)})
 ```
@@ -55,7 +55,7 @@ Measured caveats:
   This ``__init__`` imports ``memory_bank`` and ``model`` only, never
   ``training_model``; SAM 1's and SAM 3's inits both import theirs. So a
   ``.keras`` file whose top-level class is ``SAM2TrainingModel`` needs an
-  explicit ``import dl_techniques.models.SAM.SAM2.training_model`` BEFORE the
+  explicit ``import dl_techniques.models.vision_language.sam.sam2.training_model`` BEFORE the
   ``load_model`` call. MEASURED at commit ``96c6a460b`` with the package import
   alone: ``TypeError: Could not deserialize class 'SAM2TrainingModel' because
   its parent module <the pre-move dotted path>.training_model cannot be

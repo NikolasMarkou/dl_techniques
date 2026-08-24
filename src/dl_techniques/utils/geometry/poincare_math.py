@@ -188,7 +188,7 @@ class PoincareMath:
         ``(1/sqrt(c)) - 1e-4`` rounds back to exactly ``1/sqrt(c)``, the clamp in
         `log_map_0` becomes an identity and ``arctanh(1.0) = inf`` propagates as
         NaN through every downstream op. MEASURED before this fix: all three
-        shipped `models/shgcn` classes returned **100% NaN** under
+        shipped `models/graph/shgcn` classes returned **100% NaN** under
         ``mixed_float16`` -- 96/96, 36/36 and 5/5 elements -- while float32 was
         green with ``arctanh`` reading 4.9521313 at the boundary. Any constant
         chosen without reference to the dtype is one precision change away from

@@ -28,7 +28,7 @@ plan):
 import keras
 import numpy as np
 
-from dl_techniques.models.resnet.model import ResNet
+from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.layers.standard_blocks import BasicBlock, BottleneckBlock
 
 
@@ -247,7 +247,7 @@ if __name__ == "__main__":
 
 
 class TestReadmeQuotesNoAccuracy:
-    """`models/resnet/README.md` used to print a per-variant ImageNet Top-1/Top-5
+    """`models/vision/resnet/README.md` used to print a per-variant ImageNet Top-1/Top-5
     table, footnoted only "*ImageNet validation accuracy with single crop", plus a
     `Performance (ImageNet)` block per variant and an "Empirical Results (ResNet-50 on
     CIFAR-10)" comparison.
@@ -274,7 +274,7 @@ class TestReadmeQuotesNoAccuracy:
         legitimately quote a number again — but only a MEASURED one."""
         import pytest
 
-        from dl_techniques.models.resnet.model import ResNet as _ResNet
+        from dl_techniques.models.vision.resnet.model import ResNet as _ResNet
 
         with pytest.raises(NotImplementedError):
             _ResNet.from_variant("resnet18", num_classes=10, pretrained=True)

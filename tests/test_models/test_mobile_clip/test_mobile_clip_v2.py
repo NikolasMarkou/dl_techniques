@@ -53,7 +53,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.mobile_clip.mobile_clip_v2 import (
+from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 import (
     DEFAULT_CONTEXT_LENGTH,
     DEFAULT_IMAGE_SIZE,
     DEFAULT_VOCAB_SIZE,
@@ -324,7 +324,7 @@ class TestModelVariants:
         the module deliberately exposes no `MODEL_VARIANTS` global that could be
         imported and then confused with v1's.
         """
-        import dl_techniques.models.mobile_clip.mobile_clip_v2 as module
+        import dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 as module
         assert 'MODEL_VARIANTS' in vars(MobileClipV2Model)
         assert not hasattr(module, 'MODEL_VARIANTS'), (
             "a module-level MODEL_VARIANTS reappeared; the table belongs on the "
@@ -1122,7 +1122,7 @@ class TestMobileClipV2Model:
         model.build({'image': (None, _IMG, _IMG, 3), 'text': (None, _SEQ)})
 
         records = []
-        import dl_techniques.models.mobile_clip.mobile_clip_v2 as module
+        import dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 as module
         original = module.logger.info
         module.logger.info = lambda message, *a, **k: records.append(str(message))
         try:

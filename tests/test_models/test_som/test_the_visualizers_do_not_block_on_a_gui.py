@@ -2,7 +2,7 @@
 
 Plan ``plan-2026-08-22T035419-a11304c8``, ruling **D-051**.
 
-`src/dl_techniques/models/som/model.py` called ``plt.show()`` unconditionally at
+`src/dl_techniques/models/memory/som/model.py` called ``plt.show()`` unconditionally at
 the end of all five ``visualize_*`` methods. A library must not decide to block
 on a GUI, and on the headless hosts this repo runs on (``MPLBACKEND=Agg`` is
 mandated repo-wide) the call cannot render at all.
@@ -33,7 +33,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.som.model import SOMModel
+from dl_techniques.models.memory.som.model import SOMModel
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 

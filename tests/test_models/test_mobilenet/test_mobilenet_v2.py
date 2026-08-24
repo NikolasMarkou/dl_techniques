@@ -27,7 +27,7 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from dl_techniques.models.mobilenet.mobilenet_v2 import MobileNetV2, create_mobilenetv2
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2, create_mobilenetv2
 
 
 def make_divisible(v: float, divisor: int = 8) -> int:

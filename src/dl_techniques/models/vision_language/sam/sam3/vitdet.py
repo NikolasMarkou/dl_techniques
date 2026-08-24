@@ -38,7 +38,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBackbone
+from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
 trunk = Sam3ViTDetBackbone(img_size=1008, patch_size=14, embed_dim=1024,
                            depth=32, num_heads=16, window_size=24)
 ```
@@ -139,7 +139,7 @@ def _window_unpartition(
 
 # DECISION plan-2026-08-04T044628-4c240b4c/D-085
 # This attention class is deliberately module-PRIVATE and deliberately
-# UNREGISTERED, exactly as `models/SAM/SAM2/memory_attention.py`'s
+# UNREGISTERED, exactly as `models/vision_language/sam/sam2/memory_attention.py`'s
 # `_SAM2RoPEAttention` is (D-008). Do NOT promote it to a third public class in
 # this file and do NOT replace it with `create_attention_layer('multi_head', ...)`.
 # The factory's `multi_head` entry maps to `layers/attention/MultiHeadAttention`,

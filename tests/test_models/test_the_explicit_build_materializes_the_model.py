@@ -244,7 +244,7 @@ def test_the_cliffordnet_lm_build_materializes_all_nineteen():
     the fix -- 95% of the model, the worst ratio the prior plan found (see
     ``tests/test_models/test_cliffordnet/test_lazy_build_contract.py``). Now 19.
     """
-    from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+    from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
 
     keras.utils.set_random_seed(0)
     model = CliffordNetLM(vocab_size=16, channels=8, depth=1,

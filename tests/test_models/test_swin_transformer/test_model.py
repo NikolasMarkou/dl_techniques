@@ -31,7 +31,7 @@ SMOKE_BATCH, SMOKE_NUM_CLASSES = 2, 10
 
 
 def _smoke_build():
-    from dl_techniques.models.swin_transformer.model import create_swin_transformer
+    from dl_techniques.models.vision.swin_transformer.model import create_swin_transformer
 
     # 32x32 is the DOCUMENTED example input (model.py:30), not a minimum --
     # see the module docstring; smaller and non-divisible inputs also work.
@@ -60,7 +60,7 @@ def test_smoke_build_and_forward():
 #
 # The old warning claimed non-divisibility "may cause issues in deeper stages".
 # An 80-cell sweep found ZERO true positives, so the warning was reworded to a
-# compute note (`models/swin_transformer/model.py`, DECISION
+# compute note (`models/vision/swin_transformer/model.py`, DECISION
 # plan-2026-07-31T210633-b63a35aa/D-003) and NO `window_size` raise was added.
 # A prose reword is not RED-provable on its own; this class is its testable
 # content. It goes red if anyone ever makes a warned geometry a correctness
@@ -85,7 +85,7 @@ class TestWarnedGeometriesAreCorrect:
     def test_warned_geometry_builds_with_declared_shape_equal_to_actual(
             self, input_hw, patch_size, window_size):
         """A WARNED geometry must build and report its true output shape."""
-        from dl_techniques.models.swin_transformer.model import SwinTransformer
+        from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
 
         # Pin that this cell really is one the predicate warns about, derived
         # from the same expression the model uses -- not restated as a literal.

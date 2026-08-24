@@ -20,7 +20,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import keras
 
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.models.vit_siglip.model import SigLIPVisionTransformer
+from dl_techniques.models.vision.vit_siglip.model import SigLIPVisionTransformer
 
 KERAS_DEFAULT_EPSILON = 1e-3
 

@@ -32,7 +32,7 @@ grid -- which is what the initial ``z`` draw is -- and descends to the data end,
 making ``s - t`` NEGATIVE at every step. ``LogitNormalSchedule`` is strictly
 DECREASING in its uniform argument, so the loop indexes ``step_intervals`` in
 reverse to obtain that descent (D-002; the derivation sits at the loop). Same
-convention as ``models/sd3_mmdit/``, the identical rectified flow.
+convention as ``models/vision_language/sd3_mmdit/``, the identical rectified flow.
 - ``_decode``: unpatchify ``(B, gh, gw, p, p, c)`` -> ``(B, gh*p, gw*p, c)``
   [NHWC], optional latent denorm (shift/scale), VAE decode, clamp to ``[-1, 1]``.
 
@@ -70,27 +70,27 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
     Ideogram4Config,
     get_ideogram4_config,
 )
-from dl_techniques.models.ideogram4.constants import (
+from dl_techniques.models.vision_language.ideogram4.constants import (
     IMAGE_POSITION_OFFSET,
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )
-from dl_techniques.models.ideogram4.latent_norm import get_latent_norm
-from dl_techniques.models.ideogram4.scheduler import (
+from dl_techniques.models.vision_language.ideogram4.latent_norm import get_latent_norm
+from dl_techniques.models.vision_language.ideogram4.scheduler import (
     LogitNormalSchedule,
     get_schedule_for_resolution,
     make_step_intervals,
 )
-from dl_techniques.models.ideogram4.transformer import (
+from dl_techniques.models.vision_language.ideogram4.transformer import (
     Ideogram4Transformer,
     create_ideogram4_transformer,
 )
-from dl_techniques.models.ideogram4.vae import (
+from dl_techniques.models.vision_language.ideogram4.vae import (
     AutoEncoder,
     create_ideogram4_autoencoder,
 )

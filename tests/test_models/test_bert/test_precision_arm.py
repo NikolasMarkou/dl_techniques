@@ -1,5 +1,5 @@
 """
-R-088 / R-141 mixed-precision arm for ``models/bert`` -- and the defect it found and fixed.
+R-088 / R-141 mixed-precision arm for ``models/language/bert`` -- and the defect it found and fixed.
 
 Why this file exists at all, re-derived rather than carried
 -----------------------------------------------------------
@@ -29,7 +29,7 @@ under ``mixed_float16`` RAISED, verbatim::
 
 Its float32 control is green, and the bare encoder at the SAME config is green
 under ``mixed_float16`` too (``test_the_encoder_is_green_which_localises_the_defect``),
-so the fault is in the head path and not in ``models/bert``'s own encoder.
+so the fault is in the head path and not in ``models/language/bert``'s own encoder.
 
 Root cause, isolated at the layer -- the PRE-FIX line::
 
@@ -54,7 +54,7 @@ DISPOSITION -- escalated under D-011/D-016, then RESOLVED as step 3.1
 ---------------------------------------------------------------------
 Step 3 pinned this ``xfail(strict=True)`` and escalated it, because the cause
 lives in ``src/dl_techniques/layers/activations/expanded_activations.py``, which
-is outside ``models/bert/`` and ``models/resnet/`` and is reached by every
+is outside ``models/language/bert/`` and ``models/vision/resnet/`` and is reached by every
 consumer of the activation factory's ``'gelu'`` / ``'xgelu'`` keys. The
 orchestrator resolved the escalation: BERT's flagship factory failing under
 ``mixed_float16`` is not a shippable state, so step 3.1 REPAIRED the shared
@@ -109,7 +109,7 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.activations.expanded_activations import GELU, xGELU
-from dl_techniques.models.bert import create_bert, create_bert_with_head
+from dl_techniques.models.language.bert import create_bert, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..precision_arm_oracle import (
@@ -261,7 +261,7 @@ def test_the_encoder_is_green_which_localises_the_defect() -> None:
     runs in ``test_precision_arm_family.py`` and duplicating it here would be a
     copy, not a measurement. What this arm adds is the CONTRAST -- same encoder
     config, no head, no raise -- which is the evidence that
-    ``models/bert``'s own code is not what fails below.
+    ``models/language/bert``'s own code is not what fails below.
 
     MEASURED (GPU 1): 2 output tensors, the float one at ``float16``, finite.
     """

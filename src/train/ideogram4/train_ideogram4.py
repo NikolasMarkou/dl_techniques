@@ -42,12 +42,12 @@ import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import FlowMatchingVelocityLoss
-from dl_techniques.models.ideogram4.config import get_ideogram4_config
-from dl_techniques.models.ideogram4.transformer import (
+from dl_techniques.models.vision_language.ideogram4.config import get_ideogram4_config
+from dl_techniques.models.vision_language.ideogram4.transformer import (
     Ideogram4Transformer,
     create_ideogram4_transformer,
 )
-from dl_techniques.models.ideogram4.constants import (
+from dl_techniques.models.vision_language.ideogram4.constants import (
     IMAGE_POSITION_OFFSET,
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,

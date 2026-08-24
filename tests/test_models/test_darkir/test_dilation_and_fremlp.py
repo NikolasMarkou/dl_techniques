@@ -43,7 +43,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.darkir.model import DilatedBranch, FreMLP
+from dl_techniques.models.vision.image_restoration.darkir.model import DilatedBranch, FreMLP
 
 
 SIZE, CHANNELS, CENTRE = 17, 4, 8

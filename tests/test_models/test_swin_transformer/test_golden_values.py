@@ -58,7 +58,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.swin_transformer.model import SwinTransformer
+from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
 
 # --- Frozen probe configuration. The references are tied to every value. ----
 CONFIG = dict(

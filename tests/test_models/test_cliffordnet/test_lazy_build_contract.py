@@ -21,7 +21,7 @@ from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
 
 
 def _build():
-    from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+    from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
     return CliffordNetLM(vocab_size=16, channels=8, depth=1,
                          max_seq_length=8, shifts=(1,))
 

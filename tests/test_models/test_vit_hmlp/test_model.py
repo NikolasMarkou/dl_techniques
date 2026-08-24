@@ -13,7 +13,7 @@ import tempfile
 import numpy as np
 from typing import Tuple, Dict, Any, List
 
-from dl_techniques.models.vit_hmlp.model import (
+from dl_techniques.models.vision.vit_hmlp.model import (
     ViTHMLP,
     create_vit_hmlp,
     create_inputs_with_masking,

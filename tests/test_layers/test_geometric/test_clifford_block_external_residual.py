@@ -36,7 +36,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
     CausalCliffordNetBlock,
 )
-from dl_techniques.models.cliffordnet.model import CliffordNet
+from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 
 
 # gamma ~ 0: the LayerScale-gated transform contributes ~ 0, so the block's

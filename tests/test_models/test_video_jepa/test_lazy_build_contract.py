@@ -23,7 +23,7 @@ from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
 
 
 def _build():
-    from dl_techniques.models.video_jepa.model import create_video_jepa
+    from dl_techniques.models.vision.video_jepa.model import create_video_jepa
     return create_video_jepa(img_size=32, patch_size=16, num_frames=2, embed_dim=32)
 
 

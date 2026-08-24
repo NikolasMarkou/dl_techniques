@@ -19,7 +19,7 @@ or not the final norm honours it.
 import numpy as np
 import pytest
 
-from dl_techniques.models.fnet.model import FNet
+from dl_techniques.models.language.fnet.model import FNet
 
 from ..knob_sensitivity_oracle import as_array, build_seeded
 

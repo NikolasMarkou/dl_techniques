@@ -5,7 +5,7 @@ a JEPA-style action-conditioned world model. Trains on a synthetic random
 dataset by default; an HDF5 PushT loader skeleton is provided for real data.
 
 - **Script**: `src/train/lewm/train_lewm.py`
-- **Model**: `src/dl_techniques/models/lewm/`
+- **Model**: `src/dl_techniques/models/vision/lewm/`
 - **Dataset producers**: `src/dl_techniques/datasets/pusht_hdf5.py`
 - **Loss regularizer**: `src/dl_techniques/regularizers/sigreg.py`
 - **Upstream reference**: Sobal et al., 2024 (LeWM) — PyTorch source at `/tmp/lewm_source/`
@@ -20,14 +20,14 @@ runs in seconds on CPU.
 
 ## Model Overview
 
-`LeWM` (`src/dl_techniques/models/lewm/model.py`) is a self-supervised
+`LeWM` (`src/dl_techniques/models/vision/lewm/model.py`) is a self-supervised
 world model that predicts future visual embeddings conditioned on actions.
 
 ### Components
 
 | Component | File | Role |
 |-----------|------|------|
-| `ViT` encoder | `dl_techniques.models.vit.model` | Per-frame patch encoder, CLS-pooled. Default scale `tiny` (192d). |
+| `ViT` encoder | `dl_techniques.models.vision.vit.model` | Per-frame patch encoder, CLS-pooled. Default scale `tiny` (192d). |
 | `MLPProjector` (`projector`) | `lewm/projector.py` | Refines encoder features: `Linear -> LayerNorm -> GELU -> Linear`. Identity-shaped (192->192) by default. |
 | `ActionEmbedder` (`action_encoder`) | `lewm/embedder.py` | `Conv1D(k=1) -> Dense -> SiLU -> Dense`, maps `(B,T,A) -> (B,T,D)`. |
 | `ARPredictor` (`predictor`) | `lewm/predictor.py` | Stack of `AdaLNZeroConditionalBlock` transformer blocks with learned positional embedding (init stddev 0.02). Conditions on action embeddings. |
@@ -216,7 +216,7 @@ auto-enabled.
 
 - `keras >= 3.8`, `tensorflow 2.18`, `numpy`
 - `h5py` (only when `--hdf5-path` is used; imported lazily)
-- Internal: `dl_techniques.models.vit`, `dl_techniques.layers.transformers.adaln_zero`,
+- Internal: `dl_techniques.models.vision.vit`, `dl_techniques.layers.transformers.adaln_zero`,
   `dl_techniques.regularizers.sigreg`, `dl_techniques.utils.logger`,
   `train.common.setup_gpu`
 

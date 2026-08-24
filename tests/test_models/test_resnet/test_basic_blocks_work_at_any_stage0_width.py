@@ -28,7 +28,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet.model import ResNet
+from dl_techniques.models.vision.resnet.model import ResNet
 
 # ---------------------------------------------------------------------
 

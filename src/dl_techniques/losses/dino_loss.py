@@ -337,10 +337,10 @@ def _set_teacher_temp(self, value: float) -> None:
             constructor enforces.
 
     This is the seam a teacher-temperature warmup schedule drives. Reuse
-    `dl_techniques.models.depth_anything.teacher_ema.linear_ema_schedule` (or
+    `dl_techniques.models.vision.depth_anything.teacher_ema.linear_ema_schedule` (or
     `cosine_ema_schedule`) with a `keras.callbacks.LambdaCallback` rather than
     adding another schedule-callback class -- see
-    `src/dl_techniques/models/dino/README.md` § "Training".
+    `src/dl_techniques/models/vision/dino/README.md` § "Training".
     """
     if value <= 0:
         raise ValueError(f"teacher_temp must be positive, got {value}")
@@ -400,7 +400,7 @@ class DINOLoss(keras.losses.Loss):
            dimension is treated as a batch dimension, so the model must have
            already flattened its (view, pair) structure into rows -- see
            `DINOTrainingModel` in
-           `src/dl_techniques/models/dino/training.py`, which emits
+           `src/dl_techniques/models/vision/dino/training.py`, which emits
            `(batch * n_pairs, 2 * out_dim)`. **A rank > 2 packed `y_pred` is
            NOT supported**: the centering EMA reduces only `axis=0`, so a
            `(batch, n_pairs, 2 * out_dim)` input makes the batch centre

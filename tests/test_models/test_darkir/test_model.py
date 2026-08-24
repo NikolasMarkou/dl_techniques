@@ -12,7 +12,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.darkir.model import create_darkir_model
+from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
 
 SPATIAL = 32
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
 # The step-10 report carried the hypothesis "darkir ~300 dead weights -- far too
 # many to be by-design, treat as a probable finding". That hypothesis is
 # **REFUTED**. The 330 are the documented zero-init per-branch scale, stated in
-# the model's own module docstring (``models/darkir/model.py``, "Both blocks
+# the model's own module docstring (``models/vision/image_restoration/darkir/model.py``, "Both blocks
 # scale each of their two residual branches by a learnable per-channel scale ...
 # initialized to **zeros**. Every block therefore begins training as an exact
 # [identity]") and enforced at ``model.py`` in ``DarkIREncoderBlock.build`` /
@@ -193,7 +193,7 @@ class TestDarkIRGradientFlow:
 
 import contextlib
 
-from dl_techniques.models.darkir.model import (
+from dl_techniques.models.vision.image_restoration.darkir.model import (
     DarkIRDecoderBlock,
     DarkIREncoderBlock,
 )
@@ -253,7 +253,7 @@ class TestDarkIRBlockTowerIsLoadBearing:
         # DECISION plan-2026-08-19T070627-a616f581/D-016
         `F-62` recorded "darkir is an exact identity at initialization" as a
         REAL LIVE DEFECT. It is not a defect; it is the design, and this test
-        asserts it. `models/darkir/model.py`'s own module docstring says so in
+        asserts it. `models/vision/image_restoration/darkir/model.py`'s own module docstring says so in
         as many words -- "Every block therefore begins training as an exact
         identity and the whole tower starts as the global residual connection
         alone. This is the LayerScale/ReZero idea" -- and D-012 already measured

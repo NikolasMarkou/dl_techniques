@@ -25,7 +25,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.nano_vlm.model import NanoVLM
+from dl_techniques.models.vision_language.nano_vlm.model import NanoVLM
 
 IMG = 32
 PATCH = 16

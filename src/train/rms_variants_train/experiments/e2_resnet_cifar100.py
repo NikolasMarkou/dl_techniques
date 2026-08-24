@@ -30,7 +30,7 @@ import numpy as np
 import tensorflow as tf
 
 from train.common import load_dataset
-from dl_techniques.models.resnet.model import create_resnet
+from dl_techniques.models.vision.resnet.model import create_resnet
 from dl_techniques.utils.logger import logger
 
 from train.rms_variants_train.callbacks import (

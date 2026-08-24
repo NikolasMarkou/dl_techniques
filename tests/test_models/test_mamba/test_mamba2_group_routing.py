@@ -35,7 +35,7 @@ import keras
 from keras import ops
 import pytest
 
-from dl_techniques.models.mamba.components_v2 import Mamba2Layer
+from dl_techniques.models.language.mamba.components_v2 import Mamba2Layer
 
 
 D_MODEL, D_STATE, HEADDIM, D_SSM = 16, 4, 8, 32

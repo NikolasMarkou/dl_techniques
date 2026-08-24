@@ -14,15 +14,15 @@ CliffordNet block and constituent primitives.
    Re-derived 2026-08-11 with exactly that grep: 15 paths, unchanged in
    substance since 2026-08-10. They are this module itself, **8 importing
    source modules across 4 packages** (the earlier "9" counted this file):
-   ``models/cliffordnet/{lm,model}.py``,
-   ``models/clip/clifford_clip.py``,
-   ``models/video_jepa/{encoder,predictor}.py``,
+   ``models/vision/cliffordnet/{lm,model}.py``,
+   ``models/vision_language/clip/clifford_clip.py``,
+   ``models/vision/video_jepa/{encoder,predictor}.py``,
    ``train/cliffordnet/{infer_cliffordnet_nlp,train_cliffordnet_nlp,
    train_downsampling_techniques}.py``; **3 test modules**
    (``tests/test_layers/test_geometric/test_clifford_block.py`` and
    ``..._external_residual.py``, ``tests/test_models/test_video_jepa/
    test_video_jepa.py``); and **3 READMEs** that only name the class
-   (``models/cliffordnet/``, ``train/cliffordnet/``, ``train/video_jepa/``).
+   (``models/vision/cliffordnet/``, ``train/cliffordnet/``, ``train/video_jepa/``).
    The corresponding suites are
    ``tests/test_layers/test_geometric/``, ``tests/test_models/test_cliffordnet/``,
    ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``
@@ -334,7 +334,7 @@ Implementation notes, known behaviours and deviations
    (mask propagation through two convolutions, the pooled branch and the
    normalizations), not a repair.  Until it is: bucket sequences by length so
    a batch needs little or no padding, or pool with an EXPLICIT mask outside
-   the block (``models/clip/clifford_clip.py``'s text tower already does
+   the block (``models/vision_language/clip/clifford_clip.py``'s text tower already does
    exactly this).  Both effects are pinned as known behaviour by
    ``TestSequencePaddingHazard`` in
    ``tests/test_layers/test_geometric/test_clifford_block.py``; if masking is
@@ -730,7 +730,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         # This layer is deliberately rank-agnostic and is MEASURED working at
         # ranks 2, 3, 4 and 5. Two shipped consumers depend on rank 2:
         # `layers/geometric/clifford_rnn.py` (the RNN cell runs it per timestep
-        # on `(B, D)`), and `models/clip/clifford_clip.py`'s `vision_head_geo` /
+        # on `(B, D)`), and `models/vision_language/clip/clifford_clip.py`'s `vision_head_geo` /
         # `text_head_geo`, which run it on pooled `(B, D)` vectors. An
         # `InputSpec(ndim=4)`-style tightening here would break both. Inspect
         # `input_shape[-1]` and nothing else. See decisions.md D-006.
@@ -1214,7 +1214,7 @@ class CliffordNetBlock(keras.layers.Layer):
         any other value. Two distinct, measured consequences — see note 8 in
         the module docstring for the numbers and for what to do instead
         (bucket by length, or pool with an explicit mask OUTSIDE the block, as
-        ``models/clip/clifford_clip.py`` already does for its text tower).
+        ``models/vision_language/clip/clifford_clip.py`` already does for its text tower).
     :type input_mode: Optional[InputMode]
     :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
     :type layer_scale_init: float
@@ -2099,7 +2099,7 @@ class CausalCliffordNetBlock(CliffordNetBlock):
 # Do NOT restore them, and do NOT add a `strides`/`out_channels` downsampling
 # path onto `CliffordNetBlock` as a stand-in. The owner declared the DSv2
 # downsampling experiment dead; the two model modules that consumed it
-# (`models/cliffordnet/embedding_unet.py`, `models/cliffordnet/lmunet.py`), four
+# (`models/vision/cliffordnet/embedding_unet.py`, `models/vision/cliffordnet/lmunet.py`), four
 # trainers, and three test suites were removed in the same commit. Re-adding the
 # classes here would re-create exactly the half-deleted state this cleanup
 # exists to repair. See decisions.md D-005/D-006.

@@ -196,7 +196,7 @@ def test_the_energy_seeded_initializer_still_reproduces():
 # Site 3 -- the NTM heads, judged at the MODEL, where the pairs were measured
 # ---------------------------------------------------------------------------
 def test_the_ntm_heads_have_no_identical_projections_left():
-    from dl_techniques.models.ntm import create_ntm_variant
+    from dl_techniques.models.neural_computer.ntm import create_ntm_variant
     keras.utils.set_random_seed(0)
     model = create_ntm_variant(variant="tiny", input_shape=(10, 8),
                                output_dim=4)
@@ -233,7 +233,7 @@ def test_the_ntm_probe_can_see_a_collision_it_is_meant_to_reject():
 # fastvlm -- the whole-model statement, and the RoPE exemption named explicitly
 # ---------------------------------------------------------------------------
 def test_fastvlm_has_no_identical_random_pairs_outside_the_rope_caches():
-    from dl_techniques.models.fastvlm.model import FastVLM
+    from dl_techniques.models.vision_language.fastvlm.model import FastVLM
     keras.utils.set_random_seed(0)
     model = FastVLM(num_classes=4)
     pairs = _identical_same_shape_pairs(model)
@@ -272,7 +272,7 @@ def test_fastvlm_has_no_identical_random_pairs_outside_the_rope_caches():
 def test_the_cbam_squeeze_and_excite_kernels_are_no_longer_one_draw():
     """MEASURED BEFORE: 2 pairs, one per block, at (64, 8) vs (8, 64) and
     (128, 16) vs (16, 128). AFTER: 0."""
-    from dl_techniques.models.cbam import CBAMNet
+    from dl_techniques.models.vision.cbam import CBAMNet
     keras.utils.set_random_seed(1234)
     model = CBAMNet.from_variant("tiny", input_shape=(32, 32, 3), num_classes=4)
     model(np.zeros((1, 32, 32, 3), "float32"), training=False)
@@ -309,7 +309,7 @@ def test_the_flat_probe_sees_what_the_shape_probe_could_not():
 # relgt -- the 5-vs-0 disagreement, settled by the construction
 # ---------------------------------------------------------------------------
 def _relgt(embedding_dim, ffn_dim):
-    from dl_techniques.models.relgt import RELGT
+    from dl_techniques.models.graph.relgt import RELGT
     keras.utils.set_random_seed(1234)
     model = RELGT(output_dim=2, num_transformer_blocks=1, num_heads=2,
                   num_global_centroids=4, num_node_types=3, gnn_pe_dim=8,
@@ -348,7 +348,7 @@ def test_relgt_has_no_identical_pairs_at_either_disputed_construction(
 # clip -- both classes, both needing a BUILT model
 # ---------------------------------------------------------------------------
 def _clip():
-    from dl_techniques.models.clip.model import CLIP
+    from dl_techniques.models.vision_language.clip.model import CLIP
     keras.utils.set_random_seed(1234)
     model = CLIP(image_size=32, patch_size=16, vision_layers=1, vision_width=32,
                  vision_heads=2, vision_kv_heads=1, text_layers=1,
@@ -377,7 +377,7 @@ def test_clip_has_no_identical_random_pairs_outside_the_rope_caches():
 
 
 def _clifford_clip():
-    from dl_techniques.models.clip.clifford_clip import CliffordCLIP
+    from dl_techniques.models.vision_language.clip.clifford_clip import CliffordCLIP
     keras.utils.set_random_seed(1234)
     model = CliffordCLIP.from_variant(
         "nano", vocab_size=64, image_size=64, context_length=16,
@@ -431,7 +431,7 @@ def test_yolo12_detection_head_no_longer_ties_the_box_and_class_branches():
     do; if a later change makes it vanish, that is a much larger edit than
     anyone thought they were making and it should fail here first.
     """
-    from dl_techniques.models.yolo12 import create_yolov12_multitask
+    from dl_techniques.models.vision.yolo12 import create_yolov12_multitask
     keras.utils.set_random_seed(1234)
     model = create_yolov12_multitask(num_detection_classes=4,
                                      tasks=["detection"],

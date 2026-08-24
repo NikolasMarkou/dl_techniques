@@ -160,7 +160,7 @@ pip install keras>=3.0 tensorflow>=2.18 numpy dl_techniques
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.darkir import create_darkir_model
+from dl_techniques.models.vision.image_restoration.darkir import create_darkir_model
 
 # 1. Create Model (Standard Configuration)
 model = create_darkir_model(
@@ -194,7 +194,7 @@ restored_img = model.predict(x_train[:1])
 
 ### 6.1 `create_darkir_model`
 
-**Location**: `dl_techniques.models.darkir`
+**Location**: `dl_techniques.models.vision.image_restoration.darkir`
 
 The main factory function. Returns a compiled `keras.Model`.
 
@@ -208,7 +208,7 @@ model = create_darkir_model(
 
 ### 6.2 `DarkIREncoderBlock` & `DarkIRDecoderBlock`
 
-**Location**: `dl_techniques.models.darkir`
+**Location**: `dl_techniques.models.vision.image_restoration.darkir`
 
 *   **Encoder Block**: Contains Normalization -> Dilated Branches -> SimpleGate -> **FreMLP**.
 *   **Decoder Block**: Contains Normalization -> Dilated Branches -> SimpleGate -> **Inverted FFN**.
@@ -405,7 +405,7 @@ def test_darkir_shapes():
     print("✅ Shape Consistency Verified")
     
     # Check simple gate logic
-    from dl_techniques.models.darkir import SimpleGate
+    from dl_techniques.models.vision.image_restoration.darkir import SimpleGate
     sg = SimpleGate()
     # Input 2C -> Output C
     out = sg(np.random.normal(size=(1, 10, 10, 6))) 

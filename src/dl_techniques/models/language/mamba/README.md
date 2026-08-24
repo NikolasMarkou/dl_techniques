@@ -208,9 +208,9 @@ Let's build a Mamba V1-based model. Creating a V2 model is as simple as swapping
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.mamba.mamba_v1 import Mamba
+from dl_techniques.models.language.mamba.mamba_v1 import Mamba
 # To use Mamba V2, simply import it instead:
-# from dl_techniques.models.mamba.mamba_v2 import Mamba2
+# from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
 
 # 1. Define model configuration
 VOCAB_SIZE = 10000
@@ -307,7 +307,7 @@ Mamba V2's efficiency and powerful representations make it great for dense predi
 
 ```python
 import keras
-from dl_techniques.models.mamba.mamba_v2 import Mamba2
+from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
 
 # 1. Configuration for NER
 VOCAB_SIZE = 50257
@@ -339,7 +339,7 @@ ner_model.summary()
 The `create_mamba_with_head` function in `mamba_v1.py` provides a powerful pattern for combining the V1 Mamba encoder with pre-built task heads.
 
 ```python
-from dl_techniques.models.mamba.mamba_v1 import create_mamba_with_head
+from dl_techniques.models.language.mamba.mamba_v1 import create_mamba_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 seq_cls_task = NLPTaskConfig(
@@ -404,7 +404,7 @@ The `Mamba`, `Mamba2`, and all their custom layers are fully serializable using 
 ```python
 import keras
 # Import all custom classes used by the model you are loading
-from dl_techniques.models.mamba.mamba_v2 import Mamba2, Mamba2Layer, Mamba2ResidualBlock
+from dl_techniques.models.language.mamba.mamba_v2 import Mamba2, Mamba2Layer, Mamba2ResidualBlock
 
 model = Mamba2.from_variant("130m", vocab_size=1000)
 # ... train the model ...

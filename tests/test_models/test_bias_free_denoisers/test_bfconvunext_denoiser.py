@@ -1,12 +1,12 @@
 """
-Test suite for the bias-free ConvUNext denoiser (models/bias_free_denoisers/bfconvunext.py).
+Test suite for the bias-free ConvUNext denoiser (models/vision/bias_free_denoisers/bfconvunext.py).
 
 Covers the embedded ConvUNextStem layer (construction / forward / shape / config
 round-trip), the create_convunext_denoiser functional builder (ValueError paths,
 forward pass, deep supervision), the create_convunext_variant wrapper, and the
 M2 full .keras save -> load -> identical-output round-trip.
 
-NOTE: ConvUNextStem is now ONE class, defined in models/convunext/model.py and
+NOTE: ConvUNextStem is now ONE class, defined in models/vision/convunext/model.py and
 re-exported here; it carries a `use_bias` parameter that defaults to True. Being
 bias-free is therefore a contract of the *bias-free builder*
 (create_convunext_denoiser pins use_bias=False), not a structural property of the
@@ -20,7 +20,7 @@ import pytest
 import numpy as np
 from typing import Dict, Any, Tuple
 
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     ConvUNextStem,
     create_convunext_denoiser,
     create_convunext_variant,

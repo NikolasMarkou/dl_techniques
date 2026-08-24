@@ -1,4 +1,4 @@
-"""Model-level tests for `dl_techniques.models.tiny_recursive_model`.
+"""Model-level tests for `dl_techniques.models.language.tiny_recursive_model`.
 
 Ported from the former `tests/test_models/test_trm/test_model.py` during the
 iter-1 test-dir consolidation onto the src-mirroring `test_tiny_recursive_model/`.
@@ -27,7 +27,7 @@ from typing import Dict, Any
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.tiny_recursive_model import TRM, TRMInner, TRMReasoningModule
+from dl_techniques.models.language.tiny_recursive_model import TRM, TRMInner, TRMReasoningModule
 
 from ..knob_sensitivity_oracle import (
     as_array,

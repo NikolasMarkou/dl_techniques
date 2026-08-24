@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.swin_transformer.model import (
+from dl_techniques.models.vision.swin_transformer.model import (
     SwinTransformer,
     create_swin_transformer,
 )

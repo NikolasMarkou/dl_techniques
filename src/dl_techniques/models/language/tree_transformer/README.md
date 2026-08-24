@@ -139,7 +139,7 @@ This example builds a `tiny` model and inspects its outputs for a dummy sequence
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.tree_transformer import TreeTransformer
+from dl_techniques.models.language.tree_transformer import TreeTransformer
 
 # 1. Create a "tiny" Tree Transformer from a pre-defined variant
 # This model is a pure encoder, ready to be used as a foundation.
@@ -208,14 +208,14 @@ model = TreeTransformer.from_variant(
 ### Example 1: Setting up for Masked Language Modeling (MLM)
 
 The primary training objective for Tree Transformer is MLM, identical to BERT. Use the
-`MaskedLanguageModel` wrapper from `dl_techniques.models.masked_language_model` which
+`MaskedLanguageModel` wrapper from `dl_techniques.models.language.masked_language_model` which
 handles the masking, label generation, and loss internally (it is encoder-agnostic and
 accepts any encoder exposing `.hidden_size` and a `{"last_hidden_state": ...}` output).
 
 ```python
 import keras
-from dl_techniques.models.tree_transformer import TreeTransformer
-from dl_techniques.models.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.language.tree_transformer import TreeTransformer
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
 
 # 1. Create the foundation encoder. The trainer MUST set pad_token_id to match
 #    the tokenizer's pad id (e.g. 100266 for tiktoken cl100k_base) — leaving the
@@ -251,7 +251,7 @@ Use the `create_tree_transformer_with_head` factory to easily build a model for 
 
 ```python
 import keras
-from dl_techniques.models.tree_transformer import create_tree_transformer_with_head
+from dl_techniques.models.language.tree_transformer import create_tree_transformer_with_head
 from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration

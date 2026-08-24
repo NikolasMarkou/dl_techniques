@@ -40,7 +40,7 @@ PYRAMID = ((8, 64), (16, 128), (32, 256))
 
 
 def _build():
-    from dl_techniques.models.yolo12.feature_extractor import (
+    from dl_techniques.models.vision.yolo12.feature_extractor import (
         create_yolov12_feature_extractor,
     )
 
@@ -98,7 +98,7 @@ def test_an_illegal_scale_still_raises():
     Argument validation is worth pinning; it just is not evidence about the
     smoke assertion above, which is what the old name claimed.
     """
-    from dl_techniques.models.yolo12.feature_extractor import (
+    from dl_techniques.models.vision.yolo12.feature_extractor import (
         create_yolov12_feature_extractor,
     )
 

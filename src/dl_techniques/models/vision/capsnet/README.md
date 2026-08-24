@@ -192,7 +192,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.capsnet.model import create_capsnet
+from dl_techniques.models.vision.capsnet.model import create_capsnet
 
 # 1. Create a CapsNet model for MNIST (28x28 grayscale images, 10 classes)
 # The factory function handles creation and compilation.
@@ -368,7 +368,7 @@ A simple `pytest` test to ensure model creation and a forward pass work as expec
 import pytest
 import numpy as np
 import keras
-from dl_techniques.models.capsnet.model import CapsNet
+from dl_techniques.models.vision.capsnet.model import CapsNet
 
 def test_capsnet_creation_and_forward_pass():
     """Test model creation and check output shapes."""

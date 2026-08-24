@@ -18,7 +18,7 @@ import tempfile
 import os
 
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
-from dl_techniques.models.ntm.model import NTMModel, create_ntm_variant
+from dl_techniques.models.neural_computer.ntm.model import NTMModel, create_ntm_variant
 
 
 # ---------------------------------------------------------------------

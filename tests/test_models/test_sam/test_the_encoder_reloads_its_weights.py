@@ -41,7 +41,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
+from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
 
 IMG_SIZE = 64
 PATCH = 16

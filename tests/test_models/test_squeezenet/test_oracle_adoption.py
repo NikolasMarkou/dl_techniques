@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/squeezenet`` -- Phase 5 batch C.
+Oracle adoption for ``models/vision/squeezenet`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -62,11 +62,11 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.squeezenet.squeezenet_v1 import (
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import (
     SqueezeNetV1,
     create_squeezenet_v1,
 )
-from dl_techniques.models.squeezenet.squeezenet_v2 import (
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import (
     SqueezeNoduleNetV2,
     create_squeezenodule_net_v2,
 )

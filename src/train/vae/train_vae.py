@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vae.model import VAE, create_vae
+from dl_techniques.models.vision.vae.model import VAE, create_vae
 from dl_techniques.layers.sampling import Sampling, HypersphereSampling, VMFSampling
 
 from train.common import (

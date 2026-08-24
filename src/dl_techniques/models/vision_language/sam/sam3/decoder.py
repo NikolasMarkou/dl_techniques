@@ -33,7 +33,7 @@ Settled configuration: ``d_model=256``, ``num_heads=8``,
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.decoder import Sam3TransformerDecoder
+from dl_techniques.models.vision_language.sam.sam3.decoder import Sam3TransformerDecoder
 decoder = Sam3TransformerDecoder(d_model=256, num_heads=8, num_layers=6,
                                  num_queries=200, feat_size=(72, 72))
 ```

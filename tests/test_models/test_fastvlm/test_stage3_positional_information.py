@@ -45,8 +45,8 @@ import keras
 from keras import ops
 import pytest
 
-from dl_techniques.models.fastvlm.components import AttentionBlockVLM
-from dl_techniques.models.fastvlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm.components import AttentionBlockVLM
+from dl_techniques.models.vision_language.fastvlm.model import FastVLM
 
 
 DIM, HEADS, GRID, BATCH = 64, 4, 14, 2

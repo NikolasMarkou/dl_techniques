@@ -457,7 +457,7 @@ class TestMobileOneBlockFastVitExtensions:
     """Pins for the ADDITIVE FastViT kwargs.
 
     Every kwarg added for the FastViT (timm) port must default to this layer's
-    historical behaviour, because ``models/fastvlm/`` (via
+    historical behaviour, because ``models/vision_language/fastvlm/`` (via
     ``layers/repmixer_block.py::ConvolutionalStem``) is a live consumer. The first
     test in this class is the guard for that property; the rest pin each new axis.
     """
@@ -881,7 +881,7 @@ class TestMobileOneBlockNormEpsilonAndPadding:
 
     Both were shipped wrong and survived 400 green tests, because a normalization
     epsilon and a padding convention are invisible to every shape assertion. The
-    default of each kwarg is Keras' own behaviour so ``models/fastvlm/`` is
+    default of each kwarg is Keras' own behaviour so ``models/vision_language/fastvlm/`` is
     untouched; the FastViT port opts in.
     """
 
@@ -909,7 +909,7 @@ class TestMobileOneBlockNormEpsilonAndPadding:
 
         This is the counterpart of the fidelity pin: it is the assertion that
         would fire if someone "fixed" the default to the reference value and
-        silently moved every ``models/fastvlm/`` numeric.
+        silently moved every ``models/vision_language/fastvlm/`` numeric.
         """
         layer = MobileOneBlock(out_channels=32, kernel_size=3, stride=1)
         layer.build((None, 8, 8, 32))
@@ -1013,7 +1013,7 @@ class TestMobileOneBlockNormEpsilonAndPadding:
 
         This is the control for the test above: it proves the probe is
         discriminating, and it pins that the default path was NOT silently
-        changed under ``models/fastvlm/``.
+        changed under ``models/vision_language/fastvlm/``.
         """
         kxk = self._dirac_block('keras_same', 'kxk')
         scale = self._dirac_block('keras_same', 'scale')
@@ -1101,7 +1101,7 @@ class TestMobileOneBlockNormEpsilonAndPadding:
             err_msg=(
                 "the DEFAULT MobileOneBlock no longer equals Keras' own "
                 "Conv2D(padding='same') + BatchNormalization(): a default moved "
-                "and models/fastvlm/ has been silently changed"
+                "and models/vision_language/fastvlm/ has been silently changed"
             ),
         )
 

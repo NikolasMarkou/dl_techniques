@@ -33,7 +33,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3 import Sam3Image
+from dl_techniques.models.vision_language.sam.sam3 import Sam3Image
 model = Sam3Image.from_variant("tiny")
 outputs = model({"image": images, "token_ids": ids}, training=False)
 ```

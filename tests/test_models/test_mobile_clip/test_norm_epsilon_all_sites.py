@@ -27,7 +27,7 @@ import keras
 import pytest
 
 from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
-from dl_techniques.models.mobile_clip.components import MobileClipTextEncoder
+from dl_techniques.models.vision_language.mobile_clip.components import MobileClipTextEncoder
 
 KERAS_DEFAULT_EPSILON = 1e-3
 #: What `layers/norms/factory.py` setdefaults, i.e. what the unthreaded sites got.
@@ -121,7 +121,7 @@ class TestTheKnobIsThreadedNotHardcoded:
         assert len(set(seen)) == len(seen)
 
     def test_the_constant_is_imported_not_re_declared(self):
-        import dl_techniques.models.mobile_clip.components as components
+        import dl_techniques.models.vision_language.mobile_clip.components as components
 
         assert components.REFERENCE_NORM_EPSILON is REFERENCE_NORM_EPSILON
 

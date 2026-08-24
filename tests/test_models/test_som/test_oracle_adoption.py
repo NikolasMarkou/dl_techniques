@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/som`` -- Phase 5 batch C.
+Oracle adoption for ``models/memory/som`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -57,7 +57,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.som.model import SOMModel, create_som
+from dl_techniques.models.memory.som.model import SOMModel, create_som
 
 from ..gradient_flow_oracle import gradient_report
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights

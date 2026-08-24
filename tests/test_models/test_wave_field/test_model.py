@@ -13,12 +13,12 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.wave_field.model import (
+from dl_techniques.models.language.wave_field.model import (
     WaveFieldLLM,
     WaveFieldDecoderBlock,
     create_wave_field_llm,
 )
-import dl_techniques.models.wave_field as wave_field_pkg
+import dl_techniques.models.language.wave_field as wave_field_pkg
 from dl_techniques.losses import MaskedCausalLMLoss
 
 

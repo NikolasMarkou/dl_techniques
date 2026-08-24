@@ -246,7 +246,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.clip.model import CLIP
+from dl_techniques.models.vision_language.clip.model import CLIP
 
 # 1. Create a ViT-B/32 model from a predefined variant
 model = CLIP.from_variant("ViT-B/32")
@@ -322,7 +322,7 @@ The most powerful application of CLIP is classifying images without any fine-tun
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.clip.model import create_clip_variant
+from dl_techniques.models.vision_language.clip.model import create_clip_variant
 
 # Assume you have a text tokenizer
 def tokenize(texts, context_length=77):
@@ -493,7 +493,7 @@ You can validate the implementation with simple tests to ensure all variants can
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.clip.model import CLIP
+from dl_techniques.models.vision_language.clip.model import CLIP
 
 def test_creation_all_variants():
     """Test model creation for all variants."""

@@ -372,7 +372,7 @@ And one **guardrail:** the non-conservative Jacobian is not a bug to fix casuall
 - Chung, H. & Ye, J. C. (2022). *Diffusion posterior sampling (DPS).* arXiv:2209.14687.
 - Chao et al. (2023). *On investigating the conservative property of score-based generative models.* ICML. arXiv:2209.12753.
 
-**Repo assets referenced:** `src/applications/bias_free_denoiser/samplers.py` · `src/dl_techniques/utils/multiplicative_miyasawa.py` · `src/dl_techniques/models/bias_free_denoisers/{bfcnn,bfunet,bfconvunext,bfcliffordunet}.py` · `src/dl_techniques/layers/{bias_free_conv2d.py, norms/bias_free_batch_norm.py}` · `src/dl_techniques/callbacks/noise_sigma_curriculum.py` · `src/train/bfunet/eval_psnr_vs_noise.py`.
+**Repo assets referenced:** `src/applications/bias_free_denoiser/samplers.py` · `src/dl_techniques/utils/multiplicative_miyasawa.py` · `src/dl_techniques/models/vision/bias_free_denoisers/{bfcnn,bfunet,bfconvunext,bfcliffordunet}.py` · `src/dl_techniques/layers/{bias_free_conv2d.py, norms/bias_free_batch_norm.py}` · `src/dl_techniques/callbacks/noise_sigma_curriculum.py` · `src/train/bfunet/eval_psnr_vs_noise.py`.
 
 ---
 

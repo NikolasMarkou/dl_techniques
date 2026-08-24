@@ -18,7 +18,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
     BeitForImageClassification,
 )

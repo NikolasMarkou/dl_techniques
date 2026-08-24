@@ -7,7 +7,7 @@ Three independent defects, in the order they masked each other (F-82):
     call to ``NanoVLMTrainer.train_step`` raised ``AttributeError: module
     'keras' has no attribute 'GradientTape'`` before a single gradient was
     computed. The repo idiom is ``tf.GradientTape`` (see
-    ``models/masked_autoencoder/mae.py``).
+    ``models/vision/masked_autoencoder/mae.py``).
 (b) ``Metric.reset_states``. Keras 3 renamed it to ``reset_state``, so
     ``trainer.reset_metrics()`` raised at the top of every epoch.
 (c) ``for step, batch in enumerate(train_dataset)``. ``keras.utils.Sequence``

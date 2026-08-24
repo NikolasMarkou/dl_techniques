@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.detr import DETR, DetrTransformer
+from dl_techniques.models.vision.detr import DETR, DetrTransformer
 
 HIDDEN_DIM = 32
 NUM_HEADS = 4

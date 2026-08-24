@@ -32,7 +32,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM2.memory_attention import SAM2MemoryAttention
+from dl_techniques.models.vision_language.sam.sam2.memory_attention import SAM2MemoryAttention
 attention = SAM2MemoryAttention(d_model=256, num_layers=4)
 conditioned = attention(tokens, memory, memory_pos, num_obj_ptr_tokens=4)
 ```

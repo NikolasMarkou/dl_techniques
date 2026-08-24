@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/beit`` -- Phase 5 batch A.
+Oracle adoption for ``models/vision/beit`` -- Phase 5 batch A.
 
 Zero adoption of ``gradient_flow_oracle`` / ``knob_sensitivity_oracle`` /
 ``smoke_contract_oracle`` before this file. All three are adopted; no new oracle
@@ -30,7 +30,7 @@ num_classes=7)`` after one real optimizer step: **224** trainable weights,
 
 That is documented, deliberate behaviour, not a finding. ``BeitModel.build``
 carries the comment "ALWAYS built -- even in the classifier, which never calls
-it" (``models/beit/model.py``), and ``BeitModel.call`` applies the mask token
+it" (``models/vision/beit/model.py``), and ``BeitModel.call`` applies the mask token
 only when the caller passes a mask. Building it unconditionally is the fix for a
 different defect entirely: a lazily-built sub-layer drops its weights on a
 ``.keras`` round trip.
@@ -48,7 +48,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     create_beit_classifier,
     create_beit_mim,
 )

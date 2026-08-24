@@ -10,7 +10,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
-from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
 
 
 def _random_ids(shape, vocab_size):

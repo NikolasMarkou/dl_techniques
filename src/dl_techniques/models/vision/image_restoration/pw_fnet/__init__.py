@@ -9,7 +9,7 @@ the class with the reference defaults rather than delegating to a
 ``PW_FNet_Block`` is exported alongside the model because the FFN-factory test
 suite builds it standalone.
 """
-from dl_techniques.models.pw_fnet.model import (
+from dl_techniques.models.vision.image_restoration.pw_fnet.model import (
     PW_FNet,
     PW_FNet_Block,
     Downsample,

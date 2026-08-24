@@ -31,7 +31,7 @@ Architectural Design:
     -   `upsample_factor=1`, the default, is the no-upsampling case: the input
         features are assumed to already carry the output resolution, as in DPT
         variants whose encoder preserves spatial detail or whose multi-scale
-        features are fused *before* this head. `models/depth_anything/model.py`
+        features are fused *before* this head. `models/vision/depth_anything/model.py`
         does not use that default — it passes the encoder stride (16), so a
         `H/16 x W/16` feature map returns to full resolution.
 

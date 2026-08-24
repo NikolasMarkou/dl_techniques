@@ -13,7 +13,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.sd3_mmdit.text_encoders import (
+from dl_techniques.models.vision_language.sd3_mmdit.text_encoders import (
     CLIPTextEncoder,
     OpenCLIPTextEncoder,
     T5Encoder,

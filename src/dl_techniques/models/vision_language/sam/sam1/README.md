@@ -109,7 +109,7 @@ mechanisms, lives in the module docstrings:
 
 ```python
 import keras
-from dl_techniques.models.SAM.SAM1 import SAM, resize_longest_side
+from dl_techniques.models.vision_language.sam.sam1 import SAM, resize_longest_side
 
 model = SAM.from_variant('vit_b')          # RANDOM weights — no checkpoint ships
 
@@ -256,7 +256,7 @@ Two readings of it are worth stating in prose:
 **Inference latency and per-variant memory footprint are NOT measured anywhere
 in this package.** No inference benchmark ships here and none was ever run, so
 no latency or GB-per-variant figure for `vit_b` / `vit_l` / `vit_h` appears
-under `models/SAM/`. Treat any such number you find elsewhere for these variants
+under `models/vision_language/sam/`. Treat any such number you find elsewhere for these variants
 as unrelated to this implementation. (The two memory figures that DO appear —
 the 6,754.5 MiB `vit_h` forward peak in `test_correctness.py` and the COCO
 wall-clock in §10 — are a test-cost measurement and a data-pipeline
@@ -311,7 +311,7 @@ never reached. Executed, on this package's own smallest on-disk checkpoint:
 
 ```python
 import keras
-import dl_techniques.models.SAM.SAM1.training_model   # registrar-first
+import dl_techniques.models.vision_language.sam.sam1.training_model   # registrar-first
 
 model = keras.models.load_model(path, compile=False)
 print(type(model).__name__, len(model.weights))
@@ -329,7 +329,7 @@ rule that holds for all three.
 ```bash
 python -c "
 import keras
-from dl_techniques.models.SAM.SAM1 import SAM
+from dl_techniques.models.vision_language.sam.sam1 import SAM
 
 model = SAM.from_variant('vit_b')
 # Build model...

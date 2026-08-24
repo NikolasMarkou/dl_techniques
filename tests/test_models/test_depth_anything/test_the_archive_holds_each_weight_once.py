@@ -27,7 +27,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.depth_anything.model import (
+from dl_techniques.models.vision.depth_anything.model import (
     DepthAnything,
     create_depth_anything,
 )

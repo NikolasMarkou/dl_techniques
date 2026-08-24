@@ -35,12 +35,12 @@ import copy
 
 import pytest
 
-from dl_techniques.models.cbam.model import CBAMNet
-from dl_techniques.models.coshnet.model import CoShNet
-from dl_techniques.models.fractalnet.model import FractalNet
-from dl_techniques.models.resnet.model import ResNet
-from dl_techniques.models.swin_transformer.model import SwinTransformer
-from dl_techniques.models.tabm.model import TabMModel
+from dl_techniques.models.vision.cbam.model import CBAMNet
+from dl_techniques.models.vision.coshnet.model import CoShNet
+from dl_techniques.models.vision.fractalnet.model import FractalNet
+from dl_techniques.models.vision.resnet.model import ResNet
+from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
+from dl_techniques.models.tabular.tabm.model import TabMModel
 
 #: ``(label, cls, variant, overrides)`` -- each override names a field the
 #: variant preset also supplies, which is exactly the collision F-73 was.

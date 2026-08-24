@@ -567,7 +567,7 @@ class TestSwinConvBlockInputResolutionIsAdvisory:
         ``256//8 = 32 > 8``, so 0 of 7 declared-``SW`` blocks were downgraded.
         The downgrade needed ``input_resolution <= 64`` at ``ws=8``.
         """
-        from dl_techniques.models.scunet.model import SCUNet
+        from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
         cfg = dict(in_nc=3, config=[2] * 7, dim=16, head_dim=8, window_size=8,
                    stochastic_depth_rate=0.0)

@@ -62,7 +62,7 @@ library's Python files, i.e. 56% of everything under `src/`. The other eleven su
 combined are smaller than either one.
 
 > **`layers`/`models` re-derived 2026-08-14 (second pass), after `models/mobile_clip_v2/`
-> was SPLIT into `models/fastvit/` (the assembled MCi tower) + `models/mobile_clip/mobile_clip_v2.py`
+> was SPLIT into `models/vision/fastvit/` (the assembled MCi tower) + `models/vision_language/mobile_clip/mobile_clip_v2.py`
 > (the CLIP model), leaving `layers/fastvit/` untouched. That pass also corrected an
 > off-by-one in each of the two rows below — the pair total `561` had been right while its
 > `294`/`267` split was not; at that HEAD the true split was `295`/`266`. Re-derive with
@@ -72,7 +72,7 @@ combined are smaller than either one.
 > `models/mobile_clip_v2/` packages
 > landed (every one of the ~68 Numbers-table rows was
 > re-executed, not only the rows this change moved). Previously re-derived 2026-08-11,
-> after the `models/beit/` + `src/train/beit/` package landed, and 2026-08-10, after the
+> after the `models/vision/beit/` + `src/train/beit/` package landed, and 2026-08-10, after the
 > multi-package deletion pass** (`convnext_patch_vae`, `cliffordnet` submodules,
 > `bfcliffordunet`, `anomaly_detection`, `qwen3_som`, two `modern_bert` modules). Every
 > `.py` FILE-COUNT digit in this section and in the corresponding Numbers-table rows moved
@@ -87,7 +87,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 297 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 270 | **The second largest.** 74 *top-level* model packages — not 74 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules, while `src/dl_techniques/models/image_restoration/` is not an architecture at all (see below). Re-derived 2026-08-24: **71 of 74** bind a `create_*` factory in their package init and **72 of 74** export a curated `__all__`; the 3 that bind no factory are `power_sampling`, the nested family `SAM/`, and `image_restoration`, and `SAM/` and `image_restoration` are the two without an `__all__`. `SAM/` exports nothing on purpose — re-exporting the class `SAM2` there would shadow the `SAM2/` subpackage (its own init docstring carries the reasoning) — and `image_restoration/` is a DOCUMENTATION-ONLY directory: an empty `__init__.py` beside `README.md` and `BENCHMARKS.md`, holding no Python at all. It arrived by `git pull` in `4334b282d` and it is why the "model packages" row moved 73 -> 74 without any architecture landing. (This sentence said "69 of 73 ... the 4 without a factory are `power_sampling`, `mamba`, `fnet` and `SAM/`" until 2026-08-24, and before that "70 of 73 ... `power_sampling`, `SAM/`, `time_series/`": that is three consecutive wrong lists. `mamba` and `fnet` DO bind one — the figure quoted the ANYWHERE-in-package command against the IN-THE-INIT question. Re-derive from the Numbers table row, never by memory.) See Part C. |
+| **`src/dl_techniques/models/`** | 270 | **The second largest.** 74 *top-level* model packages — not 74 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/vision/bias_free_denoisers/` holds several denoiser architectures as sibling modules, while `src/dl_techniques/models/image_restoration/` is not an architecture at all (see below). Re-derived 2026-08-24: **71 of 74** bind a `create_*` factory in their package init and **72 of 74** export a curated `__all__`; the 3 that bind no factory are `power_sampling`, the nested family `SAM/`, and `image_restoration`, and `SAM/` and `image_restoration` are the two without an `__all__`. `SAM/` exports nothing on purpose — re-exporting the class `SAM2` there would shadow the `SAM2/` subpackage (its own init docstring carries the reasoning) — and `image_restoration/` is a DOCUMENTATION-ONLY directory: an empty `__init__.py` beside `README.md` and `BENCHMARKS.md`, holding no Python at all. It arrived by `git pull` in `4334b282d` and it is why the "model packages" row moved 73 -> 74 without any architecture landing. (This sentence said "69 of 73 ... the 4 without a factory are `power_sampling`, `mamba`, `fnet` and `SAM/`" until 2026-08-24, and before that "70 of 73 ... `power_sampling`, `SAM/`, `time_series/`": that is three consecutive wrong lists. `mamba` and `fnet` DO bind one — the figure quoted the ANYWHERE-in-package command against the IN-THE-INIT question. Re-derive from the Numbers table row, never by memory.) See Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 41 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -194,7 +194,7 @@ directories under `tests/test_models/`. (All three digits were re-measured on
 2026-08-14 in the whole-table re-derivation; the trainer count had drifted 48 -> 47
 since 2026-08-10 without any row moving to record it. **ADDENDUM, 2026-08-14 (later
 the same day): 47 -> 46.** `src/train/convunext/` was deleted when
-`models/convunext` and `models/bias_free_denoisers/bfconvunext` were merged onto one
+`models/vision/convunext` and `models/vision/bias_free_denoisers/bfconvunext` were merged onto one
 `create_convunext(..., use_bias=...)` builder; its two scripts reached into the
 deleted `ConvUNextModel`'s subclass-only internals and had zero importers, zero
 tests and no row here. Both derivations move together: 48 -> 47 including
@@ -211,9 +211,9 @@ is usually still trained — under another name:
 
 | Model package | Actual trainer |
 |---|---|
-| `src/dl_techniques/models/bias_free_denoisers/` | `src/train/bfunet/` — four `train_*.py` scripts, e.g. `src/train/bfunet/train_convunext_denoiser.py` |
-| `src/dl_techniques/models/byte_latent_transformer/` | `src/train/blt/train_blt.py` |
-| `src/dl_techniques/models/hierarchical_reasoning_model/` | `src/train/hrm/train_hrm.py` |
+| `src/dl_techniques/models/vision/bias_free_denoisers/` | `src/train/bfunet/` — four `train_*.py` scripts, e.g. `src/train/bfunet/train_convunext_denoiser.py` |
+| `src/dl_techniques/models/language/byte_latent_transformer/` | `src/train/blt/train_blt.py` |
+| `src/dl_techniques/models/language/hierarchical_reasoning_model/` | `src/train/hrm/train_hrm.py` |
 
 **2. Two entries under `src/train/` are not model trainers.** `src/train/logic/` is a
 boolean-circuit and rule-learning research harness (numbered experiment scripts plus its
@@ -300,7 +300,7 @@ parts:
    `src/train/`, and this package is where the shared ones concentrate.
 3. **Beside the thing they serve** — a callback tightly coupled to one model or one
    optimizer lives with it, not in `src/dl_techniques/callbacks/`. Examples:
-   `src/dl_techniques/models/depth_anything/teacher_ema.py`,
+   `src/dl_techniques/models/vision/depth_anything/teacher_ema.py`,
    `src/dl_techniques/models/memory_bank/phase_scheduler.py`, and
    `src/dl_techniques/optimization/ww_pgd_optimizer.py`.
 
@@ -451,7 +451,7 @@ the map's job is to route you to the right one, not to paraphrase it.
 | What activations / sequence-pooling options exist? | `src/dl_techniques/layers/activations/GUIDE.md`, `src/dl_techniques/layers/sequence_pooling/GUIDE.md` |
 | How is a layer subpackage organized? | `src/dl_techniques/layers/CLAUDE.md`, plus that subpackage's own `README.md` |
 | What task heads exist, and how is `create_head` dispatched? | `src/dl_techniques/layers/heads/CLAUDE.md` |
-| What does model `<name>` do? | `src/dl_techniques/models/<name>/README.md`, e.g. `src/dl_techniques/models/bias_free_denoisers/README.md` |
+| What does model `<name>` do? | `src/dl_techniques/models/<name>/README.md`, e.g. `src/dl_techniques/models/vision/bias_free_denoisers/README.md` |
 | How are model packages meant to be structured? | `src/dl_techniques/models/CLAUDE.md` |
 | How do I add or run a trainer? | `src/train/CLAUDE.md`, then that trainer's own `README.md` |
 | How do the Streamlit apps split GUI from core? | `src/applications/CLAUDE.md` |
@@ -489,8 +489,8 @@ table are named precisely *because* they do not resolve.
 | "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 49 files under `src/` name `keras.callbacks.Callback`; only 10 are in `src/dl_techniques/callbacks/` and 31 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
 | "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Now holds for models too, though it did not when this row was written: 71 of the 74 model packages bind a `create_*` in their package init and only 2 (`power_sampling` and the documentation-only `image_restoration/`) define none anywhere. The row is kept because the pre-`1bfe89d08` figures — 27 and 14 — are what the root `CLAUDE.md` claim was measured against, and they moved without the map moving. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
-| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split was repaired to 255 of 294 — that file now asserts **256 of 296**, re-derived 2026-08-19, which is this row's own lesson happening to this row's own text. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
-| `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired by shipping `global_attention_interval = 1` for those two variants (all-global attention); they now run and measure **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
+| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/vision/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split was repaired to 255 of 294 — that file now asserts **256 of 296**, re-derived 2026-08-19, which is this row's own lesson happening to this row's own text. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
+| `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/language/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired by shipping `global_attention_interval = 1` for those two variants (all-global attention); they now run and measure **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
 are gitignored and will not be in your clone. The root `CLAUDE.md` is tracked, and the
@@ -524,7 +524,7 @@ the tracked place a future reader will look.
   remains reachable as `ModernBERT.from_variant("base", global_attention_interval=3)`, which
   is the configuration that cannot complete a forward pass on this hardware.
   Rationale and the rejected alternatives: the `D-019` / `D-027` / `D-135` anchors in
-  `models/modern_bert/model.py`.
+  `models/language/modern_bert/model.py`.
 
 ---
 
@@ -617,7 +617,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > do so again" — and the mention/binding gap is now 74 against 71. The table was re-derived a
 > SECOND time after that edit, and all 66 rows reproduce.
 >
-> **The `.py` FILE-COUNT rows were re-derived on 2026-08-11**, after the `models/beit/` +
+> **The `.py` FILE-COUNT rows were re-derived on 2026-08-11**, after the `models/vision/beit/` +
 > `src/train/beit/` package landed (and on 2026-08-10, after the multi-package deletion pass) — see the boxed note in Part A § "src/dl_techniques/ — the 13
 > subpackages". They are one row-group with that section's prose and its per-subpackage
 > table: move all three together or none. The directory-count rows are current as of the

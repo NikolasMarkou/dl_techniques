@@ -50,7 +50,7 @@ from dl_techniques.layers.transformers.energy_transformer import (
     EnergyTransformer,
     WeightedAdjacencyProjector,
 )
-from dl_techniques.models.graph_energy_transformer.model import (
+from dl_techniques.models.graph.graph_energy_transformer.model import (
     GraphAnomalyDetector,
     GraphEnergyTransformerBackbone,
     create_graph_anomaly_detector,

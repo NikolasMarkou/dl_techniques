@@ -148,7 +148,7 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         # required-params check no longer covers it -- validate_embedding_config's
         # computed rule below does. Do NOT "simplify" by deleting that rule, and do
         # NOT move type_vocab_size back into required_params (that would force every
-        # token-type-free caller, e.g. models/distilbert/, to pass a dummy positive
+        # token-type-free caller, e.g. models/language/distilbert/, to pass a dummy positive
         # integer that is then serialized into every checkpoint -- the exact inert
         # config key this plan exists to delete). See decisions.md D-002 and D-010.
         'required_params': ['vocab_size', 'hidden_size', 'max_position_embeddings'],

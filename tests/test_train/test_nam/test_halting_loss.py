@@ -15,7 +15,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.nam import NAM, NAMConfig
+from dl_techniques.models.neural_computer.nam import NAM, NAMConfig
 from train.nam.train_nam import _make_compiled_train_fn
 
 B, L, ACT_STEPS = 2, 16, 2

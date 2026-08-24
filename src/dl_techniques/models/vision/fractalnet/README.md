@@ -250,7 +250,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.fractalnet.model import create_fractal_net
+from dl_techniques.models.vision.fractalnet.model import create_fractal_net
 
 # 1. Create a FractalNet-Small model for CIFAR-10 (32x32 images, 10 classes)
 # The create_fractal_net function also compiles the model.
@@ -448,7 +448,7 @@ Simple tests can validate that all model variants are created correctly and that
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.fractalnet.model import FractalNet
+from dl_techniques.models.vision.fractalnet.model import FractalNet
 
 def test_creation_all_variants():
     """Test model creation for all variants."""

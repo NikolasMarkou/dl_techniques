@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/modern_bert`` -- Phase 5 batch C.
+Oracle adoption for ``models/language/modern_bert`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -48,7 +48,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

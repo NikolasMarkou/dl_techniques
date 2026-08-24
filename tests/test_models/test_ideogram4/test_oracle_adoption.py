@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/ideogram4`` -- Phase 5 batch B.
+Oracle adoption for ``models/vision_language/ideogram4`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -32,15 +32,15 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     Ideogram4Config,
     get_ideogram4_config,
 )
-from dl_techniques.models.ideogram4.constants import (
+from dl_techniques.models.vision_language.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )
-from dl_techniques.models.ideogram4.transformer import Ideogram4Transformer
+from dl_techniques.models.vision_language.ideogram4.transformer import Ideogram4Transformer
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

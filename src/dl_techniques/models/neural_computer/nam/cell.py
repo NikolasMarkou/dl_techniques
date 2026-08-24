@@ -37,7 +37,7 @@ from dl_techniques.layers.memory.ntm_interface import (
     AddressingMode,
     MemoryState,
 )
-from dl_techniques.models.tree_transformer.model import (
+from dl_techniques.models.language.tree_transformer.model import (
     GroupAttention,
     TreeMHA,
 )

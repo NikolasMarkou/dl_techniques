@@ -16,7 +16,7 @@ from ..precision_arm_oracle import assert_precision_arm
 
 
 def _build():
-    from dl_techniques.models.darkir.model import create_darkir_model
+    from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
     return create_darkir_model(
         width=8, middle_blk_num_enc=1, middle_blk_num_dec=1,
         enc_blk_nums=[1, 1], dec_blk_nums=[1, 1], dilations=[1, 2],

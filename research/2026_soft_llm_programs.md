@@ -96,7 +96,7 @@ Can the v0 stack serve a query end-to-end in < 200 ms p50, < 500 ms p99 on GPU 1
 
 ### 3.2 T1.5 — Repository premise verification (cheap reads)
 
-- `src/dl_techniques/models/tree_transformer/` — confirmed Wang unsupervised soft constituency (Group Attention), not Dozat biaffine dependency. Documented as such in `components.py` (`"learn soft, hierarchical constituency trees directly from text"`).
+- `src/dl_techniques/models/language/tree_transformer/` — confirmed Wang unsupervised soft constituency (Group Attention), not Dozat biaffine dependency. Documented as such in `components.py` (`"learn soft, hierarchical constituency trees directly from text"`).
 - `src/dl_techniques/layers/vector_quantizer_rotation_trick.py` — Fifty et al. ICLR 2025 rotation-trick VQ, production-grade, multi-head + EMA + dead-code-reinit + k-means init + diversity/orthogonal regularizers. Strict superset of vanilla VQ.
 
 ### 3.3 T2, T3, T4 — Not yet run
@@ -186,4 +186,4 @@ T2 result: EM(R_PA) vs EM(best baseline)
 - PAWS dataset: [Zhang, Baldridge, He (NAACL 2019)](https://github.com/google-research-datasets/paws).
 - MEMORY-VQ (v1 baseline if learned codes return): [Zemlyanskiy et al., NAACL 2024](https://arxiv.org/abs/2308.14903).
 - Rotation-trick VQ (in repo): `src/dl_techniques/layers/vector_quantizer_rotation_trick.py`, Fifty et al. ICLR 2025.
-- Wang Tree Transformer (in repo): `src/dl_techniques/models/tree_transformer/`.
+- Wang Tree Transformer (in repo): `src/dl_techniques/models/language/tree_transformer/`.

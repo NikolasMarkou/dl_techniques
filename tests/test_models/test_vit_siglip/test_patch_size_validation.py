@@ -14,7 +14,7 @@ first forward. Every existing test uses 8 / 16 / 32.
 import numpy as np
 import pytest
 
-from dl_techniques.models.vit_siglip.model import (
+from dl_techniques.models.vision.vit_siglip.model import (
     SigLIPVisionTransformer,
     create_siglip_vision_transformer,
 )

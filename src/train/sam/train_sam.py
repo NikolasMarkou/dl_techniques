@@ -70,17 +70,17 @@ from train.common.args import (
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 
 from dl_techniques.losses.sam_mask_loss import SAMIoULoss, SAMMaskLoss
-from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
-from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
-from dl_techniques.models.SAM.SAM1.model import SAM
-from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
-from dl_techniques.models.SAM.SAM1.training_model import (
+from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
+from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
+from dl_techniques.models.vision_language.sam.sam1.model import SAM
+from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
+from dl_techniques.models.vision_language.sam.sam1.training_model import (
     IOU_SUPERVISION,
     LOW_RES_LOGITS,
     SAMTrainingModel,
     TRAINING_REFINEMENT_ROUNDS,
 )
-from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
 from dl_techniques.utils.logger import logger
 
 from train.sam.data import DATA_SOURCES, MASK_DIVISOR, build_sam_dataset

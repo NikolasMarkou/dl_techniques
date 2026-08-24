@@ -31,7 +31,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.mobile_clip.mobile_clip_v1 import MobileClipModel
+from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v1 import MobileClipModel
 
 # ---------------------------------------------------------------------
 

@@ -620,7 +620,7 @@ def create_tree_transformer(
 ) -> "TreeTransformer":
     """Convenience function to create Tree Transformer encoder models.
 
-    Mirrors :func:`dl_techniques.models.resnet.model.create_resnet` for consistency
+    Mirrors :func:`dl_techniques.models.vision.resnet.model.create_resnet` for consistency
     across the model zoo: a thin module-level factory that delegates to
     :meth:`TreeTransformer.from_variant`.
 

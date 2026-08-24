@@ -39,7 +39,7 @@ from typing import Optional
 
 from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.bias_free_denoisers.bfunet import (
+from dl_techniques.models.vision.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     BFUNET_CONFIGS,
 )

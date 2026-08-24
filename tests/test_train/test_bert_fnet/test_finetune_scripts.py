@@ -33,8 +33,8 @@ import pytest
 import train.bert.finetune as bert_finetune
 import train.fnet.finetune as fnet_finetune
 
-from dl_techniques.models.bert import BERT
-from dl_techniques.models.fnet import FNet
+from dl_techniques.models.language.bert import BERT
+from dl_techniques.models.language.fnet import FNet
 
 from ._scaffold import assert_layer_names, capture_config_from_argv, effective_config
 

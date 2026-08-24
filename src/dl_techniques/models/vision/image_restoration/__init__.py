@@ -13,7 +13,7 @@ exactly two documents and no code:
 here, and no model in this repository produced any of them.** They are useful as a
 target board and as a citation index; they are not a claim about this code. For the
 denoising architectures this repo actually implements and can measure, see
-``dl_techniques.models.bias_free_denoisers`` and ``src/train/bfunet/``.
+``dl_techniques.models.vision.bias_free_denoisers`` and ``src/train/bfunet/``.
 
 This module is deliberately empty of exports. It defines no ``keras.Model``, no
 ``create_*`` factory and no ``__all__``, so it resolves to no main module and is a

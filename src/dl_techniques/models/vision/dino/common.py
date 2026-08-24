@@ -4,7 +4,7 @@ This module holds the pieces that more than one DINO module needs verbatim:
 
 * `reject_input_shape` — `create_dino_v1`, `create_dino_v2` and `create_dino_v3`
   converged on a single parameter scheme (see
-  `src/dl_techniques/models/dino/README.md` § "Factory signatures"), and refusing the
+  `src/dl_techniques/models/vision/dino/README.md` § "Factory signatures"), and refusing the
   removed `input_shape` spelling is identical in all three.
 * `sync_teacher_to_student` — the DINO teacher must START as a copy of the student
   (reference `main_dino.py` does `teacher.load_state_dict(student.state_dict())`
@@ -12,10 +12,10 @@ This module holds the pieces that more than one DINO module needs verbatim:
   `DINOTrainingModel.__init__` need it, and a second hand-written copy loop is
   exactly the duplication that lets the two drift.
 
-It is imported by `src/dl_techniques/models/dino/dino_v1.py`,
-`src/dl_techniques/models/dino/dino_v2.py`,
-`src/dl_techniques/models/dino/dino_v3.py` and
-`src/dl_techniques/models/dino/training.py`.
+It is imported by `src/dl_techniques/models/vision/dino/dino_v1.py`,
+`src/dl_techniques/models/vision/dino/dino_v2.py`,
+`src/dl_techniques/models/vision/dino/dino_v3.py` and
+`src/dl_techniques/models/vision/dino/training.py`.
 
 Do NOT grow this into a shared ViT trunk or a shared `MODEL_VARIANTS` table — that
 unification is a deliberate, recorded non-goal (plan decision D-003: the three model

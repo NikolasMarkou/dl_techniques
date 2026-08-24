@@ -109,7 +109,7 @@ class TestMaxPoolingInsideTheAssembledModel:
 
     @staticmethod
     def _pooled_from_micro():
-        from dl_techniques.models.byte_latent_transformer.model import (
+        from dl_techniques.models.language.byte_latent_transformer.model import (
             create_blt_model,
         )
 

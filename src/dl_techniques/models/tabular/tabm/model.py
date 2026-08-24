@@ -1123,7 +1123,7 @@ def create_tabm_for_dataset(
 
     Example:
         >>> import numpy as np
-        >>> from dl_techniques.models.tabm.model import create_tabm_for_dataset
+        >>> from dl_techniques.models.tabular.tabm.model import create_tabm_for_dataset
 
         >>> # Generate sample tabular data
         >>> X_train = np.random.randn(1000, 15)  # 15 features

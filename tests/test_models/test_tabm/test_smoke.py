@@ -30,7 +30,7 @@ K = 8  # create_tabm_mini's default ensemble size
 
 
 def _build():
-    from dl_techniques.models.tabm.model import create_tabm_mini
+    from dl_techniques.models.tabular.tabm.model import create_tabm_mini
 
     return create_tabm_mini(
         n_num_features=N_NUM_FEATURES, cat_cardinalities=[], n_classes=N_CLASSES

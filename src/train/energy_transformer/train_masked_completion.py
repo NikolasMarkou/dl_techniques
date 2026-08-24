@@ -45,7 +45,7 @@ from train.energy_transformer.common import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.vision.masked_patches import make_masked_patch_map_fn
-from dl_techniques.models.energy_transformer import create_energy_transformer_mim
+from dl_techniques.models.vision.energy_transformer import create_energy_transformer_mim
 
 # ---------------------------------------------------------------------
 # CONFIGURATION

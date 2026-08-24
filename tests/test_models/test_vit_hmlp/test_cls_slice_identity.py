@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.vit_hmlp.model import ViTHMLP
+from dl_techniques.models.vision.vit_hmlp.model import ViTHMLP
 
 INPUT_SHAPE = (32, 32, 3)
 PATCH = 8

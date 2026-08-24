@@ -149,13 +149,13 @@ from keras import ops
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.SAM.SAM3.decoder import Sam3TransformerDecoder
-from dl_techniques.models.SAM.SAM3.maskformer_segmentation import Sam3SegmentationHead
-from dl_techniques.models.SAM.SAM3.model_misc import Sam3DotProductScoring
-from dl_techniques.models.SAM.SAM3.necks import Sam3DualViTDetNeck
-from dl_techniques.models.SAM.SAM3.query_selection import Sam3EncoderQuerySelection
-from dl_techniques.models.SAM.SAM3.text_encoder_ve import Sam3TextEncoder
-from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBackbone
+from dl_techniques.models.vision_language.sam.sam3.decoder import Sam3TransformerDecoder
+from dl_techniques.models.vision_language.sam.sam3.maskformer_segmentation import Sam3SegmentationHead
+from dl_techniques.models.vision_language.sam.sam3.model_misc import Sam3DotProductScoring
+from dl_techniques.models.vision_language.sam.sam3.necks import Sam3DualViTDetNeck
+from dl_techniques.models.vision_language.sam.sam3.query_selection import Sam3EncoderQuerySelection
+from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
+from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
 
 #: The six composed components, in the order they run. Serialization iterates
 #: this tuple rather than repeating the names, so a component added to the
@@ -214,7 +214,7 @@ class Sam3Image(keras.Model):
         identical to the one that shipped before the flag existed: no head is
         created, no weight is added, and the decoder is called by the same
         expression with ``reference_boxes=None``. At ``True`` a
-        :class:`~dl_techniques.models.SAM.SAM3.query_selection.Sam3EncoderQuerySelection`
+        :class:`~dl_techniques.models.vision_language.sam.sam3.query_selection.Sam3EncoderQuerySelection`
         head scores every image-memory position and its top ``num_queries``
         boxes become the decoder's INITIAL ``reference_boxes``, detached. Query
         CONTENT is untouched -- that is what makes it *mixed*.
@@ -786,7 +786,7 @@ class Sam3Image(keras.Model):
         the auxiliary blocks' mask channels -- see decisions.md D-005).
 
         Both production consumers run only at ``deep_supervision=True``:
-        :meth:`~dl_techniques.models.SAM.SAM3.training_model.Sam3TrainingModel.call`,
+        :meth:`~dl_techniques.models.vision_language.sam.sam3.training_model.Sam3TrainingModel.call`,
         and ``train.sam3.train_sam3.evaluate_sam3``, which packs the same blocks
         so the compiled loss's row stride agrees with the tensor it is handed.
 
@@ -889,7 +889,7 @@ class Sam3Image(keras.Model):
         :type training: Optional[bool]
         :return: ``(outputs_class, outputs_coord, presence_logits, seg,
             proposals)``; see :meth:`_forward_stacks` for the first four and
-            :meth:`~dl_techniques.models.SAM.SAM3.query_selection.Sam3EncoderQuerySelection.call`
+            :meth:`~dl_techniques.models.vision_language.sam.sam3.query_selection.Sam3EncoderQuerySelection.call`
             for the fifth.
         :rtype: Tuple[Any, Any, Any, Dict[str, Any], Optional[Dict[str, Any]]]
         :raises ValueError: If ``'image'`` or ``'token_ids'`` is absent.

@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/SAM/SAM2`` -- Phase 5 batch B.
+Oracle adoption for ``models/vision_language/sam/sam2`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -62,8 +62,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.SAM.SAM2.model import create_sam2
-from dl_techniques.models.SAM.SAM2.training_model import (
+from dl_techniques.models.vision_language.sam.sam2.model import create_sam2
+from dl_techniques.models.vision_language.sam.sam2.training_model import (
     SAM2_IOU_SUPERVISION,
     SAM2_LOW_RES_LOGITS,
     SAM2_OBJECT_SCORE_LOGITS,

@@ -16,7 +16,7 @@ import keras
 import tensorflow as tf
 
 # Imports from the project structure, assuming it's available in the path
-from dl_techniques.models.fnet.model import (
+from dl_techniques.models.language.fnet.model import (
     FNet,
     create_fnet_with_head,
 )

@@ -1,4 +1,4 @@
-"""Tests for `dl_techniques.models.depth_anything`.
+"""Tests for `dl_techniques.models.vision.depth_anything`.
 
 Covers:
 - Build + forward shape with `encoder_kind='real'` (small ViT) and
@@ -38,14 +38,14 @@ import pytest
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.depth_anything import (
+from dl_techniques.models.vision.depth_anything import (
     DepthAnything,
     DPTDecoder,
     TeacherEMACallback,
     cosine_ema_schedule,
     linear_ema_schedule,
 )
-from dl_techniques.models.depth_anything import create_depth_anything
+from dl_techniques.models.vision.depth_anything import create_depth_anything
 from dl_techniques.layers.strong_augmentation import StrongAugmentation
 
 

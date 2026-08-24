@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
-from dl_techniques.models.ntm.model_multitask import NTMMultiTask
+from dl_techniques.models.neural_computer.ntm.model_multitask import NTMMultiTask
 from train.common import setup_gpu, create_callbacks
 
 from .data_generators import (

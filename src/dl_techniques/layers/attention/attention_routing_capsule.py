@@ -36,7 +36,7 @@ Architecture:
 
     ``CapsuleBlockV2`` forwards every routing argument through to the capsule it
     owns, so the two classes share one parameter vocabulary. It is consumed in
-    production by ``models/capsnet/model_v2.py``.
+    production by ``models/vision/capsnet/model_v2.py``.
 
 Foundational Mathematics:
     Routing is one softmax over agreement scores rather than an iterative

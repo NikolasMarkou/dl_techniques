@@ -23,7 +23,7 @@ from train.common.nlp import (
     sentiment_final_model_filename,
 )
 
-from dl_techniques.models.fnet import FNet
+from dl_techniques.models.language.fnet import FNet
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskType

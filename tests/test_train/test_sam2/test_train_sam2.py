@@ -33,8 +33,8 @@ import numpy as np
 import pytest
 
 import train.sam2.train_sam2 as train_sam2_module
-from dl_techniques.models.SAM.SAM2.model import create_sam2
-from dl_techniques.models.SAM.SAM2.training_model import (
+from dl_techniques.models.vision_language.sam.sam2.model import create_sam2
+from dl_techniques.models.vision_language.sam.sam2.training_model import (
     OUTPUT_KEYS,
     SAM2TrainingModel,
     SAM2_IOU_SUPERVISION,
@@ -427,7 +427,7 @@ class TestConfigValidation:
         a data pipeline at one resolution and a model at another, which is a
         shape error deep inside the encoder rather than a config error here.
         """
-        from dl_techniques.models.SAM.SAM2.hiera import Hiera
+        from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
 
         for variant in VARIANTS:
             assert variant_image_size(variant) == (
@@ -443,7 +443,7 @@ class TestConfigValidation:
         The two are derived independently -- one from this config, one from the
         model's memory stride -- and nothing else in the trainer compares them.
         """
-        from dl_techniques.models.SAM.SAM2.model import MEMORY_STRIDE
+        from dl_techniques.models.vision_language.sam.sam2.model import MEMORY_STRIDE
 
         for variant in VARIANTS:
             config = SAM2TrainingConfig(variant=variant)
@@ -647,7 +647,7 @@ class TestTheBatchAxisIsStatic:
     unknown, not merely the batch -- and ``SAM2._decode`` reads
     ``int(pointer_tokens.shape[1])`` for the D-044 conditional gather. Both
     raise ``TypeError: int() argument must be ... not 'NoneType'`` at the first
-    ``fit()`` step, from inside ``models/SAM/SAM2/model.py``, which this iteration
+    ``fit()`` step, from inside ``models/vision_language/sam/sam2/model.py``, which this iteration
     must leave byte-unchanged.
 
     A ``fit()`` over numpy arrays never sees any of it, because Keras traces

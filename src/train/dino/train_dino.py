@@ -1,6 +1,6 @@
 """DINO self-supervised pretraining on raw images, under STOCK ``model.fit()``.
 
-Trains a `DINOTrainingModel` (student + frozen EMA teacher, `dl_techniques.models.dino`)
+Trains a `DINOTrainingModel` (student + frozen EMA teacher, `dl_techniques.models.vision.dino`)
 against `DINOLoss` over the multi-crop element produced by
 `dl_techniques.datasets.vision.multi_crop.make_multi_crop_map_fn`. Every DINO mechanism
 routes through machinery Keras already ships:
@@ -19,7 +19,7 @@ hand-rolled ``fit()`` is undocumented drift, not a template.)
 
 This docstring is the OPERATING MANUAL: what to run, what never to pass, which shipped
 defaults silently change what you measure. It does NOT carry the evidence -- the per-flag
-reference table and the headline result are in ``src/dl_techniques/models/dino/README.md``
+reference table and the headline result are in ``src/dl_techniques/models/vision/dino/README.md``
 § 6 (cited below as "README"), and the measurement record behind every number either file
 quotes is ``research/2026_dino_ssl_measurements.md``.
 
@@ -245,11 +245,11 @@ from dl_techniques.datasets.vision.multi_crop import (
     make_multi_crop_map_fn,
     make_stateless_multi_crop_map_fn,
 )
-from dl_techniques.models.dino.training import (
+from dl_techniques.models.vision.dino.training import (
     N_GLOBAL_VIEWS,
     create_dino_training_model,
 )
-from dl_techniques.models.depth_anything.teacher_ema import (
+from dl_techniques.models.vision.depth_anything.teacher_ema import (
     TeacherEMACallback,
     cosine_ema_schedule,
     linear_ema_schedule,
@@ -817,7 +817,7 @@ def create_teacher_temp_callback(
       ``set_teacher_temp`` moved it 9.95 -> 12.62. ``DINOLoss.teacher_temp`` is therefore
       read-only and a plain assignment RAISES.
     * **This is a stock ``LambdaCallback`` driving an EXISTING schedule function**
-      (``linear_ema_schedule`` from ``dl_techniques.models.depth_anything.teacher_ema``).
+      (``linear_ema_schedule`` from ``dl_techniques.models.vision.depth_anything.teacher_ema``).
       The repo already carries five schedule-callback classes with duplicated linear/cosine
       math and no shared base; do NOT add a sixth for this.
     """

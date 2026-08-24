@@ -75,7 +75,7 @@ outputs = {
 
 ```python
 import keras
-from dl_techniques.models.vit import ViT
+from dl_techniques.models.vision.vit import ViT
 from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
 
 # Step 1: Create foundation model
@@ -127,7 +127,7 @@ outputs = model(images)
 ### Example 2: ResNet with Detection Head
 
 ```python
-from dl_techniques.models.resnet import ResNet50
+from dl_techniques.models.vision.resnet import ResNet50
 from dl_techniques.layers.heads.vision import DetectionHead
 
 # Step 1: Create ResNet backbone with FPN
@@ -187,7 +187,7 @@ outputs = detector(images)
 ### Example 3: DINOv2 with Segmentation Head
 
 ```python
-from dl_techniques.models.dino import DINOv2Model
+from dl_techniques.models.vision.dino import DINOv2Model
 from dl_techniques.layers.heads.vision import SegmentationHead
 
 # Step 1: Create DINOv2 backbone
@@ -289,7 +289,7 @@ outputs = depth_model(images)
 
 ```python
 from dl_techniques.layers.heads.vision import create_multi_task_head, VisionTaskType
-from dl_techniques.models.yolo12 import YOLOv12FeatureExtractor
+from dl_techniques.models.vision.yolo12 import YOLOv12FeatureExtractor
 
 # Step 1: Create YOLO backbone
 yolo_backbone = YOLOv12FeatureExtractor(

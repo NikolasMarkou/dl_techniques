@@ -1,7 +1,7 @@
 """SD3 16-channel KL-VAE: a thin REUSE wrapper over the ideogram4 AutoEncoder.
 
 This module does NOT re-implement an encoder/decoder. It reuses
-:class:`~dl_techniques.models.ideogram4.vae.AutoEncoder` (a fully-tested Flux2
+:class:`~dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder` (a fully-tested Flux2
 KL-VAE) with ``z_channels=16`` and supplies only the two pieces that are
 SD3-specific:
 
@@ -37,7 +37,7 @@ References:
       KL-regularized first-stage autoencoder being reused.
 
     The encoder/decoder ARCHITECTURE is not defined here. It is
-    ``dl_techniques.models.ideogram4.vae.AutoEncoder``, which carries the full
+    ``dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder``, which carries the full
     References section for it.
 """
 
@@ -55,9 +55,9 @@ from dl_techniques.utils.logger import logger
 # Reuse the ideogram4 AutoEncoder + its parameter dataclass -- do NOT
 # re-implement (D-002). The SD3 config pairs an AutoEncoderParams with
 # z_channels=16 already (see config.PRESETS / get_sd3_config).
-from dl_techniques.models.ideogram4.vae import AutoEncoder
-from dl_techniques.models.ideogram4.config import AutoEncoderParams
-from dl_techniques.models.sd3_mmdit.config import get_sd3_config
+from dl_techniques.models.vision_language.ideogram4.vae import AutoEncoder
+from dl_techniques.models.vision_language.ideogram4.config import AutoEncoderParams
+from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
 
 # ---------------------------------------------------------------------
 # SD3 scalar latent-normalization constants

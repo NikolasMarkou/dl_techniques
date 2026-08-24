@@ -257,7 +257,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.power_mlp.model import PowerMLP
+from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP
 
 # 1. Create a tiny PowerMLP model for MNIST (28x28 images, 10 classes)
 # We use a pre-configured variant for convenience.
@@ -459,7 +459,7 @@ import numpy as np
 import keras
 import tempfile
 import os
-from dl_techniques.models.power_mlp.model import PowerMLP
+from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP
 
 @pytest.fixture
 def dummy_model_and_data():

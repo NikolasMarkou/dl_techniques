@@ -57,7 +57,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.lewm.predictor import ARPredictor
+from dl_techniques.models.vision.lewm.predictor import ARPredictor
 
 SEED, GATE_SEED, DATA_SEED = 20260821, 7, 0
 BATCH, NUM_FRAMES, INPUT_DIM = 2, 6, 32

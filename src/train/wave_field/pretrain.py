@@ -54,7 +54,7 @@ from train.common.clm_pretrain import (
     load_hf_clm_datasets,
     make_clm_steps_per_epoch,
 )
-from dl_techniques.models.wave_field.model import (
+from dl_techniques.models.language.wave_field.model import (
     WaveFieldLLM,
     WaveFieldDecoderBlock,
 )

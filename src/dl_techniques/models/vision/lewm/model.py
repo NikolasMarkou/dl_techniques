@@ -46,11 +46,11 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional
 
-from dl_techniques.models.vit.model import ViT
-from dl_techniques.models.lewm.config import LeWMConfig
-from dl_techniques.models.lewm.embedder import ActionEmbedder
-from dl_techniques.models.lewm.projector import MLPProjector
-from dl_techniques.models.lewm.predictor import ARPredictor
+from dl_techniques.models.vision.vit.model import ViT
+from dl_techniques.models.vision.lewm.config import LeWMConfig
+from dl_techniques.models.vision.lewm.embedder import ActionEmbedder
+from dl_techniques.models.vision.lewm.projector import MLPProjector
+from dl_techniques.models.vision.lewm.predictor import ARPredictor
 from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 

@@ -20,7 +20,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.bert import BERT, create_bert_with_head
+from dl_techniques.models.language.bert import BERT, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
@@ -532,7 +532,7 @@ class TestBERTIter1Refactor:
 
     def test_create_bert_factory(self):
         """``create_bert`` returns a configured ``BERT`` and runs a forward pass."""
-        from dl_techniques.models.bert.model import create_bert
+        from dl_techniques.models.language.bert.model import create_bert
 
         model = create_bert("tiny", vocab_size=200)
         assert isinstance(model, BERT)
@@ -560,7 +560,7 @@ class TestBERTIter1Refactor:
 
     def test_public_api_surface(self):
         """The bert package public API is exactly ``{BERT, create_bert, create_bert_with_head}``."""
-        import dl_techniques.models.bert as pkg
+        import dl_techniques.models.language.bert as pkg
 
         assert set(pkg.__all__) == {
             "BERT", "create_bert", "create_bert_with_head",
@@ -572,7 +572,7 @@ class TestBERTIter1Refactor:
 
         # BERT must remain importable from the implementation submodule path
         # (renamed .bert -> .model by commit 2c4a0ca7c; existing tests rely on this).
-        from dl_techniques.models.bert.model import BERT as BERTViaSubmodule
+        from dl_techniques.models.language.bert.model import BERT as BERTViaSubmodule
         assert BERTViaSubmodule is pkg.BERT
 
 

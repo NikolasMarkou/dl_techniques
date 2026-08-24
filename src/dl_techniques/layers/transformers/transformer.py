@@ -887,7 +887,7 @@ class TransformerLayer(keras.layers.Layer):
         # ('multi_head') forwarded it, while EIGHT of the nine attention types
         # DECLARE `kernel_initializer` in their registry entry. The consequence
         # was silent, because the attention layer then falls back to its own
-        # `glorot_uniform`: MEASURED on `models/beit`, whose whole point is
+        # `glorot_uniform`: MEASURED on `models/vision/beit`, whose whole point is
         # `TruncatedNormal(stddev=initializer_range)`, the attention q/k/v/proj
         # kernels drew at realized std 0.125238 (glorot at dim=64) while every
         # other kernel in the same model drew at 0.017609 (= 0.02 * 0.87964).
@@ -898,7 +898,7 @@ class TransformerLayer(keras.layers.Layer):
         # explicit `attention_args={'kernel_initializer': ...}` still wins.
         # `clone_initializer` is REQUIRED, not defensive: a seedless Keras
         # initializer instance REPLAYS its draw, and callers hand ONE instance
-        # to every block (models/beit/model.py:409), so forwarding it raw would
+        # to every block (models/vision/beit/model.py:409), so forwarding it raw would
         # make all N blocks bit-identical -- the D-540/D-560 defect, traded for
         # this one. The 'multi_head' branch keeps its own uncloned line: it is
         # pre-existing behaviour whose consumers' seeded draws are pinned, and

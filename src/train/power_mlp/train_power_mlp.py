@@ -28,7 +28,7 @@ import pandas as pd
 from typing import Tuple, Dict, Any, Optional, List
 from sklearn.metrics import classification_report, confusion_matrix
 
-from dl_techniques.models.power_mlp.model import PowerMLP
+from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import optimizer_builder
 

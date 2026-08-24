@@ -361,7 +361,7 @@ class TestGraphAnomalyTargetIndexIsExactlyIgnored:
 
     @staticmethod
     def _model_and_inputs(batch=2, n=6, f=4):
-        from dl_techniques.models.graph_energy_transformer.model import (
+        from dl_techniques.models.graph.graph_energy_transformer.model import (
             create_graph_anomaly_detector,
         )
 

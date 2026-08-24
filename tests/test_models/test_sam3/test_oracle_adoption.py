@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/SAM/SAM3`` -- Phase 5 batch B.
+Oracle adoption for ``models/vision_language/sam/sam3`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -56,8 +56,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.SAM.SAM3.sam3_image import Sam3Image
-from dl_techniques.models.SAM.SAM3.training_model import Sam3TrainingModel
+from dl_techniques.models.vision_language.sam.sam3.sam3_image import Sam3Image
+from dl_techniques.models.vision_language.sam.sam3.training_model import Sam3TrainingModel
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

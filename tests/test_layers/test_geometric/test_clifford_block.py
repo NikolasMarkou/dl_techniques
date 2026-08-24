@@ -1812,7 +1812,7 @@ class TestSparseRollingGeometricProductChannelContract:
     "completion" of a channel check is an ``InputSpec(ndim=4)``-style rank
     check, and two shipped consumers run this layer at RANK 2 —
     ``layers/geometric/clifford_rnn.py`` (per timestep, ``(B, D)``) and
-    ``models/clip/clifford_clip.py``'s ``vision_head_geo`` / ``text_head_geo``
+    ``models/vision_language/clip/clifford_clip.py``'s ``vision_head_geo`` / ``text_head_geo``
     (pooled ``(B, D)`` vectors).
     """
 

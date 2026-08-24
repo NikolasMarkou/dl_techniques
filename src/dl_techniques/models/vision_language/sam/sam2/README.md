@@ -118,7 +118,7 @@ SAM2ImageEncoder ───── drop `scalp` levels; vision_features = last of 
 ## 3. Quick Start
 
 ```python
-from dl_techniques.models.SAM.SAM2 import SAM2, SAM2MemoryBank, create_sam2
+from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
 
 model = create_sam2("tiny")            # RANDOM weights — no checkpoint ships
 
@@ -280,14 +280,14 @@ Executed, on this package's own smallest on-disk checkpoint:
 
 ```python
 import keras
-import dl_techniques.models.SAM.SAM2.training_model   # registrar-first: the MODULE
+import dl_techniques.models.vision_language.sam.sam2.training_model   # registrar-first: the MODULE
 
 model = keras.models.load_model(path, compile=False)
 print(type(model).__name__, len(model.weights))
 # SAM2TrainingModel 345
 ```
 
-Replacing that import with `import dl_techniques.models.SAM.SAM2` and changing
+Replacing that import with `import dl_techniques.models.vision_language.sam.sam2` and changing
 nothing else reproduces the `TypeError` above.
 
 One further caveat for anyone A/B-ing a checkpoint's outputs across a change:

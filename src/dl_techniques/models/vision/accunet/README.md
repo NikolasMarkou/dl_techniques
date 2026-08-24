@@ -384,7 +384,7 @@ import matplotlib.pyplot as plt
 
 # Local imports from your project structure
 # (Assuming the files are in the specified dl_techniques structure)
-from dl_techniques.models.accunet import create_acc_unet_binary
+from dl_techniques.models.vision.accunet import create_acc_unet_binary
 
 # 1. Generate dummy segmentation data
 def create_dummy_data(num_samples, height, width):
@@ -444,13 +444,13 @@ plt.show()
 
 **Purpose**: The main Keras `Model` subclass that assembles the entire ACC-UNet architecture. Usually instantiated via the factory functions below.
 
-**Location**: `dl_techniques.models.accunet.AccUNet`
+**Location**: `dl_techniques.models.vision.accunet.AccUNet`
 
 ### 6.2 Factory Functions
 
 These are the recommended way to create ACC-UNet models.
 
-**Location**: `dl_techniques.models.accunet`
+**Location**: `dl_techniques.models.vision.accunet`
 
 #### `create_acc_unet(...)`
 The general-purpose factory function.
@@ -553,7 +553,7 @@ This controls how many times the cross-level feature fusion is applied.
 # train_dataset: yields (image, mask) tuples of shape (256, 256, 1)
 # val_dataset: yields (image, mask) tuples of shape (256, 256, 1)
 
-from dl_techniques.models.accunet import create_acc_unet_binary
+from dl_techniques.models.vision.accunet import create_acc_unet_binary
 # A common loss for segmentation is a combination of BCE and Dice
 import tensorflow as tf
 
@@ -589,7 +589,7 @@ model.compile(
 ACC-UNet can handle variable input sizes if `input_shape` is set to `None`.
 
 ```python
-from dl_techniques.models.accunet import create_acc_unet_multiclass
+from dl_techniques.models.vision.accunet import create_acc_unet_multiclass
 
 # 1. Create model for 5 classes, dynamic HxW
 model = create_acc_unet_multiclass(
@@ -761,7 +761,7 @@ import keras
 import numpy as np
 
 # Assuming imports for create_acc_unet_binary are set up
-from dl_techniques.models.accunet import create_acc_unet_binary
+from dl_techniques.models.vision.accunet import create_acc_unet_binary
 
 def test_model_creation():
     """Test that the model can be created."""

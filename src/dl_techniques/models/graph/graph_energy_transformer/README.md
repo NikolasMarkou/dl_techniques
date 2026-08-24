@@ -2,7 +2,7 @@
 
 Keras 3 implementation of the **graph-domain** models from **Hoover et al., "Energy Transformer", NeurIPS 2023** ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253)): variant **B** (per-node anomaly detection, paper §4 / App C) and a variant **C-lite** (whole-graph classification, paper §5 / App D).
 
-Like the image models in `models/energy_transformer/`, these replace a stack of transformer blocks with **one** (or a few) `EnergyTransformer` block(s) that define a single scalar energy `E(g)` over the node states and run `T` steps of gradient descent on it. The forward pass *is* the optimization. By default both variants ride the block's existing **binary 0/1 keep-mask** — supplied as a rank-3 `(B, N, N)` `attention_mask` that literally *is* the graph adjacency — with **zero `layers/` behavior change and zero new hand-derived gradients** on that default path. An **opt-in** `use_weighted_adjacency=True` path (§3) additionally learns the paper's **eq.-25 per-edge weighted adjacency** `Ŵ`; it is the one feature that adds a real (oracle-verified) closed-form gradient term to `EnergyAttention`. With the flag **off** (the default) every existing image and graph consumer is byte-identical.
+Like the image models in `models/vision/energy_transformer/`, these replace a stack of transformer blocks with **one** (or a few) `EnergyTransformer` block(s) that define a single scalar energy `E(g)` over the node states and run `T` steps of gradient descent on it. The forward pass *is* the optimization. By default both variants ride the block's existing **binary 0/1 keep-mask** — supplied as a rank-3 `(B, N, N)` `attention_mask` that literally *is* the graph adjacency — with **zero `layers/` behavior change and zero new hand-derived gradients** on that default path. An **opt-in** `use_weighted_adjacency=True` path (§3) additionally learns the paper's **eq.-25 per-edge weighted adjacency** `Ŵ`; it is the one feature that adds a real (oracle-verified) closed-form gradient term to `EnergyAttention`. With the flag **off** (the default) every existing image and graph consumer is byte-identical.
 
 These two models exist to give the `EnergyTransformer` block a *graph* consumer and to prove that the block's proven image-side fp16/XLA fix transfers verbatim to the graph domain.
 
@@ -191,7 +191,7 @@ The defect itself is still in `layers/norms/energy_layer_norm.py`, untouched (0-
 ### Model construction
 
 ```python
-from dl_techniques.models.graph_energy_transformer import (
+from dl_techniques.models.graph.graph_energy_transformer import (
     create_graph_anomaly_detector,
     create_graph_classifier,
 )

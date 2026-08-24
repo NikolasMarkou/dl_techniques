@@ -1,6 +1,6 @@
 """CapsNet V2 — modernised capsule network with attention routing.
 
-This module is the V2 counterpart to :mod:`dl_techniques.models.capsnet.model`.
+This module is the V2 counterpart to :mod:`dl_techniques.models.vision.capsnet.model`.
 It addresses several documented shortcomings of the original 2017 architecture
 without breaking the legacy ``CapsNet`` API:
 
@@ -13,7 +13,7 @@ Improvements over V1
   (sigmoid head) rather than a squash side-effect, eliminating saturation at
   zero.
 * **Configurable backbone.** Stem can be the legacy two-conv stack or any
-  ResNet variant from :mod:`dl_techniques.models.resnet`. Stage-2 pretraining
+  ResNet variant from :mod:`dl_techniques.models.vision.resnet`. Stage-2 pretraining
   flow accepts a local weights path string; ``stem_pretrained=True`` raises
   ``NotImplementedError`` from ``create_resnet`` (no public ResNet weights
   ship with ``dl_techniques``, and it refuses rather than quietly handing back
@@ -69,13 +69,13 @@ class CapsNetV2(keras.Model):
         input_shape: ``(H, W, C)`` shape of the input image (without batch).
         stem: Stem variant — ``"legacy"`` (two-conv stack matching the
             original CapsNet paper), or any ResNet variant supported by
-            :func:`dl_techniques.models.resnet.create_resnet`
+            :func:`dl_techniques.models.vision.resnet.create_resnet`
             (``"resnet18"``, ``"resnet34"``, ``"resnet50"``,
             ``"resnet101"``, ``"resnet152"``). Defaults to ``"legacy"``.
         stem_pretrained: Pretrained-weight option for ResNet stems.
             ``False`` (default) means random init. ``True`` **raises
             ``NotImplementedError``** — no public ResNet weights ship with
-            ``dl_techniques``, and :func:`dl_techniques.models.resnet.create_resnet`
+            ``dl_techniques``, and :func:`dl_techniques.models.vision.resnet.create_resnet`
             refuses unconditionally rather than returning a randomly
             initialized backbone to a caller who asked for pretrained one.
             (Until 2026-08-15 this entry promised that a download failure
@@ -239,7 +239,7 @@ class CapsNetV2(keras.Model):
             self.resnet_stem = None
         else:
             # Lazy import — avoid circular dependency when not needed.
-            from dl_techniques.models.resnet import create_resnet
+            from dl_techniques.models.vision.resnet import create_resnet
 
             self.resnet_stem = create_resnet(
                 variant=self.stem,
@@ -619,7 +619,7 @@ def create_capsnet_v2_pretrained(
     Pass a local ``.keras`` weights path string to ``pretrained``. No public
     ResNet weights ship with ``dl_techniques``, so ``pretrained=True`` (the
     default) raises ``NotImplementedError`` from
-    :func:`dl_techniques.models.resnet.create_resnet` rather than silently
+    :func:`dl_techniques.models.vision.resnet.create_resnet` rather than silently
     returning a randomly-initialized backbone, which is what it used to do.
 
     :raises NotImplementedError: If ``pretrained`` is ``True`` rather than a path.

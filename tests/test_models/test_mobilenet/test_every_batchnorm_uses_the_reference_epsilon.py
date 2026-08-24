@@ -36,14 +36,14 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.mobilenet.common import (
+from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,
 )
-from dl_techniques.models.mobilenet.mobilenet_v1 import MobileNetV1
-from dl_techniques.models.mobilenet.mobilenet_v2 import MobileNetV2
-from dl_techniques.models.mobilenet.mobilenet_v3 import MobileNetV3
-from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 
 _INPUT_SHAPE = (64, 64, 3)
 

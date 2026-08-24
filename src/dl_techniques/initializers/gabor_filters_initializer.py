@@ -361,9 +361,9 @@ def create_gabor_depthwise_conv2d(
             # DECISION plan_2026-07-13_f44e2cb0/D-001: not validated on purpose.
             Only positively homogeneous activations (``relu``, ``leaky_relu``,
             ``linear``) preserve the degree-1 homogeneity ``D(a*x) = a*D(x)`` that
-            the bias-free denoisers in ``models/bias_free_denoisers/`` rely on;
+            the bias-free denoisers in ``models/vision/bias_free_denoisers/`` rely on;
             ``gelu``/``elu``/``tanh``/``sigmoid``/``mish`` break it. This builder is
-            generic (``models/cliffordnet/`` uses it too and is not bias-free), so
+            generic (``models/vision/cliffordnet/`` uses it too and is not bias-free), so
             it does NOT reject them — the caller owns that contract. Note also that
             the bank sweeps its five parameters along a single joint ``linspace``
             diagonal, so it holds no phase-reversed (``psi``, ``psi+180``) pairs: a

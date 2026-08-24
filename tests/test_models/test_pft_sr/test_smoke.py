@@ -27,7 +27,7 @@ BATCH, HEIGHT, WIDTH, CHANNELS, SCALE = 2, 32, 32, 3, 2
 
 
 def _build():
-    from dl_techniques.models.pft_sr.model import create_pft_sr
+    from dl_techniques.models.vision.super_resolution.pft_sr.model import create_pft_sr
 
     return create_pft_sr(scale=SCALE, variant="light")
 

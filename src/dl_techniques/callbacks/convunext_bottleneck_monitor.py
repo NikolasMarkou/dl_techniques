@@ -46,7 +46,7 @@ from dl_techniques.utils.logger import logger
 # This is now the ONLY bottleneck-monitor callback in the repo. Its sibling
 # `cliffordnet_bottleneck_monitor.py` (CliffordBottleneckMonitorCallback) was
 # DELETED: it monitored `CliffordLaplacianUNet`, whose module
-# (models/cliffordnet/autoencoder.py) no longer exists, and a string grep over
+# (models/vision/cliffordnet/autoencoder.py) no longer exists, and a string grep over
 # src/ and tests/ found its only two references were its own trainer and its own
 # test — no registry key, no custom_objects entry, no getattr-by-name lookup.
 # Do NOT resurrect it "for symmetry" or generalize THIS class to cover a Clifford

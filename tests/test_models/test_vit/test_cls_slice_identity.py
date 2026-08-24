@@ -42,7 +42,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.vit.model import ViT
+from dl_techniques.models.vision.vit.model import ViT
 
 INPUT_SHAPE = (32, 32, 3)
 PATCH = 8

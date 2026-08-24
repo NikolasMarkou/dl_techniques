@@ -65,7 +65,7 @@ from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import (
     GlobalResponseNormalization,
 )
-from dl_techniques.models.convunext.model import (
+from dl_techniques.models.vision.convunext.model import (
     CONVUNEXT_CONFIGS,
     ConvUNextStem,
     SpatialLinearAttention,
@@ -309,7 +309,7 @@ class TestMergedConvUNextStemKnobs:
     """The two knobs the merge added: `use_bias` and `stem_normalization`.
 
     This class collapses what used to be two same-named classes (the bias-free
-    GRN stem in `models/bias_free_denoisers/bfconvunext.py` and the LayerNorm
+    GRN stem in `models/vision/bias_free_denoisers/bfconvunext.py` and the LayerNorm
     stem here), so each knob needs a guard that is proven to fail when the knob
     is ignored.
     """

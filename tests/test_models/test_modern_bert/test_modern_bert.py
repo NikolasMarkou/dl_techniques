@@ -23,7 +23,7 @@ from typing import Dict, Any
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
-from dl_techniques.models.modern_bert.model  import ModernBERT, create_modern_bert_with_head
+from dl_techniques.models.language.modern_bert.model  import ModernBERT, create_modern_bert_with_head
 
 # Define a small window size for all tests to avoid OOM errors.
 TEST_WINDOW_SIZE = 16
@@ -413,7 +413,7 @@ class TestModernBERTAdvancedFeatures:
             is_global = (i + 1) % interval == 0
             # Global layers are 'group_query' with num_kv_heads == num_heads,
             # which is arithmetically plain MHA plus RoPE. See the D-007 anchor
-            # in models/modern_bert/model.py: 'multi_head' cannot carry RoPE.
+            # in models/language/modern_bert/model.py: 'multi_head' cannot carry RoPE.
             expected_type = "group_query" if is_global else "window"
             assert layer.attention_type == expected_type, f"Layer {i} has wrong attention type"
             if is_global:

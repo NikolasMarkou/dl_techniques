@@ -1,1 +1,1 @@
-"""Test package for dl_techniques.models.power_sampling."""
+"""Test package for dl_techniques.models.common.power_sampling."""

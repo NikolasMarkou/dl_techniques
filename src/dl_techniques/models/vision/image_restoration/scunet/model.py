@@ -500,7 +500,7 @@ class SCUNet(keras.Model):
         #     real data to the encoder (it is not masked out anywhere in this
         #     model). A clear raise is the honest answer.
         #   * Do NOT promote this to a helper shared with
-        #     `models/thera/tails.py`, which carries the identical constraint.
+        #     `models/vision/thera/tails.py`, which carries the identical constraint.
         #     Two sites duplicate; a THIRD triggers promotion. A shared helper
         #     here buys a three-line dedup for a new cross-package dependency
         #     edge between two model packages.

@@ -14,7 +14,7 @@ double-weight-decay guard, one place to fix).
 
 **No ``EnergyTraceCallback`` here.** The image trainers log the ET block's energy-descent
 trace out of graph via a probe backbone rebuilt with ``return_energy=True``. The graph
-backbone (:class:`~dl_techniques.models.graph_energy_transformer.GraphEnergyTransformerBackbone`)
+backbone (:class:`~dl_techniques.models.graph.graph_energy_transformer.GraphEnergyTransformerBackbone`)
 has NO ``return_energy`` flag and never surfaces the energy trace — its blocks are built with
 ``return_energy=False`` unconditionally — so there is no energy trace to probe and no fp16
 energy-trace hazard to guard against. The callback is intentionally NOT duplicated here.

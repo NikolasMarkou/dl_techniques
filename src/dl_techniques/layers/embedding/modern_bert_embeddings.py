@@ -19,7 +19,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
     dropout. Unlike classical BERT, this layer omits absolute positional
     embeddings: it emits a permutation-equivariant representation and the
     positional signal is injected by the attention layers downstream. In
-    :class:`~dl_techniques.models.modern_bert.model.ModernBERT`, which is this
+    :class:`~dl_techniques.models.language.modern_bert.model.ModernBERT`, which is this
     layer's only consumer, that means Rotary Position Embeddings (RoPE) applied
     to queries and keys in the global layers and a learnable relative position
     bias in the windowed layers. A stack built over this layer with neither is

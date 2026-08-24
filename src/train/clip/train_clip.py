@@ -25,7 +25,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder
 )
 from dl_techniques.layers.tokenizers.bpe import BPETokenizer
-from dl_techniques.models.clip.model import create_clip_model
+from dl_techniques.models.vision_language.clip.model import create_clip_model
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
 from dl_techniques.metrics.clip_accuracy import CLIPAccuracy, CLIPRecallAtK
 
@@ -320,7 +320,7 @@ class CLIPTrainer:
             # afterwards, so the clip bound must be scaled too. Do NOT write a
             # bare `self.gradient_clip_norm` here: with a loss scale of 2**15
             # that clips the TRUE global norm at `clip / 32768` and the whole
-            # update collapses -- the same trap measured in `models/vae` under
+            # update collapses -- the same trap measured in `models/vision/vae` under
             # D-089. `scale_loss(x)` returns `x` unchanged without a loss
             # scale, so the float32 path is byte-identical.
             gradients, _ = tf.clip_by_global_norm(

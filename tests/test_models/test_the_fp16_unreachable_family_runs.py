@@ -7,10 +7,10 @@ Each of these six raised a dtype error on a *plain forward pass* under
 ===================== ====================================================
 package               measured failure site at HEAD
 ===================== ====================================================
-``detr``              ``models/detr/model.py:292`` — ``ops.zeros`` no dtype
+``detr``              ``models/vision/detr/model.py:292`` — ``ops.zeros`` no dtype
 ``kan``               ``layers/ffn/kan_linear.py:389`` — float32 knot grid
-``mamba``             ``models/mamba/components.py:472`` — float32 scan state
-``mamba`` (v2)        ``models/mamba/components_v2.py:292`` — idem
+``mamba``             ``models/language/mamba/components.py:472`` — float32 scan state
+``mamba`` (v2)        ``models/language/mamba/components_v2.py:292`` — idem
 ``memory_bank``       ``models/memory_bank/read_controller.py:378`` —
                       ``dtype="float32"`` additive mask
 ``nano_vlm_world_..`` ``models/nano_vlm_world_model/scheduler.py:195``
@@ -47,7 +47,7 @@ import tensorflow as tf
 # ---------------------------------------------------------------------------
 
 def _detr():
-    from dl_techniques.models.detr import DETR, DetrTransformer
+    from dl_techniques.models.vision.detr import DETR, DetrTransformer
     backbone = keras.Sequential(
         [
             keras.layers.Conv2D(32, 3, strides=2, padding="same", activation="relu"),
@@ -72,7 +72,7 @@ def _detr():
 
 
 def _kan():
-    from dl_techniques.models.kan import KAN
+    from dl_techniques.models.general_purpose.kan import KAN
     configs = [
         {"features": 8, "grid_size": 5, "activation": "swish"},
         {"features": 4, "grid_size": 4, "activation": "gelu"},
@@ -82,7 +82,7 @@ def _kan():
 
 
 def _mamba():
-    from dl_techniques.models.mamba import Mamba
+    from dl_techniques.models.language.mamba import Mamba
     model = Mamba(vocab_size=100, d_model=32, num_layers=2,
                   d_state=8, d_conv=4, expand=2)
     tokens = np.random.RandomState(0).randint(0, 100, (2, 12)).astype("int32")
@@ -90,7 +90,7 @@ def _mamba():
 
 
 def _mamba2():
-    from dl_techniques.models.mamba.mamba_v2 import Mamba2
+    from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
     model = Mamba2(vocab_size=100, d_model=64, num_layers=2, d_state=16,
                    d_conv=4, expand=2, headdim=16)
     tokens = np.random.RandomState(0).randint(0, 100, (2, 12)).astype("int32")
@@ -139,9 +139,9 @@ def _nano_vlm_world_model():
 
 
 def _thera():
-    from dl_techniques.models.thera.model import Thera
-    from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
-    from dl_techniques.models.thera.tails import build_thera_tail
+    from dl_techniques.models.vision.thera.model import Thera
+    from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
+    from dl_techniques.models.vision.thera.tails import build_thera_tail
     model = Thera(
         hidden_dim=16, out_dim=3,
         backbone=EDSRBackbone(num_feats=16, num_blocks=1),

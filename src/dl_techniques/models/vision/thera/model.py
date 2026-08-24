@@ -58,10 +58,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.thera_heat_field import DEFAULT_K_INIT
-from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
-from dl_techniques.models.thera.rdn_backbone import RDNBackbone
-from dl_techniques.models.thera.tails import build_thera_tail
-from dl_techniques.models.thera.hypernetwork import TheraHypernetwork
+from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
+from dl_techniques.models.vision.thera.rdn_backbone import RDNBackbone
+from dl_techniques.models.vision.thera.tails import build_thera_tail
+from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
 
 # ---------------------------------------------------------------------
 # constants

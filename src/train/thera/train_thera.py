@@ -1,7 +1,7 @@
 # DECISION plan_2026-06-11_f662207d/D-012
 """THERA arbitrary-scale super-resolution trainer (nested-tape ``train_step``).
 
-This script trains a :class:`~dl_techniques.models.thera.model.Thera` model on
+This script trains a :class:`~dl_techniques.models.vision.thera.model.Thera` model on
 the arbitrary-scale SR pipeline (``train.thera.data``). The deliverable is the
 :class:`TheraTrainingModel` wrapper plus a ``train_thera`` script (config
 dataclass + argparse + ``main``).
@@ -57,7 +57,7 @@ from keras import ops
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.thera import build_thera
+from dl_techniques.models.vision.thera import build_thera
 from dl_techniques.losses.thera_jacobian_tv import thera_tv_penalty
 from dl_techniques.losses.image_restoration_loss import CharbonnierLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -88,7 +88,7 @@ DEFAULT_COMPONENTS_INIT_SCALE = 16.0
 class TheraTrainingModel(keras.Model):
     """``keras.Model`` wrapper implementing THERA's nested-tape training step.
 
-    Wraps an inner :class:`~dl_techniques.models.thera.model.Thera` (a raw
+    Wraps an inner :class:`~dl_techniques.models.vision.thera.model.Thera` (a raw
     residual-field predictor) and owns the standardize / denorm / residual-add
     and the reconstruction + Jacobian-TV objective. The inner ``Thera`` is the
     deployable artifact; this wrapper is a training harness.

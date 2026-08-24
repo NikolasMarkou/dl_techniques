@@ -32,7 +32,7 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.models.mamba.components_v2 import (
+from dl_techniques.models.language.mamba.components_v2 import (
     Mamba2Layer,
     Mamba2ResidualBlock,
 )

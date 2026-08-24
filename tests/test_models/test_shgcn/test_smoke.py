@@ -28,7 +28,7 @@ NUM_NODES, FEATURE_DIM, NUM_CLASSES = 16, 8, 3
 
 
 def _build():
-    from dl_techniques.models.shgcn.model import SHGCNNodeClassifier
+    from dl_techniques.models.graph.shgcn.model import SHGCNNodeClassifier
 
     return SHGCNNodeClassifier(num_classes=NUM_CLASSES, hidden_dims=[16, 16])
 

@@ -12,8 +12,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.sd3_mmdit.config import get_sd3_config
-from dl_techniques.models.sd3_mmdit.transformer import (
+from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
+from dl_techniques.models.vision_language.sd3_mmdit.transformer import (
     SD3MMDiT,
     create_sd3_mmdit,
 )

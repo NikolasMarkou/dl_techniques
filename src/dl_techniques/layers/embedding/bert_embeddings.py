@@ -250,7 +250,7 @@ class BertEmbeddings(keras.layers.Layer):
         # An unrecognized position_embedding_type MUST raise. Do NOT "simplify" this
         # into an `else:` that falls back to 'learned' -- a silent normalization
         # fallback of exactly that shape is the defect this plan exists to delete
-        # (models/distilbert/model.py:170-174, measured in findings/
+        # (models/language/distilbert/model.py:170-174, measured in findings/
         # step1-premise-rederivation.md (c)). See decisions.md D-006.
         valid_position_types = list(VALID_POSITION_EMBEDDING_TYPES)
         if position_embedding_type not in valid_position_types:

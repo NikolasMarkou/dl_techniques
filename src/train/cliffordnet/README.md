@@ -8,7 +8,7 @@ All models share the same algebraic core (`SparseRollingGeometricProduct` + `Gat
 > `train_conditional_denoiser.py`, `train_confidence_denoiser.py`), the routing-LM
 > trainer, the COCO multi-task trainer, the depth-estimation trainer, the embedding
 > and LM U-Net trainers and the Wikipedia pre-training helper were all deleted along
-> with the `models/cliffordnet/` modules and the strided `*BlockDSv2` blocks they
+> with the `models/vision/cliffordnet/` modules and the strided `*BlockDSv2` blocks they
 > depended on. Their sections have been removed from this document rather than left
 > as instructions that cannot be run. Recover them from git history if needed.
 
@@ -71,7 +71,7 @@ The context stream extracts local spatial/temporal patterns; the geometric produ
 ## 2. Vision Classification
 
 **Script**: `train_cliffordnet.py`
-**Model**: `CliffordNet` (`dl_techniques/models/cliffordnet/model.py`)
+**Model**: `CliffordNet` (`dl_techniques/models/vision/cliffordnet/model.py`)
 
 Trains the CliffordNet vision backbone on CIFAR-10 or CIFAR-100 following the protocol from the original paper: AdamW with cosine decay + linear warmup, AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalization, and random erasing.
 
@@ -182,7 +182,7 @@ depend on any in-block strided Clifford variant.
 ## 3. NLP Pre-training
 
 **Script**: `train_cliffordnet_nlp.py`
-**Model**: `CliffordNetLM` (`dl_techniques/models/cliffordnet/lm.py`)
+**Model**: `CliffordNetLM` (`dl_techniques/models/vision/cliffordnet/lm.py`)
 
 Pre-trains a causal language model on English Wikipedia (HuggingFace) or TFDS text datasets. The `CausalCliffordNetBlock` layers consume the `(B, seq_len, D)` sequence directly -- the caller does no reshaping; the block resolves its own layout (see `dl_techniques/layers/geometric/clifford_block.py`). Left-only padded depthwise convolutions enforce strict autoregressive causality -- no attention mask needed.
 
@@ -278,7 +278,7 @@ python -m train.cliffordnet.train_cliffordnet_nlp \
 ## 4. Power Sampling Inference
 
 **Script**: `infer_cliffordnet_nlp.py`
-**Module**: `dl_techniques/models/power_sampling/` (was `cliffordnet/power_sampling.py`)
+**Module**: `dl_techniques/models/common/power_sampling/` (was `cliffordnet/power_sampling.py`)
 
 After training `CliffordNetLM`, generate text using **power sampling** -- an inference-time method that improves reasoning and coherence without any additional training or reward models.
 
@@ -373,7 +373,7 @@ python -m train.cliffordnet.infer_cliffordnet_nlp \
 
 ```python
 import tiktoken
-from dl_techniques.models.power_sampling import (
+from dl_techniques.models.common.power_sampling import (
     PowerSampler,
     PowerSamplingConfig,
 )
@@ -430,7 +430,7 @@ for method in ["standard", "power", "max_swap"]:
 ## 5. CLIP Contrastive Pretraining
 
 **Script**: `train_clip.py`
-**Model**: `CliffordCLIP` (`dl_techniques/models/clip/clifford_clip.py`)
+**Model**: `CliffordCLIP` (`dl_techniques/models/vision_language/clip/clifford_clip.py`)
 **Data prep**: `prepare_cc3m.py`
 **Reference**: Radford, A. et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision* (CLIP). arXiv:2103.00020.
 
@@ -655,7 +655,7 @@ Paid for these in real training incidents -- documented here so future runs avoi
 
 ### Serialization
 
-`CliffordCLIP` has full `get_config` / `from_config` / `from_variant` round-trip serialization. It is **not** exported from `dl_techniques.models.cliffordnet` (that package exports only `CliffordNet` and `create_cliffordnet`) — import it from `dl_techniques.models.clip.clifford_clip`. The training script additionally writes:
+`CliffordCLIP` has full `get_config` / `from_config` / `from_variant` round-trip serialization. It is **not** exported from `dl_techniques.models.vision.cliffordnet` (that package exports only `CliffordNet` and `create_cliffordnet`) — import it from `dl_techniques.models.vision_language.clip.clifford_clip`. The training script additionally writes:
 
 ```
 results/cliffordclip_<variant>_<timestamp>/

@@ -27,7 +27,7 @@ fails whether the function calls ``show()`` or merely leaks a figure.
 import numpy as np
 import pytest
 
-from dl_techniques.models.masked_autoencoder import (
+from dl_techniques.models.vision.masked_autoencoder import (
     MaskedAutoencoder,
     create_mae_model,
     visualize_reconstruction,

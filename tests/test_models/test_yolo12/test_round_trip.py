@@ -14,11 +14,11 @@ import numpy as np
 import pytest
 from keras import ops, tree
 
-from dl_techniques.models.yolo12.feature_extractor import (
+from dl_techniques.models.vision.yolo12.feature_extractor import (
     YOLOv12FeatureExtractor,
     create_yolov12_feature_extractor,
 )
-from dl_techniques.models.yolo12.multitask import YOLOv12MultiTask
+from dl_techniques.models.vision.yolo12.multitask import YOLOv12MultiTask
 
 
 def _images(b=2, s=64, c=3):

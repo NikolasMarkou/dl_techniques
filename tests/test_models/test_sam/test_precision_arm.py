@@ -11,7 +11,7 @@ MEASURED at HEAD, on the reduced fixture of ``test_correctness.py``:
 * any ``mixed_float16`` forward RAISED
   ``InvalidArgumentError: cannot compute Sub as input #1(zero-based) was
   expected to be a half tensor but is a float tensor`` at
-  ``models/SAM/SAM1/model.py:572``, i.e. in ``preprocess``, before the image
+  ``models/vision_language/sam/sam1/model.py:572``, i.e. in ``preprocess``, before the image
   encoder ran at all;
 * the float32 control was green.
 
@@ -44,7 +44,7 @@ def test_the_pre_fix_expression_raises_and_the_cast_repairs_it():
 def test_the_constants_are_still_float32_so_the_cast_is_load_bearing():
     """If ``__init__`` ever built them in the compute dtype, this fix is dead
     weight and should be removed rather than left unexplained."""
-    from dl_techniques.models.SAM.SAM1.model import SAM
+    from dl_techniques.models.vision_language.sam.sam1.model import SAM
     from .test_correctness import build_reduced_sam
     with precision_policy("mixed_float16"):
         model = build_reduced_sam()

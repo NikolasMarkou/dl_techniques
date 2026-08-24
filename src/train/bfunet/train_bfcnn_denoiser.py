@@ -43,7 +43,7 @@ from typing import List
 
 from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.bias_free_denoisers.bfcnn import (
+from dl_techniques.models.vision.bias_free_denoisers.bfcnn import (
     create_bfcnn_denoiser,
     create_bfcnn_variant,
     BFCNN_CONFIGS,

@@ -20,7 +20,7 @@ from typing import Dict, Optional, Tuple
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, create_nlp_head

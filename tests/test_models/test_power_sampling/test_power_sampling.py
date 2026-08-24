@@ -14,14 +14,14 @@ from dataclasses import asdict
 import numpy as np
 import pytest
 
-from dl_techniques.models.power_sampling import (
+from dl_techniques.models.common.power_sampling import (
     PowerSampler,
     PowerSamplingConfig,
     make_logits_fn,
     _log_softmax,
     _nucleus_sample,
 )
-import dl_techniques.models.power_sampling.forward as forward_mod
+import dl_techniques.models.common.power_sampling.forward as forward_mod
 
 
 VOCAB = 32
@@ -746,7 +746,7 @@ class TestPadTokenIsRequiredEagerly:
 #
 # This suite is one of the 29 under `tests/test_models/` that had no
 # gradient-flow test, and it is one of only TWO that cannot get one: there is no
-# model here to assert about. `dl_techniques.models.power_sampling` is an
+# model here to assert about. `dl_techniques.models.common.power_sampling` is an
 # INFERENCE-TIME sampler -- config + numpy ops + forward closures + the MCMC
 # dispatch -- and its own package docstring says so ("... subclasses
 # `keras.Model`, so there is nothing for a model factory to build"). A
@@ -765,7 +765,7 @@ def test_this_package_ships_no_trainable_model():
     import pkgutil
     import importlib
 
-    import dl_techniques.models.power_sampling as pkg
+    import dl_techniques.models.common.power_sampling as pkg
 
     offenders = []
     for module_info in pkgutil.iter_modules(pkg.__path__):

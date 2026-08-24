@@ -186,7 +186,7 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         NOT trigger it: the warm start runs scikit-learn and assigns a variable,
         neither of which is graph-safe, so it is performed by
         :meth:`warm_start_codebook`, called eagerly before training.
-        :class:`~dl_techniques.models.vq_vae_rotation.model.VQVAERotationTrick`
+        :class:`~dl_techniques.models.vision.vq_vae_rotation.model.VQVAERotationTrick`
         calls it for you from its ``fit`` override.
     :param kmeans_init_steps: Number of mini-batches the caller should collect
         before invoking :meth:`warm_start_codebook`.
@@ -555,7 +555,7 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # codebook row, exactly like euclidean mode. This branch used to "restore
         # magnitude" by scaling the row by `x_mag / q_mag`, and it must NOT be put
         # back. `quantize_from_indices` — the only other producer of a quantized
-        # vector, and the one `models/vq_vae_rotation`'s
+        # vector, and the one `models/vision/vq_vae_rotation`'s
         # `encode_to_indices -> quantize_from_indices -> decode` pair uses — returns
         # the raw row in every mode and CANNOT reproduce the rescale: an index has
         # already discarded x_mag by design in cosine mode (that is what cosine
@@ -844,7 +844,7 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         """Initialise the codebook from encoder outputs by MiniBatchKMeans.
 
         Interface contract (public entry point, called from
-        :meth:`dl_techniques.models.vq_vae_rotation.model.VQVAERotationTrick.warm_start_codebook`
+        :meth:`dl_techniques.models.vision.vq_vae_rotation.model.VQVAERotationTrick.warm_start_codebook`
         and usable directly for a standalone quantizer):
 
         - **Parameters**: ``batches`` — either one array-like of shape

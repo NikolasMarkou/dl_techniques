@@ -676,7 +676,7 @@ class DarkIRCompositeLoss(keras.losses.Loss):
         # ungated call made `ssim_weight=0.0` a term the caller could not
         # actually switch off: it still decided whether the loss was usable at
         # all. Do not "simplify" this back to an unconditional call — the
-        # bottleneck deep-supervision head in `models/darkir/` supervises maps
+        # bottleneck deep-supervision head in `models/vision/image_restoration/darkir/` supervises maps
         # as small as 4x4.
         if self.ssim_weight > 0:
             ssim_val = tf.image.ssim(y_true, y_pred, max_val=1.0)

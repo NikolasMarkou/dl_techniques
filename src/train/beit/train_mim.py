@@ -62,7 +62,7 @@ from dl_techniques.datasets.vision.beit_masking import (
     BEIT_NUM_MASK_PATCHES,
     make_beit_mim_map_fn,
 )
-from dl_techniques.models.beit import create_beit_mim
+from dl_techniques.models.vision.beit import create_beit_mim
 
 # ---------------------------------------------------------------------
 # CONFIGURATION

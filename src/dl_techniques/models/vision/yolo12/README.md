@@ -186,7 +186,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.yolo12.multitask import YOLOv12MultiTask
+from dl_techniques.models.vision.yolo12.multitask import YOLOv12MultiTask
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
 # 1. Create a multi-task model for detection and segmentation
@@ -259,7 +259,7 @@ The feature extractor backbone comes in several scales, trading speed for accura
 The framework gracefully handles single-task configurations.
 
 ```python
-from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
+from dl_techniques.models.vision.yolo12.multitask import create_yolov12_multitask
 
 # The output will be a single tensor, not a dictionary.
 model = create_yolov12_multitask(
@@ -390,7 +390,7 @@ import numpy as np
 import keras
 import tempfile
 import os
-from dl_techniques.models.yolo12.multitask import YOLOv12MultiTask
+from dl_techniques.models.vision.yolo12.multitask import YOLOv12MultiTask
 
 def test_multitask_serialization_cycle():
     """CRITICAL TEST: Ensures a multi-task model can be saved and loaded."""

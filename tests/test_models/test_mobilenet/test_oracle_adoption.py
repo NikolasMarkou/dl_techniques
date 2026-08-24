@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/mobilenet`` -- Phase 5 batch B.
+Oracle adoption for ``models/vision/mobilenet`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -65,10 +65,10 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.mobilenet.mobilenet_v1 import MobileNetV1
-from dl_techniques.models.mobilenet.mobilenet_v2 import MobileNetV2
-from dl_techniques.models.mobilenet.mobilenet_v3 import MobileNetV3
-from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

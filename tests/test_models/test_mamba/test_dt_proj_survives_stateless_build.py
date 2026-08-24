@@ -39,8 +39,8 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.mamba.components import MambaLayer
-from dl_techniques.models.mamba.mamba_v1 import Mamba
+from dl_techniques.models.language.mamba.components import MambaLayer
+from dl_techniques.models.language.mamba.mamba_v1 import Mamba
 
 D_MODEL, SEQ, VOCAB = 16, 8, 64
 DT_MIN, DT_MAX = 0.001, 0.1

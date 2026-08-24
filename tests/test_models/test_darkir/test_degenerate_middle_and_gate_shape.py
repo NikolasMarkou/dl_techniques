@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.darkir.model import (
+from dl_techniques.models.vision.image_restoration.darkir.model import (
     create_darkir_model,
     DarkIREncoderBlock,
     DarkIRDecoderBlock,

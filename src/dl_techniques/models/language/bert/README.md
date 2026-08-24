@@ -266,7 +266,7 @@ Let's build a BERT-based sentiment analysis model.
 import keras
 import numpy as np
 
-from dl_techniques.models.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the downstream task
@@ -355,7 +355,7 @@ print(f"\nOutput predictions shape: {predictions.shape}") # (4, 3)
 **Purpose**: The main Keras `Model` subclass that implements the core BERT encoder. It outputs a dictionary containing `last_hidden_state`.
 
 ```python
-from dl_techniques.models.bert  import BERT
+from dl_techniques.models.language.bert  import BERT
 
 # Create a standalone BERT-base encoder
 # Load pretrained weights from default URL
@@ -392,7 +392,7 @@ The Parameters column is **measured against the shipped code**, not quoted from 
 it rather than trusting this table -- it went stale once already (see below):
 
 ```python
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 
 for variant in ["tiny", "small", "base", "large"]:
     model = BERT.from_variant(variant)
@@ -422,7 +422,7 @@ All four rows AGREE with their upstream `config.json` on `hidden_size`, `num_hid
 You can override default parameters of a variant by passing them as keyword arguments to `from_variant`.
 
 ```python
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 # Create a BERT-base model but with a larger vocab size
 # This is useful when fine-tuning on a domain with new vocabulary
 model = BERT.from_variant(
@@ -440,7 +440,7 @@ model = BERT.from_variant(
 
 The `pretrained` argument is flexible:
 ```python
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 
 # 1. Download and load default 'uncased' weights for BERT-base
 model = BERT.from_variant("base", pretrained=True)
@@ -459,7 +459,7 @@ NER is a token-level classification task. The factory handles this seamlessly.
 ```python
 import keras
 
-from dl_techniques.models.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert_with_head
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Define the NER task configuration
@@ -504,7 +504,7 @@ You can use the raw output of the `BERT` encoder as rich contextual features for
 
 ```python
 import keras
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Create the standalone BERT encoder
@@ -551,7 +551,7 @@ Share a single BERT encoder across multiple tasks to improve performance and eff
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
 )
@@ -636,7 +636,7 @@ For `base` and `large` models, mixed precision can dramatically speed up trainin
 
 ```python
 import keras
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 
 # Enable mixed precision globally
 keras.mixed_precision.set_global_policy('mixed_float16')
@@ -651,7 +651,7 @@ model = BERT.from_variant("large", pretrained=True)
 Use `jit_compile=True` for graph compilation, which can provide a significant speed boost after an initial compilation warmup.
 
 ```python
-from dl_techniques.models.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert_with_head
 model = create_bert_with_head(...)
 model.compile(optimizer="adam", loss="...", jit_compile=True)
 # Keras will now attempt to compile the training step with XLA.
@@ -683,7 +683,7 @@ The `BERT` model and all its custom layers are fully serializable using Keras 3'
 
 ```python
 import keras
-from dl_techniques.models.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert_with_head
 # Create and train a model
 model = create_bert_with_head(...)
 # model.compile(...) and model.fit(...)
@@ -704,7 +704,7 @@ loaded_model = keras.models.load_model('my_bert_ner_model.keras')
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.bert import create_bert_with_head, BERT
+from dl_techniques.models.language.bert import create_bert_with_head, BERT
 
 def test_model_creation_all_variants():
     """Test model creation for all variants."""

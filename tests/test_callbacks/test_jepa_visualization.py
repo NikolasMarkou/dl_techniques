@@ -19,8 +19,8 @@ import pytest
 
 import keras
 
-from dl_techniques.models.video_jepa.config import VideoJEPAConfig
-from dl_techniques.models.video_jepa.model import VideoJEPA
+from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.vision.video_jepa.model import VideoJEPA
 from dl_techniques.callbacks.jepa_visualization import (
     LatentMaskOverlayCallback,
     PatchPredictionErrorCallback,

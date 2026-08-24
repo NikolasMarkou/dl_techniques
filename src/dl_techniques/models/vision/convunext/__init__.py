@@ -2,7 +2,7 @@
 
 Re-exports the stem layer, the attention layer, the variant config table and the
 two functional builders. Internal callers may still import from
-``dl_techniques.models.convunext.model`` directly.
+``dl_techniques.models.vision.convunext.model`` directly.
 
 Deliberately NOT re-exported: ``create_inference_model_from_training_model``.
 ``create_convunext`` and ``create_convunext_variant`` do take an

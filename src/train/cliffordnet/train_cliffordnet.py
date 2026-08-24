@@ -20,7 +20,7 @@ from PIL import Image, ImageOps, ImageEnhance
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.cliffordnet import CliffordNet
+from dl_techniques.models.vision.cliffordnet import CliffordNet
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,

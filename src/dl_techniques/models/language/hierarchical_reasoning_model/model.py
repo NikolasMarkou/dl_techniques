@@ -843,7 +843,7 @@ class HierarchicalReasoningModel(keras.Model):
         # keyword argument` for ANY override of a variant key, and every key in
         # MODEL_VARIANTS is one. `create_hierarchical_reasoning_model`'s own
         # Sudoku example (`variant="base", halt_max_steps=16`) is exactly this
-        # call and could not run. Copied from `models/gpt2/gpt2.py:464`.
+        # call and could not run. Copied from `models/language/gpt2/gpt2.py:464`.
         config.update(kwargs)
         return cls(
             vocab_size=vocab_size,

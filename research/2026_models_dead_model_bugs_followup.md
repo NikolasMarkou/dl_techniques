@@ -15,7 +15,7 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 **Status:** B3/B4/B5 (audit appendix #3/#4/#5) are authored and **known-good** (py_compile clean; `HashNGramEmbedding` standalone forward passes; the HRM-convention fix makes the model build and forward ~200 lines deep). Reverted, NOT committed, because a forward smoke / `.keras` round-trip (the success criterion) cannot pass until the two bugs below are fixed.
 
 ### 1a. `ReasoningByteCore` ↔ `HierarchicalReasoningModule` call/build convention (models/, FIXABLE — fix is known-good)
-- File: `src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py`, class `ReasoningByteCore`.
+- File: `src/dl_techniques/models/language/modern_bert/modern_bert_blt_hrm.py`, class `ReasoningByteCore`.
 - `HierarchicalReasoningModule.build` asserts `isinstance(input_shape, list) and len==2`; `.call` asserts `inputs` is a 2-element list `[hidden_states, input_injection]`. (Ground truth: `layers/reasoning/hrm_reasoning_core.py:393-394,528-540`.)
 - Current (wrong): build (~685-686) passes a bare shape tuple; 4 call sites (~778/782/785/786) pass two positional tensors, e.g. `self.l_reasoning(z_l, z_h + patch_representations, training=...)`.
 - Fix (6 sites, semantics-preserving — HRM adds the injection internally):
@@ -50,7 +50,7 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 
 ## 3. Repo-wide: 31 pre-existing orphan `# DECISION` anchors (housekeeping)
 
-`validate-plan.mjs` reports 31 orphan / unknown-plan anchor ERRORs across the repo (e.g. `layers/activations/routing_probabilities.py`, `layers/attention/lighthouse_attention.py`, `layers/geometric/clifford_block.py`, `losses/*`, `models/cliffordnet/lmunet.py`, `models/depth_anything/model.py`, `models/lewm/*`, many `src/train/*`). These are `# DECISION plan_xxxx/D-NNN` anchors from old plans whose `decisions.md` sections were sliding-window-trimmed — none introduced by this plan; none in files this plan touched.
+`validate-plan.mjs` reports 31 orphan / unknown-plan anchor ERRORs across the repo (e.g. `layers/activations/routing_probabilities.py`, `layers/attention/lighthouse_attention.py`, `layers/geometric/clifford_block.py`, `losses/*`, `models/vision/cliffordnet/lmunet.py`, `models/vision/depth_anything/model.py`, `models/vision/lewm/*`, many `src/train/*`). These are `# DECISION plan_xxxx/D-NNN` anchors from old plans whose `decisions.md` sections were sliding-window-trimmed — none introduced by this plan; none in files this plan touched.
 
 - Remedy per the iterative-planner protocol: `node <skill>/scripts/bootstrap.mjs retire <plan-id>` for each obsolete plan-id (marks anchors `[STALE]`, downgrades ERROR→WARN), OR remove the stale anchors from source.
 - This is cross-plan debt; address in a dedicated housekeeping pass, not mixed into feature work.

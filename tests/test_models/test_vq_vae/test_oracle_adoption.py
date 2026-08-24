@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/vq_vae`` -- Phase 5 batch C.
+Oracle adoption for ``models/vision/vq_vae`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -59,7 +59,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.vq_vae.model import VQVAEModel, create_vq_vae
+from dl_techniques.models.vision.vq_vae.model import VQVAEModel, create_vq_vae
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

@@ -23,8 +23,8 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np
 import pytest
 
-from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBackbone
-from dl_techniques.models.SAM.SAM3.sam3_image import Sam3Image
+from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
+from dl_techniques.models.vision_language.sam.sam3.sam3_image import Sam3Image
 
 BASE = dict(img_size=16, patch_size=2, in_channels=3, embed_dim=8, depth=4,
             num_heads=2, mlp_ratio=4.0, window_size=4, global_att_blocks=(1, 3),

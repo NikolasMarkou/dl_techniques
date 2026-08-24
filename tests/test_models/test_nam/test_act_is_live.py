@@ -23,7 +23,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.nam import NAM, NAMConfig
+from dl_techniques.models.neural_computer.nam import NAM, NAMConfig
 
 HALT_MAX_STEPS = 4
 

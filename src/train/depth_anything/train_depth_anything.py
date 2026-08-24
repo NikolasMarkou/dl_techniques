@@ -1,6 +1,6 @@
 """Depth Anything monocular depth estimation training script.
 
-Pattern-5 trainer for ``dl_techniques.models.depth_anything.DepthAnything`` on
+Pattern-5 trainer for ``dl_techniques.models.vision.depth_anything.DepthAnything`` on
 MegaDepth.  Structurally a Pattern-5 trainer (it was derived 1:1 from the
 now-deleted ``train.cliffordnet.train_depth_estimation``, which is why the two
 read alike in the git history), swapping in ``create_depth_anything`` as the model factory and
@@ -8,7 +8,7 @@ using a locally-defined ``DepthEstimationLoss`` (masked L1 + multi-scale
 gradient matching) that is compatible with the model's ``sigmoid``-clamped
 output.
 
-> **Important — read** ``src/dl_techniques/models/depth_anything/README.md``
+> **Important — read** ``src/dl_techniques/models/vision/depth_anything/README.md``
 > **before running this script.** The DepthAnything implementation has known
 > gaps (placeholder encoder, unimplemented semi-supervised pipeline, sigmoid
 > output that conflicts with AffineInvariantLoss).  This script is a thin
@@ -63,11 +63,11 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.depth_anything.model import (
+from dl_techniques.models.vision.depth_anything.model import (
     DepthAnything,
     create_depth_anything,
 )
-from dl_techniques.models.depth_anything.teacher_ema import (
+from dl_techniques.models.vision.depth_anything.teacher_ema import (
     TeacherEMACallback,
     cosine_ema_schedule,
     linear_ema_schedule,
@@ -671,7 +671,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--encoder-kind", choices=["real", "placeholder"], default="real",
         help=(
-            "'real' uses an in-tree dl_techniques.models.vit.ViT backbone; "
+            "'real' uses an in-tree dl_techniques.models.vision.vit.ViT backbone; "
             "'placeholder' uses the legacy Conv-BN-ReLU stack (compat only)."
         ),
     )

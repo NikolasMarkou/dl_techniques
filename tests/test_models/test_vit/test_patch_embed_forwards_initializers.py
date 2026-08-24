@@ -26,7 +26,7 @@ outputs and an output-level assertion would pass on the broken tree.
 import keras
 import numpy as np
 
-from dl_techniques.models.vit.model import ViT
+from dl_techniques.models.vision.vit.model import ViT
 
 from ..knob_sensitivity_oracle import (
     assert_scoped_value_knob_changes_weights,

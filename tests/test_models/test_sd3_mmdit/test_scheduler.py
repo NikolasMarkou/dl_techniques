@@ -12,7 +12,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.sd3_mmdit.scheduler import FlowMatchEulerScheduler
+from dl_techniques.models.vision_language.sd3_mmdit.scheduler import FlowMatchEulerScheduler
 
 
 @pytest.fixture

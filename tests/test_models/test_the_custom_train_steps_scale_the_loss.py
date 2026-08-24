@@ -254,7 +254,7 @@ def _literal_clip_of_scaled_gradients(node: ast.FunctionDef) -> list:
     Adding `scale_loss` is only half the repair. `tape.gradient(scaled_loss)`
     returns gradients in the SCALED domain, and anything that compares them
     against a fixed threshold before `apply()` unscales them is now comparing
-    against a threshold 2**15 times too small. MEASURED in `models/vae`: with
+    against a threshold 2**15 times too small. MEASURED in `models/vision/vae`: with
     the `scale_loss` call correctly in place, a surviving
     `ops.clip(grad, -1.0, 1.0)` saturated every component and the per-element
     |dW| came out at exactly 3.051758e-06 == 0.1 * 2**-15, for an fp16/float32
@@ -301,7 +301,7 @@ def test_a_scaling_train_step_does_not_clip_against_a_constant(
 
 
 def test_the_clip_predicate_fires_on_the_pre_fix_vae_body():
-    """RED proof, taken from the real pre-fix `models/vae` source."""
+    """RED proof, taken from the real pre-fix `models/vision/vae` source."""
     pre_fix = ast.parse(
         "def train_step(self, data):\n"
         "    with tf.GradientTape() as tape:\n"

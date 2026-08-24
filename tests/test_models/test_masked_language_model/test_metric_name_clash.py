@@ -40,7 +40,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.masked_language_model import (
+from dl_techniques.models.language.masked_language_model import (
     CausalLanguageModel,
     MaskedLanguageModel,
     create_mlm_training_model,

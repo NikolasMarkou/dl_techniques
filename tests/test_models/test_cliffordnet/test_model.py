@@ -3,7 +3,7 @@
 See plans/plan_2026-05-11_0090b0b8/plan.md for context. These tests pin:
 1. The new `create_cliffordnet` top-level factory returns a built model.
 2. `pretrained=True` raises `NotImplementedError` (no silent fallback).
-3. The trimmed public API of `dl_techniques.models.cliffordnet` (2 names since
+3. The trimmed public API of `dl_techniques.models.vision.cliffordnet` (2 names since
    plan-2026-08-10-3649c19e/iter-1/step-2 — see the comment on that test).
 """
 
@@ -14,7 +14,7 @@ class TestCliffordNetIter1Refactor:
     """Pin the iter-1 refactor contract."""
 
     def test_create_cliffordnet_factory_returns_instance(self):
-        from dl_techniques.models.cliffordnet import (
+        from dl_techniques.models.vision.cliffordnet import (
             CliffordNet,
             create_cliffordnet,
         )
@@ -27,7 +27,7 @@ class TestCliffordNetIter1Refactor:
         assert model.built
 
     def test_pretrained_true_raises_not_implemented(self):
-        from dl_techniques.models.cliffordnet import create_cliffordnet
+        from dl_techniques.models.vision.cliffordnet import create_cliffordnet
 
         with pytest.raises(NotImplementedError):
             create_cliffordnet(
@@ -35,7 +35,7 @@ class TestCliffordNetIter1Refactor:
             )
 
     def test_public_api_surface(self):
-        import dl_techniques.models.cliffordnet as pkg
+        import dl_techniques.models.vision.cliffordnet as pkg
 
         # Surface REDUCED to 2 names by plan-2026-08-10-3649c19e
         # (iter-1/step-2, decisions.md D-005/D-006). Provenance of what used
@@ -53,7 +53,7 @@ class TestCliffordNetIter1Refactor:
         #   - CliffordCLIP is deliberately ABSENT: commit 6bc9b69b
         #     (plan-2026-07-15-776c737a/iter-1/step-1) git-mv'd it from
         #     cliffordnet/clip.py to clip/clifford_clip.py and dropped the
-        #     re-export. Import it from dl_techniques.models.clip.clifford_clip,
+        #     re-export. Import it from dl_techniques.models.vision_language.clip.clifford_clip,
         #     not from here.
         assert set(pkg.__all__) == {
             "CliffordNet",

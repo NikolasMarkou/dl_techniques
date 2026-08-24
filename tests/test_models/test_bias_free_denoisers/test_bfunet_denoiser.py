@@ -13,7 +13,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Tuple, Dict, Any
 
-from dl_techniques.models.bias_free_denoisers.bfunet import (
+from dl_techniques.models.vision.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     create_bfunet_variant,
     BFUNET_CONFIGS
@@ -1019,7 +1019,7 @@ class TestPretrainedContract:
         )
 
     def test_no_placeholder_weight_table(self):
-        import dl_techniques.models.bias_free_denoisers.bfunet as mod
+        import dl_techniques.models.vision.bias_free_denoisers.bfunet as mod
         assert not hasattr(mod, "BFUNET_PRETRAINED_WEIGHTS")
 
 

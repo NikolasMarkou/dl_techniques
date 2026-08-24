@@ -120,10 +120,10 @@ sampling-direction repair carries `plan-2026-08-14T233721-d4f9beb2`:
 
 | anchor | file:line | summary |
 |--------|-----------|---------|
-| D-002 (`plan-2026-08-14T233721-d4f9beb2`) | `models/ideogram4/pipeline.py`, in `Ideogram4Pipeline.__call__`'s Euler loop | reverse-indexed step grid so `t` descends noise -> data with `dt < 0` |
+| D-002 (`plan-2026-08-14T233721-d4f9beb2`) | `models/vision_language/ideogram4/pipeline.py`, in `Ideogram4Pipeline.__call__`'s Euler loop | reverse-indexed step grid so `t` descends noise -> data with `dt < 0` |
 | D-003 | `layers/embedding/multi_axis_rope.py:183` | static one-hot band-interleave (replaces dynamic scatter) |
 | D-004 | `layers/attention/ideogram4_attention.py:226` | additive finite block-diagonal segment mask (replaces boolean keep-mask) |
-| D-005 | `models/ideogram4/vae.py:317` | thin `Upsample` wrapper (replaces functional `upsample()` builder) |
+| D-005 | `models/vision_language/ideogram4/vae.py:317` | thin `Upsample` wrapper (replaces functional `upsample()` builder) |
 
 Of the port plan (`plan_2026-06-12_59a18a10`), its D-001 (overall scope) and its
 D-002 (net-new `ScalarSinusoidalEmbedding` +

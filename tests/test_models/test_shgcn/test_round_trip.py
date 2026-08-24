@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.shgcn.model import (
+from dl_techniques.models.graph.shgcn.model import (
     SHGCNModel,
     SHGCNNodeClassifier,
     SHGCNLinkPredictor,

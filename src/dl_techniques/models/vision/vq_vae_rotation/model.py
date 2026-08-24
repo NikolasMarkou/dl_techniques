@@ -454,7 +454,7 @@ class VQVAERotationTrick(keras.Model):
         with tf.GradientTape() as tape:
             x_recon = self(x, training=True)
             # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # Reduce in float32; see the sibling `models/vq_vae`. `x` is
+            # Reduce in float32; see the sibling `models/vision/vq_vae`. `x` is
             # float32 dataset data, `x_recon` is `compute_dtype`, and the
             # subtraction raised under `mixed_float16`.
             x_recon = ops.cast(x_recon, "float32")
@@ -466,13 +466,13 @@ class VQVAERotationTrick(keras.Model):
             # diversity terms and additionally carries every regularizer on the
             # caller-supplied encoder and decoder. With the narrow form a BYO encoder
             # built with `kernel_regularizer=l2(...)` contributed EXACTLY NOTHING to
-            # the gradient (measured on the sibling `models/vq_vae`: identical
+            # the gradient (measured on the sibling `models/vision/vq_vae`: identical
             # reported loss with and without the regularizer). The module's own
             # architecture diagram at the top of this file already said
             # `total_loss = recon(x, x_rec) + sum(layer.losses)`; only the code
             # disagreed. See decisions.md D-026.
             aux_losses = self.losses
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `models/vq_vae`).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `models/vision/vq_vae`).
             vq_loss = (
                 ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
                 if aux_losses else 0.0

@@ -25,8 +25,8 @@ from typing import Dict, Tuple, Generator, Optional
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.bert import BERT
-from dl_techniques.models.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.language.bert import BERT
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.optimization import learning_rate_schedule_builder
@@ -239,7 +239,7 @@ def main(argv: Optional[list] = None):
     # `from train.common import setup_gpu` therefore makes `--help` allocate a
     # GPU before argparse ever runs, defeating the point of this whole change.
     # Measured: `import train.common` -> 1 "Created device" line; `import
-    # keras, tensorflow`, `dl_techniques.models.bert`, `datasets` and
+    # keras, tensorflow`, `dl_techniques.models.language.bert`, `datasets` and
     # `tensorflow_datasets` -> 0. See decisions.md D-006.
     #
     # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: the root

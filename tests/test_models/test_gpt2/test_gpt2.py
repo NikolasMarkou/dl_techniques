@@ -9,7 +9,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.gpt2.gpt2 import GPT2
+from dl_techniques.models.language.gpt2.gpt2 import GPT2
 
 
 def _random_ids(shape, vocab_size):
@@ -375,7 +375,7 @@ class TestGPT2Iter1Refactor:
     def test_create_gpt2_factory_returns_gpt2_instance(self):
         """`create_gpt2` is importable from the package root and returns a
         ``GPT2`` instance with variant params matching ``MODEL_VARIANTS``."""
-        from dl_techniques.models.gpt2 import GPT2 as PkgGPT2, create_gpt2
+        from dl_techniques.models.language.gpt2 import GPT2 as PkgGPT2, create_gpt2
 
         model = create_gpt2("tiny")
         assert isinstance(model, PkgGPT2)
@@ -394,7 +394,7 @@ class TestGPT2Iter1Refactor:
     def test_public_api_surface(self):
         """The package's declared public API (`__all__`) is exactly
         ``{GPT2, create_gpt2}``. Locks in the 2-name surface."""
-        import dl_techniques.models.gpt2 as pkg
+        import dl_techniques.models.language.gpt2 as pkg
 
         assert sorted(pkg.__all__) == ["GPT2", "create_gpt2"]
 

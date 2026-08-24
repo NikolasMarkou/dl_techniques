@@ -79,36 +79,36 @@ def _census(model) -> collections.Counter:
 
 
 def _yolo12():
-    from dl_techniques.models.yolo12 import create_yolov12_multitask
+    from dl_techniques.models.vision.yolo12 import create_yolov12_multitask
     return create_yolov12_multitask(num_detection_classes=4,
                                     tasks=["detection"],
                                     input_shape=(64, 64, 3), scale="n")
 
 
 def _mobile_clip():
-    from dl_techniques.models.mobile_clip import create_mobile_clip_model
+    from dl_techniques.models.vision_language.mobile_clip import create_mobile_clip_model
     return create_mobile_clip_model("s0")
 
 
 def _mobilenet():
-    from dl_techniques.models.mobilenet import create_mobilenetv2
+    from dl_techniques.models.vision.mobilenet import create_mobilenetv2
     return create_mobilenetv2(variant="small", num_classes=4,
                               input_shape=(32, 32, 3))
 
 
 def _vit_hmlp():
-    from dl_techniques.models.vit_hmlp import create_vit_hmlp
+    from dl_techniques.models.vision.vit_hmlp import create_vit_hmlp
     return create_vit_hmlp(input_shape=(32, 32, 3), num_classes=4,
                            scale="tiny", patch_size=16)
 
 
 def _fastvlm():
-    from dl_techniques.models.fastvlm.model import FastVLM
+    from dl_techniques.models.vision_language.fastvlm.model import FastVLM
     return FastVLM(num_classes=4)
 
 
 def _qwen():
-    from dl_techniques.models.qwen import Qwen3Next
+    from dl_techniques.models.language.qwen import Qwen3Next
     return Qwen3Next(vocab_size=64, hidden_size=32, num_layers=1,
                      num_attention_heads=2, num_key_value_heads=1,
                      max_seq_len=32, num_experts=2, num_experts_per_tok=1,
@@ -116,13 +116,13 @@ def _qwen():
 
 
 def _accunet():
-    from dl_techniques.models.accunet import create_acc_unet
+    from dl_techniques.models.vision.accunet import create_acc_unet
     return create_acc_unet(input_channels=3, num_classes=1, base_filters=8,
                            input_shape=(32, 32))
 
 
 def _masked_autoencoder():
-    from dl_techniques.models.masked_autoencoder import create_mae_model
+    from dl_techniques.models.vision.masked_autoencoder import create_mae_model
     inp = keras.Input((32, 32, 3))
     x = keras.layers.Conv2D(16, 3, strides=2, padding="same")(inp)
     x = keras.layers.Conv2D(16, 3, strides=2, padding="same")(x)
@@ -132,7 +132,7 @@ def _masked_autoencoder():
 
 
 def _cbam():
-    from dl_techniques.models.cbam import create_cbam_net
+    from dl_techniques.models.vision.cbam import create_cbam_net
     return create_cbam_net("tiny", num_classes=4, input_shape=(32, 32, 3))
 
 
@@ -180,7 +180,7 @@ def test_the_census_can_actually_observe_a_moved_epsilon():
     ``norm_eps`` knob; the others hard-code their values, which is what R-082
     is about. If ``norm_eps`` ever stops reaching the norms, this fails.
     """
-    from dl_techniques.models.qwen import Qwen3Next
+    from dl_techniques.models.language.qwen import Qwen3Next
 
     def at(eps):
         keras.utils.set_random_seed(0)

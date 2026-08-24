@@ -20,7 +20,7 @@ import tensorflow as tf
 
 from dl_techniques.layers.grid_sample import make_grid
 from dl_techniques.layers.thera_heat_field import DEFAULT_K_INIT
-from dl_techniques.models.thera import (
+from dl_techniques.models.vision.thera import (
     Thera,
     build_thera,
     EDSRBackbone,

@@ -11,7 +11,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.capsnet.model_v2 import (
+from dl_techniques.models.vision.capsnet.model_v2 import (
     CapsNetV2,
     create_capsnet_v2,
     create_capsnet_v2_pretrained,

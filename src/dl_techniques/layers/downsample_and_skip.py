@@ -2,7 +2,7 @@
 
 This module holds :class:`DownsampleAndSkip`, the single home for the "skip
 connection + downsample" decision made at every encoder level of the U-Net-shaped
-denoisers in :mod:`dl_techniques.models.bias_free_denoisers` (``bfunet`` and
+denoisers in :mod:`dl_techniques.models.vision.bias_free_denoisers` (``bfunet`` and
 ``bfconvunext``). Both the raw-skip/pooling path and the Laplacian-pyramid split
 path live here, so the branch is written once rather than once per model family.
 """

@@ -33,7 +33,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     deep_supervision_schedule_builder
 )
-from dl_techniques.models.resnet.model import (
+from dl_techniques.models.vision.resnet.model import (
     create_resnet,
 )
 from dl_techniques.utils.deep_supervision import (

@@ -19,7 +19,7 @@ import pytest
 import pathlib
 import numpy as np
 
-from dl_techniques.models.coshnet.model import CoShNet, create_coshnet
+from dl_techniques.models.vision.coshnet.model import CoShNet, create_coshnet
 
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
@@ -104,7 +104,7 @@ class TestDocumentedParameterCounts:
     the surviving one honest.
     """
 
-    # The exact figures printed in `models/coshnet/model.py`'s module docstring,
+    # The exact figures printed in `models/vision/coshnet/model.py`'s module docstring,
     # measured at (32, 32, 3) with 10 classes.
     DOCUMENTED_TOTAL = {
         "nano": 55_282,

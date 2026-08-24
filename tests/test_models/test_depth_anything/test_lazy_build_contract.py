@@ -22,7 +22,7 @@ from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
 
 
 def _build():
-    from dl_techniques.models.depth_anything.model import create_depth_anything
+    from dl_techniques.models.vision.depth_anything.model import create_depth_anything
     return create_depth_anything(
         encoder_type='vit_s', image_shape=(64, 64, 3),
         encoder_kind='placeholder', decoder_dims=[16, 16, 16, 16],

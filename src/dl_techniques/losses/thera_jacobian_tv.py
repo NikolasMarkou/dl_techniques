@@ -5,7 +5,7 @@
 # finite-difference proxy -- Q3 forbids that; see decisions.md D-010). This module
 # is a pure-function consumer of that Jacobian; the exact-Jacobian construction
 # (nested tf.GradientTape.batch_jacobian, second-order-safe) lives in
-# `models/thera/hypernetwork.py`. Keep this an L1 (abs) reduction to match THERA's
+# `models/vision/thera/hypernetwork.py`. Keep this an L1 (abs) reduction to match THERA's
 # reference `utils.compute_metrics` -> `metrics['TV'] = mean(abs(jacobian))`.
 """THERA exact Jacobian-TV aliasing regularizer (loss helpers).
 
@@ -21,8 +21,8 @@ of the EXACT per-pixel spatial Jacobian of the neural heat field with respect to
 its local query coordinate, evaluated at heat-time ``t = 0`` (envelope == 1).
 
 The Jacobian itself is produced upstream by
-:meth:`dl_techniques.models.thera.model.Thera.call` (``return_jac=True``) /
-:meth:`dl_techniques.models.thera.hypernetwork.TheraHypernetwork.decode_with_jac`
+:meth:`dl_techniques.models.vision.thera.model.Thera.call` (``return_jac=True``) /
+:meth:`dl_techniques.models.vision.thera.hypernetwork.TheraHypernetwork.decode_with_jac`
 as an exact nested-tape ``batch_jacobian`` -- this module only reduces it to the
 scalar penalty and (optionally) sums it with the reconstruction term.
 

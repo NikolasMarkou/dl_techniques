@@ -19,7 +19,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
     DEFAULT_VOCAB_SIZE,
     BeitForMaskedImageModeling,
@@ -80,7 +80,7 @@ class TestBeitForMaskedImageModeling:
         them. Only the slice boundary itself can be pinned.
 
         This is also the test for the ``D-012`` anchor at the slice site in
-        ``models/beit/model.py``; an anchor with no test that can fail is a comment.
+        ``models/vision/beit/model.py``; an anchor with no test that can fail is a comment.
         """
         model = _mim(drop_path_rate=0.0)
         model.build((None,) + IMG)

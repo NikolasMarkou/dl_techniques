@@ -95,7 +95,7 @@ def resolve_num_groups(group_size: int, in_channels: int) -> int:
 # `norm_epsilon` and `padding_mode` both default to TODAY'S KERAS BEHAVIOUR
 # (1e-3 and asymmetric `'same'`), which is NOT the MobileOne/FastViT reference
 # (1e-5 and PyTorch's symmetric `padding = k // 2`). Do NOT "fix" the defaults:
-# `models/fastvlm/` consumes this block through `layers/repmixer_block.py` and
+# `models/vision_language/fastvlm/` consumes this block through `layers/repmixer_block.py` and
 # ships numerics that depend on both, and a defaults-unchanged value-identity
 # test pins it. The faithful port passes both explicitly from
 # `layers/fastvit/reference.py`. See decisions.md D-007.
@@ -605,7 +605,7 @@ class MobileOneBlock(keras.layers.Layer):
 
         # DECISION plan-2026-08-13T183738-24486492/D-002
         # SE ordering. `'post_act'` — se(act(x)) — is this layer's HISTORICAL order and
-        # MUST remain the default: `models/fastvlm/` (via layers/repmixer_block.py's
+        # MUST remain the default: `models/vision_language/fastvlm/` (via layers/repmixer_block.py's
         # ConvolutionalStem) ships trained-against numerics that depend on it. Do NOT
         # "fix" the default to match timm. `'pre_act'` — act(se(x)) — is the
         # FastViT/timm reference order and is available opt-in for the faithful port.

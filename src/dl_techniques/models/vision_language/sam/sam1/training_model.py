@@ -34,7 +34,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM1.training_model import SAMTrainingModel
+from dl_techniques.models.vision_language.sam.sam1.training_model import SAMTrainingModel
 trainer = SAMTrainingModel(sam, multimask_output=False)
 trainer.compile(optimizer="adam",
                 loss={"low_res_logits": SAMMaskLoss(),

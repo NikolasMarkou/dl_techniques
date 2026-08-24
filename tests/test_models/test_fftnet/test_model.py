@@ -12,7 +12,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.fftnet.model import FFTNet, create_fftnet
+from dl_techniques.models.language.fftnet.model import FFTNet, create_fftnet
 
 
 def _model():
@@ -51,7 +51,7 @@ class TestFFTNet:
         probe fails identically with and without the fix — it is a false guard,
         and the first version of this test was exactly that.
         """
-        from dl_techniques.models.fftnet.model import FFTMixer
+        from dl_techniques.models.language.fftnet.model import FFTMixer
 
         rng = np.random.default_rng(0)
         x = rng.random((2, 8, 16)).astype("float32")

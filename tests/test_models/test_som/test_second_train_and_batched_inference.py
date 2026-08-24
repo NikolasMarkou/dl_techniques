@@ -20,7 +20,7 @@ samples) is a ~75 GB float32 intermediate.
 import numpy as np
 import pytest
 
-from dl_techniques.models.som.model import SOMModel
+from dl_techniques.models.memory.som.model import SOMModel
 
 
 @pytest.fixture

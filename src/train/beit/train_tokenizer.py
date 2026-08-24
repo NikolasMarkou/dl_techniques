@@ -4,7 +4,7 @@ Trains the VQ-VAE that produces BEiT's MIM targets. BEiT v1 uses a frozen, exter
 pre-trained DALL-E dVAE (Gumbel-softmax, 8192 codes); this repo has no Gumbel dVAE, so
 the tokenizer is VQ-style — :class:`VQVAERotationTrick`, hard nearest-neighbour — exactly
 as BEiT v2's own VQ-KD tokenizer is. That deviation is recorded as X-1 in
-``models/beit/README.md`` and in ``decisions.md`` D-002 (class name corrected by D-010).
+``models/vision/beit/README.md`` and in ``decisions.md`` D-002 (class name corrected by D-010).
 
 The ONLY thing stage 1 consumes from this stage is
 ``encode_to_indices(image) -> (B, gh, gw)`` integer code ids, and the ONLY thing that has
@@ -59,7 +59,7 @@ from train.beit.common import (
     build_raw_image_dataset,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vq_vae_rotation.model import VQVAERotationTrick
+from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 # ---------------------------------------------------------------------
 # CONFIGURATION

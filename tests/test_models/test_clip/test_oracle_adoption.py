@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/clip`` -- Phase 5 batch A.
+Oracle adoption for ``models/vision_language/clip`` -- Phase 5 batch A.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -25,7 +25,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.clip.model import CLIP
+from dl_techniques.models.vision_language.clip.model import CLIP
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

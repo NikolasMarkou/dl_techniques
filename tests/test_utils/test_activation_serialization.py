@@ -170,7 +170,7 @@ def _mdn_model(activation):
 
 
 def _vit(activation):
-    from dl_techniques.models.vit.model import ViT
+    from dl_techniques.models.vision.vit.model import ViT
     return ViT(
         input_shape=(16, 16, 3), num_classes=3, scale="tiny", patch_size=4,
         activation=activation,
@@ -179,7 +179,7 @@ def _vit(activation):
 
 #: ``(id, factory, attribute-name, input-shape, is_model)``. Six classes across
 #: five packages -- ``layers/``, ``layers/statistics``, ``layers/transformers``,
-#: ``layers/time_series``, ``models/time_series`` and ``models/vit`` (the last is
+#: ``layers/time_series``, ``models/time_series`` and ``models/vision/vit`` (the last is
 #: one of D-205's three, migrated onto the shared helper by D-400).
 CASES = [
     ("HierarchicalMLPStem", _hierarchical_mlp_stem, "activation", (2, 16, 16, 3), False),

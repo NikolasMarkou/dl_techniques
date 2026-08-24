@@ -1,6 +1,6 @@
 # DINO — self-distillation vision transformers (v1 / v2 / v3)
 
-`src/dl_techniques/models/dino/` implements three Vision Transformer backbones from the
+`src/dl_techniques/models/vision/dino/` implements three Vision Transformer backbones from the
 DINO paper line, plus the DINO projection head. The matching losses live one package
 over, in `src/dl_techniques/losses/dino_loss.py`.
 
@@ -35,13 +35,13 @@ defects found in the measuring instruments, and the questions still open — liv
 
 | File | Contents |
 |---|---|
-| `src/dl_techniques/models/dino/__init__.py` | The package's public API: an explicit `__all__` re-exporting every class and factory below. |
-| `src/dl_techniques/models/dino/dino_v1.py` | `DINOHead` (the projection head all three versions use for SSL), `DINOv1`, `create_dino_v1`, `create_dino_teacher_student_pair`. |
-| `src/dl_techniques/models/dino/dino_v2.py` | `DINOv2Block`, `DINOv2VisionTransformer` (the backbone), `DINOv2` (backbone + classifier), `create_dino_v2`. |
-| `src/dl_techniques/models/dino/dino_v3.py` | `DINOv3`, `create_dino_v3`. |
-| `src/dl_techniques/models/dino/training.py` | `DINOTrainingModel`, `create_dino_training_model` — student + frozen EMA teacher over a multi-crop batch, trainable under stock `fit()`. See § 5.5. |
-| `src/dl_techniques/models/dino/common.py` | `reject_input_shape` (the one piece of the converged factory scheme identical in all three files) and `sync_teacher_to_student` (the construction-time student→teacher weight copy DINO requires). Neither is part of the public API. |
-| `src/dl_techniques/models/dino/README.md` | This file. |
+| `src/dl_techniques/models/vision/dino/__init__.py` | The package's public API: an explicit `__all__` re-exporting every class and factory below. |
+| `src/dl_techniques/models/vision/dino/dino_v1.py` | `DINOHead` (the projection head all three versions use for SSL), `DINOv1`, `create_dino_v1`, `create_dino_teacher_student_pair`. |
+| `src/dl_techniques/models/vision/dino/dino_v2.py` | `DINOv2Block`, `DINOv2VisionTransformer` (the backbone), `DINOv2` (backbone + classifier), `create_dino_v2`. |
+| `src/dl_techniques/models/vision/dino/dino_v3.py` | `DINOv3`, `create_dino_v3`. |
+| `src/dl_techniques/models/vision/dino/training.py` | `DINOTrainingModel`, `create_dino_training_model` — student + frozen EMA teacher over a multi-crop batch, trainable under stock `fit()`. See § 5.5. |
+| `src/dl_techniques/models/vision/dino/common.py` | `reject_input_shape` (the one piece of the converged factory scheme identical in all three files) and `sync_teacher_to_student` (the construction-time student→teacher weight copy DINO requires). Neither is part of the public API. |
+| `src/dl_techniques/models/vision/dino/README.md` | This file. |
 
 Related, outside this package:
 
@@ -49,8 +49,8 @@ Related, outside this package:
 |---|---|
 | `src/dl_techniques/losses/dino_loss.py` | `DINOLoss`, `iBOTPatchLoss`, `KoLeoLoss`. Re-exported from `dl_techniques.losses`. See § 5. |
 | `src/dl_techniques/datasets/vision/multi_crop.py` | `make_multi_crop_map_fn` — the `tf.data` transform producing the multi-crop element `DINOTrainingModel` consumes. See § 5.6. |
-| `src/dl_techniques/models/depth_anything/teacher_ema.py` | `TeacherEMACallback` plus `cosine_ema_schedule` / `linear_ema_schedule`. Model-agnostic: it drives the teacher EMA of any model exposing `update_teacher_ema(decay)`. |
-| `src/dl_techniques/models/depth_anything/model.py` | Uses a **placeholder** encoder described in prose as "a placeholder for DINOv2". It does **not** import from this package. Wiring it to a real `DINOv2` is a named backlog item (§ 8). |
+| `src/dl_techniques/models/vision/depth_anything/teacher_ema.py` | `TeacherEMACallback` plus `cosine_ema_schedule` / `linear_ema_schedule`. Model-agnostic: it drives the teacher EMA of any model exposing `update_teacher_ema(decay)`. |
+| `src/dl_techniques/models/vision/depth_anything/model.py` | Uses a **placeholder** encoder described in prose as "a placeholder for DINOv2". It does **not** import from this package. Wiring it to a real `DINOv2` is a named backlog item (§ 8). |
 | `tests/test_models/test_dino/` | This package's tests. See § 9. |
 
 **Variant tables are per-class.** `DINOv1.MODEL_VARIANTS`,
@@ -59,7 +59,7 @@ class attributes that share a name and disagree on their contents (v2's `giant` 
 `ffn_type='swiglu'`; v3's carries `patch_size=(14, 14)` and `stochastic_depth_rate=0.4`;
 v1's carries neither). The package binds **no** module-level `MODEL_VARIANTS` alias,
 because a single name would have to pick one of the three and misdescribe the other two.
-Reach them through the classes: `from dl_techniques.models.dino import DINOv3;
+Reach them through the classes: `from dl_techniques.models.vision.dino import DINOv3;
 DINOv3.MODEL_VARIANTS`.
 
 All five variant key sets agree — `tiny`, `small`, `base`, `large`, `giant` — and the
@@ -250,7 +250,7 @@ rotting quietly.
 ### DINOv1 — classification, and an SSL projection head
 
 ```python
-from dl_techniques.models.dino import create_dino_v1, create_dino_teacher_student_pair
+from dl_techniques.models.vision.dino import create_dino_v1, create_dino_teacher_student_pair
 
 # Supervised fine-tuning head: 32x32 input, patch 16 -> a 2x2 patch grid.
 model = create_dino_v1("small", image_size=32, patch_size=16, num_classes=10)
@@ -284,7 +284,7 @@ pass.
 
 ```python
 import numpy as np
-from dl_techniques.models.dino import create_dino_v2
+from dl_techniques.models.vision.dino import create_dino_v2
 
 model = create_dino_v2("tiny", image_size=28, patch_size=14, num_classes=10)
 
@@ -312,7 +312,7 @@ giant = create_dino_v2(
 
 ```python
 import keras
-from dl_techniques.models.dino import DINOHead, create_dino_v3
+from dl_techniques.models.vision.dino import DINOHead, create_dino_v3
 
 # Default: learned absolute positional embeddings.
 learned = create_dino_v3("small", image_size=32, patch_size=16, num_classes=10)
@@ -431,7 +431,7 @@ silent no-op into a loud failure. `get_config()` carries the **current** value, 
 warmup survives a checkpoint.
 
 Drive it with the schedule **functions** already in
-`src/dl_techniques/models/depth_anything/teacher_ema.py`
+`src/dl_techniques/models/vision/depth_anything/teacher_ema.py`
 (`linear_ema_schedule` / `cosine_ema_schedule`) plus a `keras.callbacks.LambdaCallback` —
 **not** with a new schedule-callback class. `src/dl_techniques/callbacks/temperature_annealing.py`
 does **not** fit: measured, `TemperatureAnnealingCallback._iter_target_layers` walks
@@ -442,7 +442,7 @@ and anneals nothing.
 
 ### 5.5 — `DINOTrainingModel`
 
-`src/dl_techniques/models/dino/training.py` packages the two networks:
+`src/dl_techniques/models/vision/dino/training.py` packages the two networks:
 
 - Input: one fixed-shape tensor `(batch, n_views, height, width, channels)`, where views
   `0` and `1` are the **global** crops and every view is at the **same** pixel resolution
@@ -459,9 +459,9 @@ and anneals nothing.
 
 ```python
 import numpy as np
-from dl_techniques.models.dino import create_dino_training_model
+from dl_techniques.models.vision.dino import create_dino_training_model
 from dl_techniques.losses.dino_loss import DINOLoss
-from dl_techniques.models.depth_anything.teacher_ema import (
+from dl_techniques.models.vision.depth_anything.teacher_ema import (
     TeacherEMACallback, cosine_ema_schedule,
 )
 
@@ -522,7 +522,7 @@ every number in this section is in `research/2026_dino_ssl_measurements.md`.
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.dino.train_dino --smoke
 ```
 
-`src/dl_techniques/models/dino/training.py` (§ 5.5) is the trainable model,
+`src/dl_techniques/models/vision/dino/training.py` (§ 5.5) is the trainable model,
 `src/dl_techniques/datasets/vision/multi_crop.py` (§ 5.6) is its data side, and the
 trainer joins them under stock `fit()` with **no** `validation_data` — § 5 Rule 1 is the
 reason, not a preference.
@@ -663,7 +663,7 @@ silent omission again.
    over the flattened token sequence. See § 2.
 5. **Register tokens on `DINOv3`.** `DINOv2VisionTransformer` has `num_register_tokens`;
    `DINOv3` does not.
-6. **`src/dl_techniques/models/depth_anything/model.py`'s DINOv2 placeholder.** That model
+6. **`src/dl_techniques/models/vision/depth_anything/model.py`'s DINOv2 placeholder.** That model
    describes its encoder in prose as "a placeholder for DINOv2" and does not import from
    this package. Wiring it to a real `DINOv2VisionTransformer` is an open opportunity, not
    a defect in either package.

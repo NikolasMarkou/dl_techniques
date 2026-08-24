@@ -20,7 +20,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.tree_transformer.model import (
+from dl_techniques.models.language.tree_transformer.model import (
     TreeTransformer,
     create_tree_transformer,
     create_tree_transformer_with_head,
@@ -697,7 +697,7 @@ class TestTreeTransformerIter1Fixes:
 
     def test_mlm_wrapper_compatibility(self):
         """MaskedLanguageModel accepts a TreeTransformer encoder and forwards correctly."""
-        from dl_techniques.models.masked_language_model.mlm import (
+        from dl_techniques.models.language.masked_language_model.mlm import (
             MaskedLanguageModel,
         )
         encoder = TreeTransformer.from_variant(
@@ -762,7 +762,7 @@ class TestTreeTransformerIter1Fixes:
 
     def test_model_fit_one_step_smoke(self):
         """1-step fit smoke on MaskedLanguageModel(TreeTransformer)."""
-        from dl_techniques.models.masked_language_model.mlm import (
+        from dl_techniques.models.language.masked_language_model.mlm import (
             MaskedLanguageModel,
         )
         encoder = TreeTransformer.from_variant(
@@ -833,7 +833,7 @@ class TestTreeTransformerIter1Refactor:
 
     def test_public_api_surface(self):
         """Package `__init__` exposes only the 3 public symbols."""
-        import dl_techniques.models.tree_transformer as pkg
+        import dl_techniques.models.language.tree_transformer as pkg
 
         expected = {
             "TreeTransformer",
@@ -858,7 +858,7 @@ class TestTreeTransformerIter1Refactor:
             )
 
         # But they must still be importable from .model (nam consumer contract).
-        from dl_techniques.models.tree_transformer.model import (
+        from dl_techniques.models.language.tree_transformer.model import (
             GroupAttention,
             TreeMHA,
             PositionalEncoding,
@@ -879,7 +879,7 @@ class TestTreeTransformerComponentsSplitLockIn:
     """
 
     def test_sublayers_importable_from_components_module(self):
-        from dl_techniques.models.tree_transformer.components import (
+        from dl_techniques.models.language.tree_transformer.components import (
             GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock,
         )
         for cls in (GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock):
@@ -887,25 +887,25 @@ class TestTreeTransformerComponentsSplitLockIn:
 
     def test_sublayers_re_exported_from_model_module(self):
         # Deep-import contract for nam/ and train/nam/.
-        from dl_techniques.models.tree_transformer.model import (
+        from dl_techniques.models.language.tree_transformer.model import (
             GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock,
         )
         # Same object identity — they ARE the components.py classes.
-        from dl_techniques.models.tree_transformer import components as comp
+        from dl_techniques.models.language.tree_transformer import components as comp
         assert GroupAttention is comp.GroupAttention
         assert TreeMHA is comp.TreeMHA
         assert PositionalEncoding is comp.PositionalEncoding
         assert TreeTransformerBlock is comp.TreeTransformerBlock
 
     def test_model_module_has_only_top_level_class(self):
-        import dl_techniques.models.tree_transformer.model as m
+        import dl_techniques.models.language.tree_transformer.model as m
         # Top-level + factories live here.
         assert hasattr(m, "TreeTransformer")
         assert callable(getattr(m, "create_tree_transformer", None))
         assert callable(getattr(m, "create_tree_transformer_with_head", None))
         # Sub-layers are re-exports — verify they live in components, not model.
-        assert m.GroupAttention.__module__ == "dl_techniques.models.tree_transformer.components"
-        assert m.TreeTransformer.__module__ == "dl_techniques.models.tree_transformer.model"
+        assert m.GroupAttention.__module__ == "dl_techniques.models.language.tree_transformer.components"
+        assert m.TreeTransformer.__module__ == "dl_techniques.models.language.tree_transformer.model"
 
 
 # ---------------------------------------------------------------------
@@ -913,7 +913,7 @@ class TestTreeTransformerComponentsSplitLockIn:
 # (plan-2026-08-19-a616f581 step 12)
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.tree_transformer.components import GroupAttention, TreeMHA
+from dl_techniques.models.language.tree_transformer.components import GroupAttention, TreeMHA
 
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.

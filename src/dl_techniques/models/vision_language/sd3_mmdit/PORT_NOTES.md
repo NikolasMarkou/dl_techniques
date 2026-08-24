@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-This package (`src/dl_techniques/models/sd3_mmdit/`) is a Keras 3 / TensorFlow 2.18
+This package (`src/dl_techniques/models/vision_language/sd3_mmdit/`) is a Keras 3 / TensorFlow 2.18
 port of the PyTorch MiniDiffusion SD3-style **MMDiT** (Multimodal Diffusion
 Transformer) text-to-image stack: a dual-stream rectified-flow diffusion
 transformer over a 16-channel spatial VAE latent, conditioned on CLIP +
@@ -35,13 +35,13 @@ registration in §3):
 
 | PyTorch source component | dl_techniques reuse | Import path | Note |
 |---|---|---|---|
-| SD3 VAE (ResNet enc/dec, GroupNorm32, attn mid-block, KL reparam) | `AutoEncoder` with `z_channels=16` | `dl_techniques.models.ideogram4.vae.AutoEncoder` | Architecture is structurally equivalent; only the latent-norm convention differs — **D-002** / **D-008** |
+| SD3 VAE (ResNet enc/dec, GroupNorm32, attn mid-block, KL reparam) | `AutoEncoder` with `z_channels=16` | `dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder` | Architecture is structurally equivalent; only the latent-norm convention differs — **D-002** / **D-008** |
 | `DiagonalGaussianDistribution` (reparameterization) | `Sampling` | `dl_techniques.layers.sampling.Sampling` | Used internally by the reused `AutoEncoder` |
 | rectified-flow velocity MSE objective | `FlowMatchingVelocityLoss` | `dl_techniques.losses.flow_matching_velocity_loss.FlowMatchingVelocityLoss` | Plain MSE; logit-normal weighting kept in the trainer (HARD constraint) |
 | timestep sinusoidal embedding | `ScalarSinusoidalEmbedding(dim, input_range=(0, 1000))` | `dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding` | SD3 timestep range is `[0, 1000]`, not `[0, 1]` |
 | patchify Conv2D projection | `PatchEmbedding2D` | `dl_techniques.layers.embedding.patch_embedding.PatchEmbedding2D` | `kernel=stride=patch_size` (see §4 source-bug note) |
 | QK-norm / T5 RMSNorm | `RMSNorm` | `dl_techniques.layers.norms.rms_norm.RMSNorm` | Built on per-head `(..., head_dim)` so scale is `(head_dim,)` |
-| logit-normal time-warp formula | reused formula/pattern | `dl_techniques.models.ideogram4.scheduler` (`LogitNormalSchedule`, scipy `ndtri`/`expit`) | Re-expressed in `FlowMatchEulerScheduler`; see §3 |
+| logit-normal time-warp formula | reused formula/pattern | `dl_techniques.models.vision_language.ideogram4.scheduler` (`LogitNormalSchedule`, scipy `ndtri`/`expit`) | Re-expressed in `FlowMatchEulerScheduler`; see §3 |
 | GPU setup / seeding / callbacks / config-IO | `setup_gpu`, `set_seeds`, `create_callbacks`, `save_config_json` | `train.common` | Trainer wiring, identical to the ideogram4 precedent |
 | (optional) CLIP-guidance loss | `CLIPContrastiveLoss` | `dl_techniques.losses.clip_contrastive_loss.CLIPContrastiveLoss` | Available if CLIP-guided training is added; not used by the smoke path |
 
@@ -58,11 +58,11 @@ enforcing earned-abstraction per class):
 | `PagedJointAttention` | **NEW** `MMDiTJointAttention` — `dl_techniques.layers.attention.mmdit_joint_attention` | No dual-stream concat→attend→split joint attention existed; the source's PAGING / KV-cache deque was **dropped** — **D-004** |
 | `AdaLayerNormZero` / `AdaLayerNormZeroX` / `AdaLayerNormContinuous` | **NEW** trio `AdaLayerNormZero` (6-way), `AdaLayerNormZeroX` (9-way), `AdaLayerNormContinuous` (2-way) — `dl_techniques.layers.transformers.sd3_adaln` | Repo only had the 6-way `AdaLNZeroConditionalBlock`; the 9-way (dual-attention gates) and 2-way (scale+shift, no gate) variants were absent |
 | GELU-tanh `FeedForward` | **NEW** `GELUMLPFFN`, registered as `gelu_tanh` in the FFN factory — `dl_techniques.layers.ffn.gelu_mlp_ffn.GELUMLPFFN` (`factory.py` key `gelu_tanh`) | Repo had exact-erf `GeGLUFFN` only; SD3 uses approximate (tanh) GELU. Only this layer is factory-registered (clean single-tensor call) — **D-001** |
-| `DiTBlock` | **NEW** `MMDiTBlock` + `MMDiTFinalLayer` — `dl_techniques.models.sd3_mmdit.blocks` | Dual-stream block container; the dual-attention `attn2` is a plain `keras.layers.MultiHeadAttention`, which **omits attn2 per-head QK-norm** — **D-005** |
-| `DiT` (MMDiT) | **NEW** `SD3MMDiT` + `create_sd3_mmdit(variant, **overrides)` — `dl_techniques.models.sd3_mmdit.transformer` | 2D sin-cos positional embedding implemented as a **static non-trainable weight, crop-centered** at call time, avoiding the error-prone `PositionEmbeddingSine2D` NCHW→NHWC reshape — **D-006** |
-| `NoiseScheduler` | **NEW** `FlowMatchEulerScheduler` — `dl_techniques.models.sd3_mmdit.scheduler` | `add_noise` / `euler_step` / logit-normal time sampling + weight; `t=0` data, `t=1` noise, **signed** `dt` — **D-007** |
-| `CLIP` / `OpenCLIP` / `T5` text encoders | **NEW** `CLIPTextEncoder`, `OpenCLIPTextEncoder`, `T5Encoder` — `dl_techniques.models.sd3_mmdit.text_encoders` | Repo `models/clip` is SwiGLU/GQA (not OpenAI-CLIP-faithful); no OpenCLIP; no T5. Built from scratch (token-id input, no weights) — **D-009** |
-| `HandlePrompt` + inference loop | **NEW** `SD3Pipeline`, `assemble_prompt_features`, `create_sd3_pipeline` — `dl_techniques.models.sd3_mmdit.pipeline` | End-to-end text→latent→Euler-denoise→VAE-decode surface |
+| `DiTBlock` | **NEW** `MMDiTBlock` + `MMDiTFinalLayer` — `dl_techniques.models.vision_language.sd3_mmdit.blocks` | Dual-stream block container; the dual-attention `attn2` is a plain `keras.layers.MultiHeadAttention`, which **omits attn2 per-head QK-norm** — **D-005** |
+| `DiT` (MMDiT) | **NEW** `SD3MMDiT` + `create_sd3_mmdit(variant, **overrides)` — `dl_techniques.models.vision_language.sd3_mmdit.transformer` | 2D sin-cos positional embedding implemented as a **static non-trainable weight, crop-centered** at call time, avoiding the error-prone `PositionEmbeddingSine2D` NCHW→NHWC reshape — **D-006** |
+| `NoiseScheduler` | **NEW** `FlowMatchEulerScheduler` — `dl_techniques.models.vision_language.sd3_mmdit.scheduler` | `add_noise` / `euler_step` / logit-normal time sampling + weight; `t=0` data, `t=1` noise, **signed** `dt` — **D-007** |
+| `CLIP` / `OpenCLIP` / `T5` text encoders | **NEW** `CLIPTextEncoder`, `OpenCLIPTextEncoder`, `T5Encoder` — `dl_techniques.models.vision_language.sd3_mmdit.text_encoders` | Repo `models/vision_language/clip` is SwiGLU/GQA (not OpenAI-CLIP-faithful); no OpenCLIP; no T5. Built from scratch (token-id input, no weights) — **D-009** |
+| `HandlePrompt` + inference loop | **NEW** `SD3Pipeline`, `assemble_prompt_features`, `create_sd3_pipeline` — `dl_techniques.models.vision_language.sd3_mmdit.pipeline` | End-to-end text→latent→Euler-denoise→VAE-decode surface |
 | `train.py` | **NEW** `train_sd3_mmdit.py` (`SD3FlowTrainer`, `TrainingConfig`, `make_synthetic_dataset`, `train`) — `src/train/sd3_mmdit/` | Custom logit-normal-weighted `train_step`; named `train_sd3_mmdit.py` (never `train.py`, which would shadow the `train` package) |
 
 ---
@@ -166,7 +166,7 @@ claims are made beyond these.)*
 |---|---|
 | Drop-in reuses (no edit) | **9** (ideogram4 `AutoEncoder`, `Sampling`, `FlowMatchingVelocityLoss`, `ScalarSinusoidalEmbedding`, `PatchEmbedding2D`, `RMSNorm`, logit-normal formula, `train.common`, optional `CLIPContrastiveLoss`) |
 | New shared layers (under `layers/`) | **5** (`MMDiTJointAttention`, `AdaLayerNormZero`, `AdaLayerNormZeroX`, `AdaLayerNormContinuous`, `GELUMLPFFN`) + 1 additive FFN-factory registration (`gelu_tanh`) |
-| New package files (`models/sd3_mmdit/`) | **8** source (`__init__`, `config`, `blocks`, `transformer`, `scheduler`, `vae`, `text_encoders`, `pipeline`) + this `PORT_NOTES.md` |
+| New package files (`models/vision_language/sd3_mmdit/`) | **8** source (`__init__`, `config`, `blocks`, `transformer`, `scheduler`, `vae`, `text_encoders`, `pipeline`) + this `PORT_NOTES.md` |
 | New text encoders | **3** (`CLIPTextEncoder`, `OpenCLIPTextEncoder`, `T5Encoder`) |
 | New trainer | **1** (`SD3FlowTrainer` in `train/sd3_mmdit/train_sd3_mmdit.py`) |
 | Approx. source lines added | **~4,700** across the new layer/model/train files (greenfield, sanctioned by D-003) |

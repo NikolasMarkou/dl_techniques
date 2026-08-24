@@ -7,7 +7,7 @@ Pre-fix (measured 2026-08-19 at ``num_layers=2``): 4 of 4 block norms ran at
 
 import numpy as np
 
-from dl_techniques.models.distilbert.model import DistilBERT
+from dl_techniques.models.language.distilbert.model import DistilBERT
 from tests.norm_epsilon_oracle import (
     assert_epsilon_tracks_the_knob,
     assert_every_block_norm_uses,

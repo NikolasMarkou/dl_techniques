@@ -14,8 +14,8 @@ precisely when you want to know whether the tables or the wiring moved.
 
 import pytest
 
-from dl_techniques.models.beit.model import _resolve_scale
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit.model import _resolve_scale
+from dl_techniques.models.vision.beit import (
     MODEL_VARIANTS,
     SCALE_CONFIGS,
 )

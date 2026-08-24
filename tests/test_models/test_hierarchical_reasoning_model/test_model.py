@@ -11,7 +11,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hierarchical_reasoning_model.model import (
     create_hierarchical_reasoning_model,
 )
 from tests.optimizer_state import build_optimizer_state

@@ -46,13 +46,13 @@ Standard VLMs fuse vision and language through dot-product cross-attention, whic
 |-----------|--------|----------|
 | Vision backbone (CliffordNetBlock) | Done | `layers/geometric/clifford_block.py` |
 | Causal LM backbone (CausalCliffordNetBlock) | Done | `layers/geometric/clifford_block.py` |
-| Vision classifier (CliffordNet) | Done | `models/cliffordnet/model.py` |
-| Causal LM (CliffordNetLM) | Done | `models/cliffordnet/lm.py` |
-| Contrastive model (CliffordCLIP) | Done | `models/cliffordnet/clip.py` |
+| Vision classifier (CliffordNet) | Done | `models/vision/cliffordnet/model.py` |
+| Causal LM (CliffordNetLM) | Done | `models/vision/cliffordnet/lm.py` |
+| Contrastive model (CliffordCLIP) | Done | `models/vision/cliffordnet/clip.py` |
 | Contrastive loss (CLIPContrastiveLoss) | Done | `losses/clip_contrastive_loss.py` |
 | Multimodal fusion layer | Done | `layers/fusion/multimodal_fusion.py` |
 | VLM task heads | Done | `layers/heads/vlm/factory.py` |
-| **CliffordVLM (generative VLM)** | **Needed** | `models/cliffordnet/vlm.py` |
+| **CliffordVLM (generative VLM)** | **Needed** | `models/vision/cliffordnet/vlm.py` |
 | **Clifford cross-modal fusion** | **Needed** | New layer or extension |
 | **Vision-to-LM projector** | **Needed** | Lightweight adapter |
 | **Clifford depth decoder** | **Needed** | CliffordNetBlock stack + 1x1 Conv head |
@@ -96,7 +96,7 @@ LayerScale gamma initialized to 1e-5 ensures blocks start as near-identity, enab
 
 ### 2.2 CliffordNet Vision Backbone
 
-`src/dl_techniques/models/cliffordnet/model.py`
+`src/dl_techniques/models/vision/cliffordnet/model.py`
 
 Isotropic columnar architecture -- constant spatial resolution throughout:
 ```
@@ -114,7 +114,7 @@ Proven results: CliffordNet-Lite (2.6M params) beats ResNet-18 (11.2M) on CIFAR-
 
 ### 2.3 CliffordNetLM Causal Decoder
 
-`src/dl_techniques/models/cliffordnet/lm.py`
+`src/dl_techniques/models/vision/cliffordnet/lm.py`
 
 Autoregressive language model using causal Clifford blocks:
 ```
@@ -131,7 +131,7 @@ Causality verified via unit tests: changing token at position j does not affect 
 
 ### 2.4 CliffordCLIP Contrastive Model
 
-`src/dl_techniques/models/cliffordnet/clip.py`
+`src/dl_techniques/models/vision/cliffordnet/clip.py`
 
 Dual-encoder CLIP with Clifford-aware projection heads:
 ```
@@ -153,18 +153,18 @@ This head is the empirical winner on CC3M-smoke [[Markou 2026]](#13-references) 
 
 The codebase already has production-ready depth estimation components:
 
-- **DepthAnything** (`models/depth_anything/model.py`): Complete monocular depth estimation model [[Yang 2024]](#13-references) with DINOv2 [[Oquab 2024]](#13-references) encoder + DPT decoder. Supports vit_s/vit_b/vit_l encoder sizes.
-- **DPTDecoder** (`models/depth_anything/components.py`): Dense Prediction Transformer decoder for multi-scale depth map upsampling.
+- **DepthAnything** (`models/vision/depth_anything/model.py`): Complete monocular depth estimation model [[Yang 2024]](#13-references) with DINOv2 [[Oquab 2024]](#13-references) encoder + DPT decoder. Supports vit_s/vit_b/vit_l encoder sizes.
+- **DPTDecoder** (`models/vision/depth_anything/components.py`): Dense Prediction Transformer decoder for multi-scale depth map upsampling.
 - **AffineInvariantLoss** (`losses/affine_invariant_loss.py`): Scale-and-shift-invariant loss using median normalization and MAD scaling. Critical for multi-dataset depth training where scale is ambiguous.
 - **FeatureAlignmentLoss** (`losses/feature_alignment_loss.py`): Cosine similarity-based distillation loss for transferring semantic priors from a frozen teacher encoder.
 - **Miyasawa conditional depth theory** (`research/miyasawas_theorem_conditional_depth.md`): Theoretical framework for conditional denoising applied to RGB-to-depth estimation.
-- **CliffordNetDenoiser** (`models/cliffordnet/denoiser.py`): Bias-free Clifford blocks satisfying Miyasawa's theorem -- directly applicable to depth refinement (see Section 3.4).
+- **CliffordNetDenoiser** (`models/vision/cliffordnet/denoiser.py`): Bias-free Clifford blocks satisfying Miyasawa's theorem -- directly applicable to depth refinement (see Section 3.4).
 
 ### 2.6 Existing VLM Infrastructure
 
 The codebase already has:
-- **NanoVLM** (`models/nano_vlm/model.py`): VisionEncoder + TextDecoder + MultiModalFusion -- configurable fusion strategies
-- **CLIP** (`models/clip/model.py`): Standard ViT [[Dosovitskiy 2021]](#13-references)-based dual encoder [[Radford 2021]](#13-references)
+- **NanoVLM** (`models/vision_language/nano_vlm/model.py`): VisionEncoder + TextDecoder + MultiModalFusion -- configurable fusion strategies
+- **CLIP** (`models/vision_language/clip/model.py`): Standard ViT [[Dosovitskiy 2021]](#13-references)-based dual encoder [[Radford 2021]](#13-references)
 - **MultiModalFusion** (`layers/fusion/multimodal_fusion.py`): 8 fusion strategies (cross_attention, concatenation, gated, bilinear, tensor_fusion, etc.)
 - **VLM task heads** (`layers/heads/vlm/factory.py`): Captioning, VQA, grounding, matching heads
 - **TextDecoder** (`layers/transformers/text_decoder.py`): Transformer-based autoregressive decoder
@@ -1375,7 +1375,7 @@ The hypothesis is that training a CliffordNet depth decoder alongside the VLM fo
 
 ### Phase 2: Build CliffordVLM Architecture A (2-3 weeks)
 
-1. **Implement CliffordVLM model** (`models/cliffordnet/vlm.py`):
+1. **Implement CliffordVLM model** (`models/vision/cliffordnet/vlm.py`):
    - CliffordNet vision backbone (from pre-trained weights)
    - Clifford vision projector (SRGP-based, 1 block)
    - CliffordNetLM decoder (from pre-trained weights)

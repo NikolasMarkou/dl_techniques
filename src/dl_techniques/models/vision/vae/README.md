@@ -693,7 +693,7 @@ Gaussian KL is replaced by a **radius-variance KL**. The direction carries an im
 uniform-on-sphere prior.
 
 ```python
-from dl_techniques.models.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 # Baseline diagonal-Gaussian latent
 gauss = VAE.from_variant("small", input_shape=(28, 28, 1),
@@ -792,7 +792,7 @@ Mises–Fisher Spherical VAE** (Davidson et al. 2018) closes that gap with a dir
 posterior toward the uniform prior.
 
 ```python
-from dl_techniques.models.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 # True vMF Spherical VAE: directional posterior + vMF->uniform KL
 vmf = VAE.from_variant("small", input_shape=(28, 28, 1),

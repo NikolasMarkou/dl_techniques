@@ -27,7 +27,7 @@ import pytest
 from keras import ops
 
 from dl_techniques.layers.attention.factory import STRICT_DROPPED_KEY_MARKER
-from dl_techniques.models.tiny_recursive_model import TRM, create_trm
+from dl_techniques.models.language.tiny_recursive_model import TRM, create_trm
 
 
 def _toy_config(**overrides: Any) -> Dict[str, Any]:

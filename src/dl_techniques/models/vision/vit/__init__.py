@@ -2,7 +2,7 @@
 
 Re-exports the model class and the factory function. Internal callers (e.g.
 ``depth_anything``, ``lewm``) may still import from
-``dl_techniques.models.vit.model`` directly.
+``dl_techniques.models.vision.vit.model`` directly.
 
 Deliberately NOT re-exported: ``create_inference_model_from_training_model``.
 This package used to pass it through "for Resnet-template parity", but the
@@ -11,7 +11,7 @@ deep-supervision code path at all (``grep -c deep_supervision`` over
 ``vit/model.py`` returns 0), whereas ``ResNet`` genuinely has one. ``model.py``
 never defined the helper either; it imported it from
 ``dl_techniques.utils.deep_supervision`` purely so this file could re-export it,
-which is why removing that unused import broke ``import dl_techniques.models.vit``
+which is why removing that unused import broke ``import dl_techniques.models.vision.vit``
 and, through it, collection of ``tests/test_train/test_vit`` and
 ``tests/test_train/test_dino``. Nothing imported the helper from this package.
 

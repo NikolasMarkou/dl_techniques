@@ -1,5 +1,5 @@
 """
-R-088 / R-141 mixed-precision arm for ``models/resnet`` -- the DEEP-SUPERVISED
+R-088 / R-141 mixed-precision arm for ``models/vision/resnet`` -- the DEEP-SUPERVISED
 regime, which the shared family does not reach.
 
 Why this file exists at all, re-derived rather than carried
@@ -58,7 +58,7 @@ from typing import Any, Dict
 
 import numpy as np
 
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 from ..precision_arm_oracle import assert_precision_arm, run_forward
 

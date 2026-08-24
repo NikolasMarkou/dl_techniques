@@ -5,12 +5,12 @@ per-model suites structurally cannot see: a package's *public surface*. They are
 parameterized over the real directory listing, so a new model package is covered
 the moment it is added — nobody has to remember to extend a hand-written list.
 
-Motivating defect: ``models/convnext/__init__.py`` declared
+Motivating defect: ``models/vision/convnext/__init__.py`` declared
 
     __all__ = [ConvNeXtV1, ConvNeXtV2, create_convnext_v1, create_convnext_v2]
 
 with the *objects* rather than their names. Every convnext test passed — none of
-them imported the package that way — while ``from dl_techniques.models.convnext
+them imported the package that way — while ``from dl_techniques.models.vision.convnext
 import *`` raised ``TypeError: Item in __all__ must be str, not type``. An AST
 scan showed convnext was the only package affected; ``test_all_entries_are_strings``
 is what keeps it that way.
@@ -257,7 +257,7 @@ _PRETRAINED_UNREACHABLE_EVIDENCE = {
     # `test_no_pretrained_branch_only_logs`, and it was probed by hand at D-003
     # (raises NotImplementedError). DISCOVERY reaches it; the RESOLVER does not.
     (
-        "models/bias_free_denoisers/bfunet.py",
+        "models/vision/bias_free_denoisers/bfunet.py",
         "create_bfunet_variant",
     ): "no MODEL_VARIANTS table is reachable from the callable",
     # The EXPORT-gap entries are all gone. Two `create_*_with_head` factories
@@ -265,9 +265,9 @@ _PRETRAINED_UNREACHABLE_EVIDENCE = {
     # namespace walk could see them at all, while their siblings (bert,
     # distilbert, modern_bert, tree_transformer) were reached by the same
     # resolver. Both were deleted when the export landed, exactly as the
-    # original comment predicted: `models/fnet/model.py::create_fnet_with_head`
+    # original comment predicted: `models/language/fnet/model.py::create_fnet_with_head`
     # on 2026-08-21 (step 27, D-133) and
-    # `models/mamba/mamba_v1.py::create_mamba_with_head` on 2026-08-22
+    # `models/language/mamba/mamba_v1.py::create_mamba_with_head` on 2026-08-22
     # (plan-2026-08-22-a11304c8 step 14). Do not re-add an export-gap waiver
     # here: an unexported factory is a package defect, and this file is the
     # wrong place to absorb it.
@@ -744,12 +744,12 @@ _SCHEDULED_FIXES: set = set()
 #: projection would make the stem nonlinear, which no ViT is. See the
 #: ``D-022`` anchor at that call site.
 _NAME_COLLISIONS = {
-    ("models/vit/model.py", "ViT", "patch_2d", "activation"),
-    ("models/vit/model.py", "ViT", "positional_learned", "scale"),
-    ("models/vit_hmlp/model.py", "ViTHMLP", "positional_learned", "scale"),
-    ("models/vit_siglip/model.py", "SigLIPVisionTransformer", "positional_learned", "scale"),
-    ("models/beit/model.py", "BeitModel", "positional_learned", "scale"),
-    ("models/energy_transformer/model.py", "EnergyTransformerBackbone", "positional_learned", "scale"),
+    ("models/vision/vit/model.py", "ViT", "patch_2d", "activation"),
+    ("models/vision/vit/model.py", "ViT", "positional_learned", "scale"),
+    ("models/vision/vit_hmlp/model.py", "ViTHMLP", "positional_learned", "scale"),
+    ("models/vision/vit_siglip/model.py", "SigLIPVisionTransformer", "positional_learned", "scale"),
+    ("models/vision/beit/model.py", "BeitModel", "positional_learned", "scale"),
+    ("models/vision/energy_transformer/model.py", "EnergyTransformerBackbone", "positional_learned", "scale"),
 }
 
 
@@ -829,7 +829,7 @@ def _parse_or_fail(path: Path, src_root: Path = None):
     # DECISION plan-2026-08-22T035419-a11304c8/D-070
     # WHAT NOT TO DO: do NOT restore ``except SyntaxError: continue`` here or at
     # any call site. That policy was MEASURED blind on 2026-08-22: with a syntax
-    # error injected into ``models/cbam/model.py``, ``_sweep_create_delegation``
+    # error injected into ``models/vision/cbam/model.py``, ``_sweep_create_delegation``
     # silently dropped the site (61 -> 60 factories) and the whole guard class
     # still read ``21 passed``. "Covered by the import tests" was the stated
     # justification and it is not sufficient: the import tests are a DIFFERENT
@@ -1116,7 +1116,7 @@ _TRANSFORMER_NORM_ARG_KWARGS = ("attention_norm_args", "ffn_norm_args")
 #: Key is ``(path relative to src/dl_techniques, class, normalization type,
 #: param)`` -- never a line number, for the reason ``_SCHEDULED_FIXES`` gives.
 _NORM_NAME_COLLISIONS = {
-    ("models/vit_siglip/model.py", "SigLIPVisionTransformer", "layer_norm", "scale"),
+    ("models/vision/vit_siglip/model.py", "SigLIPVisionTransformer", "layer_norm", "scale"),
 }
 
 
@@ -1300,7 +1300,7 @@ class TestTransformerLayerNormArgsAreForwarded:
     Narrowings, each a place this can miss a real defect:
 
     * only classes storing an epsilon-named attribute. ``MobileClipTextEncoder``
-      (``models/mobile_clip/components.py``) is invisible to this predicate for
+      (``models/vision_language/mobile_clip/components.py``) is invisible to this predicate for
       that reason -- its epsilon is a module-level ``REFERENCE_NORM_EPSILON``
       constant, not a stored attribute -- and it is a *correct* site, so the
       narrowing costs nothing there today. Dropping the clause is not the fix:
@@ -1311,7 +1311,7 @@ class TestTransformerLayerNormArgsAreForwarded:
       dicts and is not swept -- no measured instance, and adding it unmeasured
       would be a guard nobody has seen fire;
     * nothing here reaches a knob that has no channel at all. ``GroupAttention``
-      (``models/tree_transformer/components.py``) had no ``layer_norm_eps``
+      (``models/language/tree_transformer/components.py``) had no ``layer_norm_eps``
       parameter until it was given one as a PRODUCT fix; no call-site predicate
       can see a parameter that does not exist. It is still out of reach today for
       a second reason -- it calls ``create_normalization_layer`` with a dynamic
@@ -1518,7 +1518,7 @@ _MODEL_VARIANTS_WAIVERS = {
     # § "When the shape does not apply": multi-model families apply the shape per
     # inner architecture, and the inner architecture here is ``AutoEncoder``.
     (
-        "models/sd3_mmdit/vae.py",
+        "models/vision_language/sd3_mmdit/vae.py",
         "SD3VAE",
         "from_variant-without-table",
     ),
@@ -1868,20 +1868,20 @@ class TestModelVariantsArePresent:
     @pytest.mark.parametrize(
         "module_path,class_name,expected_keys",
         [
-            ("dl_techniques.models.SAM.SAM1.model", "SAM", ["vit_b", "vit_h", "vit_l"]),
-            ("dl_techniques.models.kan.model", "KAN",
+            ("dl_techniques.models.vision_language.sam.sam1.model", "SAM", ["vit_b", "vit_h", "vit_l"]),
+            ("dl_techniques.models.general_purpose.kan.model", "KAN",
              ["large", "medium", "micro", "small", "xlarge"]),
-            ("dl_techniques.models.ntm.model", "NTMModel", ["base", "large", "tiny"]),
-            ("dl_techniques.models.nano_vlm.model", "NanoVLM",
+            ("dl_techniques.models.neural_computer.ntm.model", "NTMModel", ["base", "large", "tiny"]),
+            ("dl_techniques.models.vision_language.nano_vlm.model", "NanoVLM",
              ["base", "large", "mini"]),
             ("dl_techniques.models.nano_vlm_world_model.model", "ScoreBasedNanoVLM",
              ["base", "large", "mini"]),
             # "repo_medium", not "large": the row was renamed on 2026-08-23 (D-463)
             # when `base` was corrected from 60 channels to the paper's 240, which
             # left an 80-channel variant sitting BETWEEN the two published sizes.
-            ("dl_techniques.models.pft_sr.model", "PFTSR",
+            ("dl_techniques.models.vision.super_resolution.pft_sr.model", "PFTSR",
              ["base", "light", "repo_medium"]),
-            ("dl_techniques.models.depth_anything.model", "DepthAnything",
+            ("dl_techniques.models.vision.depth_anything.model", "DepthAnything",
              ["vit_b", "vit_l", "vit_s"]),
         ],
     )
@@ -1919,8 +1919,8 @@ class TestModelVariantsArePresent:
         spellings drift -- which is the whole reason the house rule says "alias to
         the same dict" and "prefer an alias over renaming in place".
         """
-        from dl_techniques.models.kan.model import KAN
-        from dl_techniques.models.ntm.model import NTMModel
+        from dl_techniques.models.general_purpose.kan.model import KAN
+        from dl_techniques.models.neural_computer.ntm.model import NTMModel
 
         assert KAN.MODEL_VARIANTS is KAN.VARIANT_CONFIGS
         assert NTMModel.MODEL_VARIANTS is NTMModel.NTM_VARIANTS
@@ -2551,29 +2551,29 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
     # at D-003 3a: 45/45 sites raise). Each is one broadened `except` away from
     # being the live defect, which is what the clause-text key catches.
     #
-    # There were FIVE. `models/vit/model.py::from_variant` was the fifth and its
+    # There were FIVE. `models/vision/vit/model.py::from_variant` was the fifth and its
     # waiver is GONE because the handler itself is gone -- step 25 deleted the
     # clause outright (F-32) rather than waiving it forever, so `vit` now calls
     # `_download_weights` bare. Re-adding any `except` there makes this sweep
     # report an unwaived R-049 offender, which is this deletion's RED-proof.
     # See decisions.md D-122.
     (
-        "models/bert/model.py",
+        "models/language/bert/model.py",
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): "dead handler -- _download_weights raises only NotImplementedError",
     (
-        "models/cliffordnet/model.py",
+        "models/vision/cliffordnet/model.py",
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): "dead handler -- same proof as bert",
     (
-        "models/tree_transformer/model.py",
+        "models/language/tree_transformer/model.py",
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): "dead handler -- same proof as bert",
     (
-        "models/wave_field/model.py",
+        "models/language/wave_field/model.py",
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): (
@@ -2583,7 +2583,7 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
     ),
     # 6-7: matched by the shape, but not R-049 -- no weight FILE is loaded.
     (
-        "models/depth_anything/model.py",
+        "models/vision/depth_anything/model.py",
         "build",
         "Exception",
     ): (
@@ -2592,7 +2592,7 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
         "R-119/R-120 candidate rather than waived away"
     ),
     (
-        "models/depth_anything/model.py",
+        "models/vision/depth_anything/model.py",
         "from_pretrained_encoder",
         "Exception",
     ): (
@@ -2912,7 +2912,7 @@ def _init_imported_submodules(pkgdir: Path, pkg_suffix: str) -> dict:
 
     Both spellings are resolved, because this tree uses both: the relative
     ``from .model import X`` (``node.level == 1``) and the ABSOLUTE
-    ``from dl_techniques.models.accunet.model import X``. Reading only the
+    ``from dl_techniques.models.vision.accunet.model import X``. Reading only the
     relative form is not a stylistic miss -- measured 2026-08-20, it drops the
     main module of 15 packages (``accunet``, ``detr``, ``fastvlm``, ``lewm``,
     ``nam``, ``pw_fnet``, ``scunet``, ``shgcn``, ``som``, ``thera``,
@@ -3117,15 +3117,15 @@ _MAIN_DOC_REFERENCES_WAIVERS = {
     # two are the ONLY entries left; the eighteen ROUTED ones were fixed in
     # step 19.1 (D-086) and deleted here in the same commit, each because this
     # class's own staleness test went red.
-    "models/dino/training.py": (
+    "models/vision/dino/training.py": (
         "EXEMPT -- DINOTrainingModel is the `fit()` harness around the DINO "
         "backbones, not an architecture; the Caron et al. citation lives on "
-        "models/dino/dino_v1.py, which passes this guard"
+        "models/vision/dino/dino_v1.py, which passes this guard"
     ),
-    "models/sd3_mmdit/pipeline.py": (
+    "models/vision_language/sd3_mmdit/pipeline.py": (
         "EXEMPT -- its own docstring says it 'integrates the four already-built, "
         "separately-tested pieces'; the SD3 citation lives on "
-        "models/sd3_mmdit/transformer.py, which passes this guard"
+        "models/vision_language/sd3_mmdit/transformer.py, which passes this guard"
     ),
 }
 
@@ -3246,7 +3246,7 @@ class TestMainModuleDocstringCitesReferences:
         assert not live, (
             "a model package's main module has no non-empty `References:` "
             "section (guide-v2 §5.1 / R-039). Add the papers the implementation "
-            "actually draws on -- models/resnet/model.py is the house exemplar -- "
+            "actually draws on -- models/vision/resnet/model.py is the house exemplar -- "
             "or, if the module is a composition over siblings that carry the "
             "citation, add it to _MAIN_DOC_REFERENCES_WAIVERS with that read. "
             "Found:\n  " + "\n  ".join(live)
@@ -3533,7 +3533,7 @@ def _probe_from_variant_enumeration(cls, module) -> str:
 #: carry a bracketed list, but the keys cannot be verified against a table),
 #: with the read that explains why the table is unreachable from the module.
 _FROM_VARIANT_WEAK_ENUMERATION = {
-    ("models/sd3_mmdit/vae.py", "SD3VAE"): (
+    ("models/vision_language/sd3_mmdit/vae.py", "SD3VAE"): (
         "its from_variant delegates to create_sd3_vae -> get_sd3_config, whose "
         "table is `PRESETS` in the SIBLING module sd3_mmdit/config.py; the "
         "message it raises does enumerate (`Available: ['full', 'tiny']`), but "
@@ -3887,52 +3887,52 @@ _CREATE_DELEGATION_WAIVERS = {
     # (a) Duplicated `pretrained`/`weights` validation. `from_variant` owns the
     # pretrained contract (D-003: 45/45 sites raise NotImplementedError), so the
     # copy in the factory is the duplicated validation R-051 names by name.
-    ("models/mobilenet/mobilenet_v1.py", "create_mobilenetv1"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/mobilenet/mobilenet_v2.py", "create_mobilenetv2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/mobilenet/mobilenet_v3.py", "create_mobilenetv3"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/mobilenet/mobilenet_v4.py", "create_mobilenetv4"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/mobile_clip/mobile_clip_v1.py", "create_mobile_clip_model"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/mobile_clip/mobile_clip_v2.py", "create_mobile_clip_v2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    ("models/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
-    # The two `models/squeezenet/*` entries were DELETED on 2026-08-21 (step 27,
+    ("models/vision/mobilenet/mobilenet_v1.py", "create_mobilenetv1"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/vision/mobilenet/mobilenet_v2.py", "create_mobilenetv2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/vision/mobilenet/mobilenet_v3.py", "create_mobilenetv3"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/vision/mobilenet/mobilenet_v4.py", "create_mobilenetv4"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/vision_language/mobile_clip/mobile_clip_v1.py", "create_mobile_clip_model"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/vision_language/mobile_clip/mobile_clip_v2.py", "create_mobile_clip_v2"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    ("models/vision/swin_transformer/model.py", "create_swin_transformer"): "ROUTE step 19 -- `if pretrained: raise` duplicated from from_variant",
+    # The two `models/vision/squeezenet/*` entries were DELETED on 2026-08-21 (step 27,
     # D-129). Their recorded reason -- "duplicated from from_variant" -- was
     # FALSE: the guard existed ONLY in the factory, and
     # `SqueezeNetV1.from_variant(weights="imagenet")` returned a randomly
     # initialised model with no error at all. The guard now lives in
     # `from_variant`, the chokepoint, and the factories delegate cleanly.
-    ("models/dino/dino_v3.py", "create_dino_v3"): "ROUTE step 19 -- reject_input_shape + `if pretrained: raise` + kwargs patching",
+    ("models/vision/dino/dino_v3.py", "create_dino_v3"): "ROUTE step 19 -- reject_input_shape + `if pretrained: raise` + kwargs patching",
     # (b) Optional-argument patching into **kwargs before delegating. Small, but
     # it is logic the callee's own signature should be expressing.
-    ("models/bert/model.py", "create_bert"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
-    ("models/gpt2/gpt2.py", "create_gpt2"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
-    ("models/tree_transformer/model.py", "create_tree_transformer"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
-    ("models/wave_field/model.py", "create_wave_field_llm"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/language/bert/model.py", "create_bert"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/language/gpt2/gpt2.py", "create_gpt2"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/language/tree_transformer/model.py", "create_tree_transformer"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/language/wave_field/model.py", "create_wave_field_llm"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
     # (c) Logging in the factory. Not arithmetic, but not delegation either, and
     # the predicate cannot tell a `logger.info` call from a `model.compile` one
     # without becoming a call-name allowlist that the next offender walks past.
-    ("models/coshnet/model.py", "create_coshnet"): "ROUTE step 19 -- logger.info before delegating",
-    ("models/dino/dino_v2.py", "create_dino_v2"): "ROUTE step 19 -- 12 statements: pretrained raise, default backfill from MODEL_VARIANTS, 5 logger.info",
-    ("models/dino/dino_v1.py", "create_dino_v1"): "ROUTE step 19 -- reject_input_shape + patch_size default backfill",
+    ("models/vision/coshnet/model.py", "create_coshnet"): "ROUTE step 19 -- logger.info before delegating",
+    ("models/vision/dino/dino_v2.py", "create_dino_v2"): "ROUTE step 19 -- 12 statements: pretrained raise, default backfill from MODEL_VARIANTS, 5 logger.info",
+    ("models/vision/dino/dino_v1.py", "create_dino_v1"): "ROUTE step 19 -- reject_input_shape + patch_size default backfill",
     # (d) Composite builders: the factory assembles more than one object. These
     # are arguably outside R-051's `create_<name>` shape entirely; Phase 3
     # settles that, and until then they are named rather than silently excluded.
-    ("models/dino/dino_v1.py", "create_dino_teacher_student_pair"): "ROUTE step 19 -- builds a teacher/student PAIR and syncs them; returns a tuple, not a model",
-    ("models/beit/model.py", "create_beit_mim"): "ROUTE step 19 -- composite: backbone + MIM head",
-    ("models/beit/model.py", "create_beit_classifier"): "ROUTE step 19 -- composite: backbone + classification head",
-    ("models/fftnet/model.py", "create_fftnet_classifier"): "ROUTE step 19 -- delegates to a sibling create_* , not to from_variant",
+    ("models/vision/dino/dino_v1.py", "create_dino_teacher_student_pair"): "ROUTE step 19 -- builds a teacher/student PAIR and syncs them; returns a tuple, not a model",
+    ("models/vision/beit/model.py", "create_beit_mim"): "ROUTE step 19 -- composite: backbone + MIM head",
+    ("models/vision/beit/model.py", "create_beit_classifier"): "ROUTE step 19 -- composite: backbone + classification head",
+    ("models/language/fftnet/model.py", "create_fftnet_classifier"): "ROUTE step 19 -- delegates to a sibling create_* , not to from_variant",
     # (e) Bypasses from_variant entirely though the module defines one.
-    ("models/beit/model.py", "create_beit_backbone"): "ROUTE step 19 -- constructs BeitModel(...) directly, bypassing BeitModel.from_variant",
-    ("models/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",
-    ("models/sd3_mmdit/vae.py", "create_sd3_vae"): "ROUTE step 19 -- resolves PRESETS itself and constructs AutoEncoder(...) directly",
-    ("models/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
+    ("models/vision/beit/model.py", "create_beit_backbone"): "ROUTE step 19 -- constructs BeitModel(...) directly, bypassing BeitModel.from_variant",
+    ("models/vision/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",
+    ("models/vision_language/sd3_mmdit/vae.py", "create_sd3_vae"): "ROUTE step 19 -- resolves PRESETS itself and constructs AutoEncoder(...) directly",
+    ("models/language/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
     # (f) SEVERE -- the factory compiled, ran, or asserted. DISPOSED at step 19
     # (D-078). Three were repaired and one is refuted; all four still trip the
     # predicate because a compile call, a `build()` call and a derived log line
     # are all "not delegation", which is why they stay waived rather than
     # dropped. The reason text now records the RULING, not the charge.
-    ("models/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract ('create and compile', returns a compiled model); the from_logits=True loss default is a load-bearing anti-mistrain guard. No duplicated callee logic remains to remove",
-    ("models/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its three `assert`s are gone (void under -O); they now run over all 3 sampling types at TestVAESamplingTypes::test_create_vae_output_shapes. The compile stays: documented contract",
-    ("models/vit/model.py", "create_vit"): "step 19 REPAIRED (D-078) -- all 8 duplicated `raise ValueError` branches deleted; ViT.__init__ was MEASURED to raise for every one. Only a derived log line remains",
+    ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract ('create and compile', returns a compiled model); the from_logits=True loss default is a load-bearing anti-mistrain guard. No duplicated callee logic remains to remove",
+    ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its three `assert`s are gone (void under -O); they now run over all 3 sampling types at TestVAESamplingTypes::test_create_vae_output_shapes. The compile stays: documented contract",
+    ("models/vision/vit/model.py", "create_vit"): "step 19 REPAIRED (D-078) -- all 8 duplicated `raise ValueError` branches deleted; ViT.__init__ was MEASURED to raise for every one. Only a derived log line remains",
     ("models/time_series/tirex/model.py", "create_tirex_by_variant"): "step 19 REPAIRED (D-078) -- the dummy numpy forward pass is now `model.build(...)`, measured byte-identical (same 47 weight paths, weight delta 0.0, forward delta 0.0). Both sites in the module",
 }
 
@@ -3944,21 +3944,21 @@ _CREATE_DELEGATION_WAIVERS = {
 #: variant factory that forgets ``from_variant`` altogether would otherwise slip
 #: into this set and never be judged.
 _CREATE_WITHOUT_FROM_VARIANT = {
-    ("models/bias_free_denoisers/bfcnn.py", "create_bfcnn_variant"),
-    ("models/bias_free_denoisers/bfconvunext.py", "create_convunext_variant"),
-    ("models/bias_free_denoisers/bfunet.py", "create_bfunet_variant"),
-    ("models/convunext/model.py", "create_convunext_variant"),
-    ("models/dino/training.py", "create_dino_training_model"),
-    ("models/energy_transformer/model.py", "create_energy_transformer_backbone"),
-    ("models/energy_transformer/model.py", "create_energy_transformer_classifier"),
-    ("models/energy_transformer/model.py", "create_energy_transformer_mim"),
-    ("models/ideogram4/transformer.py", "create_ideogram4_transformer"),
-    ("models/ideogram4/vae.py", "create_ideogram4_autoencoder"),
-    ("models/nano_vlm/model.py", "create_nanovlm"),
+    ("models/vision/bias_free_denoisers/bfcnn.py", "create_bfcnn_variant"),
+    ("models/vision/bias_free_denoisers/bfconvunext.py", "create_convunext_variant"),
+    ("models/vision/bias_free_denoisers/bfunet.py", "create_bfunet_variant"),
+    ("models/vision/convunext/model.py", "create_convunext_variant"),
+    ("models/vision/dino/training.py", "create_dino_training_model"),
+    ("models/vision/energy_transformer/model.py", "create_energy_transformer_backbone"),
+    ("models/vision/energy_transformer/model.py", "create_energy_transformer_classifier"),
+    ("models/vision/energy_transformer/model.py", "create_energy_transformer_mim"),
+    ("models/vision_language/ideogram4/transformer.py", "create_ideogram4_transformer"),
+    ("models/vision_language/ideogram4/vae.py", "create_ideogram4_autoencoder"),
+    ("models/vision_language/nano_vlm/model.py", "create_nanovlm"),
     ("models/nano_vlm_world_model/model.py", "create_score_based_nanovlm"),
-    ("models/pft_sr/model.py", "create_pft_sr"),
-    ("models/sd3_mmdit/pipeline.py", "create_sd3_pipeline"),
-    ("models/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
+    ("models/vision/super_resolution/pft_sr/model.py", "create_pft_sr"),
+    ("models/vision_language/sd3_mmdit/pipeline.py", "create_sd3_pipeline"),
+    ("models/vision_language/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
     ("models/time_series/tirex/model_extended.py", "create_tirex_extended"),
 }
 
@@ -3983,14 +3983,14 @@ _CREATE_WITHOUT_FROM_VARIANT = {
 #: caller did not choose, and a caller who then calls ``compile()`` again
 #: silently discards it. Growth is the risk being guarded, not these 8.
 _CREATE_FACTORIES_THAT_COMPILE = {
-    ("models/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
-    ("models/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
-    ("models/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
-    ("models/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
-    ("models/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
-    ("models/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
-    ("models/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
-    ("models/vae/model.py", "create_vae_from_config"): "no `variant` param -- was invisible until D-071. Docstring: 'Compiled VAE model'; carries the same vmf jit_compile=False opt-out as create_vae (D-005), so it is the sibling of an already-ruled site",
+    ("models/vision/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
+    ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
+    ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
+    ("models/language/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
+    ("models/language/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
+    ("models/general_purpose/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
+    ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
+    ("models/vision/vae/model.py", "create_vae_from_config"): "no `variant` param -- was invisible until D-071. Docstring: 'Compiled VAE model'; carries the same vmf jit_compile=False opt-out as create_vae (D-005), so it is the sibling of an already-ruled site",
 }
 
 
@@ -4254,11 +4254,11 @@ class TestFactoriesThatCompileAreAllVisible:
         sites, _ = _sweep_create_delegation()
         verdict_of = {(rel, name): v for rel, name, _l, v, _d in sites}
         widened_in = {
-            ("models/capsnet/model.py", "create_capsnet"),
-            ("models/capsnet/model_v2.py", "create_capsnet_v2"),
-            ("models/masked_language_model/utils.py", "create_mlm_training_model"),
-            ("models/power_mlp/model.py", "create_power_mlp"),
-            ("models/vae/model.py", "create_vae_from_config"),
+            ("models/vision/capsnet/model.py", "create_capsnet"),
+            ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"),
+            ("models/language/masked_language_model/utils.py", "create_mlm_training_model"),
+            ("models/general_purpose/power_mlp/model.py", "create_power_mlp"),
+            ("models/vision/vae/model.py", "create_vae_from_config"),
         }
         assert {verdict_of[k] for k in widened_in} == {"no-variant"}, {
             k: verdict_of[k] for k in widened_in
@@ -5573,40 +5573,40 @@ def _sweep_step_overrides(roots=None, src_root=None):
 #: dead key linger until a LATER, DIFFERENT ``train_step`` at the same key was
 #: silently permitted.
 _FROZEN_STEP_OVERRIDES = {
-    ("src/dl_techniques/models/byte_latent_transformer/model.py",
+    ("src/dl_techniques/models/language/byte_latent_transformer/model.py",
      "ByteLatentTransformer", "train_step"),
-    ("src/dl_techniques/models/capsnet/model.py", "CapsNet", "test_step"),
-    ("src/dl_techniques/models/capsnet/model.py", "CapsNet", "train_step"),
-    ("src/dl_techniques/models/depth_anything/model.py", "DepthAnything", "train_step"),
-    ("src/dl_techniques/models/latent_gmm_registration/model.py",
+    ("src/dl_techniques/models/vision/capsnet/model.py", "CapsNet", "test_step"),
+    ("src/dl_techniques/models/vision/capsnet/model.py", "CapsNet", "train_step"),
+    ("src/dl_techniques/models/vision/depth_anything/model.py", "DepthAnything", "train_step"),
+    ("src/dl_techniques/models/point_cloud/latent_gmm_registration/model.py",
      "LatentGMMRegistration", "test_step"),
-    ("src/dl_techniques/models/latent_gmm_registration/model.py",
+    ("src/dl_techniques/models/point_cloud/latent_gmm_registration/model.py",
      "LatentGMMRegistration", "train_step"),
-    ("src/dl_techniques/models/masked_autoencoder/mae.py",
+    ("src/dl_techniques/models/vision/masked_autoencoder/mae.py",
      "MaskedAutoencoder", "test_step"),
-    ("src/dl_techniques/models/masked_autoencoder/mae.py",
+    ("src/dl_techniques/models/vision/masked_autoencoder/mae.py",
      "MaskedAutoencoder", "train_step"),
-    ("src/dl_techniques/models/masked_language_model/clm.py",
+    ("src/dl_techniques/models/language/masked_language_model/clm.py",
      "CausalLanguageModel", "test_step"),
-    ("src/dl_techniques/models/masked_language_model/clm.py",
+    ("src/dl_techniques/models/language/masked_language_model/clm.py",
      "CausalLanguageModel", "train_step"),
-    ("src/dl_techniques/models/masked_language_model/mlm.py",
+    ("src/dl_techniques/models/language/masked_language_model/mlm.py",
      "MaskedLanguageModel", "test_step"),
-    ("src/dl_techniques/models/masked_language_model/mlm.py",
+    ("src/dl_techniques/models/language/masked_language_model/mlm.py",
      "MaskedLanguageModel", "train_step"),
     ("src/dl_techniques/models/memory_bank/wave_field_memory_llm.py",
      "WaveFieldMemoryLLM", "train_step"),
     ("src/dl_techniques/models/nano_vlm_world_model/train.py",
      "ScoreVLMTrainer", "train_step"),
     ("src/dl_techniques/models/time_series/deepar/model.py", "DeepAR", "predict_step"),
-    ("src/dl_techniques/models/vae/model.py", "VAE", "test_step"),
-    ("src/dl_techniques/models/vae/model.py", "VAE", "train_step"),
-    ("src/dl_techniques/models/video_jepa/model.py", "VideoJEPA", "train_step"),
-    ("src/dl_techniques/models/vq_vae/model.py", "VQVAEModel", "test_step"),
-    ("src/dl_techniques/models/vq_vae/model.py", "VQVAEModel", "train_step"),
-    ("src/dl_techniques/models/vq_vae_rotation/model.py",
+    ("src/dl_techniques/models/vision/vae/model.py", "VAE", "test_step"),
+    ("src/dl_techniques/models/vision/vae/model.py", "VAE", "train_step"),
+    ("src/dl_techniques/models/vision/video_jepa/model.py", "VideoJEPA", "train_step"),
+    ("src/dl_techniques/models/vision/vq_vae/model.py", "VQVAEModel", "test_step"),
+    ("src/dl_techniques/models/vision/vq_vae/model.py", "VQVAEModel", "train_step"),
+    ("src/dl_techniques/models/vision/vq_vae_rotation/model.py",
      "VQVAERotationTrick", "test_step"),
-    ("src/dl_techniques/models/vq_vae_rotation/model.py",
+    ("src/dl_techniques/models/vision/vq_vae_rotation/model.py",
      "VQVAERotationTrick", "train_step"),
     ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "test_step"),
     ("src/train/bfunet/common.py", "BfunetSymmetryTrainingModel", "train_step"),
@@ -5824,7 +5824,7 @@ class TestUnparseableSourceFailsLoudly:
 
         Written against the exact injection that PROVED the old policy blind --
         a broken argument list in a ``create_*`` signature, which is what was
-        appended to ``models/cbam/model.py`` on 2026-08-22 to make
+        appended to ``models/vision/cbam/model.py`` on 2026-08-22 to make
         ``_sweep_create_delegation`` drop the site from 61 to 60 with the guard
         class still reporting ``21 passed``.
         """

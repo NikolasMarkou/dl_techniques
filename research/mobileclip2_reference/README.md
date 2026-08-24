@@ -1,7 +1,7 @@
 # MobileCLIP2 upstream reference material
 
 Third-party reference material, supplied by the repository owner and committed VERBATIM so that
-the tests of `src/dl_techniques/models/fastvit/` and `models/mobile_clip/mobile_clip_v2.py` have a **real** oracle instead of a second
+the tests of `src/dl_techniques/models/vision/fastvit/` and `models/vision_language/mobile_clip/mobile_clip_v2.py` have a **real** oracle instead of a second
 hand transcription of the same numbers.
 
 ## Contents
@@ -38,7 +38,7 @@ Covered — these tests read the files here and compare them field by field agai
 `fastvit_mci3` and `fastvit_mci4`; the JSON configs merely NAME `fastvit_mci0` / `fastvit_mci2`
 without giving their architecture. Those three variant tables were transcribed from `timm`
 upstream, `timm` is not installed, and so **they still have no local oracle** — deviation X-3 in
-`src/dl_techniques/models/fastvit/README.md` and `src/dl_techniques/models/mobile_clip/README.md`.
+`src/dl_techniques/models/vision/fastvit/README.md` and `src/dl_techniques/models/vision_language/mobile_clip/README.md`.
 
 The three ViT-tower configs of the release (`MobileCLIP-L-14`, `MobileCLIP2-B`,
 `MobileCLIP2-L-14`) are out of scope for this port and are deliberately not committed.

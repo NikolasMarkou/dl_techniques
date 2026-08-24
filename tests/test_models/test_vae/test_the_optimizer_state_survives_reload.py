@@ -26,7 +26,7 @@ from typing import List, Tuple
 import keras
 import numpy as np
 
-from dl_techniques.models.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 _OPTIMIZER_SKIP_TEXT = "Skipping variable loading for optimizer"
 

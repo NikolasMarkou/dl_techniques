@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.resnet.model import ResNet
+from dl_techniques.models.vision.resnet.model import ResNet
 from dl_techniques.optimization.deep_supervision import schedule_builder
 
 

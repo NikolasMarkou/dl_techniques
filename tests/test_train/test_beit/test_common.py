@@ -41,7 +41,7 @@ from train.beit.common import (
     load_frozen_tokenizer,
 )
 from train.energy_transformer.common import IMAGENETTE_TFDS_NAME
-from dl_techniques.models.vq_vae_rotation.model import VQVAERotationTrick
+from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 
 # ---------------------------------------------------------------------

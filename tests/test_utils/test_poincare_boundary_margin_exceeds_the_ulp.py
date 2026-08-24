@@ -6,7 +6,7 @@ Rationale
 ``arctanh`` never sees exactly 1.0. That guard was a fixed ``1e-4``. float16's
 ULP at 1.0 is **9.765625e-04, 9.77x LARGER**, so the subtraction rounded back to
 ``1/sqrt(c)``, the clamp became an identity and ``arctanh(1.0) = inf``. MEASURED
-before the fix: all three shipped `models/shgcn` classes returned 100% NaN under
+before the fix: all three shipped `models/graph/shgcn` classes returned 100% NaN under
 ``mixed_float16`` (96/96, 36/36 and 5/5 elements) with no warning, while float32
 was green.
 

@@ -1320,8 +1320,8 @@ def _strictness_break(fn) -> Optional[str]:
 # grid.
 #
 # It was RIGHT not to be one at step 5, when 4 sites --
-# `layers/time_series/mixed_sequential_block.py`, `models/nam/cell.py`,
-# `models/SAM/SAM1/image_encoder.py` and `models/tree_transformer/components.py` --
+# `layers/time_series/mixed_sequential_block.py`, `models/neural_computer/nam/cell.py`,
+# `models/vision_language/sam/sam1/image_encoder.py` and `models/language/tree_transformer/components.py` --
 # passed `activation` unconditionally and dropped it for `differential`,
 # `gelu_tanh`, `squared_relu` and `swiglu`. All four adopted
 # `assemble_ffn_config` at step 6 (D-021/D-022) and now measure 0/21; per-site
@@ -1497,14 +1497,14 @@ def _b_transformer_decoder():
 
 
 def _b_models_dino_v2():
-    from dl_techniques.models.dino.dino_v2 import DINOv2Block
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2Block
     b = DINOv2Block(dim=16, num_heads=2)
     b.build((None, 8, 16))
     return b.ffn
 
 
 def _b_models_fftnet():
-    from dl_techniques.models.fftnet.model import FFTNetBlock
+    from dl_techniques.models.language.fftnet.model import FFTNetBlock
     b = FFTNetBlock(embed_dim=16)
     b.build((None, 8, 16))
     return b.ffn
@@ -1521,48 +1521,48 @@ def _b_models_gemma():
 
 
 def _b_models_nam():
-    from dl_techniques.models.nam.cell import NAMCell, NAMConfig
+    from dl_techniques.models.neural_computer.nam.cell import NAMCell, NAMConfig
     c = NAMCell(NAMConfig(hidden_size=16, num_heads=2, intermediate_size=32))
     c.build((None, 8, 16))
     return c.ffn
 
 
 def _b_models_pw_fnet():
-    from dl_techniques.models.pw_fnet.model import PW_FNet_Block
+    from dl_techniques.models.vision.image_restoration.pw_fnet.model import PW_FNet_Block
     b = PW_FNet_Block(dim=16, use_spatial_ffn=False, ffn_type='mlp')
     b.build((None, 8, 8, 16))
     return b.ffn
 
 
 def _b_models_relgt():
-    from dl_techniques.models.relgt.model import RELGT
+    from dl_techniques.models.graph.relgt.model import RELGT
     m = RELGT(output_dim=3, embedding_dim=16, num_heads=2, ffn_dim=32,
               num_global_centroids=4, num_transformer_blocks=1)
     return m.prediction_head
 
 
 def _b_models_sam_image_encoder():
-    from dl_techniques.models.SAM.SAM1.image_encoder import ViTBlock
+    from dl_techniques.models.vision_language.sam.sam1.image_encoder import ViTBlock
     b = ViTBlock(dim=16, num_heads=2)
     b.build((None, 8, 8, 16))
     return b.ffn
 
 
 def _b_models_sam_transformer():
-    from dl_techniques.models.SAM.SAM1.transformer import TwoWayAttentionBlock
+    from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayAttentionBlock
     b = TwoWayAttentionBlock(embedding_dim=16, num_heads=2, mlp_dim=32)
     b.build([(None, 4, 16), (None, 8, 16)])
     return b.ffn
 
 
 def _b_models_sam3_decoder():
-    from dl_techniques.models.SAM.SAM3.decoder import Sam3DecoderLayer
+    from dl_techniques.models.vision_language.sam.sam3.decoder import Sam3DecoderLayer
     # `ffn` is created in `__init__`, not `build`, so no build call is needed.
     return Sam3DecoderLayer(d_model=16, num_heads=2, dim_feedforward=32).ffn
 
 
 def _b_models_sam3_vitdet():
-    from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBlock
+    from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBlock
     b = Sam3ViTDetBlock(dim=16, num_heads=2, input_size=(8, 8))
     b.build((None, 8, 8, 16))
     return b.mlp
@@ -1580,7 +1580,7 @@ def _b_models_prism():
 
 
 def _b_models_tree_transformer():
-    from dl_techniques.models.tree_transformer.components import (
+    from dl_techniques.models.language.tree_transformer.components import (
         TreeTransformerBlock,
     )
     b = TreeTransformerBlock(hidden_size=16, num_heads=2, intermediate_size=32)
@@ -1608,18 +1608,18 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
         _b_progressive_focused_transformer,
     "layers/transformers/transformer.py": _b_transformer,
     "layers/transformers/transformer_decoder.py": _b_transformer_decoder,
-    "models/dino/dino_v2.py": _b_models_dino_v2,
-    "models/fftnet/model.py": _b_models_fftnet,
+    "models/vision/dino/dino_v2.py": _b_models_dino_v2,
+    "models/language/fftnet/model.py": _b_models_fftnet,
     "layers/transformers/gemma3_transformer.py": _b_models_gemma,
-    "models/nam/cell.py": _b_models_nam,
-    "models/pw_fnet/model.py": _b_models_pw_fnet,
-    "models/relgt/model.py": _b_models_relgt,
-    "models/SAM/SAM1/image_encoder.py": _b_models_sam_image_encoder,
-    "models/SAM/SAM1/transformer.py": _b_models_sam_transformer,
-    "models/SAM/SAM3/decoder.py": _b_models_sam3_decoder,
-    "models/SAM/SAM3/vitdet.py": _b_models_sam3_vitdet,
+    "models/neural_computer/nam/cell.py": _b_models_nam,
+    "models/vision/image_restoration/pw_fnet/model.py": _b_models_pw_fnet,
+    "models/graph/relgt/model.py": _b_models_relgt,
+    "models/vision_language/sam/sam1/image_encoder.py": _b_models_sam_image_encoder,
+    "models/vision_language/sam/sam1/transformer.py": _b_models_sam_transformer,
+    "models/vision_language/sam/sam3/decoder.py": _b_models_sam3_decoder,
+    "models/vision_language/sam/sam3/vitdet.py": _b_models_sam3_vitdet,
     "models/time_series/prism/model.py": _b_models_prism,
-    "models/tree_transformer/components.py": _b_models_tree_transformer,
+    "models/language/tree_transformer/components.py": _b_models_tree_transformer,
 }
 
 
@@ -1955,7 +1955,7 @@ class TestFormerlyDroppingConstructionSites:
 
     @staticmethod
     def _nam(ffn_type: str):
-        from dl_techniques.models.nam.cell import NAMCell, NAMConfig
+        from dl_techniques.models.neural_computer.nam.cell import NAMCell, NAMConfig
         cell = NAMCell(NAMConfig(
             hidden_size=16, num_heads=2, intermediate_size=32,
             ffn_type=ffn_type, hidden_act='relu',
@@ -1965,7 +1965,7 @@ class TestFormerlyDroppingConstructionSites:
 
     @staticmethod
     def _sam(ffn_type: str):
-        from dl_techniques.models.SAM.SAM1.image_encoder import ViTBlock
+        from dl_techniques.models.vision_language.sam.sam1.image_encoder import ViTBlock
         block = ViTBlock(dim=16, num_heads=2, ffn_type=ffn_type,
                          activation='relu')
         block.build((None, 8, 8, 16))
@@ -1973,7 +1973,7 @@ class TestFormerlyDroppingConstructionSites:
 
     @staticmethod
     def _tree(ffn_type: str):
-        from dl_techniques.models.tree_transformer.components import (
+        from dl_techniques.models.language.tree_transformer.components import (
             TreeTransformerBlock,
         )
         block = TreeTransformerBlock(
@@ -2042,7 +2042,7 @@ class TestFormerlyDroppingConstructionSites:
 # site at its OWN default `ffn_type`. Both choices are deliberate and both are
 # blind to the defect class below:
 #
-#   * `models/qwen/qwen3.py` contains NO factory call at all. It reaches the
+#   * `models/language/qwen/qwen3.py` contains NO factory call at all. It reaches the
 #     factory through `TransformerLayer(ffn_args=...)` and through
 #     `MoEConfig(...ExpertConfig(ffn_config=...))`, so it is not in that file
 #     set and never could be.
@@ -2160,7 +2160,7 @@ def _derive_self_built_ffn_kwarg_sites() -> List[Dict[str, Any]]:
                     # would report `ffn_type=None` and drop out of
                     # `_derive_dynamic_type_model_classes` -- silently
                     # un-sweeping the model. MEASURED: that is exactly what
-                    # happened to `models/qwen/qwen3_next.py`.
+                    # happened to `models/language/qwen/qwen3_next.py`.
                     if value.args:
                         first = value.args[0]
                         prefiltered_type = (
@@ -2233,7 +2233,7 @@ _MODEL_FFN_RECIPES: Dict[str, List[Dict[str, Any]]] = {
          "moe_intermediate_size": 64},
     ],
     # `Qwen3SOM` had a recipe here until plan-2026-08-10-3649c19e/step-8.
-    # `models/qwen/qwen3_som.py` was deleted, so
+    # `models/language/qwen/qwen3_som.py` was deleted, so
     # `_derive_dynamic_type_model_classes()` no longer yields the class and
     # `test_every_dynamic_type_model_has_a_recipe` went RED on the stale row.
     "Qwen3Next": [
@@ -2301,8 +2301,8 @@ class TestModelBuiltFFNKwargDictSweep:
         below pass over an empty set, forever.
         """
         # The floor was 15 until plan-2026-08-10-3649c19e/step-8. Three sites
-        # went away with two deleted modules (`models/qwen/qwen3_som.py`, 2;
-        # `models/modern_bert/modern_bert_blt.py`, 1), taking the true count to
+        # went away with two deleted modules (`models/language/qwen/qwen3_som.py`, 2;
+        # `models/language/modern_bert/modern_bert_blt.py`, 1), taking the true count to
         # 13. The floor is a BLINDNESS guard, not an inventory: it is lowered
         # to the new true count rather than kept above it, because a floor the
         # repo cannot meet reports "the walk is blind" for a walk that is
@@ -2319,8 +2319,8 @@ class TestModelBuiltFFNKwargDictSweep:
             f"hazard rule below cannot fire"
         )
         files = {row["file"] for row in rows}
-        assert "models/qwen/qwen3.py" in files, (
-            "the known-defective site `models/qwen/qwen3.py` is not in the "
+        assert "models/language/qwen/qwen3.py" in files, (
+            "the known-defective site `models/language/qwen/qwen3.py` is not in the "
             "derived inventory; the walk no longer covers the regression it "
             "was written for"
         )
@@ -2354,8 +2354,8 @@ class TestModelBuiltFFNKwargDictSweep:
             self) -> None:
         """A raw dict is fine when the site also pins `ffn_type` to a literal.
 
-        Those sites (`models/clip/model.py` -> `swiglu`,
-        `models/modern_bert/*` -> `geglu`) are checked against that exact
+        Those sites (`models/vision_language/clip/model.py` -> `swiglu`,
+        `models/language/modern_bert/*` -> `geglu`) are checked against that exact
         type's registry entry instead, which is the strongest statement
         available without constructing the whole model.
         """
@@ -2404,7 +2404,7 @@ class TestModelBuiltFFNKwargDictSweep:
         THE FORWARD PASS IS HONESTLY NOT YET LOAD-BEARING, and that is recorded
         rather than dressed up. It was added on the theory that `MoELayer`
         builds its `FFNExpert`s lazily and so would need data to flow; MEASURED
-        against an injected raw `ffn_config` in `models/qwen/qwen3.py`, the
+        against an injected raw `ffn_config` in `models/language/qwen/qwen3.py`, the
         `Qwen3` MoE path in fact raises at CONSTRUCTION, so a construction-only
         sweep catches every site that exists today. The `model(x)` call is kept
         anyway, at ~95s of the ~140s runtime, because "it builds" and "it runs"

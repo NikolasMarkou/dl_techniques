@@ -19,7 +19,7 @@ from ..precision_arm_oracle import assert_precision_arm
 
 
 def _build():
-    from dl_techniques.models.pw_fnet.model import create_pw_fnet
+    from dl_techniques.models.vision.image_restoration.pw_fnet.model import create_pw_fnet
     return create_pw_fnet(width=8, middle_blk_num=1,
                           enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
 

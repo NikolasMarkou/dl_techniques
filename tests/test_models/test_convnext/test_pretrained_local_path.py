@@ -17,8 +17,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
+from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 
 
 TINY_KW = dict(depths=[1, 1], dims=[8, 16], num_classes=4)

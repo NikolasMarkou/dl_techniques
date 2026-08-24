@@ -28,19 +28,19 @@ This package contains exactly two modules plus its `__init__.py`:
 
 | Model | Domain | File | Key Idea |
 |:------|:-------|:-----|:---------|
-| `CliffordNet` | Vision | `src/dl_techniques/models/cliffordnet/model.py` | Attention-free backbone: geometric product replaces both attention and FFN |
-| `CliffordNetLM` | NLP | `src/dl_techniques/models/cliffordnet/lm.py` | Autoregressive LM with causal Clifford blocks |
+| `CliffordNet` | Vision | `src/dl_techniques/models/vision/cliffordnet/model.py` | Attention-free backbone: geometric product replaces both attention and FFN |
+| `CliffordNetLM` | NLP | `src/dl_techniques/models/vision/cliffordnet/lm.py` | Autoregressive LM with causal Clifford blocks |
 
 A third family member lives in a sibling package and is documented here because it
 shares the same algebraic core:
 
 | Model | Domain | File | Key Idea |
 |:------|:-------|:-----|:---------|
-| `CliffordCLIP` | Vision-Language | `src/dl_techniques/models/clip/clifford_clip.py` | Dual-encoder contrastive model with Clifford-aware projection head |
+| `CliffordCLIP` | Vision-Language | `src/dl_techniques/models/vision_language/clip/clifford_clip.py` | Dual-encoder contrastive model with Clifford-aware projection head |
 
-**Export surface.** `src/dl_techniques/models/cliffordnet/__init__.py` exports exactly
+**Export surface.** `src/dl_techniques/models/vision/cliffordnet/__init__.py` exports exactly
 two names — `CliffordNet` and `create_cliffordnet`. `CliffordNetLM` is **not**
-re-exported; import it from `dl_techniques.models.cliffordnet.lm` directly. That
+re-exported; import it from `dl_techniques.models.vision.cliffordnet.lm` directly. That
 `__all__` is pinned by `tests/test_models/test_cliffordnet/test_model.py`.
 
 **Removed 2026-08-10.** The denoiser (`CliffordNetDenoiser`), the conditional and
@@ -268,7 +268,7 @@ Every model in the family was audited against the core properties of the Cliffor
 ### CliffordNet (Vision)
 
 ```python
-from dl_techniques.models.cliffordnet import CliffordNet, create_cliffordnet
+from dl_techniques.models.vision.cliffordnet import CliffordNet, create_cliffordnet
 
 model = CliffordNet.nano(num_classes=100)
 # or: CliffordNet.lite(num_classes=100)
@@ -283,7 +283,7 @@ model = create_cliffordnet("lite", num_classes=100)
 per-variant classmethods — use `from_variant`:
 
 ```python
-from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
 
 model = CliffordNetLM.from_variant("nano", vocab_size=32000, max_seq_length=512)
 result = model(token_ids)  # {"logits": (B, seq_len, vocab_size)}
@@ -292,7 +292,7 @@ result = model(token_ids)  # {"logits": (B, seq_len, vocab_size)}
 ### CliffordCLIP (Vision-Language)
 
 ```python
-from dl_techniques.models.clip.clifford_clip import CliffordCLIP
+from dl_techniques.models.vision_language.clip.clifford_clip import CliffordCLIP
 
 model = CliffordCLIP.from_variant(
     "small", vocab_size=50257, image_size=112, context_length=64,

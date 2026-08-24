@@ -28,7 +28,7 @@ from sklearn.neighbors import NearestNeighbors
 
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.mini_vec2vec import MiniVec2VecAligner
+from dl_techniques.models.language.mini_vec2vec import MiniVec2VecAligner
 
 
 def generate_synthetic_data(

@@ -4,7 +4,7 @@ This module is TWO things and nothing else:
 
 1. **Thin wrappers.** ``create_convunext_denoiser`` (a ``**kwargs`` delegator) and
    ``create_convunext_variant`` (its historical signature) pin ``use_bias=False`` and
-   forward to ``dl_techniques.models.convunext.model.create_convunext``. The architecture, every
+   forward to ``dl_techniques.models.vision.convunext.model.create_convunext``. The architecture, every
    parameter, the Laplacian-pyramid option and the three documented asymmetries of the
    bias-free arm are described ONCE, there.
 2. **The Keras REGISTRAR** (contract H-4). Importing this module is what makes
@@ -65,7 +65,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-08-14T092357-0e3d792d/D-010: `ConvUNextStem` no longer LIVES here —
-# it was merged with the same-named class in `models/convunext/model.py` and now lives
+# it was merged with the same-named class in `models/vision/convunext/model.py` and now lives
 # there, gaining `use_bias` and `stem_normalization`. This module keeps importing it
 # under its own name because it is the Keras REGISTRAR that
 # `applications/bias_free_denoiser/denoiser_prior.py` and the two bfunet eval tools
@@ -73,13 +73,13 @@ from dl_techniques.utils.logger import logger
 # bf test suite imports it from here. The class's decorator deliberately keeps
 # `package="dl_techniques.bias_free_denoisers"` so its registry key does not move.
 # Do NOT delete this re-export, and do NOT re-home the class's `package=` string.
-from dl_techniques.models.convunext.model import ConvUNextStem  # noqa: F401
+from dl_techniques.models.vision.convunext.model import ConvUNextStem  # noqa: F401
 
 # `SpatialLinearAttention` moved with a BARE `@keras.saving.register_keras_serializable()`,
 # whose key `Custom>SpatialLinearAttention` was MEASURED to be module-independent on
 # Keras 3.8.0 (decisions.md D-008), so the move did not change it. Do NOT add a
 # `package=` argument "for symmetry" with `ConvUNextStem` — that WOULD change the key.
-from dl_techniques.models.convunext.model import (  # noqa: F401
+from dl_techniques.models.vision.convunext.model import (  # noqa: F401
     SpatialLinearAttention,
     CONVUNEXT_CONFIGS,
     create_convunext,
@@ -101,7 +101,7 @@ def create_convunext_denoiser(
 
     A thin DELEGATOR. Every keyword other than ``input_shape`` and
     ``block_normalization`` is forwarded VERBATIM to
-    ``dl_techniques.models.convunext.model.create_convunext``, which is where the
+    ``dl_techniques.models.vision.convunext.model.create_convunext``, which is where the
     architecture, every parameter's meaning and the three documented asymmetries
     of the bias-free arm are described ONCE. That docstring is the full parameter
     reference; it is deliberately not restated here, and this function enumerates
@@ -128,7 +128,7 @@ def create_convunext_denoiser(
         explicitly to keep the historical graph without the warning.
     :type block_normalization: Optional[str]
     :param kwargs: Every remaining parameter of
-        :func:`dl_techniques.models.convunext.model.create_convunext`, forwarded
+        :func:`dl_techniques.models.vision.convunext.model.create_convunext`, forwarded
         unchanged — including ``include_top`` and ``output_channels``, which the
         old hand-copied signature did not expose at all.
     :return: A functional, bias-free ``keras.Model``.

@@ -16,7 +16,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.tabm.model import TabMModel
+from dl_techniques.models.tabular.tabm.model import TabMModel
 
 ENSEMBLE_ARCHS = [
     'tabm',

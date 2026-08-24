@@ -1,4 +1,4 @@
-from dl_techniques.models.tree_transformer.model import (
+from dl_techniques.models.language.tree_transformer.model import (
     TreeTransformer,
     create_tree_transformer,
     create_tree_transformer_with_head,

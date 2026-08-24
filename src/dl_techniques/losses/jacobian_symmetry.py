@@ -18,7 +18,7 @@ jit-conv dead-end (432 unrolled columns; see
 different, far cheaper computation that composes cleanly. This module uses the
 pure-reverse-mode "double-VJP" (forward-over-reverse) recipe -- it needs only
 ``tf.GradientTape`` (no ``tf.autodiff.ForwardAccumulator``), matching the repo's
-established nested-tape idiom (``models/thera/hypernetwork.py``,
+established nested-tape idiom (``models/vision/thera/hypernetwork.py``,
 ``layers/physics/lagrange_layer.py``):
 
 - ``Jᵀv`` is one reverse pass: ``tape.gradient(D(y), y, output_gradients=v)``.

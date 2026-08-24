@@ -61,7 +61,7 @@ from dl_techniques.layers.heads.nlp.factory import (
     TextGenerationHead,
     get_head_class,
 )
-from dl_techniques.models.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert_with_head
 
 VARIANT = "tiny"
 NUM_CLASSES = 3
@@ -205,7 +205,7 @@ def test_the_two_dict_families_are_exactly_the_span_heads():
         f"the set of dict-output families changed to {dict_families}. If the "
         "similarity families are back, the unwrap was restricted to "
         "logits-bearing dicts -- that was considered and rejected; see the "
-        "D-018 anchor in models/bert/model.py"
+        "D-018 anchor in models/language/bert/model.py"
     )
     for name in dict_families:
         task_type = NLPTaskType[name]

@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.tiny_recursive_model import TRM
+from dl_techniques.models.language.tiny_recursive_model import TRM
 
 VOCAB = 64
 SEQ_LEN = 8

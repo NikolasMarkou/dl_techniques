@@ -732,7 +732,7 @@ class ConvNeXtV1(keras.Model):
 
         Not implemented: no public ConvNeXt V1 weights ship with
         ``dl_techniques``. Always raises. Kept to mirror the house factory
-        recipe (see ``models/resnet/model.py``) and to give an explicit failure
+        recipe (see ``models/vision/resnet/model.py``) and to give an explicit failure
         mode instead of a silent random-init fallback.
 
         :param variant: Variant name (unused).

@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
+from dl_techniques.models.vision.yolo12.multitask import create_yolov12_multitask
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
 INPUT_SHAPE = (64, 64, 3)

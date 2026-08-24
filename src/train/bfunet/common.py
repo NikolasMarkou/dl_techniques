@@ -33,7 +33,7 @@ from dl_techniques.losses.jacobian_symmetry import jacobian_symmetry_penalty
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.models.convunext.model import (
+from dl_techniques.models.vision.convunext.model import (
     POSITIVELY_HOMOGENEOUS_ACTIVATIONS,
 )
 from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
@@ -952,7 +952,7 @@ def _read_current_lr(model: keras.Model) -> float:
 # DECISION plan-2026-08-14T092357-0e3d792d/D-012: this set is DERIVED from the library's
 # single allowlist, not re-spelled here. It used to be a hand-written
 # `frozenset({"relu", "leaky_relu", "linear"})` -- an exact duplicate of the set
-# `models/convunext/model.py` now enforces at the builder, kept in lockstep by hand. Two
+# `models/vision/convunext/model.py` now enforces at the builder, kept in lockstep by hand. Two
 # copies of the same homogeneity rule is a defect, not a pattern: widening one and not
 # the other makes the trainer and the builder disagree about what bias-free means. The
 # `None` member is dropped here because this set feeds argparse `choices=` (where the

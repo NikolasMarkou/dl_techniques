@@ -12,7 +12,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.ntm.model_multitask import NTMMultiTask
+from dl_techniques.models.neural_computer.ntm.model_multitask import NTMMultiTask
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
 
 OUT_DIM = 4

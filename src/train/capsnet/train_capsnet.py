@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from typing import Tuple, Dict, Any, Optional
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.capsnet import create_capsnet
+from dl_techniques.models.vision.capsnet import create_capsnet
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 from train.common.callbacks import LearningRateLogger
 

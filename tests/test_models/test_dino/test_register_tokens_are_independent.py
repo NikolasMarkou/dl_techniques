@@ -22,7 +22,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.embedding.register_tokens import RegisterTokens
-from dl_techniques.models.dino.dino_v2 import create_dino_v2
+from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
 
 def _tiny_model(num_register_tokens=4):

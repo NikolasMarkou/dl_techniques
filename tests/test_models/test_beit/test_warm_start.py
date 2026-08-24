@@ -17,7 +17,7 @@ import numpy as np
 from keras import ops
 
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
 )
 from tests.test_models.test_beit.beit_test_geometry import (

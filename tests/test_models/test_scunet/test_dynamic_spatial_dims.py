@@ -25,7 +25,7 @@ import pytest
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
 
 def _tiny() -> SCUNet:

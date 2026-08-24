@@ -55,7 +55,7 @@ from train.common.clm_pretrain import (
     load_hf_clm_datasets,
     make_clm_steps_per_epoch,
 )
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 

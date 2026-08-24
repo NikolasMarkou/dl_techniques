@@ -3,7 +3,7 @@
 Mirrors the Stable Diffusion 3 MMDiT transformer structural parameters
 (diffusers ``SD3Transformer2DModel``) and pairs them with the reused 16-channel
 KL-VAE parameters. The VAE parameter dataclass is **reused** from the ideogram4
-port (:class:`~dl_techniques.models.ideogram4.config.AutoEncoderParams`) -- SD3
+port (:class:`~dl_techniques.models.vision_language.ideogram4.config.AutoEncoderParams`) -- SD3
 sets ``z_channels=16``; it is NOT redefined here (DRY; see D-002).
 
 All invariants the downstream MMDiT blocks / transformer silently rely on are
@@ -36,7 +36,7 @@ from typing import Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 
 # Reuse the VAE parameter dataclass from ideogram4 -- do NOT redefine it (D-002).
-from dl_techniques.models.ideogram4.config import AutoEncoderParams
+from dl_techniques.models.vision_language.ideogram4.config import AutoEncoderParams
 
 # ---------------------------------------------------------------------
 # Transformer (MMDiT) config

@@ -13,7 +13,7 @@ logs, with no warning -- and a bare ``except`` also swallows
 
 (e) ``model_v2``'s ``stem_pretrained`` docstring promised a "graceful fallback
 to random init on download failure" while
-``dl_techniques.models.resnet.create_resnet`` raises unconditionally.
+``dl_techniques.models.vision.resnet.create_resnet`` raises unconditionally.
 """
 
 import inspect
@@ -23,8 +23,8 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.capsnet.model import CapsNet
-from dl_techniques.models.capsnet import model_v2
+from dl_techniques.models.vision.capsnet.model import CapsNet
+from dl_techniques.models.vision.capsnet import model_v2
 
 
 class _MisshapedMetric(keras.metrics.Metric):

@@ -46,7 +46,7 @@ This implementation provides the core DistilBERT encoder as a **foundation model
 1.  **Foundation Model Design**: The `DistilBERT` class is a pure encoder, decoupled from task-specific heads.
 2.  **Weight loading**: `keras.models.load_model(path)` on a file you saved restores it exactly; `load_pretrained_weights(path)` transplants weights into a model you configured yourself. Only the `pretrained=True` *download* is non-functional (placeholder URLs) — §8.
 3.  **Keras 3 Native**: Built as a composite `keras.Model` and fully serializable — a `.keras` save/load round trip with no `custom_objects` reproduces the forward output exactly (measured max abs diff `0.0`). Only the TensorFlow backend is exercised here; other backends are untested.
-4.  **Shared embedding stage**: no DistilBERT-private embedding class exists. The model builds `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings` — the same layer `models/bert/` and `models/fnet/` use — via `create_embedding_layer('bert_embeddings', ...)` with `use_token_type_embeddings=False` (no segment embeddings) and `mask_zero=False`.
+4.  **Shared embedding stage**: no DistilBERT-private embedding class exists. The model builds `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings` — the same layer `models/language/bert/` and `models/language/fnet/` use — via `create_embedding_layer('bert_embeddings', ...)` with `use_token_type_embeddings=False` (no segment embeddings) and `mask_zero=False`.
 
 ### Why DistilBERT Matters
 
@@ -193,7 +193,7 @@ create_embedding_layer(
 )
 ```
 
-so the layer is `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings`, the same one `models/bert/` and `models/fnet/` build. Three kwargs carry DistilBERT's whole delta from BERT, and each differs from that layer's default — do not drop them (see the `D-011` comment at the call site):
+so the layer is `dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings`, the same one `models/language/bert/` and `models/language/fnet/` build. Three kwargs carry DistilBERT's whole delta from BERT, and each differs from that layer's default — do not drop them (see the `D-011` comment at the call site):
 
 -   **`use_token_type_embeddings=False`**: no "segment embeddings" (token type IDs). Unlike BERT, the input is treated as one continuous sequence, and no `token_type_embeddings` weight is allocated. `type_vocab_size=None` follows from it.
 -   **`mask_zero=False`**: DistilBERT threads an explicit `attention_mask` into every `TransformerLayer`, and this flag records that the embedding stage is not meant to supply a second one. Measured caveat, so the comment does not rot into a false claim: `BertEmbeddings` never *propagates* a Keras mask at **either** setting — `supports_masking` is `False`, it defines no `compute_mask`, and the inner `Embedding`'s mask is dropped at the `word_embeds + position_embeds` sum. The forward output is bit-identical (max abs diff `0.0`) with `mask_zero` `True` vs `False`, eagerly and in a functional graph. The flag's only observable effects today are `get_config()['mask_zero']` and `model.embeddings.word_embeddings.mask_zero`; it is passed explicitly so that omitting it cannot silently flip the model to BERT's `True` if the layer ever gains mask propagation.
@@ -228,7 +228,7 @@ Let's build a sentiment analysis model using the lightweight DistilBERT.
 import keras
 import numpy as np
 
-from dl_techniques.models.distilbert import create_distilbert_with_head
+from dl_techniques.models.language.distilbert import create_distilbert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the downstream task
@@ -274,7 +274,7 @@ print({k: v.shape for k, v in outputs.items()})
 **Purpose**: The main Keras `Model` subclass implementing the encoder.
 
 ```python
-from dl_techniques.models.distilbert import DistilBERT
+from dl_techniques.models.language.distilbert import DistilBERT
 
 # Standard Base model (randomly initialized)
 model = DistilBERT.from_variant("base")
@@ -334,7 +334,7 @@ Rule of thumb: `keras.models.load_model(path)` to get a saved model back as-is; 
 
 ```python
 import keras
-from dl_techniques.models.distilbert import DistilBERT
+from dl_techniques.models.language.distilbert import DistilBERT
 
 # Randomly initialized -- the working construction route
 model = DistilBERT.from_variant("base")
@@ -351,7 +351,7 @@ model = keras.models.load_model("./distilbert_weights.keras")
 ### Example 2: NER (Token Classification)
 
 ```python
-from dl_techniques.models.distilbert import create_distilbert_with_head
+from dl_techniques.models.language.distilbert import create_distilbert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 ner_config = NLPTaskConfig(
@@ -379,7 +379,7 @@ Use the model to get embeddings for downstream systems.
 
 ```python
 import keras
-from dl_techniques.models.distilbert import DistilBERT
+from dl_techniques.models.language.distilbert import DistilBERT
 
 encoder = DistilBERT.from_variant("base")
 
@@ -455,7 +455,7 @@ loaded = keras.models.load_model('distilbert_sentiment.keras')
 
 ```python
 import numpy as np
-from dl_techniques.models.distilbert import DistilBERT
+from dl_techniques.models.language.distilbert import DistilBERT
 
 def test_forward_pass():
     model = DistilBERT.from_variant("small")

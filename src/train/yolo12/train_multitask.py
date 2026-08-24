@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple, Optional
 from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.sut import OptimizedSUTDataset
-from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
+from dl_techniques.models.vision.yolo12.multitask import create_yolov12_multitask
 from dl_techniques.layers.heads.vision.task_types import (
     VisionTaskType,
     TaskConfiguration,

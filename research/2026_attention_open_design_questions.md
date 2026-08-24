@@ -184,7 +184,7 @@ defined restriction to 64 positions.
 - **(d) Leave as-is (documented dead)** — *buys* zero risk **at the cost of** keeping a
   silent-wrong-answer path in a production model.
 
-**Blast radius.** `src/dl_techniques/models/mobilenet/mobilenet_v4.py` (the only
+**Blast radius.** `src/dl_techniques/models/vision/mobilenet/mobilenet_v4.py` (the only
 non-package consumer). Factory key `'mobile_mqa'` (`factory.py:474`) — no `src/` consumer
 reaches it through the string. Tests: `tests/test_layers/test_attention/test_mobile_mqa.py`
 (zero `attention_mask` occurrences — nothing to break). Option (b) would be visible to
@@ -640,7 +640,7 @@ not a guard.
 - **(d) Leave as-is.** *Buys* nothing beyond zero risk.
 
 **Blast radius.** Three production consumers:
-`../src/dl_techniques/models/wave_field/model.py`,
+`../src/dl_techniques/models/language/wave_field/model.py`,
 `src/dl_techniques/models/memory_bank/wave_field_memory_llm.py`,
 `src/train/wave_field/pretrain.py`; plus
 `tests/test_models/test_wave_field/test_model.py` and factory key

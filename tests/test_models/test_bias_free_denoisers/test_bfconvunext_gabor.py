@@ -1,6 +1,6 @@
 """
 Test suite for the optional frozen Gabor depthwise stem of the bias-free ConvUNext
-denoiser (models/bias_free_denoisers/bfconvunext.py, plan_2026-06-19_ed071c02/D-001).
+denoiser (models/vision/bias_free_denoisers/bfconvunext.py, plan_2026-06-19_ed071c02/D-001).
 
 Covers: build with use_gabor_stem=True (full-resolution output preserved), the stem
 being non-learnable (trainable=False, zero trainable parameters), the mandatory
@@ -14,7 +14,7 @@ import keras
 import numpy as np
 from typing import Tuple
 
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
     create_convunext_variant,
 )

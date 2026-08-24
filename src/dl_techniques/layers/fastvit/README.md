@@ -30,14 +30,14 @@ different model.
 | Channel MLP | `FastVitConvMlp`: depthwise 7x7 + BN (no activation) -> 1x1 -> GELU -> drop -> 1x1 -> drop | a different FFN |
 | LayerScale | yes, per-channel, on both the token-mixer and the MLP branch | none |
 | Stochastic depth | yes, per residual branch | none |
-| Consumed by | `models/fastvit/` (the assembled MCi tower, in turn used by `models/mobile_clip/`) | **`models/fastvlm/`** |
+| Consumed by | `models/vision/fastvit/` (the assembled MCi tower, in turn used by `models/vision_language/mobile_clip/`) | **`models/vision_language/fastvlm/`** |
 
 **Which one do you want?**
 
 * Building a **faithful FastViT / MobileCLIP2 image tower** — or anything that
   must correspond block-for-block to timm's `fastvit.py` — use
   `FastVitRepMixerBlock` from **this** package.
-* Touching **`models/fastvlm/`**, or loading one of its checkpoints — that model
+* Touching **`models/vision_language/fastvlm/`**, or loading one of its checkpoints — that model
   consumes `layers/repmixer_block.py::RepMixerBlock`. It is deliberately left
   untouched by this package; substituting the FastViT block would change a
   shipped model's semantics and its checkpoint layout.
@@ -159,7 +159,7 @@ Two further contracts worth knowing:
   value is defined ONCE, as `reference.py::REFERENCE_NORM_EPSILON`, and passed
   explicitly at every construction site — including through
   `MobileOneBlock(norm_epsilon=...)`, whose own default stays at Keras' `1e-3`
-  because `models/fastvlm/` shares that block. Pinned tower-wide by
+  because `models/vision_language/fastvlm/` shares that block. Pinned tower-wide by
   `test_all_batchnorms_use_reference_epsilon`, which asserts the epsilon
   HISTOGRAM of a built mci0 and mci3 tower is a single `1e-05` bucket.
   *(This bullet previously claimed every call site already passed it. It did not:

@@ -451,7 +451,7 @@ class Mamba2ResidualBlock(keras.layers.Layer):
         remedy for a checkpoint trained under the pre-2026-08-15 default, and
         this block did not accept, forward or serialize it — which made the
         documented escape hatch unreachable from every real model, since
-        :class:`~dl_techniques.models.mamba.mamba_v2.Mamba2Model` builds its
+        :class:`~dl_techniques.models.language.mamba.mamba_v2.Mamba2Model` builds its
         whole stack out of these blocks.
     :param ngroups: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
     :param dt_min: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.

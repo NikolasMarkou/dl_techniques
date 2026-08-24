@@ -83,7 +83,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
 # --- Frozen probe configuration. Do not tune; the references below are tied
 #     to every one of these values, including the two seeds. ----------------

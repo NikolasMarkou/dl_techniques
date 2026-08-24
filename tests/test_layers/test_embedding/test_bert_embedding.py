@@ -706,7 +706,7 @@ class TestOptionalBranches:
         setting: it declares ``supports_masking = False``, defines no
         ``compute_mask``, and the inner ``Embedding``'s mask dies at the
         ``word_embeds + position_embeds`` sum. The shipped docs (this layer's
-        ``mask_zero`` docstring, the ``D-011`` anchor in ``models/distilbert``
+        ``mask_zero`` docstring, the ``D-011`` anchor in ``models/language/distilbert``
         and that package's README) state exactly this; if the layer ever gains
         mask propagation, this test must go red BEFORE those texts become false.
         """

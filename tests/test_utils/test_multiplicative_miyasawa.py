@@ -129,7 +129,7 @@ class TestAdditiveSureSelfCheck:
 
 class TestSureOnTinyModel:
     def test_sure_returns_finite_on_tiny_denoiser(self):
-        from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+        from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
             create_convunext_denoiser,
         )
 

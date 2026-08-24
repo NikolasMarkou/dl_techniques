@@ -5,7 +5,7 @@ tower with the shared CLIP text transformer.
 This is the weights-faithful half of the package. Its sibling
 ``mobile_clip_v1.py`` deliberately substitutes ``keras.applications`` CNNs for
 the MCi trunk under its own D-001; this class instead builds the real tower from
-``models/fastvit/``. Neither deprecates the other.
+``models/vision/fastvit/``. Neither deprecates the other.
 
 MobileCLIP's efficiency comes from what the image tower does at training time
 versus what it costs at inference. FastViT is structurally reparameterizable: a
@@ -109,10 +109,10 @@ from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.clip_utils import compute_clip_logits
 # The image tower is a standalone backbone package, not a private component of
-# this model: `models/fastvit/` owns the faithful timm `FastVit` MCi
+# this model: `models/vision/fastvit/` owns the faithful timm `FastVit` MCi
 # transcription and is usable on its own. Its terminal `Dense(projection_dim)`
 # IS the CLIP image projection — do NOT stack another projection on top of it.
-from dl_techniques.models.fastvit import FastVitImageEncoder
+from dl_techniques.models.vision.fastvit import FastVitImageEncoder
 
 # DECISION plan-2026-08-13T183738-24486492/D-001
 # DECISION plan-2026-08-14T135600-mcsplit/D-001  (amends the above: this used to
@@ -155,7 +155,7 @@ TEXT_TOWER_NAME = "text_encoder"
 _DEFAULT_LOGIT_SCALE_INIT = math.log(1.0 / 0.07)
 
 #: Upper bound applied to ``exp(logit_scale)`` on every use. This is v1's
-#: convention (`models/mobile_clip/mobile_clip_v1.py`) and OpenCLIP's, and it is
+#: convention (`models/vision_language/mobile_clip/mobile_clip_v1.py`) and OpenCLIP's, and it is
 #: NOT cosmetic: without it a diverging temperature produces `inf` logits and a
 #: `nan` contrastive loss with no other symptom.
 _LOGIT_SCALE_MAX = 100.0
@@ -225,7 +225,7 @@ class MobileClipV2Model(keras.Model):
     MobileCLIP2 dual encoder — FastViT (MCi) image tower + CLIP text tower.
 
     The faithful MobileCLIP port (Faghri et al., 2025, arXiv:2508.20691). Pairs
-    the FastViT MCi image tower of :mod:`dl_techniques.models.fastvit` with the
+    the FastViT MCi image tower of :mod:`dl_techniques.models.vision.fastvit` with the
     OpenCLIP-shaped text transformer of :mod:`.components` — the same one v1
     uses — and adds the CLIP epilogue: L2-normalized features, a learnable
     temperature, and the symmetric logits matrix.
@@ -526,7 +526,7 @@ class MobileClipV2Model(keras.Model):
                 **text_constructor_config, name=TEXT_TOWER_NAME)
         )
 
-        # The weight itself is created in `build()` (the `models/clip` CLIP
+        # The weight itself is created in `build()` (the `models/vision_language/clip` CLIP
         # precedent), not here.
         self.logit_scale = None
 

@@ -221,7 +221,7 @@ def _make_block(
     Args:
         shift_size: Cyclic shift for the block.
         build_shape: Shape passed to ``build()``. Pass ``(None, None, None,
-            DIM)`` to reproduce the ``models/thera`` construction, whose
+            DIM)`` to reproduce the ``models/vision/thera`` construction, whose
             spatial dims are unknown at build time.
 
     Returns:
@@ -787,7 +787,7 @@ class TestSwMsaMaskConstruction:
     def test_dynamic_spatial_dims_never_raise(self):
         """A dynamic (``None``) spatial dim must never hit the raise (D-002 / A2).
 
-        ``models/thera`` builds every Swin block with ``(B, None, None, C)``,
+        ``models/vision/thera`` builds every Swin block with ``(B, None, None, C)``,
         so a static-shape check that fired on ``None`` would kill it. Feeding
         the single-window resolution through a dynamic graph exercises the one
         case where the static path downgrades the shift; since D-012 the
@@ -830,7 +830,7 @@ class TestSwMsaMaskConstruction:
     def test_dynamic_spatial_dims_are_supported(self):
         """A block built with ``(B, None, None, C)`` must run at two resolutions.
 
-        This is the ``models/thera`` contract (plan assumption A2): the ``pro``
+        This is the ``models/vision/thera`` contract (plan assumption A2): the ``pro``
         tail builds every Swin block with dynamic spatial dims and reflect-pads
         H/W to a window-size multiple with symbolic amounts at call time. The
         guard above must therefore stay silent on a ``None`` dim, and the mask
@@ -957,9 +957,9 @@ class TestShapeIndependenceAtTraceTime:
     Measured RED at the pre-fix commit, config ``dim=32, num_heads=4,
     window_size=4, shift_size=2``, ``(1, 4, 4, 32)``, weights assigned from a
     seeded RNG: **512/512 elements differed, max |diff| 251.4, 97% relative.**
-    ``models/thera/tails.py`` builds every Swin block with
+    ``models/vision/thera/tails.py`` builds every Swin block with
     ``(B, None, None, C)``, so it was the one consumer taking the branch that
-    ``models/swin_transformer`` never takes at identical geometry.
+    ``models/vision/swin_transformer`` never takes at identical geometry.
     """
 
     @pytest.mark.parametrize(
@@ -1175,7 +1175,7 @@ class TestPaddedPositionIsolation:
     def test_padding_content_cannot_reach_the_output_symbolically(
         self, shift_size, height, width, monkeypatch
     ):
-        """The same isolation on the dynamic-shape path (``models/thera``'s).
+        """The same isolation on the dynamic-shape path (``models/vision/thera``'s).
 
         Each measurement gets its OWN ``tf.function`` trace: the fill value is
         baked into the graph as a constant, so reusing one trace across the
