@@ -131,14 +131,71 @@ class TrainingConfig:
 # CALLBACKS
 # =============================================================================
 
-class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
-    """Dynamic weight scheduler for deep supervision training."""
+# The ONE home for the per-epoch metric names this trainer plots. It is a
+# constant rather than a literal inside `create_callbacks` so that the metric
+# NAMES `build_compile_spec` produces can be asserted equal to the names that
+# get plotted, without constructing a run directory. Both branches contribute:
+# single output -> accuracy/top5_accuracy, deep supervision ->
+# primary_accuracy/primary_top5_accuracy.
+PLOTTED_METRIC_NAMES: List[str] = [
+    "accuracy",
+    "top5_accuracy",
+    "primary_accuracy",
+    "primary_top5_accuracy",
+]
 
-    def __init__(self, config: TrainingConfig, num_outputs: int) -> None:
+
+class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
+    """Dynamic weight scheduler for deep supervision training.
+
+    Rewrites the per-output loss weights at the start of every epoch by
+    assigning into the `keras.Variable` objects that were handed to
+    `model.compile(loss_weights=...)` by :func:`build_compile_spec`.
+
+    :param config: training configuration (supplies the schedule type/config
+        and the total epoch count that ``progress`` is derived from).
+    :param num_outputs: number of model outputs the schedule spans.
+    :param loss_weight_vars: the SAME list of variables that was passed to
+        ``model.compile(loss_weights=...)``. Length must equal
+        ``num_outputs``.
+    :raises ValueError: if ``loss_weight_vars`` is empty/None or its length
+        does not match ``num_outputs``.
+    """
+
+    def __init__(
+        self,
+        config: TrainingConfig,
+        num_outputs: int,
+        loss_weight_vars: List[keras.Variable],
+    ) -> None:
         super().__init__()
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-020
+        # Do NOT go back to `self.model.loss_weights = new_weights` in
+        # `on_epoch_begin`. Keras 3 `Model` has NO `loss_weights` attribute
+        # (reading it raises `AttributeError: 'Functional' object has no
+        # attribute 'loss_weights'`, MEASURED), and `CompileLoss` snapshots the
+        # weights into `_flat_losses` at build time as plain Python floats.
+        # That assignment therefore created a dead attribute nothing read and
+        # the schedule NEVER reached the loss. Do NOT "fix" it by re-`compile()`
+        # on epoch begin either -- that discards optimizer slot state every
+        # epoch. The weights must be `keras.Variable`s so `CompileLoss.call`'s
+        # `ops.multiply(value, loss_weight)` reads the CURRENT value without a
+        # retrace. See decisions.md D-020.
+        if not loss_weight_vars:
+            raise ValueError(
+                "DeepSupervisionWeightScheduler requires the loss-weight "
+                "variables built by build_compile_spec(); received "
+                f"{loss_weight_vars!r}. Without them the schedule is a no-op."
+            )
+        if len(loss_weight_vars) != num_outputs:
+            raise ValueError(
+                f"loss_weight_vars has {len(loss_weight_vars)} entries but the "
+                f"model has {num_outputs} outputs; they must match."
+            )
         self.config = config
         self.num_outputs = num_outputs
         self.total_epochs = config.epochs
+        self.loss_weight_vars = loss_weight_vars
         ds_config = {
             'type': config.deep_supervision_schedule_type,
             'config': config.deep_supervision_schedule_config
@@ -148,13 +205,92 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
     def on_epoch_begin(self, epoch: int, logs=None) -> None:
         progress = min(1.0, epoch / max(1, self.total_epochs - 1))
         new_weights = self.scheduler(progress)
-        self.model.loss_weights = new_weights
+        for var, weight in zip(self.loss_weight_vars, new_weights):
+            var.assign(float(weight))
         weights_str = ", ".join(f"{w:.4f}" for w in new_weights)
         logger.info(f"Epoch {epoch + 1}/{self.total_epochs} - DS weights: [{weights_str}]")
 
 
-def create_callbacks(config: TrainingConfig, num_outputs: int) -> Tuple[List[keras.callbacks.Callback], str]:
-    """Create training callbacks: common (checkpoint, early stop, CSV, analyzer) + domain-specific."""
+def build_compile_spec(has_multiple_outputs: bool, num_outputs: int) -> Dict[str, Any]:
+    """Build the ``loss`` / ``loss_weights`` / ``metrics`` arguments for ``compile``.
+
+    This is the ONE producer of the trainer's compile specification. Tests must
+    import and call it rather than restating the metrics list, so that the
+    compiled spec and the spec under test cannot drift apart.
+
+    :param has_multiple_outputs: True when deep supervision produced more than
+        one model output (from ``get_model_output_info``).
+    :param num_outputs: number of model outputs.
+    :returns: a dict with exactly the keys ``loss``, ``loss_weights`` and
+        ``metrics``, suitable for ``model.compile(optimizer=..., **spec)``.
+        In the multi-output case ``loss_weights`` is a list of NON-trainable
+        ``keras.Variable`` objects (see D-020) initialised to ``1/num_outputs``;
+        in the single-output case it is ``None``.
+    :rtype: Dict[str, Any]
+
+    The metric NAMES produced here are the contract that
+    :func:`create_callbacks` plots: ``accuracy`` / ``top5_accuracy`` for the
+    single-output branch and ``primary_accuracy`` / ``primary_top5_accuracy``
+    for the multi-output one.
+    """
+    if has_multiple_outputs:
+        loss_fns = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-020
+        # These MUST be variables, not floats -- see the anchor in
+        # DeepSupervisionWeightScheduler above.
+        loss_weights = [
+            keras.Variable(
+                1.0 / num_outputs,
+                trainable=False,
+                dtype='float32',
+                name=f'ds_loss_weight_{i}',
+            )
+            for i in range(num_outputs)
+        ]
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-002
+        # Do NOT go back to the dict-keyed form
+        # (`{model.output[0].name.split('/')[0]: [...]}`).
+        # `model` is a subclassed keras.Model: `model.output_names` is None and
+        # `model.output` raises, so a dict-keyed metrics spec cannot be built.
+        # Use the list-indexed form already used for loss/loss_weights above:
+        # metrics on the primary output only, none on the auxiliary heads.
+        metrics = [[PrimaryOutputAccuracy(), PrimaryOutputTopKAccuracy(k=5, name='primary_top5_accuracy')]]
+        metrics += [[] for _ in range(num_outputs - 1)]
+    else:
+        loss_fns = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        loss_weights = None
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-021
+        # Do NOT write `'top_5_accuracy'` here. It is NOT a Keras 3 metric
+        # alias: `compile()` accepts the string (metrics resolve lazily) and
+        # the FIRST `fit` step then dies with
+        # `ValueError: Could not interpret metric identifier: top_5_accuracy`.
+        # MEASURED on keras 3.8.0. The explicit spelling below also has to keep
+        # `name='top5_accuracy'`, because that is the key
+        # `create_callbacks`'s EpochMetricsPlotCallback plots.
+        metrics = [
+            'accuracy',
+            keras.metrics.SparseTopKCategoricalAccuracy(k=5, name='top5_accuracy'),
+        ]
+
+    return {'loss': loss_fns, 'loss_weights': loss_weights, 'metrics': metrics}
+
+
+def create_callbacks(
+    config: TrainingConfig,
+    num_outputs: int,
+    loss_weight_vars: Optional[List[keras.Variable]] = None,
+) -> Tuple[List[keras.callbacks.Callback], str]:
+    """Create training callbacks: common (checkpoint, early stop, CSV, analyzer) + domain-specific.
+
+    :param config: training configuration.
+    :param num_outputs: number of model outputs.
+    :param loss_weight_vars: the ``loss_weights`` entry of
+        :func:`build_compile_spec`. Required whenever deep supervision is
+        enabled and ``num_outputs > 1``; ignored otherwise.
+    :returns: ``(callbacks, results_dir)``.
+    :raises ValueError: if the deep-supervision scheduler is requested without
+        its loss-weight variables.
+    """
     callbacks, results_dir = create_common_callbacks(
         model_name=config.experiment_name or config.model_variant,
         results_dir_prefix="resnet",
@@ -164,11 +300,13 @@ def create_callbacks(config: TrainingConfig, num_outputs: int) -> Tuple[List[ker
     )
 
     if config.enable_deep_supervision and num_outputs > 1:
-        callbacks.append(DeepSupervisionWeightScheduler(config, num_outputs))
+        callbacks.append(
+            DeepSupervisionWeightScheduler(config, num_outputs, loss_weight_vars)
+        )
     viz_dir = Path(config.output_dir) / config.experiment_name / "training_metrics"
     callbacks.append(EpochMetricsPlotCallback(
         str(viz_dir),
-        ["accuracy", "top5_accuracy", "primary_accuracy", "primary_top5_accuracy"],
+        PLOTTED_METRIC_NAMES,
         every_n=5,
     ))
 
@@ -257,27 +395,13 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     optimizer = optimizer_builder(opt_config, lr_schedule)
 
     # Loss and metrics
-    if has_multiple_outputs:
-        loss_fns = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
-        initial_weights = [1.0 / num_outputs] * num_outputs
-        # DECISION plan-2026-08-23T203721-009b7ccf/D-002
-        # Do NOT go back to the dict-keyed form
-        # (`{model.output[0].name.split('/')[0]: [...]}`).
-        # `model` is a subclassed keras.Model: `model.output_names` is None and
-        # `model.output` raises, so a dict-keyed metrics spec cannot be built.
-        # Use the list-indexed form already used for loss/loss_weights above:
-        # metrics on the primary output only, none on the auxiliary heads.
-        metrics = [[PrimaryOutputAccuracy(), PrimaryOutputTopKAccuracy(k=5, name='primary_top5_accuracy')]]
-        metrics += [[] for _ in range(num_outputs - 1)]
-    else:
-        loss_fns = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-        initial_weights = None
-        metrics = ['accuracy', 'top_5_accuracy']
-
-    model.compile(optimizer=optimizer, loss=loss_fns, loss_weights=initial_weights, metrics=metrics)
+    compile_spec = build_compile_spec(has_multiple_outputs, num_outputs)
+    model.compile(optimizer=optimizer, **compile_spec)
 
     # Train
-    callbacks, _ = create_callbacks(config, num_outputs)
+    callbacks, _ = create_callbacks(
+        config, num_outputs, loss_weight_vars=compile_spec['loss_weights']
+    )
 
     val_steps = config.validation_steps
     if val_steps is None:
