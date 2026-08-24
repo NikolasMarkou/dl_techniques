@@ -972,6 +972,14 @@ class BeitForImageClassification(keras.Model):
         ``(batch, num_classes)`` — logits.
     """
 
+    # DECISION plan-2026-08-24T074054-247151fd/D-007
+    # WHAT NOT TO DO: do not decompose these head constructors into `_build_*`
+    # helpers to mirror `BeitModel.__init__`. Measured by AST at this commit
+    # (body[0].lineno -> body[-1].end_lineno): this constructor is 40 lines and
+    # `BeitForMaskedImageModeling.__init__` is 22 -- both at or under the 40-line
+    # threshold the trunk decomposition earned. A `_build_head` extracted from 40
+    # lines that builds four attributes with no reuse is a shallow method and pure
+    # classitis; symmetry with the trunk is not a reason on its own.
     def __init__(
             self,
             backbone: BeitModel,
