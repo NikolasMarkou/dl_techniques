@@ -339,12 +339,27 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   and `mobilenet/mobilenet_v2.py` stay where they are; renaming breaks every import.
 - **Never convert docstring style.** This package is measurably mixed; match the file you
   are editing (see `src/dl_techniques/CLAUDE.md` § Code Style).
-- **Never delete the deep-supervision re-export shim** at the bottom of `resnet/model.py`,
-  `convunext/model.py`, `bias_free_denoisers/bfunet.py` and
-  `bias_free_denoisers/bfconvunext.py`. It is a deliberate late import. Three of the four
-  carry an explicit `# noqa: E402`; `bfconvunext.py` has the same trailing import block
-  without the marker (verified 2026-08-19) — that is a lint-annotation gap, not a licence
-  to remove the import.
+- **Never re-export the deep-supervision helpers from a `models/` package.**
+  `get_model_output_info` and `create_inference_model_from_training_model` live in
+  `dl_techniques/utils/deep_supervision.py` and are imported from there. No `models/*`
+  module and no `models/*/__init__.py` passes either name through; do not re-add a
+  pass-through. They are model-agnostic — they inspect any Keras model's outputs and slice
+  a training model down to its primary head — so a model package re-exporting them
+  advertised a surface it did not own and gave one function two import paths for no gain.
+  `models/vit/__init__.py` is the documented shape, and `models/resnet/__init__.py` now
+  carries the same docstring; read either before reaching for a shim.
+  This bullet **reverses** the rule that stood in its place until 2026-08-24 ("Never delete
+  the deep-supervision re-export shim ... It is a deliberate late import"), so do not read
+  the current tree as drift and restore the shims. That rule was factually wrong on both
+  counts. It named four files as carrying the shim, but `bias_free_denoisers/bfunet.py` had
+  no import at all — only an orphaned comment describing one, left behind when commit
+  `e40a13a86` deleted the import (re-verified 2026-08-24: no top-level import past line 900
+  in that file; the comment is now gone too). And the "deliberate late import" premise was
+  tested at every site this removal touched, where no circular import existed anywhere —
+  `utils/deep_supervision.py` imports only `keras` and `utils.logger` and cannot cycle back
+  into `models/` — so the tail-of-file placement was stylistic, not structural. Removal
+  decided in `plan-2026-08-24T120026-64ffd751/D-001`; this rule inverted in
+  `plan-2026-08-24T120026-64ffd751/D-002`.
 
 ### When the shape does not apply
 
