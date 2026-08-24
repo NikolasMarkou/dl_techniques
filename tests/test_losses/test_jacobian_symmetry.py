@@ -73,8 +73,12 @@ def _drop_path_residual_net(drop_path_rate: float = 0.3) -> keras.Model:
     ``out = inp + StochasticDepth(Conv(inp))``. Output channels == input channels
     (3), so the output shape matches the input (the penalty's single-same-shaped
     tensor contract). The ``StochasticDepth`` sublayer (reused from the repo,
-    ``layers/stochastic_depth.py`` -- the exact layer ``bfconvunext.py:409`` wires
-    into every non-tiny variant) is ACTIVE only under ``training=True``; under
+    ``layers/stochastic_depth.py`` -- the exact layer the shared ConvUNext block
+    builder in ``models/convunext/model.py`` puts on the residual BRANCH whenever
+    ``drop_path_rate > 0``, i.e. in every non-tiny bias-free variant, since
+    ``CONVUNEXT_CONFIGS`` gives tiny 0.0 and small/base/large/xlarge 0.1/0.1/0.2/0.3;
+    ``bias_free_denoisers/bfconvunext.py`` only re-exports the class as the Keras
+    registrar and wires nothing) is ACTIVE only under ``training=True``; under
     ``training=False`` it is a deterministic identity. This is the surface the
     shipped ``training=False`` fix must render deterministic (D-005).
     """

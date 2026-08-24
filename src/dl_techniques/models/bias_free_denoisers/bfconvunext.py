@@ -210,6 +210,15 @@ def create_convunext_denoiser(
     #   * `stem_normalization` is pinned even though it equals `create_convunext`'s
     #     current default: the docstring's "the stem is pinned" claim was inherited,
     #     not enforced, until this line. See decisions.md D-010.
+    #   * KNOWN COST of this delegation, measured 2026-08-24: `make docs` now emits
+    #     `create_convunext_denoiser(input_shape)` and nothing else. `generate_docs.py`
+    #     builds a signature from `node.args.args` alone -- no keyword-only args, no
+    #     `**kwargs` -- so `block_normalization` (the D-048 sentinel carrying the
+    #     degree-1-homogeneity warning) and every forwardable parameter are invisible
+    #     to generated documentation, where 38 names used to appear. That is a
+    #     limitation of the doc extractor, not of this call; do NOT "fix" it by
+    #     re-adding the hand-copied parameter list. Read `create_convunext`'s
+    #     docstring for the parameter reference.
     return create_convunext(
         input_shape=input_shape,
         use_bias=False,
