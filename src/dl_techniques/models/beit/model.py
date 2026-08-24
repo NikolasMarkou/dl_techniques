@@ -396,8 +396,35 @@ class BeitModel(keras.Model):
         self.initializer_range = float(initializer_range)
 
         self._validate_config()
+        self._resolve_geometry()
+        self._build_embeddings()
+        self._build_tokens()
+        self._build_encoder()
+        self._build_final_norm()
 
-        # ----- derived geometry -----
+        logger.info(
+            f"Created BeitModel-{scale}: {self.hidden_size}d, {self.num_layers}L, "
+            f"{self.num_heads}h, ffn={self.intermediate_size}, grid={self.grid_size}, "
+            f"N={self.num_patches}, eps={self.layer_norm_eps}, "
+            f"layer_scale={self.layer_scale_init_value}"
+        )
+
+    # -----------------------------------------------------------------
+    # Construction helpers. Each is called EXACTLY ONCE, from `__init__`, in the
+    # order written there -- that is what a constructor decomposition is, and it is
+    # why they take no arguments and return nothing: they read and write `self`.
+    #
+    # WHAT NOT TO DO: do not rename these after the ORDER they run in
+    # (`_build_step1`, `_build_phase2`). A temporal name tells the reader when the
+    # method is called, which `__init__` already shows, and hides what it owns, which
+    # is the only thing a reader coming from a weight name or a traceback needs.
+
+    def _resolve_geometry(self) -> None:
+        """Derive the patch grid, the patch count and the token-sequence length.
+
+        Runs AFTER `_validate_config`, which is what guarantees the divisions below
+        are exact: the image dims are checked divisible by the patch dims there.
+        """
         img_h, img_w, _ = self.input_shape_config
         patch_h, patch_w = _as_pair(self.patch_size, "patch_size")
         # The PATCH GRID, which is `BeitAttention`'s `window_size` — NOT the image size
@@ -405,25 +432,43 @@ class BeitModel(keras.Model):
         self.grid_size: Tuple[int, int] = (img_h // patch_h, img_w // patch_w)
         self.num_patches = self.grid_size[0] * self.grid_size[1]
         self.seq_len = self.num_patches + 1  # + cls
+        # Kept so `_build_embeddings` can pass the RESOLVED pair without re-running
+        # `_as_pair`; private, because `self.patch_size` stays the serialization field.
+        self._patch_size_pair: Tuple[int, int] = (patch_h, patch_w)
 
-        kernel_init = keras.initializers.TruncatedNormal(stddev=self.initializer_range)
-
-        # ----- CREATE all sub-layers in __init__ (unbuilt) -----
-        self.patch_embed = create_embedding_layer(
-            'patch_2d',
-            patch_size=(patch_h, patch_w),
-            embed_dim=self.hidden_size,
-            kernel_initializer=kernel_init,
-            name="patch_embed",
+        # DECISION plan-2026-08-24T074054-247151fd/D-003
+        # ONE `TruncatedNormal` instance, deliberately SHARED by `patch_embed` and by
+        # every one of the `num_layers` encoder layers. It is hoisted to `self` only so
+        # that two helpers can reach the SAME object; the sharing itself is unchanged
+        # from before the decomposition.
+        # WHAT NOT TO DO: do not "harden" this into a per-layer
+        # `clone_initializer(...)`, and do not give each helper its own
+        # `TruncatedNormal(...)`. Both are the repo's standard shared-seedless-
+        # initializer fix and both are WRONG HERE: a seedless initializer draws from the
+        # global RNG, so N independent instances consume it in a different pattern than
+        # one instance used N times, which changes every weight in the model. That is a
+        # silent numerical change wearing a hygiene fix's clothes. This restructure is
+        # required to be bitwise inert (`tests/test_models/test_beit/
+        # test_the_restructure_moves_no_numbers.py`), so the hardening belongs to a
+        # separate, separately-measured change.
+        # See decisions.md D-003.
+        self._kernel_init = keras.initializers.TruncatedNormal(
+            stddev=self.initializer_range
         )
 
-        # Guide §9: ALWAYS CREATE, CONDITIONALLY USE. The classifier never calls this,
-        # but it MUST own the weight or its trunk stops matching the MIM trunk and the
-        # warm start silently transfers a different set of layers. This is the
-        # DELIBERATE exception to "build only what call() runs" — see build().
-        self.mask_token = MaskTokenApply(name="mask_token")
+    def _build_embeddings(self) -> None:
+        """Create the embedding stage: patch projection, optional absolute position, dropout.
 
-        self.cls_token = ClassTokenPrepend(name="cls_token")
+        Sub-layers are CREATED here and left UNBUILT; `build()` builds every one of them
+        explicitly from stored config.
+        """
+        self.patch_embed = create_embedding_layer(
+            'patch_2d',
+            patch_size=self._patch_size_pair,
+            embed_dim=self.hidden_size,
+            kernel_initializer=self._kernel_init,
+            name="patch_embed",
+        )
 
         # Absolute position embedding is created ONLY when enabled. Unlike the mask
         # token, this is not a warm-start hazard: it is static backbone config, so the
@@ -449,6 +494,18 @@ class BeitModel(keras.Model):
             self.hidden_dropout_rate, name="embed_dropout"
         )
 
+    def _build_tokens(self) -> None:
+        """Create the two token-manipulating layers: the mask token and the cls token."""
+        # Guide §9: ALWAYS CREATE, CONDITIONALLY USE. The classifier never calls this,
+        # but it MUST own the weight or its trunk stops matching the MIM trunk and the
+        # warm start silently transfers a different set of layers. This is the
+        # DELIBERATE exception to "build only what call() runs" — see build().
+        self.mask_token = MaskTokenApply(name="mask_token")
+
+        self.cls_token = ClassTokenPrepend(name="cls_token")
+
+    def _build_encoder(self) -> None:
+        """Create the stochastic-depth ramp and the `num_layers` transformer blocks."""
         # The stochastic-depth LINEAR RAMP is a MODEL-level responsibility:
         # `TransformerLayer` holds one float per instance and has no intra-layer
         # schedule. `linear_drop_path_rates` is the repo's single definition of this
@@ -491,11 +548,13 @@ class BeitModel(keras.Model):
                     layer_scale_init_value=self.layer_scale_init_value,
                     use_stochastic_depth=True,
                     stochastic_depth_rate=self.drop_path_rates[i],
-                    kernel_initializer=kernel_init,
+                    kernel_initializer=self._kernel_init,
                     name=f"encoder_layer_{i}",
                 )
             )
 
+    def _build_final_norm(self) -> None:
+        """Create the trunk's final LayerNorm — only on the `use_mean_pooling is False` fork."""
         # DECISION plan-2026-08-11T012340-f63796dc/D-007
         # The trunk's final LayerNorm EXISTS ONLY WHEN `use_mean_pooling is False`.
         # This is not a simplification, it is BEiT's own fork. In HF's port
@@ -520,13 +579,6 @@ class BeitModel(keras.Model):
             self.final_norm = layers.LayerNormalization(
                 epsilon=self.layer_norm_eps, name="final_norm"
             )
-
-        logger.info(
-            f"Created BeitModel-{scale}: {self.hidden_size}d, {self.num_layers}L, "
-            f"{self.num_heads}h, ffn={self.intermediate_size}, grid={self.grid_size}, "
-            f"N={self.num_patches}, eps={self.layer_norm_eps}, "
-            f"layer_scale={self.layer_scale_init_value}"
-        )
 
     # -----------------------------------------------------------------
 
