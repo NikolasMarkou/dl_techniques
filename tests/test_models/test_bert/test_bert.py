@@ -571,7 +571,7 @@ class TestBERTIter1Refactor:
         )
 
         # BERT must remain importable from the implementation submodule path
-        # (renamed .bert -> .model by merge 4ed922781; existing tests rely on this).
+        # (renamed .bert -> .model by commit 2c4a0ca7c; existing tests rely on this).
         from dl_techniques.models.bert.model import BERT as BERTViaSubmodule
         assert BERTViaSubmodule is pkg.BERT
 
