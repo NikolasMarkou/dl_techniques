@@ -32,19 +32,33 @@ from typing import Any, List, Tuple
 
 import pytest
 
+from .model_package_discovery import leaf_packages
+
 MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "dl_techniques" / "models"
+
+#: ``{bare package name: dotted module path}`` for every LEAF model package.
+#: This used to be a one-level listing of ``MODELS_DIR``; after the family
+#: restructure that listing returns the eleven family *containers* instead of
+#: the packages inside them, so discovery lives in one shared place now. Keys
+#: stay bare (``"beit"``, ``"sam1"``) -- they are what parameterized ids and the
+#: waiver tables below are written against -- so every import site must go
+#: through :data:`PACKAGE_MODULES` rather than concatenating the bare name onto
+#: ``dl_techniques.models.``.
+PACKAGE_MODULES = leaf_packages()
 
 
 def _package_names() -> List[str]:
-    """Every top-level model subpackage, from the directory listing."""
-    return sorted(
-        p.name
-        for p in MODELS_DIR.iterdir()
-        if p.is_dir() and p.name != "__pycache__" and (p / "__init__.py").exists()
-    )
+    """Every leaf model package's bare name."""
+    return sorted(PACKAGE_MODULES)
 
 
 PACKAGES = _package_names()
+
+
+def _package_dir(pkg: str) -> Path:
+    """On-disk directory of one leaf package, from its dotted module path."""
+    relative = PACKAGE_MODULES[pkg].split("dl_techniques.models.", 1)[1]
+    return MODELS_DIR.joinpath(*relative.split("."))
 
 
 #: Variant-name fragments ordered smallest-first. Used only to pick which named
@@ -170,7 +184,7 @@ def _iter_pretrained_callables():
     seen = set()
     for pkg in PACKAGES:
         try:
-            module = importlib.import_module(f"dl_techniques.models.{pkg}")
+            module = importlib.import_module(PACKAGE_MODULES[pkg])
         except Exception:  # covered by test_package_imports
             continue
         for name in dir(module):
@@ -334,6 +348,44 @@ class TestPackageDiscovery:
             f"expected the full model package set, found {len(PACKAGES)}: {PACKAGES}"
         )
 
+    def test_the_families_themselves_are_not_packages(self):
+        """The parameterization must name LEAF packages, never the containers.
+
+        A count alone cannot tell 79 right names from 79 wrong ones. The
+        restructure's failure mode was a one-level listing collapsing the set
+        to the eleven family directories, so those are excluded by name here,
+        and the packages that only a recursive walk reaches are required by
+        name in the sibling test below.
+        """
+        containers = {
+            "common", "general_purpose", "graph", "language", "memory",
+            "neural_computer", "point_cloud", "tabular", "time_series",
+            "vision", "vision_language",
+            "image_restoration", "keypoints", "super_resolution", "sam",
+        }
+        found = containers & set(PACKAGES)
+        assert not found, f"family/subfamily containers listed as packages: {sorted(found)}"
+
+    def test_the_second_level_nestings_are_reached(self):
+        """Packages a two-level walk still misses must be in the population."""
+        expected = {
+            "darkir": "dl_techniques.models.vision.image_restoration.darkir",
+            "pw_fnet": "dl_techniques.models.vision.image_restoration.pw_fnet",
+            "scunet": "dl_techniques.models.vision.image_restoration.scunet",
+            "pft_sr": "dl_techniques.models.vision.super_resolution.pft_sr",
+            "superpoint": "dl_techniques.models.vision.keypoints.superpoint",
+            "sam1": "dl_techniques.models.vision_language.sam.sam1",
+            "sam2": "dl_techniques.models.vision_language.sam.sam2",
+            "sam3": "dl_techniques.models.vision_language.sam.sam3",
+            "power_sampling": "dl_techniques.models.common.power_sampling",
+        }
+        wrong = {
+            name: PACKAGE_MODULES.get(name)
+            for name, dotted in expected.items()
+            if PACKAGE_MODULES.get(name) != dotted
+        }
+        assert not wrong, f"nested leaf packages missing or mis-resolved: {wrong}"
+
     def test_parent_init_is_not_a_public_api(self):
         """``dl_techniques.models`` itself exports nothing; import from the subpackage.
 
@@ -358,7 +410,7 @@ class TestAllDeclaration:
         A list of objects passes every ordinary import but breaks ``import *``
         with ``TypeError: Item in __all__ must be str``.
         """
-        node = _all_node(MODELS_DIR / pkg / "__init__.py")
+        node = _all_node(_package_dir(pkg) / "__init__.py")
         if node is None:
             pytest.skip(f"{pkg} declares no __all__")
         assert isinstance(node, (ast.List, ast.Tuple)), (
@@ -374,7 +426,7 @@ class TestAllDeclaration:
 
     def test_all_entries_resolve(self, pkg: str):
         """Every name in ``__all__`` must actually be bound by the package."""
-        module = importlib.import_module(f"dl_techniques.models.{pkg}")
+        module = importlib.import_module(PACKAGE_MODULES[pkg])
         declared = getattr(module, "__all__", None)
         if not declared:
             pytest.skip(f"{pkg} declares no __all__")
@@ -382,7 +434,7 @@ class TestAllDeclaration:
         assert not missing, f"{pkg}: __all__ names not bound by the package: {missing}"
 
     def test_no_duplicate_entries(self, pkg: str):
-        module = importlib.import_module(f"dl_techniques.models.{pkg}")
+        module = importlib.import_module(PACKAGE_MODULES[pkg])
         declared = getattr(module, "__all__", None)
         if not declared:
             pytest.skip(f"{pkg} declares no __all__")
@@ -395,7 +447,7 @@ class TestPackageImports:
     """A package must import cleanly, and its submodules must not be dead."""
 
     def test_package_imports(self, pkg: str):
-        importlib.import_module(f"dl_techniques.models.{pkg}")
+        importlib.import_module(PACKAGE_MODULES[pkg])
 
     def test_star_import_succeeds(self, pkg: str):
         """``from dl_techniques.models.<pkg> import *`` must not raise.
@@ -404,7 +456,7 @@ class TestPackageImports:
         the package's own 73-test suite stayed green.
         """
         namespace: dict = {}
-        exec(f"from dl_techniques.models.{pkg} import *", namespace)  # noqa: S102
+        exec(f"from {PACKAGE_MODULES[pkg]} import *", namespace)  # noqa: S102
 
 
 class TestDecisionAnchorsIntact:
@@ -3004,10 +3056,15 @@ def _sweep_main_modules(roots=None, src_root=None):
     artifact, not a missing docstring, and acting on it would have "fixed" 17
     packages that were never broken.
 
-    A package whose ``__init__.py`` re-exports nothing first-party (``SAM``,
-    which documents in its own docstring WHY it exports nothing) is resolved by
-    recursing into its subpackages -- that is what reaches
-    ``SAM/SAM1/model.py``, ``SAM/SAM2/model.py`` and ``SAM/SAM3/sam3_image.py``.
+    The population is :func:`model_package_discovery.leaf_packages`, NOT a
+    one-level listing of ``root``. A one-level listing of the restructured tree
+    returns the eleven family containers, which re-export nothing first-party
+    and so resolve to zero main modules -- ``n_packages`` read 11 and every
+    real package fell out of the guard silently. The leaf walk is also what
+    reaches ``vision_language/sam/sam1/model.py``, ``.../sam2/model.py`` and
+    ``.../sam3/sam3_image.py``, which used to arrive by recursing out of the
+    ``SAM`` container that re-exported nothing; they are ordinary leaf packages
+    now and need no special case.
     """
     roots = (MODELS_DIR,) if roots is None else roots
     src_root = MODELS_DIR.parent if src_root is None else src_root
@@ -3029,29 +3086,19 @@ def _sweep_main_modules(roots=None, src_root=None):
             rel = path.relative_to(src_root).as_posix()
             mains[rel] = (label, ast.get_docstring(tree))
             found = True
-        if found:
-            return True
-        for child in sorted(pkgdir.iterdir()):
-            if (
-                child.is_dir()
-                and child.name != "__pycache__"
-                and (child / "__init__.py").exists()
-            ):
-                if handle(child, f"{pkg_suffix}.{child.name}", label):
-                    found = True
         return found
 
     for root in roots:
-        for pkgdir in sorted(Path(root).iterdir()):
-            if not (
-                pkgdir.is_dir()
-                and pkgdir.name != "__pycache__"
-                and (pkgdir / "__init__.py").exists()
-            ):
-                continue
+        root = Path(root)
+        # The population is the LEAF packages, not a one-level listing. A
+        # one-level listing of the restructured tree returns the eleven family
+        # containers, which resolve nothing and drove ``n_packages`` to 11.
+        for pkg, dotted in sorted(leaf_packages(root).items()):
+            suffix = dotted.split("dl_techniques.models.", 1)[-1]
+            pkgdir = root.joinpath(*suffix.split("."))
             counts["n_packages"] += 1
-            if not handle(pkgdir, pkgdir.name, pkgdir.name):
-                unresolved.append(pkgdir.name)
+            if not handle(pkgdir, suffix, pkg):
+                unresolved.append(pkg)
     counts["n_main_modules"] = len(mains)
     counts["n_packages_without_main"] = len(unresolved)
     counts["packages_without_main"] = tuple(sorted(unresolved))
@@ -3149,6 +3196,10 @@ _PACKAGES_WITHOUT_MAIN_MODULE = {
     # transcribed literature survey; not one of its PSNR/SSIM numbers was measured
     # in this repository. Delete this entry only in the commit that adds a real
     # model to that package. See decisions.md D-014.
+    # 2026-08-25: `image_restoration` is a sub-family CONTAINER under the leaf
+    # walk, so it is no longer a population member and this entry is inert. It is
+    # retained rather than deleted because D-014's instruction above conditions
+    # deletion on a model landing there, which has not happened.
     "image_restoration": (
         "holds NO PYTHON AT ALL -- an empty __init__.py (now carrying a docstring "
         "that says so) beside README.md and BENCHMARKS.md, which are a transcribed "
@@ -3158,6 +3209,36 @@ _PACKAGES_WITHOUT_MAIN_MODULE = {
         "Arrived by git pull in 4334b282d and adjudicated 2026-08-24 by "
         "plan-2026-08-24-247151fd step 11. If an implementation ever lands there, "
         "delete this entry in the same commit that adds the model."
+    ),
+    # The three below are NOT restructure damage. They are a long-standing
+    # `time_series/` design that the pre-restructure one-level walk could not
+    # see: it treated `time_series` as ONE package and resolved it by recursion,
+    # so its seven children were never population members. The leaf walk makes
+    # them members and exposes the shape. MEASURED 2026-08-25:
+    #   stat -c%s src/dl_techniques/models/time_series/*/__init__.py
+    #   adaptive_ema 452, mdn 52, nbeats 208, xlstm 703, deepar 0, prism 0,
+    #   tirex 0
+    # Waived, not fixed: writing the re-exports is a models-package change with
+    # its own import-surface and serialization blast radius, and this plan is a
+    # path-and-prose repair (plan-2026-08-24-8fd4f20d invariant 1: no
+    # behavioural change to any model). Delete these three entries in the commit
+    # that gives them a re-exporting __init__.py.
+    "deepar": (
+        "ZERO-BYTE __init__.py -- DeepAR/create_deepar are re-exported by the "
+        "PARENT models/time_series/__init__.py (`from .deepar.model import ...`), "
+        "not by the leaf, so nothing resolves THROUGH the leaf's own init. "
+        "Pre-existing; exposed 2026-08-25 by the leaf-package walk."
+    ),
+    "prism": (
+        "ZERO-BYTE __init__.py -- PRISMModel/create_prism_model are re-exported "
+        "by models/time_series/__init__.py, not by the leaf. Pre-existing; "
+        "exposed 2026-08-25 by the leaf-package walk."
+    ),
+    "tirex": (
+        "ZERO-BYTE __init__.py -- TiRexCore/create_tirex_model/"
+        "create_tirex_by_variant are re-exported by models/time_series/"
+        "__init__.py, not by the leaf. Pre-existing; exposed 2026-08-25 by the "
+        "leaf-package walk."
     ),
 }
 
@@ -3271,30 +3352,41 @@ class TestMainModuleDocstringCitesReferences:
     def test_the_main_module_resolver_found_the_tree(self):
         """Anti-vacuity floor, DERIVED at landing time from the measurement.
 
-        Measured 2026-08-20: 73 packages, **108 main modules**, 72 packages with
-        at least one. The floors are ``int(0.8 * n)`` -- 86 modules and 57
-        packages -- so a fifth of the tree may be refactored away before this
-        guard is allowed to call itself alive. A floor a few percent under the
-        population would trip on a legitimate rename, and would say nothing more
-        about whether the resolver still walks the tree.
+        RE-DERIVED 2026-08-25 after the family restructure, by running the sweep
+        rather than by adjusting the old numbers: **79 leaf packages, 104 main
+        modules, 75 packages with at least one**. The population grew (73 -> 79)
+        because the leaf walk now reaches the second-level nestings, and the
+        module count fell (108 -> 104) because the four sub-family containers
+        (``vision/image_restoration``, ``vision/keypoints``,
+        ``vision/super_resolution``, ``vision_language/sam``) are no longer
+        counted as packages of their own.
+
+        The floors are ``int(0.8 * n)`` -- 63 packages, 83 modules, 60 covered --
+        so a fifth of the tree may be refactored away before this guard is
+        allowed to call itself alive. A floor a few percent under the population
+        would trip on a legitimate rename, and would say nothing more about
+        whether the resolver still walks the tree. Note the PREVIOUS floors did
+        not catch the restructure: ``n_packages`` read 11 and the assertion fired
+        only because 11 < 58, which is luck, not design -- the by-name guards in
+        ``TestPackageDiscovery`` are what discriminate a collapsed walk now.
         """
         mains, counts = _sweep_main_modules()
-        assert counts["n_packages"] >= 58, (
-            f"expected 73 model packages, found {counts['n_packages']}"
+        assert counts["n_packages"] >= 63, (
+            f"expected 79 leaf model packages, found {counts['n_packages']}"
         )
-        assert counts["n_main_modules"] >= 86, (
-            f"expected ~108 resolvable main modules, found "
+        assert counts["n_main_modules"] >= 83, (
+            f"expected ~104 resolvable main modules, found "
             f"{counts['n_main_modules']}: the __init__.py resolver stopped "
             f"seeing the tree ({counts})"
         )
         covered = {pkg for pkg, _ in mains.values()}
-        assert len(covered) >= 57, (
-            f"expected ~72 packages with a resolvable main module, found "
+        assert len(covered) >= 60, (
+            f"expected ~75 packages with a resolvable main module, found "
             f"{len(covered)}"
         )
 
     def test_the_only_unresolved_package_is_the_designed_exemption(self):
-        """``power_sampling`` and ``image_restoration``, and nothing else.
+        """``power_sampling`` and the three empty ``time_series`` inits, and nothing else.
 
         Pinned rather than counted: a package that stops re-exporting its model
         would silently leave this guard's subject set, and a bare
