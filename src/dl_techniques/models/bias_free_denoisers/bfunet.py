@@ -920,15 +920,3 @@ def create_bfunet_variant(
         )
 
     return model
-
-# ---------------------------------------------------------------------
-# Utility Functions for Deep Supervision
-# ---------------------------------------------------------------------
-
-# Re-exported so callers of `models.bias_free_denoisers.bfunet` get the
-# deep-supervision helpers from the same module as the builders themselves --
-# `src/train/bfunet/` imports a builder and `get_model_output_info` in one
-# statement. The import sits here rather than at the top because it is an API
-# re-export, not a dependency of the code above.
-
-# ---------------------------------------------------------------------
