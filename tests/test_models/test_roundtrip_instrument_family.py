@@ -217,8 +217,9 @@ SUBJECT_KEY_IS_A_GROUP = {
 #: every entry here is work that is owed.
 #:
 #: All eight were invisible before 2026-08-25: the pre-restructure coverage walk
-#: was one level deep, so ``models/SAM`` and ``models/time_series`` each counted
-#: as ONE package and their children were never population members. Building
+#: was one level deep, so the pre-restructure ``SAM`` directory and the
+#: ``time_series`` directory each counted as ONE package and their children were
+#: never population members. Building
 #: eight subjects is a models-conformance job, not the path-and-prose repair
 #: that exposed them (plan-2026-08-24-8fd4f20d, pre-mortem trigger 1), so they
 #: are recorded rather than absorbed. Pinned exactly by

@@ -127,7 +127,7 @@ def _calls_scale_loss(node: ast.FunctionDef, module_defs=None) -> bool:
     """True if `node` -- or a same-module helper it calls -- uses `scale_loss`.
 
     The one-level callee closure is NOT optional. A purely lexical predicate
-    reports `depth_anything/model.py:975` as an offender, and it is the one
+    reports `vision/depth_anything/model.py:975` as an offender, and it is the one
     COMPLIANT site in the tree: its `train_step` dispatches to
     `_train_step_supervised` / `_train_step_semi_supervised`, and those hold the
     `scale_loss` call. A guard that cannot see one level of indirection would

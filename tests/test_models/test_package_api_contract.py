@@ -472,7 +472,7 @@ class TestDecisionAnchorsIntact:
 
     The pattern must match the anchor FORM (``# DECISION <plan-id>/D-NNN``), not
     the bare phrase. A plain ``grep "# DECISION"`` reports 284 because
-    ``bias_free_denoisers/bfconvunext.py`` mentions ``# DECISION`` inside a
+    ``vision/bias_free_denoisers/bfconvunext.py`` mentions ``# DECISION`` inside a
     docstring while pointing at the real anchor below it. Counting that mention
     as an anchor is the same false positive this repo has hit repeatedly with
     mechanical scans, and it would make the floor un-holdable the moment the
@@ -584,7 +584,7 @@ class TestPretrainedNeverSilentlyRandom:
             "a `pretrained` branch that only logs returns a randomly initialized "
             "model to a caller who asked for a trained one. Raise "
             "NotImplementedError instead (see models/CLAUDE.md Axis 3 and "
-            f"resnet/model.py). Found: {offenders}"
+            f"vision/resnet/model.py). Found: {offenders}"
         )
 
     def test_the_behavioural_arm_reaches_almost_the_whole_population(self):
@@ -782,7 +782,7 @@ _SCHEDULED_FIXES: set = set()
 #: attribute that merely *shares a name* with a declared factory parameter.
 #:
 #: Five of the six are the ViT-family ``scale``, which is the variant-size string
-#: (``"base"``, ``"large"``, ...; e.g. ``vit/model.py`` ``self.scale = str(scale)``)
+#: (``"base"``, ``"large"``, ...; e.g. ``vision/vit/model.py`` ``self.scale = str(scale)``)
 #: and has nothing to do with ``positional_learned``'s embedding-scale parameter.
 #: No AST predicate can tell the two apart -- both are ``self.scale`` assigned
 #: from a same-named ``__init__`` argument -- so the discrimination is recorded
@@ -791,7 +791,7 @@ _SCHEDULED_FIXES: set = set()
 #: The sixth is ``ViT.activation``, added 2026-08-18 when the four REAL drops at
 #: the same call site were fixed. ``patch_2d`` declares an ``activation``
 #: (default ``'linear'``) and ``ViT`` stores ``self.activation``, but ViT's is the
-#: FFN activation -- documented as such in ``vit/model.py`` and passed to every
+#: FFN activation -- documented as such in ``vision/vit/model.py`` and passed to every
 #: ``TransformerLayer`` -- and forwarding its ``'gelu'`` default into the patch
 #: projection would make the stem nonlinear, which no ViT is. See the
 #: ``D-022`` anchor at that call site.
@@ -1162,7 +1162,7 @@ _TRANSFORMER_NORM_ARG_KWARGS = ("attention_norm_args", "ffn_norm_args")
 #: The single entry is the ViT-family ``scale`` shape already catalogued in
 #: ``_NAME_COLLISIONS``, reached here through a different factory:
 #: ``SigLIPVisionTransformer`` stores ``self.scale = str(scale)`` (the variant
-#: size, ``vit_siglip/model.py:357``) while ``LayerNormalization.__init__``
+#: size, ``vision/vit_siglip/model.py:357``) while ``LayerNormalization.__init__``
 #: declares ``scale: bool``. Same two words, unrelated meanings.
 #:
 #: Key is ``(path relative to src/dl_techniques, class, normalization type,
@@ -2956,7 +2956,8 @@ def _init_imported_submodules(pkgdir: Path, pkg_suffix: str) -> dict:
     """Every submodule of ``pkgdir`` that its own ``__init__.py`` imports FROM.
 
     Contract: takes the package directory and its dotted path relative to the
-    sweep root (``"accunet"``, ``"time_series"``, ``"SAM/SAM2"`` -> ``"SAM.SAM2"``);
+    sweep root (``"vision/accunet"`` -> ``"vision.accunet"``,
+    ``"vision_language/sam/sam2"`` -> ``"vision_language.sam.sam2"``);
     returns ``{submodule_dotted_path: [imported names]}``. Returns ``{}`` for a
     package with no ``__init__.py`` or no first-party imports.
 
@@ -3050,9 +3051,10 @@ def _sweep_main_modules(roots=None, src_root=None):
     **This resolution is the substance of the guard, not plumbing.** The
     step-EXPLORE census used a two-NAME heuristic -- look for ``model.py`` or
     ``<pkg>.py`` -- and reported ``main_doc_present=N`` for 17 packages purely
-    because they name their module something else (``bert/bert.py`` is fine but
-    ``gemma/gemma3.py``, ``qwen/qwen3.py``, ``mobilenet/mobilenet_v4.py``,
-    ``masked_autoencoder/mae.py`` are not ``model.py``). That is a filename
+    because they name their module something else (``language/bert/bert.py`` is fine but
+    ``language/gemma/gemma3.py``, ``language/qwen/qwen3.py``,
+    ``vision/mobilenet/mobilenet_v4.py``,
+    ``vision/masked_autoencoder/mae.py`` are not ``model.py``). That is a filename
     artifact, not a missing docstring, and acting on it would have "fixed" 17
     packages that were never broken.
 
@@ -3150,8 +3152,8 @@ def _references_section_state(doc) -> str:
 #: injection.
 #:
 #: **Step 19.1 (D-086) closed all twenty ROUTED rows**: 16 modules gained a
-#: ``References`` section and 2 (``masked_autoencoder/utils.py``,
-#: ``masked_language_model/utils.py``) gained a module docstring outright. The
+#: ``References`` section and 2 (``vision/masked_autoencoder/utils.py``,
+#: ``language/masked_language_model/utils.py``) gained a module docstring outright. The
 #: waiver set is down to the TWO genuine exemptions -- composition modules whose
 #: citations live on the siblings they compose. Step 7 shipped the guard; step
 #: 19.1 shipped the docstrings, and this list shrank by eighteen in the same
@@ -3487,7 +3489,7 @@ def _sweep_from_variant_classes(roots=None, src_root=None):
 #: Names a module-level variant table goes by in this tree. Deliberately WIDER
 #: than ``_LEGACY_VARIANT_TABLE_RE`` above (which exists to FLAG legacy names):
 #: this one only has to FIND the keys, so it also accepts ``MODEL_VARIANTS``
-#: itself and ``PRESETS`` (``sd3_mmdit/config.py``).
+#: itself and ``PRESETS`` (``vision_language/sd3_mmdit/config.py``).
 _VARIANT_TABLE_NAME_RE = re.compile(r"^(?:[A-Z0-9_]*VARIANTS?|VARIANT_CONFIGS|PRESETS)$")
 
 #: Required-argument kinds ``_resolve_required_arg`` does not carry, all of them
@@ -3625,7 +3627,7 @@ def _probe_from_variant_enumeration(cls, module) -> str:
 _FROM_VARIANT_WEAK_ENUMERATION = {
     ("models/vision_language/sd3_mmdit/vae.py", "SD3VAE"): (
         "its from_variant delegates to create_sd3_vae -> get_sd3_config, whose "
-        "table is `PRESETS` in the SIBLING module sd3_mmdit/config.py; the "
+        "table is `PRESETS` in the SIBLING module vision_language/sd3_mmdit/config.py; the "
         "message it raises does enumerate (`Available: ['full', 'tiny']`), but "
         "this guard verifies the list is present rather than key-exact"
     ),
