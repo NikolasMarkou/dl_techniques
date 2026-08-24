@@ -116,10 +116,16 @@ References:
 
 import keras
 from typing import Any, Dict, Optional, List, Literal
-from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PFTSR(keras.Model):

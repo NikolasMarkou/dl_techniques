@@ -41,30 +41,6 @@ variant can be swapped in without forking the file. The scale table
 (`ViT.MODEL_VARIANTS`) reproduces the published widths, depths and head counts;
 the BLOCK defaults do not, in one named respect.
 
-**`normalization_position` defaults to `"post"`, and published ViT is pre-LN.**
-Dosovitskiy et al. 2020 normalize BEFORE each sub-layer; the default here takes
-`TransformerLayer.call`'s post-LN branch (`SubLayer -> Add -> Norm`) instead. So
-`ViT(scale='base')`, `create_vit()` and `ViT.from_variant('vit_large')` are a
-different function from any checkpoint ported from the paper's release, and at
-the deeper scales they are the configuration the pre-LN literature reports as
-needing warmup to converge at all. Pass `normalization_position='pre'` for the
-published architecture. The sibling `vit_hmlp/model.py` defaults to `"pre"`, so
-the repository's two ViTs deliberately disagree on this one knob: the default is
-NOT flipped here because it would silently change the function every existing
-`vit` checkpoint and training script was fitted under, and nothing in the
-package can tell which of the two a saved model used beyond its own stored
-config. This is a documented divergence, not an oversight -- see
-`plans/plan-2026-08-18T140459-7991552f/decisions.md` D-047.
-
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: a placeholder URL 404s into an
-HTML payload that masquerades as a `.keras` file, and swallowing that failure
-makes an unavailable checkpoint indistinguishable from a successful load. Pass
-a local `.keras` path to `pretrained` instead; the classifier head and any
-input-shape-dependent layers are skipped by name when the target task differs
-from the checkpoint's.
-
 References:
     - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
       Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
@@ -135,181 +111,275 @@ REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
 
 @keras.saving.register_keras_serializable()
 class ViT(keras.Model):
-    """
-    Vision Transformer model with factory-based component creation and modern Keras 3 patterns.
+    """Vision Transformer: an image as a short sequence of patch tokens.
 
-    This model implements the complete Vision Transformer architecture using the dl_techniques
-    framework's factory system for consistent component creation. It supports different scales
-    and configurations for various vision_heads tasks including classification, feature extraction,
-    and transfer learning.
+    Cuts the image into non-overlapping ``patch_size`` squares, linearly
+    projects each to ``embed_dim``, prepends a learnable CLS token, adds a
+    learned positional embedding and runs a plain transformer encoder. After
+    the patch projection the model has NO notion of two dimensions: the
+    positional embedding is the only source of geometry, and removing it would
+    make the model permutation-invariant over patches. Attention is global from
+    layer one, so receptive field does not grow with depth. Block internals --
+    attention type, FFN type, normalization type and position -- come from the
+    ``dl_techniques`` factories rather than being hard-coded.
 
-    **Intent**: Provide a production-ready Vision Transformer implementation that leverages
-    the dl_techniques framework's modular components while following modern Keras 3 best
-    practices for robust serialization and deployment.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input Images (batch, height, width, channels)
-           ↓
-    PatchEmbedding2D → Patches (batch, num_patches, embed_dim)
-           ↓
-    Add CLS Token → (batch, seq_len, embed_dim)
-           ↓
-    PositionalEmbedding + Dropout
-           ↓
-    TransformerLayer × num_layers
-           ↓
-    Final Normalization
-           ↓
-    [Classification Head] OR [Feature Extraction]
-           ↓
-    Output (shape depends on configuration)
-    ```
+    .. code-block:: text
 
-    **Scale Configurations**:
-    - **Tiny**: 192d, 3h, 12L - Efficient for small datasets/mobile deployment
-    - **Small**: 384d, 6h, 12L - Balanced performance and efficiency
-    - **Base**: 768d, 12h, 12L - Standard configuration (original paper)
-    - **Large**: 1024d, 16h, 24L - High performance for large datasets
-    - **Huge**: 1280d, 16h, 32L - Maximum capacity for demanding tasks
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, C]                  │
+        │  H % patch_h == 0, W % patch_w == 0  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  PatchEmbedding2D                    │
+        │  Conv P×P /P → [B, N, D]             │
+        │  N = (H/Pₕ)·(W/Pw)                   │
+        │  LINEAR: the ViT stem has no         │
+        │  activation (see the D-022 anchor)   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  prepend CLS token                   │
+        │  ONE (1, 1, D) weight, zero-init,    │
+        │  broadcast over the batch            │
+        │  → [B, N+1, D]                       │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  + learned positional embedding      │
+        │  → Dropout(pos_dropout_rate)         │
+        │  WITHOUT this the model is           │
+        │  PERMUTATION-INVARIANT over patches  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayer × num_layers       │
+        │    MHA → FFN, normalization_position │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  final norm over the WHOLE sequence  │
+        └───────────────┬──────────────────────┘
+                        │
+            ┌───────────┴────────────┐
+            ▼                        ▼
+        include_top=True        include_top=False
+            │                        │
+        ┌───────────────┐   ┌────────────────────────────┐
+        │ x_norm[:, 0]  │   │ pooling='cls'  → x[:, 0]   │
+        │ [Dropout]     │   │ pooling='mean' → mean over │
+        │ Dense(classes)│   │ pooling='max'  → max  over │
+        │               │   │   positions 1.. ONLY       │
+        │ → [B, classes]│   │ pooling=None → [B,N+1,D]   │
+        └───────────────┘   └────────────────────────────┘
 
-    Args:
-        input_shape: Tuple[int, int, int], input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
-            Example: (224, 224, 3) for ImageNet.
-        num_classes: Integer, number of output classes for classification.
-            Must be positive. Only used when include_top=True.
-        scale: VitScale, model scale configuration determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'. Defaults to 'base'.
-        patch_size: Union[int, Tuple[int, int]], size of patches to extract from images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
-            Defaults to 16.
-        include_top: Boolean, whether to include classification head.
-            When False, model acts as feature extractor. Defaults to True.
-        pooling: Optional[PoolingMode], pooling strategy for feature extraction.
-            Only used when include_top=False:
-            - 'cls': Use CLS token representation
-            - 'mean': Global average pooling over sequence
-            - 'max': Global max pooling over sequence
-            - None: Return full sequence (batch, seq_len, embed_dim)
-            Defaults to None.
-        dropout_rate: Float, dropout rate for general regularization.
-            Applied in transformer layers and classification head. Defaults to 0.0.
-        attention_dropout_rate: Float, dropout rate for attention weights.
-            Applied within attention mechanisms. Defaults to 0.0.
-        pos_dropout_rate: Float, dropout rate after positional embeddings.
-            Defaults to 0.0.
-        kernel_initializer: Union[str, dict, Initializer], weight initializer for
-            all layers. Defaults to ``TruncatedNormal(stddev=0.02)``, the ViT
-            convention (HuggingFace ``ViTConfig.initializer_range = 0.02``,
-            https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py).
-        kernel_regularizer: Optional[Regularizer], weight regularizer for all layers.
-            Defaults to None.
-        bias_initializer: Union[str, Initializer], bias initializer for all layers.
-            Defaults to 'zeros'.
-        bias_regularizer: Optional[Regularizer], bias regularizer for all layers.
-            Defaults to None.
-        normalization_type: NormalizationType, normalization layer type.
-            Uses factory for consistent creation. Available options:
-            - 'layer_norm': Standard layer normalization (default)
-            - 'rms_norm': Root Mean Square normalization
-            - 'band_rms': Band-constrained RMS normalization
-            - 'dynamic_tanh': Dynamic Tanh normalization
-            Defaults to 'layer_norm'.
-        normalization_position: Literal['pre', 'post'], normalization position in transformer.
-            - 'post': Post-normalization (Vaswani et al. 2017's original Transformer)
-            - 'pre': Pre-normalization (Dosovitskiy et al. 2020's published ViT,
-              and what the `References` block above cites)
-            Defaults to 'post', which is NOT the published ViT configuration.
-            Pass 'pre' to reproduce the paper or to load a checkpoint ported
-            from its release. See the module docstring for why the default is
-            deliberately not flipped.
-        ffn_type: FFNType, feed-forward network type for transformer layers.
-            Uses factory for consistent creation. Available options:
-            - 'mlp': Standard MLP with intermediate expansion (default)
-            - 'swiglu': SwiGLU activation with gating mechanism
-            - 'geglu': GELU-based Gated Linear Unit
-            Defaults to 'mlp'.
-        activation: Union[str, Callable], activation function for FFN.
-            Defaults to 'gelu'.
-        name: Optional[str], model name. Auto-generated if None.
-        **kwargs: Additional arguments for Model base class.
+    **CLS exclusion in mean/max pooling (deliberate):**
+
+    .. code-block:: text
+
+        sequence:   [ CLS | p₀ | p₁ | p₂ | ... | p_{N-1} ]
+                       ▲     └──────────────────────────┘
+                       │            patch tokens
+                       │
+              pooling='cls' reads THIS alone
+
+              pooling='mean'/'max' read the patch tokens ONLY
+              (SequencePooling(exclude_positions=[0]))
+
+        averaging CLS into the patch statistics would mix a
+        SUMMARY vector into the thing it summarizes. The
+        siblings vit_siglip / vit_hmlp include it; here the
+        divergence is EXPLICIT in exclude_positions, not silent.
+
+    **Normalization position (default diverges from the paper):**
+
+    .. code-block:: text
+
+        'post' (DEFAULT here)          'pre' (published ViT)
+
+        x ──┬─► MHA ─┐                 x ──┬─► Norm ─► MHA ─┐
+            │        ▼                     │                ▼
+            └─────► (+) ─► Norm            └──────────────► (+)
+                                                            │
+        x ──┬─► FFN ─┐                 x ──┬─► Norm ─► FFN ─┐
+            │        ▼                     │                ▼
+            └─────► (+) ─► Norm            └──────────────► (+)
+
+        Dosovitskiy et al. 2020 use PRE. The default is 'post'
+        and is NOT flipped, because every vit checkpoint and
+        training script in this repo was fitted under it and a
+        flipped default would silently rebuild only the models
+        that stored no value. Pass normalization_position='pre'
+        for the paper. See the D-047 anchor in __init__.
+
+    **Scales:**
+
+    .. code-block:: text
+
+        scale     embed_dim   heads   layers   mlp_ratio
+        pico         192        3        6        4.0
+        tiny         192        3       12        4.0
+        small        384        6       12        4.0
+        base         768       12       12        4.0
+        large       1024       16       24        4.0
+        huge        1280       16       32        4.0
+
+        variant keys for from_variant: "vit_pico" .. "vit_huge"
+
+        cost is QUADRATIC in N = (H/P)·(W/P), so patch_size is
+        the central efficiency knob: halving P quadruples the
+        sequence and ~16×s the attention cost.
+
+    :param input_shape: Input image shape ``(height, width, channels)``. All
+        dimensions must be positive and the spatial dims must be divisible by
+        the corresponding patch dimensions. Defaults to ``(224, 224, 3)``.
+    :type input_shape: Tuple[int, int, int]
+    :param num_classes: Number of output classes. Must be positive. Only used
+        when ``include_top=True``. Defaults to 1000.
+    :type num_classes: int
+    :param scale: Model scale, one of ``'pico'``, ``'tiny'``, ``'small'``,
+        ``'base'``, ``'large'``, ``'huge'``; fixes ``embed_dim``, ``num_heads``,
+        ``num_layers`` and ``mlp_ratio``. Defaults to ``'base'``.
+    :type scale: VitScale
+    :param patch_size: Patch size; an int gives square patches. The image
+        dimensions must be divisible by it. Defaults to 16.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param include_top: Whether to include the classification head. When False
+        the model is a feature extractor. Defaults to True.
+    :type include_top: bool
+    :param pooling: Pooling strategy, used ONLY when ``include_top=False``:
+        ``'cls'`` reads position 0 alone, ``'mean'`` and ``'max'`` pool the
+        patch tokens EXCLUDING position 0, and ``None`` returns the full
+        normalized sequence. Defaults to None.
+    :type pooling: Optional[PoolingMode]
+    :param dropout_rate: General dropout rate, applied in the transformer
+        layers and before the classification head. Must be in ``[0, 1]``.
+        Defaults to 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Dropout rate for attention weights. Must be
+        in ``[0, 1]``. Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Dropout rate after the positional embedding. Must
+        be in ``[0, 1]``. Defaults to 0.0.
+    :type pos_dropout_rate: float
+    :param kernel_initializer: Weight initializer for every layer. ``None``
+        resolves to :data:`REFERENCE_KERNEL_INITIALIZER`,
+        ``TruncatedNormal(stddev=0.02)``, the ViT convention. Each sub-layer
+        receives its own ``clone_initializer`` copy; see the D-540 anchor.
+    :type kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]]
+    :param kernel_regularizer: Weight regularizer for every layer. Defaults to
+        None.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: Bias initializer for every layer. Defaults to
+        ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Bias regularizer for every layer. Defaults to None.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization identifier passed to
+        ``create_normalization_layer``: ``'layer_norm'`` (default),
+        ``'rms_norm'``, ``'band_rms'``, ``'dynamic_tanh'`` and so on.
+    :type normalization_type: NormalizationType
+    :param normalization_kwargs: Optional kwargs forwarded to the final norm's
+        factory call and to every transformer layer as both
+        ``attention_norm_args`` and ``ffn_norm_args``. ``None`` resolves to
+        ``{}``, which makes every factory call byte-identical to the
+        pre-plumbing version and keeps existing checkpoints bit-exact.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param normalization_position: ``'post'`` (default) or ``'pre'``. The
+        default is NOT the published ViT configuration; pass ``'pre'`` to
+        reproduce the paper or to load a checkpoint ported from its release.
+        See the module docstring for why the default is deliberately not
+        flipped.
+    :type normalization_position: Literal['pre', 'post']
+    :param ffn_type: Feed-forward network identifier passed to the factory:
+        ``'mlp'`` (default), ``'swiglu'``, ``'geglu'`` and so on.
+    :type ffn_type: FFNType
+    :param activation: Activation for the FFN. Defaults to ``'gelu'``. Note it
+        is NOT forwarded to the patch projection, which is linear.
+    :type activation: Union[str, callable]
+    :param use_layer_scale: Whether transformer layers apply layer scale.
+        Defaults to False.
+    :type use_layer_scale: bool
+    :param layer_scale_init_value: Initial layer-scale value. Defaults to 1e-5.
+    :type layer_scale_init_value: float
+    :param name: Model name; auto-generated as ``vision_transformer_<scale>``
+        when None.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+
+    :raises ValueError: If ``input_shape`` is not a positive 3-tuple, if
+        ``patch_size`` is invalid or does not divide the image dimensions, if
+        ``num_classes`` is not positive, if ``scale`` or ``pooling`` is
+        unrecognized, or if any dropout rate leaves ``[0, 1]``.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-        Requirements:
-        - height and width must be divisible by corresponding patch dimensions
-        - All dimensions must be positive
-        - Channels typically 1 (grayscale) or 3 (RGB)
+        4D tensor ``(batch_size, height, width, channels)``, with height and
+        width divisible by the corresponding patch dimensions.
 
     Output shape:
-        Depends on configuration:
+        - ``include_top=True``: ``(batch_size, num_classes)``, LOGITS with no
+          softmax applied.
+        - ``include_top=False, pooling='cls'|'mean'|'max'``:
+          ``(batch_size, embed_dim)``.
+        - ``include_top=False, pooling=None``:
+          ``(batch_size, num_patches + 1, embed_dim)``.
 
-        **Classification mode** (include_top=True):
-        - Shape: `(batch_size, num_classes)`
-        - Values: Logits for each class (no softmax applied)
-
-        **Feature extraction mode** (include_top=False):
-        - pooling='cls': `(batch_size, embed_dim)` - CLS token features
-        - pooling='mean': `(batch_size, embed_dim)` - Mean-pooled features
-        - pooling='max': `(batch_size, embed_dim)` - Max-pooled features
-        - pooling=None: `(batch_size, seq_len, embed_dim)` - Full sequence
-
-    Attributes:
-        embed_dim: Integer, embedding dimension determined by scale.
-        num_heads: Integer, number of attention heads determined by scale.
-        num_layers: Integer, number of transformer layers determined by scale.
-        num_patches: Integer, total number of image patches.
-        max_seq_len: Integer, maximum sequence length (num_patches + 1 for CLS).
-        patch_embed: PatchEmbedding2D layer for image tokenization.
-        pos_embed: PositionalEmbedding layer for sequence position encoding.
-        transformer_layers: List of TransformerLayer instances.
-        norm: Final normalization layer.
-        head: Optional Dense layer for classification.
+    :ivar embed_dim: Embedding dimension, fixed by ``scale``.
+    :vartype embed_dim: int
+    :ivar num_heads: Attention head count, fixed by ``scale``.
+    :vartype num_heads: int
+    :ivar num_layers: Transformer depth, fixed by ``scale``.
+    :vartype num_layers: int
+    :ivar num_patches: ``(H // patch_h) * (W // patch_w)``.
+    :vartype num_patches: int
+    :ivar max_seq_len: ``num_patches + 1``, counting the CLS token.
+    :vartype max_seq_len: int
+    :ivar cls_token: Learnable ``(1, 1, embed_dim)`` token, created in ``build``.
+    :vartype cls_token: keras.Variable
+    :ivar transformer_layers: The encoder stack.
+    :vartype transformer_layers: list[TransformerLayer]
 
     Example:
-        ```python
-        # Standard ViT-Base for ImageNet classification
-        model = ViT(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base'
-        )
+        .. code-block:: python
 
-        # Feature extractor with CLS token
-        feature_model = ViT(
-            input_shape=(224, 224, 3),
-            scale='base',
-            include_top=False,
-            pooling='cls'
-        )
+            # Standard ViT-Base for ImageNet classification
+            model = ViT(
+                input_shape=(224, 224, 3),
+                num_classes=1000,
+                scale='base'
+            )
 
-        # Custom configuration with modern components
-        custom_model = ViT(
-            input_shape=(384, 384, 3),
-            num_classes=10,
-            scale='small',
-            patch_size=16,
-            normalization_type='rms_norm',
-            normalization_position='pre',
-            ffn_type='swiglu',
-            dropout_rate=0.1,
-            attention_dropout_rate=0.1
-        )
+            # Feature extractor with CLS token
+            feature_model = ViT(
+                input_shape=(224, 224, 3),
+                scale='base',
+                include_top=False,
+                pooling='cls'
+            )
 
-        # Compile for training
-        model.compile(
-            optimizer='adamw',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        ```
+            # Published architecture plus modern components
+            custom_model = ViT(
+                input_shape=(384, 384, 3),
+                num_classes=10,
+                scale='small',
+                patch_size=16,
+                normalization_type='rms_norm',
+                normalization_position='pre',
+                ffn_type='swiglu',
+                dropout_rate=0.1,
+                attention_dropout_rate=0.1
+            )
+
+            model.compile(
+                optimizer='adamw',
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy']
+            )
 
     Note:
-        This implementation follows modern Keras 3 patterns with proper serialization
-        support. All sub-components are created using dl_techniques factories for
-        consistency and configurability.
+        The head emits LOGITS, so compile with ``from_logits=True``.
     """
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
@@ -359,7 +429,54 @@ class ViT(keras.Model):
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize Vision Transformer model."""
+        """Initialize the Vision Transformer and create every sub-layer.
+
+        :param input_shape: Input image shape ``(height, width, channels)``.
+        :type input_shape: Tuple[int, int, int]
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param scale: Model scale key into :attr:`SCALE_CONFIGS`.
+        :type scale: VitScale
+        :param patch_size: Square or ``(h, w)`` patch size.
+        :type patch_size: Union[int, Tuple[int, int]]
+        :param include_top: Whether to build the classification head.
+        :type include_top: bool
+        :param pooling: Feature-extraction pooling strategy.
+        :type pooling: Optional[PoolingMode]
+        :param dropout_rate: General dropout rate.
+        :type dropout_rate: float
+        :param attention_dropout_rate: Attention-weight dropout rate.
+        :type attention_dropout_rate: float
+        :param pos_dropout_rate: Post-positional-embedding dropout rate.
+        :type pos_dropout_rate: float
+        :param kernel_initializer: Weight initializer; ``None`` resolves to the
+            ViT reference.
+        :type kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]]
+        :param kernel_regularizer: Weight regularizer.
+        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+        :param bias_initializer: Bias initializer.
+        :type bias_initializer: Union[str, keras.initializers.Initializer]
+        :param bias_regularizer: Bias regularizer.
+        :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+        :param normalization_type: Normalization identifier.
+        :type normalization_type: NormalizationType
+        :param normalization_kwargs: Kwargs forwarded to every norm factory call.
+        :type normalization_kwargs: Optional[Dict[str, Any]]
+        :param normalization_position: ``'pre'`` or ``'post'``.
+        :type normalization_position: Literal['pre', 'post']
+        :param ffn_type: Feed-forward network identifier.
+        :type ffn_type: FFNType
+        :param activation: FFN activation.
+        :type activation: Union[str, callable]
+        :param use_layer_scale: Whether layers apply layer scale.
+        :type use_layer_scale: bool
+        :param layer_scale_init_value: Initial layer-scale value.
+        :type layer_scale_init_value: float
+        :param name: Model name; auto-generated when None.
+        :type name: Optional[str]
+        :param kwargs: Additional keyword arguments for ``keras.Model``.
+        :raises ValueError: If any configuration value is invalid.
+        """
         # Auto-generate name if not provided
         if name is None:
             name = f"vision_transformer_{scale}"
@@ -595,10 +712,14 @@ class ViT(keras.Model):
             f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model and all its sub-layers.
+        """Create the CLS token and explicitly build every sub-layer.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        Each sub-layer is built in computational order rather than left to a
+        lazy first call, so the weight tree materializes on ``.keras`` reload.
+
+        :param input_shape: Input shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if self.built:
             return
@@ -650,15 +771,18 @@ class ViT(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the Vision Transformer.
+        """Forward pass through the Vision Transformer.
 
-        Args:
-            inputs: Input tensor (batch_size, height, width, channels).
-            training: Whether in training mode.
-
-        Returns:
-            Model output tensor. Shape depends on include_top and pooling settings.
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Model output. ``(batch, num_classes)`` logits with
+            ``include_top=True``; otherwise the pooled features
+            ``(batch, embed_dim)`` or, when ``pooling is None``, the full
+            normalized sequence ``(batch, max_seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # 1. Convert image to a sequence of patch embeddings
         x = self.patch_embed(inputs, training=training)
@@ -700,14 +824,13 @@ class ViT(keras.Model):
             return x_norm
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute the output shape for a given input shape.
 
-        Args:
-            input_shape: Input tensor shape.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape, depending on ``include_top`` and ``pooling``.
+        :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if len(input_shape) < 4:
             raise ValueError(f"Expected 4D input shape (batch, height, width, channels), got {input_shape}")
@@ -723,10 +846,13 @@ class ViT(keras.Model):
                 return (batch_size, self.max_seq_len, self.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the configuration for serialization.
 
-        CRITICAL: Must include ALL __init__ parameters for proper serialization.
+        Includes EVERY ``__init__`` parameter, which is what makes the
+        round trip lossless.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -769,24 +895,23 @@ class ViT(keras.Model):
             config: Dict[str, Any],
             custom_objects: Optional[Dict[str, Any]] = None
     ) -> "ViT":
-        """
-        Recreate a model from its serialized configuration.
+        """Recreate a model from its serialized configuration.
 
         ViT had NO ``from_config`` at all before D-205. That was survivable only
-        because every other serialized key (`initializers`, `regularizers`) is
-        resolved by ``keras.initializers.get`` / ``keras.regularizers.get``
+        because every other serialized key (``initializers``, ``regularizers``)
+        is resolved by ``keras.initializers.get`` / ``keras.regularizers.get``
         inside ``__init__``. ``activation`` is not: it is handed straight to
         ``TransformerLayer``, so a serialized callable has to be turned back
         into one here.
 
-        Args:
-            config: Configuration dictionary from ``get_config``.
-            custom_objects: Optional mapping of names to custom callables, used
-                to resolve an activation that is not registered with
-                ``keras.saving.register_keras_serializable``.
-
-        Returns:
-            A new ``ViT`` instance.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :param custom_objects: Optional mapping of names to custom callables,
+            used to resolve an activation that is not registered with
+            ``keras.saving.register_keras_serializable``.
+        :type custom_objects: Optional[Dict[str, Any]]
+        :return: A new ``ViT`` instance.
+        :rtype: ViT
         """
         config = dict(config)
         activation = config.get("activation")
@@ -797,11 +922,15 @@ class ViT(keras.Model):
         return cls(**config)
 
     def get_feature_extractor(self) -> "ViT":
-        """
-        Get a feature extractor version of this model.
+        """Return a feature-extractor twin of this model.
 
-        Returns:
-            New ViT instance configured for feature extraction.
+        Copies every configuration value, sets ``include_top=False`` and
+        ``pooling='cls'``. Note this constructs a NEW, randomly-initialized
+        model; it does not transfer this instance's weights.
+
+        :return: New ViT instance configured for CLS-token feature extraction.
+        :rtype: ViT
+        :raises ValueError: If the model was not properly initialized.
         """
         if not hasattr(self, 'input_shape_config') or not self.input_shape_config:
             raise ValueError("Model must be properly initialized before creating feature extractor")
@@ -831,7 +960,7 @@ class ViT(keras.Model):
         )
 
     def summary_detailed(self) -> None:
-        """Print detailed model summary with architecture information."""
+        """Log a detailed architecture summary, beyond ``keras.Model.summary``."""
         logger.info("Vision Transformer Model Summary")
         logger.info(f"Scale: {self.scale}")
         logger.info(f"Input Shape: {self.input_shape_config}")
@@ -880,14 +1009,15 @@ class ViT(keras.Model):
         :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`
         which does a full-model load + layer-by-layer ``set_weights``.
 
-        Args:
-            weights_path: Path to the ``.keras`` weights file.
-            skip_mismatch: Whether to skip layers with mismatched shapes
-                (forwarded as the inverse of ``strict``).
-
-        Raises:
-            FileNotFoundError: If ``weights_path`` does not exist.
-            ValueError: If the file is not ``.keras`` or strict transfer fails.
+        :param weights_path: Path to the ``.keras`` weights file.
+        :type weights_path: str
+        :param skip_mismatch: Whether to skip layers with mismatched shapes,
+            forwarded as the inverse of ``strict``. The ``head`` prefix is
+            skipped unconditionally.
+        :type skip_mismatch: bool
+        :raises FileNotFoundError: If ``weights_path`` does not exist.
+        :raises ValueError: If the file is not ``.keras`` or strict transfer
+            fails.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -920,7 +1050,7 @@ class ViT(keras.Model):
             dataset: str = "imagenet",
             cache_dir: Optional[str] = None,
     ) -> str:
-        """Download pretrained weights for ``variant``.
+        """Download pretrained weights for ``variant``; always raises.
 
         # DECISION plan_2026-05-12_f2d29729/D-002
         Diverges from the resnet template which actually attempts to download
@@ -930,14 +1060,14 @@ class ViT(keras.Model):
         :class:`NotImplementedError` so failures are loud, not silent
         404s that produce HTML payloads masquerading as ``.keras`` files.
 
-        Args:
-            variant: Model variant (e.g. ``"vit_base"``). Unused; reserved
-                for the future signature parity with :class:`ResNet`.
-            dataset: Pretraining dataset name. Unused; same reason.
-            cache_dir: Cache directory. Unused; same reason.
-
-        Raises:
-            NotImplementedError: Always.
+        :param variant: Model variant (e.g. ``"vit_base"``). Unused; reserved
+            for signature parity with :class:`ResNet`.
+        :type variant: str
+        :param dataset: Pretraining dataset name. Unused; same reason.
+        :type dataset: str
+        :param cache_dir: Cache directory. Unused; same reason.
+        :type cache_dir: Optional[str]
+        :raises NotImplementedError: Always.
         """
         del variant, dataset, cache_dir  # silence unused-arg lint
         raise NotImplementedError(
@@ -965,29 +1095,34 @@ class ViT(keras.Model):
         ``_download_weights``; see the ``# DECISION ... D-122`` note at that call
         site for why no ``except`` clause guards it.
 
-        Args:
-            variant: One of the keys in :attr:`MODEL_VARIANTS`
-                (``"vit_pico".."vit_huge"``).
-            num_classes: Number of output classes for the classification head.
-            input_shape: Input image shape ``(H, W, C)``. Defaults to
-                ``(224, 224, 3)``.
-            pretrained: Either a boolean (``True`` -> attempt download, will
-                raise) or a string path to a local ``.keras`` checkpoint.
-            weights_dataset: Dataset name for pretrained weights routing.
-            weights_input_shape: Optional input shape the pretrained weights
-                were trained at. If different from ``input_shape``, mismatch
-                skipping is enabled during transfer.
-            cache_dir: Optional cache directory for downloads.
-            **kwargs: Forwarded to the :class:`ViT` constructor.
-
-        Returns:
-            Configured (and possibly weight-loaded) :class:`ViT` instance.
-
-        Raises:
-            ValueError: If ``variant`` is not recognized.
-            NotImplementedError: If ``pretrained=True`` (boolean) -- no public
-                ViT weights are hosted.
-            FileNotFoundError: If ``pretrained="/path"`` and the path is missing.
+        :param variant: One of the keys in :attr:`MODEL_VARIANTS`
+            (``"vit_pico".."vit_huge"``).
+        :type variant: str
+        :param num_classes: Number of output classes for the classification
+            head.
+        :type num_classes: int
+        :param input_shape: Input image shape ``(H, W, C)``. ``None`` resolves
+            to ``(224, 224, 3)``.
+        :type input_shape: Optional[Tuple[int, int, int]]
+        :param pretrained: Either a boolean (``True`` attempts a download and
+            will raise) or a string path to a local ``.keras`` checkpoint.
+        :type pretrained: Union[bool, str]
+        :param weights_dataset: Dataset name for pretrained-weight routing.
+        :type weights_dataset: str
+        :param weights_input_shape: Optional input shape the pretrained weights
+            were trained at. A difference from ``input_shape`` enables mismatch
+            skipping during transfer, since the positional embeddings differ.
+        :type weights_input_shape: Optional[Tuple[int, int, int]]
+        :param cache_dir: Optional cache directory for downloads.
+        :type cache_dir: Optional[str]
+        :param kwargs: Forwarded to the :class:`ViT` constructor.
+        :type kwargs: Any
+        :return: Configured (and possibly weight-loaded) :class:`ViT` instance.
+        :rtype: ViT
+        :raises ValueError: If ``variant`` is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is the boolean ``True``;
+            no public ViT weights are hosted.
+        :raises FileNotFoundError: If ``pretrained`` is a path that is missing.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -1098,66 +1233,92 @@ def create_vit(
         activation: Union[str, callable] = "gelu",
         **kwargs: Any
 ) -> ViT:
-    """
-    Create a Vision Transformer model with specified configuration.
+    """Create a Vision Transformer with the specified configuration.
 
-    Resnet-template factory: ``variant`` is the canonical key and routes
-    through :meth:`ViT.from_variant` so callers get the pretrained-weights
-    + variant registry for free.
+    ResNet-template factory: ``variant`` is the canonical key and routes
+    through :meth:`ViT.from_variant`, so callers get the pretrained-weights
+    handling and the variant registry for free. This function validates
+    NOTHING itself; see the D-078 anchor in the body.
 
-    Args:
-        variant: Variant key (``"vit_pico".."vit_huge"``). Defaults to
-            ``"vit_base"``.
-        num_classes: Number of output classes for classification.
-            Must be positive. Only used when include_top=True.
-        input_shape: Input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
-        patch_size: Size of patches to extract from input images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
-        include_top: Whether to include the classification head.
-        pooling: Pooling mode for feature extraction when include_top=False.
-            Available: 'cls', 'mean', 'max', None.
-        dropout_rate: Dropout rate for general regularization.
-        attention_dropout_rate: Dropout rate for attention weights.
-        pos_dropout_rate: Dropout rate for positional embeddings.
-        kernel_initializer: Weight initializer for all layers. Defaults to
-            ``TruncatedNormal(stddev=0.02)`` -- see :data:`REFERENCE_KERNEL_INITIALIZER`.
-        kernel_regularizer: Weight regularizer for all layers.
-        bias_initializer: Bias initializer for all layers.
-        bias_regularizer: Bias regularizer for all layers.
-        normalization_type: Type of normalization layer to use.
-        normalization_position: Position of normalization in transformer layers.
-            Defaults to 'post', which is NOT the published ViT configuration
-            ('pre'); see the module docstring.
-        ffn_type: Type of feed-forward network for transformer layers.
-        activation: Activation function for feed-forward networks.
-        **kwargs: Additional arguments for ViT constructor.
-
-    Returns:
-        ViT model instance.
-
-    Raises:
-        ValueError: If any parameter validation fails.
+    :param variant: Variant key, ``"vit_pico".."vit_huge"``. Defaults to
+        ``"vit_base"``.
+    :type variant: str
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``.
+    :type num_classes: int
+    :param input_shape: Input image shape ``(height, width, channels)``; the
+        spatial dims must be divisible by ``patch_size``.
+    :type input_shape: Tuple[int, int, int]
+    :param patch_size: Patch size; an int gives square patches.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param pretrained: Local ``.keras`` path, or the boolean ``True`` which
+        raises ``NotImplementedError``.
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset name for pretrained-weight routing.
+    :type weights_dataset: str
+    :param weights_input_shape: Input shape the pretrained weights were trained
+        at.
+    :type weights_input_shape: Optional[Tuple[int, int, int]]
+    :param cache_dir: Optional cache directory for downloads.
+    :type cache_dir: Optional[str]
+    :param include_top: Whether to include the classification head.
+    :type include_top: bool
+    :param pooling: Feature-extraction pooling when ``include_top=False``:
+        ``'cls'``, ``'mean'``, ``'max'`` or None.
+    :type pooling: Optional[PoolingMode]
+    :param dropout_rate: General dropout rate.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention-weight dropout rate.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Post-positional-embedding dropout rate.
+    :type pos_dropout_rate: float
+    :param kernel_initializer: Weight initializer; ``None`` resolves to
+        :data:`REFERENCE_KERNEL_INITIALIZER`, ``TruncatedNormal(stddev=0.02)``.
+    :type kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]]
+    :param kernel_regularizer: Weight regularizer.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: Bias initializer.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Bias regularizer.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization identifier.
+    :type normalization_type: NormalizationType
+    :param normalization_kwargs: Kwargs forwarded to every norm factory call.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param normalization_position: ``'post'`` (default) or ``'pre'``. The
+        default is NOT the published ViT configuration; see the module
+        docstring.
+    :type normalization_position: Literal['pre', 'post']
+    :param ffn_type: Feed-forward network identifier.
+    :type ffn_type: FFNType
+    :param activation: FFN activation.
+    :type activation: Union[str, callable]
+    :param kwargs: Additional arguments forwarded to the :class:`ViT`
+        constructor.
+    :type kwargs: Any
+    :return: ViT model instance.
+    :rtype: ViT
+    :raises ValueError: Propagated from :class:`ViT`'s own validation.
 
     Example:
-        ```python
-        # Create ViT-Base for ImageNet
-        model = create_vision_transformer(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base'
-        )
+        .. code-block:: python
 
-        # Create feature extractor with modern components
-        feature_model = create_vision_transformer(
-            input_shape=(384, 384, 3),
-            scale='small',
-            include_top=False,
-            pooling='cls',
-            normalization_type='rms_norm',
-            ffn_type='swiglu'
-        )
-        ```
+            # ViT-Base for ImageNet
+            model = create_vit(
+                variant='vit_base',
+                input_shape=(224, 224, 3),
+                num_classes=1000
+            )
+
+            # Feature extractor with modern components
+            feature_model = create_vit(
+                variant='vit_small',
+                input_shape=(384, 384, 3),
+                include_top=False,
+                pooling='cls',
+                normalization_type='rms_norm',
+                ffn_type='swiglu'
+            )
     """
     # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory validates
     # NOTHING. It used to carry eight `raise ValueError` branches -- num_classes

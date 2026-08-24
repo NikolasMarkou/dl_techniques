@@ -5,7 +5,7 @@ ReLU-k activations, with configurable power, dropout and batch normalization.
 Kolmogorov-Arnold Networks move the nonlinearity from the nodes to the edges: each
 connection carries its own learned univariate function, parameterized as a B-spline
 over a grid. That is what gives KAN its expressiveness per parameter, and it is
-also what makes it slow — every forward pass must locate each input in the spline
+also what makes it slow -- every forward pass must locate each input in the spline
 grid and evaluate the basis polynomials there, an irregular, memory-bound
 computation that does not reduce to a matrix multiply. PowerMLP starts from the
 observation that the *shape* KAN buys with splines can be approximated by a fixed
@@ -19,7 +19,7 @@ The layer is two branches summed:
 The main branch is a dense projection followed by `ReLU_k(z) = max(0, z)^k`. Raising
 ReLU to an integer power `k` makes the branch piecewise-polynomial of degree `k`
 rather than piecewise-linear, so a single layer can bend where a ReLU layer would
-need several to approximate the same curvature — the same degree-of-freedom KAN
+need several to approximate the same curvature -- the same degree-of-freedom KAN
 gets from its splines, but as an elementwise power on an already-projected vector.
 The branch ordering matters and is easy to state backwards: the dense map comes
 *first* and the power is applied to its output, so `k` acts on learned features
@@ -29,7 +29,7 @@ The basis branch applies `swish(x) = x * sigmoid(x)` to the *input* and then
 projects it. Swish is smooth, non-monotonic and unbounded above, which makes it a
 complementary shape to `ReLU_k`: it is nonzero for negative inputs, where `ReLU_k`
 is identically zero and its gradient vanishes. Summing the two means a unit is
-never fully dead — whatever the main branch gates off, the basis branch still
+never fully dead -- whatever the main branch gates off, the basis branch still
 passes a signal and a gradient. The basis projection is deliberately bias-free;
 both branches carrying a bias would be redundant, and the main branch already has
 one.
@@ -40,7 +40,7 @@ in that branch lives entirely in `W_basis`. This is the trade PowerMLP makes, an
 it is why it is faster rather than merely cheaper.
 
 The model stacks these layers according to `hidden_units`, which is read as
-`[input_dim, hidden_1, ..., hidden_n, output_dim]` — the first entry describes the
+`[input_dim, hidden_1, ..., hidden_n, output_dim]` -- the first entry describes the
 expected input width rather than creating a layer, and the last entry sizes the
 output. Optional batch normalization and dropout are applied after each hidden
 layer, in that order. The output layer is a plain `Dense`, not a PowerMLP layer:
@@ -48,7 +48,7 @@ the final map needs an arbitrary activation (softmax, sigmoid, or none for
 regression), and `ReLU_k` on the logits would clamp them non-negative and destroy
 the parameterization every downstream loss expects.
 
-`k` is a fixed integer hyperparameter, validated as such at construction — it is
+`k` is a fixed integer hyperparameter, validated as such at construction -- it is
 not learned. The preset variants raise it with model size (2 for micro, 3 through
 base, 4 for the two largest), since higher-degree units are only worth their
 conditioning cost when there is enough width to use them. Large `k` sharpens the
@@ -83,163 +83,217 @@ from dl_techniques.utils.model_build import materialize_sublayers
 
 @keras.saving.register_keras_serializable()
 class PowerMLP(keras.Model):
-    """
-    PowerMLP model: Efficient alternative to Kolmogorov-Arnold Networks.
+    """PowerMLP: a dual-branch MLP that trades KAN's splines for ReLU-k.
 
-    This model provides a complete Keras Model implementation of PowerMLP, offering
-    superior computational efficiency compared to KAN while maintaining competitive
-    performance across various tasks. The dual-branch architecture combines the
-    expressiveness of nonlinear transformations with computational efficiency.
+    A stack of :class:`PowerMLPLayer` instances, each summing a main branch
+    (dense projection then ``ReLU_k(z) = max(0, z)^k``) with a basis branch
+    (``swish`` on the INPUT, then a bias-free projection). The power makes a
+    layer piecewise-polynomial of degree ``k`` rather than piecewise-linear,
+    recovering the curvature-per-layer KAN gets from B-splines while keeping
+    the compute dense and GEMM-shaped. The two branches are complementary: the
+    basis branch is nonzero exactly where ``ReLU_k`` is identically zero, so a
+    unit is never fully dead.
 
-    **Intent**: Provide an efficient alternative to KAN that can be
-    easily integrated into existing Keras workflows while offering significant
-    computational advantages for practical deep learning applications. The model is
-    designed to be drop-in compatible with standard Keras workflows while providing
-    ~40x faster training and ~10x fewer FLOPs compared to equivalent KAN networks.
+    **Architecture Overview:**
 
-    **Architecture**:
-    The model consists of a sequence of PowerMLPLayer instances, each implementing
-    a dual-branch design that combines dense transformations with basis functions.
-    Optional regularization techniques (dropout, batch normalization) can be applied
-    between layers for improved generalization.
+    .. code-block:: text
 
-    ```
-    Input(shape=[batch, input_dim])
-           ↓
-    PowerMLPLayer_1(units=hidden_1)
-           ↓ [main: Dense→ReLU-k] + [basis: BasisFunc→Dense]
-    [BatchNorm_1] (optional)
-           ↓
-    [Dropout_1] (optional)
-           ↓
-    PowerMLPLayer_2(units=hidden_2)
-           ↓ [main: Dense→ReLU-k] + [basis: BasisFunc→Dense]
-    [BatchNorm_2] (optional)
-           ↓
-    [Dropout_2] (optional)
-           ↓
-    ...
-           ↓
-    Dense(units=output_dim, activation=output_activation)
-           ↓
-    Output(shape=[batch, output_dim])
-    ```
+        ┌──────────────────────────────────────┐
+        │  Input [B, input_dim]                │
+        │  input_dim = hidden_units[0]         │
+        │  (that entry DESCRIBES the input;    │
+        │   it does not create a layer)        │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  PowerMLPLayer(hidden_units[1])      │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  [BatchNormalization]  (optional)    │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  [Dropout]             (optional)    │
+        │  order is FIXED: norm, then dropout  │
+        └───────────────┬──────────────────────┘
+                        ▼
+                       ...
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  PowerMLPLayer(hidden_units[-2])     │
+        │  → [BatchNorm] → [Dropout]           │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Dense(hidden_units[-1],             │
+        │        activation=output_activation) │
+        │  a PLAIN Dense, NOT a PowerMLPLayer: │
+        │  ReLU_k on the logits would clamp    │
+        │  them non-negative and destroy the   │
+        │  parameterization every loss expects │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output [B, output_dim]              │
+        └──────────────────────────────────────┘
 
-    **Component Details**:
-    - **PowerMLPLayer**: Dual-branch layer with main (Dense→ReLU-k) and basis branches
-    - **BatchNormalization**: Optional normalization for training stability (especially for k > 3)
-    - **Dropout**: Optional regularization to prevent overfitting
-    - **Output Layer**: Standard Dense layer with configurable activation
-    - **Flexibility**: Support for arbitrary depth and width configurations
+    **Layer internals (the dual branch):**
 
-    **Configuration Format**:
-    The `hidden_units` list is interpreted as `[input_dim, hidden_1_units, ..., hidden_n_units, output_units]`:
-    - First element: Input dimension (must match input data)
-    - Middle elements: Hidden layer dimensions (PowerMLPLayers)
-    - Last element: Output dimension (standard Dense layer)
+    .. code-block:: text
 
-    Args:
-        hidden_units: List of integers specifying the number of units for the
-            input, hidden, and output layers. The first element is the input
-            dimension, the last is the output dimension. Must have at least two
-            elements (input and output). For example, `[784, 128, 64, 10]` creates
-            a network with 784 input features, two hidden PowerMLP layers with
-            128 and 64 units respectively, and 10 output units.
-        k: Integer, power exponent for the ReLU-k activation function in main branch.
-            Must be positive. Higher values create more aggressive nonlinearities.
-            Recommended range: 2-5. Higher k values may require batch normalization
-            and gradient clipping. Defaults to 3.
-        kernel_initializer: Initializer for kernel weights in all layers.
-            Can be string name ('glorot_uniform', 'he_normal') or Initializer instance.
-            Defaults to "he_normal" which is appropriate for ReLU-like activations.
-        bias_initializer: Initializer for bias vectors in all layers.
-            Can be string name or Initializer instance. Defaults to "zeros".
-        kernel_regularizer: Optional regularizer function applied to kernel weights.
-            Can be string name ('l1', 'l2', 'l1_l2') or Regularizer instance.
-            Helps prevent overfitting by penalizing large weights. Defaults to None.
-        bias_regularizer: Optional regularizer function applied to bias vectors.
-            Can be string name or Regularizer instance. Defaults to None.
-        use_bias: Boolean, whether to use bias in the main branch dense layers.
-            The basis branch never uses bias by design. Defaults to True.
-        output_activation: Optional activation function for the final output layer.
-            Can be string name ('softmax', 'sigmoid') or callable. None for linear
-            output (regression). Use 'softmax' for multi-class classification,
-            'sigmoid' for binary classification, None for regression. Defaults to None.
-        dropout_rate: Float between 0 and 1, dropout rate applied after each
-            hidden layer. Set to 0.0 to disable dropout. Higher values provide
-            stronger regularization. Typical values: 0.1-0.5. Defaults to 0.0.
-        batch_normalization: Boolean, whether to apply batch normalization
-            after each hidden layer. Recommended when k > 3 for training stability.
-            Can improve convergence and generalization. Defaults to False.
-        name: Optional string name for the model. Defaults to "power_mlp".
-        **kwargs: Additional keyword arguments passed to the Model parent class,
-            such as `trainable`, `dtype`, etc.
+                       x  [B, in]
+                       │
+            ┌──────────┴───────────┐
+            ▼                      ▼
+        ┌───────────────┐   ┌───────────────────┐
+        │ MAIN branch   │   │ BASIS branch      │
+        │               │   │                   │
+        │ Dense(units,  │   │ swish(x)          │
+        │   use_bias)   │   │  = x·sigmoid(x)   │
+        │      ▼        │   │ applied to the    │
+        │ ReLU_k:       │   │ INPUT, not to a   │
+        │   max(0,z)^k  │   │ projection        │
+        │               │   │      ▼            │
+        │ the dense map │   │ Dense(units,      │
+        │ comes FIRST;  │   │   NO BIAS)        │
+        │ k acts on     │   │                   │
+        │ LEARNED       │   │ stateless act +   │
+        │ features      │   │ linear map: all   │
+        └───────┬───────┘   │ learning is in    │
+                │           │ W_basis           │
+                │           └─────────┬─────────┘
+                └────────► (+) ◄──────┘
+                           ▼
+                        y [B, units]
+
+    **Why the two branches are complementary:**
+
+    .. code-block:: text
+
+              ReLU_k (k=3)              swish
+        │        ╱                │      ╱
+        │       ╱                 │    ╱
+        │      ╱                  │  ╱
+        ├─────●──────             ├─╲╱──────
+        │  ZERO here              │  nonzero for x < 0
+        │  gradient VANISHES      │  gradient survives
+
+        summing them means whatever the main branch gates
+        off, the basis branch still passes a signal AND a
+        gradient -- a unit is never fully dead.
+
+    **Variants:**
+
+    .. code-block:: text
+
+        variant   hidden_units (inner)        k
+        micro     [32, 16]                    2
+        tiny      [64, 32]                    3
+        small     [128, 64, 32]               3
+        base      [256, 128, 64]              3
+        large     [512, 256, 128]             4
+        xlarge    [1024, 512, 256, 128]       4
+
+        from_variant wraps these as
+            [input_dim] + inner + [num_classes]
+
+        k rises with size: higher-degree units are only worth
+        their conditioning cost when there is width to use
+        them, and large k is why batch_normalization becomes
+        worth enabling.
+
+    :param hidden_units: Layer sizes read as
+        ``[input_dim, hidden_1, ..., hidden_n, output_dim]``. The FIRST entry
+        is the expected input width and creates no layer; the LAST sizes the
+        output ``Dense``. Must have at least two elements and all values
+        positive. For example ``[784, 128, 64, 10]`` gives two hidden
+        PowerMLP layers.
+    :type hidden_units: List[int]
+    :param k: Power exponent of the ``ReLU-k`` activation in the main branch.
+        Must be a positive INTEGER; it is a fixed hyperparameter, not learned.
+        Recommended range 2-5; higher values may need batch normalization and
+        gradient clipping. Defaults to 3.
+    :type k: int
+    :param kernel_initializer: Initializer for every kernel. Defaults to
+        ``"he_normal"``, appropriate for ReLU-like activations.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for every bias. Defaults to
+        ``"zeros"``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernels. Defaults to
+        None.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer for biases. Defaults to None.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_bias: Whether the main branch's dense layers carry a bias. The
+        basis branch NEVER uses one, by design. Defaults to True.
+    :type use_bias: bool
+    :param output_activation: Activation for the final ``Dense``. ``None``
+        (default) gives a linear output for regression or for a loss consuming
+        logits; ``'softmax'`` for multi-class, ``'sigmoid'`` for binary.
+    :type output_activation: Optional[Union[str, callable]]
+    :param dropout_rate: Dropout applied after each hidden layer, in
+        ``[0, 1]``. 0.0 disables it. Defaults to 0.0.
+    :type dropout_rate: float
+    :param batch_normalization: Whether to apply batch normalization after each
+        hidden layer, BEFORE dropout. Recommended when ``k > 3``. Defaults to
+        False.
+    :type batch_normalization: bool
+    :param name: Model name. Defaults to ``"power_mlp"``.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+
+    :raises ValueError: If ``hidden_units`` has fewer than two elements or
+        contains a non-positive value, if ``k`` is not positive, or if
+        ``dropout_rate`` leaves ``[0, 1]``.
+    :raises TypeError: If ``k`` is not an integer.
 
     Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-        `input_dim` should match the first element of `hidden_units`.
-        Typically 2D: `(batch_size, input_dim)` for flat feature vectors.
+        N-D tensor ``(batch_size, ..., input_dim)``, where ``input_dim``
+        matches ``hidden_units[0]``. Typically 2D.
 
     Output shape:
-        N-D tensor with shape: `(batch_size, ..., output_dim)` where output_dim is the
-        last element in `hidden_units`. For classification with softmax, values sum to 1.
+        N-D tensor ``(batch_size, ..., output_dim)``, where ``output_dim`` is
+        ``hidden_units[-1]``.
 
-    Attributes:
-        hidden_units: List of layer dimensions including input and output.
-        k: Power exponent for ReLU-k activation.
-        hidden_layers: List of PowerMLPLayer instances for feature transformation.
-        dropout_layers: List of optional Dropout layers for regularization.
-        batch_norm_layers: List of optional BatchNormalization layers.
-        output_layer: Final Dense layer for output generation.
-        kernel_initializer: Initializer for kernel weights (serialized form).
-        bias_initializer: Initializer for bias vectors (serialized form).
-        kernel_regularizer: Regularizer for kernel weights (serialized form).
-        bias_regularizer: Regularizer for bias vectors (serialized form).
-        use_bias: Whether bias is used in layers.
-        output_activation: Output activation function (serialized form).
-        dropout_rate: Dropout probability.
-        batch_normalization: Whether batch normalization is enabled.
-
-    Raises:
-        ValueError: If hidden_units has fewer than two elements or contains non-positive values.
-        TypeError: If k is not an integer.
-        ValueError: If k is not a positive integer.
-        ValueError: If dropout_rate is not in [0, 1].
+    :ivar hidden_layers: The :class:`PowerMLPLayer` stack.
+    :vartype hidden_layers: List[PowerMLPLayer]
+    :ivar dropout_layers: Per-hidden-layer ``Dropout``, or ``None`` entries.
+    :vartype dropout_layers: List[Optional[keras.layers.Dropout]]
+    :ivar batch_norm_layers: Per-hidden-layer ``BatchNormalization``, or
+        ``None`` entries.
+    :vartype batch_norm_layers: List[Optional[keras.layers.BatchNormalization]]
+    :ivar output_layer: The final plain ``Dense``.
+    :vartype output_layer: keras.layers.Dense
 
     Example:
-        ```python
-        import keras
-        import numpy as np
+        .. code-block:: python
 
-        # Standard classification model with input_dim=784 (MNIST)
-        model = PowerMLP(
-            hidden_units=[784, 128, 64, 10],
-            k=3,
-            dropout_rate=0.2,
-            output_activation="softmax"
-        )
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
+            # Classification, input_dim = 784 (MNIST)
+            model = PowerMLP(
+                hidden_units=[784, 128, 64, 10],
+                k=3,
+                dropout_rate=0.2,
+                output_activation="softmax"
+            )
+            model.compile(
+                optimizer='adam',
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy']
+            )
 
-        # Regression model with batch normalization
-        model = PowerMLP(
-            hidden_units=[100, 256, 128, 1],
-            k=4,
-            batch_normalization=True,
-            output_activation=None
-        )
-        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+            # Regression with batch normalization
+            model = PowerMLP(
+                hidden_units=[100, 256, 128, 1],
+                k=4,
+                batch_normalization=True,
+                output_activation=None
+            )
+            model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
-        # Using model variants for CIFAR-10 (input_dim=3072)
-        model = PowerMLP.from_variant("base", num_classes=10, input_dim=3072)
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
-
-        # Train the model
-        model.fit(x_train, y_train, epochs=10, validation_data=(x_val, y_val))
-        ```
+            # From a variant, for CIFAR-10 (flattened, input_dim = 3072)
+            model = PowerMLP.from_variant("base", num_classes=10, input_dim=3072)
 
     Note:
         All sub-layers are created in ``__init__``. ``build()`` materializes
@@ -274,30 +328,36 @@ class PowerMLP(keras.Model):
         name: Optional[str] = "power_mlp",
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the PowerMLP model.
+        """Initialize the model and create every sub-layer.
 
-        Creates all sub-layers in the network including PowerMLPLayers, optional
-        dropout and batch normalization layers, and the output layer. All layers
-        are instantiated but not yet built (building happens on first call).
+        Sub-layers are instantiated here but not yet built; materialization
+        happens in :meth:`build`.
 
-        Args:
-            hidden_units: List of integers for layer sizes, including input and output.
-            k: Power for ReLU-k activation.
-            kernel_initializer: Initializer for kernel weights.
-            bias_initializer: Initializer for bias vector.
-            kernel_regularizer: Regularizer for kernel weights.
-            bias_regularizer: Regularizer for bias vector.
-            use_bias: Whether to use bias in main branch.
-            output_activation: Activation function for output layer.
-            dropout_rate: Dropout rate for regularization.
-            batch_normalization: Whether to use batch normalization.
-            name: Optional name for the model.
-            **kwargs: Additional keyword arguments for Model parent class.
-
-        Raises:
-            ValueError: If parameters are invalid.
-            TypeError: If k is not an integer.
+        :param hidden_units: Layer sizes including input and output.
+        :type hidden_units: List[int]
+        :param k: Power for the ``ReLU-k`` activation.
+        :type k: int
+        :param kernel_initializer: Initializer for kernels.
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param bias_initializer: Initializer for biases.
+        :type bias_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Regularizer for kernels.
+        :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param bias_regularizer: Regularizer for biases.
+        :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param use_bias: Whether the main branch uses a bias.
+        :type use_bias: bool
+        :param output_activation: Activation for the output layer.
+        :type output_activation: Optional[Union[str, callable]]
+        :param dropout_rate: Dropout rate after each hidden layer.
+        :type dropout_rate: float
+        :param batch_normalization: Whether to use batch normalization.
+        :type batch_normalization: bool
+        :param name: Model name.
+        :type name: Optional[str]
+        :param kwargs: Additional keyword arguments for ``keras.Model``.
+        :raises ValueError: If any parameter is invalid.
+        :raises TypeError: If ``k`` is not an integer.
         """
         super().__init__(name=name, **kwargs)
 
@@ -339,20 +399,17 @@ class PowerMLP(keras.Model):
         k: int,
         dropout_rate: float
     ) -> None:
-        """
-        Validate initialization parameters.
+        """Validate the initialization parameters with descriptive errors.
 
-        Ensures all parameters are within valid ranges and of correct types.
-        Raises descriptive errors for invalid configurations.
-
-        Args:
-            hidden_units: List of layer sizes.
-            k: Power for ReLU-k activation.
-            dropout_rate: Dropout rate.
-
-        Raises:
-            ValueError: If any parameter is invalid.
-            TypeError: If k is not an integer.
+        :param hidden_units: List of layer sizes.
+        :type hidden_units: List[int]
+        :param k: Power for the ``ReLU-k`` activation.
+        :type k: int
+        :param dropout_rate: Dropout rate.
+        :type dropout_rate: float
+        :raises ValueError: If ``hidden_units`` is too short or non-positive,
+            if ``k`` is not positive, or if ``dropout_rate`` leaves ``[0, 1]``.
+        :raises TypeError: If ``k`` is not an integer.
         """
         if not hidden_units or len(hidden_units) < 2:
             raise ValueError(
@@ -377,12 +434,12 @@ class PowerMLP(keras.Model):
             )
 
     def _create_hidden_layers(self) -> None:
-        """
-        Create the hidden PowerMLP layers with optional dropout and batch norm.
+        """Create the hidden PowerMLP layers with optional dropout and norm.
 
-        Instantiates all hidden layers (PowerMLPLayer) along with their optional
-        regularization layers (Dropout, BatchNormalization). The hidden layers
-        correspond to elements from the second to the second-to-last in hidden_units.
+        The hidden layers correspond to ``hidden_units[1:-1]``; the first entry
+        describes the input and the last sizes the output layer. Optional
+        regularizers are appended as ``None`` placeholders when disabled, so the
+        three lists stay index-aligned.
         """
         # Hidden layers: hidden_units[1:-1]
         for i, units in enumerate(self.hidden_units[1:-1]):
@@ -419,11 +476,11 @@ class PowerMLP(keras.Model):
                 self.dropout_layers.append(None)
 
     def _create_output_layer(self) -> None:
-        """
-        Create the output layer.
+        """Create the output layer, a plain ``Dense`` sized by ``hidden_units[-1]``.
 
-        Uses a standard Dense layer for the output to allow flexible activation
-        functions. The output units correspond to the last element in hidden_units.
+        Deliberately NOT a :class:`PowerMLPLayer`: the final map needs an
+        arbitrary activation, and ``ReLU_k`` on the logits would clamp them
+        non-negative.
         """
         output_units = self.hidden_units[-1]
 
@@ -448,8 +505,8 @@ class PowerMLP(keras.Model):
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
         gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -461,23 +518,17 @@ class PowerMLP(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass for the PowerMLP model.
+        """Forward pass through the hidden stack and the output layer.
 
-        Processes inputs through all hidden layers with optional regularization,
-        then through the output layer. Keras automatically builds sub-layers on
-        first call.
-
-        Args:
-            inputs: Input tensor with shape `(batch_size, ..., input_dim)` where
-                input_dim must match the first element of hidden_units.
-            training: Boolean indicating whether the layer should behave in
-                training mode (apply dropout) or inference mode (no dropout).
-                If None, Keras infers from the current execution context.
-
-        Returns:
-            Output tensor with shape `(batch_size, ..., output_dim)` where
-            output_dim is the last element in hidden_units.
+        :param inputs: Input tensor of shape ``(batch_size, ..., input_dim)``,
+            where ``input_dim`` matches ``hidden_units[0]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode, which decides
+            whether dropout and batch-norm statistics are active. ``None`` lets
+            Keras infer it from the execution context.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, ..., output_dim)``.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -503,30 +554,25 @@ class PowerMLP(keras.Model):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the model.
+        """Compute the output shape, replacing the last axis with the output width.
 
-        Args:
-            input_shape: Shape tuple of input tensor, typically
-                `(batch_size, input_dim)`.
-
-        Returns:
-            Output shape tuple: `(batch_size, output_dim)` where output_dim
-            is the last element in hidden_units.
+        :param input_shape: Shape tuple of the input, typically
+            ``(batch_size, input_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape with the final axis set to
+            ``hidden_units[-1]``.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape[:-1] + (self.hidden_units[-1],)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get model configuration for serialization.
+        """Return the model configuration for serialization.
 
-        Returns a dictionary containing all constructor parameters needed to
-        recreate this model. Serializes complex objects like initializers and
-        regularizers properly.
+        Initializers, regularizers and the output activation are stored in
+        their serialized forms.
 
-        Returns:
-            Dictionary containing the complete model configuration including
-            all constructor parameters and their serialized forms.
+        :return: Dictionary containing every constructor parameter.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -545,17 +591,15 @@ class PowerMLP(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "PowerMLP":
-        """
-        Create PowerMLP model from configuration dictionary.
+        """Create a model instance from its configuration.
 
-        Deserializes complex objects (initializers, regularizers, activations)
-        from their serialized forms and instantiates the model.
+        Deserializes the initializers, regularizers and activation from their
+        stored forms before constructing.
 
-        Args:
-            config: Configuration dictionary as returned by get_config().
-
-        Returns:
-            PowerMLP model instance reconstructed from the configuration.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: PowerMLP instance reconstructed from the configuration.
+        :rtype: PowerMLP
         """
         # Deserialize complex objects
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
@@ -589,34 +633,32 @@ class PowerMLP(keras.Model):
         input_dim: int,
         **kwargs: Any
     ) -> "PowerMLP":
-        """
-        Create a PowerMLP model from a predefined variant.
+        """Create a PowerMLP model from a predefined variant.
 
-        Provides convenient access to pre-configured model architectures
-        optimized for different scales and use cases. Variants differ in
-        depth, width, and k value.
+        The variant's inner width list is wrapped as
+        ``[input_dim] + inner + [num_classes]``.
 
-        Args:
-            variant: String identifier for the model variant. Must be one of:
-                "micro", "tiny", "small", "base", "large", "xlarge".
-            num_classes: Integer, number of output classes or output dimension.
-                For classification, this is the number of classes. For regression,
-                typically 1.
-            input_dim: Integer, input feature dimension. Must match the dimensionality
-                of your input data (e.g., 784 for flattened MNIST, 3072 for flattened CIFAR-10).
-            **kwargs: Additional arguments passed to the constructor to override
-                variant defaults. Can include dropout_rate, batch_normalization,
-                output_activation, k, etc. **`hidden_units` is refused by name**
-                (`ValueError`): this method builds the variant's own architecture,
-                so a caller-supplied list was silently discarded before 2026-08-15.
-                Use `PowerMLP(hidden_units=..., k=...)` directly for that.
-
-        Returns:
-            PowerMLP model instance configured according to the specified variant.
-
-        Raises:
-            ValueError: If variant is not recognized, or if `hidden_units` is
-                passed in **kwargs.
+        :param variant: One of ``"micro"``, ``"tiny"``, ``"small"``,
+            ``"base"``, ``"large"``, ``"xlarge"``.
+        :type variant: str
+        :param num_classes: Output dimension: the number of classes for
+            classification, or typically 1 for regression.
+        :type num_classes: int
+        :param input_dim: Input feature dimension; must match the data (e.g.
+            784 for flattened MNIST, 3072 for flattened CIFAR-10).
+        :type input_dim: int
+        :param kwargs: Additional arguments overriding the variant's defaults,
+            such as ``dropout_rate``, ``batch_normalization``,
+            ``output_activation`` or ``k``. **``hidden_units`` is REFUSED by
+            name** with a ``ValueError``: this method builds the variant's own
+            architecture, and a caller-supplied list was silently discarded
+            before 2026-08-15. Use ``PowerMLP(hidden_units=..., k=...)``
+            directly for that.
+        :type kwargs: Any
+        :return: PowerMLP instance configured for the variant.
+        :rtype: PowerMLP
+        :raises ValueError: If ``variant`` is not recognized, or if
+            ``hidden_units`` is passed in ``kwargs``.
 
         Example:
             >>> # CIFAR-10 model (flattened 32x32x3 = 3072)
@@ -680,27 +722,24 @@ class PowerMLP(keras.Model):
         overwrite: bool = True,
         save_format: str = "keras"
     ) -> None:
-        """
-        Save the model to a file.
+        """Save the model, creating the parent directory if needed.
 
-        Convenience method that ensures the directory exists before saving.
-        Uses the standard Keras save format (.keras) by default.
+        An UNBUILT model is REFUSED rather than written: ``self.save()`` would
+        produce a syntactically valid ``.keras`` archive holding ZERO weights,
+        and ``load_model()`` would hand it back as a zero-weight model.
 
-        An UNBUILT model is refused rather than written: `self.save()` would
-        produce a syntactically valid `.keras` archive holding ZERO weights, and
-        `load_model()` would hand it back as a zero-weight model.
-
-        Args:
-            filepath: Path where to save the model. Should end with '.keras'.
-            overwrite: Whether to overwrite existing file. Defaults to True.
-            save_format: Accepted for backwards compatibility and IGNORED. Keras 3
-                selects the format from the file extension; `saving_api.save_model`
-                pops this kwarg and never forwards it.
-
-        Raises:
-            ValueError: if the model has not been built. Unlike `CapsNet`,
-                `PowerMLP.__init__` takes no input shape, so this method has
-                nothing to build from.
+        :param filepath: Destination path; should end with ``.keras``.
+        :type filepath: str
+        :param overwrite: Whether to overwrite an existing file. Defaults to
+            True.
+        :type overwrite: bool
+        :param save_format: Accepted for backwards compatibility and IGNORED.
+            Keras 3 selects the format from the file extension;
+            ``saving_api.save_model`` pops this kwarg and never forwards it.
+        :type save_format: str
+        :raises ValueError: If the model has not been built. Unlike
+            ``CapsNet``, ``PowerMLP.__init__`` takes no input shape, so this
+            method has nothing to build from.
         """
         # Ensure directory exists
         directory = os.path.dirname(filepath)
@@ -729,14 +768,12 @@ class PowerMLP(keras.Model):
 
     @classmethod
     def load_model(cls, filepath: str) -> "PowerMLP":
-        """
-        Load a saved PowerMLP model.
+        """Load a saved PowerMLP model.
 
-        Args:
-            filepath: Path to the saved model file.
-
-        Returns:
-            Loaded PowerMLP model ready for inference or continued training.
+        :param filepath: Path to the saved model file.
+        :type filepath: str
+        :return: Loaded model, ready for inference or continued training.
+        :rtype: PowerMLP
         """
         # Note: With proper @keras.saving.register_keras_serializable() decorator,
         # custom_objects may not be strictly necessary, but we include them for robustness
@@ -750,15 +787,14 @@ class PowerMLP(keras.Model):
         return model
 
     def summary(self, **kwargs: Any) -> None:
-        """
-        Print model summary with additional PowerMLP-specific information.
+        """Print the model summary plus PowerMLP-specific configuration.
 
-        Extends the standard Keras summary with PowerMLP configuration details
-        including architecture, parameter counts, and regularization settings.
+        Builds the model first if it is not already built, inferring the input
+        width from ``hidden_units[0]``.
 
-        Args:
-            **kwargs: Additional keyword arguments passed to Model.summary(),
-                such as `line_length`, `positions`, `print_fn`.
+        :param kwargs: Additional arguments passed to ``keras.Model.summary``,
+            such as ``line_length``, ``positions`` or ``print_fn``.
+        :type kwargs: Any
         """
         # Build the model first if it hasn't been built
         if not self.built:
@@ -780,14 +816,10 @@ class PowerMLP(keras.Model):
         logger.info(f"  - Use bias: {self.use_bias}")
 
     def __repr__(self) -> str:
-        """
-        Return string representation of the model.
+        """Return a concise string representation for debugging and logging.
 
-        Provides a concise, readable representation useful for debugging
-        and logging.
-
-        Returns:
-            String representation including key parameters.
+        :return: Representation including the key parameters.
+        :rtype: str
         """
         return (
             f"PowerMLP(hidden_units={self.hidden_units}, k={self.k}, "
@@ -808,30 +840,50 @@ def create_power_mlp(
     metrics: Optional[List[Union[str, keras.metrics.Metric]]] = None,
     **kwargs: Any
 ) -> PowerMLP:
-    """
-    Create and compile a PowerMLP model.
+    """Create and compile a PowerMLP model in one call.
 
-    This is a convenience function that creates a PowerMLP model and compiles it
-    with the specified optimizer, loss, and metrics in a single call.
+    **Default-loss derivation:**
 
-    Args:
-        hidden_units: List of integers specifying the number of units in each layer.
-            Format: [input_dim, hidden_1, ..., hidden_n, output_dim].
-        k: Power exponent for the ReLU-k activation function. Defaults to 3.
-        optimizer: Optimizer name or instance. If string, learning_rate will be
-            applied. Defaults to "adam".
-        learning_rate: Learning rate for optimizer. Only used if optimizer is
-            a string. Defaults to 0.001.
-        loss: Loss function name or instance. ``None`` (the default) DERIVES a
-            categorical cross-entropy whose ``from_logits`` matches the model's
-            actual ``output_activation`` -- ``True`` for the default linear
-            output, ``False`` for softmax. Pass a value to override.
-        metrics: List of metric names or instances. If None, defaults to ['accuracy'].
-        **kwargs: Additional arguments for PowerMLP constructor, such as
-            dropout_rate, batch_normalization, output_activation, etc.
+    .. code-block:: text
 
-    Returns:
-        Compiled PowerMLP model ready for training with model.fit().
+        loss=None  →  the loss FOLLOWS output_activation:
+
+            output_activation=None (default)  →  CategoricalCrossentropy(
+                                                     from_logits=True)
+            output_activation='softmax'       →  CategoricalCrossentropy(
+            output_activation='sigmoid'              from_logits=False)
+
+        a fixed `loss="categorical_crossentropy"` string would compile
+        with from_logits=False against the LINEAR default, feeding
+        unnormalized real values to a cross-entropy that renormalizes
+        by output/sum(output) and clips -- finite, meaningless, silent.
+        See the D-053 anchor.
+
+    :param hidden_units: Layer sizes as
+        ``[input_dim, hidden_1, ..., hidden_n, output_dim]``.
+    :type hidden_units: List[int]
+    :param k: Power for the ``ReLU-k`` activation. Defaults to 3.
+    :type k: int
+    :param optimizer: Optimizer name or instance. When a string,
+        ``learning_rate`` is applied to it. Defaults to ``"adam"``.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate, applied when ``optimizer`` is a
+        string. Defaults to 0.001.
+    :type learning_rate: float
+    :param loss: Loss name or instance. ``None`` (the default) DERIVES a
+        categorical cross-entropy whose ``from_logits`` matches the model's
+        actual ``output_activation``: ``True`` for the default linear output,
+        ``False`` for softmax or sigmoid. Pass a value to override.
+    :type loss: Optional[Union[str, keras.losses.Loss]]
+    :param metrics: Metric names or instances. ``None`` resolves to
+        ``['accuracy']``.
+    :type metrics: Optional[List[Union[str, keras.metrics.Metric]]]
+    :param kwargs: Additional arguments for the :class:`PowerMLP` constructor,
+        such as ``dropout_rate``, ``batch_normalization`` or
+        ``output_activation``.
+    :type kwargs: Any
+    :return: Compiled PowerMLP model, ready for ``model.fit()``.
+    :rtype: PowerMLP
 
     Example:
         >>> # The documented default: linear output, cross-entropy on LOGITS.
@@ -914,23 +966,24 @@ def create_power_mlp_regressor(
     learning_rate: float = 0.001,
     **kwargs: Any
 ) -> PowerMLP:
-    """
-    Create and compile a PowerMLP model for regression tasks.
+    """Create and compile a PowerMLP for regression.
 
-    Convenience function that sets up appropriate loss and metrics for
-    regression problems (MSE loss, MAE metric, no output activation).
+    Pins ``loss='mse'``, ``metrics=['mae', 'mse']`` and a linear output, so the
+    default-loss derivation in :func:`create_power_mlp` does not apply.
 
-    Args:
-        hidden_units: List of integers specifying the number of units in each layer.
-            The last element should typically be 1 for single-target regression,
-            or N for multi-target regression.
-        k: Power exponent for the ReLU-k activation function. Defaults to 3.
-        optimizer: Optimizer name or instance. Defaults to "adam".
-        learning_rate: Learning rate for optimizer. Defaults to 0.001.
-        **kwargs: Additional arguments for PowerMLP constructor.
-
-    Returns:
-        Compiled PowerMLP model configured for regression.
+    :param hidden_units: Layer sizes; the last element is typically 1 for
+        single-target regression, or N for multi-target.
+    :type hidden_units: List[int]
+    :param k: Power for the ``ReLU-k`` activation. Defaults to 3.
+    :type k: int
+    :param optimizer: Optimizer name or instance. Defaults to ``"adam"``.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate. Defaults to 0.001.
+    :type learning_rate: float
+    :param kwargs: Additional arguments for the :class:`PowerMLP` constructor.
+    :type kwargs: Any
+    :return: Compiled model configured for regression.
+    :rtype: PowerMLP
 
     Example:
         >>> model = create_power_mlp_regressor(
@@ -960,22 +1013,25 @@ def create_power_mlp_binary_classifier(
     learning_rate: float = 0.001,
     **kwargs: Any
 ) -> PowerMLP:
-    """
-    Create and compile a PowerMLP model for binary classification.
+    """Create and compile a PowerMLP for binary classification.
 
-    Convenience function that sets up appropriate loss, metrics, and activation
-    for binary classification problems (BCE loss, sigmoid activation).
+    Pins ``loss='binary_crossentropy'``, a sigmoid output and
+    accuracy/precision/recall metrics, so the default-loss derivation in
+    :func:`create_power_mlp` does not apply.
 
-    Args:
-        hidden_units: List of integers specifying the number of units in each layer.
-            The last element should be 1 for binary classification.
-        k: Power exponent for the ReLU-k activation function. Defaults to 3.
-        optimizer: Optimizer name or instance. Defaults to "adam".
-        learning_rate: Learning rate for optimizer. Defaults to 0.001.
-        **kwargs: Additional arguments for PowerMLP constructor.
-
-    Returns:
-        Compiled PowerMLP model configured for binary classification.
+    :param hidden_units: Layer sizes; the last element should be 1. A different
+        value logs a warning rather than raising.
+    :type hidden_units: List[int]
+    :param k: Power for the ``ReLU-k`` activation. Defaults to 3.
+    :type k: int
+    :param optimizer: Optimizer name or instance. Defaults to ``"adam"``.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate. Defaults to 0.001.
+    :type learning_rate: float
+    :param kwargs: Additional arguments for the :class:`PowerMLP` constructor.
+    :type kwargs: Any
+    :return: Compiled model configured for binary classification.
+    :rtype: PowerMLP
 
     Example:
         >>> model = create_power_mlp_binary_classifier(
