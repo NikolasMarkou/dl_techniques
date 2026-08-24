@@ -39,7 +39,7 @@ References:
 """
 
 import keras
-from typing import Optional, Union, Tuple
+from typing import Any, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -105,59 +105,29 @@ from dl_techniques.models.convunext.model import (  # noqa: F401
 
 def create_convunext_denoiser(
         input_shape: Tuple[int, int, int],
-        depth: int = 4,
-        initial_filters: int = 64,
-        filter_multiplier: float = 2.0,
-        blocks_per_level: int = 2,
-        convnext_version: str = 'v2',
-        stem_kernel_size: Union[int, Tuple[int, int]] = 7,
-        use_gabor_stem: bool = False,
-        gabor_filters: int = 32,
-        gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
-        gabor_activation: Optional[str] = None,
-        gabor_stem_projection: bool = True,
-        use_laplacian_pyramid: bool = False,
-        laplacian_kernel_size: Tuple[int, int] = (5, 5),
-        high_freq_blocks: int = 0,
-        bottleneck_attention_blocks: int = 0,
-        bottleneck_attention_heads: int = 8,
-        zero_pad_channels: bool = False,
-        extra_zero_output_channels: bool = False,
-        final_projection_groups: int = 1,
-        downsample_pool_type: str = "max",
-        expose_bottleneck: bool = False,
-        block_kernel_size: Union[int, Tuple[int, int]] = 7,
-        block_activation: Union[str, keras.layers.Layer] = 'gelu',
+        *,
         block_normalization: Optional[str] = None,
-        stem_activation: Union[str, keras.layers.Layer] = 'gelu',
-        drop_path_rate: float = 0.1,
-        final_activation: Union[str, callable] = 'linear',
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
-        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
-        depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        dropout_rate: float = 0.0,
-        enable_deep_supervision: bool = False,
-        supervision_norm_scale: bool = True,
-        supervision_norm_center: bool = False,
-        supervision_activation: Union[str, keras.layers.Layer] = 'gelu',
-        model_name: str = 'convunext'
+        **kwargs: Any
 ) -> keras.Model:
     """Create the BIAS-FREE ConvUNext denoiser: ``create_convunext(..., use_bias=False)``.
 
-    This is a thin wrapper that pins ``use_bias=False`` and forwards every other
-    argument verbatim. The architecture, every parameter's meaning and the three
-    documented asymmetries of the bias-free arm are described ONCE, on
-    ``dl_techniques.models.convunext.model.create_convunext`` — read that
-    docstring; this signature is deliberately identical to it minus ``use_bias``
-    and ``stem_normalization`` (the stem is pinned to
-    ``'global_response_norm'``, the ConvNeXt-V2 / bias-free choice).
+    A thin DELEGATOR. Every keyword other than ``input_shape`` and
+    ``block_normalization`` is forwarded VERBATIM to
+    ``dl_techniques.models.convunext.model.create_convunext``, which is where the
+    architecture, every parameter's meaning and the three documented asymmetries
+    of the bias-free arm are described ONCE. That docstring is the full parameter
+    reference; it is deliberately not restated here, and this function enumerates
+    nothing, so a parameter added there is reachable here the same day.
 
-    The signature is frozen: `src/train/bfunet/train_convunext_denoiser.py`,
-    `utils/multiplicative_miyasawa.py` and the two bf test suites call it by
-    keyword. Parameters are forwarded via a ``locals()`` capture taken as the
-    FIRST statement, so a parameter can never be silently dropped from the
-    forward (a missing one raises ``TypeError`` at the call instead).
+    Two arguments are pinned by this wrapper and therefore cannot be forwarded:
+    ``use_bias=False`` (the whole point of the bias-free arm) and
+    ``stem_normalization='global_response_norm'`` (the ConvNeXt-V2 / bias-free
+    choice). Passing either raises ``TypeError: ... got multiple values ...`` —
+    the pin cannot be overridden by accident, silently or otherwise.
+
+    ``create_convunext`` declares no ``**kwargs``, so an unknown keyword raises
+    ``TypeError`` at the delegation, naming the offending keyword and the callee
+    (``create_convunext()``, not this wrapper).
 
     :param input_shape: Shape of input images ``(height, width, channels)``.
     :type input_shape: tuple of 3 ints
@@ -169,8 +139,15 @@ def create_convunext_denoiser(
         ``'batchnorm'`` for a homogeneous bias-free stack, or ``'layernorm'``
         explicitly to keep the historical graph without the warning.
     :type block_normalization: Optional[str]
+    :param kwargs: Every remaining parameter of
+        :func:`dl_techniques.models.convunext.model.create_convunext`, forwarded
+        unchanged — including ``include_top`` and ``output_channels``, which the
+        old hand-copied signature did not expose at all.
     :return: A functional, bias-free ``keras.Model``.
     :rtype: keras.Model
+    :raises TypeError: If a keyword is not a ``create_convunext`` parameter, or if
+        it duplicates ``use_bias``/``stem_normalization``/``input_shape``, which
+        this wrapper supplies itself.
     """
     # DECISION plan-2026-08-14T092357-0e3d792d/D-011: forward via a `locals()` capture
     # taken as the FIRST statement of the body, NOT by hand-listing ~40 keyword
@@ -181,7 +158,15 @@ def create_convunext_denoiser(
     # but not on `create_convunext` raises TypeError at the call — loud, immediate, and
     # impossible to ship. Do NOT "clean this up" into an explicit argument list, and do
     # NOT move any statement above it (that would sweep locals into the forward).
-    forwarded = dict(locals())
+    # SUPERSEDED 2026-08-24 (plan-2026-08-24T120026-64ffd751/D-010): the `locals()`
+    # capture is GONE, and with it the 38-of-42 hand-copied signature it fed. The
+    # guarantee above is NOT weakened — it is now enforced by Python itself, and it
+    # now covers the SIGNATURE too, which the capture never could: `create_convunext`
+    # declares 42 explicit parameters and NO `**kwargs` (MEASURED at iter-2/step-2:
+    # `inspect.signature(create_convunext)` has no VAR_KEYWORD), so an unknown
+    # forwarded name raises TypeError at the call — loud, immediate, impossible to
+    # ship. Pinned by tests/test_models/test_bias_free_denoisers/
+    # test_the_bfconvunext_delegation_contract.py::TestUnknownKwargIsLoud.
 
     # DECISION plan-2026-08-18T140459-7991552f/D-048
     # `block_normalization` defaults to the `None` SENTINEL, not to the string
@@ -210,7 +195,7 @@ def create_convunext_denoiser(
     # `setdefault` exists to draw (D-014: batchnorm is selected at the VARIANT
     # wrapper and nowhere else). See decisions.md D-048.
     if block_normalization is None:
-        forwarded['block_normalization'] = 'layernorm'
+        block_normalization = 'layernorm'
         logger.warning(
             "create_convunext_denoiser: no block_normalization was passed, so "
             "it resolves to 'layernorm' -- the historical default, which is "
@@ -223,7 +208,27 @@ def create_convunext_denoiser(
             "silence this and keep the historical graph."
         )
 
-    return create_convunext(use_bias=False, **forwarded)
+    # DECISION plan-2026-08-24T120026-64ffd751/D-010: delegate with `**kwargs`, and pin
+    # `use_bias` / `stem_normalization` HERE as explicit arguments of THIS call.
+    #   * Do NOT re-add the hand-copied parameter list. It duplicated
+    #     `create_convunext`'s signature with no parity test and had already lost
+    #     `include_top` and `output_channels` — 38 of 42 — so a bias-free feature
+    #     extractor could not be built through this entry point at all.
+    #   * Do NOT demote the two pins to `kwargs.setdefault(...)`. A setdefault lets a
+    #     caller pass `use_bias=True` and get a BIASED model back from the bias-free
+    #     builder silently, which breaks f(a*x) = a*f(x) and the Miyasawa
+    #     residual-as-score reading `denoiser_prior.py` and `ddnm.py` depend on. As
+    #     arguments they raise `TypeError: got multiple values` instead.
+    #   * `stem_normalization` is pinned even though it equals `create_convunext`'s
+    #     current default: the docstring's "the stem is pinned" claim was inherited,
+    #     not enforced, until this line. See decisions.md D-010.
+    return create_convunext(
+        input_shape=input_shape,
+        use_bias=False,
+        stem_normalization='global_response_norm',
+        block_normalization=block_normalization,
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------
