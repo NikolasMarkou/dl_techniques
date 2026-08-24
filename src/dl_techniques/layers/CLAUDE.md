@@ -134,7 +134,7 @@ subpackage with an `__all__`, prefer the package-level import.
 
 > **This does not put `layers/` in opposition to a Google-style `models/`.** `models/` has no
 > package-wide style at all — it is measurably mixed, and its normative exemplar for new packages
-> (`models/bert/bert.py`) is itself entirely Sphinx/reST. The earlier phrasing here, "this differs
+> (`models/bert/model.py`) is itself entirely Sphinx/reST. The earlier phrasing here, "this differs
 > from `models/`", rested on a blanket claim that measurement refuted. Where `layers/` genuinely
 > differs is from the Google-majority `losses/`, `metrics/`, `utils/`, `optimization/`, `analyzer/`
 > and `visualization/`.

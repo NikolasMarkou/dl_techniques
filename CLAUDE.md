@@ -84,7 +84,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
   |---|---|
   | `layers/` | predominantly Sphinx/reST |
   | `models/` | measurably mixed — no package-wide rule in either direction |
-  | New `models/` package | follow `models/bert/bert.py`, which is entirely Sphinx/reST |
+  | New `models/` package | follow `models/bert/model.py`, which is entirely Sphinx/reST |
 
   **Match the file you are editing; never convert a file wholesale.** The measured per-package
   counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md`

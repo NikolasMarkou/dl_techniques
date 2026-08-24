@@ -41,6 +41,10 @@ import keras
 from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
 
+from dl_techniques.utils.logger import logger
+from .logic_operators import LearnableLogicOperator
+from .arithmetic_operators import LearnableArithmeticOperator
+
 
 # DECISION plan_2026-05-13_3a2f1d23/D-002 (rationale corrected in
 # plan_2026-05-13_e33114da/D-007)
@@ -81,16 +85,8 @@ def _resolve_gate_entropy_coefficient(
         return float(gate_entropy_coefficient)
     return float(load_balance_coefficient or 0.0)
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
-from .logic_operators import LearnableLogicOperator
-from .arithmetic_operators import LearnableArithmeticOperator
 
 # ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class CircuitDepthLayer(keras.layers.Layer):

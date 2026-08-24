@@ -35,6 +35,8 @@ from dl_techniques.optimization import (
 )
 from dl_techniques.models.resnet.model import (
     create_resnet,
+)
+from dl_techniques.utils.deep_supervision import (
     get_model_output_info,
     create_inference_model_from_training_model
 )

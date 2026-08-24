@@ -215,6 +215,14 @@ REGISTRAR_CLASSES = [
 
 STEM_REGISTRY_KEY = 'dl_techniques.bias_free_denoisers>ConvUNextStem'
 
+# The OTHER key a saved bias-free ConvUNext graph names. `SpatialLinearAttention` carries a
+# BARE `@keras.saving.register_keras_serializable()` (convunext/model.py), whose key was
+# MEASURED to be module-independent on Keras 3.8.0 (decisions.md D-008) — which is why the
+# ConvUNext merge could move the class without breaking checkpoints. Adding a `package=`
+# argument "for symmetry" with `ConvUNextStem` WOULD change it, and that is the failure this
+# literal exists to catch; `bfconvunext.py` carries the same warning in prose.
+ATTENTION_REGISTRY_KEY = 'Custom>SpatialLinearAttention'
+
 # The names `bfconvunext` must keep bound as module ATTRIBUTES. This is a DIFFERENT
 # contract from registry presence, and the difference is measured, not assumed: deleting
 # the `from ...convunext.model import ConvUNextStem` re-export does NOT de-register the
@@ -271,6 +279,26 @@ class TestRegistrarContract:
         assert keys == [STEM_REGISTRY_KEY], (
             f"ConvUNextStem registry keys after importing only bfconvunext: {keys}; "
             f"expected exactly [{STEM_REGISTRY_KEY!r}]"
+        )
+
+    def test_registrar_import_registers_spatial_linear_attention_under_the_bare_key(
+        self, registrar_probe_result: dict
+    ) -> None:
+        """The EXACT key, not merely that something resolves.
+
+        `test_registrar_import_resolves_every_saved_graph_class[SpatialLinearAttention]`
+        below asserts only presence, so it stays GREEN when a `package=` argument mints a
+        BRAND-NEW key — MEASURED, by temporarily adding `package="x"` to the decorator:
+        that test passed while every `.keras` graph naming the old key would have failed
+        at `load_model`. This exact-match assertion is the one that went red. Keep both:
+        presence is parametrized over seven classes, exactness is per-key.
+        """
+        keys = registrar_probe_result['resolved'].get('SpatialLinearAttention', [])
+        assert keys == [ATTENTION_REGISTRY_KEY], (
+            "SpatialLinearAttention registry keys after importing only bfconvunext: "
+            f"{keys}; expected exactly [{ATTENTION_REGISTRY_KEY!r}]. A `package=` "
+            "argument on its decorator changes the key and silently breaks every saved "
+            "checkpoint containing this layer"
         )
 
     @pytest.mark.parametrize("name", RE_EXPORTED_NAMES)

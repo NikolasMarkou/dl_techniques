@@ -335,16 +335,90 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   append-only manifest `plans/ANCHORS.md`; a comment-tidying sweep that removes one silently
   destroys the record. Files with a high comment density are usually dense *because of*
   these anchors — never target a file by comment density.
-- **Never rename a module file to `model.py`.** `bert/bert.py`, `convnext/convnext_v1.py`
-  and `mobilenet/mobilenet_v2.py` stay where they are; renaming breaks every import.
+<!-- DECISION plan-2026-08-24T120026-64ffd751/D-006: the bullet below INVERTS the
+     absolute "Never rename a module file to `model.py`" prohibition that stood here until
+     2026-08-24. Do NOT rename `bert/model.py` back to `bert/bert.py` — its 13 referencing
+     sites were repointed in `62d0b05cb` and are consistent. Do NOT read this bullet as
+     permission to rename `gpt2/gpt2.py` or `time_series/forecast.py`: both are cited by
+     path elsewhere in the tree, and `gpt2/gpt2.py` is a live waiver key in
+     `tests/test_models/test_package_api_contract.py`.
+     This anchor was placed retroactively per DECISION
+     plan-2026-08-24T120026-64ffd751/D-008, which corrects the false claim that a Markdown
+     convention document cannot carry one. -->
+- **A module rename must carry every referencing site in the same commit.** `bert/` now
+  holds `model.py`, renamed from `bert/bert.py` on 2026-08-24 by commit `2c4a0ca7c`
+  ("[models] cleaning up models documentation and structure") — not by the merge
+  `4ed922781` that carried it in. `convnext/convnext_v1.py` and `mobilenet/mobilenet_v2.py`
+  genuinely do stay where they are, and for a reason that does not generalize to `bert/`:
+  they are *versioned variants* sitting beside their siblings (`convnext_v2.py`,
+  `mobilenet_v1/v3/v4.py`), so a `model.py` in either package would name one version and
+  hide the rest. What the rename got wrong was its blast radius, and not in the obvious way:
+  `2c4a0ca7c` touched 19 files and *did* repoint `models/bert/__init__.py` alongside 10 test
+  modules under `tests/test_models/test_bert/`. It grepped one directory. The 13 references
+  it missed were 11 outside that directory — 5 convention/README documents and 6 test
+  modules, including `tests/test_models/test_package_api_contract.py`, whose waiver dict is
+  keyed by *file path* — plus 2 inside it that it repointed only partially. Measured cost:
+  tree-wide collection sat at `23809 collected, 3 errors` and
+  `tests/test_models/test_package_api_contract.py` at `520 passed, 4 failed` until commit
+  `62d0b05cb` repointed all 13, which restored `23828 collected, 0 errors` and
+  `524 passed, 0 failed`. So: grep the whole tree for the old path first — documents and
+  path-keyed test data, not just `import` lines — and land every hit in the same commit.
+  This bullet is **not** a licence to rename. It **reverses** the absolute prohibition that
+  stood in its place until 2026-08-24 ("Never rename a module file to `model.py`.
+  `bert/bert.py` ... stay where they are; renaming breaks every import") exactly as far as
+  `bert/` and no further: `bert/model.py` is correct and its 13 references are now
+  consistent, so do not read it as drift and rename it back. The only two other packages
+  holding a single non-`__init__` module are `gpt2/gpt2.py` and `time_series/forecast.py`,
+  and both are to be LEFT ALONE. `gpt2/gpt2.py` is cited by path in
+  `src/dl_techniques/CLAUDE.md:79` and is a live waiver key
+  `("models/gpt2/gpt2.py", "create_gpt2")` at `test_package_api_contract.py:3907` — the same
+  construct whose `bert` twin one line above produced 4 of the failures counted above, and
+  it is checked from both sides (an unwaived offender fails one test, a stale key fails
+  another). `time_series/forecast.py` holds the shared `Forecast`/`ForecastMixin` imported
+  by four `src/train/` modules and three test modules; it is not a model module at all.
+  Recorded in `plan-2026-08-24T120026-64ffd751/D-006`.
 - **Never convert docstring style.** This package is measurably mixed; match the file you
   are editing (see `src/dl_techniques/CLAUDE.md` § Code Style).
-- **Never delete the deep-supervision re-export shim** at the bottom of `resnet/model.py`,
-  `convunext/model.py`, `bias_free_denoisers/bfunet.py` and
-  `bias_free_denoisers/bfconvunext.py`. It is a deliberate late import. Three of the four
-  carry an explicit `# noqa: E402`; `bfconvunext.py` has the same trailing import block
-  without the marker (verified 2026-08-19) — that is a lint-annotation gap, not a licence
-  to remove the import.
+<!-- DECISION plan-2026-08-24T120026-64ffd751/D-002: the bullet below INVERTS the
+     "Never delete the deep-supervision re-export shim" rule that stood here until
+     2026-08-24. Do NOT restore the pass-throughs at the tail of `models/*` modules or in
+     `models/*/__init__.py`, and do NOT read the current tree as drift. This is NOT a
+     licence to sweep cross-package imports generally: a registrar import (`# noqa: F401`,
+     bound for its Keras registration side effect) is load-bearing and is carved out below.
+     Removal decided in DECISION plan-2026-08-24T120026-64ffd751/D-001; this anchor placed
+     retroactively per DECISION plan-2026-08-24T120026-64ffd751/D-008. -->
+- **Never re-export the deep-supervision helpers from a `models/` package.**
+  `get_model_output_info` and `create_inference_model_from_training_model` live in
+  `dl_techniques/utils/deep_supervision.py` and are imported from there. No `models/*`
+  module and no `models/*/__init__.py` passes either name through; do not re-add a
+  pass-through. They are model-agnostic — they inspect any Keras model's outputs and slice
+  a training model down to its primary head — so a model package re-exporting them
+  advertised a surface it did not own and gave one function two import paths for no gain.
+  `models/vit/__init__.py` is the documented shape, and `models/resnet/__init__.py` now
+  carries the same docstring; read either before reaching for a shim.
+  What this forbids is a **surface re-export**: a name passed through so callers gain a
+  second import path to something the package does not own. It does not touch a
+  **registrar import** — a cross-package import bound for its
+  `@keras.saving.register_keras_serializable` side effect, so `keras.models.load_model` can
+  resolve every custom class a saved graph names. Those carry `# noqa: F401`, are
+  load-bearing, and must not be swept.
+  `models/bias_free_denoisers/bfconvunext.py:44-87` is the reference case (registrar
+  contract H-4, anchored under `plan-2026-08-19T163559-499b6f0e/D-080`): the last sweep that
+  deleted its twelve "unused" imports failed 7 tests at `TestRegistrarContract`. The test to
+  apply is whether a consumer needs the *name* at runtime or only the import's side effect —
+  if deleting it breaks `load_model`, it is a registrar, not a shim.
+  This bullet **reverses** the rule that stood in its place until 2026-08-24 ("Never delete
+  the deep-supervision re-export shim ... It is a deliberate late import"), so do not read
+  the current tree as drift and restore the shims. That rule was factually wrong on both
+  counts. It named four files as carrying the shim, but `bias_free_denoisers/bfunet.py` had
+  no import at all — only an orphaned comment describing one, left behind when commit
+  `e40a13a86` deleted the import (re-verified 2026-08-24: no top-level import past line 900
+  in that file; the comment is now gone too). And the "deliberate late import" premise was
+  tested at every site this removal touched, where no circular import existed anywhere —
+  `utils/deep_supervision.py` imports only `keras` and `utils.logger` and cannot cycle back
+  into `models/` — so the tail-of-file placement was stylistic, not structural. Removal
+  decided in `plan-2026-08-24T120026-64ffd751/D-001`; this rule inverted in
+  `plan-2026-08-24T120026-64ffd751/D-002`.
 
 ### When the shape does not apply
 

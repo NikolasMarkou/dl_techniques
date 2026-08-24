@@ -280,7 +280,9 @@ For deployment, you typically don't want the overhead of calculating the auxilia
 ```python
 from dl_techniques.models.bias_free_denoisers.bfconvunext import (
     create_convunext_variant,
-    create_inference_model_from_training_model
+)
+from dl_techniques.utils.deep_supervision import (
+    create_inference_model_from_training_model,
 )
 
 # 1. Load trained training model

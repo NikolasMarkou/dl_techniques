@@ -295,7 +295,6 @@ def create_and_train_tabm(
         metrics = ['mae']
 
     if arch_type != 'plain':
-        from dl_techniques.models.tabm import TabMLoss
         loss = TabMLoss(loss)
 
     model.compile(optimizer='adam', loss=loss, metrics=metrics)

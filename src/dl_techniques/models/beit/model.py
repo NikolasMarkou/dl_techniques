@@ -111,6 +111,10 @@ References:
 # package-wide rule. `layers/attention/beit_attention.py` was already Sphinx and is
 # deliberately untouched. New docstrings added HERE must be Sphinx, to keep the file
 # internally consistent.
+# CORRECTION 2026-08-24: `models/bert/bert.py`, named above, was renamed to
+# `models/bert/model.py` by merge `4ed922781`. The exemplar claim is unchanged and still
+# points at the same file under its new name. The line above is preserved as written
+# because anchor bodies are append-only.
 
 import keras
 from keras import layers

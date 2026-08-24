@@ -1079,7 +1079,7 @@ print(sorted(history.history.keys()))
 
 # 8. Convert to inference model (single output). `input_shape` is required for
 #    the same reason as in step 2.
-from dl_techniques.models.resnet import create_inference_model_from_training_model
+from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
 
 inference_model = create_inference_model_from_training_model(
     model, input_shape=(32, 32, 3)
@@ -1401,7 +1401,7 @@ history = model.fit(
 )
 
 # 6. Create inference model (single output)
-from dl_techniques.models.resnet import create_inference_model_from_training_model
+from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
 inference_model = create_inference_model_from_training_model(
     model, input_shape=(224, 224, 3)
 )

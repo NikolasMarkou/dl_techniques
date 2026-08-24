@@ -694,9 +694,11 @@ class TestBFCNNParameterized:
         }
         sigs = assert_structural_knob_changes_weights(builders, knob="kernel_size")
         for k, sig in sigs.items():
-            # bfcnn.py fixes the stem at `initial_kernel_size=5` (line 152) and
-            # the output projection at 1x1 (line 177); `kernel_size` governs the
-            # residual blocks only, so those two extents are always present.
+            # In bfcnn.py, `_build_bfcnn_backbone` gives the stem
+            # `kernel_size=initial_kernel_size` (default 5) and fixes the final
+            # projection at 1x1; `kernel_size` governs the residual blocks only, so
+            # those two extents are always present. Cited by SYMBOL, not by line:
+            # the two line numbers that stood here were already stale.
             spatial = {s[:2] for s in sig if len(s) == 4}
             assert spatial == {(5, 5), (k, k), (1, 1)}, (
                 f"kernel_size={k} produced conv extents {sorted(spatial)}"

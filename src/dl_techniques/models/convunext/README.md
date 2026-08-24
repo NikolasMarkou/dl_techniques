@@ -286,10 +286,10 @@ silently ignoring the argument.
 `enable_deep_supervision=True` returns `[final_output, supervision...]`;
 `expose_bottleneck=True` appends a TRAILING `bottleneck` output. Convert a
 deep-supervision training model to its single-output inference form with the shared
-utility (re-exported from this package):
+utility (from `dl_techniques.utils.deep_supervision`):
 
 ```python
-from dl_techniques.models.convunext import create_inference_model_from_training_model
+from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
 
 train_m = create_convunext(input_shape=(32, 32, 1), depth=3, initial_filters=8,
                            enable_deep_supervision=True)
@@ -324,15 +324,23 @@ produces round-trip deltas that look like reinitialized weights.
 
 ## 8. Relationship to `bfconvunext`
 
-`src/dl_techniques/models/bias_free_denoisers/bfconvunext.py` is now 232 lines
-(`wc -l`) and does exactly two jobs:
+`src/dl_techniques/models/bias_free_denoisers/bfconvunext.py` is now 289 lines
+(`wc -l`, 2026-08-24) and does exactly two jobs:
 
-1. **Thin `use_bias=False` wrappers** at their historical, frozen signatures:
-   `create_convunext_denoiser(...)` forwards here with `use_bias=False`;
-   `create_convunext_variant(...)` adds `kwargs.setdefault('block_normalization',
-   'batchnorm')` ([§5](#5-block_normalization--the-default-rule)) and defaults
-   `enable_deep_supervision=True`. The forward is a `locals()` capture, so a parameter
-   can never be silently dropped.
+1. **Thin `use_bias=False` wrappers.** `create_convunext_denoiser(input_shape, *,
+   block_normalization=None, **kwargs)` is a pure delegator: it forwards every other
+   keyword here VERBATIM, with `use_bias=False` and
+   `stem_normalization='global_response_norm'` pinned as explicit arguments of the call.
+   `create_convunext_variant(...)` keeps its historical signature, adds
+   `kwargs.setdefault('block_normalization', 'batchnorm')`
+   ([§5](#5-block_normalization--the-default-rule)) and defaults
+   `enable_deep_supervision=True`. Neither wrapper enumerates a parameter, so nothing can
+   be silently dropped and nothing can drift out of step: `create_convunext` declares no
+   `**kwargs`, so an unknown forwarded keyword raises `TypeError` at the call, and a
+   parameter added here is reachable through the bias-free arm the same day. (Until
+   2026-08-24 `create_convunext_denoiser` hand-copied 38 of these 42 parameters into its
+   own signature and forwarded them via a `dict(locals())` capture; `include_top` and
+   `output_channels` were among the four it had lost.)
 2. **The Keras registrar.** Importing it registers `ConvUNextStem`, `ConvNextV1Block`,
    `GlobalResponseNormalization`, `MatchChannels`, `GaborFiltersInitializer` and
    `SpatialLinearAttention` so `keras.models.load_model` resolves them.
@@ -367,7 +375,6 @@ from dl_techniques.models.convunext import (
     CONVUNEXT_CONFIGS,                        # the one variant dict
     create_convunext,                         # the builder
     create_convunext_variant,                 # variant -> builder
-    create_inference_model_from_training_model,  # re-export from utils.deep_supervision
 )
 ```
 

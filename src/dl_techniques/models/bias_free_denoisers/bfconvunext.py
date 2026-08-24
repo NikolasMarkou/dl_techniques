@@ -2,9 +2,9 @@
 
 This module is TWO things and nothing else:
 
-1. **Thin wrappers.** ``create_convunext_denoiser`` and ``create_convunext_variant``
-   keep their exact historical signatures and pin ``use_bias=False``, forwarding to
-   ``dl_techniques.models.convunext.model.create_convunext``. The architecture, every
+1. **Thin wrappers.** ``create_convunext_denoiser`` (a ``**kwargs`` delegator) and
+   ``create_convunext_variant`` (its historical signature) pin ``use_bias=False`` and
+   forward to ``dl_techniques.models.convunext.model.create_convunext``. The architecture, every
    parameter, the Laplacian-pyramid option and the three documented asymmetries of the
    bias-free arm are described ONCE, there.
 2. **The Keras REGISTRAR** (contract H-4). Importing this module is what makes
@@ -32,24 +32,15 @@ References:
       Image Segmentation. (https://arxiv.org/abs/1505.04597)
     - Miyasawa, 1961 / Robbins, 1956. The empirical-Bayes identity behind the
       residual-as-score reading named above.
-
-    The architecture itself is documented once, on
-    ``dl_techniques.models.convunext.model``; this module is wrappers and the
-    Keras registrar.
 """
 
 import keras
-from typing import Optional, Union, Tuple
+from typing import Any, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-# REGISTRAR imports (contract H-4). `applications/bias_free_denoiser/denoiser_prior.py`
-# and the two bfunet eval tools import THIS module purely so `keras.models.load_model`
-# can resolve every custom class a saved bias-free ConvUNext graph names. None of these
-# are USED below any more (the builder itself moved to `models/convunext/model.py`);
-# they are imported for their registration side effect. Do NOT "clean up" as unused.
 # DECISION plan-2026-08-19T163559-499b6f0e/D-080: every import in this block
 # carries `# noqa: F401` because this module is a REGISTRAR. Twelve of its
 # imports are bound for their side effect -- importing them REGISTERS the Keras
@@ -70,7 +61,7 @@ from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip  # noqa: 
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
-# ConvUNext Bias-Free Building Blocks (Simple Stem)
+# Registrar re-exports from the shared ConvUNext builder
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-08-14T092357-0e3d792d/D-010: `ConvUNextStem` no longer LIVES here —
@@ -84,13 +75,10 @@ from dl_techniques.utils.logger import logger
 # Do NOT delete this re-export, and do NOT re-home the class's `package=` string.
 from dl_techniques.models.convunext.model import ConvUNextStem  # noqa: F401
 
-# Re-exported from the merged home so this module stays the ONE import path the bf
-# test suite, the bfunet trainer and `utils/multiplicative_miyasawa.py` use, and so it
-# keeps REGISTERING `SpatialLinearAttention` (registrar contract H-4). The class moved
-# with a BARE `@keras.saving.register_keras_serializable()`, whose key
-# `Custom>SpatialLinearAttention` was MEASURED to be module-independent on Keras 3.8.0
-# (decisions.md D-008), so the move did not change it. Do NOT add a `package=` argument
-# "for symmetry" with `ConvUNextStem` — that WOULD change the key.
+# `SpatialLinearAttention` moved with a BARE `@keras.saving.register_keras_serializable()`,
+# whose key `Custom>SpatialLinearAttention` was MEASURED to be module-independent on
+# Keras 3.8.0 (decisions.md D-008), so the move did not change it. Do NOT add a
+# `package=` argument "for symmetry" with `ConvUNextStem` — that WOULD change the key.
 from dl_techniques.models.convunext.model import (  # noqa: F401
     SpatialLinearAttention,
     CONVUNEXT_CONFIGS,
@@ -105,59 +93,29 @@ from dl_techniques.models.convunext.model import (  # noqa: F401
 
 def create_convunext_denoiser(
         input_shape: Tuple[int, int, int],
-        depth: int = 4,
-        initial_filters: int = 64,
-        filter_multiplier: float = 2.0,
-        blocks_per_level: int = 2,
-        convnext_version: str = 'v2',
-        stem_kernel_size: Union[int, Tuple[int, int]] = 7,
-        use_gabor_stem: bool = False,
-        gabor_filters: int = 32,
-        gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
-        gabor_activation: Optional[str] = None,
-        gabor_stem_projection: bool = True,
-        use_laplacian_pyramid: bool = False,
-        laplacian_kernel_size: Tuple[int, int] = (5, 5),
-        high_freq_blocks: int = 0,
-        bottleneck_attention_blocks: int = 0,
-        bottleneck_attention_heads: int = 8,
-        zero_pad_channels: bool = False,
-        extra_zero_output_channels: bool = False,
-        final_projection_groups: int = 1,
-        downsample_pool_type: str = "max",
-        expose_bottleneck: bool = False,
-        block_kernel_size: Union[int, Tuple[int, int]] = 7,
-        block_activation: Union[str, keras.layers.Layer] = 'gelu',
+        *,
         block_normalization: Optional[str] = None,
-        stem_activation: Union[str, keras.layers.Layer] = 'gelu',
-        drop_path_rate: float = 0.1,
-        final_activation: Union[str, callable] = 'linear',
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
-        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
-        depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        dropout_rate: float = 0.0,
-        enable_deep_supervision: bool = False,
-        supervision_norm_scale: bool = True,
-        supervision_norm_center: bool = False,
-        supervision_activation: Union[str, keras.layers.Layer] = 'gelu',
-        model_name: str = 'convunext'
+        **kwargs: Any
 ) -> keras.Model:
     """Create the BIAS-FREE ConvUNext denoiser: ``create_convunext(..., use_bias=False)``.
 
-    This is a thin wrapper that pins ``use_bias=False`` and forwards every other
-    argument verbatim. The architecture, every parameter's meaning and the three
-    documented asymmetries of the bias-free arm are described ONCE, on
-    ``dl_techniques.models.convunext.model.create_convunext`` — read that
-    docstring; this signature is deliberately identical to it minus ``use_bias``
-    and ``stem_normalization`` (the stem is pinned to
-    ``'global_response_norm'``, the ConvNeXt-V2 / bias-free choice).
+    A thin DELEGATOR. Every keyword other than ``input_shape`` and
+    ``block_normalization`` is forwarded VERBATIM to
+    ``dl_techniques.models.convunext.model.create_convunext``, which is where the
+    architecture, every parameter's meaning and the three documented asymmetries
+    of the bias-free arm are described ONCE. That docstring is the full parameter
+    reference; it is deliberately not restated here, and this function enumerates
+    nothing, so a parameter added there is reachable here the same day.
 
-    The signature is frozen: `src/train/bfunet/train_convunext_denoiser.py`,
-    `utils/multiplicative_miyasawa.py` and the two bf test suites call it by
-    keyword. Parameters are forwarded via a ``locals()`` capture taken as the
-    FIRST statement, so a parameter can never be silently dropped from the
-    forward (a missing one raises ``TypeError`` at the call instead).
+    Two arguments are pinned by this wrapper and therefore cannot be forwarded:
+    ``use_bias=False`` (the whole point of the bias-free arm) and
+    ``stem_normalization='global_response_norm'`` (the ConvNeXt-V2 / bias-free
+    choice). Passing either raises ``TypeError: ... got multiple values ...`` —
+    the pin cannot be overridden by accident, silently or otherwise.
+
+    ``create_convunext`` declares no ``**kwargs``, so an unknown keyword raises
+    ``TypeError`` at the delegation, naming the offending keyword and the callee
+    (``create_convunext()``, not this wrapper).
 
     :param input_shape: Shape of input images ``(height, width, channels)``.
     :type input_shape: tuple of 3 ints
@@ -169,9 +127,25 @@ def create_convunext_denoiser(
         ``'batchnorm'`` for a homogeneous bias-free stack, or ``'layernorm'``
         explicitly to keep the historical graph without the warning.
     :type block_normalization: Optional[str]
+    :param kwargs: Every remaining parameter of
+        :func:`dl_techniques.models.convunext.model.create_convunext`, forwarded
+        unchanged — including ``include_top`` and ``output_channels``, which the
+        old hand-copied signature did not expose at all.
     :return: A functional, bias-free ``keras.Model``.
     :rtype: keras.Model
+    :raises TypeError: If a keyword is not a ``create_convunext`` parameter, or if
+        it duplicates ``use_bias``/``stem_normalization``/``input_shape``, which
+        this wrapper supplies itself.
     """
+    # SUPERSEDED 2026-08-24 (plan-2026-08-24T120026-64ffd751/D-010): the `locals()`
+    # capture is GONE, and with it the 38-of-42 hand-copied signature it fed. The
+    # guarantee below is NOT weakened — it is now enforced by Python itself, and it
+    # now covers the SIGNATURE too, which the capture never could: `create_convunext`
+    # declares 42 explicit parameters and NO `**kwargs` (MEASURED at iter-2/step-2:
+    # `inspect.signature(create_convunext)` has no VAR_KEYWORD), so an unknown
+    # forwarded name raises TypeError at the call — loud, immediate, impossible to
+    # ship. Pinned by tests/test_models/test_bias_free_denoisers/
+    # test_the_bfconvunext_delegation_contract.py::TestUnknownKwargIsLoud.
     # DECISION plan-2026-08-14T092357-0e3d792d/D-011: forward via a `locals()` capture
     # taken as the FIRST statement of the body, NOT by hand-listing ~40 keyword
     # arguments. The hand-listed form is the tempting "explicit" alternative and it is
@@ -181,7 +155,6 @@ def create_convunext_denoiser(
     # but not on `create_convunext` raises TypeError at the call — loud, immediate, and
     # impossible to ship. Do NOT "clean this up" into an explicit argument list, and do
     # NOT move any statement above it (that would sweep locals into the forward).
-    forwarded = dict(locals())
 
     # DECISION plan-2026-08-18T140459-7991552f/D-048
     # `block_normalization` defaults to the `None` SENTINEL, not to the string
@@ -210,7 +183,7 @@ def create_convunext_denoiser(
     # `setdefault` exists to draw (D-014: batchnorm is selected at the VARIANT
     # wrapper and nowhere else). See decisions.md D-048.
     if block_normalization is None:
-        forwarded['block_normalization'] = 'layernorm'
+        block_normalization = 'layernorm'
         logger.warning(
             "create_convunext_denoiser: no block_normalization was passed, so "
             "it resolves to 'layernorm' -- the historical default, which is "
@@ -223,7 +196,36 @@ def create_convunext_denoiser(
             "silence this and keep the historical graph."
         )
 
-    return create_convunext(use_bias=False, **forwarded)
+    # DECISION plan-2026-08-24T120026-64ffd751/D-010: delegate with `**kwargs`, and pin
+    # `use_bias` / `stem_normalization` HERE as explicit arguments of THIS call.
+    #   * Do NOT re-add the hand-copied parameter list. It duplicated
+    #     `create_convunext`'s signature with no parity test and had already lost
+    #     `include_top` and `output_channels` — 38 of 42 — so a bias-free feature
+    #     extractor could not be built through this entry point at all.
+    #   * Do NOT demote the two pins to `kwargs.setdefault(...)`. A setdefault lets a
+    #     caller pass `use_bias=True` and get a BIASED model back from the bias-free
+    #     builder silently, which breaks f(a*x) = a*f(x) and the Miyasawa
+    #     residual-as-score reading `denoiser_prior.py` and `ddnm.py` depend on. As
+    #     arguments they raise `TypeError: got multiple values` instead.
+    #   * `stem_normalization` is pinned even though it equals `create_convunext`'s
+    #     current default: the docstring's "the stem is pinned" claim was inherited,
+    #     not enforced, until this line. See decisions.md D-010.
+    #   * KNOWN COST of this delegation, measured 2026-08-24: `make docs` now emits
+    #     `create_convunext_denoiser(input_shape)` and nothing else. `generate_docs.py`
+    #     builds a signature from `node.args.args` alone -- no keyword-only args, no
+    #     `**kwargs` -- so `block_normalization` (the D-048 sentinel carrying the
+    #     degree-1-homogeneity warning) and every forwardable parameter are invisible
+    #     to generated documentation, where 38 names used to appear. That is a
+    #     limitation of the doc extractor, not of this call; do NOT "fix" it by
+    #     re-adding the hand-copied parameter list. Read `create_convunext`'s
+    #     docstring for the parameter reference.
+    return create_convunext(
+        input_shape=input_shape,
+        use_bias=False,
+        stem_normalization='global_response_norm',
+        block_normalization=block_normalization,
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -259,9 +261,13 @@ def create_convunext_variant(
         Defaults to True.
     :type enable_deep_supervision: bool
     :param kwargs: Additional keyword arguments overriding the variant defaults.
+        ``use_bias`` is NOT among them: it is pinned to ``False`` by this wrapper and
+        passing it raises ``TypeError: ... got multiple values ...``.
     :return: A functional, bias-free ``keras.Model``.
     :rtype: keras.Model
     :raises ValueError: If ``variant`` is not recognized.
+    :raises TypeError: If ``use_bias`` is passed (this wrapper supplies it), or if a
+        keyword is not a ``create_convunext`` parameter.
 
     Example::
 
@@ -271,7 +277,6 @@ def create_convunext_variant(
         ...                                      enable_deep_supervision=False,
         ...                                      convnext_version='v1')
     """
-    kwargs.setdefault('use_bias', False)
     # DECISION plan-2026-08-14T092357-0e3d792d/D-014: 'batchnorm' is selected HERE, at
     # the bias-free VARIANT wrapper, and nowhere else.
     #   * Do NOT move this key into the shared `CONVUNEXT_CONFIGS` dict — that dict feeds
@@ -288,21 +293,27 @@ def create_convunext_variant(
     # only under batchnorm, so the NAMED bias-free variants get it; the raw builder call
     # keeps its historical graph. decisions.md D-003 (ruling) and D-014 (implementation).
     kwargs.setdefault('block_normalization', 'batchnorm')
+
+    # DECISION plan-2026-08-24T120026-64ffd751/D-013: `use_bias=False` is pinned as an
+    # explicit ARGUMENT of this call, exactly as in `create_convunext_denoiser` above.
+    #   * Do NOT demote it back to `kwargs.setdefault('use_bias', False)`, which is what
+    #     it was until 2026-08-24. A setdefault lets a caller-supplied value WIN:
+    #     MEASURED at f390e123d, `create_convunext_variant('tiny', shape, use_bias=True)`
+    #     returned a model with 54 bias tensors / 29 biased layers out of the BIAS-FREE
+    #     entry point, silently, while the sibling arm raised. As an argument it raises
+    #     `TypeError: got multiple values` instead. Pinned by
+    #     tests/test_models/test_bias_free_denoisers/
+    #     test_the_bfconvunext_delegation_contract.py::TestPinnedKwargsCannotBeOverridden
+    #     ::test_variant_wrapper_also_refuses_use_bias_true.
+    #   * Do NOT "harmonize" this with the `block_normalization` setdefault three lines
+    #     above by promoting THAT one too. D-014 states the opposite for that key --
+    #     `setdefault` there is load-bearing ("a caller passing
+    #     `block_normalization='layernorm'` must keep it"). The two keys have opposite
+    #     override semantics on purpose. See decisions.md D-013.
     return _create_convunext_variant(
         variant=variant,
         input_shape=input_shape,
         enable_deep_supervision=enable_deep_supervision,
+        use_bias=False,
         **kwargs
     )
-
-
-# ---------------------------------------------------------------------
-# Utility Functions for Deep Supervision
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.deep_supervision import (  # noqa: F401
-    get_model_output_info,
-    create_inference_model_from_training_model,
-)
-
-# ---------------------------------------------------------------------

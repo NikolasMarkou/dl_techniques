@@ -104,6 +104,10 @@ from dl_techniques.layers.match_channels import MatchChannels
 from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 
 # ---------------------------------------------------------------------
@@ -1775,21 +1779,3 @@ def create_convunext_variant(
         input_shape=input_shape,
         **config
     )
-
-
-# ---------------------------------------------------------------------
-# Utility Functions for Deep Supervision
-# ---------------------------------------------------------------------
-
-# Re-exported so `models/convunext` has ONE inference-model helper and it is the
-# canonical, functional-graph one. The deleted `ConvUNextModel` carried a bespoke
-# copy that rebuilt a subclassed model from its config and round-tripped weights
-# through a temp file; the shared util slices the functional graph instead
-# (`training_model.output` / `.input`), which is what a functional ConvUNext needs.
-from dl_techniques.utils.deep_supervision import (  # noqa: F401
-    create_inference_model_from_training_model,
-)
-from dl_techniques.utils.activation_serialization import (
-    serialize_activation,
-    deserialize_activation,
-)

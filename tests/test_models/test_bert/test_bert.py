@@ -532,7 +532,7 @@ class TestBERTIter1Refactor:
 
     def test_create_bert_factory(self):
         """``create_bert`` returns a configured ``BERT`` and runs a forward pass."""
-        from dl_techniques.models.bert.bert import create_bert
+        from dl_techniques.models.bert.model import create_bert
 
         model = create_bert("tiny", vocab_size=200)
         assert isinstance(model, BERT)
@@ -570,9 +570,9 @@ class TestBERTIter1Refactor:
             "package; import it from dl_techniques.layers.heads.nlp instead."
         )
 
-        # BERT must remain importable from the .bert submodule path
-        # (existing tests rely on this — see line 23 of this file).
-        from dl_techniques.models.bert.bert import BERT as BERTViaSubmodule
+        # BERT must remain importable from the implementation submodule path
+        # (renamed .bert -> .model by commit 2c4a0ca7c; existing tests rely on this).
+        from dl_techniques.models.bert.model import BERT as BERTViaSubmodule
         assert BERTViaSubmodule is pkg.BERT
 
 

@@ -86,11 +86,11 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet import (
-    ResNet,
+from dl_techniques.models.resnet import ResNet
+from dl_techniques.utils.deep_supervision import (
     create_inference_model_from_training_model,
+    get_model_output_info,
 )
-from dl_techniques.utils.deep_supervision import get_model_output_info
 
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10

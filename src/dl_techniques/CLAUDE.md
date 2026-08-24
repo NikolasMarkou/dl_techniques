@@ -75,7 +75,7 @@ Majority, not rule: every Google-majority package except `analyzer/` and `visual
 contains Sphinx files. The `models/` "neither" bucket is mostly `__init__.py` and modules with no
 parameter docs at all.
 
-**For a NEW `models/` package follow `models/bert/bert.py`** — the normative exemplar, and entirely
+**For a NEW `models/` package follow `models/bert/model.py`** — the normative exemplar, and entirely
 Sphinx/reST (0 `Args:` / 78 `:param `). That is why the recently added `models/gpt2/gpt2.py`
 (0 / 26) and `models/wave_field/model.py` (31 `:param `, plus 1 stray `Args:` at :232) are Sphinx.
 
