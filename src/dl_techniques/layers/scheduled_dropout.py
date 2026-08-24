@@ -70,7 +70,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

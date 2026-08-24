@@ -64,7 +64,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -262,7 +261,7 @@ class TRM(keras.Model):
                 - `halted`: Boolean mask initialized to True (triggers reset on first step).
                 - `current_data`: Data tensor initialized to zeros.
         """
-        batch_size = ops.shape(batch["inputs"])[0]
+        batch_size = keras.ops.shape(batch["inputs"])[0]
         full_shape = (
             batch_size,
             self.seq_len + self.puzzle_emb_len,
@@ -271,13 +270,13 @@ class TRM(keras.Model):
 
         return {
             "inner_carry": {
-                "z_H": ops.zeros(full_shape, dtype=self.compute_dtype),
-                "z_L": ops.zeros(full_shape, dtype=self.compute_dtype),
+                "z_H": keras.ops.zeros(full_shape, dtype=self.compute_dtype),
+                "z_L": keras.ops.zeros(full_shape, dtype=self.compute_dtype),
             },
-            "steps": ops.zeros((batch_size,), dtype="int32"),
+            "steps": keras.ops.zeros((batch_size,), dtype="int32"),
             # Start with `halted` as True to trigger a reset on the first step.
-            "halted": ops.ones((batch_size,), dtype="bool"),
-            "current_data": {k: ops.zeros_like(v) for k, v in batch.items()},
+            "halted": keras.ops.ones((batch_size,), dtype="bool"),
+            "current_data": {k: keras.ops.zeros_like(v) for k, v in batch.items()},
         }
 
     def call(
@@ -320,12 +319,12 @@ class TRM(keras.Model):
         # Reset inner state (z_H, z_L) for newly started sequences using
         # the initial state weights from the (now built) `inner` layer.
         # Broadcasting is handled by ops.where with appropriate expansion.
-        reset_flag = ops.expand_dims(halted, axis=(-1, -2))
-        z_H = ops.where(reset_flag, self.inner.H_init, inner_carry["z_H"])
-        z_L = ops.where(reset_flag, self.inner.L_init, inner_carry["z_L"])
+        reset_flag = keras.ops.expand_dims(halted, axis=(-1, -2))
+        z_H = keras.ops.where(reset_flag, self.inner.H_init, inner_carry["z_H"])
+        z_L = keras.ops.where(reset_flag, self.inner.L_init, inner_carry["z_L"])
 
         # Reset step counter for newly started sequences
-        steps = ops.where(halted, 0, carry["steps"])
+        steps = keras.ops.where(halted, 0, carry["steps"])
 
         # Update the data for sequences that have not yet halted.
         # For halted sequences, use new batch data; for non-halted, keep current.
@@ -333,8 +332,8 @@ class TRM(keras.Model):
         for k, v in batch.items():
             # Expand halted mask to match data dimensions
             expand_dims = (1,) * (len(v.shape) - 1)
-            halted_expanded = ops.reshape(halted, (-1, *expand_dims))
-            current_data[k] = ops.where(halted_expanded, v, carry["current_data"][k])
+            halted_expanded = keras.ops.reshape(halted, (-1, *expand_dims))
+            current_data[k] = keras.ops.where(halted_expanded, v, carry["current_data"][k])
 
         # Perform inner reasoning step
         new_inner_carry, logits, (q_halt, q_continue) = self.inner(
@@ -367,10 +366,10 @@ class TRM(keras.Model):
             new_halted = new_halted | halt_signal
 
             # Exploration: randomly force continuation for some sequences
-            rand_val = keras.random.uniform(ops.shape(q_halt))
+            rand_val = keras.random.uniform(keras.ops.shape(q_halt))
             explore_halt = rand_val < self.halt_exploration_prob
-            min_halt_steps = ops.cast(explore_halt, "int32") * keras.random.randint(
-                ops.shape(steps), 2, self.halt_max_steps + 1
+            min_halt_steps = keras.ops.cast(explore_halt, "int32") * keras.random.randint(
+                keras.ops.shape(steps), 2, self.halt_max_steps + 1
             )
             new_halted = new_halted & (steps >= min_halt_steps)
 
@@ -385,13 +384,13 @@ class TRM(keras.Model):
                     new_inner_carry, current_data, training=False
                 )
                 # Target is the maximum Q-value at the next state
-                target_q = ops.where(
+                target_q = keras.ops.where(
                     is_last_step,
                     next_q_halt,
-                    ops.maximum(next_q_halt, next_q_continue)
+                    keras.ops.maximum(next_q_halt, next_q_continue)
                 )
-                target_q = ops.stop_gradient(target_q)
-                outputs["target_q_continue"] = ops.sigmoid(target_q)
+                target_q = keras.ops.stop_gradient(target_q)
+                outputs["target_q_continue"] = keras.ops.sigmoid(target_q)
 
         if not training:
             # Inference mode: halt on learned signal OR max-steps reached.
