@@ -252,9 +252,13 @@ def create_convunext_variant(
         Defaults to True.
     :type enable_deep_supervision: bool
     :param kwargs: Additional keyword arguments overriding the variant defaults.
+        ``use_bias`` is NOT among them: it is pinned to ``False`` by this wrapper and
+        passing it raises ``TypeError: ... got multiple values ...``.
     :return: A functional, bias-free ``keras.Model``.
     :rtype: keras.Model
     :raises ValueError: If ``variant`` is not recognized.
+    :raises TypeError: If ``use_bias`` is passed (this wrapper supplies it), or if a
+        keyword is not a ``create_convunext`` parameter.
 
     Example::
 
@@ -264,7 +268,6 @@ def create_convunext_variant(
         ...                                      enable_deep_supervision=False,
         ...                                      convnext_version='v1')
     """
-    kwargs.setdefault('use_bias', False)
     # DECISION plan-2026-08-14T092357-0e3d792d/D-014: 'batchnorm' is selected HERE, at
     # the bias-free VARIANT wrapper, and nowhere else.
     #   * Do NOT move this key into the shared `CONVUNEXT_CONFIGS` dict — that dict feeds
@@ -281,9 +284,27 @@ def create_convunext_variant(
     # only under batchnorm, so the NAMED bias-free variants get it; the raw builder call
     # keeps its historical graph. decisions.md D-003 (ruling) and D-014 (implementation).
     kwargs.setdefault('block_normalization', 'batchnorm')
+
+    # DECISION plan-2026-08-24T120026-64ffd751/D-013: `use_bias=False` is pinned as an
+    # explicit ARGUMENT of this call, exactly as in `create_convunext_denoiser` above.
+    #   * Do NOT demote it back to `kwargs.setdefault('use_bias', False)`, which is what
+    #     it was until 2026-08-24. A setdefault lets a caller-supplied value WIN:
+    #     MEASURED at f390e123d, `create_convunext_variant('tiny', shape, use_bias=True)`
+    #     returned a model with 54 bias tensors / 29 biased layers out of the BIAS-FREE
+    #     entry point, silently, while the sibling arm raised. As an argument it raises
+    #     `TypeError: got multiple values` instead. Pinned by
+    #     tests/test_models/test_bias_free_denoisers/
+    #     test_the_bfconvunext_delegation_contract.py::TestPinnedKwargsCannotBeOverridden
+    #     ::test_variant_wrapper_also_refuses_use_bias_true.
+    #   * Do NOT "harmonize" this with the `block_normalization` setdefault three lines
+    #     above by promoting THAT one too. D-014 states the opposite for that key --
+    #     `setdefault` there is load-bearing ("a caller passing
+    #     `block_normalization='layernorm'` must keep it"). The two keys have opposite
+    #     override semantics on purpose. See decisions.md D-013.
     return _create_convunext_variant(
         variant=variant,
         input_shape=input_shape,
         enable_deep_supervision=enable_deep_supervision,
+        use_bias=False,
         **kwargs
     )

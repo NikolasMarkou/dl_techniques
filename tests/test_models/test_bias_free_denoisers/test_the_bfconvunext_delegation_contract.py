@@ -261,6 +261,42 @@ class TestPinnedKwargsCannotBeOverridden:
             f"got: {excinfo.value}"
         )
 
+    def test_variant_wrapper_also_refuses_use_bias_true(self) -> None:
+        """The VARIANT arm must refuse `use_bias=True` exactly as its sibling does.
+
+        Not covered by `test_bfconvunext_wrappers.py:87
+        test_variant_wrapper_pins_use_bias_false`: that test calls the DEFAULT path
+        and asserts the built model has no biases, so it cannot see an override. It
+        stayed green while `create_convunext_variant('tiny', shape, use_bias=True)`
+        returned a model with 54 bias tensors / 29 biased layers -- measured at
+        f390e123d, when the pin was a `kwargs.setdefault('use_bias', False)` and a
+        caller-supplied value therefore WON. The bias-free entry point returned a
+        BIASED model silently, which is the same hazard the
+        `# DECISION plan-2026-08-24T120026-64ffd751/D-010` anchor forbids by name in
+        the denoiser arm forty lines above it.
+
+        The second assertion is what stops this test passing by accident: the
+        DEFAULT path must still build, and must still be bias-free.
+        """
+        with pytest.raises(TypeError, match=RAISES_EITHER_WAY) as excinfo:
+            bf_create_convunext_variant(
+                'tiny', INPUT_SHAPE, use_bias=True, **SMALL
+            )
+        assert 'use_bias' in str(excinfo.value), (
+            f"the TypeError must NAME the pinned parameter 'use_bias'; "
+            f"got: {excinfo.value}"
+        )
+
+        model = bf_create_convunext_variant('tiny', INPUT_SHAPE, **SMALL)
+        offenders = [
+            layer.name
+            for layer in model._flatten_layers()
+            if getattr(layer, "use_bias", False)
+        ]
+        assert not offenders, (
+            f"the variant wrapper's default path is not bias-free: {offenders}"
+        )
+
     def test_input_shape_cannot_be_supplied_twice(self) -> None:
         """`input_shape` is a NAMED parameter, never an entry in `**kwargs`.
 
