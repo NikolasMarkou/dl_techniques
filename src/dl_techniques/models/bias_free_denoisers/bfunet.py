@@ -138,6 +138,558 @@ BFUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
 }
 
 # ---------------------------------------------------------------------
+# Builder helpers
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-24T174647-07af0659/D-002: the six `_validate_*` / `_build_*` helpers
+# below are a PURE DECOMPOSITION of `create_bfunet_denoiser`, extracted verbatim. The
+# extraction contract, in three parts, all of which a plain reading of the diff can check:
+# (1) NOT ONE LAYER IS RENAMED and no `name=` string is edited -- both builders in this
+#     package are functional (`keras.Model(inputs, outputs)`), so layer/weight NAMES are the
+#     checkpoint contract for every stored `.keras` under `results/`, and a rename breaks
+#     them silently at `load_model` time, not at build time. MEASURED for this plan: a
+#     one-word rename of `final_output` moved ARM_WEIGHT_NAMES and ARM_LAYER_SEQUENCE while
+#     weight VALUES and the forward pass stayed bit-identical -- the forward pass CANNOT see
+#     this defect class.
+# (2) LAYER CREATION ORDER IS PRESERVED EXACTLY. Keras auto-generates names from creation
+#     order for any layer built without `name=`; the builders here always pass `name=`, but
+#     the Laplacian pyramid's inner `GaussianFilter` picks up a process-order-dependent
+#     name-scope suffix, so order is load-bearing anyway.
+# (3) EVERY HELPER FORWARDS THE CALLER'S `kernel_initializer` / `kernel_regularizer` OBJECT
+#     AS-IS. Do NOT construct, clone, or re-resolve one inside a helper: that changes the
+#     number of RNG draws, so every downstream layer initializes differently while every
+#     name and shape still matches (the trap recorded for the BEiT restructure as D-017).
+# Do NOT collapse the explicitly-forwarded parameters into a shared params object or a
+# `**kwargs` bag -- that was designed and deliberately rejected (decisions.md D-001), and it
+# would turn a greppable interface into an opaque one. See decisions.md D-002.
+
+def _validate_bfunet_args(
+        input_shape: Tuple[int, int, int],
+        depth: int,
+        initial_filters: int,
+        filter_multiplier: int,
+        blocks_per_level: int,
+        high_freq_blocks: int,
+        block_normalization: str,
+        downsample_pool_type: str,
+        final_projection_groups: int,
+        dropout_rate: float,
+) -> str:
+    """
+    Validate the builder arguments and resolve the block normalization.
+
+    Args mirror the identically-named parameters of `create_bfunet_denoiser`. The
+    checks run in the order written and that order is part of the contract: when two
+    arguments are invalid at once, which message a caller sees is observable behaviour.
+
+    Returns:
+        String, the RESOLVED normalization name. This -- not the raw
+        `block_normalization` argument -- is what every block and every
+        deep-supervision head must receive.
+
+    Raises:
+        TypeError: If input_shape is not a tuple of 3 integers.
+        ValueError: If depth < 2, initial_filters <= 0, filter_multiplier < 1,
+            blocks_per_level <= 0, high_freq_blocks < 0, block_normalization is not one
+            of the three accepted names, downsample_pool_type is not 'max'/'average',
+            final_projection_groups < 1, or dropout_rate is outside [0.0, 1.0).
+    """
+    # Input validation
+    if not isinstance(input_shape, tuple) or len(input_shape) != 3:
+        raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
+
+    if depth < 2:
+        raise ValueError(f"depth must be at least 2, got {depth}")
+
+    if initial_filters <= 0:
+        raise ValueError(f"initial_filters must be positive, got {initial_filters}")
+
+    if filter_multiplier < 1:
+        raise ValueError(f"filter_multiplier must be at least 1, got {filter_multiplier}")
+
+    if blocks_per_level <= 0:
+        raise ValueError(f"blocks_per_level must be positive, got {blocks_per_level}")
+
+    if high_freq_blocks < 0:
+        raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
+
+    # DECISION plan_2026-07-04_58ac8e73/D-002: additive ConvUNeXt-parity features. Every
+    # new kwarg defaults to a byte-identical no-op; the OFF path reproduces the original
+    # plain U-Net exactly (same layer names/ops) so the ~30 existing tests + bfunet_conditional
+    # stay green. Do NOT change default behavior.
+    if block_normalization not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
+        raise ValueError(
+            "block_normalization must be 'batchnorm', 'layernorm' or 'bias_free_batchnorm', "
+            f"got {block_normalization}")
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
+    # BiasFreeBatchNorm inside a bias-free denoiser. `block_norm` -- NOT the raw
+    # `block_normalization` argument -- is what every block, and the deep-supervision head,
+    # must receive: the raw value reaches stock BatchNormalization, whose moving_mean
+    # subtraction breaks f(a*x)=a*f(x) once training has moved it off zero. See decisions.md
+    # D-020 and the anchor in layers/bias_free_conv2d.py.
+    block_norm = resolve_denoiser_normalization(block_normalization)
+    if downsample_pool_type not in ('max', 'average'):
+        raise ValueError(
+            f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}")
+    if final_projection_groups < 1:
+        raise ValueError(f"final_projection_groups must be >= 1, got {final_projection_groups}")
+    if not (0.0 <= dropout_rate < 1.0):
+        raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
+
+    return block_norm
+
+def _build_gabor_stem(
+        inputs: keras.KerasTensor,
+        input_shape: Tuple[int, int, int],
+        use_gabor_stem: bool,
+        gabor_filters: int,
+        gabor_kernel_size: Union[int, Tuple[int, int]],
+        gabor_activation: Optional[str],
+        gabor_stem_projection: bool,
+        initial_filters: int,
+        kernel_initializer: Union[str, keras.initializers.Initializer],
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+) -> keras.KerasTensor:
+    """
+    Build the optional frozen Gabor stem in front of the encoder.
+
+    Args mirror the identically-named parameters of `create_bfunet_denoiser`.
+    `kernel_initializer` / `kernel_regularizer` are forwarded as objects, never
+    re-resolved (see the D-002 anchor above).
+
+    Returns:
+        KerasTensor, the tensor the encoder path starts from: `inputs` unchanged when
+        `use_gabor_stem=False` (a true no-op that adds zero layers).
+
+    Raises:
+        ValueError: If `gabor_stem_projection=False` and
+            `input_channels * gabor_filters != initial_filters`.
+    """
+    # Optional frozen Gabor stem (default OFF -> stem_input is inputs, a no-op). Reuses the
+    # shared bias-free gabor bank + mandatory 1x1 projection (mirrors bfconvunext).
+    if use_gabor_stem:
+        gabor = create_gabor_depthwise_conv2d(
+            filters=gabor_filters,
+            kernel_size=gabor_kernel_size,
+            activation=gabor_activation,
+            strides=1,
+            padding='same',
+            use_bias=False,
+            trainable=False,
+            name='gabor_stem',
+        )(inputs)
+        if gabor_stem_projection:
+            stem_input = keras.layers.Conv2D(
+                filters=initial_filters,
+                kernel_size=1,
+                use_bias=False,  # Bias-free projection
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                name='gabor_stem_projection',
+            )(gabor)
+        else:
+            gabor_out_ch = input_shape[-1] * gabor_filters
+            if gabor_out_ch != initial_filters:
+                raise ValueError(
+                    "gabor_stem_projection=False requires input_channels * gabor_filters == "
+                    f"initial_filters, but {input_shape[-1]} * {gabor_filters} = {gabor_out_ch} "
+                    f"!= initial_filters({initial_filters}). Match them, or keep projection on."
+                )
+            stem_input = gabor
+        logger.info(f"Frozen Gabor stem enabled: filters={gabor_filters}, "
+                    f"kernel_size={gabor_kernel_size}, projection={gabor_stem_projection}")
+    else:
+        stem_input = inputs
+
+    return stem_input
+
+def _build_encoder_path(
+        stem_input: keras.KerasTensor,
+        filter_sizes: List[int],
+        depth: int,
+        blocks_per_level: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        initial_kernel_size: Union[int, Tuple[int, int]],
+        activation: Union[str, callable],
+        kernel_initializer: Union[str, keras.initializers.Initializer],
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+        use_residual_blocks: bool,
+        block_norm: str,
+        dropout_rate: float,
+        use_laplacian_pyramid: bool,
+        laplacian_kernel_size: Tuple[int, int],
+        downsample_pool_type: str,
+        high_freq_blocks: int,
+) -> Tuple[keras.KerasTensor, List[keras.KerasTensor]]:
+    """
+    Build the contracting path: `depth` levels of blocks, each followed by a junction.
+
+    Args mirror the identically-named parameters of `create_bfunet_denoiser`, except
+    `block_norm`, which is the RESOLVED value returned by `_validate_bfunet_args`.
+
+    Returns:
+        Tuple of (the downsampled tensor entering the bottleneck, the list of skip
+        connections ordered shallowest-first).
+    """
+    skip_connections: List[keras.layers.Layer] = []
+
+    x = stem_input
+    logger.info(f"Building encoder path with {depth} levels")
+
+    for level in range(depth):
+        current_filters = filter_sizes[level]
+        logger.info(f"Encoder level {level}: {current_filters} filters")
+
+        # Convolution blocks at current resolution
+        for block_idx in range(blocks_per_level):
+            if level == 0 and block_idx == 0:
+                # first level
+                x = BiasFreeConv2D(
+                    filters=current_filters,
+                    kernel_size=initial_kernel_size,
+                    activation=activation,
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    use_batch_norm=True,
+                    normalization_type=block_norm,
+                    dropout_rate=dropout_rate,
+                    name=f'encoder_level_{level}_conv_{block_idx}'
+                )(x)
+            else:
+                if use_residual_blocks:
+                    x = BiasFreeResidualBlock(
+                        filters=current_filters,
+                        kernel_size=kernel_size,
+                        activation=activation,
+                        kernel_initializer=kernel_initializer,
+                        kernel_regularizer=kernel_regularizer,
+                        normalization_type=block_norm,
+                        dropout_rate=dropout_rate,
+                        name=f'encoder_level_{level}_residual_block_{block_idx}'
+                    )(x)
+                else:
+                    x = BiasFreeConv2D(
+                        filters=current_filters,
+                        kernel_size=kernel_size,
+                        activation=activation,
+                        kernel_initializer=kernel_initializer,
+                        kernel_regularizer=kernel_regularizer,
+                        use_batch_norm=True,
+                        normalization_type=block_norm,
+                        dropout_rate=dropout_rate,
+                        name=f'encoder_level_{level}_conv_{block_idx}'
+                    )(x)
+
+        # Skip connection + downsample. ALL levels route through the DownsampleAndSkip
+        # Layer so the pool-type / Laplacian-pyramid swap lives in one place. The last
+        # level's pool feeds the bottleneck and keeps the original name
+        # 'bottleneck_downsample'. The junction Layer WRAPS the pooling/pyramid op, so
+        # the caller-visible name now belongs to the wrapper and the inner op is named
+        # '<name>_pool' / '<name>_pyramid' (accepted graph change C-2). The returned
+        # order is (skip, downsampled) on both paths -- do NOT swap it.
+        junction_name = (
+            f'encoder_downsample_{level}' if level < depth - 1
+            else 'bottleneck_downsample'
+        )
+        skip, x = DownsampleAndSkip(
+            use_laplacian_pyramid=use_laplacian_pyramid,
+            laplacian_kernel_size=laplacian_kernel_size,
+            pool_type=downsample_pool_type,
+            # bfunet is unconditionally bias-free, and `DownsampleAndSkip.use_bias`
+            # (added for its learned 'strided_conv' branch) is READ BY THE TRAINERS'
+            # compliance sweep -- `train/bfunet/train_unet_denoiser.py:198` walks
+            # `_flatten_layers()` for any layer whose `use_bias` is truthy. Leaving the
+            # constructor default (True) makes every junction report as a bias offender
+            # even though the pooling branch has no weights at all. Keep this explicit.
+            use_bias=False,
+            name=junction_name,
+        )(x)
+
+        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
+        # high-frequency band with N bias-free residual blocks before it becomes the
+        # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
+        # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
+        # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
+        # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
+        # there is no high band and this would rename/insert layers into the raw-skip path.
+        # The high band is channel-preserving, so filters=current_filters is shape-safe.
+        if high_freq_blocks > 0 and use_laplacian_pyramid:
+            for hf_idx in range(high_freq_blocks):
+                skip = BiasFreeResidualBlock(
+                    filters=current_filters,
+                    kernel_size=kernel_size,
+                    activation=activation,
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    normalization_type=block_norm,
+                    dropout_rate=dropout_rate,
+                    name=f'skip_highfreq_block_{level}_{hf_idx}'
+                )(skip)
+
+        skip_connections.append(skip)
+
+    return x, skip_connections
+
+def _build_bottleneck(
+        x: keras.KerasTensor,
+        filter_sizes: List[int],
+        depth: int,
+        blocks_per_level: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        activation: Union[str, callable],
+        kernel_initializer: Union[str, keras.initializers.Initializer],
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+        use_residual_blocks: bool,
+        block_norm: str,
+        dropout_rate: float,
+        expose_bottleneck: bool,
+) -> Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]:
+    """
+    Build the bottleneck blocks at the lowest resolution.
+
+    Args mirror the identically-named parameters of `create_bfunet_denoiser`, except
+    `block_norm`, which is the RESOLVED value returned by `_validate_bfunet_args`.
+
+    Returns:
+        Tuple of (the bottleneck tensor, the optional exposed bottleneck tap -- `None`
+        unless `expose_bottleneck=True`).
+    """
+    bottleneck_filters = filter_sizes[depth]
+    logger.info(f"Building bottleneck with {bottleneck_filters} filters")
+
+    # NOTE: the downsample INTO the bottleneck is produced by the last encoder-loop
+    # iteration above (named 'bottleneck_downsample'), so there is no separate pool here.
+
+    # Bottleneck convolution blocks
+    for block_idx in range(blocks_per_level):
+        if use_residual_blocks:
+            x = BiasFreeResidualBlock(
+                filters=bottleneck_filters,
+                kernel_size=kernel_size,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                normalization_type=block_norm,
+                dropout_rate=dropout_rate,
+                name=f'bottleneck_residual_block_{block_idx}'
+            )(x)
+        else:
+            x = BiasFreeConv2D(
+                filters=bottleneck_filters,
+                kernel_size=kernel_size,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                use_batch_norm=True,
+                normalization_type=block_norm,
+                dropout_rate=dropout_rate,
+                name=f'bottleneck_conv_{block_idx}'
+            )(x)
+
+    # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
+    # latent so it can be exposed as an additional output. No-op when expose_bottleneck=False.
+    bottleneck_output = None
+    if expose_bottleneck:
+        x = keras.layers.Activation('linear', name='bottleneck')(x)
+        bottleneck_output = x
+
+    return x, bottleneck_output
+
+def _build_decoder_path(
+        x: keras.KerasTensor,
+        skip_connections: List[keras.KerasTensor],
+        filter_sizes: List[int],
+        depth: int,
+        output_channels: int,
+        initial_filters: int,
+        blocks_per_level: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        activation: Union[str, callable],
+        final_activation: Union[str, callable],
+        kernel_initializer: Union[str, keras.initializers.Initializer],
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+        use_residual_blocks: bool,
+        block_norm: str,
+        dropout_rate: float,
+        zero_pad_channels: bool,
+        enable_deep_supervision: bool,
+) -> Tuple[keras.KerasTensor, List[keras.KerasTensor]]:
+    """
+    Build the expanding path: upsample, merge the skip, run blocks, optionally tap a
+    deep-supervision head at every level above 0.
+
+    Args mirror the identically-named parameters of `create_bfunet_denoiser`, except
+    `block_norm`, which is the RESOLVED value returned by `_validate_bfunet_args`.
+
+    Returns:
+        Tuple of (the full-resolution decoder tensor, the deep-supervision outputs in
+        DEEP-TO-SHALLOW order -- the caller reverses them).
+    """
+    deep_supervision_outputs: List[keras.layers.Layer] = []
+
+    logger.info(f"Building decoder path with {depth} levels")
+
+    for level in range(depth - 1, -1, -1):
+        current_filters = filter_sizes[level]
+        logger.info(f"Decoder level {level}: {current_filters} filters")
+
+        # Upsampling
+        x = keras.layers.UpSampling2D(
+            size=(2, 2),
+            interpolation='bilinear',
+            name=f'decoder_upsample_{level}'
+        )(x)
+
+        # Get corresponding skip connection
+        skip = skip_connections[level]
+
+        # Ensure spatial dimensions match for concatenation
+        # Handle potential size mismatches due to pooling/upsampling
+        if x.shape[1] != skip.shape[1] or x.shape[2] != skip.shape[2]:
+            # Crop or pad to match dimensions
+            target_height, target_width = skip.shape[1], skip.shape[2]
+            x = keras.layers.Resizing(
+                height=target_height,
+                width=target_width,
+                interpolation='bilinear',
+                name=f'decoder_resize_{level}'
+            )(x)
+
+        # Merge skip connection. OFF (default): Concatenate (byte-identical). ON
+        # (zero_pad_channels): parameter-free channel match — slice the upsampled branch
+        # to current_filters and ADD the (current_filters) skip. Bias-free either way.
+        if zero_pad_channels:
+            x = keras.layers.Add(name=f'decoder_add_{level}')(
+                [skip, MatchChannels(current_filters, name=f'decoder_match_{level}')(x)]
+            )
+        else:
+            x = keras.layers.Concatenate(
+                axis=-1,
+                name=f'decoder_concat_{level}'
+            )([skip, x])
+
+        # Convolution blocks after merging
+        for block_idx in range(blocks_per_level):
+            if use_residual_blocks:
+                x = BiasFreeResidualBlock(
+                    filters=current_filters,
+                    kernel_size=kernel_size,
+                    activation=activation,
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    normalization_type=block_norm,
+                    dropout_rate=dropout_rate,
+                    name=f'decoder_level_{level}_residual_block_{block_idx}'
+                )(x)
+            else:
+                x = BiasFreeConv2D(
+                    filters=current_filters,
+                    kernel_size=kernel_size,
+                    activation=activation,
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    use_batch_norm=True,
+                    normalization_type=block_norm,
+                    dropout_rate=dropout_rate,
+                    name=f'decoder_level_{level}_conv_{block_idx}'
+                )(x)
+
+        # =====================================================================
+        # DEEP SUPERVISION OUTPUT (if enabled and not the final level)
+        # =====================================================================
+
+        if enable_deep_supervision and level > 0:
+            # Create supervision output at current scale from a branch
+            # The supervision head is IN SCOPE for `block_normalization` (unlike
+            # ConvUNext's, which documents its head LayerNorm as deliberately out of
+            # scope). It feeds gradient straight into the decoder, so leaving it on stock
+            # BN while every block used BiasFreeBatchNorm made that gradient
+            # scale-dependent. `dropout_rate` is forwarded for the same reason.
+            supervision_branch = BiasFreeConv2D(
+                filters=initial_filters,
+                kernel_size=3,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                use_batch_norm=True,
+                normalization_type=block_norm,
+                dropout_rate=dropout_rate,
+                name=f'supervision_intermediate_level_{level}'
+            )(x)
+
+            supervision_output = BiasFreeConv2D(
+                filters=output_channels,
+                kernel_size=1,
+                activation=final_activation,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                use_batch_norm=False,
+                name=f'supervision_output_level_{level}'
+            )(supervision_branch)
+
+            deep_supervision_outputs.append(supervision_output)
+
+            logger.info(f"Added deep supervision output at level {level} "
+                       f"with shape: {supervision_output.shape}")
+
+    return x, deep_supervision_outputs
+
+def _build_final_projection(
+        x: keras.KerasTensor,
+        output_channels: int,
+        final_activation: Union[str, callable],
+        kernel_initializer: Union[str, keras.initializers.Initializer],
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+        final_projection_groups: int,
+) -> keras.KerasTensor:
+    """
+    Build the primary inference output: a bias-free 1x1 projection to `output_channels`.
+
+    Args mirror the identically-named parameters of `create_bfunet_denoiser`.
+
+    Returns:
+        KerasTensor, the final output, named 'final_output' on BOTH branches.
+
+    Raises:
+        ValueError: If `final_projection_groups > 1` does not divide both the incoming
+            channel count and `output_channels`.
+    """
+    # Final convolution to output channels (no batch norm, custom activation).
+    # OFF (final_projection_groups==1): the original bias-free 1x1 (byte-identical).
+    # ON (>1): a grouped bias-free Conv2D so each output group reads a disjoint feature
+    # group (groups==output_channels -> one group per color channel).
+    if final_projection_groups == 1:
+        final_output = BiasFreeConv2D(
+            filters=output_channels,
+            kernel_size=1,
+            activation=final_activation,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            use_batch_norm=False,
+            name='final_output'
+        )(x)
+    else:
+        in_ch = x.shape[-1]
+        if in_ch % final_projection_groups != 0 or output_channels % final_projection_groups != 0:
+            raise ValueError(
+                f"final_projection_groups={final_projection_groups} must divide BOTH the "
+                f"final-projection input channels ({in_ch}) and output_channels "
+                f"({output_channels}). Pick a group count dividing both, or use 1 (ungrouped)."
+            )
+        final_output = keras.layers.Conv2D(
+            filters=output_channels,
+            kernel_size=1,
+            groups=final_projection_groups,
+            activation=final_activation,
+            use_bias=False,  # Bias-free
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name='final_output'
+        )(x)
+
+    return final_output
+
+# ---------------------------------------------------------------------
 # Core Model Creation Function
 # ---------------------------------------------------------------------
 
@@ -253,383 +805,103 @@ def create_bfunet_denoiser(
         ... )
     """
 
-    # Input validation
-    if not isinstance(input_shape, tuple) or len(input_shape) != 3:
-        raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
-
-    if depth < 2:
-        raise ValueError(f"depth must be at least 2, got {depth}")
-
-    if initial_filters <= 0:
-        raise ValueError(f"initial_filters must be positive, got {initial_filters}")
-
-    if filter_multiplier < 1:
-        raise ValueError(f"filter_multiplier must be at least 1, got {filter_multiplier}")
-
-    if blocks_per_level <= 0:
-        raise ValueError(f"blocks_per_level must be positive, got {blocks_per_level}")
-
-    if high_freq_blocks < 0:
-        raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
-
-    # DECISION plan_2026-07-04_58ac8e73/D-002: additive ConvUNeXt-parity features. Every
-    # new kwarg defaults to a byte-identical no-op; the OFF path reproduces the original
-    # plain U-Net exactly (same layer names/ops) so the ~30 existing tests + bfunet_conditional
-    # stay green. Do NOT change default behavior.
-    if block_normalization not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
-        raise ValueError(
-            "block_normalization must be 'batchnorm', 'layernorm' or 'bias_free_batchnorm', "
-            f"got {block_normalization}")
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
-    # BiasFreeBatchNorm inside a bias-free denoiser. `block_norm` -- NOT the raw
-    # `block_normalization` argument -- is what every block, and the deep-supervision head,
-    # must receive: the raw value reaches stock BatchNormalization, whose moving_mean
-    # subtraction breaks f(a*x)=a*f(x) once training has moved it off zero. See decisions.md
-    # D-020 and the anchor in layers/bias_free_conv2d.py.
-    block_norm = resolve_denoiser_normalization(block_normalization)
-    if downsample_pool_type not in ('max', 'average'):
-        raise ValueError(
-            f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}")
-    if final_projection_groups < 1:
-        raise ValueError(f"final_projection_groups must be >= 1, got {final_projection_groups}")
-    if not (0.0 <= dropout_rate < 1.0):
-        raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
+    block_norm = _validate_bfunet_args(
+        input_shape=input_shape,
+        depth=depth,
+        initial_filters=initial_filters,
+        filter_multiplier=filter_multiplier,
+        blocks_per_level=blocks_per_level,
+        high_freq_blocks=high_freq_blocks,
+        block_normalization=block_normalization,
+        downsample_pool_type=downsample_pool_type,
+        final_projection_groups=final_projection_groups,
+        dropout_rate=dropout_rate,
+    )
 
     # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
-    # Optional frozen Gabor stem (default OFF -> stem_input is inputs, a no-op). Reuses the
-    # shared bias-free gabor bank + mandatory 1x1 projection (mirrors bfconvunext).
-    if use_gabor_stem:
-        gabor = create_gabor_depthwise_conv2d(
-            filters=gabor_filters,
-            kernel_size=gabor_kernel_size,
-            activation=gabor_activation,
-            strides=1,
-            padding='same',
-            use_bias=False,
-            trainable=False,
-            name='gabor_stem',
-        )(inputs)
-        if gabor_stem_projection:
-            stem_input = keras.layers.Conv2D(
-                filters=initial_filters,
-                kernel_size=1,
-                use_bias=False,  # Bias-free projection
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                name='gabor_stem_projection',
-            )(gabor)
-        else:
-            gabor_out_ch = input_shape[-1] * gabor_filters
-            if gabor_out_ch != initial_filters:
-                raise ValueError(
-                    "gabor_stem_projection=False requires input_channels * gabor_filters == "
-                    f"initial_filters, but {input_shape[-1]} * {gabor_filters} = {gabor_out_ch} "
-                    f"!= initial_filters({initial_filters}). Match them, or keep projection on."
-                )
-            stem_input = gabor
-        logger.info(f"Frozen Gabor stem enabled: filters={gabor_filters}, "
-                    f"kernel_size={gabor_kernel_size}, projection={gabor_stem_projection}")
-    else:
-        stem_input = inputs
+    stem_input = _build_gabor_stem(
+        inputs=inputs,
+        input_shape=input_shape,
+        use_gabor_stem=use_gabor_stem,
+        gabor_filters=gabor_filters,
+        gabor_kernel_size=gabor_kernel_size,
+        gabor_activation=gabor_activation,
+        gabor_stem_projection=gabor_stem_projection,
+        initial_filters=initial_filters,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+    )
 
     # Calculate filter sizes for each level (int() keeps a float filter_multiplier safe;
     # for the default int multiplier this is a no-op).
     filter_sizes = [int(initial_filters * (filter_multiplier ** i)) for i in range(depth + 1)]
 
-    # Storage for skip connections and deep supervision outputs
-    skip_connections: List[keras.layers.Layer] = []
-    deep_supervision_outputs: List[keras.layers.Layer] = []
-
-    # =========================================================================
-    # ENCODER PATH (Contracting)
-    # =========================================================================
-
-    x = stem_input
-    logger.info(f"Building encoder path with {depth} levels")
-
-    for level in range(depth):
-        current_filters = filter_sizes[level]
-        logger.info(f"Encoder level {level}: {current_filters} filters")
-
-        # Convolution blocks at current resolution
-        for block_idx in range(blocks_per_level):
-            if level == 0 and block_idx == 0:
-                # first level
-                x = BiasFreeConv2D(
-                    filters=current_filters,
-                    kernel_size=initial_kernel_size,
-                    activation=activation,
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    use_batch_norm=True,
-                    normalization_type=block_norm,
-                    dropout_rate=dropout_rate,
-                    name=f'encoder_level_{level}_conv_{block_idx}'
-                )(x)
-            else:
-                if use_residual_blocks:
-                    x = BiasFreeResidualBlock(
-                        filters=current_filters,
-                        kernel_size=kernel_size,
-                        activation=activation,
-                        kernel_initializer=kernel_initializer,
-                        kernel_regularizer=kernel_regularizer,
-                        normalization_type=block_norm,
-                        dropout_rate=dropout_rate,
-                        name=f'encoder_level_{level}_residual_block_{block_idx}'
-                    )(x)
-                else:
-                    x = BiasFreeConv2D(
-                        filters=current_filters,
-                        kernel_size=kernel_size,
-                        activation=activation,
-                        kernel_initializer=kernel_initializer,
-                        kernel_regularizer=kernel_regularizer,
-                        use_batch_norm=True,
-                        normalization_type=block_norm,
-                        dropout_rate=dropout_rate,
-                        name=f'encoder_level_{level}_conv_{block_idx}'
-                    )(x)
-
-        # Skip connection + downsample. ALL levels route through the DownsampleAndSkip
-        # Layer so the pool-type / Laplacian-pyramid swap lives in one place. The last
-        # level's pool feeds the bottleneck and keeps the original name
-        # 'bottleneck_downsample'. The junction Layer WRAPS the pooling/pyramid op, so
-        # the caller-visible name now belongs to the wrapper and the inner op is named
-        # '<name>_pool' / '<name>_pyramid' (accepted graph change C-2). The returned
-        # order is (skip, downsampled) on both paths -- do NOT swap it.
-        junction_name = (
-            f'encoder_downsample_{level}' if level < depth - 1
-            else 'bottleneck_downsample'
-        )
-        skip, x = DownsampleAndSkip(
-            use_laplacian_pyramid=use_laplacian_pyramid,
-            laplacian_kernel_size=laplacian_kernel_size,
-            pool_type=downsample_pool_type,
-            # bfunet is unconditionally bias-free, and `DownsampleAndSkip.use_bias`
-            # (added for its learned 'strided_conv' branch) is READ BY THE TRAINERS'
-            # compliance sweep -- `train/bfunet/train_unet_denoiser.py:198` walks
-            # `_flatten_layers()` for any layer whose `use_bias` is truthy. Leaving the
-            # constructor default (True) makes every junction report as a bias offender
-            # even though the pooling branch has no weights at all. Keep this explicit.
-            use_bias=False,
-            name=junction_name,
-        )(x)
-
-        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
-        # high-frequency band with N bias-free residual blocks before it becomes the
-        # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
-        # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
-        # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
-        # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
-        # there is no high band and this would rename/insert layers into the raw-skip path.
-        # The high band is channel-preserving, so filters=current_filters is shape-safe.
-        if high_freq_blocks > 0 and use_laplacian_pyramid:
-            for hf_idx in range(high_freq_blocks):
-                skip = BiasFreeResidualBlock(
-                    filters=current_filters,
-                    kernel_size=kernel_size,
-                    activation=activation,
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    normalization_type=block_norm,
-                    dropout_rate=dropout_rate,
-                    name=f'skip_highfreq_block_{level}_{hf_idx}'
-                )(skip)
-
-        skip_connections.append(skip)
-
-    # =========================================================================
-    # BOTTLENECK
-    # =========================================================================
-
-    bottleneck_filters = filter_sizes[depth]
-    logger.info(f"Building bottleneck with {bottleneck_filters} filters")
-
-    # NOTE: the downsample INTO the bottleneck is produced by the last encoder-loop
-    # iteration above (named 'bottleneck_downsample'), so there is no separate pool here.
-
-    # Bottleneck convolution blocks
-    for block_idx in range(blocks_per_level):
-        if use_residual_blocks:
-            x = BiasFreeResidualBlock(
-                filters=bottleneck_filters,
-                kernel_size=kernel_size,
-                activation=activation,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                normalization_type=block_norm,
-                dropout_rate=dropout_rate,
-                name=f'bottleneck_residual_block_{block_idx}'
-            )(x)
-        else:
-            x = BiasFreeConv2D(
-                filters=bottleneck_filters,
-                kernel_size=kernel_size,
-                activation=activation,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                use_batch_norm=True,
-                normalization_type=block_norm,
-                dropout_rate=dropout_rate,
-                name=f'bottleneck_conv_{block_idx}'
-            )(x)
-
-    # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
-    # latent so it can be exposed as an additional output. No-op when expose_bottleneck=False.
-    bottleneck_output = None
-    if expose_bottleneck:
-        x = keras.layers.Activation('linear', name='bottleneck')(x)
-        bottleneck_output = x
-
-    # =========================================================================
-    # DECODER PATH (Expanding) with Deep Supervision
-    # =========================================================================
-
-    logger.info(f"Building decoder path with {depth} levels")
     output_channels = input_shape[-1]
 
-    for level in range(depth - 1, -1, -1):
-        current_filters = filter_sizes[level]
-        logger.info(f"Decoder level {level}: {current_filters} filters")
+    x, skip_connections = _build_encoder_path(
+        stem_input=stem_input,
+        filter_sizes=filter_sizes,
+        depth=depth,
+        blocks_per_level=blocks_per_level,
+        kernel_size=kernel_size,
+        initial_kernel_size=initial_kernel_size,
+        activation=activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        use_residual_blocks=use_residual_blocks,
+        block_norm=block_norm,
+        dropout_rate=dropout_rate,
+        use_laplacian_pyramid=use_laplacian_pyramid,
+        laplacian_kernel_size=laplacian_kernel_size,
+        downsample_pool_type=downsample_pool_type,
+        high_freq_blocks=high_freq_blocks,
+    )
 
-        # Upsampling
-        x = keras.layers.UpSampling2D(
-            size=(2, 2),
-            interpolation='bilinear',
-            name=f'decoder_upsample_{level}'
-        )(x)
+    x, bottleneck_output = _build_bottleneck(
+        x=x,
+        filter_sizes=filter_sizes,
+        depth=depth,
+        blocks_per_level=blocks_per_level,
+        kernel_size=kernel_size,
+        activation=activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        use_residual_blocks=use_residual_blocks,
+        block_norm=block_norm,
+        dropout_rate=dropout_rate,
+        expose_bottleneck=expose_bottleneck,
+    )
 
-        # Get corresponding skip connection
-        skip = skip_connections[level]
+    x, deep_supervision_outputs = _build_decoder_path(
+        x=x,
+        skip_connections=skip_connections,
+        filter_sizes=filter_sizes,
+        depth=depth,
+        output_channels=output_channels,
+        initial_filters=initial_filters,
+        blocks_per_level=blocks_per_level,
+        kernel_size=kernel_size,
+        activation=activation,
+        final_activation=final_activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        use_residual_blocks=use_residual_blocks,
+        block_norm=block_norm,
+        dropout_rate=dropout_rate,
+        zero_pad_channels=zero_pad_channels,
+        enable_deep_supervision=enable_deep_supervision,
+    )
 
-        # Ensure spatial dimensions match for concatenation
-        # Handle potential size mismatches due to pooling/upsampling
-        if x.shape[1] != skip.shape[1] or x.shape[2] != skip.shape[2]:
-            # Crop or pad to match dimensions
-            target_height, target_width = skip.shape[1], skip.shape[2]
-            x = keras.layers.Resizing(
-                height=target_height,
-                width=target_width,
-                interpolation='bilinear',
-                name=f'decoder_resize_{level}'
-            )(x)
-
-        # Merge skip connection. OFF (default): Concatenate (byte-identical). ON
-        # (zero_pad_channels): parameter-free channel match — slice the upsampled branch
-        # to current_filters and ADD the (current_filters) skip. Bias-free either way.
-        if zero_pad_channels:
-            x = keras.layers.Add(name=f'decoder_add_{level}')(
-                [skip, MatchChannels(current_filters, name=f'decoder_match_{level}')(x)]
-            )
-        else:
-            x = keras.layers.Concatenate(
-                axis=-1,
-                name=f'decoder_concat_{level}'
-            )([skip, x])
-
-        # Convolution blocks after merging
-        for block_idx in range(blocks_per_level):
-            if use_residual_blocks:
-                x = BiasFreeResidualBlock(
-                    filters=current_filters,
-                    kernel_size=kernel_size,
-                    activation=activation,
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    normalization_type=block_norm,
-                    dropout_rate=dropout_rate,
-                    name=f'decoder_level_{level}_residual_block_{block_idx}'
-                )(x)
-            else:
-                x = BiasFreeConv2D(
-                    filters=current_filters,
-                    kernel_size=kernel_size,
-                    activation=activation,
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    use_batch_norm=True,
-                    normalization_type=block_norm,
-                    dropout_rate=dropout_rate,
-                    name=f'decoder_level_{level}_conv_{block_idx}'
-                )(x)
-
-        # =====================================================================
-        # DEEP SUPERVISION OUTPUT (if enabled and not the final level)
-        # =====================================================================
-
-        if enable_deep_supervision and level > 0:
-            # Create supervision output at current scale from a branch
-            # The supervision head is IN SCOPE for `block_normalization` (unlike
-            # ConvUNext's, which documents its head LayerNorm as deliberately out of
-            # scope). It feeds gradient straight into the decoder, so leaving it on stock
-            # BN while every block used BiasFreeBatchNorm made that gradient
-            # scale-dependent. `dropout_rate` is forwarded for the same reason.
-            supervision_branch = BiasFreeConv2D(
-                filters=initial_filters,
-                kernel_size=3,
-                activation=activation,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                use_batch_norm=True,
-                normalization_type=block_norm,
-                dropout_rate=dropout_rate,
-                name=f'supervision_intermediate_level_{level}'
-            )(x)
-
-            supervision_output = BiasFreeConv2D(
-                filters=output_channels,
-                kernel_size=1,
-                activation=final_activation,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                use_batch_norm=False,
-                name=f'supervision_output_level_{level}'
-            )(supervision_branch)
-
-            deep_supervision_outputs.append(supervision_output)
-
-            logger.info(f"Added deep supervision output at level {level} "
-                       f"with shape: {supervision_output.shape}")
-
-    # =========================================================================
-    # FINAL OUTPUT LAYER (Primary inference output)
-    # =========================================================================
-
-    # Final convolution to output channels (no batch norm, custom activation).
-    # OFF (final_projection_groups==1): the original bias-free 1x1 (byte-identical).
-    # ON (>1): a grouped bias-free Conv2D so each output group reads a disjoint feature
-    # group (groups==output_channels -> one group per color channel).
-    if final_projection_groups == 1:
-        final_output = BiasFreeConv2D(
-            filters=output_channels,
-            kernel_size=1,
-            activation=final_activation,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            use_batch_norm=False,
-            name='final_output'
-        )(x)
-    else:
-        in_ch = x.shape[-1]
-        if in_ch % final_projection_groups != 0 or output_channels % final_projection_groups != 0:
-            raise ValueError(
-                f"final_projection_groups={final_projection_groups} must divide BOTH the "
-                f"final-projection input channels ({in_ch}) and output_channels "
-                f"({output_channels}). Pick a group count dividing both, or use 1 (ungrouped)."
-            )
-        final_output = keras.layers.Conv2D(
-            filters=output_channels,
-            kernel_size=1,
-            groups=final_projection_groups,
-            activation=final_activation,
-            use_bias=False,  # Bias-free
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name='final_output'
-        )(x)
+    final_output = _build_final_projection(
+        x=x,
+        output_channels=output_channels,
+        final_activation=final_activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        final_projection_groups=final_projection_groups,
+    )
 
     # =========================================================================
     # MODEL CREATION
@@ -687,6 +959,7 @@ def create_bfunet_denoiser(
     logger.info(f"Total parameters: {model.count_params():,}")
 
     return model
+
 
 # ---------------------------------------------------------------------
 # Pretrained Weights Functions
