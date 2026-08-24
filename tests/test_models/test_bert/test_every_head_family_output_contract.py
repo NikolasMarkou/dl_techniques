@@ -75,6 +75,10 @@ NUM_CLASSES = 3
 # rows' 32000 is `NLPTaskConfig`'s default vocabulary size.
 _QA_DICT = {"start_logits": (None, None), "end_logits": (None, None)}
 
+# Sentinel for a task type that is reachable through `get_head_class` but that
+# `create_bert_with_head` deliberately REFUSES to build.
+RAISES = "RAISES"
+
 EXPECTED_CONTRACT = {
     # TokenClassificationHead -- one logit vector per token
     NLPTaskType.TOKEN_CLASSIFICATION: (None, None, NUM_CLASSES),
@@ -108,10 +112,12 @@ EXPECTED_CONTRACT = {
     NLPTaskType.TEXT_SUMMARIZATION: (None, None, 32000),
     # TEXT_COMPLETION used to RAISE here; see the D-022 anchor in task_types.py
     NLPTaskType.TEXT_COMPLETION: (None, None, 32000),
-    # MultipleChoiceHead -- see test_multiple_choice_is_not_silently_wrong.py.
-    # This factory feeds it a token sequence, so `logits` is one score per
-    # TOKEN. The shape is pinned here as a FACT, not an endorsement.
-    NLPTaskType.MULTIPLE_CHOICE: (None, None),
+    # MultipleChoiceHead -- REFUSED by the factory (step 13.3, D-024). It is
+    # reachable through get_head_class but cannot be built here, because this
+    # factory can only feed it a token sequence. `RAISES` is the sentinel; the
+    # message itself is pinned by
+    # tests/test_models/test_bert/test_sequence_length_and_multiple_choice.py.
+    NLPTaskType.MULTIPLE_CHOICE: RAISES,
 }
 
 
@@ -154,9 +160,14 @@ def test_the_output_contract_of_every_reachable_task_type(task_type):
         f"{task_type.name} is reachable through get_head_class but has no row "
         "in EXPECTED_CONTRACT; add one with its MEASURED contract"
     )
+    expected = EXPECTED_CONTRACT[task_type]
+    if expected is RAISES:
+        with pytest.raises(ValueError):
+            _build(task_type)
+        return
+
     model = _build(task_type)
     actual = _describe(model.output)
-    expected = EXPECTED_CONTRACT[task_type]
 
     assert actual == expected, (
         f"{task_type.name} ({get_head_class(task_type).__name__}) output "
@@ -186,7 +197,9 @@ def test_the_two_dict_families_are_exactly_the_span_heads():
     # logits-bearing dicts, the table-reading version stayed GREEN while three
     # families had rejoined the dict set.
     dict_families = sorted(
-        t.name for t in REACHABLE if isinstance(_build(t).output, dict)
+        t.name
+        for t in REACHABLE
+        if EXPECTED_CONTRACT[t] is not RAISES and isinstance(_build(t).output, dict)
     )
     assert dict_families == ["QUESTION_ANSWERING", "SPAN_EXTRACTION"], (
         f"the set of dict-output families changed to {dict_families}. If the "

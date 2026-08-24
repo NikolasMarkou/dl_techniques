@@ -79,7 +79,7 @@ from dl_techniques.layers.transformers import (
 )
 from dl_techniques.layers.activations import resolve_activation
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
 
 # ---------------------------------------------------------------------
 
@@ -669,6 +669,8 @@ class BERT(keras.Model):
         else:
             input_ids = inputs
 
+        self._validate_sequence_length(input_ids)
+
         embedding_output = self.embeddings(
             input_ids=input_ids,
             token_type_ids=token_type_ids,
@@ -715,6 +717,62 @@ class BERT(keras.Model):
                 else keras.ops.ones_like(input_ids)
             )
         }
+
+    def _validate_sequence_length(
+        self, input_ids: keras.KerasTensor
+    ) -> None:
+        """Reject a sequence longer than the learned position table.
+
+        :param input_ids: The resolved token-id tensor, rank >= 2, whose LAST
+            axis is the sequence.
+        :type input_ids: keras.KerasTensor
+        :raises ValueError: if the sequence length is statically known and
+            exceeds ``max_position_embeddings``.
+
+        Returns silently when the length is not statically known (a symbolic
+        trace over ``keras.Input(shape=(None,))``); there is nothing to check
+        at that point and the concrete-shape call that follows will do it.
+        """
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-023
+        # WITHOUT this check the model was silently wrong, and DIFFERENTLY
+        # wrong per device. MEASURED at `max_position_embeddings=16`, seq_len
+        # 17: on GPU the forward returned a finite result with no warning (an
+        # out-of-range position gather reads zeros), while on CPU the same call
+        # raised `InvalidArgumentError` from `Embedding.call()`. A silent wrong
+        # answer on the device this repo trains on is the worst of the three
+        # outcomes, so it is converted into a loud one here.
+        #
+        # This is the RIGHT home for it, which was re-derived rather than
+        # assumed. `BERT.call` is on EVERY entry path: MEASURED, Keras 3
+        # executes a Functional graph by calling each operation's `call()` with
+        # real tensors, so `create_bert_with_head(...).predict(x)` reaches this
+        # line with a fully static `TensorShape([2, 17])` even though the graph
+        # was BUILT over `keras.Input(shape=(None,))`. Do NOT move this into
+        # `create_bert_with_head`: the factory only ever sees the symbolic
+        # `None` sequence axis and could not check anything, and the bare
+        # `BERT(...)` path would lose the guard entirely.
+        #
+        # Do NOT "fix" the underlying gather by clamping or wrapping the
+        # position ids -- that would keep the wrong answer and hide it.
+        shape = getattr(input_ids, "shape", None)
+        if shape is None or len(shape) < 2:
+            return
+        try:
+            seq_len = int(shape[-1])
+        except TypeError:
+            # Dynamic sequence axis (symbolic build). Nothing to check.
+            return
+
+        if seq_len > self.max_position_embeddings:
+            raise ValueError(
+                f"seq_len={seq_len} exceeds max_position_embeddings="
+                f"{self.max_position_embeddings}. BERT's position embeddings "
+                f"are a learned table of {self.max_position_embeddings} rows, "
+                "so there is no embedding for position "
+                f"{self.max_position_embeddings}. Truncate the input to "
+                f"{self.max_position_embeddings} tokens, or build the model "
+                f"with max_position_embeddings>={seq_len}."
+            )
 
     def load_pretrained_weights(
         self,
@@ -1137,6 +1195,10 @@ def create_bert_with_head(
     :param head_config_overrides: Optional dictionary to override default head
         configuration. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
+    :raises ValueError: if ``task_config.task_type`` is
+        ``NLPTaskType.MULTIPLE_CHOICE``. That head needs a
+        ``(batch, num_choices, hidden)`` input this factory cannot produce; see
+        the ``D-024`` anchor in the body for the actionable alternative.
     :return: A complete `keras.Model` ready for the specified task.
 
         **All THREE inputs are required**, by name:
@@ -1167,8 +1229,11 @@ def create_bert_with_head(
         unwrapped to that bare tensor -- this includes `{"embeddings": ...}`,
         not only `{"logits": ...}`.
 
-        So of the 24 reachable task types, **22 give a bare tensor and 2 give a
-        dict**. The two are `QUESTION_ANSWERING` and `SPAN_EXTRACTION`, which
+        So of the 23 task types this factory BUILDS, **21 give a bare tensor
+        and 2 give a dict**. (24 task types are reachable through
+        `get_head_class`; `MULTIPLE_CHOICE` is refused here with a
+        `ValueError` -- see the D-024 anchor above.)
+        The two are `QUESTION_ANSWERING` and `SPAN_EXTRACTION`, which
         keep `{"start_logits": ..., "end_logits": ...}` because those are
         genuinely independent tensors. Worth calling out explicitly, because
         rule (2) is easy to miss: the three `TextSimilarityHead` tasks
@@ -1218,6 +1283,31 @@ def create_bert_with_head(
         cache_dir=cache_dir,
         **bert_config_overrides
     )
+
+    # DECISION plan-2026-08-23T203721-009b7ccf/D-024
+    # MULTIPLE_CHOICE builds without error here and produces a SEMANTICALLY
+    # WRONG graph, which is worse than a raise. `MultipleChoiceHead` expects
+    # `(batch, num_choices, hidden)` and scores each CHOICE; this factory can
+    # only ever feed it the token sequence `(batch, seq_len, hidden)`, so
+    # MEASURED, `logits` comes out `(None, None)` -- one score per TOKEN -- and
+    # `num_classes` is ignored entirely. Step 4's bare-tensor contract made
+    # that output look MORE legitimate, not less. `get_head_class` in
+    # `layers/heads/nlp/factory.py` already set the precedent for this subsystem
+    # ("NO SILENT FALLBACK"); refusing here matches it.
+    # Do NOT relax this to a warning: a warning in a factory is a silent wrong
+    # answer with a log line. The head itself is NOT deprecated -- build it
+    # directly with `create_nlp_head` and feed it a rank-3 choices tensor.
+    if task_config.task_type == NLPTaskType.MULTIPLE_CHOICE:
+        raise ValueError(
+            "create_bert_with_head cannot build a MULTIPLE_CHOICE model. "
+            "MultipleChoiceHead scores a (batch, num_choices, hidden) tensor, "
+            "but this factory feeds the head the token sequence "
+            "(batch, seq_len, hidden), which yields one score per TOKEN and "
+            "ignores num_classes entirely. Build the encoder and the head "
+            "separately: encode each choice with BERT, stack the pooled "
+            "representations into (batch, num_choices, hidden), and call "
+            "create_nlp_head(task_config=...) on that."
+        )
 
     task_head = create_nlp_head(
         task_config=task_config,
