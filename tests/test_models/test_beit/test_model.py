@@ -21,6 +21,7 @@ Two costs are traded deliberately:
   on ``training is False`` -- and every block here carries a non-zero drop-path rate.
 """
 
+import json
 import os
 import tempfile
 
@@ -422,6 +423,41 @@ class TestBeitModelSerialization:
             if key in ('name', 'trainable', 'dtype'):
                 continue
             assert getattr(clone, 'input_shape_config' if key == 'input_shape' else key) == value
+
+    def test_from_config_restores_patch_size_tuple_after_a_real_json_cycle(self):
+        """``from_config`` earns its place on exactly one field: ``patch_size``.
+
+        The cycle is a REAL one -- ``json.dumps``/``json.loads`` -- because that is what
+        strips tuple-ness; handing ``get_config()``'s dict straight back to
+        ``from_config`` would pass with or without the override and prove nothing.
+        Measured without the override at 59011a9d: ``patch_size`` came back a
+        ``keras.src.utils.tracking.TrackedList`` and ``get_config()`` stopped being a
+        fixed point. ``input_shape`` is deliberately NOT the subject: ``__init__``
+        already coerces it, so that arm is vacuous by measurement.
+        """
+        model = _tiny(patch_size=(PATCH, PATCH))
+        config = model.get_config()
+        assert type(config['patch_size']) is tuple
+
+        reloaded = BeitModel.from_config(json.loads(json.dumps(config)))
+        assert type(reloaded.patch_size) is tuple, (
+            f"patch_size came back as {type(reloaded.patch_size).__name__}"
+        )
+        # get_config is a fixed point again: round 2 emits what round 1 emitted.
+        assert reloaded.get_config()['patch_size'] == config['patch_size']
+        assert type(reloaded.get_config()['patch_size']) is tuple
+
+    def test_from_config_leaves_an_int_patch_size_an_int(self):
+        """The override must not "helpfully" widen an int into a pair.
+
+        A directly-constructed ``patch_size=16`` model emits ``16``; a deserialized one
+        must emit ``16`` too, or two models with identical behaviour disagree on their
+        own config.
+        """
+        config = _tiny(patch_size=PATCH).get_config()
+        reloaded = BeitModel.from_config(json.loads(json.dumps(config)))
+        assert reloaded.patch_size == PATCH
+        assert type(reloaded.patch_size) is int
 
     def test_keras_roundtrip_preserves_values(self):
         """Shapes/counts agreeing is NOT evidence; compare the OUTPUT values."""

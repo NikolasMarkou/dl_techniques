@@ -756,6 +756,25 @@ class BeitModel(keras.Model):
         })
         return config
 
+    # DECISION plan-2026-08-24T074054-247151fd/D-008
+    # This override is NOT a `cls(**config)` pass-through -- it exists for exactly one
+    # measured field. `__init__` coerces `input_shape` to a tuple itself (`:373`), so a
+    # JSON round trip already returns a tuple there and normalising it here would be
+    # dead code. `self.patch_size` is stored RAW (`:375`), so a config that went through
+    # JSON hands `[16, 16]` back and Keras attribute tracking wraps it into a
+    # `TrackedList`: `get_config()` then stops being a fixed point (round 1 emits a
+    # tuple, round 2 a list). WHAT NOT TO DO: do not widen this to normalise every
+    # field "for symmetry" -- an override that restores nothing is the pass-through red
+    # flag. An `int` patch_size is deliberately left an `int`, so the emitted config is
+    # identical to what a directly-constructed model emits.
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BeitModel":
+        config = dict(config)
+        patch_size = config.get("patch_size")
+        if isinstance(patch_size, (list, tuple)):
+            config["patch_size"] = tuple(int(v) for v in patch_size)
+        return cls(**config)
+
     @classmethod
     def from_variant(
             cls,
