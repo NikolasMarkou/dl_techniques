@@ -205,7 +205,7 @@ def test_the_two_dict_families_are_exactly_the_span_heads():
         f"the set of dict-output families changed to {dict_families}. If the "
         "similarity families are back, the unwrap was restricted to "
         "logits-bearing dicts -- that was considered and rejected; see the "
-        "D-018 anchor in models/bert/bert.py"
+        "D-018 anchor in models/bert/model.py"
     )
     for name in dict_families:
         task_type = NLPTaskType[name]

@@ -2558,7 +2558,7 @@ _WEIGHT_LOAD_HANDLER_WAIVERS = {
     # report an unwaived R-049 offender, which is this deletion's RED-proof.
     # See decisions.md D-122.
     (
-        "models/bert/bert.py",
+        "models/bert/model.py",
         "from_variant",
         "(IOError, OSError, ValueError)",
     ): "dead handler -- _download_weights raises only NotImplementedError",
@@ -3903,7 +3903,7 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/dino/dino_v3.py", "create_dino_v3"): "ROUTE step 19 -- reject_input_shape + `if pretrained: raise` + kwargs patching",
     # (b) Optional-argument patching into **kwargs before delegating. Small, but
     # it is logic the callee's own signature should be expressing.
-    ("models/bert/bert.py", "create_bert"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
+    ("models/bert/model.py", "create_bert"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
     ("models/gpt2/gpt2.py", "create_gpt2"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
     ("models/tree_transformer/model.py", "create_tree_transformer"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",
     ("models/wave_field/model.py", "create_wave_field_llm"): "ROUTE step 19 -- `if vocab_size is not None: kwargs[...]` before delegating",

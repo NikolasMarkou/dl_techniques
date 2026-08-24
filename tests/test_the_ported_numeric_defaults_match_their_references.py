@@ -240,7 +240,7 @@ def _dino_initializer_stddev() -> float:
 
 
 def _bert_default_hidden_act() -> str:
-    from dl_techniques.models.bert.bert import BERT
+    from dl_techniques.models.bert.model import BERT
 
     return BERT.DEFAULT_HIDDEN_ACT
 
@@ -401,7 +401,7 @@ def _grid():
 
 
 def _built_bert_ffn_activations():
-    from dl_techniques.models.bert.bert import BERT
+    from dl_techniques.models.bert.model import BERT
 
     ids = np.random.RandomState(0).randint(0, 64, size=(2, 8))
     inputs = {
