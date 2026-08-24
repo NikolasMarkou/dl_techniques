@@ -154,8 +154,9 @@ CALLER_KWARG_SETS = [
     ('initial_filters', 'input_shape'),
     ('input_shape',),]
 
-# The three sets that are actually BUILT (E2). The other 35 are bind-checked only
-# (E1): building all 38 real Keras graphs costs ~20 minutes for no extra information
+# The three sets that are actually BUILT (E2); the NAMES of all 38 are covered by the
+# single set-difference assertion (E1). Building all 38 real Keras graphs costs ~20
+# minutes for no extra information
 # -- every one of them differs from these three only in the VALUE of a parameter
 # `create_convunext` already declares, and the delegation contract is about NAMES.
 # What building buys, and binding cannot, is proof that the pinned `use_bias=False` /
@@ -376,9 +377,11 @@ class TestEveryLiveCallerKwargSetStillBinds:
     DISTINCT ones recorded at RUNTIME across 105 real calls; a static harvest could
     not resolve the seven `**splat` helpers the callers use.
 
-    Split deliberately: all 38 are BIND-checked (E1, microseconds each), three are
-    actually BUILT (E2). See the comment on BUILD_SUBSET for why building all 38 buys
-    no extra information.
+    Split deliberately: the union of all 38 name sets is checked against
+    `create_convunext`'s declared parameters in ONE set difference (E1), and three
+    sets are actually BUILT (E2). See the comment on BUILD_SUBSET for why building
+    all 38 buys no extra information, and the E1 test's own docstring for why it is
+    one assertion rather than 38 parametrizations.
     """
 
     def test_build_subset_is_drawn_from_the_harvested_sets(self) -> None:
@@ -390,25 +393,30 @@ class TestEveryLiveCallerKwargSetStillBinds:
                 f"be building a call nobody makes"
             )
 
-    @pytest.mark.parametrize("names", CALLER_KWARG_SETS, ids=lambda s: '+'.join(s))
-    def test_caller_signature_binds(self, names: Tuple[str, ...]) -> None:
-        """Bind at BOTH ends: the wrapper accepts it, and the callee declares it.
+    def test_every_harvested_caller_name_is_declared_by_the_callee(self) -> None:
+        """ONE set difference over the union of all 38 harvested sets.
 
-        The wrapper-side bind alone is nearly vacuous under `**kwargs` (everything
-        binds). The callee-side bind -- against `create_convunext` with the wrapper's
-        pinned arguments ALREADY supplied -- is the one with teeth: it fails on an
-        unknown name AND on a collision with a pin.
+        This replaced 38 parametrized bind checks on 2026-08-24, and the reason is
+        measured, not stylistic: those 38 all stayed GREEN under a mutation of the
+        file they exist to guard (the `use_bias=False` pin deleted from
+        `bfconvunext.create_convunext_denoiser`), because they bound against
+        `create_convunext` with the pins written as HARDCODED LITERALS -- a mirror of
+        the implementation, not an oracle over it. Re-verified at iter-2/step-5.4
+        before the deletion: 38 passed under the mutation, while
+        `test_caller_signature_builds` and `TestPinnedKwargsCannotBeOverridden` went
+        red. Those are kept; a guard that cannot fail is not kept.
+
+        What the 38 did guard is real and survives here at full strength: under a
+        `**kwargs` delegation a caller's keyword binds if and only if
+        `create_convunext` DECLARES it, so a parameter disappearing or being renamed
+        there silently breaks a live call site. The union of the 38 runtime-harvested
+        sets is exactly the set of names that must remain declared.
         """
-        kwargs = _kwargs_for(names)
-
-        inspect.signature(create_convunext_denoiser).bind(**kwargs)
-
-        delegated = {k: v for k, v in kwargs.items() if k != 'input_shape'}
-        inspect.signature(create_convunext).bind(
-            input_shape=INPUT_SHAPE,
-            use_bias=False,
-            stem_normalization='global_response_norm',
-            **delegated,
+        harvested = {name for names in CALLER_KWARG_SETS for name in names}
+        declared = set(inspect.signature(create_convunext).parameters)
+        assert harvested - declared == set(), (
+            f"names harvested from REAL calls no longer bind on create_convunext: "
+            f"{sorted(harvested - declared)}; a live caller is broken"
         )
 
     @pytest.mark.parametrize("names", BUILD_SUBSET, ids=lambda s: '+'.join(s))
