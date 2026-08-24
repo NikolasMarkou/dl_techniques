@@ -268,7 +268,7 @@ module <the pre-move dotted path>.training_model cannot be imported.
 survives nowhere under `src/`, and writing it in prose erodes that instrument
 exactly as effectively as a real reference would.)
 
-> **Importing the SAM 2 *package* is NOT sufficient.** `SAM2/__init__.py`
+> **Importing the SAM 2 *package* is NOT sufficient.** `sam2/__init__.py`
 > imports `memory_bank` and `model` only, never `training_model`, so
 > `Custom>SAM2TrainingModel` is never entered into the registry by a package
 > import and Keras falls straight through to the failing fallback. SAM 1's and

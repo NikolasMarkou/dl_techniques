@@ -67,7 +67,7 @@ from dl_techniques.utils.activation_serialization import (
 #: The SHIPPED attention-dropout rate of SAM 1's mask-decoder transformer, and
 #: the single home of the number. Both classes below take it as their
 #: constructor default and ``SAM.MODEL_VARIANTS`` reads it from here rather than
-#: restating ``0.0``. Mirrors ``SAM2/memory_attention.DEFAULT_DROPOUT_RATE``
+#: restating ``0.0``. Mirrors ``sam2/memory_attention.DEFAULT_DROPOUT_RATE``
 #: (D-090), including the fact that the number, not just the knob, has one home.
 #: It is ``0.0`` on purpose and that is what makes the SAM 1 knob a
 #: behaviour-preserving addition: MEASURED, ``TwoWayTransformer(depth=2)``

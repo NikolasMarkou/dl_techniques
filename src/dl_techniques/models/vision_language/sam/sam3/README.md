@@ -382,7 +382,7 @@ print(type(model).__name__, len(model.weights))
 ```
 
 Import the **module**, not the package. For SAM 3 the package import happens to
-be sufficient too, because `SAM3/__init__.py` imports `training_model` — but
+be sufficient too, because `sam3/__init__.py` imports `training_model` — but
 that is not true of every sibling (SAM 2's `__init__` does not, and fails), so
 naming the defining module is the rule that holds for all three.
 

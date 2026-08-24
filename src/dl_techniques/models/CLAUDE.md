@@ -222,8 +222,9 @@ the entry is kept so the correction is not silently re-reverted.
   discriminator is child count and import weight. Do not file it as an inconsistency to fix.
 - The 4 **subfamily** inits are split: `vision/image_restoration/__init__.py` and
   `vision_language/sam/__init__.py` carry substantive docstrings that predate the restructure
-  (the SAM one documents a measured name-shadowing failure — read it before adding a
-  re-export there), while `vision/keypoints/__init__.py` and
+  (the SAM one records a name-shadowing failure that was real under the pre-restructure
+  `SAM1/ SAM2/ SAM3/` spelling and is RETIRED by the lowercase rename — read it before
+  adding a re-export there, and note that D-002, not the collision, is what keeps it empty), while `vision/keypoints/__init__.py` and
   `vision/super_resolution/__init__.py` are still 0 bytes.
 
 ### Per-leaf `__init__.py` census — re-derived 2026-08-25

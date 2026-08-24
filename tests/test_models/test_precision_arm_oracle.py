@@ -581,7 +581,7 @@ class _UntraceableModel(keras.Model):
     """Raises under ANY tracing -- the literal ``SAM.postprocess_masks`` shape.
 
     ``len()`` on a symbolic tensor is exactly what ``ops.image.resize`` does to
-    ``SAM``'s tensor ``original_size`` (``SAM/SAM1/model.py:634``), and it is
+    ``SAM``'s tensor ``original_size`` (``vision_language/sam/sam1/model.py``, ``SAM.postprocess_masks``), and it is
     why that model fails identically at ``jit_compile=False`` and ``True``.
     """
 

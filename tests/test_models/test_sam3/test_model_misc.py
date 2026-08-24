@@ -527,7 +527,7 @@ class TestSerialization:
 class TestPackageSurface:
 
     def test_the_head_is_exported_from_the_package(self):
-        from dl_techniques.models.vision_language.sam import SAM3 as sam3
+        from dl_techniques.models.vision_language.sam import sam3
         assert sam3.Sam3DotProductScoring is Sam3DotProductScoring
         assert "Sam3DotProductScoring" in sam3.__all__
 

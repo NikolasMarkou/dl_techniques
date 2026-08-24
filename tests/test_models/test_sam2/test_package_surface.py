@@ -32,9 +32,11 @@ from typing import Dict, List, Optional
 
 import pytest
 
-# The PACKAGE, aliased to keep the module object distinct from the class named
-# ``SAM2`` imported on the next line; the two differ only by case after the move.
-from dl_techniques.models.vision_language.sam import SAM2 as sam2
+# The PACKAGE. It needs no alias: the subpackage is spelled ``sam2`` and the
+# class on the next line ``SAM2``, and Python is case-sensitive, so the two
+# names coexist. Before the 2026-08-24 restructure the subpackage was ``SAM2/``
+# and this line read ``import SAM2 as sam2`` to keep them apart.
+from dl_techniques.models.vision_language.sam import sam2
 from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
 
 # ---------------------------------------------------------------------

@@ -3160,7 +3160,7 @@ class TestRealVariantForwardPass:
         F-R4 --- pin the documented per-variant counts to a MEASUREMENT.
 
         The per-variant table's single home is the ``Model Variants:`` block of
-        ``models/vision_language/sam/sam1/model.py``'s module docstring; ``SAM1/README.md`` §7
+        ``models/vision_language/sam/sam1/model.py``'s module docstring; ``sam1/README.md`` §7
         points at it rather than restating it. That table previously quoted
         reference-PyTorch figures that two of this iteration's own layout
         changes had falsified (the mask decoder was listed at 3,143,424 against
