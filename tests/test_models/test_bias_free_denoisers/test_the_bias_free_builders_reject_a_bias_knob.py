@@ -18,7 +18,10 @@ caller override and returned a model with 54 bias tensors out of the bias-free b
 The three guards:
 
 * **G1** -- `use_bias=True` RAISES on all four entry points, and the message names `use_bias`.
-* **G2** -- a default-built model has EXACTLY ZERO bias tensors, with two anti-vacuity controls.
+* **G2** -- a built model has EXACTLY ZERO bias tensors, with anti-vacuity controls: (a) on
+  all four default builds, and (b) on the non-default configurations that reach the
+  hand-written `use_bias=False` sites in `bfunet.py` (the grouped final projection and the
+  Gabor stem), which a defaults-only build cannot touch.
 * **G3** -- the two `*_variant` functions really are `**kwargs` delegators, structurally AND
   behaviourally. There was no signature-parity test between any variant/denoiser pair anywhere
   in `tests/` before this file.
@@ -151,6 +154,112 @@ def test_default_built_model_has_zero_bias_tensors(entry_point):
     offenders = [w.path for w in model.weights if 'bias' in w.path.lower()]
     assert _count_bias_tensors(model) == 0, (
         f"{entry_point} built a model with {len(offenders)} bias tensor(s): {offenders}")
+
+
+#: Configurations that reach a hardcoded-bias-freeness site the DEFAULT build never touches.
+#:
+#: Measured 2026-08-24 on `bfunet.py`: at defaults the layer named ``final_output`` is a
+#: `BiasFreeConv2D`, whose bias-freeness lives inside the layer. But `_build_final_projection`
+#: has a SECOND branch, selected by ``final_projection_groups > 1``, which builds a raw
+#: `keras.layers.Conv2D(..., use_bias=False)` -- bias-freeness written out by hand at the call
+#: site. `_build_gabor_stem` has two more such hand-written sites (the frozen Gabor bank and its
+#: 1x1 projection), reachable only via ``use_gabor_stem=True``. Flipping any of them to
+#: ``use_bias=True`` leaves a defaults-only zero-bias guard entirely GREEN.
+#:
+#: Each entry carries a `probe` layer that EXISTS ONLY on the branch it is meant to reach, so
+#: the case cannot silently degrade into another default build (see the reachability control in
+#: the test below). `raw_conv=True` additionally pins that the probe is a plain
+#: `keras.layers.Conv2D` and NOT a `BiasFreeConv2D` -- i.e. that this really is the
+#: hand-written-`use_bias` branch.
+#:
+#: `bfcnn.py` has no counterpart: it contains no raw `Conv2D` and no `use_bias` literal at all
+#: (every conv is a `BiasFreeConv2D`), so there is no non-default branch to cover there.
+#: `bfunet.py`'s remaining `use_bias=False` literal, on `DownsampleAndSkip`, is unreachable as a
+#: bias: it only binds a weight under ``pool_type='strided_conv'``, which `_validate_bfunet_args`
+#: rejects (``downsample_pool_type`` must be ``'max'`` or ``'average'``). A guard case for it
+#: would be vacuous by construction.
+BRANCH_REACHING_CONFIGS = {
+    'bfunet_grouped_final_projection': dict(
+        build=lambda: create_bfunet_denoiser(
+            input_shape=(16, 16, 2), depth=2, initial_filters=4, blocks_per_level=1,
+            final_projection_groups=2),
+        probe='final_output',
+        raw_conv=True,
+    ),
+    'bfunet_variant_grouped_final_projection': dict(
+        build=lambda: create_bfunet_variant(
+            'tiny', (16, 16, 2), initial_filters=4, blocks_per_level=1,
+            final_projection_groups=2),
+        probe='final_output',
+        raw_conv=True,
+    ),
+    'bfunet_gabor_stem_projection_on': dict(
+        build=lambda: create_bfunet_denoiser(
+            input_shape=INPUT_SHAPE, depth=2, initial_filters=4, blocks_per_level=1,
+            use_gabor_stem=True, gabor_filters=4, gabor_stem_projection=True),
+        probe='gabor_stem_projection',
+        raw_conv=True,
+    ),
+    'bfunet_gabor_stem_projection_off': dict(
+        build=lambda: create_bfunet_denoiser(
+            input_shape=INPUT_SHAPE, depth=2, initial_filters=4, blocks_per_level=1,
+            use_gabor_stem=True, gabor_filters=4, gabor_stem_projection=False),
+        probe='gabor_stem',
+        raw_conv=False,
+    ),
+}
+
+
+@pytest.mark.parametrize('config_id', sorted(BRANCH_REACHING_CONFIGS))
+def test_non_default_branches_have_zero_bias_tensors(config_id):
+    """G2(b): bias-freeness also holds on the branches a default build never selects.
+
+    The test above builds every entry point with no knobs, which is exactly why it cannot see
+    the hand-written `use_bias=False` sites listed in `BRANCH_REACHING_CONFIGS` -- all of them
+    sit behind a non-default parameter value. Measured 2026-08-24: flipping
+    `_build_final_projection`'s grouped-branch `use_bias=False` to `True` leaves all twelve
+    guards in this file green; it turns THIS test red on
+    `[bfunet_grouped_final_projection]` and `[bfunet_variant_grouped_final_projection]` while
+    the defaults-only cases stay green.
+
+    Three anti-vacuity controls run here:
+
+    1. REACHABILITY -- the built model must contain the probe layer, which exists only on the
+       branch under test, and (where `raw_conv`) that layer must be a plain
+       `keras.layers.Conv2D` rather than a `BiasFreeConv2D`. Without this, a config that
+       stopped selecting the branch would keep passing forever;
+    2. the model must have SOME weights;
+    3. the bias predicate must return > 0 on a deliberately-biased control.
+    """
+    spec = BRANCH_REACHING_CONFIGS[config_id]
+    model = spec['build']()
+
+    layer_names = [layer.name for layer in model.layers]
+    assert spec['probe'] in layer_names, (
+        f"{config_id} did not reach its branch: no layer named {spec['probe']!r} in "
+        f"{layer_names}. The configuration no longer selects the branch this case exists to "
+        f"cover, so the zero-bias assertion below would be a duplicate of the defaults test.")
+
+    if spec['raw_conv']:
+        probe_layer = model.get_layer(spec['probe'])
+        assert type(probe_layer) is keras.layers.Conv2D, (
+            f"{config_id}: layer {spec['probe']!r} is a {type(probe_layer).__name__}, not a "
+            f"plain keras.layers.Conv2D. This case exists to cover the branch whose "
+            f"bias-freeness is written at the CALL SITE; a BiasFreeConv2D here means the "
+            f"branch moved and this case is now redundant with the defaults test.")
+
+    assert len(model.weights) > 0, (
+        f"{config_id} built a model with NO weights -- the zero-bias assertion below would be "
+        f"vacuous")
+
+    control = _biased_control()
+    assert _count_bias_tensors(control) > 0, (
+        "the bias predicate cannot see a bias even on a Conv2D(use_bias=True) control; the "
+        "zero-bias assertion below would be vacuous")
+
+    offenders = [w.path for w in model.weights if 'bias' in w.path.lower()]
+    assert _count_bias_tensors(model) == 0, (
+        f"{config_id} built a model with {len(offenders)} bias tensor(s): {offenders}")
 
 
 # ---------------------------------------------------------------------
