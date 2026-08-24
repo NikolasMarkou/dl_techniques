@@ -876,21 +876,6 @@ class ResNet(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Utility Functions for Deep Supervision
-# ---------------------------------------------------------------------
-
-# Re-exported so callers of `models.resnet` get the deep-supervision helpers
-# from the same module as the model itself — `src/train/resnet/train_resnet.py`
-# imports `create_resnet` and `get_model_output_info` in one statement. The
-# import sits here rather than at the top because it is an API re-export, not a
-# dependency of the class above.
-from dl_techniques.utils.deep_supervision import (  # noqa: E402,F401
-    get_model_output_info,
-    create_inference_model_from_training_model,
-)
-
-
-# ---------------------------------------------------------------------
 
 
 def create_resnet(
