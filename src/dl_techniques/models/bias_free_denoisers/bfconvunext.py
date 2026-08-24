@@ -2,9 +2,9 @@
 
 This module is TWO things and nothing else:
 
-1. **Thin wrappers.** ``create_convunext_denoiser`` and ``create_convunext_variant``
-   keep their exact historical signatures and pin ``use_bias=False``, forwarding to
-   ``dl_techniques.models.convunext.model.create_convunext``. The architecture, every
+1. **Thin wrappers.** ``create_convunext_denoiser`` (a ``**kwargs`` delegator) and
+   ``create_convunext_variant`` (its historical signature) pin ``use_bias=False`` and
+   forward to ``dl_techniques.models.convunext.model.create_convunext``. The architecture, every
    parameter, the Laplacian-pyramid option and the three documented asymmetries of the
    bias-free arm are described ONCE, there.
 2. **The Keras REGISTRAR** (contract H-4). Importing this module is what makes

@@ -402,7 +402,7 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   `@keras.saving.register_keras_serializable` side effect, so `keras.models.load_model` can
   resolve every custom class a saved graph names. Those carry `# noqa: F401`, are
   load-bearing, and must not be swept.
-  `models/bias_free_denoisers/bfconvunext.py:47-100` is the reference case (registrar
+  `models/bias_free_denoisers/bfconvunext.py:44-87` is the reference case (registrar
   contract H-4, anchored under `plan-2026-08-19T163559-499b6f0e/D-080`): the last sweep that
   deleted its twelve "unused" imports failed 7 tests at `TestRegistrarContract`. The test to
   apply is whether a consumer needs the *name* at runtime or only the import's side effect —
