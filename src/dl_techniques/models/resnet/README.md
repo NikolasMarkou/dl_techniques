@@ -1453,6 +1453,7 @@ Train with progressively larger image sizes for better performance.
 
 ```python
 import keras
+import numpy as np
 from dl_techniques.models.resnet import ResNet
 
 def train_progressive_resize(initial_size=128, final_size=224, num_stages=3):
