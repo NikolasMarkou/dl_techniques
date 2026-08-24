@@ -329,6 +329,14 @@ change the architecture with no error.
 
 ## 5. Quick Start Guide
 
+> **Every fenced `python` block in this file was extracted from this file and executed
+> before it was committed** — all 20 of them, serially on GPU 1 (RTX 4070), 2026-08-24,
+> **20/20 exit 0** (the 18 that existed before this pass, plus the two re-derivation
+> snippets in §7 and §15.6, all re-run together after the edit). Each `# Output:` comment is the program's own captured stdout, not a
+> description of what it should print. Serially is load-bearing: co-scheduling two of
+> these on one GPU has been measured to raise
+> `FailedPreconditionError: DNN library initialization failed`.
+
 ### 5.1 A classifier in six lines
 
 ```python
@@ -385,6 +393,7 @@ clf.compile(
     metrics=["accuracy"],
 )
 print(mim.name, clf.name)
+# Output: beit_mim beit_classifier
 ```
 
 ---
@@ -454,8 +463,13 @@ precondition.
 
 ## 7. Configuration & Model Variants
 
-Parameter counts below are **measured** on the shipped code (backbone only, `224×224×3`
-input, `patch_size=16`, i.e. a 14×14 = 196-patch grid).
+Parameter counts below are **measured** on the shipped code, re-derived 2026-08-24 on
+GPU 1 (RTX 4070), at exactly this configuration: `create_beit_backbone(scale,
+(224, 224, 3), 16)` then `.build((None, 224, 224, 3))` — backbone only, no head,
+`patch_size=16`, i.e. a 14×14 = 196-patch grid. They are `count_params()`, so they
+include the non-trainable weights; BEiT has no BatchNorm, so for this model that
+distinction happens to be empty. Re-derive them with the snippet directly below the
+table rather than trusting the table.
 
 | Scale | `hidden_size` | Layers | Heads | FFN | `layer_scale_init_value` | Backbone params | Upstream? |
 |:---:|:---:|:---:|:---:|:---:|:---:|---:|:---|
@@ -463,6 +477,28 @@ input, `patch_size=16`, i.e. a 14×14 = 196-patch grid).
 | **`small`** | 384 | 12 | 6 | 1536 | 0.1 | 21,646,944 | ❌ **repo invention** — same |
 | **`base`** | 768 | 12 | 12 | 3072 | 0.1 | 85,761,216 | ✅ `microsoft/beit-base-patch16-224` |
 | **`large`** | 1024 | 24 | 16 | 4096 | **1e-5** | 303,404,544 | ✅ `microsoft/beit-large-patch16-224` (but see §15.2 for the init value) |
+
+Re-derive the `Backbone params` column:
+
+```python
+from dl_techniques.models.beit import create_beit_backbone
+
+for scale in ("tiny", "small", "base", "large"):
+    model = create_beit_backbone(scale, (224, 224, 3), 16)
+    model.build((None, 224, 224, 3))
+    print(f"{scale}: {model.count_params():,}")
+# Output: tiny: 5,515,056
+# Output: small: 21,646,944
+# Output: base: 85,761,216
+# Output: large: 303,404,544
+```
+
+> **No accuracy, throughput or convergence number appears in this table, and that is
+> deliberate.** Nothing in this repository has ever trained a BEiT to a published
+> benchmark, and a number in a README is indistinguishable from a measurement to every
+> reader. For reference numbers read the paper; for numbers about *this* code, train it
+> and measure. The columns above are architecture facts and a parameter count — both
+> re-derivable from the snippet in seconds, which is the only reason they are quoted.
 
 `tiny` and `small` exist for cheap CI and smoke runs (deviation **X-3**, §15.3). They are
 not reproductions of anything.
@@ -632,6 +668,8 @@ block = TransformerLayer(
 block.build((None, 17, 192))
 print(type(block.attention).__name__)                     # BeitAttention
 print(block(np.random.rand(2, 17, 192).astype("float32"), training=False).shape)
+# Output: BeitAttention
+# Output: (2, 17, 192)
 ```
 
 ---
@@ -671,6 +709,12 @@ with tempfile.TemporaryDirectory() as tmp:
     report = load_weights_from_checkpoint(
         target=clf, ckpt_path=ckpt, skip_prefixes=("decoder_", "head_"),
     )
+    # `load_weights_from_checkpoint` LOGS its own report. Captured stdout:
+    #   loaded             : 1 layers
+    #   skipped_by_prefix  : 2 layers
+    #   shape_mismatch     : 0 layers
+    #   missing_in_source  : 0 layers
+    #   unused_in_source   : 0 layers
 
 # (3) ASSERT the transfer happened -- never just log the report.
 assert BACKBONE_NAME in report.loaded, report.summary_string()
@@ -697,6 +741,7 @@ clf.build((None, 64, 64, 3))
 clf.backbone.trainable = False
 trainable = [w.path for w in clf.trainable_weights]
 print(len(clf.trainable_weights), len(clf.weights))      # only the head remains trainable
+# Output: 4 224     <- head kernel+bias and head_norm gamma+beta, out of 224 tensors
 assert all("backbone" not in p for p in trainable)
 print(clf(np.random.rand(2, 64, 64, 3).astype("float32"), training=False).shape)  # (2, 10)
 ```
@@ -740,7 +785,9 @@ classifier. Keep the flag identical across both stages.
 ### 10.1 Cost drivers
 
 - **Sequence length is quadratic.** `N = (H/p)·(W/p)`. At `224/16` that is 196 tokens; at
-  `384/16` it is 576, i.e. ~8.6× the attention FLOPs. Halving the patch size quadruples `N`.
+  `384/16` it is 576, i.e. ~8.6× the attention FLOPs — that ratio is `(576/196)² = 8.64`,
+  an ANALYTIC consequence of the quadratic term, **not measured here**. No wall-clock or
+  FLOP profile of this model has been taken in this repository.
 - **The relative-position bias adds a `(num_heads, N+1, N+1)` tensor per block.** It is
   gathered from a table each forward pass; the table itself is tiny
   (`((2Wh−1)(2Ww−1)+3) × num_heads`), but the materialized bias is the same size as the
@@ -762,6 +809,7 @@ try:
     clf.build((None, 64, 64, 3))
     out = clf(np.random.rand(2, 64, 64, 3).astype("float32"), training=False)
     print(out.dtype, np.isfinite(np.asarray(out, dtype="float32")).all())
+    # Output: <dtype: 'float16'> True
 finally:
     keras.mixed_precision.set_global_policy(original)
 ```
@@ -787,7 +835,10 @@ compute, raise the epsilon.
 
 ### 11.1 The reference hyperparameters
 
-From the paper's appendix (see the caveat in §16.3):
+From the paper's appendix (see the caveat in §16.3) — **quoted, not measured here.**
+None of these numbers describes this implementation: no BEiT has ever been pre-trained or
+fine-tuned in this repository, so there is no run behind any cell below. For reference
+numbers read the paper; for numbers about *this* code, train it and measure.
 
 | Stage | Optimizer | Peak LR | Weight decay | Warmup | Epochs | Batch | Stoch. depth |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -849,7 +900,14 @@ np.testing.assert_allclose(before, after, atol=1e-6, rtol=0)
 print(type(restored).__name__, restored.backbone.name)   # BeitForImageClassification beit_backbone
 ```
 
-Config round-trips are also exact:
+Config round-trips are also exact, and `BeitModel.from_config` is a real override rather
+than a pass-through: `get_config()` emits `patch_size` as a tuple, JSON turns it into a
+list, and `cls(**config)` would then store a `TrackedList` — at which point `get_config()`
+stops being a fixed point, emitting a tuple on round 1 and a list on round 2. The override
+normalises exactly that field, and deliberately leaves an `int` `patch_size` an `int` so a
+deserialized model emits the same config a directly-constructed one does. `input_shape`
+needs no such treatment: the constructor already coerces it. Both directions are pinned in
+`tests/test_models/test_beit/test_model.py::TestBeitModelSerialization`.
 
 ```python
 from dl_techniques.models.beit import BeitModel
@@ -864,25 +922,45 @@ print(b.scale, b.grid_size, b.layer_norm_eps, b.layer_scale_init_value)
 
 ## 13. Testing & Validation
 
-The suites below are the real ones, and the counts are what they produce at this commit —
-`passed` quoted **with** `collected`, because a suite that runs almost nothing also reports
-green.
+The suites below are the real ones, and every count was **re-run on 2026-08-24, GPU 1
+(RTX 4070)**, one directory per process — `passed` quoted **with** `collected`, because a
+suite that runs almost nothing also reports green.
 
 | Suite | Command | Result |
 |:---|:---|:---|
-| Model package | `pytest tests/test_models/test_beit/ -q` | **92 passed / 92 collected** |
+| Model package | `pytest tests/test_models/test_beit/ -q` | **117 passed / 117 collected** |
 | Attention layer | `pytest tests/test_layers/test_attention/test_beit_attention.py -q` | **99 passed / 99 collected** |
 | Masking + map fn | `pytest tests/test_datasets/test_beit_masking.py -q` | **32 passed / 32 collected** |
 | `TransformerLayer` wiring | `pytest tests/test_layers/test_transformers/test_transformer_beit_integration.py -q` | **31 passed / 31 collected** |
+| Trainers | `pytest tests/test_train/test_beit/ -q` | **109 passed, 1 skipped / 110 collected** |
 
 All commands are run from the repo root with the `.venv` interpreter and
-`CUDA_VISIBLE_DEVICES=1`.
+`CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg`. Run them **one directory per process**: two
+concurrent BEiT pytest processes on one GPU have been measured to manufacture failures
+that neither produces alone.
 
-`tests/test_models/test_beit/test_model.py` is organized as ten classes:
-`TestBeitScaleConfigs`, `TestBeitModelInitialization`, `TestBeitModelBuild`,
-`TestBeitModelForward`, `TestBeitModelSerialization`, `TestBeitArchitectureValidation`,
-`TestBeitForMaskedImageModeling`, `TestBeitForImageClassification`, `TestBeitWarmStart`,
-`TestBeitUnbuiltFit`.
+`tests/test_models/test_beit/` is one behaviour-named file per concern, following
+`tests/test_models/test_resnet/`. It used to be a single 1173-line `test_model.py` holding
+ten test classes; on 2026-08-24 those classes were moved VERBATIM (proven by an
+AST-identity comparison against the pre-move file, not by inspection) into:
+
+| File | Concern it owns |
+|:---|:---|
+| `test_model.py` | the trunk core — initialization, build, forward, serialization |
+| `test_scale_configs.py` | `SCALE_CONFIGS` / `MODEL_VARIANTS` as data; constructs nothing |
+| `test_architecture_invariants.py` | what the composition actually wired, read off the objects |
+| `test_masked_image_modeling_head.py` | the MIM head end to end |
+| `test_image_classification_head.py` | the classification head end to end |
+| `test_warm_start.py` | the cross-head MIM → classifier transfer (§9.1) |
+| `test_unbuilt_fit.py` | `fit()` with no preceding `build()` (Issue 6 in §14) |
+| `test_oracle_adoption.py` | the four shared `tests/test_models/*_oracle.py` instruments |
+| `test_the_restructure_moves_no_numbers.py` | the bit-identity harness (see below) |
+| `beit_test_geometry.py` | not a test — the one shared 32×32 / patch-16 geometry |
+
+`test_the_restructure_moves_no_numbers.py` pins **6 weight-shape signature sha256 and 6
+bitwise output sha256** against an EXTERNAL golden reference loaded from a pinned git
+commit, so a refactor that moves a number by one bit fails by name rather than by
+suspicion.
 
 Guards worth knowing about, because they encode facts rather than shapes:
 
@@ -1136,6 +1214,26 @@ The cost is parameters, and only parameters. At `base` / 14×14 the table holds
 |:---|:---:|---:|
 | BEiT v1 pre-training (shared) | 1 | **8,784** |
 | this package (per-layer, 12 layers) | 12 | **105,408** |
+
+Both cells were re-derived from the shipped weights on 2026-08-24 (GPU 1), at
+`create_beit_backbone("base", (224, 224, 3), 16)` — the `12` and the `8,784` are read off
+the model, not off the formula, so a change to the table's shape or to the per-layer
+topology moves them:
+
+```python
+import numpy as np
+from dl_techniques.models.beit import create_beit_backbone
+
+model = create_beit_backbone("base", (224, 224, 3), 16)
+model.build((None, 224, 224, 3))
+tables = [w for w in model.weights if "relative_position_bias_table" in w.path]
+per_table = int(np.prod(tables[0].shape))
+print(len(tables), tables[0].shape, per_table, len(tables) * per_table)
+# Output: 12 (732, 12) 8784 105408
+```
+
+The shared row is the counterfactual: ONE such table, which is what BEiT v1 pre-training
+holds, hence `8,784`.
 
 That is +96,624 parameters, ≈ +0.11 % of the `base` backbone's 85.7 M — negligible in
 memory, but it is a real capacity difference in the pre-training objective, not a
