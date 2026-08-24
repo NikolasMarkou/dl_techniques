@@ -77,8 +77,11 @@ References:
 """
 
 import keras
-from keras import initializers, regularizers
 from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -92,7 +95,7 @@ from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------------
 
-_DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
+_DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 
 
 @keras.saving.register_keras_serializable()
@@ -260,10 +263,10 @@ class CliffordNetLM(keras.Model):
         self.dropout_rate = dropout_rate
         self.tie_word_embeddings = tie_word_embeddings
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.normalization_type = normalization_type
         self.normalization_kwargs = dict(normalization_kwargs or {})
 
@@ -449,10 +452,10 @@ class CliffordNetLM(keras.Model):
             "dropout_rate": self.dropout_rate,
             "tie_word_embeddings": self.tie_word_embeddings,
             "use_bias": self.use_bias,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
         })
@@ -462,7 +465,7 @@ class CliffordNetLM(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> "CliffordNetLM":
         for key in ("kernel_regularizer", "bias_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
-                config[key] = regularizers.deserialize(config[key])
+                config[key] = keras.regularizers.deserialize(config[key])
         return cls(**config)
 
     @classmethod
@@ -494,3 +497,5 @@ class CliffordNetLM(keras.Model):
             max_seq_length=max_seq_length,
             **defaults,
         )
+
+# ---------------------------------------------------------------------------

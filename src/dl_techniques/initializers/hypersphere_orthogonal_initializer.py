@@ -1,4 +1,5 @@
-"""Initialize weights as orthogonal vectors on a hypersphere.
+"""
+Initialize weights as orthogonal vectors on a hypersphere.
 
 This initializer populates a weight tensor with vectors that are mutually
 orthogonal and lie on the surface of a hypersphere of a specified radius.

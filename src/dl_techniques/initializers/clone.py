@@ -29,13 +29,15 @@ basis branch; a query and a key projection) is a training pathology. Probe the
 site before cloning it.
 """
 
+import keras
 import copy
 from typing import Any, Optional, Union
 
-import keras
+# ---------------------------------------------------------------------
 
 __all__ = ["clone_initializer"]
 
+# ---------------------------------------------------------------------
 
 def clone_initializer(
         initializer: Optional[Union[str, keras.initializers.Initializer]],
@@ -82,3 +84,5 @@ def clone_initializer(
         return resolved.__class__.from_config(resolved.get_config())
     except Exception:  # noqa: BLE001 -- a custom initializer may not round trip
         return copy.deepcopy(resolved)
+
+# ---------------------------------------------------------------------

@@ -32,7 +32,6 @@ Reference:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -118,7 +117,7 @@ class LinearUpInitializer(keras.initializers.Initializer):
         # x and y rows are stacked along axis -2 to produce the (..., 2, N) out.
         draw_shape = leading + (1, n)
 
-        pi = ops.convert_to_tensor(3.141592653589793, dtype="float32")
+        pi = keras.ops.convert_to_tensor(3.141592653589793, dtype="float32")
         u_norm = keras.random.uniform(
             draw_shape, minval=0.0, maxval=1.0,
             dtype="float32", seed=self._seed_generator,
@@ -128,13 +127,13 @@ class LinearUpInitializer(keras.initializers.Initializer):
             dtype="float32", seed=self._seed_generator,
         )
 
-        norm = pi * self.scale * ops.sqrt(u_norm)
+        norm = pi * self.scale * keras.ops.sqrt(u_norm)
         theta = 2.0 * pi * u_theta
-        x = norm * ops.cos(theta)           # (..., 1, N) -> f_x row
-        y = norm * ops.sin(theta)           # (..., 1, N) -> f_y row
-        result = ops.concatenate([x, y], axis=-2)   # (..., 2, N)
+        x = norm * keras.ops.cos(theta)           # (..., 1, N) -> f_x row
+        y = norm * keras.ops.sin(theta)           # (..., 1, N) -> f_y row
+        result = keras.ops.concatenate([x, y], axis=-2)   # (..., 2, N)
 
-        return ops.cast(result, dtype)
+        return keras.ops.cast(result, dtype)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

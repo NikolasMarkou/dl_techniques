@@ -47,7 +47,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Optional, Any, Tuple, Dict, Union
 
 # ---------------------------------------------------------------------
@@ -181,8 +180,8 @@ class OrthonormalInitializer(keras.initializers.Initializer):
         tensor
             A 1D tensor containing the diagonal elements.
         """
-        matrix_shape = ops.shape(matrix)
-        min_dim = ops.numpy.minimum(matrix_shape[0], matrix_shape[1])
+        matrix_shape = keras.ops.shape(matrix)
+        min_dim = keras.ops.numpy.minimum(matrix_shape[0], matrix_shape[1])
 
         # Extract diagonal elements one by one and stack them
         diagonal_elements = []
@@ -257,7 +256,7 @@ class OrthonormalInitializer(keras.initializers.Initializer):
             random_tensor = ops.convert_to_tensor(random_matrix, dtype=dtype)
 
             # Compute QR decomposition using keras.ops
-            q, r = ops.linalg.qr(random_tensor, mode="reduced")
+            q, r = keras.ops.linalg.qr(random_tensor, mode="reduced")
 
             # Ensure deterministic results by applying a simple sign convention
             # We'll make the first element of each column have a consistent sign
@@ -267,10 +266,10 @@ class OrthonormalInitializer(keras.initializers.Initializer):
             first_row = q[0, :]  # Shape: (feature_dims,)
 
             # Create sign corrections based on the first row
-            signs = ops.where(
-                ops.numpy.greater_equal(first_row, ops.cast(0.0, dtype)),
-                ops.ones_like(first_row),
-                ops.cast(-1.0, dtype) * ops.ones_like(first_row)
+            signs = keras.ops.where(
+                keras.ops.numpy.greater_equal(first_row, ops.cast(0.0, dtype)),
+                keras.ops.ones_like(first_row),
+                keras.ops.cast(-1.0, dtype) * ops.ones_like(first_row)
             )
 
             # Apply sign corrections to each column
@@ -280,7 +279,7 @@ class OrthonormalInitializer(keras.initializers.Initializer):
             orthonormal_vectors = q_corrected[:n_clusters, :]
 
             # Ensure the result has the correct dtype
-            result = ops.cast(orthonormal_vectors, dtype)
+            result = keras.ops.cast(orthonormal_vectors, dtype)
 
             logger.debug(f"Successfully generated orthonormal vectors with shape {ops.shape(result)}")
             return result

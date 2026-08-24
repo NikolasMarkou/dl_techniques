@@ -57,14 +57,6 @@ its `get_config()`; that dict is what `FractalBlock` stores and re-instantiates
 per leaf, which is what makes the recursive structure serializable and why every
 leaf in a stage is configured identically while holding independent weights.
 
-Construction happens in `__init__` through the functional API before
-`super().__init__(inputs, outputs)`, so this is a Functional model wearing a
-subclass's constructor rather than a subclassed model with a `call`. The head
-emits RAW LOGITS — there is no softmax — so `create_fractal_net` defaults its
-loss to `SparseCategoricalCrossentropy(from_logits=True)`. It previously
-defaulted to the string `"sparse_categorical_crossentropy"`, which resolves to
-`from_logits=False` and mis-trained silently.
-
 References:
     - Larsson et al., 2017. FractalNet: Ultra-Deep Neural Networks without
       Residuals. ICLR. (https://arxiv.org/abs/1605.07648)

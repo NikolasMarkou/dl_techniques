@@ -24,7 +24,7 @@ Two consequences follow, and they are the whole argument for the architecture.
 The mixer has zero parameters and zero learned state, so a layer's entire
 capacity sits in its feed-forward network. And because every output position is
 a fixed linear combination of every input position, one layer already achieves
-global receptive field -- the property attention is usually credited with -
+global receptive field -- the property attention is usually credited with --
 without any pairwise score matrix. The reported cost is a few points of
 accuracy against a BERT baseline in exchange for substantially faster training,
 which is a favourable trade whenever the encoder is a component rather than the
@@ -49,7 +49,7 @@ variants span tiny through large.
 `normalization_position='pre'` switches every block to `x = input +
 branch(Norm(input))` and adds the stack-final normalization that arrangement
 requires; `position_embedding_type` selects between a learned absolute table and
-a fixed sinusoidal one. Both are real knobs as of 2026-08-15 — until then each
+a fixed sinusoidal one. Both are real knobs as of 2026-08-15 -- until then each
 was validated, stored and serialized while the value never reached the layer that
 would have honoured it, so `normalization_position='pre'` built a post-norm stack
 and `position_embedding_type` was ignored entirely.
@@ -97,42 +97,120 @@ from dl_techniques.utils.model_build import materialize_sublayers
 
 @keras.saving.register_keras_serializable()
 class FNet(keras.Model):
-    """FNet (Fourier Transform-based Neural Network) model.
+    """FNet: a transformer encoder whose token mixer is a Fourier transform.
 
-    This is a pure encoder implementation with pretrained weights support,
-    designed to produce contextual token representations. It separates the
-    core transformer-like architecture from any task-specific layers (like
-    pooling or classification heads), making it highly flexible for pre-training,
-    fine-tuning, and multi-task learning.
-
-    The model expects inputs as a dictionary containing 'input_ids', and
-    optionally 'attention_mask', and 'token_type_ids'. It
-    outputs a dictionary containing the 'last_hidden_state' and the forwarded
-    'attention_mask'.
+    A pure encoder in which the entire self-attention sublayer is replaced by an
+    unparameterized 2-D discrete Fourier transform, ``y = Re(F_seq(F_hidden(x)))``.
+    The mixer has ZERO parameters and ZERO learned state, so a layer's whole
+    capacity lives in its feed-forward network, and one layer already has global
+    receptive field because every output position is a fixed linear combination
+    of every input position. Cost drops from ``O(L^2)`` to ``O(L log L)`` with no
+    pairwise score matrix anywhere. The model emits
+    ``{"last_hidden_state", "attention_mask"}`` and owns no pooler and no task
+    head, so the same weights can back several heads at once.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input(input_ids, attention_mask, token_type_ids)
-               │
-               ▼
-        Embeddings(Word + Position + Token Type) -> LayerNorm -> Dropout
-               │
-               ▼
-        FNetEncoderBlock₁ (Fourier Transform -> FFN)
-               │
-               ▼
-              ...
-               │
-               ▼
-        FNetEncoderBlockₙ (Fourier Transform -> FFN)
-               │
-               ▼
-        Output Dictionary {
-            "last_hidden_state": [batch, seq_len, hidden_size],
-            "attention_mask": [batch, seq_len]
-        }
+        ┌──────────────────────────────────────┐
+        │  Input dict                          │
+        │  input_ids       [B, L]    (required)│
+        │  attention_mask  [B, L]    (optional)│
+        │  token_type_ids  [B, L]    (optional)│
+        │  position_ids    [B, L]    (optional)│
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  BertEmbeddings                      │
+        │    Word ⊕ Position ⊕ TokenType       │
+        │    → Norm(layer_norm_eps) → Dropout  │
+        │    (learned | sinusoidal positions)  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  FNetEncoderBlock₁                   │
+        │    Fourier mix → FFN                 │
+        └───────────────┬──────────────────────┘
+                        ▼
+                       ...
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  FNetEncoderBlockₙ                   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  final_norm   ('pre' ONLY)           │
+        │  a pre-norm stack leaves its last    │
+        │  residual sum unnormalized; built    │
+        │  only for 'pre' so no post-norm      │
+        │  checkpoint's weight tree changes    │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output dict                         │
+        │    "last_hidden_state"  [B, L, H]    │
+        │    "attention_mask"     [B, L]       │
+        │  Mask echoed; ones_like(input_ids)   │
+        │  when no attention_mask is supplied  │
+        └──────────────────────────────────────┘
+
+    **Block internals (the mixer is the whole difference from BERT):**
+
+    .. code-block:: text
+
+        post-norm (default)              pre-norm ('pre')
+
+        x ──┬─► FourierMix ─┐            x ──┬─► Norm ─► FourierMix ─┐
+            │               ▼                │                       ▼
+            └────────────► (+) ─► Norm       └─────────────────────► (+)
+                            │                                        │
+        x ──┬─► FFN ────────┐                x ──┬─► Norm ─► FFN ────┐
+            │               ▼                    │                   ▼
+            └────────────► (+) ─► Norm           └─────────────────► (+)
+                                                                     │
+                                                          + final_norm once
+
+        FourierMix, in full:
+
+            X ──► DFT along HIDDEN ──► DFT along SEQUENCE ──► Re{·}
+
+            no weights, no state, no score matrix.
+            the imaginary part is DISCARDED so the sublayer
+            stays a real map of unchanged shape, leaving the
+            residual and the FFN untouched.
+
+    **Masking is NOT attention masking:**
+
+    .. code-block:: text
+
+        attention:  scores + (1 − mask)·(−inf)  BEFORE softmax
+                    → a padded token is INVISIBLE to every other
+
+        FNet:       output · mask               AFTER mixing
+                    → a padded token's own output is zeroed, but it
+                      HAS ALREADY CONTRIBUTED to every real token,
+                      because a DFT cannot be told to skip an index
+
+        tok₀  tok₁  PAD   PAD          the DFT mixes all four
+          │     │    │     │
+          └─────┴────┴─────┘  ──► every output reads every input
+          ▼     ▼    ▼     ▼
+          y₀    y₁   0     0           mask zeroes the PAD outputs
+                                        only, after the fact
+
+        the mask is still forwarded on the output so downstream
+        heads can pool correctly
+
+    **Variants:**
+
+    .. code-block:: text
+
+        variant   hidden   layers   intermediate
+        tiny        256       4          512
+        small       512       6         2048
+        base        768      12         3072
+        large      1024      24         4096
 
     :param vocab_size: Size of the vocabulary. Defaults to 30522.
     :type vocab_size: int
@@ -179,10 +257,11 @@ class FNet(keras.Model):
     :type normalization_position: str
     :param ffn_type: Type of feed-forward network. Defaults to "mlp".
     :type ffn_type: str
-    :param use_stochastic_depth: Whether to enable stochastic depth.
-        Defaults to False.
+    :param use_stochastic_depth: Whether to enable stochastic depth. The
+        per-block rate follows a linear schedule from 0 to
+        ``stochastic_depth_rate`` across the stack. Defaults to False.
     :type use_stochastic_depth: bool
-    :param stochastic_depth_rate: Drop path rate for stochastic depth.
+    :param stochastic_depth_rate: Terminal drop-path rate for stochastic depth.
         Defaults to 0.1.
     :type stochastic_depth_rate: float
     :param kwargs: Additional keyword arguments for the `keras.Model`.
@@ -191,8 +270,21 @@ class FNet(keras.Model):
     :vartype embeddings: dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings
     :ivar encoder_layers: A list of `FNetEncoderBlock` instances.
     :vartype encoder_layers: list[dl_techniques.layers.fnet_encoder_block.FNetEncoderBlock]
+    :ivar final_norm: Stack-final normalization, present ONLY when
+        ``normalization_position == 'pre'``; ``None`` otherwise.
+    :vartype final_norm: Optional[keras.layers.Layer]
 
     :raises ValueError: If invalid configuration parameters are provided.
+
+    Input shape:
+        Mapping with ``input_ids`` of shape ``(batch_size, seq_len)``, plus the
+        optional ``attention_mask``, ``token_type_ids`` and ``position_ids`` at
+        the same shape.
+
+    Output shape:
+        Mapping with ``last_hidden_state`` at
+        ``(batch_size, seq_len, hidden_size)`` and ``attention_mask`` at
+        ``(batch_size, seq_len)``.
 
     Example:
         .. code-block:: python
@@ -212,6 +304,9 @@ class FNet(keras.Model):
             print(outputs["last_hidden_state"].shape)
             # (2, 128, 768)
 
+    Note:
+        Masking is multiplicative and post-mix, so the usual "masked tokens are
+        invisible" guarantee does NOT hold. See the masking diagram above.
     """
 
     # Model variant configurations following FNet paper specifications
@@ -309,6 +404,7 @@ class FNet(keras.Model):
         :param stochastic_depth_rate: Drop rate for stochastic depth.
         :type stochastic_depth_rate: float
         :param kwargs: Additional keyword arguments for the `keras.Model`.
+        :raises ValueError: If any configuration value is invalid.
         """
         super().__init__(**kwargs)
 
@@ -384,7 +480,11 @@ class FNet(keras.Model):
             )
 
     def _build_architecture(self) -> None:
-        """Build all model components (embeddings and encoder layers)."""
+        """Build all model components: embeddings, encoder blocks, final norm.
+
+        The drop-path schedule is computed here and handed to the blocks
+        per-index; ``final_norm`` is created only under pre-normalization.
+        """
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: `position_embedding_type`
         # is FORWARDED. It used to be validated, stored and serialized here while
         # `BertEmbeddings` silently used its own default ('learned'), so
@@ -448,6 +548,7 @@ class FNet(keras.Model):
         gets called.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -467,7 +568,9 @@ class FNet(keras.Model):
         :param inputs: Input token IDs or a dictionary containing 'input_ids'
             and other optional tensors like 'attention_mask'.
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
-        :param attention_mask: Mask to avoid attention on padding tokens.
+        :param attention_mask: Mask to avoid attention on padding tokens. Note
+            it is applied MULTIPLICATIVELY and post-mix here; see the class
+            docstring.
         :type attention_mask: Optional[keras.KerasTensor]
         :param token_type_ids: Token type IDs for distinguishing sequences.
         :type token_type_ids: Optional[keras.KerasTensor]
@@ -845,6 +948,37 @@ def create_fnet_with_head(
        factory.
     3. Combine them into a single, end-to-end `keras.Model`.
 
+    **Head integration:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  keras.Input × 3 (ALL required)      │
+        │    input_ids / attention_mask /      │
+        │    token_type_ids                    │
+        │  shape = (sequence_length,) or       │
+        │          (None,) if unspecified      │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  FNet encoder (FNet.from_variant)    │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  NLP task head (create_nlp_head)     │
+        │    {hidden_states, attention_mask}   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  head output returned AS IS          │
+        │  (no logits/derived-key collapse     │
+        │   here, unlike create_bert_with_head)│
+        └──────────────────────────────────────┘
+
+        PASS `sequence_length`: the Fourier mixer wants a known
+        length at build time, so a dynamic (None,) axis may not
+        be compatible.
+
     :param fnet_variant: The FNet variant to use (e.g., "base", "large").
     :type fnet_variant: str
     :param task_config: An `NLPTaskConfig` object defining the task.
@@ -867,7 +1001,11 @@ def create_fnet_with_head(
         not be compatible with FNet's Fourier Transform layer which
         requires a known length at build time. Defaults to None.
     :type sequence_length: Optional[int]
-    :return: A complete `keras.Model` ready for the specified task.
+    :return: A complete `keras.Model` ready for the specified task. All three
+        inputs are required by name; the Functional wrapper declares one
+        ``keras.Input`` per key and Keras matches a data dict against that
+        declaration exactly. For a single-segment task pass
+        ``np.zeros_like(input_ids)`` as ``token_type_ids``.
     :rtype: keras.Model
 
     Example:

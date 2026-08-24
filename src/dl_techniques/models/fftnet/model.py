@@ -7,7 +7,7 @@ in both time and memory and is the reason long sequences and high-resolution ima
 are expensive. The convolution theorem offers a different route to global mixing:
 a pointwise multiplication in the frequency domain is a circular convolution in the
 token domain, so multiplying by a length-`N` filter couples every token to every
-other token at `O(N log N)` — the cost of the transform — and with `O(N)` parameters
+other token at `O(N log N)` -- the cost of the transform -- and with `O(N)` parameters
 instead of `O(N^2)` computation.
 
 The catch is that a fixed filter makes the mixing input-independent, which is
@@ -19,15 +19,15 @@ per-feature offset, which is added to a learned base filter:
 `W = W_base + MLP(mean(x))`,  `y = IFFT(modReLU(FFT(x) * W))`
 
 so the spectral gains applied to a given image depend on that image's summary
-statistics. It is weaker than attention — the modulation is one global vector, not a
-per-token-pair score — and that is the trade: global receptive field and log-linear
+statistics. It is weaker than attention -- the modulation is one global vector, not a
+per-token-pair score -- and that is the trade: global receptive field and log-linear
 cost, in exchange for content dependence that is global rather than pairwise.
 
 The nonlinearity is `modReLU`, which is what keeps a stack of these layers from
 collapsing. Applying a real ReLU to a complex tensor is not meaningful, and applying
 none at all would make consecutive spectral filters compose into a single linear
-filter. `modReLU` acts on the magnitude only — it shifts `|z|` by a learned
-per-feature bias, rectifies, and rescales `z` by the ratio — so the phase, which is
+filter. `modReLU` acts on the magnitude only -- it shifts `|z|` by a learned
+per-feature bias, rectifies, and rescales `z` by the ratio -- so the phase, which is
 where the spatial arrangement of the signal lives, passes through untouched. The
 magnitude used in the denominator is floored at `1e-8` so a zero-magnitude bin does
 not produce a division by zero. The bias initializes at `-0.1`, a small negative
@@ -37,12 +37,12 @@ as the identity.
 **Which axis the FFT runs over is the thing to get right, and it was wrong once.**
 `tf.signal.fft` transforms the INNERMOST axis. The token state is `(B, N, D)`, so
 calling it directly transformed `D`, the feature axis, and the layer performed no
-token mixing whatsoever — the one thing the architecture exists to do. The sequence
+token mixing whatsoever -- the one thing the architecture exists to do. The sequence
 axis is therefore transposed to the end for the transform and transposed back
 afterwards. The shape of `W_base`, `(seq_len, embed_dim)`, is a gain per frequency
 BIN per feature, and it is only meaningful when the bins index the token axis; that
 shape is the check on this. Because `W_base` is sized by `seq_len`, the model is tied
-to the token count it was built for — a fixed image resolution, unlike attention.
+to the token count it was built for -- a fixed image resolution, unlike attention.
 
 **ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10).** ``FFTMixer.call`` uses
 ``tf.signal.fft`` / ``tf.signal.ifft`` on a complex64 tensor. This cannot migrate to
@@ -53,7 +53,7 @@ keras.ops-only rule for the forward pass.
 
 Structurally each block is a standard pre-norm transformer block with the mixer in
 the attention slot: `x + FFTMixer(norm(x))` then `x + FFN(norm(x))`. Keeping the
-residual-and-norm skeleton intact is deliberate — it isolates the mixing mechanism as
+residual-and-norm skeleton intact is deliberate -- it isolates the mixing mechanism as
 the only variable, so a comparison against an attention baseline measures the mixer
 rather than a differently-tuned block.
 
@@ -98,47 +98,125 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 
 @keras.saving.register_keras_serializable()
 class FFTMixer(keras.layers.Layer):
-    """
-    Adaptive spectral filtering layer implementing the core FFTNet mechanism.
+    """Adaptive spectral filtering: global token mixing at ``O(N log N)``.
 
-    This layer performs global token mixing in the frequency domain using the
-    Fast Fourier Transform (FFT) with learned, data-dependent filtering.
+    Replaces the ``O(N^2)`` self-attention score matrix with a pointwise
+    multiplication in the frequency domain, which by the convolution theorem is
+    a circular convolution over tokens and therefore couples every token to
+    every other one. Adaptivity, which a fixed Fourier mixer gives up, is
+    recovered by conditioning the filter on a global context vector:
+    ``W = W_base + MLP(mean(x))``. The modulation is ONE global vector, not a
+    per-token-pair score, so this is weaker than attention by construction and
+    that is the trade.
 
-    **Intent**: Replace O(N²) self-attention with O(N log N) frequency-domain
-    mixing while maintaining adaptive, input-dependent behavior through learned
-    spectral filters.
+    **Operation:**
 
-    **Architecture (from paper Section 3.2)**:
-    ```
-    Input X(B, N, D)
-         ↓
-    FFT → F(B, N, D) [complex]
-         ↓
-    Global Context: c = mean(X, axis=1)
-         ↓
-    MLP(c) → ΔW
-         ↓
-    Filter: W = W_base + ΔW
-         ↓
-    Apply Filter: F̃ = F ⊙ W
-         ↓
-    modReLU(F̃)
-         ↓
-    IFFT → Y(B, N, D) [real]
-    ```
+    .. code-block:: text
 
-    Args:
-        embed_dim: Embedding dimension.
-        mlp_hidden_dim: Hidden dimension for the adaptive filter MLP. Default: 256.
-        dropout_rate: Dropout probability. Default: 0.0.
-        use_bias_in_modrelu: Whether to use learnable bias in modReLU. Default: True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        Input X [B, N, D]  (real)
+              │
+              ├──────────────────────────────┐
+              ▼                              ▼
+        ┌──────────────────────┐   ┌──────────────────────────┐
+        │ cast complex64       │   │ c = mean(X, axis=tokens) │
+        │ transpose → [B,D,N]  │   │   [B, D]                 │
+        │ tf.signal.fft        │   │        ▼                 │
+        │ transpose → [B,N,D]  │   │ Dense(mlp_hidden, gelu)  │
+        │                      │   │        ▼                 │
+        │ the transposes are   │   │ Dense(D)  →  ΔW  [B, D]  │
+        │ NOT cosmetic; see    │   │        ▼                 │
+        │ the axis note below  │   │ W = W_base + ΔW[:,None,:]│
+        └──────────┬───────────┘   └────────────┬─────────────┘
+                   │  F [B,N,D] complex         │  W [B,N,D]
+                   └──────────────┬─────────────┘
+                                  ▼
+                          F̃ = F ⊙ complex(W)
+                                  ▼
+                ┌───────────────────────────────────────┐
+                │  modReLU: magnitude only              │
+                │    |z| + b → relu → scale z by ratio  │
+                │    PHASE PASSES THROUGH UNTOUCHED     │
+                └───────────────────┬───────────────────┘
+                                    ▼
+                ┌───────────────────────────────────────┐
+                │ transpose → [B,D,N]                   │
+                │ tf.signal.ifft                        │
+                │ transpose → [B,N,D] → real() → cast   │
+                └───────────────────┬───────────────────┘
+                                    ▼
+                              Dropout
+                                    ▼
+                        Output Y [B, N, D]  (real)
+
+    **Which axis the FFT runs over (this was wrong once):**
+
+    .. code-block:: text
+
+        tf.signal.fft transforms the INNERMOST axis.
+
+        WRONG:  fft(X)                  X is [B, N, D]
+                                        → transforms D, the FEATURE axis
+                                        → NO token mixing at all, i.e. the
+                                          one thing this layer exists to do
+
+        RIGHT:  transpose to [B, D, N] ► fft ► transpose back
+
+        The check on this is W_base's shape, (seq_len, embed_dim):
+        a gain per frequency BIN per feature, meaningful only when
+        the bins index the TOKEN axis.
+
+        Consequence: W_base is sized by seq_len, so the layer is
+        TIED to the token count it was built for -- a fixed image
+        resolution, unlike attention.
+
+    **modReLU (why not a plain ReLU, and why not nothing):**
+
+    .. code-block:: text
+
+        plain relu(z) on a complex tensor  →  not meaningful
+        no nonlinearity at all             →  consecutive spectral
+                                              filters COLLAPSE into
+                                              one linear filter
+
+        modReLU(z) = z · relu(|z| + b) / max(|z|, 1e-8)
+                         └─ magnitude ─┘   └─ floor guards a
+                            shifted and       zero-magnitude bin
+                            rectified
+
+        b initializes at −0.1, a small NEGATIVE value, so the
+        activation starts by SUPPRESSING low-magnitude bins
+        rather than acting as the identity.
+
+    :param embed_dim: Embedding dimension ``D``; preserved through the layer.
+    :type embed_dim: int
+    :param mlp_hidden_dim: Hidden width of the adaptive filter MLP that maps the
+        global context vector to the per-feature filter offset. Defaults to 256.
+    :type mlp_hidden_dim: int
+    :param dropout_rate: Dropout probability applied to the real output.
+        Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias_in_modrelu: Whether ``modrelu_bias`` is created in
+        :meth:`build` and added inside modReLU. Defaults to True.
+    :type use_bias_in_modrelu: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, embed_dim)`.
+        3D tensor ``(batch_size, sequence_length, embed_dim)``. The sequence
+        length must match the one the layer was built at, because ``W_base`` is
+        sized by it.
 
     Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, embed_dim)`.
+        3D tensor ``(batch_size, sequence_length, embed_dim)``.
+
+    :ivar W_base: Learned base spectral filter of shape
+        ``(seq_len, embed_dim)``, initialized to ones: a gain per frequency bin
+        per feature.
+    :vartype W_base: keras.Variable
+    :ivar modrelu_bias: Per-feature magnitude bias of shape ``(embed_dim,)``,
+        initialized to ``-0.1``. ``None`` when ``use_bias_in_modrelu`` is False.
+    :vartype modrelu_bias: Optional[keras.Variable]
+    :ivar filter_mlp: The two-layer MLP producing the filter offset.
+    :vartype filter_mlp: keras.Sequential
     """
 
     def __init__(
@@ -149,6 +227,18 @@ class FFTMixer(keras.layers.Layer):
             use_bias_in_modrelu: bool = True,
             **kwargs: Any
     ) -> None:
+        """Initialize the mixer and create the filter MLP.
+
+        :param embed_dim: Embedding dimension.
+        :type embed_dim: int
+        :param mlp_hidden_dim: Hidden width of the adaptive filter MLP.
+        :type mlp_hidden_dim: int
+        :param dropout_rate: Dropout probability.
+        :type dropout_rate: float
+        :param use_bias_in_modrelu: Whether modReLU carries a learnable bias.
+        :type use_bias_in_modrelu: bool
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        """
         super().__init__(**kwargs)
 
         self.embed_dim = embed_dim
@@ -168,7 +258,13 @@ class FFTMixer(keras.layers.Layer):
         self.modrelu_bias = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer by creating frequency-dependent parameters."""
+        """Create the frequency-dependent parameters and build the filter MLP.
+
+        :param input_shape: Shape ``(batch, seq_len, embed_dim)``. ``seq_len``
+            fixes the first axis of ``W_base``, which is why the layer is tied
+            to one token count.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         _, seq_len, embed_dim = input_shape
 
         # Base spectral filter W_base (initialized to ones)
@@ -200,7 +296,16 @@ class FFTMixer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass implementing adaptive spectral filtering."""
+        """Forward pass: FFT, adaptive filter, modReLU, inverse FFT.
+
+        :param inputs: Input tensor of shape
+            ``(batch, sequence_length, embed_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Real output tensor of the same shape.
+        :rtype: keras.KerasTensor
+        """
         # 1. Fourier Transform along the TOKEN axis.
         #
         # ``tf.signal.fft`` transforms the INNERMOST axis. ``inputs`` is
@@ -241,7 +346,14 @@ class FFTMixer(keras.layers.Layer):
         return Y
 
     def _apply_modrelu(self, z: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply modReLU activation to complex tensor."""
+        """Apply modReLU to a complex tensor, rescaling magnitude and keeping phase.
+
+        :param z: Complex64 tensor, the filtered spectrum.
+        :type z: keras.KerasTensor
+        :return: Complex64 tensor of the same shape, with magnitudes shifted by
+            the learned bias and rectified and phases unchanged.
+        :rtype: keras.KerasTensor
+        """
         # DECISION plan-2026-08-19T163559-499b6f0e/D-054
         # ``magnitude`` is float32 by construction -- it is ``abs()`` of a
         # complex64 tensor and TensorFlow's complex ops have no half-precision
@@ -272,11 +384,21 @@ class FFTMixer(keras.layers.Layer):
         return z * scale_complex
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape is identical to input shape."""
+        """Compute the output shape, which is identical to the input shape.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return the configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'embed_dim': self.embed_dim,
@@ -293,24 +415,62 @@ class FFTMixer(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class FFTNetBlock(keras.layers.Layer):
-    """
-    Complete Transformer-style block using FFTMixer for token mixing.
+    """A pre-norm transformer block with :class:`FFTMixer` in the attention slot.
 
-    This layer replaces standard self-attention with FFT-based adaptive
-    spectral filtering, maintaining the Transformer architecture with
-    pre-normalization and residual connections.
+    The residual-and-norm skeleton is deliberately left intact: keeping
+    everything except the mixer identical to a standard block is what makes a
+    comparison against an attention baseline measure the MIXER rather than a
+    differently-tuned block.
 
-    Args:
-        embed_dim: Embedding dimension.
-        mlp_hidden_dim: Hidden dimension for FFTMixer's adaptive MLP. Default: 256.
-        ffn_ratio: Expansion factor for FFN hidden dimension. Default: 4.
-        dropout_rate: Dropout probability. Default: 0.0.
-        ffn_type: Type of FFN from factory. Default: 'mlp'.
-        normalization_type: Type of normalization from factory. Default: 'layer_norm'.
-        use_bias_in_modrelu: Whether the block's ``FFTMixer`` uses a learnable
-            bias in modReLU. Forwarded verbatim; defaults to ``FFTMixer``'s own
-            default (``True``) so existing configurations are unchanged.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    **Block structure:**
+
+    .. code-block:: text
+
+        x ──┬─► norm1 ─► FFTMixer ─┐
+            │                      ▼
+            └───────────────────► (+)
+                                   │
+            ┌──────────────────────┘
+            │
+        x ──┬─► norm2 ─► FFN ──────┐
+            │                      ▼
+            └───────────────────► (+)
+                                   ▼
+                                Output
+
+        pre-norm throughout: the skip path is an unmodified
+        identity, and only the mixer differs from a standard
+        attention block
+
+    :param embed_dim: Embedding dimension, preserved through the block.
+    :type embed_dim: int
+    :param mlp_hidden_dim: Hidden width of the mixer's adaptive filter MLP.
+        Defaults to 256.
+    :type mlp_hidden_dim: int
+    :param ffn_ratio: Expansion factor for the FFN hidden dimension, which is
+        ``ffn_ratio * embed_dim``. Defaults to 4.
+    :type ffn_ratio: int
+    :param dropout_rate: Dropout probability, shared by the mixer and the FFN.
+        Defaults to 0.0.
+    :type dropout_rate: float
+    :param ffn_type: FFN identifier passed to ``create_ffn_layer``. Defaults to
+        ``'mlp'``.
+    :type ffn_type: str
+    :param normalization_type: Normalization identifier passed to
+        ``create_normalization_layer``. Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param use_bias_in_modrelu: Whether the block's :class:`FFTMixer` uses a
+        learnable bias in modReLU. Forwarded verbatim; defaults to
+        :class:`FFTMixer`'s own default (``True``) so existing configurations
+        are unchanged.
+    :type use_bias_in_modrelu: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    Input shape:
+        3D tensor ``(batch_size, sequence_length, embed_dim)``.
+
+    Output shape:
+        3D tensor ``(batch_size, sequence_length, embed_dim)``.
     """
 
     def __init__(
@@ -324,6 +484,24 @@ class FFTNetBlock(keras.layers.Layer):
             use_bias_in_modrelu: bool = True,
             **kwargs: Any
     ) -> None:
+        """Initialize the block and create its four sub-layers.
+
+        :param embed_dim: Embedding dimension.
+        :type embed_dim: int
+        :param mlp_hidden_dim: Hidden width of the mixer's filter MLP.
+        :type mlp_hidden_dim: int
+        :param ffn_ratio: FFN expansion factor.
+        :type ffn_ratio: int
+        :param dropout_rate: Dropout probability.
+        :type dropout_rate: float
+        :param ffn_type: FFN identifier for the factory.
+        :type ffn_type: str
+        :param normalization_type: Normalization identifier for the factory.
+        :type normalization_type: str
+        :param use_bias_in_modrelu: Whether modReLU carries a learnable bias.
+        :type use_bias_in_modrelu: bool
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        """
         super().__init__(**kwargs)
 
         self.embed_dim = embed_dim
@@ -367,7 +545,11 @@ class FFTNetBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build sub-layers."""
+        """Build the two norms, the mixer and the FFN explicitly.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         self.norm1.build(input_shape)
         self.fft_mixer.build(input_shape)
         self.norm2.build(input_shape)
@@ -380,7 +562,16 @@ class FFTNetBlock(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the FFTNet block."""
+        """Forward pass: mixer residual, then FFN residual.
+
+        :param inputs: Input tensor of shape
+            ``(batch, sequence_length, embed_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of the same shape.
+        :rtype: keras.KerasTensor
+        """
         # First residual: FFT mixing
         x = inputs + self.fft_mixer(self.norm1(inputs), training=training)
 
@@ -390,11 +581,21 @@ class FFTNetBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape is identical to input shape."""
+        """Compute the output shape, which is identical to the input shape.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return the configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'embed_dim': self.embed_dim,
@@ -414,61 +615,132 @@ class FFTNetBlock(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class FFTNet(keras.Model):
-    """
-    FFTNet (Adaptive Spectral Filtering) foundation model for vision tasks.
+    """FFTNet: a pure vision encoder built on adaptive spectral filtering.
 
-    This is a pure encoder implementation designed to produce contextualized patch
-    representations. It separates the core transformer architecture from any
-    task-specific layers, making it highly flexible for pre-training, fine-tuning,
-    and multi-task learning.
+    A ViT-shaped backbone in which every attention sublayer is an
+    :class:`FFTMixer`. It embeds patches, prepends a CLS token, adds a learned
+    positional embedding, runs ``num_layers`` :class:`FFTNetBlock` instances and
+    normalizes. The model holds NO pooling and NO classification layer, and it
+    returns all three of ``last_hidden_state``, ``cls_token`` and
+    ``patch_features`` UNCONDITIONALLY rather than switching its return type on
+    a flag: a classification head reads the CLS token, a dense-prediction head
+    reads the patch features, and neither needs the encoder reconfigured. Heads
+    attach externally through :func:`create_fftnet_with_head`.
 
     **Architecture Overview:**
-    ```
-    Input(image)
-         ↓
-    Patch Embedding → (B, N, D)
-         ↓
-    Add CLS Token → (B, N+1, D)
-         ↓
-    Add Position Embedding
-         ↓
-    FFTNetBlock₁ (FFTMixer → FFN)
-         ↓
-        ...
-         ↓
-    FFTNetBlockₙ (FFTMixer → FFN)
-         ↓
-    Final Normalization
-         ↓
-    Output Dictionary {
-        "last_hidden_state": [B, N+1, D],
-        "cls_token": [B, D],
-        "patch_features": [B, N, D]
-    }
-    ```
 
-    Args:
-        image_size: Input image size (assumes square images). Default: 224.
-        patch_size: Size of each square patch. Default: 16.
-        embed_dim: Embedding dimension. Default: 768.
-        num_layers: Number of FFTNet blocks. Default: 12.
-        mlp_hidden_dim: Hidden dimension for FFTMixer adaptive MLP. Default: 256.
-        ffn_ratio: Expansion factor for FFN. Default: 4.
-        dropout_rate: Dropout probability. Default: 0.1.
-        ffn_type: Type of FFN from factory. Default: 'mlp'.
-        normalization_type: Type of normalization from factory. Default: 'layer_norm'.
-        use_bias_in_modrelu: Whether each block's ``FFTMixer`` uses a learnable
-            bias in modReLU. Default: True (``FFTMixer``'s own default).
-        **kwargs: Additional keyword arguments for the Model base class.
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  Input [B, image_size, image_size, 3]│
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  PatchEmbedding2D(patch_size)        │
+        │  → [B, N, D],  N = (I / P)²          │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  prepend CLS token                   │
+        │  ONE (1, 1, D) weight, tiled over B  │
+        │  → [B, N+1, D]                       │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  + pos_embed  (1, N+1, D), LEARNED   │
+        │  → Dropout                           │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  FFTNetBlock₁ (FFTMixer → FFN)       │
+        └───────────────┬──────────────────────┘
+                        ▼
+                       ...
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  FFTNetBlockₙ                        │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  final normalization                 │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output dict, ALL THREE always       │
+        │    "last_hidden_state"  [B, N+1, D]  │
+        │    "cls_token"          [B, D]    x[:,0]
+        │    "patch_features"     [B, N, D] x[:,1:]
+        └──────────────────────────────────────┘
+
+        FIXED RESOLUTION: each mixer's W_base is sized by N+1,
+        so the encoder is tied to the token count it was built
+        for. Unlike attention, it cannot be re-run at another
+        image size.
+
+    **Variants:**
+
+    .. code-block:: text
+
+        variant   embed_dim   layers   mlp_hidden   ffn_ratio   params
+        tiny         384         4          96          4        --
+        small        512         6         128          4        --
+        base         768        12         256          4       ~76M
+        large       1024        24         512          4      ~268M
+        huge        1280        32         640          4      ~540M
+
+    :param image_size: Input image size; images are assumed square. Must be
+        positive and divisible by ``patch_size``. Defaults to 224.
+    :type image_size: int
+    :param patch_size: Edge length of each square patch. Must be positive.
+        Defaults to 16.
+    :type patch_size: int
+    :param embed_dim: Embedding dimension. Must be positive. Defaults to 768.
+    :type embed_dim: int
+    :param num_layers: Number of :class:`FFTNetBlock` instances. Must be
+        positive. Defaults to 12.
+    :type num_layers: int
+    :param mlp_hidden_dim: Hidden width of each mixer's adaptive filter MLP.
+        Defaults to 256.
+    :type mlp_hidden_dim: int
+    :param ffn_ratio: FFN expansion factor. Defaults to 4.
+    :type ffn_ratio: int
+    :param dropout_rate: Dropout probability, in ``[0, 1]``. Defaults to 0.1.
+    :type dropout_rate: float
+    :param ffn_type: FFN identifier passed to ``create_ffn_layer``. Defaults to
+        ``'mlp'``.
+    :type ffn_type: str
+    :param normalization_type: Normalization identifier passed to
+        ``create_normalization_layer``. Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param use_bias_in_modrelu: Whether each block's :class:`FFTMixer` uses a
+        learnable bias in modReLU. Defaults to True (:class:`FFTMixer`'s own
+        default).
+    :type use_bias_in_modrelu: bool
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+
+    :raises ValueError: If ``image_size`` or ``patch_size`` is not positive, if
+        ``image_size`` is not divisible by ``patch_size``, if ``embed_dim`` or
+        ``num_layers`` is not positive, or if ``dropout_rate`` leaves ``[0, 1]``.
 
     Input shape:
-        4D tensor with shape: `(batch_size, image_size, image_size, 3)`.
+        4D tensor ``(batch_size, image_size, image_size, 3)``.
 
     Output shape:
-        Dictionary containing:
-        - `last_hidden_state`: Full sequence (B, num_patches+1, embed_dim)
-        - `cls_token`: CLS token features (B, embed_dim)
-        - `patch_features`: Patch-only features (B, num_patches, embed_dim)
+        A mapping with:
+
+        - ``last_hidden_state``: ``(batch, num_patches + 1, embed_dim)``
+        - ``cls_token``: ``(batch, embed_dim)``
+        - ``patch_features``: ``(batch, num_patches, embed_dim)``
+
+    :ivar num_patches: ``(image_size // patch_size) ** 2``.
+    :vartype num_patches: int
+    :ivar cls_token: Learnable ``(1, 1, embed_dim)`` token, created in ``build``.
+    :vartype cls_token: keras.Variable
+    :ivar pos_embed: Learnable ``(1, num_patches + 1, embed_dim)`` table,
+        created in ``build``.
+    :vartype pos_embed: keras.Variable
+    :ivar blocks: The block stack.
+    :vartype blocks: list[FFTNetBlock]
 
     Example:
         >>> # Create FFTNet-Base foundation model
@@ -539,6 +811,31 @@ class FFTNet(keras.Model):
             use_bias_in_modrelu: bool = True,
             **kwargs: Any
     ) -> None:
+        """Initialize the encoder and build its architecture.
+
+        :param image_size: Input image size (square).
+        :type image_size: int
+        :param patch_size: Square patch edge length.
+        :type patch_size: int
+        :param embed_dim: Embedding dimension.
+        :type embed_dim: int
+        :param num_layers: Number of blocks.
+        :type num_layers: int
+        :param mlp_hidden_dim: Hidden width of each mixer's filter MLP.
+        :type mlp_hidden_dim: int
+        :param ffn_ratio: FFN expansion factor.
+        :type ffn_ratio: int
+        :param dropout_rate: Dropout probability.
+        :type dropout_rate: float
+        :param ffn_type: FFN identifier for the factory.
+        :type ffn_type: str
+        :param normalization_type: Normalization identifier for the factory.
+        :type normalization_type: str
+        :param use_bias_in_modrelu: Whether modReLU carries a learnable bias.
+        :type use_bias_in_modrelu: bool
+        :param kwargs: Additional keyword arguments for ``keras.Model``.
+        :raises ValueError: If any configuration value is invalid.
+        """
         super().__init__(**kwargs)
 
         # Validate configuration
@@ -577,7 +874,22 @@ class FFTNet(keras.Model):
             num_layers: int,
             dropout_rate: float
     ) -> None:
-        """Validate model configuration parameters."""
+        """Validate model configuration parameters.
+
+        :param image_size: Input image size.
+        :type image_size: int
+        :param patch_size: Square patch edge length.
+        :type patch_size: int
+        :param embed_dim: Embedding dimension.
+        :type embed_dim: int
+        :param num_layers: Number of blocks.
+        :type num_layers: int
+        :param dropout_rate: Dropout probability.
+        :type dropout_rate: float
+        :raises ValueError: If any value is non-positive, if ``image_size`` is
+            not divisible by ``patch_size``, or if ``dropout_rate`` leaves
+            ``[0, 1]``.
+        """
         if image_size <= 0:
             raise ValueError(f"image_size must be positive, got {image_size}")
         if patch_size <= 0:
@@ -597,7 +909,11 @@ class FFTNet(keras.Model):
             )
 
     def _build_architecture(self) -> None:
-        """Build all model components."""
+        """Create the patch embedding, the block stack and the final norm.
+
+        The CLS token and the positional table are WEIGHTS and are therefore
+        created in :meth:`build` instead.
+        """
         # Patch embedding
         self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
@@ -630,7 +946,12 @@ class FFTNet(keras.Model):
         self.norm = create_normalization_layer(self.normalization_type, name='norm')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the model by creating learnable parameters."""
+        """Create the CLS token and positional table, and build every sub-layer.
+
+        :param input_shape: Shape of the input images,
+            ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         # CLS token: (1, 1, embed_dim)
         self.cls_token = self.add_weight(
             name='cls_token',
@@ -664,20 +985,22 @@ class FFTNet(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """
-        Forward pass of the FFTNet foundation model.
+        """Forward pass of the FFTNet foundation model.
 
-        Args:
-            inputs: Input images of shape (batch_size, height, width, channels).
-            training: Boolean, whether the model is in training mode.
+        :param inputs: Input images of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: A dictionary with all three of the following keys, always:
 
-        Returns:
-            A dictionary with the following keys:
-            - `last_hidden_state`: The sequence of hidden states at the output
-              of the final layer. Shape: (batch, num_patches+1, embed_dim).
-            - `cls_token`: The CLS token features. Shape: (batch, embed_dim).
-            - `patch_features`: Features for patches only (excluding CLS).
-              Shape: (batch, num_patches, embed_dim).
+            - ``last_hidden_state``: the final layer's full sequence, shape
+              ``(batch, num_patches + 1, embed_dim)``.
+            - ``cls_token``: the CLS features, shape ``(batch, embed_dim)``.
+            - ``patch_features``: the patch features excluding CLS, shape
+              ``(batch, num_patches, embed_dim)``.
+
+        :rtype: Dict[str, keras.KerasTensor]
         """
         batch_size = keras.ops.shape(inputs)[0]
 
@@ -711,18 +1034,16 @@ class FFTNet(keras.Model):
 
     @classmethod
     def from_variant(cls, variant: str, **kwargs: Any) -> "FFTNet":
-        """
-        Create an FFTNet model from a predefined variant.
+        """Create an FFTNet model from a predefined variant.
 
-        Args:
-            variant: String, one of "base", "large", "huge", "small", "tiny".
-            **kwargs: Additional arguments to override the variant's defaults.
-
-        Returns:
-            An FFTNet model instance.
-
-        Raises:
-            ValueError: If variant is not recognized.
+        :param variant: One of ``"base"``, ``"large"``, ``"huge"``,
+            ``"small"``, ``"tiny"``.
+        :type variant: str
+        :param kwargs: Additional arguments overriding the variant's defaults.
+        :type kwargs: Any
+        :return: An FFTNet model instance.
+        :rtype: FFTNet
+        :raises ValueError: If the variant is not recognized.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -742,7 +1063,11 @@ class FFTNet(keras.Model):
         return cls(**config)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return the model configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "image_size": self.image_size,
@@ -760,11 +1085,20 @@ class FFTNet(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FFTNet":
-        """Create model from configuration."""
+        """Create a model instance from its configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: FFTNet model instance.
+        :rtype: FFTNet
+        """
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
-        """Print model summary with additional FFTNet-specific information."""
+        """Print the model summary with additional FFTNet-specific information.
+
+        :param kwargs: Additional arguments passed to ``keras.Model.summary``.
+        """
         super().summary(**kwargs)
         logger.info("FFTNet Foundation Model Configuration:")
         logger.info(f"  - Architecture: {self.num_layers} layers, {self.embed_dim} hidden size")
@@ -789,26 +1123,67 @@ def create_fftnet_with_head(
         fftnet_config_overrides: Optional[Dict[str, Any]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
 ) -> keras.Model:
-    """
-    Factory function to create a complete FFTNet model with a task-specific head.
+    """Factory function to create a complete FFTNet model with a task head.
 
     This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational `FFTNet` model.
+    1. Instantiate a foundational :class:`FFTNet` model.
     2. Create a task-specific head.
-    3. Combine them into a single, end-to-end `keras.Model`.
+    3. Combine them into a single, end-to-end ``keras.Model``.
 
-    Args:
-        fftnet_variant: String, the FFTNet variant to use (e.g., "base", "large").
-        task_type: String, the vision task type: "classification", "detection", "segmentation".
-        num_classes: Integer, number of classes for classification tasks. Required for classification.
-        image_size: Integer, input image size. Default: 224.
-        patch_size: Integer, patch size. Default: 16.
-        fftnet_config_overrides: Optional dictionary to override default FFTNet
-            configuration for the chosen variant.
-        head_config_overrides: Optional dictionary to override default head configuration.
+    **Head integration:**
 
-    Returns:
-        A complete `keras.Model` ready for training or inference on a specific task.
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  keras.Input [B, I, I, 3]  "images"  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  FFTNet encoder (from_variant)       │
+        │  → last_hidden_state / cls_token /   │
+        │    patch_features                    │
+        └───────────────┬──────────────────────┘
+                        │  classification reads cls_token
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  [Dropout] → Dense(num_classes)      │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output {"logits": [B, num_classes]} │
+        │  a DICT, not a bare tensor           │
+        └──────────────────────────────────────┘
+
+        detection / segmentation raise NotImplementedError:
+        build the encoder directly and attach your own head,
+        reading patch_features for dense prediction.
+
+    :param fftnet_variant: The FFTNet variant to use (e.g. ``"base"``,
+        ``"large"``).
+    :type fftnet_variant: str
+    :param task_type: The vision task: ``"classification"``, ``"detection"`` or
+        ``"segmentation"``. Only classification is implemented. Defaults to
+        ``"classification"``.
+    :type task_type: Literal["classification", "detection", "segmentation"]
+    :param num_classes: Number of classes; REQUIRED for classification.
+    :type num_classes: Optional[int]
+    :param image_size: Input image size. Defaults to 224.
+    :type image_size: int
+    :param patch_size: Patch size. Defaults to 16.
+    :type patch_size: int
+    :param fftnet_config_overrides: Optional dictionary overriding the chosen
+        variant's encoder configuration.
+    :type fftnet_config_overrides: Optional[Dict[str, Any]]
+    :param head_config_overrides: Optional dictionary overriding the head
+        configuration; ``dropout_rate`` is the recognized key.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :return: A complete ``keras.Model`` whose output is
+        ``{"logits": (batch, num_classes)}``.
+    :rtype: keras.Model
+    :raises ValueError: If ``num_classes`` is omitted for classification, or if
+        ``task_type`` is unrecognized.
+    :raises NotImplementedError: If ``task_type`` is ``"detection"`` or
+        ``"segmentation"``.
 
     Example:
         >>> # Create classification model
@@ -907,17 +1282,20 @@ def create_fftnet(
         patch_size: int = 16,
         **kwargs: Any
 ) -> FFTNet:
-    """
-    Create FFTNet foundation model with preset configuration.
+    """Create an FFTNet foundation model from a preset configuration.
 
-    Args:
-        variant: Model variant - 'base', 'large', 'huge', 'small', or 'tiny'.
-        image_size: Input image size. Default: 224.
-        patch_size: Patch size. Default: 16.
-        **kwargs: Additional keyword arguments to override preset configuration.
-
-    Returns:
-        Configured FFTNet foundation model.
+    :param variant: Model variant: ``'base'``, ``'large'``, ``'huge'``,
+        ``'small'`` or ``'tiny'``.
+    :type variant: Literal["base", "large", "huge", "small", "tiny"]
+    :param image_size: Input image size. Defaults to 224.
+    :type image_size: int
+    :param patch_size: Patch size. Defaults to 16.
+    :type patch_size: int
+    :param kwargs: Additional keyword arguments overriding the preset.
+    :type kwargs: Any
+    :return: Configured FFTNet foundation model.
+    :rtype: FFTNet
+    :raises ValueError: If the variant is not recognized.
 
     Example:
         >>> # Create base foundation model
@@ -937,6 +1315,7 @@ def create_fftnet(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_fftnet_classifier(
         variant: Literal["base", "large", "huge", "small", "tiny"] = "base",
@@ -945,18 +1324,24 @@ def create_fftnet_classifier(
         patch_size: int = 16,
         **kwargs: Any
 ) -> keras.Model:
-    """
-    Convenience function to create FFTNet classification model.
+    """Convenience function to create an FFTNet classification model.
 
-    Args:
-        variant: Model variant.
-        num_classes: Number of output classes.
-        image_size: Input image size.
-        patch_size: Patch size.
-        **kwargs: Additional configuration overrides.
+    Note that ``kwargs`` are forwarded as ENCODER overrides
+    (``fftnet_config_overrides``), not head overrides.
 
-    Returns:
-        Complete classification model.
+    :param variant: Model variant.
+    :type variant: Literal["base", "large", "huge", "small", "tiny"]
+    :param num_classes: Number of output classes. Defaults to 1000.
+    :type num_classes: int
+    :param image_size: Input image size. Defaults to 224.
+    :type image_size: int
+    :param patch_size: Patch size. Defaults to 16.
+    :type patch_size: int
+    :param kwargs: Additional encoder configuration overrides.
+    :type kwargs: Any
+    :return: Complete classification model whose output is
+        ``{"logits": (batch, num_classes)}``.
+    :rtype: keras.Model
 
     Example:
         >>> # Create ImageNet classifier
@@ -978,3 +1363,5 @@ def create_fftnet_classifier(
         patch_size=patch_size,
         fftnet_config_overrides=kwargs
     )
+
+# ---------------------------------------------------------------------

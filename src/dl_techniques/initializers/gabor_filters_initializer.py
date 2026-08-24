@@ -1,4 +1,5 @@
-"""Gabor-filter-bank initializer for convolutional layers.
+"""
+Gabor-filter-bank initializer for convolutional layers.
 
 This initializer is deterministic and does not perform random sampling.
 Instead, it fills a ``Conv2D`` kernel of shape ``(kh, kw, in_ch, out_ch)`` with
@@ -50,7 +51,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Callable, Dict, Any, Optional, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -277,7 +277,7 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
             # Replicate the same 2D Gabor across all input channels.
             kernel[:, :, :, j] = gb[:, :, None]
 
-        return ops.convert_to_tensor(kernel, dtype=dtype)
+        return keras.ops.convert_to_tensor(kernel, dtype=dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization.

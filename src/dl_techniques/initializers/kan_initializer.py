@@ -42,7 +42,6 @@ Reference:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -231,7 +230,7 @@ class KANInitializer(keras.initializers.Initializer):
 
         rng = np.random.default_rng(self.seed)
         values = (rng.standard_normal(size=shape) * stddev).astype("float32")
-        return ops.cast(ops.convert_to_tensor(values), dtype)
+        return keras.ops.cast(keras.ops.convert_to_tensor(values), dtype)
 
     # -----------------------------------------------------------------
 

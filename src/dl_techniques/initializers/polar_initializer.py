@@ -22,7 +22,6 @@ machinery, which is why it is implemented directly.
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -94,7 +93,7 @@ class PolarInitializer(keras.initializers.Initializer):
 
         target = self.gain * (np.sqrt(2.0) if self.norm is None else self.norm)
         result = (directions * target).astype("float32")
-        return ops.cast(ops.convert_to_tensor(result), dtype)
+        return keras.ops.cast(keras.ops.convert_to_tensor(result), dtype)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

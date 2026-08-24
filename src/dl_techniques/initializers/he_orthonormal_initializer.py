@@ -1,4 +1,5 @@
-"""Initialize weights by orthonormalizing a He-normal random matrix.
+"""
+Initialize weights by orthonormalizing a He-normal random matrix.
 
 This initializer combines two powerful concepts for neural network
 initialization: the variance-scaling principle of He initialization and the
@@ -47,7 +48,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Any, Tuple, Dict, Union
 
 # ---------------------------------------------------------------------
@@ -223,27 +223,27 @@ class HeOrthonormalInitializer(keras.initializers.Initializer):
 
             # Apply QR decomposition to the transposed matrix
             # This gives us orthonormal columns that become orthonormal rows after transpose
-            he_matrix_t = ops.transpose(he_matrix)  # Shape: (feature_dims, n_clusters)
-            q, r = ops.linalg.qr(he_matrix_t)  # Q: (feature_dims, n_clusters)
+            he_matrix_t = keras.ops.transpose(he_matrix)  # Shape: (feature_dims, n_clusters)
+            q, r = keras.ops.linalg.qr(he_matrix_t)  # Q: (feature_dims, n_clusters)
 
             # Apply sign convention: make diagonal elements of R positive
-            r_diag = ops.diagonal(r)  # Shape: (n_clusters,)
-            signs = ops.where(
-                ops.greater_equal(r_diag, ops.cast(0.0, dtype)),
-                ops.cast(1.0, dtype),
-                ops.cast(-1.0, dtype)
+            r_diag = keras.ops.diagonal(r)  # Shape: (n_clusters,)
+            signs = keras.ops.where(
+                keras.ops.greater_equal(r_diag, keras.ops.cast(0.0, dtype)),
+                keras.ops.cast(1.0, dtype),
+                keras.ops.cast(-1.0, dtype)
             )
 
             # Apply signs to Q
-            q_signed = q * ops.expand_dims(signs, axis=0)  # Shape: (feature_dims, n_clusters)
+            q_signed = q * keras.ops.expand_dims(signs, axis=0)  # Shape: (feature_dims, n_clusters)
 
             # Transpose to get orthonormal rows
-            orthonormal_vectors = ops.transpose(q_signed)  # Shape: (n_clusters, feature_dims)
+            orthonormal_vectors = keras.ops.transpose(q_signed)  # Shape: (n_clusters, feature_dims)
 
             # Ensure correct dtype
-            orthonormal_vectors = ops.cast(orthonormal_vectors, dtype)
+            orthonormal_vectors = keras.ops.cast(orthonormal_vectors, dtype)
 
-            logger.debug(f"Successfully generated He orthonormal vectors with shape {ops.shape(orthonormal_vectors)}")
+            logger.debug(f"Successfully generated He orthonormal vectors with shape {keras.ops.shape(orthonormal_vectors)}")
             return orthonormal_vectors
 
         except Exception as e:

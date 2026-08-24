@@ -1,4 +1,5 @@
-"""Advanced Keras Initializers.
+"""
+Advanced Keras Initializers.
 
 This module provides a collection of advanced weight initializers for Keras,
 designed to improve training stability and model performance in various

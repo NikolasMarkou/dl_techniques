@@ -56,7 +56,7 @@ branch scales the spatial features rather than being added alongside them. The
 decoder's second path is an ordinary gated inverted FFN (expand 1x1, SimpleGate,
 project 1x1) added in the usual way. The ordering detail is that the optional
 extra depthwise convolution sits *before* the channel-expanding 1x1 in the
-encoder and *after* it in the decoder — and because the decoder's version keeps
+encoder and *after* it in the decoder -- and because the decoder's version keeps
 `groups=channels` while operating on `channels * dw_expand` maps, that layer is
 a grouped convolution with `dw_expand` channels per group, not a true depthwise
 convolution as its name suggests.
@@ -68,32 +68,6 @@ identity and the whole tower starts as the global residual connection alone.
 This is the LayerScale/ReZero idea and it is what allows a deep restoration
 tower to be trained without warmup tricks: the network cannot destroy its input
 before it has learned anything worth adding.
-
-The assembled model is a functional builder — `create_darkir_model` returns
-`keras.Model(inputs, outputs)`, not a subclass — with an input of shape
-`(None, None, img_channels)`, so it is fully convolutional and resolution-agnostic
-at call time. Stages downsample with a stride-2 2x2 convolution and upsample by
-a 1x1 channel expansion followed by pixel shuffle. The expansion factor there is
-worth stating precisely: pixel shuffle at `block_size=2` divides channels by four
-while doubling each spatial dimension, and the decoder halves its width per
-stage, so the pre-shuffle convolution must emit `(chan // 2) * 4 == chan * 2`
-filters for the post-shuffle tensor to match the encoder skip it is added to.
-The size requirement follows from the same arithmetic and is a hard constraint
-rather than a preference: the stride-2 downsample uses `padding='valid'`, so a
-height or width that is not a multiple of `2 ** len(enc_blk_nums)` truncates on
-the way down, and the skip-connection `Add` then fails on mismatched shapes.
-
-`use_side_loss=True` adds a second output for deep supervision, taken from the
-bottleneck features captured between the middle encoder blocks and the middle
-decoder blocks. Note that this tap is at bottleneck resolution: the side output
-has shape `(B, H / 2**stages, W / 2**stages, img_channels)`, not full resolution,
-so any auxiliary loss against it must downsample the target first —
-`src/train/darkir/train_darkir.py --side-loss` is the in-repo wiring that does
-so, and until it existed this flag built a model whose second output no loss in
-the repo could be applied to. This differs
-from the paper, whose auxiliary supervision is applied to a full-resolution
-enhanced image produced by a distinct low-light branch; the single shared trunk
-here does not reproduce that two-branch split.
 
 References:
     - Feijoo et al., 2025. DarkIR: Robust Low-Light Image Restoration. CVPR 2025.
@@ -113,7 +87,6 @@ References:
 """
 
 import keras
-from keras import layers, ops
 from typing import List, Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -123,638 +96,113 @@ from typing import List, Optional, Tuple, Dict, Any
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 
-
-# ---------------------------------------------------------------------
-
-
-def _add_list(tensors: List[Any]) -> Any:
-    """Element-wise sum of a non-empty list of tensors.
-
-    Backend-agnostic replacement for the nonexistent ``keras.ops.add_n``
-    (absent in Keras 3.8). Folds the list with ``keras.ops.add``.
-    """
-    acc = tensors[0]
-    for t in tensors[1:]:
-        acc = ops.add(acc, t)
-    return acc
-
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class SimpleGate(keras.layers.Layer):
-    """
-    SimpleGate: Element-wise multiplicative gating without learnable parameters.
-
-    This layer implements a parameter-free gating mechanism by splitting the input
-    channels in half and performing element-wise multiplication. This is an efficient
-    alternative to more complex gating mechanisms like GLU or GTU.
-
-    **Intent**: Provide efficient non-linear activation through channel interaction
-    without additional parameters, commonly used in efficient vision architectures.
-
-    **Architecture**:
-    ```
-    Input(shape=[..., 2*C])
-           ↓
-    Split: x1, x2 (shape=[..., C] each)
-           ↓
-    Gate: output = x1 ⊙ x2  (element-wise multiply)
-           ↓
-    Output(shape=[..., C])
-    ```
-
-    **Mathematical Operation**:
-        Given input x ∈ ℝ^(B×H×W×2C):
-        x1, x2 = split(x, axis=-1)  # Each ∈ ℝ^(B×H×W×C)
-        output = x1 ⊙ x2            # ∈ ℝ^(B×H×W×C)
-
-    Args:
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
-        Note: `channels` must be even (divisible by 2).
-
-    Output shape:
-        4D tensor with shape: `(batch, height, width, channels // 2)`.
-
-    Example:
-        ```python
-        # Basic usage
-        gate = SimpleGate()
-        x = ops.random.normal((2, 32, 32, 64))  # 64 channels
-        y = gate(x)  # Output: (2, 32, 32, 32)
-
-        # In a model
-        inputs = keras.Input((None, None, 3))
-        x = layers.Conv2D(64, 3, padding='same')(inputs)
-        x = SimpleGate()(x)  # Reduces to 32 channels
-        ```
-
-    Note:
-        Input channels must be even. If using SimpleGate, ensure preceding layers
-        produce even number of channels (typically achieved by using expansion
-        factors that result in even dimensions).
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-
-    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply gating operation by splitting and multiplying.
-
-        Args:
-            x: Input tensor of shape (batch, height, width, 2*channels).
-
-        Returns:
-            Gated output of shape (batch, height, width, channels).
-        """
-        # Split along the channel axis (last axis in Keras NHWC format)
-        x1, x2 = ops.split(x, 2, axis=-1)
-        return x1 * x2
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (channels are halved).
-
-        Args:
-            input_shape: Shape tuple of input.
-
-        Returns:
-            Shape tuple of output with channels // 2.
-        """
-        output_shape = list(input_shape)
-        output_shape[-1] = input_shape[-1] // 2 if input_shape[-1] is not None else None
-        return tuple(output_shape)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        return super().get_config()
-
-
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class FreMLP(keras.layers.Layer):
-    """
-    Frequency MLP: Processes features in the frequency domain for global modeling.
-
-    This layer applies FFT to transform features to frequency domain, processes
-    the magnitude spectrum with a simple MLP (keeping phase unchanged), and
-    transforms back to spatial domain. This provides an efficient way to capture
-    global context without the quadratic complexity of self-attention.
-
-    **Intent**: Enable efficient global feature modeling in CNNs by operating in
-    the frequency domain, replacing expensive self-attention mechanisms while
-    maintaining similar receptive field properties.
-
-    **Architecture**:
-    ```
-    Input(shape=[B, H, W, C])
-           ↓
-    FFT: x_freq = rfft2(x)  # Complex (B, H, W//2+1, C)
-           ↓
-    Decompose: mag = |x_freq|, phase = ∠x_freq
-           ↓
-    Process Magnitude:
-      mag -> Conv1x1(C → expansion*C) -> LeakyReLU -> Conv1x1(expansion*C → C)
-           ↓
-    Reconstruct: x_freq' = mag' * exp(i*phase)
-           ↓
-    IFFT: output = irfft2(x_freq')  # Real (B, H, W, C)
-           ↓
-    Output(shape=[B, H, W, C])
-    ```
-
-    **Mathematical Operations**:
-    1. **Forward FFT**: X_freq = FFT2D(x), where X_freq ∈ ℂ^(B×H×W'×C)
-    2. **Decomposition**: mag = |X_freq|, phase = arg(X_freq)
-    3. **Magnitude Processing**: mag' = MLP(mag)
-    4. **Reconstruction**: X'_freq = mag' ⊙ exp(i·phase)
-    5. **Inverse FFT**: output = IFFT2D(X'_freq)
-
-    Where:
-    - FFT2D/IFFT2D are 2D Fast Fourier Transform operations
-    - | · | denotes complex magnitude
-    - arg(·) denotes complex phase
-    - ⊙ denotes element-wise multiplication
-
-    Args:
-        channels: Integer, number of input/output channels. Must be positive.
-            The layer maintains channel dimensionality throughout processing.
-        expansion: Integer, expansion factor for internal MLP hidden dimension.
-            Hidden dimension = channels * expansion. Defaults to 2.
-            Larger values provide more capacity but increase computation.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
-
-    Output shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
-        Shape is preserved; only feature values are transformed.
-
-    Attributes:
-        channels: Number of input/output channels.
-        expansion: Expansion factor for MLP hidden dimension.
-        conv1: First 1x1 convolution (channels → expansion*channels).
-        act: LeakyReLU activation with negative slope 0.1.
-        conv2: Second 1x1 convolution (expansion*channels → channels).
-
-    Example:
-        ```python
-        # Basic usage
-        freq_mlp = FreMLP(channels=64, expansion=2)
-        x = ops.random.normal((2, 32, 32, 64))
-        y = freq_mlp(x)  # Output: (2, 32, 32, 64)
-
-        # With different expansion
-        freq_mlp = FreMLP(channels=128, expansion=4)  # More capacity
-
-        # In a restoration network
-        x = layers.Conv2D(64, 3, padding='same')(inputs)
-        x = FreMLP(channels=64)(x)  # Global frequency processing
-        ```
-
-    Note:
-        - Uses rfft2 (real FFT) for efficiency since input is real-valued
-        - Phase information is preserved; only magnitude is processed
-        - Computation is O(HW log(HW)) due to FFT, independent of channel count
-        - More efficient than self-attention for global modeling (O(H²W²))
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        expansion: int = 2,
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if channels <= 0:
-            raise ValueError(f"channels must be positive, got {channels}")
-        if expansion <= 0:
-            raise ValueError(f"expansion must be positive, got {expansion}")
-
-        self.channels = channels
-        self.expansion = expansion
-
-        # Create sub-layers in __init__
-        hidden_dim = int(channels * expansion)
-        self.conv1 = layers.Conv2D(
-            hidden_dim,
-            kernel_size=1,
-            strides=1,
-            padding='valid',
-            name='conv1'
-        )
-        self.act = layers.LeakyReLU(negative_slope=0.1, name='leaky_relu')
-        self.conv2 = layers.Conv2D(
-            channels,
-            kernel_size=1,
-            strides=1,
-            padding='valid',
-            name='conv2'
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers for proper serialization.
-
-        Args:
-            input_shape: Shape tuple of the input.
-        """
-        # Build sub-layers explicitly
-        self.conv1.build(input_shape)
-
-        # Compute intermediate shape after conv1
-        conv1_output_shape = self.conv1.compute_output_shape(input_shape)
-        self.act.build(conv1_output_shape)
-        self.conv2.build(conv1_output_shape)
-
-        # Always call parent build at the end
-        super().build(input_shape)
-
-    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Forward pass: FFT -> Process Magnitude -> IFFT.
-
-        Args:
-            x: Input tensor of shape (batch, height, width, channels).
-
-        Returns:
-            Output tensor of shape (batch, height, width, channels).
-        """
-        # NOTE: keras.ops exposes a complex-as-(real, imag)-tuple FFT API
-        # (fft2/ifft2) and transforms the LAST TWO axes. There is no rfft2/
-        # irfft2/angle/complex in keras.ops, so we use full-spectrum fft2 over
-        # the spatial (H, W) dims by moving them last: NHWC -> NCHW.
-
-        # 1. FFT over spatial dimensions (H, W). Input is real -> zero imag part.
-        #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
-        # The whole spectral section (steps 1, 2, 4 and 5) is a float32 ISLAND.
-        # TensorFlow has no float16 kernel for ``fft2``/``ifft2``, so under
-        # ``mixed_float16`` this raised ``TypeError: the `real` and `imag`
-        # components have incorrect types: float16 float16``. Only step 3 -- the
-        # 1x1-conv MLP, whose weights autocast -- runs at ``compute_dtype``, so
-        # the magnitude is cast DOWN before the convs and back UP after them.
-        # Do NOT collapse the two casts by running the convs in float32: that
-        # would silently opt the layer's only matmuls out of mixed precision.
-        # See decisions.md D-054.
-        x_t = ops.transpose(ops.cast(x, "float32"), (0, 3, 1, 2))  # (B, C, H, W)
-        freq_real, freq_imag = ops.fft2((x_t, ops.zeros_like(x_t)))
-
-        # 2. Magnitude (phase is retained implicitly via the unit phasor below).
-        mag = ops.sqrt(ops.square(freq_real) + ops.square(freq_imag))  # (B, C, H, W)
-
-        # 3. Process the magnitude spectrum through the 1x1-conv MLP, which
-        # operates channels-last; transpose to NHWC and back.
-        mag_nhwc = ops.cast(
-            ops.transpose(mag, (0, 2, 3, 1)), self.compute_dtype
-        )                                              # (B, H, W, C)
-        mag_nhwc = self.conv1(mag_nhwc)
-        mag_nhwc = self.act(mag_nhwc)
-        mag_nhwc = self.conv2(mag_nhwc)
-        mag_proc = ops.cast(
-            ops.transpose(mag_nhwc, (0, 3, 1, 2)), "float32"
-        )                                              # (B, C, H, W)
-
-        # 4. Reconstruct with the original phase: scale the unit phasor
-        # (freq / |freq|) by the processed magnitude. Guard the divide.
-        denom = ops.maximum(mag, keras.config.epsilon())
-        out_real = mag_proc * (freq_real / denom)
-        out_imag = mag_proc * (freq_imag / denom)
-
-        # 5. Inverse FFT back to the spatial domain. The processed spectrum
-        # keeps the Hermitian symmetry of a real signal (the 1x1 conv acts
-        # identically on conjugate-pair bins), so the real part is the output.
-        spatial_real, _ = ops.ifft2((out_real, out_imag))  # (B, C, H, W)
-        return ops.cast(
-            ops.transpose(spatial_real, (0, 2, 3, 1)), self.compute_dtype
-        )                                                  # (B, H, W, C)
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (same as input).
-
-        Args:
-            input_shape: Shape tuple of input.
-
-        Returns:
-            Shape tuple of output (identical to input).
-        """
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "channels": self.channels,
-            "expansion": self.expansion
-        })
-        return config
-
-
-# ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class DilatedBranch(keras.layers.Layer):
-    """
-    A single branch of dilated depthwise convolution for multi-scale context.
-
-    This layer implements a depthwise convolution with a specific dilation rate,
-    used as one branch in parallel multi-scale processing. Depthwise convolutions
-    apply separate filters per input channel, reducing parameters while capturing
-    spatial patterns at the specified dilation rate.
-
-    **Intent**: Capture spatial context at a specific scale determined by dilation
-    rate, to be combined with other branches for multi-scale feature extraction.
-
-    **Architecture**:
-    ```
-    Input(shape=[B, H, W, C])
-           ↓
-    Depthwise Conv3x3 (dilation=d, groups=C)
-           ↓
-    Output(shape=[B, H, W, C*expansion])
-    ```
-
-    **Mathematical Operation**:
-        For each channel i independently:
-        output[:, :, :, i] = conv3x3_dilated(input[:, :, :, i], dilation=d)
-
-    Where dilation rate d controls receptive field size without increasing parameters.
-
-    Args:
-        channels: Integer, number of input channels. Used for reference but expansion
-            determines output channels. Must be positive.
-        expansion: Integer, factor to expand channels by. Output channels will be
-            channels * expansion. Defaults to 1 (no expansion). Must be positive.
-        dilation: Integer, dilation rate for the convolution. Controls spatial
-            receptive field. Common values: 1 (standard), 4, 9 (multi-scale).
-            Must be positive. Defaults to 1.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
-
-    Output shape:
-        4D tensor with shape: `(batch, height, width, channels * expansion)`.
-        Spatial dimensions preserved by padding='same'.
-
-    Attributes:
-        channels: Number of input channels.
-        expansion: Channel expansion factor.
-        dilation: Dilation rate for convolution.
-        dw_channels: Computed output channels (channels * expansion).
-        conv: Depthwise Conv2D layer with specified dilation.
-
-    Example:
-        ```python
-        # Single branch with dilation rate 1 (standard convolution)
-        branch1 = DilatedBranch(channels=64, expansion=2, dilation=1)
-
-        # Branch with dilation rate 4 (larger receptive field)
-        branch2 = DilatedBranch(channels=64, expansion=2, dilation=4)
-
-        # Multi-scale parallel processing
-        x = ops.random.normal((2, 32, 32, 64))
-        branches = [
-            DilatedBranch(channels=64, expansion=2, dilation=d)
-            for d in [1, 4, 9]
-        ]
-        # Combine outputs: sum or concatenate
-        outputs = [branch(x) for branch in branches]
-        combined = ops.add_n(outputs)  # Element-wise sum
-        ```
-
-    Note:
-        - Uses groups=dw_channels for true depthwise convolution
-        - padding='same' maintains spatial dimensions regardless of dilation
-        - Dilation rate increases receptive field: (kernel_size + (kernel_size-1)*(dilation-1))
-        - For kernel_size=3: dilation 1→3×3, dilation 4→11×11, dilation 9→19×19
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        expansion: int = 1,
-        dilation: int = 1,
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if channels <= 0:
-            raise ValueError(f"channels must be positive, got {channels}")
-        if expansion <= 0:
-            raise ValueError(f"expansion must be positive, got {expansion}")
-        if dilation <= 0:
-            raise ValueError(f"dilation must be positive, got {dilation}")
-
-        self.channels = channels
-        self.expansion = expansion
-        self.dilation = dilation
-        self.dw_channels = int(channels * expansion)
-
-        # Create depthwise convolution in __init__
-        self.conv = layers.Conv2D(
-            filters=self.dw_channels,
-            kernel_size=3,
-            padding="same",
-            dilation_rate=self.dilation,
-            groups=self.dw_channels,  # Depthwise: each filter processes one channel
-            use_bias=True,
-            name=f"dilated_conv_d{self.dilation}"
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the convolution layer.
-
-        Args:
-            input_shape: Shape tuple of the input.
-        """
-        # Build sub-layer explicitly
-        self.conv.build(input_shape)
-
-        # Always call parent build at the end
-        super().build(input_shape)
-
-    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply dilated depthwise convolution.
-
-        Args:
-            x: Input tensor of shape (batch, height, width, channels).
-
-        Returns:
-            Output tensor of shape (batch, height, width, channels * expansion).
-        """
-        return self.conv(x)
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
-
-        Args:
-            input_shape: Shape tuple of input.
-
-        Returns:
-            Shape tuple of output with expanded channels.
-        """
-        return self.conv.compute_output_shape(input_shape)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "channels": self.channels,
-            "expansion": self.expansion,
-            "dilation": self.dilation
-        })
-        return config
-
+from .components import FreMLP, DilatedBranch, SimpleGate, _add_list
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class DarkIREncoderBlock(keras.layers.Layer):
-    """
-    Encoder Block (EBlock) for DarkIR with parallel dilated branches and FreMLP.
+    """Encoder block (EBlock): parallel dilated branches plus a FreMLP modulator.
 
-    This block implements the core encoder component of DarkIR, featuring:
-    1. Parallel dilated convolution branches for multi-scale context
-    2. Channel attention for adaptive feature weighting
-    3. SimpleGate activation for efficient non-linearity
-    4. Frequency MLP for global feature modeling
+    Two residual paths. The first is the multi-scale spatial path: normalize,
+    optional depthwise convolution, expand with a 1x1, run the parallel dilated
+    bank and SUM it, gate, rescale per channel with NAFNet's sigmoid-free
+    simplified channel attention, project back. The second is
+    :class:`FreMLP`, applied MULTIPLICATIVELY -- the frequency output scales the
+    running signal rather than being added alongside it. Both branch scales
+    (``beta``, ``gamma``) are zero-initialized, so a fresh block is an exact
+    identity.
 
-    The block uses a dual-residual structure with learnable scaling factors.
+    **Block structure:**
 
-    **Intent**: Extract multi-scale features while capturing both local (via dilated
-    convolutions) and global (via FreMLP) context for robust low-light restoration.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input(shape=[B, H, W, C])
-           ↓
-    ┌──────────────────────────────────────────────┐
-    │ Path 1: Multi-scale Dilated Processing      │
-    ├──────────────────────────────────────────────┤
-    LayerNorm → [Optional DW Conv] → 1×1 Conv(→C*dw_expand)
-           ↓
-    Parallel Dilated Branches [d₁, d₂, ..., dₙ] → Sum
-           ↓
-    SimpleGate (→C*dw_expand/2)
-           ↓
-    Channel Attention: GlobalAvgPool → 1×1 Conv → Multiply
-           ↓
-    1×1 Conv(→C) → Add with Input (scaled by β)
-    └──────────────────────────────────────────────┘
-           ↓ y
-    ┌──────────────────────────────────────────────┐
-    │ Path 2: Frequency Domain Processing         │
-    ├──────────────────────────────────────────────┤
-    LayerNorm → FreMLP → Multiply with y
-           ↓
-    Add to y (scaled by γ)
-    └──────────────────────────────────────────────┘
-           ↓
-    Output(shape=[B, H, W, C])
-    ```
+        Input x [B, H, W, C]
+              │
+        ┌─────┴────────────────────────────────────────────┐
+        │  PATH 1: multi-scale spatial                     │
+        │                                                  │
+        │  LayerNorm                                       │
+        │       ▼                                          │
+        │  [DWConv 3×3]  ◄── extra_depth_wise, BEFORE the  │
+        │       ▼            1×1 in the encoder            │
+        │  Conv1×1 → C·dw_expand                           │
+        │       ▼                                          │
+        │  Σ over dilated branches [d₁, d₂, ..., dₙ]       │
+        │       ▼                                          │
+        │  SimpleGate → C·dw_expand/2                      │
+        │       ▼                                          │
+        │  GAP → Conv1×1 → multiply   (NO sigmoid:         │
+        │       ▼                      unbounded rescale)  │
+        │  Conv1×1 → C                                     │
+        └─────┬────────────────────────────────────────────┘
+              ▼
+        y = x + β ⊙ (path 1)          β zero-init, per channel
+              │
+        ┌─────┴────────────────────────────────────────────┐
+        │  PATH 2: frequency modulation                    │
+        │                                                  │
+        │  LayerNorm → FreMLP → multiply by y              │
+        │  (MULTIPLICATIVE, not additive: the spectrum     │
+        │   SCALES the spatial features)                   │
+        └─────┬────────────────────────────────────────────┘
+              ▼
+        out = y + γ ⊙ (y ⊙ FreMLP(Norm(y)))
+              ▼
+        Output [B, H, W, C]
 
-    **Mathematical Operations**:
-    1. **Path 1 (Dilated)**: y = x + β · Conv1x1(Attn(SG(∑ᵢ DConvᵢ(Conv1x1(Norm(x))))))
-    2. **Path 2 (Frequency)**: out = y + γ · (y ⊙ FreMLP(Norm(y)))
+    :param channels: Number of input and output channels, maintained throughout
+        the block. Must be positive.
+    :type channels: int
+    :param dw_expand: Expansion factor for the depthwise path; intermediate
+        width is ``channels * dw_expand``, which must be even for SimpleGate.
+        Must be positive. Defaults to 2.
+    :type dw_expand: int
+    :param dilations: Dilation rates, one parallel branch per entry. ``None``
+        resolves to ``[1]``. Must be non-empty and all positive. Commonly
+        ``[1, 4, 9]``.
+    :type dilations: List[int]
+    :param extra_depth_wise: Whether to insert an extra depthwise convolution
+        BEFORE the channel-expanding 1x1. Note this is the opposite ordering
+        from :class:`DarkIRDecoderBlock`. Defaults to False.
+    :type extra_depth_wise: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    Where:
-    - β, γ: learnable PER-CHANNEL gates of shape `(1, 1, 1, channels)`,
-      initialized to 0. NOT scalars, despite how the equations above read:
-      `build` allocates one weight per channel and the multiply broadcasts
-      over N, H, W only.
-    - DConvᵢ: dilated convolution with rate dᵢ
-    - SG: SimpleGate activation
-    - Attn: channel attention mechanism
-    - ⊙: element-wise multiplication
-
-    Args:
-        channels: Integer, number of input/output channels. Must be positive.
-            This determines the feature dimension maintained throughout the block.
-        dw_expand: Integer, expansion factor for depthwise convolution channels.
-            Intermediate channels = channels * dw_expand. Defaults to 2.
-            Must be positive and even (for SimpleGate).
-        dilations: List of integers, dilation rates for parallel branches.
-            Each value creates one branch. Common: [1, 4, 9] for multi-scale.
-            Defaults to [1]. All values must be positive.
-        extra_depth_wise: Boolean, whether to add extra depthwise conv before branching.
-            Adds additional inductive bias. Defaults to False.
-        **kwargs: Additional arguments for Layer base class.
+    :raises ValueError: If ``channels`` or ``dw_expand`` is not positive, or if
+        ``dilations`` is empty or contains a non-positive value.
 
     Input shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
+        4D tensor ``(batch, height, width, channels)``.
 
     Output shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
-        Shape is preserved; residual connections maintain dimensionality.
+        4D tensor ``(batch, height, width, channels)``; the residual structure
+        preserves dimensionality.
 
-    Attributes:
-        channels: Number of channels.
-        dw_expand: Depthwise expansion factor.
-        dilations: List of dilation rates.
-        extra_depth_wise: Whether extra DW conv is used.
-        expanded_channels: Computed intermediate channels.
-        norm1, norm2: LayerNorm layers for two paths.
-        extra_conv: Optional extra depthwise convolution.
-        conv1: 1x1 projection to expanded channels.
-        branches: List of DilatedBranch layers.
-        sca_avg: Global average pooling for channel attention.
-        sca_conv: 1x1 conv for channel attention.
-        sg1: SimpleGate activation.
-        conv3: 1x1 projection back to original channels.
-        freq: FreMLP for frequency domain processing.
-        gamma, beta: Learnable residual scaling factors.
+    :ivar beta: Learnable PER-CHANNEL scale of shape ``(1, 1, 1, channels)`` on
+        the spatial path, zero-initialized. NOT a scalar, despite how the
+        equations read: the multiply broadcasts over N, H, W only.
+    :vartype beta: keras.Variable
+    :ivar gamma: The same, for the frequency path.
+    :vartype gamma: keras.Variable
+    :ivar branches: The parallel :class:`DilatedBranch` bank.
+    :vartype branches: List[DilatedBranch]
+    :ivar freq: The frequency-domain modulator.
+    :vartype freq: FreMLP
 
     Example:
-        ```python
-        # Standard encoder block
-        block = DarkIREncoderBlock(
-            channels=64,
-            dw_expand=2,
-            dilations=[1, 4, 9]
-        )
-        x = ops.random.normal((2, 32, 32, 64))
-        y = block(x)  # Output: (2, 32, 32, 64)
+        .. code-block:: python
 
-        # With extra depthwise conv for more inductive bias
-        block = DarkIREncoderBlock(
-            channels=64,
-            dilations=[1, 4, 9],
-            extra_depth_wise=True
-        )
-
-        # Single-scale (no multi-scale branching)
-        block = DarkIREncoderBlock(channels=64, dilations=[1])
-        ```
+            block = DarkIREncoderBlock(
+                channels=64, dw_expand=2, dilations=[1, 4, 9]
+            )
+            x = ops.random.normal((2, 32, 32, 64))
+            y = block(x)  # (2, 32, 32, 64)
 
     Note:
-        - dw_expand should result in even channels for SimpleGate to work
-        - Learnable scales (beta, gamma) start at 0 for stable training
-        - FreMLP provides global context without attention's quadratic cost
-        - Multiple residual paths enable better gradient flow
+        Zero-initialized ``beta`` and ``gamma`` mean the tower begins training
+        as its global residual connection alone, which is what removes the need
+        for warmup tricks.
     """
 
     def __init__(
@@ -765,6 +213,19 @@ class DarkIREncoderBlock(keras.layers.Layer):
         extra_depth_wise: bool = False,
         **kwargs: Any
     ) -> None:
+        """Initialize the encoder block and create every sub-layer.
+
+        :param channels: Number of input and output channels.
+        :type channels: int
+        :param dw_expand: Depthwise-path expansion factor.
+        :type dw_expand: int
+        :param dilations: Dilation rates for the parallel bank.
+        :type dilations: List[int]
+        :param extra_depth_wise: Whether to add the extra depthwise convolution.
+        :type extra_depth_wise: bool
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :raises ValueError: If any configuration value is invalid.
+        """
         super().__init__(**kwargs)
 
         if channels <= 0:
@@ -791,7 +252,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
 
         # Extra DW Conv (Optional)
         if self.extra_depth_wise:
-            self.extra_conv = layers.Conv2D(
+            self.extra_conv = keras.layers.Conv2D(
                 self.channels,
                 kernel_size=3,
                 padding="same",
@@ -800,10 +261,10 @@ class DarkIREncoderBlock(keras.layers.Layer):
                 name='extra_dw_conv'
             )
         else:
-            self.extra_conv = layers.Identity(name='identity_extra')
+            self.extra_conv = keras.layers.Identity(name='identity_extra')
 
         # Projection to expanded channels
-        self.conv1 = layers.Conv2D(
+        self.conv1 = keras.layers.Conv2D(
             self.expanded_channels,
             kernel_size=1,
             padding="valid",
@@ -818,11 +279,11 @@ class DarkIREncoderBlock(keras.layers.Layer):
         ]
 
         # Channel Attention / Aggregation
-        self.sca_avg = layers.GlobalAveragePooling2D(
+        self.sca_avg = keras.layers.GlobalAveragePooling2D(
             keepdims=True,
             name='channel_attn_pool'
         )
-        self.sca_conv = layers.Conv2D(
+        self.sca_conv = keras.layers.Conv2D(
             self.expanded_channels // 2,
             kernel_size=1,
             padding="valid",
@@ -834,7 +295,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         self.sg1 = SimpleGate(name='simple_gate')
 
         # Projection back to original channels
-        self.conv3 = layers.Conv2D(
+        self.conv3 = keras.layers.Conv2D(
             self.channels,
             kernel_size=1,
             padding="valid",
@@ -846,11 +307,10 @@ class DarkIREncoderBlock(keras.layers.Layer):
         self.freq = FreMLP(self.channels, expansion=2, name='freq_mlp')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build all sub-layers for proper serialization.
+        """Build every sub-layer and create the two per-channel branch scales.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build normalization layers
         self.norm1.build(input_shape)
@@ -906,15 +366,15 @@ class DarkIREncoderBlock(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass with dual residual paths.
+        """Forward pass over the spatial path then the frequency modulation.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Output tensor of shape (batch, height, width, channels).
+        :param inputs: Input tensor of shape
+            ``(batch, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of the same shape.
+        :rtype: keras.KerasTensor
         """
         # Store original input for residual
         y = inputs
@@ -955,19 +415,21 @@ class DarkIREncoderBlock(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (same as input).
+        """Compute the output shape, which is identical to the input shape.
 
-        Args:
-            input_shape: Shape tuple of input.
-
-        Returns:
-            Shape tuple of output (identical to input).
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return the configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "channels": self.channels,
@@ -983,137 +445,105 @@ class DarkIREncoderBlock(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class DarkIRDecoderBlock(keras.layers.Layer):
-    """
-    Decoder Block (DBlock) for DarkIR with dual SimpleGate and FFN structure.
+    """Decoder block (DBlock): the same dilated path, with a gated FFN instead.
 
-    This block implements the decoder component of DarkIR, similar to encoder but
-    replacing FreMLP with a gated FFN structure. Features:
-    1. Parallel dilated convolution branches for multi-scale context
-    2. Channel attention for adaptive feature weighting
-    3. Dual SimpleGate activations for efficient non-linearity
-    4. Inverted FFN structure for feature refinement
+    Shares the encoder's multi-scale spatial path but replaces :class:`FreMLP`
+    with an ordinary gated inverted FFN (expand 1x1, SimpleGate, project 1x1)
+    added in the usual way, and moves the optional extra convolution AFTER the
+    channel-expanding 1x1. Because that convolution keeps ``groups=channels``
+    while operating on ``channels * dw_expand`` maps, it is a GROUPED
+    convolution with ``dw_expand`` channels per group, not a true depthwise
+    convolution as its name suggests.
 
-    **Intent**: Refine multi-scale features for image reconstruction while maintaining
-    efficient computation through gating mechanisms instead of heavy frequency processing.
+    **Block structure:**
 
-    **Architecture**:
-    ```
-    Input(shape=[B, H, W, C])
-           ↓
-    ┌──────────────────────────────────────────────┐
-    │ Path 1: Multi-scale Dilated Processing      │
-    ├──────────────────────────────────────────────┤
-    LayerNorm → 1×1 Conv(→C*dw_expand) → [Optional DW Conv]
-           ↓
-    Parallel Dilated Branches [d₁, d₂, ..., dₙ] → Sum
-           ↓
-    SimpleGate₁ (→C*dw_expand/2)
-           ↓
-    Channel Attention: GlobalAvgPool → 1×1 Conv → Multiply
-           ↓
-    1×1 Conv(→C) → Add with Input (scaled by β)
-    └──────────────────────────────────────────────┘
-           ↓ y
-    ┌──────────────────────────────────────────────┐
-    │ Path 2: Gated FFN Processing                │
-    ├──────────────────────────────────────────────┤
-    LayerNorm → 1×1 Conv(→C*ffn_expand)
-           ↓
-    SimpleGate₂ (→C*ffn_expand/2)
-           ↓
-    1×1 Conv(→C) → Add to y (scaled by γ)
-    └──────────────────────────────────────────────┘
-           ↓
-    Output(shape=[B, H, W, C])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Path 1 (Dilated)**: y = x + β · Conv1x1(Attn(SG₁(∑ᵢ DConvᵢ(Conv1x1(Norm(x))))))
-    2. **Path 2 (Gated FFN)**: out = y + γ · Conv1x1(SG₂(Conv1x1(Norm(y))))
+        Input x [B, H, W, C]
+              │
+        ┌─────┴────────────────────────────────────────────┐
+        │  PATH 1: multi-scale spatial                     │
+        │                                                  │
+        │  LayerNorm                                       │
+        │       ▼                                          │
+        │  Conv1×1 → C·dw_expand                           │
+        │       ▼                                          │
+        │  [grouped Conv 3×3]  ◄── extra_depth_wise, AFTER │
+        │       ▼                  the 1×1 here; groups=C  │
+        │                          over C·dw_expand maps   │
+        │  Σ over dilated branches [d₁, d₂, ..., dₙ]       │
+        │       ▼                                          │
+        │  SimpleGate₁ → C·dw_expand/2                     │
+        │       ▼                                          │
+        │  GAP → Conv1×1 → multiply   (NO sigmoid)         │
+        │       ▼                                          │
+        │  Conv1×1 → C                                     │
+        └─────┬────────────────────────────────────────────┘
+              ▼
+        y = x + β ⊙ (path 1)          β zero-init, per channel
+              │
+        ┌─────┴────────────────────────────────────────────┐
+        │  PATH 2: gated inverted FFN                      │
+        │                                                  │
+        │  LayerNorm → Conv1×1 → C·ffn_expand              │
+        │       ▼                                          │
+        │  SimpleGate₂ → C·ffn_expand/2                    │
+        │       ▼                                          │
+        │  Conv1×1 → C          (ADDITIVE, unlike the      │
+        └─────┬─────────────────  encoder's multiplicative │
+              ▼                   frequency path)          │
+        out = y + γ ⊙ (path 2)
+              ▼
+        Output [B, H, W, C]
 
-    Where:
-    - β, γ: learnable PER-CHANNEL gates of shape `(1, 1, 1, channels)`,
-      initialized to 0. NOT scalars, despite how the equations above read:
-      `build` allocates one weight per channel and the multiply broadcasts
-      over N, H, W only.
-    - DConvᵢ: dilated convolution with rate dᵢ
-    - SG₁, SG₂: SimpleGate activations (separate instances)
-    - Attn: channel attention mechanism
+    :param channels: Number of input and output channels, maintained throughout
+        the block. Must be positive.
+    :type channels: int
+    :param dw_expand: Expansion factor for the depthwise path; intermediate
+        width is ``channels * dw_expand``, which must be even for SimpleGate.
+        Must be positive. Defaults to 2.
+    :type dw_expand: int
+    :param ffn_expand: Expansion factor for the FFN path; intermediate width is
+        ``channels * ffn_expand``, which must be even for SimpleGate. Must be
+        positive. Defaults to 2.
+    :type ffn_expand: int
+    :param dilations: Dilation rates, one parallel branch per entry. ``None``
+        resolves to ``[1]``. Must be non-empty and all positive.
+    :type dilations: List[int]
+    :param extra_depth_wise: Whether to insert the extra grouped convolution
+        AFTER the channel-expanding 1x1. Note this is the opposite ordering
+        from :class:`DarkIREncoderBlock`. Defaults to False.
+    :type extra_depth_wise: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    Args:
-        channels: Integer, number of input/output channels. Must be positive.
-            This determines the feature dimension maintained throughout the block.
-        dw_expand: Integer, expansion factor for depthwise convolution channels.
-            Intermediate channels for path 1 = channels * dw_expand. Defaults to 2.
-            Must be positive and even (for SimpleGate).
-        ffn_expand: Integer, expansion factor for FFN path.
-            Intermediate channels for path 2 = channels * ffn_expand. Defaults to 2.
-            Must be positive and even (for SimpleGate).
-        dilations: List of integers, dilation rates for parallel branches.
-            Each value creates one branch. Common: [1, 4, 9] for multi-scale.
-            Defaults to [1]. All values must be positive.
-        extra_depth_wise: Boolean, whether to add extra depthwise conv after projection.
-            Note: In decoder, applied AFTER conv1 (opposite of encoder). Defaults to False.
-        **kwargs: Additional arguments for Layer base class.
+    :raises ValueError: If ``channels``, ``dw_expand`` or ``ffn_expand`` is not
+        positive, or if ``dilations`` is empty or contains a non-positive value.
 
     Input shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
+        4D tensor ``(batch, height, width, channels)``.
 
     Output shape:
-        4D tensor with shape: `(batch, height, width, channels)`.
-        Shape is preserved; residual connections maintain dimensionality.
+        4D tensor ``(batch, height, width, channels)``.
 
-    Attributes:
-        channels: Number of channels.
-        dw_expand: Depthwise expansion factor.
-        ffn_expand: FFN expansion factor.
-        dilations: List of dilation rates.
-        extra_depth_wise: Whether extra DW conv is used.
-        dw_channels: Computed intermediate channels for path 1.
-        ffn_channels: Computed intermediate channels for path 2.
-        norm1, norm2: LayerNorm layers for two paths.
-        conv1: 1x1 projection to expanded channels.
-        extra_conv: Optional extra depthwise convolution.
-        branches: List of DilatedBranch layers.
-        sca_avg: Global average pooling for channel attention.
-        sca_conv: 1x1 conv for channel attention.
-        sg1, sg2: Two SimpleGate activations (for separate paths).
-        conv3: 1x1 projection back to original channels (path 1).
-        conv4: 1x1 expansion for FFN path.
-        conv5: 1x1 projection for FFN path.
-        gamma, beta: Learnable residual scaling factors.
+    :ivar beta: Learnable PER-CHANNEL scale of shape ``(1, 1, 1, channels)`` on
+        the spatial path, zero-initialized. NOT a scalar: the multiply
+        broadcasts over N, H, W only.
+    :vartype beta: keras.Variable
+    :ivar gamma: The same, for the FFN path.
+    :vartype gamma: keras.Variable
+    :ivar sg1: SimpleGate on the spatial path.
+    :vartype sg1: SimpleGate
+    :ivar sg2: A SEPARATE SimpleGate instance on the FFN path.
+    :vartype sg2: SimpleGate
 
     Example:
-        ```python
-        # Standard decoder block
-        block = DarkIRDecoderBlock(
-            channels=64,
-            dw_expand=2,
-            ffn_expand=2,
-            dilations=[1, 4, 9]
-        )
-        x = ops.random.normal((2, 32, 32, 64))
-        y = block(x)  # Output: (2, 32, 32, 64)
+        .. code-block:: python
 
-        # With extra depthwise for more capacity
-        block = DarkIRDecoderBlock(
-            channels=64,
-            dilations=[1, 4, 9],
-            extra_depth_wise=True
-        )
-
-        # Higher FFN expansion for refinement
-        block = DarkIRDecoderBlock(
-            channels=64,
-            ffn_expand=4  # More capacity in FFN path
-        )
-        ```
-
-    Note:
-        - Both dw_expand and ffn_expand should result in even channels for SimpleGate
-        - Learnable scales (beta, gamma) start at 0 for stable training
-        - FFN path provides feature refinement without global frequency modeling
-        - Order differs from encoder: conv1 before extra_conv (if used)
+            block = DarkIRDecoderBlock(
+                channels=64, dw_expand=2, ffn_expand=2, dilations=[1, 4, 9]
+            )
+            x = ops.random.normal((2, 32, 32, 64))
+            y = block(x)  # (2, 32, 32, 64)
     """
 
     def __init__(
@@ -1125,6 +555,21 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         extra_depth_wise: bool = False,
         **kwargs: Any
     ) -> None:
+        """Initialize the decoder block and create every sub-layer.
+
+        :param channels: Number of input and output channels.
+        :type channels: int
+        :param dw_expand: Depthwise-path expansion factor.
+        :type dw_expand: int
+        :param ffn_expand: FFN-path expansion factor.
+        :type ffn_expand: int
+        :param dilations: Dilation rates for the parallel bank.
+        :type dilations: List[int]
+        :param extra_depth_wise: Whether to add the extra grouped convolution.
+        :type extra_depth_wise: bool
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :raises ValueError: If any configuration value is invalid.
+        """
         super().__init__(**kwargs)
 
         if channels <= 0:
@@ -1154,7 +599,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         self.norm2 = create_normalization_layer("layer_norm", axis=-1, epsilon=1e-6)
 
         # First projection
-        self.conv1 = layers.Conv2D(
+        self.conv1 = keras.layers.Conv2D(
             self.dw_channels,
             kernel_size=1,
             padding="valid",
@@ -1164,7 +609,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
 
         # Extra DW Conv (Optional) - NOTE: Applied AFTER conv1 in decoder
         if self.extra_depth_wise:
-            self.extra_conv = layers.Conv2D(
+            self.extra_conv = keras.layers.Conv2D(
                 self.dw_channels,
                 kernel_size=3,
                 padding="same",
@@ -1173,7 +618,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
                 name='extra_dw_conv'
             )
         else:
-            self.extra_conv = layers.Identity(name='identity_extra')
+            self.extra_conv = keras.layers.Identity(name='identity_extra')
 
         # Parallel Dilated Branches
         # Note: In decoder, branches work with dw_channels and expansion=1
@@ -1183,11 +628,11 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         ]
 
         # Channel Attention
-        self.sca_avg = layers.GlobalAveragePooling2D(
+        self.sca_avg = keras.layers.GlobalAveragePooling2D(
             keepdims=True,
             name='channel_attn_pool'
         )
-        self.sca_conv = layers.Conv2D(
+        self.sca_conv = keras.layers.Conv2D(
             self.dw_channels // 2,
             kernel_size=1,
             padding="valid",
@@ -1200,7 +645,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         self.sg2 = SimpleGate(name='simple_gate_2')
 
         # Projection back to original channels
-        self.conv3 = layers.Conv2D(
+        self.conv3 = keras.layers.Conv2D(
             self.channels,
             kernel_size=1,
             padding="valid",
@@ -1209,14 +654,14 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         )
 
         # FFN Path projections
-        self.conv4 = layers.Conv2D(
+        self.conv4 = keras.layers.Conv2D(
             self.ffn_channels,
             kernel_size=1,
             padding="valid",
             use_bias=True,
             name='conv4_ffn_expand'
         )
-        self.conv5 = layers.Conv2D(
+        self.conv5 = keras.layers.Conv2D(
             self.channels,
             kernel_size=1,
             padding="valid",
@@ -1225,11 +670,10 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build all sub-layers for proper serialization.
+        """Build every sub-layer and create the two per-channel branch scales.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build normalization layers
         self.norm1.build(input_shape)
@@ -1290,15 +734,15 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass with dual residual paths.
+        """Forward pass over the spatial path then the gated FFN.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Output tensor of shape (batch, height, width, channels).
+        :param inputs: Input tensor of shape
+            ``(batch, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of the same shape.
+        :rtype: keras.KerasTensor
         """
         # Store original input for residual
         y = inputs
@@ -1345,19 +789,21 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (same as input).
+        """Compute the output shape, which is identical to the input shape.
 
-        Args:
-            input_shape: Shape tuple of input.
-
-        Returns:
-            Shape tuple of output (identical to input).
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return the configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "channels": self.channels,
@@ -1383,146 +829,198 @@ def create_darkir_model(
     extra_depth_wise: bool = True,
     use_side_loss: bool = False
 ) -> keras.Model:
-    """
-    Create the DarkIR model for low-light image restoration.
+    """Build the DarkIR model for low-light image restoration.
 
-    This function constructs a U-Net style architecture with:
-    - Multiple encoder stages with downsampling
-    - Middle bottleneck with encoder and decoder blocks
-    - Multiple decoder stages with upsampling and skip connections
-    - Global residual connection from input to output
+    A functional builder, NOT a subclass: it returns
+    ``keras.Model(inputs, outputs)`` over a ``(None, None, img_channels)``
+    input, so the model is fully convolutional and resolution-agnostic at call
+    time. Encoder stages downsample with a stride-2 2x2 convolution; decoder
+    stages upsample with a 1x1 channel expansion followed by pixel shuffle and
+    add the matching encoder skip. A global residual carries the input to the
+    output, so the network learns only the correction to apply.
 
-    **Architecture Overview**:
-    ```
-    Input (H, W, 3)
-         ↓
-    Intro Conv (H, W, width)
-         ↓
-    ┌─────────────────────────────────────┐
-    │ Encoder Stage 0                     │
-    │  - enc_blk_nums[0] × EncoderBlock   │
-    │  - Downsample (H/2, W/2, width*2)   │──→ skip_0
-    └─────────────────────────────────────┘
-         ↓
-    ┌─────────────────────────────────────┐
-    │ Encoder Stage 1                     │
-    │  - enc_blk_nums[1] × EncoderBlock   │
-    │  - Downsample (H/4, W/4, width*4)   │──→ skip_1
-    └─────────────────────────────────────┘
-         ↓
-    ... (more encoder stages)
-         ↓
-    ┌─────────────────────────────────────┐
-    │ Middle Section                      │
-    │  - middle_blk_num_enc × EncoderBlk  │
-    │  - middle_blk_num_dec × DecoderBlk  │
-    └─────────────────────────────────────┘
-         ↓
-    ┌─────────────────────────────────────┐
-    │ Decoder Stage 0                     │
-    │  - Upsample (PixelShuffle)          │
-    │  - Add skip_last                    │
-    │  - dec_blk_nums[0] × DecoderBlock   │
-    └─────────────────────────────────────┘
-         ↓
-    ... (more decoder stages)
-         ↓
-    Ending Conv (H, W, 3)
-         ↓
-    Add Input (Global Residual)
-         ↓
-    Output (H, W, 3)
-    ```
+    **Architecture Overview:**
 
-    Args:
-        img_channels: Integer, number of input/output image channels.
-            Typically 3 for RGB images. Must be positive. Defaults to 3.
-        width: Integer, base feature width (initial channel dimension).
-            Doubled at each downsampling stage. Must be positive. Defaults to 32.
-        middle_blk_num_enc: Integer, number of encoder blocks in middle section.
-            Must be non-negative. Defaults to 2.
-        middle_blk_num_dec: Integer, number of decoder blocks in middle section.
-            Must be non-negative. Defaults to 2.
-        enc_blk_nums: List of integers, number of blocks per encoder stage.
-            Length determines number of encoder stages (downsampling operations).
-            Defaults to [1, 2, 3]. All values must be positive.
-        dec_blk_nums: List of integers, number of blocks per decoder stage.
-            Must match length of enc_blk_nums. Defaults to [3, 1, 1].
-            All values must be positive.
-        dilations: List of integers, dilation rates for all blocks.
-            Applied to all encoder and decoder blocks. Common: [1, 4, 9].
-            Defaults to [1, 4, 9]. All values must be positive.
-        extra_depth_wise: Boolean, whether to use extra depthwise convolution
-            in all blocks. Adds inductive bias. Defaults to True.
-        use_side_loss: Boolean, whether to return an intermediate output for
-            deep supervision. When True, returns [main_output, side_output],
-            and the side output is at BOTTLENECK resolution
-            (H / 2**len(enc_blk_nums)), not full resolution. A caller that
-            compiles a single full-resolution loss against both outputs will
-            build fine and die at the first fit() step on a shape mismatch;
-            the target for the side output must be downsampled by the same
-            factor. `src/train/darkir/train_darkir.py --side-loss` is the
-            in-repo reference for that wiring. Defaults to False.
+    .. code-block:: text
 
-    Returns:
-        keras.Model: The constructed DarkIR model.
-            - If use_side_loss=False: Single output of shape (B, H, W, img_channels)
-            - If use_side_loss=True: Two outputs, [main, side], with shapes
-              (B, H, W, img_channels) and
-              (B, H // 2**len(enc_blk_nums), W // 2**len(enc_blk_nums), img_channels)
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, img_channels]       │
+        │  H, W must be multiples of 2^stages  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Intro Conv 3×3 → width              │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────┐
+        │ Enc 0: n₀ × EBlock   │──skip 0──────────────────┐
+        └──────────┬───────────┘                          │
+              Conv 2×2 /2 'valid'   width → width·2       │
+        ┌──────────▼───────────┐                          │
+        │ Enc 1: n₁ × EBlock   │──skip 1───────────┐      │
+        └──────────┬───────────┘                   │      │
+              Conv 2×2 /2       width·2 → width·4  │      │
+        ┌──────────▼───────────┐                   │      │
+        │ Enc 2: n₂ × EBlock   │──skip 2────┐      │      │
+        └──────────┬───────────┘            │      │      │
+              Conv 2×2 /2                   │      │      │
+        ┌──────────▼───────────────────────┐│      │      │
+        │  MIDDLE                          ││      │      │
+        │   middle_blk_num_enc × EBlock    ││      │      │
+        │        ▼                         ││      │      │
+        │      x_light  ──────────────────────► side_out  │
+        │        ▼        (use_side_loss)  ││      │      │
+        │   middle_blk_num_dec × DBlock    ││      │      │
+        │        ▼                         ││      │      │
+        │   Add([x, x_light])              ││      │      │
+        └──────────┬───────────────────────┘│      │      │
+                   ▼                        │      │      │
+        ┌──────────────────────┐            │      │      │
+        │ Conv1×1 → chan·2     │            │      │      │
+        │ PixelShuffle(2)      │◄───────────┘      │      │
+        │ Add(skip 2)          │                   │      │
+        │ Dec 0: m₀ × DBlock   │                   │      │
+        └──────────┬───────────┘                   │      │
+        ┌──────────▼───────────┐                   │      │
+        │ Dec 1: m₁ × DBlock   │◄──────────────────┘      │
+        └──────────┬───────────┘                          │
+        ┌──────────▼───────────┐                          │
+        │ Dec 2: m₂ × DBlock   │◄─────────────────────────┘
+        └──────────┬───────────┘
+                   ▼
+        ┌──────────────────────────────────────┐
+        │  Ending Conv 3×3 → img_channels      │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Add(input)   GLOBAL RESIDUAL        │
+        │  → Output [B, H, W, img_channels]    │
+        └──────────────────────────────────────┘
+
+    **Upsample channel arithmetic (why chan·2, not chan·4):**
+
+    .. code-block:: text
+
+        PixelShuffle(block_size=2):  channels ÷ 4, H and W × 2
+
+        pre-shuffle Conv1×1 emits  chan · 2
+                    post-shuffle:  chan · 2 / 4  =  chan / 2
+                     encoder skip:              chan / 2     ✓ match
+
+        the original chan·4 left chan channels post-shuffle and
+        mismatched the chan/2 skip; never caught because the model
+        was dead-on-forward via the nonexistent DepthToSpace (D-002)
+
+    **Size constraint:**
+
+    .. code-block:: text
+
+        the stride-2 downsample uses padding='valid', so a dimension
+        that is not a multiple of 2^len(enc_blk_nums) TRUNCATES on the
+        way down and the skip Add fails on mismatched shapes
+
+        enc_blk_nums=[1,2,3]  →  8× downsampling  →  H, W % 8 == 0
+
+    :param img_channels: Number of input and output image channels; typically 3
+        for RGB. Must be positive. Defaults to 3.
+    :type img_channels: int
+    :param width: Base feature width, doubled at each downsampling stage. Must
+        be positive. Defaults to 32.
+    :type width: int
+    :param middle_blk_num_enc: Number of encoder blocks in the middle section.
+        Must be non-negative; 0 is genuinely safe here because ``x_light`` is
+        then just the encoder output and the middle residual is still a real
+        one. Defaults to 2.
+    :type middle_blk_num_enc: int
+    :param middle_blk_num_dec: Number of decoder blocks in the middle section.
+        Must be at least 1: at 0 the middle residual degenerates to exactly
+        ``2 * x_light``. See the D-126 anchor in the body. Defaults to 2.
+    :type middle_blk_num_dec: int
+    :param enc_blk_nums: Blocks per encoder stage; its length is the number of
+        downsampling operations. ``None`` resolves to ``[1, 2, 3]``. All values
+        must be positive.
+    :type enc_blk_nums: List[int]
+    :param dec_blk_nums: Blocks per decoder stage; must have the same length as
+        ``enc_blk_nums``. ``None`` resolves to ``[3, 1, 1]``. All values must be
+        positive.
+    :type dec_blk_nums: List[int]
+    :param dilations: Dilation rates applied to every encoder and decoder
+        block. ``None`` resolves to ``[1, 4, 9]``. All values must be positive.
+    :type dilations: List[int]
+    :param extra_depth_wise: Whether every block uses its extra convolution
+        (before the 1x1 in the encoder, after it in the decoder). Defaults to
+        True.
+    :type extra_depth_wise: bool
+    :param use_side_loss: Whether to return an intermediate output for deep
+        supervision. When True the model returns ``[main_output, side_output]``
+        and the side output is at BOTTLENECK resolution
+        (``H / 2**len(enc_blk_nums)``), not full resolution. A caller that
+        compiles a single full-resolution loss against both outputs will build
+        fine and die at the first ``fit()`` step on a shape mismatch; the target
+        for the side output must be downsampled by the same factor.
+        ``src/train/darkir/train_darkir.py --side-loss`` is the in-repo
+        reference for that wiring. Defaults to False.
+    :type use_side_loss: bool
+
+    :return: The constructed DarkIR model. With ``use_side_loss=False`` a single
+        output of shape ``(B, H, W, img_channels)``; with ``use_side_loss=True``
+        two outputs, ``[main, side]``, of shapes ``(B, H, W, img_channels)`` and
+        ``(B, H // 2**stages, W // 2**stages, img_channels)``.
+    :rtype: keras.Model
+
+    :raises ValueError: If ``img_channels`` or ``width`` is not positive, if
+        ``middle_blk_num_enc`` is negative, if ``middle_blk_num_dec`` is less
+        than 1, if ``enc_blk_nums`` and ``dec_blk_nums`` differ in length, or if
+        any block count or dilation is not positive.
 
     Input shape:
-        4D tensor with shape: `(batch, height, width, img_channels)`.
-        Height and width should be multiples of 2^num_stages for clean downsampling.
-        Values should be in range [0, 1] (normalized images).
+        4D tensor ``(batch, height, width, img_channels)``. Height and width
+        must be multiples of ``2 ** len(enc_blk_nums)``. Values are expected in
+        ``[0, 1]``.
 
     Output shape:
-        4D tensor with shape: `(batch, height, width, img_channels)`.
-        Restored image in same range as input [0, 1].
+        4D tensor ``(batch, height, width, img_channels)``, the restored image
+        in the same range as the input.
 
     Example:
-        ```python
-        # Small model for testing
-        model = create_darkir_model(
-            img_channels=3,
-            width=16,
-            enc_blk_nums=[1, 1],
-            dec_blk_nums=[1, 1],
-            dilations=[1]
-        )
+        .. code-block:: python
 
-        # Medium model (paper default)
-        model = create_darkir_model(
-            img_channels=3,
-            width=32,
-            enc_blk_nums=[1, 2, 3],
-            dec_blk_nums=[3, 1, 1],
-            dilations=[1, 4, 9],
-            extra_depth_wise=True
-        )
+            # Small model for testing
+            model = create_darkir_model(
+                img_channels=3,
+                width=16,
+                enc_blk_nums=[1, 1],
+                dec_blk_nums=[1, 1],
+                dilations=[1]
+            )
 
-        # Large model with deep supervision
-        model = create_darkir_model(
-            img_channels=3,
-            width=48,
-            enc_blk_nums=[2, 4, 6],
-            dec_blk_nums=[6, 4, 2],
-            dilations=[1, 4, 9],
-            use_side_loss=True
-        )
+            # Paper default
+            model = create_darkir_model(
+                img_channels=3,
+                width=32,
+                enc_blk_nums=[1, 2, 3],
+                dec_blk_nums=[3, 1, 1],
+                dilations=[1, 4, 9],
+                extra_depth_wise=True
+            )
 
-        # Test forward pass
-        x = ops.random.normal((1, 256, 256, 3))
-        y = model(x)
-        print(y.shape)  # (1, 256, 256, 3)
-        ```
+            # Large model with deep supervision
+            model = create_darkir_model(
+                img_channels=3,
+                width=48,
+                enc_blk_nums=[2, 4, 6],
+                dec_blk_nums=[6, 4, 2],
+                dilations=[1, 4, 9],
+                use_side_loss=True
+            )
+
+            x = ops.random.normal((1, 256, 256, 3))
+            y = model(x)  # (1, 256, 256, 3)
 
     Note:
-        - Total downsampling factor: 2^len(enc_blk_nums)
-        - For enc_blk_nums=[1,2,3]: 8x downsampling (1/8 resolution at bottleneck)
-        - Channel progression: width → 2*width → 4*width → ... → max_channels
-        - Skip connections preserve spatial information during upsampling
-        - Global residual enables learning only the correction to apply
+        Channel progression is ``width -> 2*width -> 4*width -> ...``; the
+        global residual means the tower learns only the correction, and the
+        zero-initialized block scales mean it starts as that residual alone.
     """
     # Set defaults
     if enc_blk_nums is None:
@@ -1570,7 +1068,7 @@ def create_darkir_model(
     inputs = keras.Input(shape=(None, None, img_channels), name="input_image")
 
     # === Intro Convolution ===
-    x = layers.Conv2D(width, kernel_size=3, padding="same", name="intro")(inputs)
+    x = keras.layers.Conv2D(width, kernel_size=3, padding="same", name="intro")(inputs)
 
     # === Encoder Path ===
     skips = []
@@ -1591,7 +1089,7 @@ def create_darkir_model(
 
         # Downsample (stride 2 convolution)
         chan = chan * 2
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             chan,
             kernel_size=2,
             strides=2,
@@ -1622,7 +1120,7 @@ def create_darkir_model(
         )(x)
 
     # Residual connection in middle section
-    x = layers.Add(name="middle_residual")([x, x_light])
+    x = keras.layers.Add(name="middle_residual")([x, x_light])
 
     # === Decoder Path ===
     for i, num_blocks in enumerate(dec_blk_nums):
@@ -1634,7 +1132,7 @@ def create_darkir_model(
         # original chan*4 left chan channels post-shuffle, mismatching the
         # chan//2-channel skip in the Add below; never caught because the model
         # was dead-on-forward via the nonexistent DepthToSpace. See D-002.)
-        x = layers.Conv2D(
+        x = keras.layers.Conv2D(
             chan * 2,
             kernel_size=1,
             use_bias=False,
@@ -1650,7 +1148,7 @@ def create_darkir_model(
 
         # Add skip connection
         skip = skips.pop()
-        x = layers.Add(name=f"skip_add_{i}")([x, skip])
+        x = keras.layers.Add(name=f"skip_add_{i}")([x, skip])
 
         # Apply decoder blocks
         for j in range(num_blocks):
@@ -1662,7 +1160,7 @@ def create_darkir_model(
             )(x)
 
     # === Ending Convolution ===
-    x = layers.Conv2D(
+    x = keras.layers.Conv2D(
         img_channels,
         kernel_size=3,
         padding="same",
@@ -1670,7 +1168,7 @@ def create_darkir_model(
     )(x)
 
     # === Global Residual ===
-    outputs = layers.Add(name="final_residual")([x, inputs])
+    outputs = keras.layers.Add(name="final_residual")([x, inputs])
 
     # === Optional Side Loss ===
     if use_side_loss:
@@ -1683,7 +1181,7 @@ def create_darkir_model(
         # separate full-resolution low-light branch, see the module docstring).
         # A caller wiring this flag must produce a matching downsampled target;
         # `src/train/darkir/train_darkir.py --side-loss` does exactly that.
-        side_out = layers.Conv2D(
+        side_out = keras.layers.Conv2D(
             img_channels,
             kernel_size=3,
             padding="same",

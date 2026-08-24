@@ -9,9 +9,8 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
-
+from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 # Backbone name resolution

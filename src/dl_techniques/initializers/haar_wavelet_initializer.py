@@ -51,7 +51,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Dict, Any, Tuple, Optional, Union, Sequence
 
 # ---------------------------------------------------------------------
@@ -178,7 +177,7 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
                 kernel[:, :, i, j] = patterns[pattern_idx]
 
         # Convert to tensor using keras ops
-        return ops.convert_to_tensor(kernel, dtype=dtype)
+        return keras.ops.convert_to_tensor(kernel, dtype=dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization.

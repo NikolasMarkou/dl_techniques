@@ -8,7 +8,7 @@ trained on one can only ever name the categories somebody enumerated in
 advance. Image-caption pairs are abundant and their supervision is open-ended,
 but a caption is not a label: predicting it token by token is expensive, and two
 captions of the same picture rarely agree word for word. The contrastive
-formulation extracts a usable signal anyway by asking a much weaker question —
+formulation extracts a usable signal anyway by asking a much weaker question --
 which caption in this batch belongs to which image. Both modalities are mapped
 into one embedding space, each feature is L2-normalized so an inner product is a
 cosine, and a batch of `N` pairs produces an `N x N` similarity matrix whose
@@ -17,8 +17,8 @@ diagonal must dominate both its row and its column:
 `S = tau * f_I(I) @ f_T(T)^T`
 
 The training objective is the symmetric cross-entropy over `S`'s rows and its
-columns. It scales because the batch supplies its own negatives — the `N^2 - N`
-mismatched pairs cost nothing to construct — and it yields zero-shot
+columns. It scales because the batch supplies its own negatives -- the `N^2 - N`
+mismatched pairs cost nothing to construct -- and it yields zero-shot
 classification for free, since any set of class names can be encoded as text and
 used directly as a classifier weight matrix. The loss itself is not implemented
 here; this module produces the two logits matrices and the temperature, and the
@@ -49,19 +49,19 @@ from the same query vector and the attention blocks are what make its final
 state image-specific; it is created in `build()` alongside the temperature rather
 than in `__init__`. On the text side the pooled position is found by
 `last_non_pad_token`, which counts non-pad tokens and reads index `count - 1`.
-That assumes right padding and pad id `0` — the id is hard-coded at this call
+That assumes right padding and pad id `0` -- the id is hard-coded at this call
 site. Left-padded batches, or a tokenizer whose pad id is not zero, will pool the
 wrong position silently rather than raising. Where the tower still differs from
 the reference implementation is *which* position it pools: OpenAI CLIP locates
 the EOT token as the argmax of the token ids, this one counts non-pad tokens.
-The masking now agrees — `encode_text` builds a lower-triangular causal mask and
+The masking now agrees -- `encode_text` builds a lower-triangular causal mask and
 passes it to every text block, so the pooled last real token is the only
 position that has read the whole sentence, which is what makes last-token
 pooling meaningful. The mask is constructed in the masking factory's *block*
 semantics and inverted once to the *attend* semantics the attention layers
 expect, and it is broadcast to rank 3 deliberately: a rank-2 mask is read by
 `GroupedQueryAttention` as a `(batch, seq)` padding mask, not as a
-`(seq, seq)` score mask. The vision tower is bidirectional and stays so — there
+`(seq, seq)` score mask. The vision tower is bidirectional and stays so -- there
 is no ordering over image patches to respect.
 
 The temperature is stored as its logarithm. `logit_scale` is an unconstrained
@@ -114,135 +114,254 @@ from dl_techniques.utils.masking import create_mask
 
 @keras.saving.register_keras_serializable()
 class CLIP(keras.Model):
-    """
-    CLIP model with integrated vision and text encoders.
+    """CLIP: two independent transformer towers meeting at one similarity matmul.
 
-    This model implements the complete CLIP architecture following modern
-    Keras 3 patterns. It uses a Vision Transformer (ViT) for image encoding
-    and a standard Transformer for text encoding, projecting both into a
-    shared embedding space for contrastive learning.
+    A Vision Transformer encodes images and a text Transformer encodes
+    captions; both project into a shared ``embed_dim`` space, L2-normalize, and
+    produce an ``N x N`` cosine similarity matrix scaled by a learnable
+    temperature. The towers share NO parameters and never attend to each other:
+    the final matmul is the only point of contact, and the contrastive gradient
+    is the only thing forcing them into agreement. Both towers are modernized
+    relative to Radford et al. -- grouped-query attention, RMSNorm in the
+    pre-norm position, SwiGLU feed-forward, and RoPE in place of a learned
+    positional table. The contrastive loss itself is NOT here; this model emits
+    the two logits matrices and the temperature.
 
-    **Intent**: Provide a complete CLIP implementation that follows
-    modern Keras 3 best practices for robust serialization and deployment.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Image Input (batch, H, W, 3)          Text Input (batch, seq_len)
-           ↓                                      ↓
-    Patch Embedding                        Token Embedding
-           ↓                                      ↓
-    Add CLS Token                          Transformer Layers × N
-           ↓                                      ↓
-    Vision Transformer × N                 Extract EOS Features
-           ↓                                      ↓
-    Extract CLS Features                   Project to embed_dim
-           ↓                                      ↓
-    Project to embed_dim                   L2 Normalize
-           ↓                                      ↓
-    L2 Normalize                          Text Features
-           ↓
-    Image Features
-           ↓
-    Compute Similarity Matrix (scaled by temperature)
-    ```
+    .. code-block:: text
 
-    Args:
-        image_size: Integer, input image size (height and width). Must be
-            positive and divisible by patch_size. Defaults to 224.
-        patch_size: Integer, size of image patches for vision transformer.
-            Must be positive and divide image_size. Defaults to 16.
-        vision_layers: Integer, number of transformer layers in vision
-            encoder. Must be positive. Defaults to 12.
-        vision_width: Integer, hidden dimension of vision transformer.
-            Must be positive and divisible by vision_heads. Defaults to 768.
-        vision_heads: Integer, number of attention heads in vision
-            transformer. Must be positive and divide vision_width.
-            Defaults to 12.
-        vision_kv_heads: Integer, number of key-value heads for vision GQA.
-            Must be positive and divide vision_heads. Defaults to 4.
-        vocab_size: Integer, size of text vocabulary. Must be positive.
-            Defaults to 49408.
-        context_length: Integer, maximum text sequence length. Must be
-            positive. Defaults to 77.
-        text_layers: Integer, number of transformer layers in text encoder.
-            Must be positive. Defaults to 12.
-        text_width: Integer, hidden dimension of text transformer. Must be
-            positive and divisible by text_heads. Defaults to 512.
-        text_heads: Integer, number of attention heads in text transformer.
-            Must be positive and divide text_width. Defaults to 8.
-        text_kv_heads: Integer, number of key-value heads for text GQA.
-            Must be positive and divide text_heads. Defaults to 8.
-        embed_dim: Integer, dimension of shared embedding space. Must be
-            positive. Defaults to 512.
-        ffn_expansion_factor: Integer, expansion factor for feed-forward
-            networks. Must be positive. Defaults to 4.
-        ffn_multiple_of: Integer, round FFN hidden dim to multiple of this
-            value. Must be positive. Defaults to 256.
-        dropout_rate: Float, general dropout probability. Must be in [0, 1).
-            Defaults to 0.0.
-        attention_dropout_rate: Float, dropout probability for attention
-            weights. Must be in [0, 1). Defaults to 0.0.
-        logit_scale_init: Float, initial value for learnable temperature
-            parameter. Defaults to 2.6592 (e^2.6592 ≈ 14.3).
-        **kwargs: Additional arguments for Model base class.
+        ┌────────────────────────────┐   ┌────────────────────────────┐
+        │  Image [B, H, W, 3]        │   │  Text [B, L] token ids     │
+        └─────────────┬──────────────┘   └─────────────┬──────────────┘
+                      ▼                                ▼
+        ┌────────────────────────────┐   ┌────────────────────────────┐
+        │ Conv P×P /P  (patchify)    │   │ Embedding(vocab, W_t)      │
+        │ → [B, N_patches, W_v]      │   │ → [B, L, W_t]              │
+        │ NO positional table        │   │ NO positional table        │
+        └─────────────┬──────────────┘   └─────────────┬──────────────┘
+                      ▼                                │
+        ┌────────────────────────────┐                 │
+        │ prepend CLS token          │                 │
+        │ ONE (1,1,W_v) weight,      │                 │
+        │ broadcast over the batch   │                 │
+        │ → [B, N+1, W_v]            │                 │
+        └─────────────┬──────────────┘                 │
+                      ▼                                ▼
+        ┌────────────────────────────┐   ┌────────────────────────────┐
+        │ TransformerLayer × L_v     │   │ TransformerLayer × L_t     │
+        │  GQA + RoPE, RMSNorm(pre), │   │  GQA + RoPE, RMSNorm(pre), │
+        │  SwiGLU FFN                │   │  SwiGLU FFN                │
+        │  BIDIRECTIONAL             │   │  CAUSAL mask (rank 3)      │
+        └─────────────┬──────────────┘   └─────────────┬──────────────┘
+                      ▼                                ▼
+        ┌────────────────────────────┐   ┌────────────────────────────┐
+        │ pool position 0 (CLS)      │   │ pool last non-pad token    │
+        │                            │   │ assumes RIGHT padding,     │
+        │                            │   │ pad id 0 (hard-coded)      │
+        └─────────────┬──────────────┘   └─────────────┬──────────────┘
+                      ▼                                ▼
+        ┌────────────────────────────┐   ┌────────────────────────────┐
+        │ Dense(embed_dim), no bias  │   │ Dense(embed_dim), no bias  │
+        │ → L2 normalize             │   │ → L2 normalize             │
+        └─────────────┬──────────────┘   └─────────────┬──────────────┘
+                      │                                │
+                      └───────────────┬────────────────┘
+                                      ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │  S = exp(logit_scale) · f_I @ f_Tᵀ                       │
+        │  logits_per_image [B, B]                                 │
+        │  logits_per_text  [B, B]  (the transpose)                │
+        │  the ONLY place the two towers meet                      │
+        └──────────────────────────────────────────────────────────┘
+
+    **Contrastive objective (loss lives in dl_techniques.losses):**
+
+    .. code-block:: text
+
+                     T₀   T₁   T₂   T₃         each row must pick its
+                   ┌────┬────┬────┬────┐       own column, and each
+              I₀   │ ✓  │    │    │    │       column its own row
+                   ├────┼────┼────┼────┤
+              I₁   │    │ ✓  │    │    │       diagonal  = N positives
+                   ├────┼────┼────┼────┤       off-diag  = N² − N free
+              I₂   │    │    │ ✓  │    │                   negatives
+                   ├────┼────┼────┼────┤
+              I₃   │    │    │    │ ✓  │       loss = ½(CE over rows
+                   └────┴────┴────┴────┘              + CE over cols)
+
+        temperature is stored as its LOG: exp() on every use keeps the
+        multiplier positive with no constraint object.
+        default 2.6592 = ln(1 / 0.07) ≈ 14.3
+        NO upper clamp here (unlike MobileCLIP): a diverging temperature
+        gives inf logits and a nan loss with no other symptom.
+
+    **Text causal mask (semantics inversion and rank):**
+
+    .. code-block:: text
+
+        create_mask('causal')  BLOCK semantics    attention layers want
+        True = mask OUT                            ATTEND semantics
+              ┌───┬───┬───┬───┐                  ┌───┬───┬───┬───┐
+              │ F │ T │ T │ T │                  │ T │ F │ F │ F │
+              ├───┼───┼───┼───┤   logical_not    ├───┼───┼───┼───┤
+              │ F │ F │ T │ T │  ──────────────► │ T │ T │ F │ F │
+              ├───┼───┼───┼───┤                  ├───┼───┼───┼───┤
+              │ F │ F │ F │ T │                  │ T │ T │ T │ F │
+              ├───┼───┼───┼───┤                  ├───┼───┼───┼───┤
+              │ F │ F │ F │ F │                  │ T │ T │ T │ T │
+              └───┴───┴───┴───┘                  └───┴───┴───┴───┘
+
+        then broadcast to rank 3 [B, L, L] ON PURPOSE: a rank-2 mask is
+        read by GroupedQueryAttention as a (batch, seq) PADDING mask,
+        not as a (seq, seq) score mask.
+
+    **Variants:**
+
+    .. code-block:: text
+
+        variant     patch  L_v  W_v   H_v  KV_v  L_t  W_t   H_t  KV_t  embed
+        ViT-B/32      32    12   768   12    4    12   512    8    8    512
+        ViT-B/16      16    12   768   12    4    12   512    8    8    512
+        ViT-L/14      14    24  1024   16    4    12   768   12   12    768
+        ViT-H/14      14    32  1280   16    4    24  1024   16   16   1024
+
+        L_v/W_v/H_v = vision layers / width / heads, KV = kv heads.
+        H/14 is the one scale where the TEXT tower deepens (24, not 12);
+        see the D-112 anchor in MODEL_VARIANTS.
+        The kv-head columns are NOT from any released CLIP: no CLIP
+        checkpoint uses grouped-query attention.
+
+    :param image_size: Input image height and width. Must be positive and
+        divisible by ``patch_size``. Defaults to 224.
+    :type image_size: int
+    :param patch_size: Edge length of a square image patch; also the stride of
+        the patch convolution. Must divide ``image_size``. Defaults to 16.
+    :type patch_size: int
+    :param vision_layers: Number of transformer layers in the vision tower.
+        Must be positive. Defaults to 12.
+    :type vision_layers: int
+    :param vision_width: Hidden dimension of the vision tower. Must be
+        divisible by ``vision_heads``. Defaults to 768.
+    :type vision_width: int
+    :param vision_heads: Number of attention heads in the vision tower.
+        Defaults to 12.
+    :type vision_heads: int
+    :param vision_kv_heads: Number of key-value heads for vision grouped-query
+        attention. Must divide ``vision_heads``. Defaults to 4.
+    :type vision_kv_heads: int
+    :param vocab_size: Size of the text vocabulary. Must be positive. Defaults
+        to 49408.
+    :type vocab_size: int
+    :param context_length: Maximum text sequence length. Must be positive.
+        Defaults to 77.
+    :type context_length: int
+    :param text_layers: Number of transformer layers in the text tower. Must be
+        positive. Defaults to 12.
+    :type text_layers: int
+    :param text_width: Hidden dimension of the text tower. Must be divisible by
+        ``text_heads``. Defaults to 512.
+    :type text_width: int
+    :param text_heads: Number of attention heads in the text tower. Defaults
+        to 8.
+    :type text_heads: int
+    :param text_kv_heads: Number of key-value heads for text grouped-query
+        attention. Must divide ``text_heads``. Defaults to 8.
+    :type text_kv_heads: int
+    :param embed_dim: Dimension of the shared embedding space both towers
+        project into. Must be positive. Defaults to 512.
+    :type embed_dim: int
+    :param ffn_expansion_factor: Expansion factor for both towers' SwiGLU
+        feed-forward networks. Must be positive. Defaults to 4.
+    :type ffn_expansion_factor: int
+    :param ffn_multiple_of: Round the FFN hidden dimension up to a multiple of
+        this value. Must be positive. Defaults to 256.
+    :type ffn_multiple_of: int
+    :param dropout_rate: General dropout probability, in ``[0, 1)``. Defaults
+        to 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Dropout probability for attention weights,
+        in ``[0, 1)``. Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param logit_scale_init: Initial value of the LOG temperature. Defaults to
+        2.6592, i.e. ``ln(1 / 0.07)``, so the initial multiplier is about 14.3.
+        No upper clamp is applied on use.
+    :type logit_scale_init: float
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base
+        class.
+
+    :raises ValueError: If ``image_size`` is not divisible by ``patch_size``,
+        if either width is not divisible by its head count, or if either head
+        count is not divisible by its kv-head count.
 
     Input shape:
-        A dictionary with keys:
-        - 'image': 4D tensor `(batch_size, height, width, channels)`
-        - 'text': 2D tensor `(batch_size, sequence_length)`
+        A mapping with either or both of:
+
+        - ``'image'``: 4D tensor ``(batch_size, height, width, channels)``
+        - ``'text'``: 2D tensor ``(batch_size, sequence_length)``
+
+        A tuple ``(images, texts)`` is accepted equivalently.
 
     Output shape:
-        A dictionary with keys:
-        - 'image_features': 2D tensor `(batch_size, embed_dim)`
-        - 'text_features': 2D tensor `(batch_size, embed_dim)`
-        - 'logits_per_image': 2D tensor `(batch_size, batch_size)`
-        - 'logits_per_text': 2D tensor `(batch_size, batch_size)`
-        - 'logit_scale': Scalar tensor (learnable temperature)
+        A mapping whose KEYS DEPEND ON THE INPUT:
 
-    Attributes:
-        All initialization parameters are stored as instance attributes.
-        Additional computed attributes:
-        - num_patches: Integer, number of patches per image.
-        - patch_conv: Conv2D layer for patch embedding.
-        - vision_transformer_layers: List of TransformerLayer instances.
-        - vision_projection: Dense layer for vision projection.
-        - token_embedding: Embedding layer for text tokens.
-        - text_transformer_layers: List of TransformerLayer instances.
-        - text_projection: Dense layer for text projection.
-        - logit_scale: Scalar weight for temperature scaling.
-        - class_token: Learnable CLS token for vision encoder.
+        - ``'image_features'``: ``(batch_size, embed_dim)``, if an image was
+          given.
+        - ``'text_features'``: ``(batch_size, embed_dim)``, if text was given.
+        - ``'logits_per_image'``, ``'logits_per_text'``:
+          ``(batch_size, batch_size)``, and ``'logit_scale'``: scalar. Present
+          ONLY when both modalities were given.
+
+    :ivar num_patches: ``(image_size // patch_size) ** 2``.
+    :vartype num_patches: int
+    :ivar patch_conv: Strided convolution implementing patch embedding.
+    :vartype patch_conv: keras.layers.Conv2D
+    :ivar vision_transformer_layers: The vision tower's blocks.
+    :vartype vision_transformer_layers: list[TransformerLayer]
+    :ivar vision_projection: Bias-free projection into the shared space.
+    :vartype vision_projection: keras.layers.Dense
+    :ivar token_embedding: Text token embedding table.
+    :vartype token_embedding: keras.layers.Embedding
+    :ivar text_transformer_layers: The text tower's blocks.
+    :vartype text_transformer_layers: list[TransformerLayer]
+    :ivar text_projection: Bias-free projection into the shared space.
+    :vartype text_projection: keras.layers.Dense
+    :ivar logit_scale: Scalar LOG temperature weight, created in ``build``.
+    :vartype logit_scale: keras.Variable
+    :ivar class_token: Learnable ``(1, 1, vision_width)`` CLS token, created in
+        ``build``.
+    :vartype class_token: keras.Variable
 
     Example:
-        ```python
-        # Create a model from a predefined variant
-        model = CLIPModel.from_variant("ViT-B/16")
+        .. code-block:: python
 
-        # Build the model
-        model.build({
-            'image': (None, 224, 224, 3),
-            'text': (None, 77)
-        })
+            # Create a model from a predefined variant
+            model = CLIP.from_variant("ViT-B/16")
 
-        # Prepare inputs
-        images = keras.random.normal((32, 224, 224, 3))
-        text_tokens = keras.random.uniform(
-            (32, 77), 0, 49408, dtype='int32')
+            # Build the model
+            model.build({
+                'image': (None, 224, 224, 3),
+                'text': (None, 77)
+            })
 
-        # Full forward pass for training
-        outputs = model({'image': images, 'text': text_tokens})
+            images = keras.random.normal((32, 224, 224, 3))
+            text_tokens = keras.random.uniform(
+                (32, 77), 0, 49408, dtype='int32')
 
-        # Get features for inference
-        image_features = model.encode_image(images)
-        text_features = model.encode_text(text_tokens)
+            # Full forward pass for training
+            outputs = model({'image': images, 'text': text_tokens})
 
-        # Save and load
-        model.save('clip_model.keras')
-        loaded_model = keras.models.load_model('clip_model.keras')
-        ```
+            # Single-tower inference
+            image_features = model.encode_image(images)
+            text_features = model.encode_text(text_tokens)
 
-    References:
-        Radford, A., et al. (2021). Learning Transferable Visual
-        Representations from Natural Language Supervision. ICML.
+            model.save('clip_model.keras')
+            loaded_model = keras.models.load_model('clip_model.keras')
+
+    Note:
+        Text pooling assumes RIGHT padding with pad id 0. A left-padded batch,
+        or a tokenizer whose pad id is not zero, pools the wrong position
+        silently rather than raising.
     """
 
     MODEL_VARIANTS = {
@@ -338,11 +457,50 @@ class CLIP(keras.Model):
         logit_scale_init: float = 2.6592,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize CLIP model.
+        """Initialize the CLIP model.
 
-        All sub-layers are created here following the golden rule. Weights
-        are created in build().
+        All sub-layers are created here following the golden rule; the model's
+        own weights (``logit_scale``, ``class_token``) are created in
+        :meth:`build`.
+
+        :param image_size: Input image height and width.
+        :type image_size: int
+        :param patch_size: Square patch edge length and convolution stride.
+        :type patch_size: int
+        :param vision_layers: Number of vision transformer layers.
+        :type vision_layers: int
+        :param vision_width: Vision tower hidden dimension.
+        :type vision_width: int
+        :param vision_heads: Vision attention heads.
+        :type vision_heads: int
+        :param vision_kv_heads: Vision key-value heads for GQA.
+        :type vision_kv_heads: int
+        :param vocab_size: Text vocabulary size.
+        :type vocab_size: int
+        :param context_length: Maximum text sequence length.
+        :type context_length: int
+        :param text_layers: Number of text transformer layers.
+        :type text_layers: int
+        :param text_width: Text tower hidden dimension.
+        :type text_width: int
+        :param text_heads: Text attention heads.
+        :type text_heads: int
+        :param text_kv_heads: Text key-value heads for GQA.
+        :type text_kv_heads: int
+        :param embed_dim: Shared embedding dimension.
+        :type embed_dim: int
+        :param ffn_expansion_factor: SwiGLU expansion factor.
+        :type ffn_expansion_factor: int
+        :param ffn_multiple_of: FFN hidden-dimension rounding multiple.
+        :type ffn_multiple_of: int
+        :param dropout_rate: General dropout probability.
+        :type dropout_rate: float
+        :param attention_dropout_rate: Attention-weight dropout probability.
+        :type attention_dropout_rate: float
+        :param logit_scale_init: Initial LOG temperature.
+        :type logit_scale_init: float
+        :param kwargs: Additional keyword arguments for ``keras.Model``.
+        :raises ValueError: If any divisibility constraint is violated.
         """
         super().__init__(**kwargs)
 
@@ -387,11 +545,12 @@ class CLIP(keras.Model):
         )
 
     def _validate_config(self) -> None:
-        """
-        Validate configuration parameters.
+        """Validate the divisibility constraints between the stored parameters.
 
-        Raises:
-            ValueError: If any configuration parameter is invalid.
+        :raises ValueError: If ``image_size`` is not divisible by
+            ``patch_size``, if either tower's width is not divisible by its
+            head count, or if either head count is not divisible by its
+            kv-head count.
         """
         if self.image_size % self.patch_size != 0:
             raise ValueError(
@@ -420,10 +579,11 @@ class CLIP(keras.Model):
             )
 
     def _create_vision_encoder(self) -> None:
-        """
-        Create all layers for the vision encoder.
+        """Create every vision-tower sub-layer.
 
-        This follows the golden rule: create layers in __init__, not build().
+        Follows the golden rule: layers are created in ``__init__``, not in
+        ``build``. The CLS token is a WEIGHT and therefore belongs to
+        :meth:`build` instead.
         """
         # Patch embedding layer
         self.patch_conv = layers.Conv2D(
@@ -468,10 +628,10 @@ class CLIP(keras.Model):
         )
 
     def _create_text_encoder(self) -> None:
-        """
-        Create all layers for the text encoder.
+        """Create every text-tower sub-layer.
 
-        This follows the golden rule: create layers in __init__, not build().
+        Follows the golden rule: layers are created in ``__init__``, not in
+        ``build``.
         """
         # Token embedding layer
         self.token_embedding = layers.Embedding(
@@ -517,15 +677,17 @@ class CLIP(keras.Model):
         self,
         input_shape: Union[Dict[str, Any], Tuple[Any, ...]]
     ) -> None:
-        """
-        Create the model's own weights.
+        """Create the model's own weights and materialize every sub-layer.
 
-        Following the golden rule, this method creates weights that don't
-        depend on sub-layers and explicitly builds all sub-layers.
+        Following the golden rule, this creates the two weights that do not
+        belong to any sub-layer (``logit_scale`` and ``class_token``) and then
+        explicitly builds each tower's layers at their known shapes.
 
-        Args:
-            input_shape: Input shape specification, either dictionary with
-                'image' and 'text' keys or tuple of shapes.
+        :param input_shape: Either a mapping with ``'image'`` and ``'text'``
+            shapes or a tuple of shapes. Only forwarded to
+            ``super().build``; every sub-layer shape is derived from the
+            constructor config.
+        :type input_shape: Union[Dict[str, Any], Tuple[Any, ...]]
         """
         if self.built:
             return
@@ -576,21 +738,22 @@ class CLIP(keras.Model):
     def _ensure_built(self) -> None:
         """Build the model's own weights if a public encoder is called first.
 
-        `class_token`, `logit_scale` and the positional embeddings are created in
-        `build`, which Keras runs on `__call__`. `encode_image` is a public entry point that does NOT go through
-        `__call__`, so on a fresh instance it reads `self.class_token` as None
-        and fails inside `ops.broadcast_to` with
+        ``class_token``, ``logit_scale`` and the positional embeddings are
+        created in ``build``, which Keras runs on ``__call__``. ``encode_image``
+        is a public entry point that does NOT go through ``__call__``, so on a
+        fresh instance it reads ``self.class_token`` as None and fails inside
+        ``ops.broadcast_to`` with
 
             ValueError: Attempt to convert a value (None) ... to a Tensor
 
-        rather than saying the model is unbuilt. Shapes come from the constructor
-        config, so no input is needed to resolve them.
+        rather than saying the model is unbuilt. Shapes come from the
+        constructor config, so no input is needed to resolve them.
 
-        `encode_text` deliberately does NOT call this. It touches none of the
-        weights `build` creates, and building there would LOCK the layer, so a
-        caller that swaps or taps `text_transformer_layers` after a first
-        `encode_text` -- which is exactly how the causality probe in
-        `tests/test_models/test_clip/test_model.py` reads per-position hidden
+        ``encode_text`` deliberately does NOT call this. It touches none of the
+        weights ``build`` creates, and building there would LOCK the layer, so a
+        caller that swaps or taps ``text_transformer_layers`` after a first
+        ``encode_text`` -- which is exactly how the causality probe in
+        ``tests/test_models/test_clip/test_model.py`` reads per-position hidden
         states -- would hit "You cannot add new elements of state to a layer
         that is already built".
         """
@@ -606,17 +769,17 @@ class CLIP(keras.Model):
         images: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Encode images to the shared embedding space.
+        """Encode images into the shared embedding space.
 
-        Args:
-            images: Input images tensor with shape
-                `(batch_size, height, width, channels)`.
-            training: Optional boolean, whether the model is in training mode.
-                If None, uses the training mode from call context.
-
-        Returns:
-            L2-normalized image features with shape `(batch_size, embed_dim)`.
+        :param images: Input images of shape
+            ``(batch_size, height, width, channels)``.
+        :type images: keras.KerasTensor
+        :param training: Whether the model is in training mode. ``None`` uses
+            the training mode from the call context.
+        :type training: Optional[bool]
+        :return: L2-normalized image features of shape
+            ``(batch_size, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         self._ensure_built()
         batch_size = ops.shape(images)[0]
@@ -657,17 +820,21 @@ class CLIP(keras.Model):
         text_ids: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Encode text to the shared embedding space.
+        """Encode text into the shared embedding space.
 
-        Args:
-            text_ids: Input text token IDs of shape
-                `(batch_size, sequence_length)`.
-            training: Optional boolean, whether the model is in training mode.
-                If None, uses the training mode from call context.
+        The tower is CAUSAL: a lower-triangular mask is built here and passed
+        to every block, which is what makes the pooled last real token the only
+        position that has read the whole sentence. Pooling assumes RIGHT
+        padding with pad id 0.
 
-        Returns:
-            L2-normalized text features with shape `(batch_size, embed_dim)`.
+        :param text_ids: Token IDs of shape ``(batch_size, sequence_length)``.
+        :type text_ids: keras.KerasTensor
+        :param training: Whether the model is in training mode. ``None`` uses
+            the training mode from the call context.
+        :type training: Optional[bool]
+        :return: L2-normalized text features of shape
+            ``(batch_size, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
@@ -717,26 +884,28 @@ class CLIP(keras.Model):
         ],
         training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """
-        Forward pass of the CLIP model.
+        """Forward pass of the CLIP model, partial by design.
 
-        This method handles both single-modality and multi-modality inputs.
-        For training, both 'image' and 'text' should be provided. For
-        inference, either one or both can be provided.
+        Handles single-modality and dual-modality inputs. Training needs both
+        ``'image'`` and ``'text'``; inference may pass either, in which case
+        only that tower's features are returned and the logits keys are omitted
+        entirely, so encoding a caption bank does not require a dummy image
+        batch. The output structure therefore DEPENDS ON THE INPUT.
 
-        Args:
-            inputs: Either a dictionary with keys 'image' and/or 'text',
-                or a tuple of (images, texts).
-            training: Optional boolean, whether the model is in training mode.
-                If None, uses the training mode from call context.
+        :param inputs: A mapping with keys ``'image'`` and/or ``'text'``, or a
+            tuple ``(images, texts)``.
+        :type inputs: Union[Dict[str, keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Whether the model is in training mode. ``None`` uses
+            the training mode from the call context.
+        :type training: Optional[bool]
+        :return: A dictionary with:
 
-        Returns:
-            Dictionary with the following keys:
-            - 'image_features': Image embeddings if images provided
-            - 'text_features': Text embeddings if texts provided
-            - 'logits_per_image': Similarity scores if both provided
-            - 'logits_per_text': Transposed similarity if both provided
-            - 'logit_scale': Temperature parameter if both provided
+            - ``image_features``: image embeddings, if images were provided.
+            - ``text_features``: text embeddings, if texts were provided.
+            - ``logits_per_image``, ``logits_per_text``, ``logit_scale``: only
+              when BOTH modalities were provided.
+
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Parse inputs
         if isinstance(inputs, dict):
@@ -777,14 +946,14 @@ class CLIP(keras.Model):
         self,
         input_shape: Union[Dict[str, Any], Tuple]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shape for given input shape.
+        """Compute the output shapes, mirroring ``call``'s partial contract.
 
-        Args:
-            input_shape: Dictionary with 'image' and/or 'text' shapes,
-                or a tuple of shapes.
-
-        Returns:
-            Dictionary with output shapes for each returned tensor.
+        :param input_shape: A mapping with ``'image'`` and/or ``'text'``
+            shapes, or a tuple of shapes.
+        :type input_shape: Union[Dict[str, Any], Tuple]
+        :return: Mapping from output key to shape, containing only the keys
+            ``call`` would emit for this input.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         output_shapes = {}
 
@@ -812,11 +981,10 @@ class CLIP(keras.Model):
         return output_shapes
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get model configuration for serialization.
+        """Return the model configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters.
+        :return: Dictionary containing every constructor parameter.
+        :rtype: Dict[str, Any]
         """
         config = {
             'image_size': self.image_size,
@@ -843,14 +1011,12 @@ class CLIP(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CLIP":
-        """
-        Create model from configuration.
+        """Create a model instance from its configuration.
 
-        Args:
-            config: Dictionary containing constructor parameters.
-
-        Returns:
-            New CLIPModel instance.
+        :param config: Dictionary containing constructor parameters.
+        :type config: Dict[str, Any]
+        :return: New CLIP instance.
+        :rtype: CLIP
         """
         return cls(**config)
 
@@ -860,32 +1026,25 @@ class CLIP(keras.Model):
         variant: str,
         **kwargs: Any
     ) -> "CLIP":
-        """
-        Create a CLIP model from a predefined variant.
+        """Create a CLIP model from a predefined variant.
 
-        Args:
-            variant: String, one of "ViT-B/32", "ViT-B/16", "ViT-L/14",
-                "ViT-H/14".
-            **kwargs: Additional arguments to override the variant's default
-                configuration.
-
-        Returns:
-            A CLIPModel instance configured for the specified variant.
-
-        Raises:
-            ValueError: If the variant is not recognized.
+        :param variant: One of ``"ViT-B/32"``, ``"ViT-B/16"``, ``"ViT-L/14"``,
+            ``"ViT-H/14"``.
+        :type variant: str
+        :param kwargs: Additional arguments overriding the variant's defaults.
+        :type kwargs: Any
+        :return: A CLIP instance configured for the specified variant.
+        :rtype: CLIP
+        :raises ValueError: If the variant is not recognized.
 
         Example:
-            ```python
-            # Create ViT-B/16 variant
-            model = CLIPModel.from_variant("ViT-B/16")
+            .. code-block:: python
 
-            # Create with custom dropout
-            model = CLIPModel.from_variant(
-                "ViT-B/16",
-                dropout_rate=0.1
-            )
-            ```
+                # Create ViT-B/16 variant
+                model = CLIP.from_variant("ViT-B/16")
+
+                # Create with custom dropout
+                model = CLIP.from_variant("ViT-B/16", dropout_rate=0.1)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -904,28 +1063,24 @@ class CLIP(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_clip_model(**kwargs: Any) -> CLIP:
-    """
-    Convenience function to create a CLIP model.
+    """Convenience function to create a CLIP model with a custom configuration.
 
-    This function is a simple wrapper around the CLIPModel constructor,
-    allowing for easy creation with custom configurations.
+    A thin wrapper around the :class:`CLIP` constructor.
 
-    Args:
-        **kwargs: Keyword arguments for the CLIPModel constructor.
-
-    Returns:
-        A configured CLIPModel instance.
+    :param kwargs: Keyword arguments for the :class:`CLIP` constructor.
+    :type kwargs: Any
+    :return: A configured CLIP instance.
+    :rtype: CLIP
 
     Example:
-        ```python
-        # Create custom CLIP model
-        model = create_clip_model(
-            image_size=384,
-            patch_size=16,
-            vision_layers=24,
-            embed_dim=768
-        )
-        ```
+        .. code-block:: python
+
+            model = create_clip_model(
+                image_size=384,
+                patch_size=16,
+                vision_layers=24,
+                embed_dim=768
+            )
     """
     logger.info("Creating custom CLIP model")
     return CLIP(**kwargs)
@@ -933,29 +1088,28 @@ def create_clip_model(**kwargs: Any) -> CLIP:
 # ---------------------------------------------------------------------
 
 def create_clip_variant(variant: str, **kwargs: Any) -> CLIP:
-    """
-    Convenience function to create a CLIP model from a predefined variant.
+    """Convenience function to create a CLIP model from a predefined variant.
 
-    Args:
-        variant: The model variant string (e.g., "ViT-B/16").
-        **kwargs: Additional arguments to override the variant's default
-            configuration.
-
-    Returns:
-        A configured CLIPModel instance.
+    :param variant: The model variant string (e.g. ``"ViT-B/16"``).
+    :type variant: str
+    :param kwargs: Additional arguments overriding the variant's defaults.
+    :type kwargs: Any
+    :return: A configured CLIP instance.
+    :rtype: CLIP
+    :raises ValueError: If the variant is not recognized.
 
     Example:
-        ```python
-        # Create standard ViT-B/16
-        model = create_clip_variant("ViT-B/16")
+        .. code-block:: python
 
-        # Create with modifications
-        model = create_clip_variant(
-            "ViT-B/16",
-            dropout_rate=0.1,
-            attention_dropout_rate=0.1
-        )
-        ```
+            # Create standard ViT-B/16
+            model = create_clip_variant("ViT-B/16")
+
+            # Create with modifications
+            model = create_clip_variant(
+                "ViT-B/16",
+                dropout_rate=0.1,
+                attention_dropout_rate=0.1
+            )
     """
     return CLIP.from_variant(variant, **kwargs)
 

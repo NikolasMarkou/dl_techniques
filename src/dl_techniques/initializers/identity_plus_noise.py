@@ -1,5 +1,4 @@
 import keras
-from keras import ops
 from typing import Optional, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -23,7 +22,7 @@ class IdentityPlusNoise(keras.initializers.Initializer):
                 f"IdentityPlusNoise expects a square 2-D shape, got {shape}"
             )
         dtype = dtype or "float32"
-        eye = ops.eye(shape[0], dtype=dtype)
+        eye = keras.ops.eye(shape[0], dtype=dtype)
         if self.stddev == 0.0:
             return eye
         noise = keras.random.normal(
