@@ -129,6 +129,26 @@ BACKBONE_NAME = "beit_backbone"
 # rather than on the backbone (a backbone field nothing reads is a config-shaped lie).
 DEFAULT_VOCAB_SIZE = 8192
 
+# ---------------------------------------------------------------------------------
+# THE VARIANT STORY: two tables and one resolver, read top to bottom.
+#
+#   SCALE_CONFIGS   answers "what ARCHITECTURE is this scale?"    'base'      -> widths
+#   MODEL_VARIANTS  answers "what SCALE is this public name?"     'beit_base' -> 'base'
+#   _resolve_scale  accepts either spelling and returns a SCALE_CONFIGS key
+#
+# DECISION plan-2026-08-24T074054-247151fd/D-009
+# WHAT NOT TO DO: do NOT merge these two dicts into one table keyed by public name,
+# however redundant `{'scale': 'tiny'}` looks. `src/dl_techniques/models/CLAUDE.md:269`
+# rules verbatim that "`SCALE_CONFIGS` is NOT a stale spelling of `MODEL_VARIANTS`, and
+# the two must not be merged where both appear", names `beit` (with `vit` and
+# `energy_transformer`) as a deliberate carrier of both, and states at `:285-287` what
+# the merge would destroy: "a name->scale indirection that exists so a variant can pin a
+# patch size or an input resolution alongside its scale". `vit` and
+# `energy_transformer` are graded against the same rule, so a local merge here breaks a
+# repo-wide invariant, not just this file. The tidiness win is taken WITHOUT the merge:
+# the two tables and the resolver are co-located under this one header.
+# ---------------------------------------------------------------------------------
+
 # DECISION plan-2026-08-11T012340-f63796dc/D-003
 # `layer_scale_init_value` DIVERGES between the two primary sources, and the split
 # below is timm's, not HF's. Measured (both fetched verbatim, 2026-08-11):
