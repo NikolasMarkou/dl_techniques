@@ -87,7 +87,7 @@ combined are smaller than either one.
 | Subpackage | `.py` | Role |
 |---|---|---|
 | **`src/dl_techniques/layers/`** | 297 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 270 | **The second largest.** 74 *top-level* model packages — not 74 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules, while `src/dl_techniques/models/image_restoration/` is not an architecture at all (see below). Re-derived 2026-08-24: **71 of 74** bind a `create_*` factory in their package init and **73 of 74** export a curated `__all__`; the 3 that bind no factory are `power_sampling`, the nested family `SAM/`, and `image_restoration`, and `image_restoration` is also the one without an `__all__`. `SAM/` exports nothing on purpose — re-exporting the class `SAM2` there would shadow the `SAM2/` subpackage (its own init docstring carries the reasoning) — and `image_restoration/` is a DOCUMENTATION-ONLY directory: an empty `__init__.py` beside `README.md` and `BENCHMARKS.md`, holding no Python at all. It arrived by `git pull` in `4334b282d` and it is why the "model packages" row moved 73 -> 74 without any architecture landing. (This sentence said "69 of 73 ... the 4 without a factory are `power_sampling`, `mamba`, `fnet` and `SAM/`" until 2026-08-24, and before that "70 of 73 ... `power_sampling`, `SAM/`, `time_series/`": that is three consecutive wrong lists. `mamba` and `fnet` DO bind one — the figure quoted the ANYWHERE-in-package command against the IN-THE-INIT question. Re-derive from the Numbers table row, never by memory.) See Part C. |
+| **`src/dl_techniques/models/`** | 270 | **The second largest.** 74 *top-level* model packages — not 74 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules, while `src/dl_techniques/models/image_restoration/` is not an architecture at all (see below). Re-derived 2026-08-24: **71 of 74** bind a `create_*` factory in their package init and **72 of 74** export a curated `__all__`; the 3 that bind no factory are `power_sampling`, the nested family `SAM/`, and `image_restoration`, and `SAM/` and `image_restoration` are the two without an `__all__`. `SAM/` exports nothing on purpose — re-exporting the class `SAM2` there would shadow the `SAM2/` subpackage (its own init docstring carries the reasoning) — and `image_restoration/` is a DOCUMENTATION-ONLY directory: an empty `__init__.py` beside `README.md` and `BENCHMARKS.md`, holding no Python at all. It arrived by `git pull` in `4334b282d` and it is why the "model packages" row moved 73 -> 74 without any architecture landing. (This sentence said "69 of 73 ... the 4 without a factory are `power_sampling`, `mamba`, `fnet` and `SAM/`" until 2026-08-24, and before that "70 of 73 ... `power_sampling`, `SAM/`, `time_series/`": that is three consecutive wrong lists. `mamba` and `fnet` DO bind one — the figure quoted the ANYWHERE-in-package command against the IN-THE-INIT question. Re-derive from the Numbers table row, never by memory.) See Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 41 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -109,7 +109,7 @@ Every one of the 13 has its own `CLAUDE.md` — start there, not here.
 | Directory | Present here | Ships in a clone | Consequence |
 |---|---|---|---|
 | `src/`, `tests/`, `research/`, `imgs/`, `scripts/` | yes | yes | The whole repo a newcomer gets. |
-| `results/` | yes — 8 run dirs, 4.5 M | **no** (gitignored) | Zero checkpoints in a clone. These two digits are the most volatile in this file: they describe one machine's untracked scratch, and they fell from 55 dirs / 6.3 G to 6 / 3.4 M between 2026-08-11 and 2026-08-14, then rose to 8 / 4.5 M when `plan-2026-08-14T042537-ff96c6c6` proved a repo-root-write guard RED (the 2 added dirs are that injection's artifacts, deliberately left in place because nothing under `results/` may be deleted; the figure returns to 6 if the user removes them). Do not read them as a repo property, and never act on them — `results/` is gitignored and untracked, so a deletion there is unrecoverable. |
+| `results/` | yes — 9 run dirs, 4.5 M | **no** (gitignored) | Zero checkpoints in a clone. These two digits are the most volatile in this file: they describe one machine's untracked scratch, and they fell from 55 dirs / 6.3 G to 6 / 3.4 M between 2026-08-11 and 2026-08-14, then rose to 8 / 4.5 M when `plan-2026-08-14T042537-ff96c6c6` proved a repo-root-write guard RED (the 2 added dirs are that injection's artifacts, deliberately left in place because nothing under `results/` may be deleted; the figure returns to 6 if the user removes them). Do not read them as a repo property, and never act on them — `results/` is gitignored and untracked, so a deletion there is unrecoverable. |
 | `plans/` | yes | **no** (gitignored) | Planner state is machine-local. |
 | `data/` | yes — 2.6 G | **no** (untracked) | Local datasets only. |
 
@@ -326,16 +326,16 @@ Every command is in the Numbers table at the foot of this file.
 Three honest exceptions. None of them is a defect to go fix on sight; each is a
 thing you will meet and should not be surprised by.
 
-- **Raw TensorFlow has not been fully migrated.** 61 files under
+- **Raw TensorFlow has not been fully migrated.** 60 files under
   `src/dl_techniques/` still import `tensorflow` directly despite `keras.ops`
   being the stated backend-agnostic surface. The standing repo preference is to
   *migrate* such a site rather than document it as an accepted exception, unless
   it is genuinely unmigratable (FFT, SVD).
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
-  `src/dl_techniques/layers/attention/` — 339 modules carry Sphinx/reST
-  `:param:` and 246 carry a Google-style `Args:` block, and the two sets are not
-  disjoint: 13 modules carry both, so these do not sum to a partition. reST is
+  `src/dl_techniques/layers/attention/` — 347 modules carry Sphinx/reST
+  `:param:` and 242 carry a Google-style `Args:` block, and the two sets are not
+  disjoint: 18 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
   *within itself* — 34 of its 35 modules. The split reaches the shared test
@@ -344,7 +344,7 @@ thing you will meet and should not be surprised by.
   docstrings" line as a preference for new code, not a description of the tree.
 - **The factory convention is now near-universal, but this entry is kept because
   the measurement trap that produced it is not.** Re-derived 2026-08-24, **71 of 74**
-  model packages bind a `create_*` in their own `<pkg>/__init__.py` and **73 of 74**
+  model packages bind a `create_*` in their own `<pkg>/__init__.py` and **72 of 74**
   declare a curated `__all__` (`SAM/` and the documentation-only `image_restoration/`
   are the exceptions), so the old
   "read the init before assuming
@@ -486,10 +486,10 @@ table are named precisely *because* they do not resolve.
 | `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist. `test -e docs/` fails. `Makefile` target `docs` runs `generate_docs.py` on demand; nothing is committed. Any `docs/` you find locally is your own build output |
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
-| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 49 files under `src/` name `keras.callbacks.Callback`; only 10 are in `src/dl_techniques/callbacks/` and 32 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
+| "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 49 files under `src/` name `keras.callbacks.Callback`; only 10 are in `src/dl_techniques/callbacks/` and 31 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
 | "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Now holds for models too, though it did not when this row was written: 71 of the 74 model packages bind a `create_*` in their package init and only 2 (`power_sampling` and the documentation-only `image_restoration/`) define none anywhere. The row is kept because the pre-`1bfe89d08` figures — 27 and 14 — are what the root `CLAUDE.md` claim was measured against, and they moved without the map moving. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
-| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split is 255 of 294. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
+| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split was repaired to 255 of 294 — that file now asserts **256 of 296**, re-derived 2026-08-19, which is this row's own lesson happening to this row's own text. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
 | `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired by shipping `global_attention_interval = 1` for those two variants (all-global attention); they now run and measure **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
@@ -622,11 +622,34 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > subpackages". They are one row-group with that section's prose and its per-subpackage
 > table: move all three together or none. The directory-count rows are current as of the
 > same date.
+>
+> **Superseded 2026-08-24 (third pass that day)** by `plan-2026-08-24-64ffd751`
+> (the `bfconvunext` rewrite). ALL 66 enforceable rows were re-run with their OWN commands and
+> **3 moved**; the other 63 reproduce. Only ONE is this plan's: `tests/` 1068 -> 1069, the single
+> delegation-contract guard `tests/test_models/test_bias_free_denoisers/test_the_bfconvunext_delegation_contract.py`.
+> The other two are inherited debt from the `git pull` merged in `4ed922781`, whose docstring
+> rewrites in `accunet/`, `convnext/`, `coshnet/` and `modern_bert/` converted Google `Args:`
+> blocks to Sphinx: `:param ` 343 -> 347 and `Args:` 246 -> 242. Both were ALREADY RED at this
+> plan's base commit (the tabulated values are byte-identical in `git show 4ed922781:REPO_MAP.md`
+> and at HEAD), so this plan did not break them; it is settling them rather than leaving them RED.
+>
+> **Seven UNENFORCED prose digits were re-derived in the same edit** — the sweep reads only rows
+> that carry a Value *and* a command, so everything below is invisible to it and had drifted:
+> the raw-`tensorflow` importer count in Part A's "three honest exceptions" (61 -> 60), that
+> section's docstring split (339 -> 347 `:param `, 246 -> 242 `Args:`, 13 -> 18 carrying both),
+> the curated-`__all__` figure in BOTH places it is stated (73 -> **72** of 74 — the digit
+> contradicted its own sentence, which already named `SAM/` *and* `image_restoration/` as the two
+> exceptions, and the Part A models cell additionally claimed `image_restoration` was the only one),
+> the `src/train/` callback count in the Part D ledger (32 -> 31, against a green table row reading
+> 31), and the `results/` run-dir count in the "ships in a clone" table (8 -> 9, against this
+> file's own later note recording that same 8 -> 9 move). **The two `(local)` prose-valued rows
+> (`4.5M`, `2.6G`) were also re-run and both reproduce exactly** — they are unenforced because
+> their Values are not digits, not because they are unmeasured.
 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1012 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1068 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1069 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 297 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -690,8 +713,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 257 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
-| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 343 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 246 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 347 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 242 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 18 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 9 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 84 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
