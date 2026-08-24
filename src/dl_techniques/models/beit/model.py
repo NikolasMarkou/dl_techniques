@@ -96,6 +96,22 @@ References:
       and the constructor defaults.
 """
 
+# DECISION plan-2026-08-24T074054-247151fd/D-012
+# DOCSTRING STYLE: this module is 100% Sphinx/reST (`:param:` / `:type:` /
+# `:returns:` / `:raises:`), converted wholesale from Google `Args:` on 2026-08-24 on
+# the user's explicit instruction, to match the declared exemplars
+# `models/resnet/model.py` and `models/bert/bert.py`.
+# WHAT NOT TO DO: do NOT read this file as drift and convert it back. That override
+# is deliberate and it CONTRADICTS two tracked convention documents, which both still
+# stand for every other file: repo-root `CLAUDE.md` (Core Conventions) says "Match the
+# file you are editing; never convert a file wholesale", and
+# `src/dl_techniques/models/CLAUDE.md` ("Things you must NOT do") says "Never convert
+# docstring style. This package is measurably mixed; match the file you are editing."
+# Neither document was changed; this file is a named, recorded exception, not a new
+# package-wide rule. `layers/attention/beit_attention.py` was already Sphinx and is
+# deliberately untouched. New docstrings added HERE must be Sphinx, to keep the file
+# internally consistent.
+
 import keras
 from keras import layers
 from keras.saving import serialize_keras_object, deserialize_keras_object
@@ -210,14 +226,11 @@ MODEL_VARIANTS: Dict[str, Dict[str, str]] = {
 def _resolve_scale(variant: str) -> str:
     """Accept either a scale key (``'base'``) or a variant key (``'beit_base'``).
 
-    Args:
-        variant: A key of :data:`SCALE_CONFIGS` or of :data:`MODEL_VARIANTS`.
-
-    Returns:
-        The resolved :data:`SCALE_CONFIGS` key.
-
-    Raises:
-        ValueError: If ``variant`` is neither spelling.
+    :param variant: A key of :data:`SCALE_CONFIGS` or of :data:`MODEL_VARIANTS`.
+    :type variant: str
+    :returns: The resolved :data:`SCALE_CONFIGS` key.
+    :rtype: str
+    :raises ValueError: If ``variant`` is neither spelling.
     """
     if variant in SCALE_CONFIGS:
         return variant
@@ -331,64 +344,157 @@ class BeitModel(keras.Model):
     that never calls it (authoring guide §9). That is what makes the two trunks
     weight-identical so the warm start is complete. Do not "optimize" it away.
 
-    Args:
-        input_shape: Image shape ``(height, width, channels)``. Defaults to
-            ``(224, 224, 3)``.
-        patch_size: Patch size; ``int`` for square patches or ``(h, w)``. Defaults to
-            ``16``.
-        scale: One of ``'tiny'``, ``'small'``, ``'base'``, ``'large'`` (see
-            :data:`SCALE_CONFIGS`); a variant spelling such as ``'beit_base'`` is also
-            accepted.
-        hidden_size: Override the scale's model width ``D``. ``None`` -> from ``scale``.
-        num_layers: Override the scale's block count. ``None`` -> from ``scale``.
-        num_heads: Override the scale's head count. ``None`` -> from ``scale``.
-        intermediate_size: Override the scale's FFN width. ``None`` -> from ``scale``.
-        layer_scale_init_value: Override the scale's LayerScale init. ``None`` -> from
-            ``scale``. See :data:`SCALE_CONFIGS` for why the value is scale-dependent.
-        layer_norm_eps: Epsilon at EVERY normalization site. Defaults to ``1e-12``
-            (HF ``BeitConfig``), which is 6 orders of magnitude tighter than a generic
-            ViT's ``1e-6`` — it is passed explicitly and never inherited from a
-            constructor default.
-        drop_path_rate: Maximum stochastic-depth rate. The per-block rates are the
-            linear ramp ``0 -> drop_path_rate`` across ``num_layers``. Defaults to
-            ``0.1``.
-        hidden_dropout_rate: Dropout after the embedding stage and on each block's FFN
-            output. Defaults to ``0.0`` (HF ``BeitConfig``). Upstream the field is
-            ``BeitConfig.hidden_dropout_prob``; it is spelled ``_rate`` here because
-            every dropout rate in this repository is (D-130), and the value and
-            meaning are unchanged.
-        attention_probs_dropout_rate: Dropout on the attention probabilities. Defaults
-            to ``0.0`` (HF ``BeitConfig``). Upstream:
-            ``BeitConfig.attention_probs_dropout_prob``.
-        use_absolute_position_embeddings: Add a learnable absolute position embedding
-            over the ``N + 1`` token sequence. Defaults to ``False`` — BEiT uses
-            RELATIVE position bias instead, and no shipped BEiT/BEiTv2 variant in HF or
-            timm enables this.
-        use_relative_position_bias: Give every block's ``BeitAttention`` its own
-            learnable relative-position-bias table. Defaults to ``True``.
-        use_shared_relative_position_bias: One table shared by every block (BEiT's
-            pre-training-only mode). Only ``False`` is supported; ``True`` raises.
-        use_mean_pooling: BEiT's classification convention — mean over the final patch
-            tokens (cls excluded) with a SEPARATE LayerNorm on the pooled mean. It also
-            controls whether this trunk applies its own final LayerNorm; see the note
-            on :attr:`final_norm`. Defaults to ``True`` (HF ``BeitConfig``).
-        initializer_range: Stddev of the ``TruncatedNormal`` used for every projection
-            kernel. Defaults to ``0.02`` (HF ``BeitConfig``).
-        name: Model name. Defaults to :data:`BACKBONE_NAME` — do not change it for a
-            model that must participate in the MIM -> classifier warm start.
+    **Architecture Overview:**
 
-    Raises:
-        ValueError: If any size is non-positive, ``hidden_size % num_heads != 0``, the
-            image dims are not divisible by the patch dims, a dropout rate lies outside
-            ``[0, 1]``, ``scale`` is unknown, or ``use_shared_relative_position_bias``
-            is ``True``.
+    .. code-block:: text
+
+        Input image [B, H, W, C]            (+ optional bool_mask [B, N])
+                 |
+                 v
+        +---------------------------------------------------+
+        | PatchEmbedding: Conv p x p, stride p  -> [B, N, D] |
+        |   N = (H / p_h) * (W / p_w)                        |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        | MaskTokenApply: x[mask] <- learnable mask_token    |
+        |   ALWAYS created and built; applied only when a    |
+        |   mask is passed. No token is ever dropped.        |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        | ClassTokenPrepend                   -> [B, N+1, D] |
+        |   [+ absolute position embedding, off by default]  |
+        |   [+ embedding Dropout]                            |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        |  x num_layers   BEiT block (PRE-norm)              |
+        |                                                    |
+        |    x --> LN --> BeitAttention --> g1 * --> DropPath|
+        |    +--------------------------------------> (+)    |
+        |                                                    |
+        |    x --> LN --> MLP(GELU) ------> g2 * --> DropPath|
+        |    +--------------------------------------> (+)    |
+        |                                                    |
+        |  relative position bias: ONE TABLE PER BLOCK       |
+        |    (use_shared_relative_position_bias=True raises)  |
+        |  drop-path: linear ramp 0 -> drop_path_rate        |
+        |  g1, g2: LayerScale, init layer_scale_init_value   |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        | final_norm -- created ONLY when use_mean_pooling   |
+        |   is False. When True the pooling head owns the    |
+        |   norm instead (D-007), so the trunk emits         |
+        |   unnormalized tokens by design.                   |
+        +------------------------+--------------------------+
+                                 v
+              Output [B, N+1, D] -- cls token at index 0
+
+    :param input_shape: Image shape ``(height, width, channels)``. Defaults to
+        ``(224, 224, 3)``.
+    :type input_shape: Tuple[int, int, int]
+    :param patch_size: Patch size; ``int`` for square patches or ``(h, w)``. Defaults
+        to ``16``.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param scale: One of ``'tiny'``, ``'small'``, ``'base'``, ``'large'`` (see
+        :data:`SCALE_CONFIGS`); a variant spelling such as ``'beit_base'`` is also
+        accepted.
+    :type scale: BeitScale
+    :param hidden_size: Override the scale's model width ``D``. ``None`` -> from
+        ``scale``.
+    :type hidden_size: Optional[int]
+    :param num_layers: Override the scale's block count. ``None`` -> from ``scale``.
+    :type num_layers: Optional[int]
+    :param num_heads: Override the scale's head count. ``None`` -> from ``scale``.
+    :type num_heads: Optional[int]
+    :param intermediate_size: Override the scale's FFN width. ``None`` -> from
+        ``scale``.
+    :type intermediate_size: Optional[int]
+    :param layer_scale_init_value: Override the scale's LayerScale init. ``None`` ->
+        from ``scale``. See :data:`SCALE_CONFIGS` for why the value is scale-dependent.
+    :type layer_scale_init_value: Optional[float]
+    :param layer_norm_eps: Epsilon at EVERY normalization site. Defaults to ``1e-12``
+        (HF ``BeitConfig``), which is 6 orders of magnitude tighter than a generic
+        ViT's ``1e-6`` — it is passed explicitly and never inherited from a
+        constructor default.
+    :type layer_norm_eps: float
+    :param drop_path_rate: Maximum stochastic-depth rate. The per-block rates are the
+        linear ramp ``0 -> drop_path_rate`` across ``num_layers``. Defaults to ``0.1``.
+    :type drop_path_rate: float
+    :param hidden_dropout_rate: Dropout after the embedding stage and on each block's
+        FFN output. Defaults to ``0.0`` (HF ``BeitConfig``). Upstream the field is
+        ``BeitConfig.hidden_dropout_prob``; it is spelled ``_rate`` here because every
+        dropout rate in this repository is (D-130), and the value and meaning are
+        unchanged.
+    :type hidden_dropout_rate: float
+    :param attention_probs_dropout_rate: Dropout on the attention probabilities.
+        Defaults to ``0.0`` (HF ``BeitConfig``). Upstream:
+        ``BeitConfig.attention_probs_dropout_prob``.
+    :type attention_probs_dropout_rate: float
+    :param use_absolute_position_embeddings: Add a learnable absolute position
+        embedding over the ``N + 1`` token sequence. Defaults to ``False`` — BEiT uses
+        RELATIVE position bias instead, and no shipped BEiT/BEiTv2 variant in HF or
+        timm enables this.
+    :type use_absolute_position_embeddings: bool
+    :param use_relative_position_bias: Give every block's ``BeitAttention`` its own
+        learnable relative-position-bias table. Defaults to ``True``.
+    :type use_relative_position_bias: bool
+    :param use_shared_relative_position_bias: One table shared by every block (BEiT's
+        pre-training-only mode). Only ``False`` is supported; ``True`` raises.
+    :type use_shared_relative_position_bias: bool
+    :param use_mean_pooling: BEiT's classification convention — mean over the final
+        patch tokens (cls excluded) with a SEPARATE LayerNorm on the pooled mean. It
+        also controls whether this trunk applies its own final LayerNorm; see the note
+        on :attr:`final_norm`. Defaults to ``True`` (HF ``BeitConfig``).
+    :type use_mean_pooling: bool
+    :param initializer_range: Stddev of the ``TruncatedNormal`` used for every
+        projection kernel. Defaults to ``0.02`` (HF ``BeitConfig``).
+    :type initializer_range: float
+    :param name: Model name. Defaults to :data:`BACKBONE_NAME` — do not change it for
+        a model that must participate in the MIM -> classifier warm start.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+    :type kwargs: Any
+    :raises ValueError: If any size is non-positive, ``hidden_size % num_heads != 0``,
+        the image dims are not divisible by the patch dims, a dropout rate lies outside
+        ``[0, 1]``, ``scale`` is unknown, or ``use_shared_relative_position_bias`` is
+        ``True``.
 
     Input shape:
-        ``(batch, H, W, C)``; or a 2-tuple ``[(batch, H, W, C), (batch, N)]`` whose
-        second entry is the boolean patch mask.
+        - Unmasked: 4D tensor ``(batch, H, W, C)``.
+        - Masked, tuple form: ``[(batch, H, W, C), (batch, N)]``, the second entry
+          boolean.
+        - Masked, dict form: ``{'images': (batch, H, W, C), 'mask': (batch, N)}``;
+          the ``'mask'`` key is optional.
 
     Output shape:
-        ``(batch, N + 1, hidden_size)`` — the FULL sequence, cls token first.
+        3D tensor ``(batch, N + 1, hidden_size)`` — the FULL sequence, cls token at
+        index 0. There is only ONE output mode: this trunk never pools and never
+        drops a token, so both the masked and the unmasked call return the same
+        shape.
+
+    Example:
+        >>> # By variant name, the house entry point
+        >>> backbone = BeitModel.from_variant('beit_base', (224, 224, 3), 16)
+        >>>
+        >>> # Deterministic forward: training=False, NOT training=None
+        >>> images = keras.random.normal((2, 224, 224, 3))
+        >>> tokens = backbone(images, training=False)   # (2, 197, 768)
+        >>>
+        >>> # Masked forward for BEiT pre-training
+        >>> mask = keras.ops.zeros((2, 196), dtype='bool')
+        >>> tokens = backbone((images, mask), training=False)
+        >>>
+        >>> # cls-token pooling instead of BEiT's mean pooling: the trunk then owns
+        >>> # the final LayerNorm itself
+        >>> backbone = BeitModel(scale='tiny', use_mean_pooling=False)
+
+    Note:
+        No pretrained BEiT weights are distributed with ``dl_techniques``. Train it
+        and measure, or load a checkpoint you produced yourself; the numbers in the
+        BEiT paper are not numbers about this code.
     """
 
     def __init__(
@@ -736,15 +842,15 @@ class BeitModel(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass.
 
-        Args:
-            inputs: ``image (B, H, W, C)``, ``(image, bool_mask (B, N))``, or a dict
-                with an ``'images'`` key and an optional ``'mask'`` key.
-            training: Keras training flag. Note that ``training=None`` is NOT inference
-                for the blocks' stochastic depth — pass ``training=False`` explicitly
-                for a deterministic forward.
-
-        Returns:
-            ``(B, N + 1, hidden_size)`` — the full token sequence, cls first.
+        :param inputs: ``image (B, H, W, C)``, ``(image, bool_mask (B, N))``, or a
+            dict with an ``'images'`` key and an optional ``'mask'`` key.
+        :type inputs: Any
+        :param training: Keras training flag. Note that ``training=None`` is NOT
+            inference for the blocks' stochastic depth — pass ``training=False``
+            explicitly for a deterministic forward.
+        :type training: Optional[bool]
+        :returns: ``(B, N + 1, hidden_size)`` — the full token sequence, cls first.
+        :rtype: keras.KerasTensor
         """
         image, bool_mask = _split_inputs(inputs, "BeitModel")
 
@@ -834,18 +940,18 @@ class BeitModel(keras.Model):
     ) -> "BeitModel":
         """Create a :class:`BeitModel` from a variant name.
 
-        Args:
-            variant: A key of :data:`MODEL_VARIANTS` (``'beit_tiny'`` ...
-                ``'beit_large'``) or the bare scale (``'tiny'`` ... ``'large'``).
-            input_shape: Image shape ``(H, W, C)``.
-            patch_size: ``int`` or ``(h, w)``.
-            **kwargs: Forwarded to the constructor.
-
-        Returns:
-            The configured backbone, named :data:`BACKBONE_NAME`.
-
-        Raises:
-            ValueError: If ``variant`` is not recognized.
+        :param variant: A key of :data:`MODEL_VARIANTS` (``'beit_tiny'`` ...
+            ``'beit_large'``) or the bare scale (``'tiny'`` ... ``'large'``).
+        :type variant: str
+        :param input_shape: Image shape ``(H, W, C)``.
+        :type input_shape: Tuple[int, int, int]
+        :param patch_size: ``int`` or ``(h, w)``.
+        :type patch_size: Union[int, Tuple[int, int]]
+        :param kwargs: Forwarded to the constructor.
+        :type kwargs: Any
+        :returns: The configured backbone, named :data:`BACKBONE_NAME`.
+        :rtype: BeitModel
+        :raises ValueError: If ``variant`` is not recognized.
         """
         return cls(
             input_shape=input_shape,
@@ -881,22 +987,70 @@ class BeitForMaskedImageModeling(keras.Model):
     ``head_`` prefix, so ``skip_prefixes=("decoder_", "head_")`` transfers the trunk
     and nothing else.
 
-    Args:
-        backbone: A :class:`BeitModel` (must be named :data:`BACKBONE_NAME` for the
-            warm start to match by name), or its serialized config dict.
-        vocab_size: Size of the discrete visual-token codebook. Defaults to
-            :data:`DEFAULT_VOCAB_SIZE` (8192, the DALL-E dVAE codebook).
-        name: Model name.
+    **Architecture Overview:**
 
-    Raises:
-        ValueError: If ``vocab_size`` is not a positive integer.
+    .. code-block:: text
+
+        Input [B, H, W, C]  +  bool_mask [B, N]
+                 |
+                 v
+        +---------------------------------------------------+
+        | BeitModel trunk (BACKBONE_NAME)     -> [B, N+1, D] |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        | slice [:, 1:, :]  -- DROP the cls position         |
+        |   -> [B, N, D], index-aligned with an [B, N]       |
+        |   target-id tensor. Emitting N+1 logits would put  |
+        |   every target off by one, silently.               |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        | decoder_norm: LayerNorm(eps = backbone's eps)      |
+        +------------------------+--------------------------+
+                                 v
+        +---------------------------------------------------+
+        | decoder_head: Dense(vocab_size), NO activation     |
+        +------------------------+--------------------------+
+                                 v
+              Output [B, N, vocab_size] -- LOGITS
+
+    :param backbone: A :class:`BeitModel` (must be named :data:`BACKBONE_NAME` for the
+        warm start to match by name), or its serialized config dict.
+    :type backbone: Union[BeitModel, Dict[str, Any]]
+    :param vocab_size: Size of the discrete visual-token codebook. Defaults to
+        :data:`DEFAULT_VOCAB_SIZE` (8192, the DALL-E dVAE codebook).
+    :type vocab_size: int
+    :param name: Model name.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+    :type kwargs: Any
+    :raises ValueError: If ``vocab_size`` is not a positive integer.
+    :raises TypeError: If ``backbone`` is neither a :class:`BeitModel` nor a config
+        dict that deserializes to one.
 
     Input shape:
-        ``[(batch, H, W, C), (batch, N) bool]`` — image + patch mask. A bare
-        ``(batch, H, W, C)`` image is also accepted (no tokens are replaced).
+        - Masked (the training form): ``[(batch, H, W, C), (batch, N) bool]`` — image
+          plus patch mask; or the dict form
+          ``{'images': ..., 'mask': ...}``.
+        - Unmasked: a bare ``(batch, H, W, C)`` image is also accepted, in which case
+          no token is replaced.
 
     Output shape:
-        ``(batch, N, vocab_size)`` — logits over the codebook, cls position excluded.
+        3D tensor ``(batch, N, vocab_size)`` — logits over the codebook, cls position
+        excluded. One output mode only.
+
+    Example:
+        >>> model = create_beit_mim('tiny', (224, 224, 3), 16)
+        >>> model.compile(
+        ...     optimizer='adamw',
+        ...     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        ... )  # the sample_weight in the tf.data element restricts the loss to the
+        ...    # masked positions -- this class has no train_step and adds none
+        >>>
+        >>> images = keras.random.normal((2, 224, 224, 3))
+        >>> mask = keras.ops.zeros((2, 196), dtype='bool')
+        >>> logits = model((images, mask), training=False)   # (2, 196, 8192)
     """
 
     def __init__(
@@ -1006,21 +1160,69 @@ class BeitForImageClassification(keras.Model):
     **The head emits LOGITS** (no softmax). Compile with
     ``SparseCategoricalCrossentropy(from_logits=True)`` — the house convention.
 
-    Args:
-        backbone: A :class:`BeitModel` (named :data:`BACKBONE_NAME`), or its serialized
-            config dict.
-        num_classes: Number of output classes. Must be positive.
-        dropout_rate: Dropout before the final Dense. Defaults to ``0.0``.
-        name: Model name.
+    **Architecture Overview:**
 
-    Raises:
-        ValueError: If ``num_classes <= 0`` or ``dropout_rate`` is outside ``[0, 1]``.
+    .. code-block:: text
+
+        Input [B, H, W, C]
+                 |
+                 v
+        +---------------------------------------------------+
+        | BeitModel trunk (BACKBONE_NAME)     -> [B, N+1, D] |
+        +------------------------+--------------------------+
+                                 v
+        +----------------------------+----------------------+
+        | use_mean_pooling=True      | use_mean_pooling=False|
+        |                            |                       |
+        | head_pool: mean over       | take the cls state    |
+        |   [:, 1:, :]  (cls token   |   [:, 0, :]           |
+        |   EXCLUDED)                |                       |
+        | head_norm: LayerNorm       | already normed by the |
+        |   (the trunk applies none  |   trunk's final_norm; |
+        |   in this mode -- D-007)   |   head_norm not made  |
+        +------------------------+---+-----------------------+
+                                 v   [B, D]
+        +---------------------------------------------------+
+        | head_dropout -> head_classifier: Dense(num_classes)|
+        +------------------------+--------------------------+
+                                 v
+              Output [B, num_classes] -- LOGITS
+
+    :param backbone: A :class:`BeitModel` (named :data:`BACKBONE_NAME`), or its
+        serialized config dict.
+    :type backbone: Union[BeitModel, Dict[str, Any]]
+    :param num_classes: Number of output classes. Must be positive.
+    :type num_classes: int
+    :param dropout_rate: Dropout before the final Dense. Defaults to ``0.0``.
+    :type dropout_rate: float
+    :param name: Model name.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+    :type kwargs: Any
+    :raises ValueError: If ``num_classes <= 0`` or ``dropout_rate`` is outside
+        ``[0, 1]``.
+    :raises TypeError: If ``backbone`` is neither a :class:`BeitModel` nor a config
+        dict that deserializes to one.
 
     Input shape:
-        ``(batch, H, W, C)``.
+        4D tensor ``(batch, H, W, C)``. This head never takes a mask.
 
     Output shape:
-        ``(batch, num_classes)`` — logits.
+        2D tensor ``(batch, num_classes)`` — LOGITS, in both pooling modes. The
+        ``use_mean_pooling`` fork changes which tokens are pooled and where the
+        LayerNorm lives, never the output shape.
+
+    Example:
+        >>> model = create_beit_classifier('tiny', (224, 224, 3), 16, num_classes=10)
+        >>> model.build((None, 224, 224, 3))   # BEFORE any warm-start transfer
+        >>> model.compile(
+        ...     optimizer='adamw',
+        ...     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        ... )
+        >>>
+        >>> # cls-token pooling instead: the trunk owns the final norm in that mode
+        >>> backbone = BeitModel(scale='tiny', use_mean_pooling=False)
+        >>> model = BeitForImageClassification(backbone, num_classes=10)
     """
 
     # DECISION plan-2026-08-24T074054-247151fd/D-007
@@ -1144,16 +1346,22 @@ def create_beit_backbone(
 ) -> BeitModel:
     """Create a standalone :class:`BeitModel` trunk.
 
-    Args:
-        variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'`` (or ``'beit_base'``
-            ...).
-        input_shape: ``(H, W, C)``.
-        patch_size: ``int`` or ``(h, w)``.
-        **overrides: Any :class:`BeitModel` constructor kwarg (e.g. ``drop_path_rate``,
-            ``use_mean_pooling``, ``layer_norm_eps``).
+    :param variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'`` (or
+        ``'beit_base'`` ...).
+    :type variant: str
+    :param input_shape: ``(H, W, C)``.
+    :type input_shape: Tuple[int, int, int]
+    :param patch_size: ``int`` or ``(h, w)``.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param overrides: Any :class:`BeitModel` constructor kwarg (e.g.
+        ``drop_path_rate``, ``use_mean_pooling``, ``layer_norm_eps``).
+    :type overrides: Any
+    :returns: The backbone, named :data:`BACKBONE_NAME`.
+    :rtype: BeitModel
 
-    Returns:
-        The backbone, named :data:`BACKBONE_NAME`.
+    Example:
+        >>> backbone = create_beit_backbone('base', (224, 224, 3), 16)
+        >>> backbone.build((None, 224, 224, 3))
     """
     return BeitModel(
         input_shape=input_shape,
@@ -1173,16 +1381,19 @@ def create_beit_mim(
 ) -> BeitForMaskedImageModeling:
     """Create the masked-image-modeling model.
 
-    Args:
-        variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'``.
-        input_shape: ``(H, W, C)``.
-        patch_size: ``int`` or ``(h, w)``.
-        vocab_size: Discrete visual-token codebook size.
-        **overrides: Backbone constructor kwargs.
-
-    Returns:
-        A :class:`BeitForMaskedImageModeling` whose trunk is named
+    :param variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'``.
+    :type variant: str
+    :param input_shape: ``(H, W, C)``.
+    :type input_shape: Tuple[int, int, int]
+    :param patch_size: ``int`` or ``(h, w)``.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param vocab_size: Discrete visual-token codebook size.
+    :type vocab_size: int
+    :param overrides: Backbone constructor kwargs.
+    :type overrides: Any
+    :returns: A :class:`BeitForMaskedImageModeling` whose trunk is named
         :data:`BACKBONE_NAME`.
+    :rtype: BeitForMaskedImageModeling
 
     Example:
         >>> model = create_beit_mim('tiny', (224, 224, 3), 16, vocab_size=8192)
@@ -1210,18 +1421,22 @@ def create_beit_classifier(
 ) -> BeitForImageClassification:
     """Create the classifier (logits head; warm-startable from an MIM checkpoint).
 
-    Args:
-        variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'``.
-        input_shape: ``(H, W, C)``.
-        patch_size: ``int`` or ``(h, w)``.
-        num_classes: Number of classes.
-        dropout_rate: Dropout before the final Dense.
-        **overrides: Backbone constructor kwargs.
-
-    Returns:
-        A :class:`BeitForImageClassification` whose trunk is named
+    :param variant: ``'tiny'`` / ``'small'`` / ``'base'`` / ``'large'``.
+    :type variant: str
+    :param input_shape: ``(H, W, C)``.
+    :type input_shape: Tuple[int, int, int]
+    :param patch_size: ``int`` or ``(h, w)``.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param num_classes: Number of classes.
+    :type num_classes: int
+    :param dropout_rate: Dropout before the final Dense.
+    :type dropout_rate: float
+    :param overrides: Backbone constructor kwargs.
+    :type overrides: Any
+    :returns: A :class:`BeitForImageClassification` whose trunk is named
         :data:`BACKBONE_NAME` and is weight-identical to :func:`create_beit_mim`'s at
         the same backbone config.
+    :rtype: BeitForImageClassification
 
     Example:
         >>> model = create_beit_classifier('tiny', (224, 224, 3), 16, num_classes=10)
