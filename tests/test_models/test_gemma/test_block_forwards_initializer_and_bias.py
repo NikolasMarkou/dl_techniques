@@ -29,7 +29,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.gemma.components import Gemma3TransformerBlock
+from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
 
 from ..knob_sensitivity_oracle import (
     assert_scoped_value_knob_changes_weights,
