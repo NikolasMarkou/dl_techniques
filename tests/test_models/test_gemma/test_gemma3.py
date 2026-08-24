@@ -23,9 +23,9 @@ from dl_techniques.models.gemma.gemma3 import (
     Gemma3,
     create_gemma3,
     create_gemma3_generation,
-    create_gemma3_classification
+    create_gemma3_classification,
+    Gemma3TransformerBlock
 )
-from dl_techniques.models.gemma.components import Gemma3TransformerBlock
 
 
 # It's good practice to have a base config fixture

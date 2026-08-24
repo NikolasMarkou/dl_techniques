@@ -110,8 +110,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.utils.model_build import materialize_sublayers
-
-from .components import Gemma3TransformerBlock
+from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
 
 # ---------------------------------------------------------------------
 

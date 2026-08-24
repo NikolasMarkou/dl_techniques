@@ -62,7 +62,7 @@ from typing import Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

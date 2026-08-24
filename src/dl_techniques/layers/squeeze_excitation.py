@@ -58,7 +58,6 @@ References:
 
 import keras
 from typing import Dict, Optional, Tuple, Union, Callable, Any
-from keras import layers, activations, ops, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
@@ -70,7 +69,7 @@ from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
-class SqueezeExcitation(layers.Layer):
+class SqueezeExcitation(keras.layers.Layer):
     """
     Squeeze-and-Excitation block for channel-wise feature recalibration.
 
@@ -133,10 +132,10 @@ class SqueezeExcitation(layers.Layer):
         reduction_ratio: float = 0.25,
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'relu',
         use_bias: bool = False,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_normal',
-        kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_normal',
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -151,22 +150,22 @@ class SqueezeExcitation(layers.Layer):
         self.reduction_ratio = reduction_ratio
         self.activation = activation
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Get activation function
-        self.reduction_activation = activations.get(activation)
+        self.reduction_activation = keras.activations.get(activation)
 
         # Shape-dependent attributes (set during build)
         self.input_channels: Optional[int] = None
         self.bottleneck_channels: Optional[int] = None
 
         # Sub-layers (created during build due to shape dependency)
-        self.global_pool: Optional[layers.GlobalAveragePooling2D] = None
-        self.conv_reduce: Optional[layers.Conv2D] = None
-        self.conv_restore: Optional[layers.Conv2D] = None
+        self.global_pool: Optional[keras.layers.GlobalAveragePooling2D] = None
+        self.conv_reduce: Optional[keras.layers.Conv2D] = None
+        self.conv_restore: Optional[keras.layers.Conv2D] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -197,12 +196,12 @@ class SqueezeExcitation(layers.Layer):
         )
 
         # CREATE all sub-layers (necessary exception to general Keras 3 pattern)
-        self.global_pool = layers.GlobalAveragePooling2D(
+        self.global_pool = keras.layers.GlobalAveragePooling2D(
             keepdims=True,
             name='global_pool'
         )
 
-        self.conv_reduce = layers.Conv2D(
+        self.conv_reduce = keras.layers.Conv2D(
             filters=self.bottleneck_channels,
             kernel_size=1,
             use_bias=self.use_bias,
@@ -213,7 +212,7 @@ class SqueezeExcitation(layers.Layer):
             name='conv_reduce'
         )
 
-        self.conv_restore = layers.Conv2D(
+        self.conv_restore = keras.layers.Conv2D(
             filters=self.input_channels,
             kernel_size=1,
             use_bias=self.use_bias,
@@ -278,11 +277,11 @@ class SqueezeExcitation(layers.Layer):
 
         if input_rank == 2:
             # (B, C) -> (B, 1, 1, C)
-            x = ops.expand_dims(x, axis=1)
-            x = ops.expand_dims(x, axis=1)
+            x = keras.ops.expand_dims(x, axis=1)
+            x = keras.ops.expand_dims(x, axis=1)
         elif input_rank == 3:
             # (B, S, C) -> (B, S, 1, C)
-            x = ops.expand_dims(x, axis=2)
+            x = keras.ops.expand_dims(x, axis=2)
 
         # Squeeze: Global average pooling to capture channel statistics
         # Input to global_pool is effectively 4D
@@ -295,16 +294,16 @@ class SqueezeExcitation(layers.Layer):
 
         # Step 2: Dimensionality restoration with sigmoid gating
         excited = self.conv_restore(excited, training=training)
-        attention_weights = activations.sigmoid(excited)
+        attention_weights = keras.activations.sigmoid(excited)
 
         # Scale: Apply learned attention weights to original features
-        output = ops.multiply(x, attention_weights)
+        output = keras.ops.multiply(x, attention_weights)
 
         # Restore original dimensions
         if input_rank == 2:
-            output = ops.squeeze(output, axis=[1, 2])
+            output = keras.ops.squeeze(output, axis=[1, 2])
         elif input_rank == 3:
-            output = ops.squeeze(output, axis=2)
+            output = keras.ops.squeeze(output, axis=2)
 
         return output
 
@@ -329,12 +328,12 @@ class SqueezeExcitation(layers.Layer):
         config = super().get_config()
         config.update({
             'reduction_ratio': self.reduction_ratio,
-            'activation': activations.serialize(self.reduction_activation),
+            'activation': keras.activations.serialize(self.reduction_activation),
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 

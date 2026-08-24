@@ -33,22 +33,23 @@ occupies a different range, every edge spends its capacity on the wrong
 interval and extrapolates outside it. `update_kan_grids(x)` re-fits the knot
 positions to the empirical distribution of a data sample and should be run
 before training on any new dataset; it is not optional tuning, it is part of
-setup.
+setup. The failure mode when it is skipped is silence rather than an error:
+`KANLinear` sums over the input axis, activations grow roughly 30x per layer
+and leave `grid_range=(-2.0, 2.0)` after layer 0, the spline basis is then
+identically zero, and with `base_scaler` initialized to a constant the whole
+model collapses to a constant function. `grids_adapted` exposes that state on
+the object so it is readable rather than inferred from a flat loss curve.
 
 Structurally the model is a stack of `KANLinear` layers driven by a list of
-per-layer config dicts, with an optional final activation. Five preset variants
-span micro (`[16, 8]`, grid 3) through xlarge (`[512, 256, 128, 64]`, grid 12),
-trading grid resolution and width together, since a fine grid on a narrow layer
-tends to overfit and a coarse grid on a wide one wastes it. The variant table is
-named `VARIANT_CONFIGS` here rather than the house `MODEL_VARIANTS`; trainers
-and tests reference the existing spelling.
-
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful load. Pass
-a local `.keras` path to `pretrained` instead.
+per-layer config dicts, with an optional final activation. The last layer is
+forced linear and the network-level activation is applied as its own
+`Activation` layer, so a `softmax` in a variant preset cannot be applied twice.
+Five preset variants span micro (`[16, 8]`, grid 3) through xlarge
+(`[512, 256, 128, 64]`, grid 12), trading grid resolution and width together,
+since a fine grid on a narrow layer tends to overfit and a coarse grid on a wide
+one wastes it. The variant table is named `VARIANT_CONFIGS` here rather than the
+house `MODEL_VARIANTS`; trainers and tests reference the existing spelling, and
+`MODEL_VARIANTS` is a class-level alias to the same object.
 
 References:
     - Liu et al., 2024. KAN: Kolmogorov-Arnold Networks.
@@ -77,34 +78,119 @@ from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class KAN(keras.Model):
-    """Modern Kolmogorov-Arnold Network model using Keras 3 functional API patterns.
+    """
+    Kolmogorov-Arnold Network built as a Keras 3 Functional model.
 
-    KAN stacks multiple KANLinear layers to create a deep network that can
-    approximate complex multivariate functions using learnable spline-based
-    activation functions on edges.
+    Stacks ``KANLinear`` layers, each of which places a learnable univariate
+    function on every connection -- a B-spline of order ``spline_order`` over
+    ``grid_size`` intervals, added to a fixed base activation -- while nodes only
+    sum what arrives. The layer list is given as ``layer_configs``, one dict per
+    layer, and the final layer's ``activation`` is lifted out into a separate
+    ``Activation`` layer with the ``KANLinear`` itself forced to ``'linear'`` so
+    the transform is never applied twice.
 
-    **Architecture**:
-    ```
-    Input(shape=[input_features])
-           ↓
-    KANLinear(layer_configs[0])
-           ↓
-         ...
-           ↓
-    KANLinear(layer_configs[-1]) -> Produces logits/raw output
-           ↓
-    Activation(final_activation) -> Optional final transform
-           ↓
-    Output
-    ```
+    Knot grids are a training precondition, not a tuning knob:
+    :meth:`update_kan_grids` must be run on a representative data sample before
+    training, and :attr:`grids_adapted` reports whether it has been.
 
-    Args:
-        layer_configs: List of dictionaries, each containing KANLinear configuration.
-        input_features: Integer, number of input features. Must be positive.
-        name: Optional string name for the model.
-        **kwargs: Additional arguments passed to the Model base class.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │     Input [B, input_features]        │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  KANLinear 0  (features₀)            │──┐
+        └───────────────┬──────────────────────┘  │
+                        ▼                         │
+        ┌──────────────────────────────────────┐  │
+        │  KANLinear 1  (features₁)            │  │  edge, not node:
+        └───────────────┬──────────────────────┘  │
+                        ▼                         │  x ──► base_act(x)·wᵦ ──┐
+                       ...                        │  │                      ▼
+                        ▼                         │  └► Σ cᵢ·Bᵢ(x)·wₛ ───► (+)
+        ┌──────────────────────────────────────┐  │                         │
+        │  KANLinear N-1 (output features)     │──┘   node = Σ over edges ◄─┘
+        │  activation forced to 'linear'       │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Activation(final_activation)        │
+        │  (omitted when 'linear')             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output [B, features₍N-1₎]           │
+        └──────────────────────────────────────┘
+
+        grids: knots span grid_range; update_kan_grids(x) re-fits them
+               per layer by quantile matching on that layer's own inputs
+
+    **Variants:**
+
+    .. code-block:: text
+
+        micro    [16, 8]                grid  3   order 3   swish
+        small    [64, 32, 16]           grid  5   order 3   swish
+        medium   [128, 64, 32]          grid  7   order 3   gelu
+        large    [256, 128, 64, 32]     grid 10   order 3   gelu
+        xlarge   [512, 256, 128, 64]    grid 12   order 3   gelu
+
+    :param layer_configs: One dict of ``KANLinear`` keyword arguments per layer,
+        ordered input-side first. Each must carry a ``'features'`` key; other
+        keys (``grid_size``, ``spline_order``, ``activation``, ...) are forwarded
+        verbatim. Copied on entry, so the caller's dicts are never mutated. The
+        last entry's ``activation`` becomes the model-level final activation.
+    :type layer_configs: List[Dict[str, Any]]
+    :param input_features: Number of input features. Must be a positive integer.
+    :type input_features: int
+    :param name: Optional model name. Defaults to ``'kan_model'``.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+
+    :raises ValueError: If ``layer_configs`` is not a non-empty list, if any
+        entry is not a dict or lacks ``'features'``, or if ``input_features`` is
+        not a positive integer.
+
+    Input shape:
+        2D tensor with shape ``(batch_size, input_features)``.
+
+    Output shape:
+        2D tensor with shape ``(batch_size, layer_configs[-1]['features'])``.
+
+    Example:
+        >>> # From a preset variant
+        >>> model = KAN.from_variant("small", input_features=784, output_features=10)
+        >>> model.update_kan_grids(x_sample)   # required before training
+        >>>
+        >>> # From bare layer sizes
+        >>> model = KAN.from_layer_sizes([784, 64, 32, 10], grid_size=5)
+        >>>
+        >>> # From explicit per-layer configs
+        >>> model = KAN(
+        ...     layer_configs=[{"features": 32, "grid_size": 5},
+        ...                    {"features": 10, "activation": "softmax"}],
+        ...     input_features=784,
+        ... )
+
+    Note:
+        No pretrained KAN weights are distributed with ``dl_techniques``.
+        ``pretrained=True`` raises ``NotImplementedError`` rather than warning
+        and returning a randomly-initialized model; pass a local checkpoint via
+        ``pretrained='/path/to/weights.keras'`` instead.
+
+    Warning:
+        A freshly constructed model **cannot be trained as-is at the documented
+        defaults**. Measured: the output is exactly ``1 / output_features`` for
+        every input with ``std == 0.0``, and 0 of 12 trainable weights receive a
+        non-zero gradient. After :meth:`update_kan_grids` the same model has
+        12 of 12 live gradients.
     """
 
     VARIANT_CONFIGS = {
@@ -178,10 +264,20 @@ class KAN(keras.Model):
         been fitted to the data is not merely under-tuned — at the documented
         defaults it is a constant function with identically-zero gradients — so
         this is a training precondition, not a tuning knob.
+
+        :return: ``True`` once :meth:`update_kan_grids` has completed.
+        :rtype: bool
         """
         return self._grids_adapted
 
-    def _log_model_creation(self):
+    def _log_model_creation(self) -> None:
+        """Log the layer widths and warn, once, that the grids are unadapted.
+
+        The warning is emitted at construction rather than at ``fit`` time
+        because the unadapted state has no error surface of its own: it presents
+        as a flat loss curve, so the only chance to say so is before training
+        starts.
+        """
         structure = [str(self.input_features)] + [str(cfg['features']) for cfg in self.layer_configs]
         logger.info(f"Created KAN model: {' -> '.join(structure)} ({self.num_layers} layers)")
         logger.warning(
@@ -194,6 +290,20 @@ class KAN(keras.Model):
         )
 
     def _validate_and_copy_configs(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate every layer config and return shallow copies of them.
+
+        The copy is not cosmetic: ``_build_functional_model`` and
+        ``from_variant`` both mutate per-layer dicts (popping ``activation``,
+        inserting ``features``), and without copying here those edits would
+        propagate back into the caller's list -- and, via ``from_variant``, into
+        the class-level ``VARIANT_CONFIGS`` table.
+
+        :param configs: Raw per-layer ``KANLinear`` config dicts.
+        :type configs: List[Dict[str, Any]]
+        :return: Validated copies, in the same order.
+        :rtype: List[Dict[str, Any]]
+        :raises ValueError: If an entry is not a dict or lacks ``'features'``.
+        """
         validated_configs = []
         for i, config in enumerate(configs):
             if not isinstance(config, dict):
@@ -204,7 +314,17 @@ class KAN(keras.Model):
         return validated_configs
 
     def _build_functional_model(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Construct the Functional API graph."""
+        """Construct the Functional API graph.
+
+        The final layer's ``activation`` is popped off and applied as its own
+        ``Activation`` layer while the ``KANLinear`` is forced to ``'linear'``.
+        Leaving it in place would apply the transform twice -- a variant preset
+        carrying ``activation='softmax'`` would softmax the edge outputs and then
+        softmax the sum.
+
+        :return: The ``(inputs, outputs)`` pair for ``keras.Model``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        """
         inputs = keras.Input(shape=(self.input_features,), name="kan_input")
         x = inputs
         final_activation_fn = None
@@ -231,16 +351,21 @@ class KAN(keras.Model):
         return inputs, x
 
     def update_kan_grids(self, x_data: Union[keras.KerasTensor, np.ndarray, Any]) -> None:
-        """
-        Update the B-spline grids of all KANLinear layers using the provided data.
+        """Re-fit every ``KANLinear`` layer's B-spline knot grid to real data.
 
-        This is a critical step for KAN training. It performs a forward pass to
-        collect the input distribution seen by each hidden layer, then adapts
-        that layer's grid to match the distribution (quantile matching).
+        A forward pass collects the input distribution each layer actually sees
+        -- which is not the model input for anything past layer 0 -- and each
+        layer's knots are then quantile-matched to its own distribution. Hidden
+        activations are pulled out through a temporary extraction model built on
+        the symbolic ``layer.input`` tensors, which is available because this is
+        a Functional model.
 
-        Args:
-            x_data: Batch of input data (numpy array or tensor). Should be a
-                representative sample of the training data (e.g., 100-1000 samples).
+        This is setup, not tuning: run it on a representative sample (roughly
+        100-1000 rows) before training on any new dataset. Sets
+        :attr:`grids_adapted`.
+
+        :param x_data: Representative batch of model inputs.
+        :type x_data: Union[keras.KerasTensor, np.ndarray, Any]
         """
         kan_layers = [layer for layer in self.layers if isinstance(layer, KANLinear)]
         if not kan_layers:
@@ -251,23 +376,23 @@ class KAN(keras.Model):
         # We build a temporary model to extract intermediate activations.
         # For a functional model, layer.input gives the symbolic tensor feeding the layer.
         layer_inputs = [layer.input for layer in kan_layers]
-        
+
         # Create a temporary extraction model
         # Note: self.input corresponds to the model's main input
         extraction_model = keras.Model(inputs=self.input, outputs=layer_inputs)
-        
+
         # Run inference to get actual values
         # verbose=0 prevents progress bars for this utility op
         intermediate_values = extraction_model.predict(x_data, verbose=0)
-        
+
         # Handle singleton case (predict returns array instead of list if 1 output)
         if len(kan_layers) == 1:
             intermediate_values = [intermediate_values]
-            
+
         # Update each layer with its corresponding input distribution
         for layer, data in zip(kan_layers, intermediate_values):
             layer.update_grid_from_samples(data)
-            
+
         self._grids_adapted = True
         logger.info(f"Updated grids for {len(kan_layers)} KAN layers.")
 
@@ -276,21 +401,23 @@ class KAN(keras.Model):
         weights_path: str,
         skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained weights into the model from a local checkpoint.
 
-        Weights are transferred layer-by-layer via
+        Transfer is layer-by-layer via
         :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
-        the canonical replacement for ``self.load_weights(by_name=True)`` (which
-        raises on ``.keras`` files in Keras 3.8+).
+        the canonical replacement for ``self.load_weights(..., by_name=True)``,
+        which raises on ``.keras`` files in Keras 3.8+.
 
-        Args:
-            weights_path: String, path to the weights file (.keras format).
-            skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-                Maps to ``strict=not skip_mismatch``.
+        :param weights_path: Path to the weights file (``.keras`` format).
+        :type weights_path: str
+        :param skip_mismatch: Whether to skip layers whose shapes do not match
+            the checkpoint's (typically the output layer under a changed
+            ``output_features``). Maps to the transfer helper's ``strict=not
+            skip_mismatch``.
+        :type skip_mismatch: bool
 
-        Raises:
-            FileNotFoundError: If weights_path doesn't exist.
-            ValueError: If weights cannot be loaded.
+        :raises FileNotFoundError: If ``weights_path`` does not exist.
+        :raises ValueError: If the weights cannot be loaded.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -317,14 +444,12 @@ class KAN(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
-    # a non-existent host; `from_variant` caught the download failure, logged a
-    # warning and continued with random initialization, so `pretrained=True`
-    # silently produced untrained weights. Do NOT reinstate a warn-and-return
-    # branch here or in `from_variant`. No public KAN weights are distributed
-    # with dl_techniques; pass a local path via
-    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
+    # `_download_weights` raises instead of falling back to random init, so an
+    # unavailable checkpoint is never silently indistinguishable from a
+    # successful load. Do NOT reinstate a warn-and-return branch here or in
+    # `from_variant`. No public KAN weights are distributed with dl_techniques;
+    # pass a local path via `pretrained="/path/to/file.keras"` or use
+    # `pretrained=False` (default).
     @staticmethod
     def _download_weights(
         variant: str,
@@ -333,17 +458,18 @@ class KAN(keras.Model):
     ) -> str:
         """Resolve a download path for pretrained weights of ``variant``.
 
-        Not implemented: no public KAN weights ship with dl_techniques. Always
-        raises, so an unavailable checkpoint is never silently indistinguishable
-        from a successful load.
+        Not implemented: no public KAN weights ship with ``dl_techniques``.
+        Always raises. Kept to mirror the house factory recipe and to give an
+        explicit failure mode instead of a silent random-init fallback.
 
-        Args:
-            variant: Model variant name (unused).
-            dataset: Dataset identifier (unused).
-            cache_dir: Cache directory (unused).
+        :param variant: Model variant name (unused).
+        :type variant: str
+        :param dataset: Dataset identifier (unused).
+        :type dataset: str
+        :param cache_dir: Cache directory (unused).
+        :type cache_dir: Optional[str]
 
-        Raises:
-            NotImplementedError: Always.
+        :raises NotImplementedError: Always.
         """
         raise NotImplementedError(
             f"No pretrained KAN weights are distributed with dl_techniques "
@@ -366,27 +492,51 @@ class KAN(keras.Model):
         override_config: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> "KAN":
-        """Factory method to create KAN models from standard presets.
+        """Create a KAN model from a predefined variant.
 
-        Args:
-            variant: "micro", "small", "medium", "large", or "xlarge".
-            input_features: Dimension of input data.
-            output_features: Dimension of output.
-            output_activation: Final activation (e.g., "softmax", "sigmoid").
-            pretrained: If a string, a path to a local weights file. If True,
-                        raises NotImplementedError -- no public KAN weights ship
-                        with dl_techniques. If False (default), random init.
-            weights_dataset: Dataset the weights were trained on (e.g., "mnist").
-                             Only used if pretrained=True and not a local path.
-            weights_input_features: Input dimension of the pretrained model.
-                                    Used to detect mismatches.
-            cache_dir: Directory to cache downloaded weights.
-            override_config: Dictionary to override variant defaults.
-            **kwargs: Arguments passed to KAN constructor.
+        The variant's ``hidden_features`` list expands into one layer config per
+        width, each inheriting the preset's ``grid_size`` / ``spline_order`` /
+        ``activation``, followed by an output layer of ``output_features``. The
+        preset dict is copied before any of that, so the class-level
+        ``VARIANT_CONFIGS`` table is never mutated for later callers.
 
-        Raises:
-            ValueError: If variant is not recognized.
-            NotImplementedError: If pretrained is True.
+        :param variant: One of ``"micro"``, ``"small"``, ``"medium"``,
+            ``"large"``, ``"xlarge"``.
+        :type variant: str
+        :param input_features: Dimension of the input data.
+        :type input_features: int
+        :param output_features: Dimension of the output.
+        :type output_features: int
+        :param output_activation: Final activation. When omitted, defaults to
+            ``'softmax'`` for ``output_features > 1`` and ``'linear'`` otherwise.
+        :type output_activation: Optional[str]
+        :param pretrained: A path to a local weights file, or ``False`` (default)
+            for random initialization. ``True`` raises ``NotImplementedError`` --
+            no public KAN weights ship with ``dl_techniques``.
+        :type pretrained: Union[bool, str]
+        :param weights_dataset: Dataset the checkpoint was trained on, used to
+            infer its class count. Only consulted when ``pretrained`` is set.
+        :type weights_dataset: str
+        :param weights_input_features: Input dimension of the pretrained model,
+            used to detect a mismatch against ``input_features``.
+        :type weights_input_features: Optional[int]
+        :param cache_dir: Directory to cache downloaded weights.
+        :type cache_dir: Optional[str]
+        :param override_config: Overrides merged over the variant preset before
+            the layer configs are expanded.
+        :type override_config: Optional[Dict[str, Any]]
+        :param kwargs: Additional arguments passed to the constructor.
+
+        :return: A KAN instance whose knot grids are NOT yet adapted.
+        :rtype: KAN
+
+        :raises ValueError: If ``variant`` is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
+
+        Example:
+            >>> model = KAN.from_variant("medium", input_features=784,
+            ...                          output_features=10)
+            >>> model.update_kan_grids(x_sample)
         """
         if variant not in cls.VARIANT_CONFIGS:
             available = list(cls.VARIANT_CONFIGS.keys())
@@ -437,6 +587,9 @@ class KAN(keras.Model):
                 )
                 skip_mismatch = True
 
+            # A checkpoint's head width follows its dataset; a different
+            # `output_features` means the affected layer must be skipped rather
+            # than refused.
             pretrained_classes = 10
             if weights_dataset == "cifar100":
                 pretrained_classes = 100
@@ -474,7 +627,30 @@ class KAN(keras.Model):
         final_activation: Optional[str] = None,
         **kan_layer_kwargs: Any
     ) -> "KAN":
-        """Create a KAN by defining a list of node counts per layer."""
+        """Create a KAN from a flat list of node counts.
+
+        ``layer_sizes[0]`` is the input width and every later entry is one
+        ``KANLinear`` layer, all sharing the same grid, order and activation.
+
+        :param layer_sizes: Node counts, input first, output last. At least two.
+        :type layer_sizes: List[int]
+        :param grid_size: Number of B-spline intervals per edge.
+        :type grid_size: int
+        :param spline_order: B-spline order per edge.
+        :type spline_order: int
+        :param activation: Base activation for every layer.
+        :type activation: str
+        :param final_activation: Final activation. When omitted, defaults to
+            ``'softmax'`` for a multi-unit output and ``'linear'`` otherwise.
+        :type final_activation: Optional[str]
+        :param kan_layer_kwargs: Additional keyword arguments forwarded to every
+            ``KANLinear``.
+
+        :return: A KAN instance whose knot grids are NOT yet adapted.
+        :rtype: KAN
+
+        :raises ValueError: If ``layer_sizes`` has fewer than two elements.
+        """
         if len(layer_sizes) < 2:
             raise ValueError("layer_sizes must have at least 2 elements (input -> output)")
 
@@ -505,7 +681,11 @@ class KAN(keras.Model):
         return cls(layer_configs=layer_configs, input_features=input_features)
 
     def get_architecture_summary(self) -> str:
-        """Returns a formatted string summarizing the KAN architecture details."""
+        """Render a per-layer summary of widths, grids, orders and activations.
+
+        :return: A formatted, multi-line summary string.
+        :rtype: str
+        """
         lines = ["KAN Model Architecture Summary"]
         lines.append("=" * 50)
 
@@ -535,7 +715,15 @@ class KAN(keras.Model):
         return "\n".join(lines)
 
     def _estimate_parameters(self) -> int:
-        """Estimate number of trainable parameters."""
+        """Estimate the trainable parameter count from the layer configs alone.
+
+        Per layer and per edge there are ``grid_size + spline_order`` spline
+        coefficients plus a spline scaler and a base scaler, giving
+        ``in * out * (grid + order) + 2 * in * out``.
+
+        :return: Estimated number of trainable parameters.
+        :rtype: int
+        """
         total_params = 0
         curr_in = self.input_features
 
@@ -550,7 +738,7 @@ class KAN(keras.Model):
             # 2. Spline scalers: in * out
             # 3. Base scalers:   in * out
             # Note: KANLinear does not currently implement a bias vector.
-            
+
             layer_params = (curr_in * curr_out * num_basis) + (2 * curr_in * curr_out)
 
             total_params += layer_params
@@ -559,17 +747,19 @@ class KAN(keras.Model):
         return total_params
 
     def summary(self, **kwargs: Any) -> None:
+        """Print the Keras summary, followed by the KAN-specific summary.
+
+        :param kwargs: Forwarded to ``keras.Model.summary``.
+        """
         super().summary(**kwargs)
         logger.info("\n" + self.get_architecture_summary())
 
     def get_config(self) -> Dict[str, Any]:
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
-        # FIRST, then the model's own keys. Without it `trainable` (and the
-        # dtype policy) are dropped and silently restored to their DEFAULTS on
-        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
-        # with a literal dict again.
-        # `name` was already reported by hand here; `trainable` was not, and it
-        # is the one with the measured consequence.
+        """Get model configuration for serialization.
+
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "layer_configs": self.layer_configs,
@@ -579,7 +769,15 @@ class KAN(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "KAN":
+        """Create a model from its configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: A KAN instance.
+        :rtype: KAN
+        """
         return cls(**config)
+
 
 # ---------------------------------------------------------------------
 # factory method
@@ -596,27 +794,44 @@ def create_kan_model(
     cache_dir: Optional[str] = None,
     **model_kwargs: Any
 ) -> KAN:
-    """Helper to create a standard KAN model configuration.
+    """Convenience function to create KAN models.
 
-    Args:
-        variant: "micro", "small", "medium", "large", or "xlarge".
-        input_features: Input dimension.
-        output_features: Output dimension.
-        output_activation: Final activation.
-        pretrained: Path string to a local weights file, or False (default).
-            True raises NotImplementedError -- no public KAN weights ship with
-            dl_techniques.
-        weights_dataset: Dataset for pretrained weights (e.g. "mnist").
-        weights_input_features: Original input features of pretrained model.
-        cache_dir: Download cache location.
-        **model_kwargs: Additional model arguments.
+    :param variant: One of ``"micro"``, ``"small"``, ``"medium"``, ``"large"``,
+        ``"xlarge"``.
+    :type variant: str
+    :param input_features: Input dimension.
+    :type input_features: int
+    :param output_features: Output dimension.
+    :type output_features: int
+    :param output_activation: Final activation.
+    :type output_activation: Optional[str]
+    :param pretrained: Path to a local weights file, or ``False`` (default).
+        ``True`` raises ``NotImplementedError`` -- no public KAN weights ship
+        with ``dl_techniques``.
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset for the pretrained weights (e.g. ``"mnist"``).
+    :type weights_dataset: str
+    :param weights_input_features: Original input dimension of the pretrained
+        model.
+    :type weights_input_features: Optional[int]
+    :param cache_dir: Download cache location.
+    :type cache_dir: Optional[str]
+    :param model_kwargs: Additional arguments passed to the model constructor.
 
-    Returns:
-        Uncompiled KAN model whose knot grids are NOT yet adapted
+    :return: Uncompiled KAN model whose knot grids are NOT yet adapted
         (``model.grids_adapted is False``).
+    :rtype: KAN
 
-    Raises:
-        NotImplementedError: If pretrained is True.
+    :raises NotImplementedError: If ``pretrained`` is ``True``.
+
+    Example:
+        >>> # MNIST-shaped classifier
+        >>> model = create_kan_model("small", input_features=784, output_features=10)
+        >>> model.update_kan_grids(x_sample)
+        >>>
+        >>> # Scalar regression
+        >>> model = create_kan_model("micro", input_features=8, output_features=1,
+        ...                          output_activation="linear")
 
     Warning:
         The returned model **cannot be trained as-is at these defaults.**
@@ -642,3 +857,5 @@ def create_kan_model(
         cache_dir=cache_dir,
         **model_kwargs
     )
+
+# ---------------------------------------------------------------------

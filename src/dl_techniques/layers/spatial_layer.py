@@ -62,7 +62,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Optional, Any, Literal
 
 # ---------------------------------------------------------------------
@@ -151,34 +150,34 @@ class SpatialLayer(keras.layers.Layer):
             raise ValueError(f"SpatialLayer expects 4D input, got shape {input_shape}")
 
         # Create coordinate grids using keras.ops
-        x_coords = ops.linspace(
+        x_coords = keras.ops.linspace(
             start=-0.5,
             stop=0.5,
             num=self.resolution[1]  # width
         )
-        y_coords = ops.linspace(
+        y_coords = keras.ops.linspace(
             start=-0.5,
             stop=0.5,
             num=self.resolution[0]  # height
         )
 
         # Create meshgrid - note: meshgrid returns (Y, X) by default in TensorFlow style
-        yy_grid, xx_grid = ops.meshgrid(y_coords, x_coords, indexing='ij')
+        yy_grid, xx_grid = keras.ops.meshgrid(y_coords, x_coords, indexing='ij')
 
         # Normalize the grids to have zero mean and unit standard deviation
         # This ensures compatibility with typical neural network activation scales
         epsilon = 1e-7  # Numerical stability
 
-        xx_normalized = (xx_grid - ops.mean(xx_grid)) / (ops.std(xx_grid) + epsilon)
-        yy_normalized = (yy_grid - ops.mean(yy_grid)) / (ops.std(yy_grid) + epsilon)
+        xx_normalized = (xx_grid - keras.ops.mean(xx_grid)) / (keras.ops.std(xx_grid) + epsilon)
+        yy_normalized = (yy_grid - keras.ops.mean(yy_grid)) / (keras.ops.std(yy_grid) + epsilon)
 
         # Stack x and y coordinates along last dimension
         # Shape: (resolution[0], resolution[1], 2)
-        coordinate_grid = ops.stack([xx_normalized, yy_normalized], axis=-1)
+        coordinate_grid = keras.ops.stack([xx_normalized, yy_normalized], axis=-1)
 
         # Add batch dimension for later broadcasting
         # Shape: (1, resolution[0], resolution[1], 2)
-        self.xy_grid = ops.expand_dims(coordinate_grid, axis=0)
+        self.xy_grid = keras.ops.expand_dims(coordinate_grid, axis=0)
 
         super().build(input_shape)
 
@@ -201,14 +200,14 @@ class SpatialLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Get input spatial dimensions
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         batch_size = input_shape[0]
         target_height = input_shape[1]
         target_width = input_shape[2]
 
         # Resize the coordinate grid to match input spatial dimensions
         # Use keras.ops.image.resize for backend-agnostic resizing
-        xy_grid_resized = ops.image.resize(
+        xy_grid_resized = keras.ops.image.resize(
             images=self.xy_grid,
             size=(target_height, target_width),
             interpolation=self.resize_method,
@@ -217,7 +216,7 @@ class SpatialLayer(keras.layers.Layer):
 
         # Tile the grid to match the batch size
         # ops.repeat repeats along specified axis
-        xy_grid_batched = ops.repeat(
+        xy_grid_batched = keras.ops.repeat(
             xy_grid_resized,
             repeats=batch_size,
             axis=0
