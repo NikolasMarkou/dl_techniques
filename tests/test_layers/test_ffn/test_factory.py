@@ -1511,7 +1511,7 @@ def _b_models_fftnet():
 
 
 def _b_models_gemma():
-    from dl_techniques.models.gemma.components import Gemma3TransformerBlock
+    from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
     b = Gemma3TransformerBlock(
         hidden_size=16, num_attention_heads=2, num_key_value_heads=2,
         ffn_hidden_size=32,
@@ -1610,7 +1610,7 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "layers/transformers/transformer_decoder.py": _b_transformer_decoder,
     "models/dino/dino_v2.py": _b_models_dino_v2,
     "models/fftnet/model.py": _b_models_fftnet,
-    "models/gemma/components.py": _b_models_gemma,
+    "layers/transformers/gemma3_transformer.py": _b_models_gemma,
     "models/nam/cell.py": _b_models_nam,
     "models/pw_fnet/model.py": _b_models_pw_fnet,
     "models/relgt/model.py": _b_models_relgt,

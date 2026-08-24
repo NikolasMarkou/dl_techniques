@@ -419,7 +419,7 @@ def _built_bert_ffn_activations():
 
 
 def _built_gemma_ffn_activations():
-    from dl_techniques.models.gemma.components import Gemma3TransformerBlock
+    from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
 
     keras.utils.set_random_seed(7)
     block = Gemma3TransformerBlock(
