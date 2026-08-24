@@ -286,10 +286,10 @@ silently ignoring the argument.
 `enable_deep_supervision=True` returns `[final_output, supervision...]`;
 `expose_bottleneck=True` appends a TRAILING `bottleneck` output. Convert a
 deep-supervision training model to its single-output inference form with the shared
-utility (re-exported from this package):
+utility (from `dl_techniques.utils.deep_supervision`):
 
 ```python
-from dl_techniques.models.convunext import create_inference_model_from_training_model
+from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
 
 train_m = create_convunext(input_shape=(32, 32, 1), depth=3, initial_filters=8,
                            enable_deep_supervision=True)
@@ -367,7 +367,6 @@ from dl_techniques.models.convunext import (
     CONVUNEXT_CONFIGS,                        # the one variant dict
     create_convunext,                         # the builder
     create_convunext_variant,                 # variant -> builder
-    create_inference_model_from_training_model,  # re-export from utils.deep_supervision
 )
 ```
 
