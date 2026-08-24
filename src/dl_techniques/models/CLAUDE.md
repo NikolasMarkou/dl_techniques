@@ -286,8 +286,12 @@ from memory, and note that a different instrument gives a different answer (an u
 `tests/test_models/` is **not** being restructured to match the 11 families, and this is a
 ruling, not a backlog item. Recorded in `plan-2026-08-24T205033-8fd4f20d/D-001`.
 
-- Measured today: `ls -d tests/test_models/*/ | wc -l` → **82** test directories, all one
-  level deep, plus ~30 loose modules.
+- Measured today:
+  `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ | wc -l` → **79**
+  test directories, all one level deep, plus **24** loose `test_*.py` modules
+  (`find tests/test_models -maxdepth 1 -name 'test_*.py' | wc -l`). Exclude `__pycache__`
+  explicitly: a bare `ls -d tests/test_models/*/` counted it and two `__pycache__`-only shells
+  left behind by `git rm`, and read 82 until the 2026-08-25 prune.
 - `grep -rn "from \.\." --include='*.py' tests/test_models | wc -l` → **215** relative imports
   (it was 219 before `377ab9565` deleted 21 orphaned test files). They reach shared oracle
   modules that live at `tests/test_models/*.py` — `gradient_flow_oracle`,
@@ -757,11 +761,18 @@ rationale for each is in `research/2026_keras_custom_models_instructions_v2.md`.
 ## Testing
 
 Tests live in `tests/test_models/`, **flat**, one directory per leaf package —
-`ls -d tests/test_models/*/ | wc -l` → **82** as of 2026-08-25. That is more than the 79 leaf
-packages because several architectures get more than one suite, and it does not mirror the
-family tree by design (see "Tests are FLAT" above). One exception to the directory rule:
-`vision/lewm` is tested by the loose `tests/test_models/test_lewm.py`, so a
-directory-to-directory comparison will wrongly report it as untested. Test pattern:
+`find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ | wc -l` → **79**
+as of 2026-08-25, the same number as the leaf packages. **That equality is a coincidence, not a
+bijection**: the two sets differ by two on each side. `vision/lewm` is tested by the loose
+`tests/test_models/test_lewm.py` and `vision_language/sam/sam1` by `tests/test_models/test_sam/`
+(a directory name that predates the `sam1` spelling), while `tests/test_models/test_sam/` and
+`tests/test_models/test_time_series/` have no same-named leaf — the latter targets the container
+`time_series/` itself, which is the only container owning a module of its own (`forecast.py`).
+A directory-to-directory comparison will wrongly report `lewm` and `sam1` as untested. The tree
+does not mirror the family layout by design (see "Tests are FLAT" above). Use
+`! -name __pycache__`: bare `ls -d tests/test_models/*/` counts `__pycache__` and, until the
+2026-08-25 prune, also counted two `__pycache__`-only shells left behind by `git rm` — which is
+how this line read **82**. Test pattern:
 - Class-based organization: `class TestModelName`
 - Tests cover: serialization, initialization, forward pass, gradient flow, training mode, variants, edge cases
 - Pytest fixtures provide model configs
