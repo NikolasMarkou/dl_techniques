@@ -3129,10 +3129,10 @@ _MAIN_DOC_REFERENCES_WAIVERS = {
     ),
 }
 
-#: The one package for which NO main module resolves, with the read that clears
-#: it. Pinned by name so the number cannot drift silently: a second package
-#: appearing here means either a real regression (a package stopped re-exporting
-#: its model) or a resolver blind spot, and both must be looked at.
+#: The packages for which NO main module resolves, each with the read that clears
+#: it. Pinned by name so the number cannot drift silently: a new package appearing
+#: here means either a real regression (a package stopped re-exporting its model)
+#: or a resolver blind spot, and both must be looked at.
 _PACKAGES_WITHOUT_MAIN_MODULE = {
     "power_sampling": (
         "designed §5.6 exemption -- its own __init__.py documents it as a "
@@ -3140,6 +3140,26 @@ _PACKAGES_WITHOUT_MAIN_MODULE = {
         "create_* factory, only PowerSampler (a plain object) plus config/ops/"
         "protocols. plan.md's Edge Cases name it as the designed exception and "
         "Phase 3 batch 1 (step 9) settles its shape classification."
+    ),
+    # DECISION plan-2026-08-24T074054-247151fd/D-014
+    # WHAT NOT TO DO: do not "fix" this by writing a house-shape module docstring
+    # with a `References:` section for `image_restoration`. That is the obvious
+    # remedy and it is impossible here, not merely unattractive: the package holds
+    # a ZERO-BYTE __init__.py, README.md and BENCHMARKS.md and NO PYTHON AT ALL,
+    # so `_sweep_main_modules` has no module to resolve and any citation written
+    # there would name papers for code that does not exist. BENCHMARKS.md is a
+    # transcribed literature survey; not one of its PSNR/SSIM numbers was measured
+    # in this repository. Delete this entry only in the commit that adds a real
+    # model to that package. See decisions.md D-014.
+    "image_restoration": (
+        "holds NO PYTHON AT ALL -- an empty __init__.py (now carrying a docstring "
+        "that says so) beside README.md and BENCHMARKS.md, which are a transcribed "
+        "literature survey of published PSNR/SSIM numbers. There is no main module "
+        "to resolve and no implementation a `References:` section could cite, so "
+        "writing one would be a fabricated citation for code that does not exist. "
+        "Arrived by git pull in 4334b282d and adjudicated 2026-08-24 by "
+        "plan-2026-08-24-247151fd step 11. If an implementation ever lands there, "
+        "delete this entry in the same commit that adds the model."
     ),
 }
 
@@ -3276,11 +3296,17 @@ class TestMainModuleDocstringCitesReferences:
         )
 
     def test_the_only_unresolved_package_is_the_designed_exemption(self):
-        """``power_sampling`` and nothing else may resolve to no main module.
+        """``power_sampling`` and ``image_restoration``, and nothing else.
 
         Pinned rather than counted: a package that stops re-exporting its model
         would silently leave this guard's subject set, and a bare
-        ``<= 1 unresolved`` assertion would not notice which one it was.
+        ``<= 2 unresolved`` assertion would not notice which ones they were.
+
+        The second entry was added 2026-08-24. ``image_restoration`` arrived by
+        `git pull` and turned this test RED with
+        ``AssertionError: ... ['image_restoration']``; it holds no Python at all,
+        only two markdown files, so it is an exemption rather than a docstring
+        to write. See its entry in :data:`_PACKAGES_WITHOUT_MAIN_MODULE`.
         """
         _, counts = _sweep_main_modules()
         unexpected = sorted(
