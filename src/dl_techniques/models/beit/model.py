@@ -281,6 +281,35 @@ def _image_shape_of(input_shape: Any) -> Any:
     return input_shape
 
 
+# ---
+# DECISION plan-2026-08-24T074054-247151fd/D-010
+# `_coerce_backbone` lived BETWEEN `BeitModel` and `BeitForMaskedImageModeling` until
+# this commit, which is why its return annotation is now a STRING: it is read at
+# def-time and `BeitModel` does not exist yet up here (this module has no
+# `from __future__ import annotations`). WHAT NOT TO DO: do not "tidy" the quotes off,
+# and do not move the function back down to its consumers to avoid them -- a module
+# helper wedged between two class definitions is the shape this step exists to remove.
+# The BODY reference to `BeitModel` needs no quoting: it resolves at CALL time, long
+# after the class is defined.
+
+
+def _coerce_backbone(backbone: Any) -> "BeitModel":
+    """Accept a live backbone or its serialized config dict (the ``from_config`` path)."""
+    if isinstance(backbone, BeitModel):
+        return backbone
+    if isinstance(backbone, dict):
+        obj = deserialize_keras_object(backbone)
+        if not isinstance(obj, BeitModel):
+            raise TypeError(
+                f"Deserialized backbone is a {type(obj).__name__}, expected BeitModel"
+            )
+        return obj
+    raise TypeError(
+        "backbone must be a BeitModel (or its serialized config dict), got "
+        f"{type(backbone).__name__}"
+    )
+
+
 # ---------------------------------------------------------------------
 
 
@@ -827,23 +856,6 @@ class BeitModel(keras.Model):
 
 
 # ---------------------------------------------------------------------
-
-
-def _coerce_backbone(backbone: Any) -> BeitModel:
-    """Accept a live backbone or its serialized config dict (the ``from_config`` path)."""
-    if isinstance(backbone, BeitModel):
-        return backbone
-    if isinstance(backbone, dict):
-        obj = deserialize_keras_object(backbone)
-        if not isinstance(obj, BeitModel):
-            raise TypeError(
-                f"Deserialized backbone is a {type(obj).__name__}, expected BeitModel"
-            )
-        return obj
-    raise TypeError(
-        "backbone must be a BeitModel (or its serialized config dict), got "
-        f"{type(backbone).__name__}"
-    )
 
 
 @keras.saving.register_keras_serializable()
