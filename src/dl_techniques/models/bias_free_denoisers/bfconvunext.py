@@ -61,7 +61,7 @@ from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip  # noqa: 
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
-# ConvUNext Bias-Free Building Blocks (Simple Stem)
+# Registrar re-exports from the shared ConvUNext builder
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-08-14T092357-0e3d792d/D-010: `ConvUNextStem` no longer LIVES here —
@@ -137,6 +137,15 @@ def create_convunext_denoiser(
         it duplicates ``use_bias``/``stem_normalization``/``input_shape``, which
         this wrapper supplies itself.
     """
+    # SUPERSEDED 2026-08-24 (plan-2026-08-24T120026-64ffd751/D-010): the `locals()`
+    # capture is GONE, and with it the 38-of-42 hand-copied signature it fed. The
+    # guarantee below is NOT weakened — it is now enforced by Python itself, and it
+    # now covers the SIGNATURE too, which the capture never could: `create_convunext`
+    # declares 42 explicit parameters and NO `**kwargs` (MEASURED at iter-2/step-2:
+    # `inspect.signature(create_convunext)` has no VAR_KEYWORD), so an unknown
+    # forwarded name raises TypeError at the call — loud, immediate, impossible to
+    # ship. Pinned by tests/test_models/test_bias_free_denoisers/
+    # test_the_bfconvunext_delegation_contract.py::TestUnknownKwargIsLoud.
     # DECISION plan-2026-08-14T092357-0e3d792d/D-011: forward via a `locals()` capture
     # taken as the FIRST statement of the body, NOT by hand-listing ~40 keyword
     # arguments. The hand-listed form is the tempting "explicit" alternative and it is
@@ -146,15 +155,6 @@ def create_convunext_denoiser(
     # but not on `create_convunext` raises TypeError at the call — loud, immediate, and
     # impossible to ship. Do NOT "clean this up" into an explicit argument list, and do
     # NOT move any statement above it (that would sweep locals into the forward).
-    # SUPERSEDED 2026-08-24 (plan-2026-08-24T120026-64ffd751/D-010): the `locals()`
-    # capture is GONE, and with it the 38-of-42 hand-copied signature it fed. The
-    # guarantee above is NOT weakened — it is now enforced by Python itself, and it
-    # now covers the SIGNATURE too, which the capture never could: `create_convunext`
-    # declares 42 explicit parameters and NO `**kwargs` (MEASURED at iter-2/step-2:
-    # `inspect.signature(create_convunext)` has no VAR_KEYWORD), so an unknown
-    # forwarded name raises TypeError at the call — loud, immediate, impossible to
-    # ship. Pinned by tests/test_models/test_bias_free_denoisers/
-    # test_the_bfconvunext_delegation_contract.py::TestUnknownKwargIsLoud.
 
     # DECISION plan-2026-08-18T140459-7991552f/D-048
     # `block_normalization` defaults to the `None` SENTINEL, not to the string
