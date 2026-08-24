@@ -335,6 +335,16 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   append-only manifest `plans/ANCHORS.md`; a comment-tidying sweep that removes one silently
   destroys the record. Files with a high comment density are usually dense *because of*
   these anchors — never target a file by comment density.
+<!-- DECISION plan-2026-08-24T120026-64ffd751/D-006: the bullet below INVERTS the
+     absolute "Never rename a module file to `model.py`" prohibition that stood here until
+     2026-08-24. Do NOT rename `bert/model.py` back to `bert/bert.py` — its 13 referencing
+     sites were repointed in `62d0b05cb` and are consistent. Do NOT read this bullet as
+     permission to rename `gpt2/gpt2.py` or `time_series/forecast.py`: both are cited by
+     path elsewhere in the tree, and `gpt2/gpt2.py` is a live waiver key in
+     `tests/test_models/test_package_api_contract.py`.
+     This anchor was placed retroactively per DECISION
+     plan-2026-08-24T120026-64ffd751/D-008, which corrects the false claim that a Markdown
+     convention document cannot carry one. -->
 - **A module rename must carry every referencing site in the same commit.** `bert/` now
   holds `model.py`, renamed from `bert/bert.py` on 2026-08-24 by commit `2c4a0ca7c`
   ("[models] cleaning up models documentation and structure") — not by the merge
@@ -369,6 +379,14 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   Recorded in `plan-2026-08-24T120026-64ffd751/D-006`.
 - **Never convert docstring style.** This package is measurably mixed; match the file you
   are editing (see `src/dl_techniques/CLAUDE.md` § Code Style).
+<!-- DECISION plan-2026-08-24T120026-64ffd751/D-002: the bullet below INVERTS the
+     "Never delete the deep-supervision re-export shim" rule that stood here until
+     2026-08-24. Do NOT restore the pass-throughs at the tail of `models/*` modules or in
+     `models/*/__init__.py`, and do NOT read the current tree as drift. This is NOT a
+     licence to sweep cross-package imports generally: a registrar import (`# noqa: F401`,
+     bound for its Keras registration side effect) is load-bearing and is carved out below.
+     Removal decided in DECISION plan-2026-08-24T120026-64ffd751/D-001; this anchor placed
+     retroactively per DECISION plan-2026-08-24T120026-64ffd751/D-008. -->
 - **Never re-export the deep-supervision helpers from a `models/` package.**
   `get_model_output_info` and `create_inference_model_from_training_model` live in
   `dl_techniques/utils/deep_supervision.py` and are imported from there. No `models/*`
@@ -378,6 +396,17 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   advertised a surface it did not own and gave one function two import paths for no gain.
   `models/vit/__init__.py` is the documented shape, and `models/resnet/__init__.py` now
   carries the same docstring; read either before reaching for a shim.
+  What this forbids is a **surface re-export**: a name passed through so callers gain a
+  second import path to something the package does not own. It does not touch a
+  **registrar import** — a cross-package import bound for its
+  `@keras.saving.register_keras_serializable` side effect, so `keras.models.load_model` can
+  resolve every custom class a saved graph names. Those carry `# noqa: F401`, are
+  load-bearing, and must not be swept.
+  `models/bias_free_denoisers/bfconvunext.py:47-100` is the reference case (registrar
+  contract H-4, anchored under `plan-2026-08-19T163559-499b6f0e/D-080`): the last sweep that
+  deleted its twelve "unused" imports failed 7 tests at `TestRegistrarContract`. The test to
+  apply is whether a consumer needs the *name* at runtime or only the import's side effect —
+  if deleting it breaks `load_model`, it is a registrar, not a shim.
   This bullet **reverses** the rule that stood in its place until 2026-08-24 ("Never delete
   the deep-supervision re-export shim ... It is a deliberate late import"), so do not read
   the current tree as drift and restore the shims. That rule was factually wrong on both
