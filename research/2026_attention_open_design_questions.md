@@ -641,7 +641,7 @@ not a guard.
 
 **Blast radius.** Three production consumers:
 `../src/dl_techniques/models/language/wave_field/model.py`,
-`src/dl_techniques/models/memory_bank/wave_field_memory_llm.py`,
+`src/dl_techniques/models/memory_bank/wave_field_memory_llm.py` [package deleted 2026-08-24],
 `src/train/wave_field/pretrain.py`; plus
 `tests/test_models/test_wave_field/test_model.py` and factory key
 `'wave_field'` (`factory.py:99` import). `self.scale` is **not** a `get_config()` key, so

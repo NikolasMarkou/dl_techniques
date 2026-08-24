@@ -76,7 +76,6 @@ RELOAD_PATH_DRIFT = {
     "mamba": 9,
     "nam": 16,
     "nano_vlm": 16,
-    "nano_vlm_world_model": 204,
     "qwen": 32,
     "tabm": 5,
     "tree_transformer": 14,
@@ -99,7 +98,6 @@ AUTONAME_STEMS = {
     "masked_language_model": ("bert",),
     "nam": ("group_attention", "layer_normalization", "tree_mha"),
     "nano_vlm": ("vision_encoder",),
-    "nano_vlm_world_model": ("dense", "vision_encoder"),
     "qwen": ("linear_gating", "swi_gluffn"),
     "tabm": ("n_linear", "scale_ensemble", "tab_m_backbone"),
     "tree_transformer": ("group_attention", "layer_normalization",
@@ -127,17 +125,17 @@ STOCHASTIC_OUTPUT = {
     "vae": "calibrate",
     "sd3_mmdit": "calibrate",
     "relgt": "calibrate",
-    "nano_vlm_world_model": "calibrate",
     # Not stochastic in the same sense: its own two calls agree to 9.31e-10, a
     # float32 reduction-order difference, so a fixed small bound is honest and
     # `calibrate` would be flaky at exactly 0.0.
     "vq_vae": 1e-8,
 }
 
-#: The measured round-trip/self-spread ratios are 1.54 (``vae``), 1.21
-#: (``nano_vlm_world_model``), 0.88 (``sd3_mmdit``) and 0.65 (``relgt``); 3.0 is
-#: ~2x the worst. The WEIGHT arm stays at ``atol=0.0`` for all four, so the
-#: strict guard against a lost weight is not the one being relaxed here.
+#: The measured round-trip/self-spread ratios are 1.54 (``vae``), 0.88
+#: (``sd3_mmdit``) and 0.65 (``relgt``); 3.0 is ~2x the worst. A fourth, 1.21
+#: (``nano_vlm_world_model``), went with that package's deletion on 2026-08-24.
+#: The WEIGHT arm stays at ``atol=0.0`` for all three, so the strict guard
+#: against a lost weight is not the one being relaxed here.
 CALIBRATION_FACTOR = 3.0
 
 #: Packages whose ``.build(shape)`` half of the parity arm is skipped, and why.

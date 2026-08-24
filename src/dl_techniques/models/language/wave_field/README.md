@@ -482,13 +482,14 @@ propagates on. Sweep it — but pair every sweep with the leak probe from §3, a
 record both numbers. A configuration that trains better while leaking the
 future is not a better language model.
 
-### Pattern 3: memory-augmented variant
+### Pattern 3: memory-augmented variant (REMOVED)
 
-`src/dl_techniques/models/memory_bank/` layers a dual-tap long-term / working
-memory bank on top of `WaveFieldLLM` (`wave_field_memory_llm.py`). It is a
-separate package with its own tests, and it currently ships **no trainer** —
-`src/train/wave_field/train_memory.py` was deleted on 2026-08-13. The model
-package itself was not deleted.
+A `memory_bank` package once layered a dual-tap long-term / working memory bank
+on top of `WaveFieldLLM` (`wave_field_memory_llm.py`). Its trainer,
+`src/train/wave_field/train_memory.py`, was deleted on 2026-08-13, and the model
+package itself was deleted from the tree on 2026-08-24 along with its tests.
+Nothing under `models/` implements this pattern today; recover it from git
+history (`git log -- src/dl_techniques/models/memory_bank`) if you want it back.
 
 ---
 

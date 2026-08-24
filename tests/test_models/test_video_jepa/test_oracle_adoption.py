@@ -22,7 +22,7 @@ mentioned in a comment.
 Every gradient assertion in this file therefore uses **the loss the model
 actually trains with** -- the output term PLUS ``model.losses`` (next-frame,
 mask-prediction and SIGReg). Under it, ``0 of 117`` are dead. This is the same
-shape ``vq_vae`` needed in this batch and ``memory_bank`` needed in batch B.
+shape ``vq_vae`` needed in this batch.
 
 Measured 2026-08-21 on **CPU** (see the device note below), one Adam step, at
 ``img_size=32 / patch_size=8 / num_frames=2``:

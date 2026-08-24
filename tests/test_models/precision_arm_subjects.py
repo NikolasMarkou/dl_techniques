@@ -58,8 +58,7 @@ CHARGED_PACKAGES: Tuple[str, ...] = (
     "byte_latent_transformer", "capsnet", "cbam", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
     "gpt2", "hierarchical_reasoning_model", "ideogram4", "lewm",
-    "masked_autoencoder", "masked_language_model", "memory_bank",
-    "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
+    "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
     "pft_sr", "power_mlp", "qwen", "relgt", "resnet", "scunet", "sd3_mmdit",
     "shgcn", "som", "squeezenet", "superpoint", "swin_transformer", "tabm",
     "time_series", "tiny_recursive_model", "vae", "video_jepa", "vit",
@@ -398,21 +397,6 @@ def _b_wave_field():
 
 
 _sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16))
-
-
-def _b_memory_bank():
-    from dl_techniques.models.memory_bank import WaveFieldMemoryLLM
-    return WaveFieldMemoryLLM(
-        vocab_size=64, embed_dim=32, depth=4, num_heads=2, max_seq_len=16,
-        d_k=8, d_v=16, s_lt=64, top_k=4, infonce_negatives=8,
-        diversity_subsample=16,
-    )
-
-
-# ``allowed_none_grads=1``: MEASURED IDENTICAL under float32 -- 1 of 92 in
-# BOTH arms (fp16 ``grad_norm_sum`` 5.537149e-01, float32 5.536436e-01).
-_sub("memory_bank", _b_memory_bank, lambda: _ids(64, 2, 16),
-     allowed_none_grads=1)
 
 
 def _b_masked_language_model():
@@ -1215,20 +1199,6 @@ def _nam_call(model, inputs, training):
 
 _extra("nam", _b_nam, lambda: {"input_ids": _ids(16, 2, 16)},
        call_fn=_nam_call)
-
-
-def _b_nano_vlm_world_model():
-    from dl_techniques.models.nano_vlm_world_model.model import (
-        create_score_based_nanovlm,
-    )
-    return create_score_based_nanovlm(variant="mini", vocab_size=256)
-
-
-def _nvwm_inputs():
-    return {"images": _f32(1, 224, 224, 3), "text": _ids(256, 1, 8)}
-
-
-_extra("nano_vlm_world_model", _b_nano_vlm_world_model, _nvwm_inputs)
 
 
 def _b_thera():

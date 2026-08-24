@@ -138,9 +138,9 @@ def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
         # All six classes auto-register via @register_keras_serializable;
         # listing them defensively protects against import-order surprises.
         # Keys are the Keras REGISTERED names (`"Custom>WaveFieldLLM"`, ...),
-        # derived rather than hard-coded -- see D-014 in the memory_bank
-        # sibling `memory_llm_custom_objects()` for why a bare class-name key
-        # can never match.
+        # derived rather than hard-coded: a bare class-name key can never
+        # match, because `get_registered_name` returns the PACKAGE-qualified
+        # name that the archive actually stores.
         custom_objects={
             keras.saving.get_registered_name(cls): cls
             for cls in (

@@ -327,7 +327,7 @@ class TextDecoder(keras.layers.Layer):
         # a 25x change in `initializer_range` moved the block-kernel std by a
         # factor of 1.00 (0.12245 in both arms). This is a four-line edit with a
         # wide blast radius -- it changes the initial weight distribution of every
-        # block in `gpt2`, `qwen`, `nano_vlm` and `nano_vlm_world_model`. Post-fix
+        # block in `gpt2`, `qwen` and `nano_vlm`. Post-fix
         # the GPT-2 blocks' weights are ~1.8x smaller, which attenuated the
         # two-block cross-position signal ~50x and required
         # `test_gpt2.py::test_without_the_mask_the_same_tokens_do_leak` to be

@@ -36,11 +36,11 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 
 ---
 
-## 2. nano_vlm_world_model — full-model forward dead (one bug remaining)
+## 2. nano_vlm_world_model [package deleted 2026-08-24] — full-model forward dead (one bug remaining)
 
 **Status:** import-path + scheduler-dtype bugs FIXED and committed (`1d15636e`); B7 (scheduler→plain class) committed (`29367bc3`) and verified at the scheduler level. Full-model forward / `.keras` round-trip still blocked by the bug below.
 
-- File: `src/dl_techniques/models/nano_vlm_world_model/model.py` (+ `create_vision_encoder` defaults).
+- File: `src/dl_techniques/models/nano_vlm_world_model/model.py` [package deleted 2026-08-24] (+ `create_vision_encoder` defaults).
 - Symptom: `InvalidArgumentError: Ranks of all input tensors should match: [2,8,384] vs [2,384]` at `ConditionalDenoiser.call` (`denoisers.py:221`, `ops.concatenate([x, c], axis=1)`).
 - Root cause: `create_vision_encoder` defaults to `output_mode='cls'` → returns rank-2 pooled `[B, embed_dim]`; the model's `vision_config` never overrides it (unlike `text_config`, which yields rank-3). `ConditionalDenoiser` expects a rank-3 condition `[B, cond_seq_len, dim]`.
 - Fix options: set `output_mode` to a sequence-returning mode in the model's `vision_config`, OR make `ConditionalDenoiser` handle a rank-2 condition. >10 lines, untested; pick based on intended world-model semantics.

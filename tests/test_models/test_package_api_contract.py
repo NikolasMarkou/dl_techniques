@@ -1874,8 +1874,6 @@ class TestModelVariantsArePresent:
             ("dl_techniques.models.neural_computer.ntm.model", "NTMModel", ["base", "large", "tiny"]),
             ("dl_techniques.models.vision_language.nano_vlm.model", "NanoVLM",
              ["base", "large", "mini"]),
-            ("dl_techniques.models.nano_vlm_world_model.model", "ScoreBasedNanoVLM",
-             ["base", "large", "mini"]),
             # "repo_medium", not "large": the row was renamed on 2026-08-23 (D-463)
             # when `base` was corrected from 60 channels to the paper's 240, which
             # left an 80-channel variant sitting BETWEEN the two published sizes.
@@ -3937,7 +3935,7 @@ _CREATE_DELEGATION_WAIVERS = {
 }
 
 
-#: The 16 ``create_*(variant=...)`` functions whose module defines no
+#: The 15 ``create_*(variant=...)`` functions whose module defines no
 #: ``from_variant`` -- excluded from R-051 BY SCOPE, since the rule is about
 #: delegating to a method that does not exist here. §5.6's functional-builder
 #: exemption class. Pinned by name so the exclusion cannot grow silently: a NEW
@@ -3955,7 +3953,6 @@ _CREATE_WITHOUT_FROM_VARIANT = {
     ("models/vision_language/ideogram4/transformer.py", "create_ideogram4_transformer"),
     ("models/vision_language/ideogram4/vae.py", "create_ideogram4_autoencoder"),
     ("models/vision_language/nano_vlm/model.py", "create_nanovlm"),
-    ("models/nano_vlm_world_model/model.py", "create_score_based_nanovlm"),
     ("models/vision/super_resolution/pft_sr/model.py", "create_pft_sr"),
     ("models/vision_language/sd3_mmdit/pipeline.py", "create_sd3_pipeline"),
     ("models/vision_language/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
@@ -5534,12 +5531,14 @@ def _sweep_step_overrides(roots=None, src_root=None):
 
     Subject set is NAME-based and covers all of ``src/`` (library, trainers and
     applications), deliberately: a base-class-based predicate could be evaded by
-    changing what the class inherits from, and 12 of the 34 sites live under
+    changing what the class inherits from, and 12 of the 32 sites live under
     ``src/train/`` where the same house rule applies.
 
     Measured 2026-08-20: **34 keys -- 22 train_step, 11 test_step, 1
     predict_step** -- independently re-derived three times now (ip-verifier,
-    ip-reviewer, and here), exact every time.
+    ip-reviewer, and here), exact every time. Re-measured 2026-08-24 after the
+    `memory_bank` and `nano_vlm_world_model` packages were DELETED from the
+    tree: **32 keys -- 20 train_step, 11 test_step, 1 predict_step**.
     """
     if roots is None:
         roots, src_root = (_SRC_ROOT,), REPO_ROOT
@@ -5563,7 +5562,8 @@ def _sweep_step_overrides(roots=None, src_root=None):
     return rows, counts
 
 
-#: The frozen population: 34 ``(path, class, method)`` keys, measured 2026-08-20.
+#: The frozen population: 32 ``(path, class, method)`` keys, measured 2026-08-24
+#: (34 at 2026-08-20; two keys dropped with their deleted packages -- see D-003).
 #:
 #: The house rule is "do not GROW this set". Additions FAIL; removals PASS the
 #: growth predicate -- but they fail the liveness test below, which is
@@ -5594,10 +5594,6 @@ _FROZEN_STEP_OVERRIDES = {
      "MaskedLanguageModel", "test_step"),
     ("src/dl_techniques/models/language/masked_language_model/mlm.py",
      "MaskedLanguageModel", "train_step"),
-    ("src/dl_techniques/models/memory_bank/wave_field_memory_llm.py",
-     "WaveFieldMemoryLLM", "train_step"),
-    ("src/dl_techniques/models/nano_vlm_world_model/train.py",
-     "ScoreVLMTrainer", "train_step"),
     ("src/dl_techniques/models/time_series/deepar/model.py", "DeepAR", "predict_step"),
     ("src/dl_techniques/models/vision/vae/model.py", "VAE", "test_step"),
     ("src/dl_techniques/models/vision/vae/model.py", "VAE", "train_step"),
@@ -5644,9 +5640,9 @@ class Injected(keras.Model):
 class TestCustomStepOverridePopulationIsFrozen:
     """The custom ``train_step`` population may not grow (R-067/R-097/R-100).
 
-    Why a freeze and not a ban: 6 of the 34 implement genuinely non-stock
+    Why a freeze and not a ban: 5 of the 32 implement genuinely non-stock
     objectives (VAE ELBO, VQ-VAE codebook, MAE masking, V-JEPA EMA target,
-    CapsNet margin+reconstruction, memory_bank's dual-optimizer phase freeze),
+    CapsNet margin+reconstruction),
     and step 4 measured none of them defective on any of the three rules. Why a
     freeze and not nothing: the same measurement found 2 LIVE CRITICALs
     (``byte_latent_transformer`` and ``latent_gmm_registration`` cannot train
@@ -5729,20 +5725,20 @@ class TestCustomStepOverridePopulationIsFrozen:
         )
 
     def test_the_frozen_population_is_the_measured_one(self):
-        """Anti-vacuity: the frozen set is exactly the 34 keys step 4 measured.
+        """Anti-vacuity: the frozen set is exactly the 32 keys measured.
 
         No 0.8 floor here -- a freeze is an equality, and a floor would let the
         set decay to 27 unnoticed.
         """
         _rows, counts = _sweep_step_overrides()
-        assert len(_FROZEN_STEP_OVERRIDES) == 34
+        assert len(_FROZEN_STEP_OVERRIDES) == 32
         assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
         assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
-            22,
+            20,
             11,
             1,
         ), (
-            "the step-override mix moved off the measured 22/11/1; reconcile "
+            "the step-override mix moved off the measured 20/11/1; reconcile "
             f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
         )
 
@@ -5767,8 +5763,8 @@ class TestCustomStepOverridePopulationIsFrozen:
     def test_a_line_keyed_freeze_would_have_drifted(self):
         """The key choice, asserted rather than asserted-about.
 
-        Every one of the 34 sites carries a line number, and 15 of the 34 files
-        were edited by this plan's own step 5.8. A line-keyed freeze would have
+        Every one of the 32 sites carries a line number, and 15 of those files
+        were edited by that plan's own step 5.8. A line-keyed freeze would have
         gone stale on a commit that changed no override at all; this asserts the
         key genuinely excludes the line.
         """

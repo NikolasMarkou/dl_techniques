@@ -99,11 +99,7 @@ MODELS_ROOT = (
 # Nothing here is "routed to" a step any more; the three that remain are
 # ruled, not owed.
 KNOWN_UNSCALED = {
-    "latent_gmm_registration/model.py": "fp16-unreachable by design (D-004 arm b)",
-    "memory_bank/wave_field_memory_llm.py": "scale_loss is an unconditional "
-                                            "no-op here; see that file's own anchor",
-    "nano_vlm_world_model/train.py": "never probed; not a `keras.Model.train_step` "
-                                     "on the shipped forward path",
+    "point_cloud/latent_gmm_registration/model.py": "fp16-unreachable by design (D-004 arm b)",
 }
 
 
