@@ -224,8 +224,10 @@ the entry is kept so the correction is not silently re-reverted.
   `vision_language/sam/__init__.py` carry substantive docstrings that predate the restructure
   (the SAM one records a name-shadowing failure that was real under the pre-restructure
   `SAM1/ SAM2/ SAM3/` spelling and is RETIRED by the lowercase rename — read it before
-  adding a re-export there, and note that D-002, not the collision, is what keeps it empty), while `vision/keypoints/__init__.py` and
-  `vision/super_resolution/__init__.py` are still 0 bytes.
+  adding a re-export there, and note that D-002, not the collision, is what keeps it empty).
+  `vision/keypoints/__init__.py` and `vision/super_resolution/__init__.py` were 0 bytes
+  until 2026-08-25 and now carry docstrings of the same shape; all four subfamily containers
+  are documented and none re-exports.
 
 ### Per-leaf `__init__.py` census — re-derived 2026-08-25
 
