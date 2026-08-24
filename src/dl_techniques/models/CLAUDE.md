@@ -335,8 +335,26 @@ no logic of its own. The package `__init__.py` exports the class and the factory
   append-only manifest `plans/ANCHORS.md`; a comment-tidying sweep that removes one silently
   destroys the record. Files with a high comment density are usually dense *because of*
   these anchors — never target a file by comment density.
-- **Never rename a module file to `model.py`.** `bert/bert.py`, `convnext/convnext_v1.py`
-  and `mobilenet/mobilenet_v2.py` stay where they are; renaming breaks every import.
+- **A module rename must carry every referencing site in the same commit.** `bert/` now
+  holds `model.py`, renamed from `bert/bert.py` by merge `4ed922781` on 2026-08-24.
+  `convnext/convnext_v1.py` and `mobilenet/mobilenet_v2.py` genuinely do stay where they
+  are, and for a reason that does not generalize to `bert/`: they are *versioned variants*
+  sitting beside their siblings (`convnext_v2.py`, `mobilenet_v1/v3/v4.py`), so a
+  `model.py` in either package would name one version and hide the rest. A package with a
+  single model module is the case `model.py` is for. What the merge actually got wrong was
+  the rename's blast radius: it updated `models/bert/__init__.py` and stopped. The 13 other
+  files naming the old path — tests, trainers, and the convention documents that cite it as
+  the house exemplar — were left pointing at a file that no longer existed. Measured cost:
+  tree-wide collection sat at `23809 collected, 3 errors` and
+  `tests/test_models/test_package_api_contract.py` at `520 passed, 4 failed` until commit
+  `62d0b05cb` repointed all 13, which restored `23828 collected, 0 errors` and
+  `524 passed, 0 failed`. So: rename freely when the package holds one model module, but
+  grep the whole tree for the old path first and land every hit in the same commit.
+  This bullet **reverses** the absolute prohibition that stood in its place until
+  2026-08-24 ("Never rename a module file to `model.py`. `bert/bert.py` ... stay where they
+  are; renaming breaks every import"), so do not read `bert/model.py` as drift and rename it
+  back — the tree is correct and its references are consistent. Recorded in
+  `plan-2026-08-24T120026-64ffd751/D-006`.
 - **Never convert docstring style.** This package is measurably mixed; match the file you
   are editing (see `src/dl_techniques/CLAUDE.md` § Code Style).
 - **Never re-export the deep-supervision helpers from a `models/` package.**
