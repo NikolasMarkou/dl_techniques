@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of robust, **Bias-Free** neural networks designed for blind image denoising. This collection includes a standard ResNet-style denoiser (**BFCNN**), a U-Net architecture (**BF-UNet**), and a modern U-Net incorporating ConvNeXt V2 blocks (**ConvUNext**).
+A Keras 3 implementation of robust, **Bias-Free** neural networks designed for blind image denoising. This collection includes a standard ResNet-style denoiser (**BFCNN**), a U-Net architecture (**BF-UNet**), and a modern U-Net incorporating ConvNeXt V2 blocks (**ConvUNext**).
 
 These models are architected to generalize across different noise levels, solving a common limitation in standard CNN denoisers.
 
@@ -81,7 +81,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 
 ### 3.3 ConvUNext (Modern Backbone)
 **ConvUNext** combines the U-Net macro-architecture with **ConvNeXt V2** micro-architecture (inverted bottlenecks, large kernels, Global Response Normalization).
--   **Best for**: State-of-the-art performance, capturing long-range dependencies.
+-   **Best for**: the strongest of the three backbones here, capturing long-range dependencies.
 -   **Innovations**:
     -   **7x7 Kernels**: Larger receptive field than standard U-Net (3x3).
     -   **GRN (Global Response Norm)**: Enhances channel contrast for better feature learning.
@@ -115,13 +115,14 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 > exploits, with zero retraining.
 
 #### Optional frozen Gabor stem (non-learnable)
-`create_convunext_denoiser` accepts three params to prepend a **non-learnable (frozen)** Gabor depthwise convolution stem:
+`create_convunext_denoiser` accepts three params that swap the learned stem for a **non-learnable (frozen)** Gabor depthwise convolution stem:
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `use_gabor_stem` | `False` | When `True`, prepend a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters`, before the standard ConvUNext stem. Default `False` is byte-identical to the original architecture. |
+| `use_gabor_stem` | `False` | When `True`, build a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters` **INSTEAD OF** the learned `ConvUNextStem` — not before it. The Gabor front-end already performs initial feature extraction and sets the channel count, so the builder skips the stem entirely and falls through to the (no-op) channel-adjust branch. Default `False` is byte-identical to the original architecture. |
 | `gabor_filters` | `32` | Depth multiplier of the depthwise Gabor bank; the stem emits `input_channels * gabor_filters` channels which the 1x1 projection reduces back to `initial_filters`. |
 | `gabor_kernel_size` | `11` | Kernel size of the Gabor depthwise stem. |
+| `gabor_stem_projection` | `True` | Added after this table was first written. `False` DROPS the mandatory 1x1 projection and feeds the Gabor bank straight into the encoder — legal only when `input_channels * gabor_filters == initial_filters` exactly (`ValueError` otherwise), and it leaves all cross-channel mixing to the first ConvNeXt block. |
 
 The Gabor weights are deterministic (`GaborFiltersInitializer`) and the layer is `trainable=False`, so the stem contributes **zero trainable parameters** and is preserved (still frozen) across `.keras` round-trips. The mandatory 1x1 projection is bias-free, keeping the whole front-end strictly bias-free.
 
@@ -197,8 +198,8 @@ pip install keras>=3.0 tensorflow>=2.16
 
 ```python
 import keras
-from dl_techniques.models.bfunet import create_bfunet_variant
-from dl_techniques.models.bfconvunext import create_convunext_variant
+from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
+from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_variant
 
 # 1. Create a Base ConvUNext model for RGB images
 # Note: Deep supervision is enabled by default for variants
@@ -253,7 +254,7 @@ When training with deep supervision, your data generator must provide multiple g
 
 ```python
 import numpy as np
-from dl_techniques.models.bfconvunext import create_convunext_variant
+from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_variant
 
 # Create model
 model = create_convunext_variant('small', (64, 64, 3), enable_deep_supervision=True)
@@ -277,7 +278,7 @@ model.fit(X, targets, epochs=5)
 For deployment, you typically don't want the overhead of calculating the auxiliary outputs.
 
 ```python
-from dl_techniques.models.bfconvunext import (
+from dl_techniques.models.bias_free_denoisers.bfconvunext import (
     create_convunext_variant,
     create_inference_model_from_training_model
 )
@@ -293,20 +294,33 @@ inference_model = create_inference_model_from_training_model(training_model)
 result = inference_model.predict(some_image)
 ```
 
-### Example 3: Loading Pretrained BF-UNet
-BF-UNet supports automatic weight downloading for standard configurations.
+### Example 3: Loading BF-UNet Weights From a Local File
+
+**No weights are downloadable.** `pretrained=True` raises `NotImplementedError` --
+there is no host, no checkpoint and no fallback to random initialization. The
+`weights_dataset` argument only names a checkpoint that would be fetched, so it is
+inert. The supported route is a local `.keras` file you produced yourself, passed as
+`pretrained="<path>"`:
 
 ```python
-from dl_techniques.models.bfunet import create_bfunet_variant
+from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
 
-model = create_bfunet_variant(
-    'base',
-    input_shape=(256, 256, 3),
-    pretrained=True,
-    weights_dataset='imagenet_denoising'
+# A model you trained and saved earlier.
+model = create_bfunet_variant('tiny', input_shape=(64, 64, 3))
+model.save('/tmp/bfunet_tiny.keras')
+
+# Reload its weights into a freshly configured model of the same shape.
+restored = create_bfunet_variant(
+    'tiny',
+    input_shape=(64, 64, 3),
+    pretrained='/tmp/bfunet_tiny.keras',
 )
-print("✅ Pretrained weights loaded.")
 ```
+
+`keras.models.load_model('/tmp/bfunet_tiny.keras')` is the simpler route when you want
+the saved model back as-is; `pretrained="<path>"` exists to transplant weights into a
+configuration you built yourself (e.g. a different `input_shape`, with
+`weights_input_shape=` set to the shape the file was trained at).
 
 ---
 

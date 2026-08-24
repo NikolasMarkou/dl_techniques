@@ -190,6 +190,14 @@ class TrainingConfig:
     validation_steps: Optional[int] = None
     early_stopping_patience: int = 25
     monitor_metric: str = 'val_accuracy'
+    # DECISION plan-2026-08-17T183311-79c63e38/D-044
+    # Hardcoded, and NOT routed through
+    # `src/train/common/callbacks.py::resolve_monitor_mode`. It is correct for
+    # the default `val_accuracy`, but changing `monitor_metric` to a
+    # minimize-direction metric (any `*_loss`, `val_mae`, ...) WITHOUT also
+    # setting `monitor_mode='min'` silently inverts checkpoint selection: the
+    # WORST epoch is kept. There is no cross-check between the two fields.
+    # See decisions.md D-044.
     monitor_mode: str = 'max'
 
     # --- Output & Logging ---

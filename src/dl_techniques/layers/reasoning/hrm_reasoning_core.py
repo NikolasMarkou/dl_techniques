@@ -58,8 +58,10 @@ References:
         Theory). The interaction between the global `z_h` and the specialized `z_l`
         shares conceptual similarities with GWT.
     3.  Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
-        Embedding." The layer supports RoPE (`rope_theta`) as a modern positional
-        encoding strategy.
+        Embedding." With `pos_encodings="rope"` (the default) the reasoning
+        modules run grouped-query attention, which rotates Q and K by their own
+        positions using `rope_theta`. RoPE is applied inside attention, not as a
+        term added to the input embedding.
 """
 
 import math
@@ -73,7 +75,6 @@ from typing import Optional, Union, Dict, Any, Tuple, Literal
 from .hrm_reasoning_module import HierarchicalReasoningModule
 from .hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 from ..embedding.positional_embedding import PositionalEmbedding
-from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 # ---------------------------------------------------------------------
 
@@ -102,7 +103,9 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         │              │                                       │
         │              ▼                                       │
         │  Token Embedding + Puzzle Embedding (optional)       │
-        │  + Positional Encoding (Learned / RoPE)              │
+        │  + Learned Positional Encoding (if pos_encodings     │
+        │    == "learned"; RoPE instead rotates Q/K inside     │
+        │    the reasoning modules' attention)                 │
         │              │                                       │
         │              ▼                                       │
         │  ┌─── Reasoning Cycles (stop_gradient) ────┐         │
@@ -149,9 +152,13 @@ class HierarchicalReasoningCore(keras.layers.Layer):
     :type num_heads: int
     :param ffn_expansion_factor: FFN expansion factor. Defaults to 4.
     :type ffn_expansion_factor: int
-    :param pos_encodings: Positional encoding type (``"rope"`` or ``"learned"``).
+    :param pos_encodings: Positional encoding type. ``"rope"`` (the default)
+        runs the reasoning modules on grouped-query attention, which rotates Q
+        and K inside attention; ``"learned"`` adds a learned positional
+        embedding to the input stream and leaves attention position-blind.
     :type pos_encodings: Literal["rope", "learned"]
-    :param rope_theta: Theta parameter for RoPE. Defaults to 10000.0.
+    :param rope_theta: Theta parameter for RoPE. Only used when
+        ``pos_encodings="rope"``. Defaults to 10000.0.
     :type rope_theta: float
     :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
     :type dropout_rate: float
@@ -283,23 +290,39 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         else:
             self.puzzle_embedding = None
 
-        # Positional embeddings
-        if pos_encodings == "rope":
-            self.rope = RotaryPositionEmbedding(
-                head_dim=embed_dim // num_heads,
-                max_seq_len=self.total_seq_len,
-                rope_theta=rope_theta,
-                name="rope"
-            )
-            self.position_embedding = None
-        elif pos_encodings == "learned":
+        # Positional embeddings.
+        #
+        # DECISION plan-2026-08-17T183311-79c63e38/D-012: `pos_encodings="rope"`
+        # owns NO layer here. It selects the reasoning modules' attention TYPE
+        # instead, and RoPE is applied inside that attention layer, to Q and K.
+        #
+        # WHAT NOT TO DO: do NOT re-introduce a `self.rope =
+        # RotaryPositionEmbedding(...)` on this core "so the setting has
+        # something to point at", and do NOT call one from
+        # `_input_embeddings()`. That is exactly what shipped, and it is why
+        # this defect was invisible: the core built a real, correctly-configured
+        # RoPE layer that no code path ever handed a Q or K tensor, while every
+        # attention layer underneath ran `attention_type='multi_head'`, which
+        # carries no RoPE at all. The whole reasoning stack was measured exactly
+        # permutation-equivariant (2.02656e-06, float32 noise). Applying it at
+        # `_input_embeddings` would not fix it either: that method returns an
+        # additive `(batch, total_seq_len, embed_dim)` embedding, and rotating
+        # THAT does not reproduce RoPE's relative-position property, which comes
+        # from rotating Q and K by their own positions before the dot product.
+        # See decisions.md D-012.
+        self.position_embedding = None
+        if pos_encodings == "learned":
             self.position_embedding = PositionalEmbedding(
                 max_seq_len=self.total_seq_len,
                 dim=embed_dim,
                 dropout_rate=0.0,  # No dropout in original
                 name="position_embedding"
             )
-            self.rope = None
+
+        # `pos_encodings` is a genuine either/or: 'learned' adds its positional
+        # term at the embedding stage and must NOT also get RoPE inside
+        # attention, so it falls back to plain multi-head attention.
+        reasoning_attention_type = 'group_query' if pos_encodings == "rope" else 'multi_head'
 
         # Reasoning modules
         self.h_reasoning = HierarchicalReasoningModule(
@@ -307,6 +330,9 @@ class HierarchicalReasoningCore(keras.layers.Layer):
             embed_dim=embed_dim,
             num_heads=num_heads,
             ffn_expansion_factor=ffn_expansion_factor,
+            attention_type=reasoning_attention_type,
+            max_seq_len=self.total_seq_len,
+            rope_theta=rope_theta,
             dropout_rate=dropout_rate,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -319,6 +345,9 @@ class HierarchicalReasoningCore(keras.layers.Layer):
             embed_dim=embed_dim,
             num_heads=num_heads,
             ffn_expansion_factor=ffn_expansion_factor,
+            attention_type=reasoning_attention_type,
+            max_seq_len=self.total_seq_len,
+            rope_theta=rope_theta,
             dropout_rate=dropout_rate,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -354,19 +383,39 @@ class HierarchicalReasoningCore(keras.layers.Layer):
 
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         """
-        # Create initial states for reasoning modules
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-030: `h_init`/`l_init` are
+        # NON-TRAINABLE, and that is not a downgrade — it is what they always
+        # were in fact. They are read ONLY by `reset_carry`, so they enter the
+        # computation as cycle 0's carry, and `call` applies
+        # `keras.ops.stop_gradient` to the incoming `z_h`/`z_l` UNCONDITIONALLY
+        # before the one gradient-carrying step (truncated BPTT, the reference
+        # HRM's 1-step approximation). Every path from these two variables to
+        # the loss therefore crosses that barrier. MEASURED on CPU before this
+        # change: `tape.gradient(loss, core.h_init)` was `None`, likewise
+        # `l_init`, while the SAME tape returned max|g| = 1.335 for
+        # `core.lm_head.kernel` — so the `None` was a real gradient barrier, not
+        # a dead tape.
+        #
+        # Do NOT "fix" this by removing the `stop_gradient` in `call`: that is
+        # the truncated-BPTT design, it is what bounds activation memory to one
+        # step regardless of `h_cycles`/`l_cycles`, and unrolling it would
+        # diverge from the reference HRM (which likewise carries these two as
+        # non-trainable BUFFERS, not parameters). Do NOT re-add
+        # `trainable=True` to make `count_params()` look larger: the optimizer
+        # never updated them, so a "trainable" report was a false claim about
+        # 2 * embed_dim parameters. See decisions.md D-030.
         self.h_init = self.add_weight(
             name="h_init",
             shape=(self.embed_dim,),
             initializer=keras.initializers.TruncatedNormal(stddev=1.0),
-            trainable=True
+            trainable=False
         )
 
         self.l_init = self.add_weight(
             name="l_init",
             shape=(self.embed_dim,),
             initializer=keras.initializers.TruncatedNormal(stddev=1.0),
-            trainable=True
+            trainable=False
         )
 
         # Build sub-layers in computational order
@@ -383,10 +432,6 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         if self.position_embedding is not None:
             pos_input_shape = (None, self.total_seq_len, self.embed_dim)
             self.position_embedding.build(pos_input_shape)
-        if self.rope is not None:
-            head_dim = self.embed_dim // self.num_heads
-            rope_input_shape = (None, self.num_heads, self.total_seq_len, head_dim)
-            self.rope.build(rope_input_shape)
 
         # Reasoning modules expect list of two shapes: [hidden_states, input_injection]
         reasoning_input_shape = (None, self.total_seq_len, self.embed_dim)

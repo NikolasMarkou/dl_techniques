@@ -15,14 +15,43 @@ Key implementation notes (per F-002, F-004, LESSONS):
   modification.
 - Phase counter and global step live as ``add_weight(trainable=False)`` so
   they survive ``model.save`` / ``load_model`` round-trips.
-- Custom :meth:`train_step` splits trainable variables by name prefix
-  (``memory_`` / ``gate_`` -> memory optimizer; everything else ->
-  backbone optimizer).
+- The whole curriculum reads off that phase counter **inside the traced
+  graph**: memory injection, the anti-collapse aux losses and the
+  phase-2 backbone freeze are all multiplicative gates derived from
+  ``current_phase``. Nothing about the curriculum is a Python attribute
+  a callback flips — ``fit()`` traces ``train_function`` before
+  ``on_train_begin`` and rebuilds it only from ``compile()``, so a
+  Python flip after the first batch never reaches the graph.
+- Custom :meth:`train_step` splits trainable variables by the leading
+  component of ``Variable.path`` — the Keras 3 layer-qualified property —
+  falling back to the bare ``Variable.name`` for weights the model creates
+  on itself (``memory_`` / ``gate_`` -> memory optimizer; everything else
+  -> backbone optimizer). ``Variable.name`` alone is **not** the
+  layer-qualified name under Keras 3; see
+  :func:`split_trainable_by_prefix`.
 - :meth:`compile` accepts both ``backbone_optimizer`` and
   ``memory_optimizer`` and registers the backbone with Keras while
   keeping the memory optimizer as a model attribute.
 - :meth:`warmup_memory_keys` runs offline ``MiniBatchKMeans`` on hidden
   states at the read tap and seeds ``K_lt``.
+
+References:
+    - Graves et al., 2014. Neural Turing Machines.
+      (https://arxiv.org/abs/1410.5401) -- external read/write memory addressed
+      by content, which is what the write and read controllers here are.
+    - Graves et al., 2016. Hybrid computing using a neural network with dynamic
+      external memory (DNC). Nature 538 -- the differentiable-memory line this
+      follows.
+    - Wu et al., 2022. Memorizing Transformers. ICLR 2022.
+      (https://arxiv.org/abs/2203.08913) -- top-k retrieval from a
+      non-differentiable memory bank injected back into a decoder stack.
+    - Jang et al., 2017 / Maddison et al., 2017. Categorical
+      Reparameterization with Gumbel-Softmax (https://arxiv.org/abs/1611.01144)
+      and The Concrete Distribution (https://arxiv.org/abs/1611.00712) -- the
+      straight-through estimator used by the top-K retrieval.
+    - The backbone this wraps VERBATIM is documented at
+      ``dl_techniques.models.wave_field.model``, which carries its own
+      References section (GPT-2, Transformer, S4, Hyena).
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -51,12 +80,11 @@ from dl_techniques.models.memory_bank.write_controller import (
 )
 from dl_techniques.models.memory_bank.read_controller import (
     MemoryReadController,
+    _DEAD_INFONCE_TEMPERATURE_KEY,
 )
 from dl_techniques.models.memory_bank.phase_scheduler import (
     PHASE_WARMUP,
     PHASE_FREEZE_BACKBONE,
-    PHASE_FULL,
-    PHASE_EXTEND,
 )
 
 
@@ -82,30 +110,79 @@ def linear_top_k_anneal(
     return schedule
 
 
+def _scale_gradient(grad: Any, scale: Any) -> Any:
+    """Multiply ``grad`` by scalar ``scale``, preserving sparsity.
+
+    The token-embedding gradient arrives as a ``tf.IndexedSlices``; the
+    plain ``grad * scale`` spelling densifies it, which for a
+    ``(vocab_size, embed_dim)`` table is a per-step allocation of tens of
+    millions of floats. Scaling ``.values`` keeps the sparse form.
+
+    :param grad: A dense gradient tensor or a ``tf.IndexedSlices``.
+    :param scale: Scalar tensor; cast to the gradient's dtype.
+    :returns: The scaled gradient, same kind as the input.
+    """
+    if isinstance(grad, tf.IndexedSlices):
+        return tf.IndexedSlices(
+            grad.values * ops.cast(scale, grad.values.dtype),
+            grad.indices,
+            grad.dense_shape,
+        )
+    return grad * ops.cast(scale, grad.dtype)
+
+
 def split_trainable_by_prefix(
     variables: List[Any],
     memory_prefixes: Tuple[str, ...] = ("memory_", "gate_"),
 ) -> Tuple[List[Any], List[Any]]:
-    """Partition ``variables`` into ``(memory_vars, backbone_vars)`` by
-    matching the **leading path component** of each variable's ``.name``
-    against ``memory_prefixes``.
+    """Partition ``variables`` into ``(memory_vars, backbone_vars)``.
 
-    Keras variable names compose as ``<layer_name>/<weight_name>`` (and
-    nested paths add further ``/`` components). R3+R4: we split on ``/``
-    and check whether the leading component **starts with** any prefix.
-    This is stricter than the previous substring match — a stray
-    ``"memory_"`` somewhere mid-path no longer leaks variables across
-    optimizers.
+    Under Keras 3 a variable carries **two** names, and they are not the
+    same string: ``Variable.name`` is the bare weight name handed to
+    ``add_weight`` (``"kernel"``, ``"bias"``, ``"gamma"``), while the
+    layer-qualified hierarchy lives in the separate ``Variable.path``
+    property (``"memory_read_controller/gate_W_g/kernel"``). Matching
+    ``.name`` therefore sees only weights created by a literal
+    ``add_weight(name="memory_...")`` call and never sees a sublayer's
+    weights, whatever its parent layer is called.
 
-    :returns: ``(memory_vars, backbone_vars)``. Variables with empty or
-        missing names are routed to backbone (defensive).
+    A variable is routed to memory when **either**:
+
+    - the **leading component of** ``.path`` starts with a prefix — the
+      memory subtrees (``memory_lt_bank``, ``memory_read_controller``,
+      ``memory_write_controller``) are top-level attributes of the model,
+      so every weight beneath them, including the read gate
+      ``memory_read_controller/gate_W_g/kernel``, matches here; or
+    - the bare ``.name`` starts with a prefix — this covers weights the
+      model creates on **itself** via ``add_weight``, whose path is
+      prefixed by the model's own name (``wave_field_memory_llm/
+      memory_global_step``) and so has a non-matching leading component.
+
+    Matching *any* path component is deliberately **not** done: the
+    backbone's :class:`WaveFieldAttention` contains a ``gate_proj`` Dense
+    in every block, so an any-component rule would hand 2 variables per
+    block to the memory optimizer.
+
+    :param variables: Keras 3 variables to partition.
+    :param memory_prefixes: Prefixes marking the memory partition.
+    :returns: ``(memory_vars, backbone_vars)``. Variables with an empty or
+        missing path and name are routed to backbone (defensive).
     """
     memory_vars: List[Any] = []
     backbone_vars: List[Any] = []
     for v in variables:
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-015 — match on
+        # `.path` (leading component) plus the bare `.name`. Do NOT go
+        # back to `.name` alone: under Keras 3 that is the bare weight
+        # name, so every Dense/LayerNormalization weight in the memory
+        # controllers — the read gate above all — silently trained on the
+        # backbone optimizer. And do NOT relax to an any-component path
+        # match: `block_*/attention/gate_proj/*` would be captured.
+        path = getattr(v, "path", "") or ""
         name = getattr(v, "name", "") or ""
-        head = name.split("/", 1)[0]
-        if any(head.startswith(p) for p in memory_prefixes):
+        head = path.split("/", 1)[0]
+        if any(head.startswith(p) or name.startswith(p)
+               for p in memory_prefixes):
             memory_vars.append(v)
         else:
             backbone_vars.append(v)
@@ -206,10 +283,16 @@ class WaveFieldMemoryLLM(keras.Model):
         lambda_v_diversity: float = 1e-3,
         diversity_subsample: int = 1024,
         infonce_negatives: int = 256,
-        infonce_temperature: float = 0.1,
         # O6 — opt-in V_lt diversity aux loss. Default False so existing
         # variants and tests are unaffected.
         enable_v_diversity: bool = False,
+        # C-28 — emit the four anti-collapse aux losses into the graph.
+        # They are then scaled by the `current_phase` gate, so Phase 1
+        # contributes exactly 0.0 and Phase 2+ contributes the real term.
+        # `False` removes them from the graph entirely and no curriculum
+        # can bring them back (see `MemoryReadController`'s class
+        # docstring).
+        enable_aux_losses: bool = True,
         # O7 — optional schedule for `read_controller.top_k`. A callable
         # `step -> int` that returns the new top_k for a given training
         # step. Applied by `PhaseScheduler.on_train_batch_begin` only on
@@ -264,8 +347,8 @@ class WaveFieldMemoryLLM(keras.Model):
         self.lambda_v_diversity = lambda_v_diversity
         self.diversity_subsample = diversity_subsample
         self.infonce_negatives = infonce_negatives
-        self.infonce_temperature = infonce_temperature
         self.enable_v_diversity = enable_v_diversity
+        self.enable_aux_losses = enable_aux_losses
         self.top_k_schedule = top_k_schedule
         self.multi_head_keys = multi_head_keys
         self.dropout_rate = dropout_rate
@@ -304,6 +387,7 @@ class WaveFieldMemoryLLM(keras.Model):
         # Optimizers (set by compile()).
         self.backbone_optimizer = None
         self.memory_optimizer = None
+        self._backbone_base_lr: Optional[float] = None
 
         logger.info(
             f"Created WaveFieldMemoryLLM: depth={depth}, embed_dim={embed_dim}, "
@@ -396,8 +480,17 @@ class WaveFieldMemoryLLM(keras.Model):
             lambda_v_diversity=self.lambda_v_diversity,
             diversity_subsample=self.diversity_subsample,
             infonce_negatives=self.infonce_negatives,
-            infonce_temperature=self.infonce_temperature,
             enable_v_diversity=self.enable_v_diversity,
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — the aux
+            # losses are enabled STATICALLY here, at construction, because
+            # the flags decide graph shape. The curriculum switches them
+            # at runtime with the `aux_scale` tensor `call` passes down.
+            # Do NOT hand these flags to `PhaseScheduler` to flip.
+            enable_gate_entropy=self.enable_aux_losses,
+            enable_load_balance=self.enable_aux_losses,
+            enable_z_loss=self.enable_aux_losses,
+            enable_diversity=self.enable_aux_losses,
+            enable_infonce=self.enable_aux_losses,
             multi_head_keys=self.multi_head_keys,
             name="memory_read_controller",
         )
@@ -470,9 +563,17 @@ class WaveFieldMemoryLLM(keras.Model):
         # `if training` block and the per-flag enables in
         # `MemoryReadController._maybe_add_aux_losses`, so eval-time
         # forward in P1 is correct even with retrieval running.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — one gate, read
+        # from the `current_phase` Variable on every traced step, drives
+        # BOTH the injection and the anti-collapse aux losses. The two were
+        # separate mechanisms before: the injection used this gate (and
+        # worked), while the aux losses used Python bools a callback
+        # flipped after the trace (and never fired once). Do not
+        # reintroduce a Python-attribute switch for either.
         memory_active = ops.not_equal(
             self.current_phase, ops.cast(PHASE_WARMUP, "float32"),
         )
+        aux_scale = ops.cast(memory_active, "float32")
 
         k_wm = None
         v_wm = None
@@ -486,7 +587,8 @@ class WaveFieldMemoryLLM(keras.Model):
                 # gate the injection by `memory_active`.
                 k_lt, v_lt = self.lt_memory(None)
                 injection = self.read_controller(
-                    x, k_lt, v_lt, k_wm, v_wm, wm_mask, training=training,
+                    x, k_lt, v_lt, k_wm, v_wm, wm_mask,
+                    aux_scale=aux_scale, training=training,
                 )
                 injection = injection * ops.cast(memory_active, injection.dtype)
                 x = x + injection
@@ -528,7 +630,51 @@ class WaveFieldMemoryLLM(keras.Model):
             raise ValueError("memory_optimizer must be provided")
         self.backbone_optimizer = backbone_optimizer
         self.memory_optimizer = memory_optimizer
+        # Remembered so `set_backbone_optimizer_active(True)` can restore
+        # the rate the caller asked for after a phase-2 freeze.
+        self._backbone_base_lr: Optional[float] = None
+        lr = getattr(backbone_optimizer, "_learning_rate", None)
+        if isinstance(lr, keras.Variable):
+            self._backbone_base_lr = float(ops.convert_to_numpy(lr))
         super().compile(optimizer=backbone_optimizer, **kwargs)
+
+    def set_backbone_optimizer_active(self, active: bool) -> None:
+        """Gate the backbone optimizer's learning-rate ``Variable``.
+
+        This is the eager half of the phase-2 backbone freeze; the in-graph
+        half is the gradient mask in :meth:`train_step`. The mask stops new
+        gradient from reaching the backbone, but a gradient of exactly zero
+        is **not** a freeze under Adam/AdamW: the moment estimates carried
+        over from phase 1 keep producing a non-zero
+        ``lr * m_hat / (sqrt(v_hat) + eps)`` update, and AdamW's decay term
+        keeps shrinking the weights. Zeroing the learning rate closes both,
+        exactly (every term of both updates is multiplied by ``lr``).
+
+        The learning rate is a ``keras.Variable`` read inside the traced
+        step, so assigning it here takes effect on the very next batch
+        without a retrace.
+
+        :param active: ``True`` restores the rate passed to
+            :meth:`compile`; ``False`` sets it to ``0.0``.
+        :raises ValueError: If the backbone optimizer was built with a
+            ``LearningRateSchedule`` (or any non-``Variable`` rate), which
+            cannot be assigned and therefore cannot be frozen.
+        """
+        opt = self.backbone_optimizer
+        if opt is None:
+            return
+        lr = getattr(opt, "_learning_rate", None)
+        if not isinstance(lr, keras.Variable):
+            raise ValueError(
+                "PhaseScheduler's phase-2 backbone freeze needs an "
+                "assignable learning rate, but this model's "
+                f"backbone_optimizer carries {type(lr).__name__}. Compile "
+                "the backbone optimizer with a float learning_rate (drive "
+                "any schedule from a callback instead); a "
+                "LearningRateSchedule cannot be zeroed, so the backbone "
+                "would keep training through phase 2."
+            )
+        lr.assign(self._backbone_base_lr if active else 0.0)
 
     def train_step(self, data):
         x, y = data
@@ -536,13 +682,33 @@ class WaveFieldMemoryLLM(keras.Model):
             y_pred = self(x, training=True)
             loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
 
+        # DECISION plan-2026-08-17T183311-79c63e38/D-034
+        # NO `optimizer.scale_loss(loss)` call here, DELIBERATELY -- unlike
+        # every other custom `train_step` in this repo, where omitting it is a
+        # ~32768x silent under-update under `mixed_float16`. This model is the
+        # measured exception, for two independent reasons:
+        #   1. Gradients are applied through `self.backbone_optimizer` and
+        #      `self.memory_optimizer` -- the RAW optimizer objects. Keras'
+        #      `auto_scale_loss` only wraps `self.optimizer`, so neither of
+        #      these is ever a `LossScaleOptimizer`, neither unscales, and
+        #      calling `scale_loss` on them is an unconditional no-op. Adding
+        #      the call would look like a fix and change nothing.
+        #   2. The model cannot execute under `mixed_float16` at all today:
+        #      `MemoryReadController.call()` raises `InvalidArgumentError` on a
+        #      dtype mismatch before a single step completes (measured).
+        # Making fp16 correct here means wrapping BOTH optimizers by hand and
+        # reconciling their two independent dynamic scales -- a design change,
+        # not a one-line fix, and unverifiable until (2) is resolved. Flagged
+        # as a scoped follow-up in decisions.md D-034; do not "just add
+        # scale_loss".
         trainable_vars = self.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
 
         # R3+R4: drop None-gradient pairs first, then route via
-        # `split_trainable_by_prefix` (leading-component match). Keeps
-        # routing logic in one place; train_step no longer encodes the
-        # prefix policy inline.
+        # `split_trainable_by_prefix` (leading `.path` component, or the
+        # bare `.name` for model-owned weights). Keeps routing logic in
+        # one place; train_step no longer encodes the prefix policy
+        # inline.
         live = [(g, v) for g, v in zip(grads, trainable_vars) if g is not None]
         if live:
             live_grads = [g for g, _ in live]
@@ -559,12 +725,37 @@ class WaveFieldMemoryLLM(keras.Model):
         else:
             memory_pairs, backbone_pairs = [], []
 
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — the phase-2
+        # backbone freeze is this mask, read from `current_phase` on every
+        # traced step, NOT a `layer.trainable = False` flip in the
+        # curriculum callback. `self.trainable_variables` above is a Python
+        # list evaluated once when `train_function` is traced, so a
+        # `.trainable` flip at a later phase boundary cannot remove
+        # anything from it. Keeping the mask here (rather than only zeroing
+        # the backbone learning rate) makes the freeze a property of the
+        # SAVED phase counter: a model reloaded mid-curriculum freezes
+        # correctly with no callback attached. See decisions.md D-016.
+        backbone_active = ops.cast(
+            ops.not_equal(
+                self.current_phase,
+                ops.cast(PHASE_FREEZE_BACKBONE, "float32"),
+            ),
+            "float32",
+        )
+        backbone_pairs = [
+            (_scale_gradient(g, backbone_active), v)
+            for g, v in backbone_pairs
+        ]
+
         if backbone_pairs:
             self.backbone_optimizer.apply_gradients(backbone_pairs)
         if memory_pairs:
             self.memory_optimizer.apply_gradients(memory_pairs)
 
-        self._global_step.assign_add(tf.constant(1.0, dtype="float32"))
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-083: a plain float, not
+        # `tf.constant`. `assign_add` converts it, and the raw-`tf` spelling
+        # bought nothing.
+        self._global_step.assign_add(1.0)
 
         # B5: dict-keyed forward + dict-keyed compile must work for
         # non-loss metrics. The Keras `CompileMetrics` container expects
@@ -778,8 +969,8 @@ class WaveFieldMemoryLLM(keras.Model):
             "lambda_v_diversity": self.lambda_v_diversity,
             "diversity_subsample": self.diversity_subsample,
             "infonce_negatives": self.infonce_negatives,
-            "infonce_temperature": self.infonce_temperature,
             "enable_v_diversity": self.enable_v_diversity,
+            "enable_aux_losses": self.enable_aux_losses,
             "multi_head_keys": self.multi_head_keys,
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
@@ -803,6 +994,31 @@ class WaveFieldMemoryLLM(keras.Model):
         config = cls.MODEL_VARIANTS[variant].copy()
         config.pop("description", None)
         config.update(overrides)
+        return cls(**config)
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "WaveFieldMemoryLLM":
+        """Rebuild from a ``get_config()`` dict.
+
+        Every value ``get_config`` emits is a plain scalar, so this is a
+        straight ``cls(**config)``. It is spelled out rather than inherited to
+        record the one constructor argument that deliberately does NOT survive
+        a round-trip: ``top_k_schedule`` is a Python callable, is therefore
+        absent from ``get_config``, and a reloaded model runs with the fixed
+        ``top_k``. Re-attach it after loading if you were using one.
+
+        It also drops ``infonce_temperature`` from configs saved before
+        2026-08-19, when that dead argument was removed (see
+        :data:`~dl_techniques.models.memory_bank.read_controller._DEAD_INFONCE_TEMPERATURE_KEY`).
+        """
+        if _DEAD_INFONCE_TEMPERATURE_KEY in config:
+            config = {k: v for k, v in config.items()
+                      if k != _DEAD_INFONCE_TEMPERATURE_KEY}
+            logger.warning(
+                f"WaveFieldMemoryLLM: ignoring legacy config key "
+                f"'{_DEAD_INFONCE_TEMPERATURE_KEY}'; the InfoNCE temperature "
+                f"is the learned `log_temp_nce` weight and always was."
+            )
         return cls(**config)
 
 
@@ -843,3 +1059,30 @@ def memory_llm_custom_objects() -> Dict[str, Any]:
         MemoryReadController,
     )
     return {keras.saving.get_registered_name(cls): cls for cls in classes}
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_wave_field_memory_llm(
+    variant: str = "small",
+    **overrides: Any,
+) -> WaveFieldMemoryLLM:
+    """Create a :class:`WaveFieldMemoryLLM` from a named variant.
+
+    :param variant: One of ``WaveFieldMemoryLLM.MODEL_VARIANTS``
+        ("tiny", "small", "medium", "large", "xl").
+    :param overrides: Constructor arguments overriding the variant's entries.
+    :returns: A configured :class:`WaveFieldMemoryLLM`.
+    :raises ValueError: If ``variant`` is not a known variant name.
+
+    Example::
+
+        model = create_wave_field_memory_llm("tiny", vocab_size=128)
+        logits = model(token_ids)
+    """
+    return WaveFieldMemoryLLM.from_variant(variant, **overrides)
+
+# ---------------------------------------------------------------------

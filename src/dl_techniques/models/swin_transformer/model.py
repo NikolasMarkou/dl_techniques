@@ -1,55 +1,128 @@
 """
-Swin Transformer Model Implementation
-====================================
+Hierarchical vision transformer built from shifted-window attention, with four
+stages, patch merging between them, and an optional classification head.
 
-A complete implementation of the Swin Transformer architecture with hierarchical vision_heads
-transformer using shifted windows. This implementation follows modern Keras 3 patterns
-for consistency and maintainability.
+The architecture exists to resolve a tension between two facts about applying
+transformers to images. Global self-attention costs `O((HW)^2)` in the number of
+tokens, which is unaffordable at the resolutions dense prediction needs; but
+restricting attention to fixed local windows makes the cost `O(M^2 * HW)` — linear
+in image area for a fixed window `M` — at the price of never letting information
+cross a window boundary, which stacks into a network of disconnected columns.
+Swin's answer is to alternate the window partition instead of enlarging it.
+Even-indexed blocks partition the feature map on a regular `MxM` grid; odd-indexed
+blocks shift the whole partition by `M/2` in both axes, so a window in the shifted
+layer straddles four windows of the previous layer. Two consecutive blocks
+therefore connect every token to a neighbourhood strictly larger than one window,
+and stacking them grows the receptive field without ever computing a global
+attention matrix.
 
-Based on: "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows" (Liu et al., 2021)
-https://arxiv.org/abs/2103.14030
+Implementing that shift naively would produce windows of unequal size at the image
+border — `(M/2+1)^2` partitions instead of `(H/M)^2`, which cannot be batched. The
+trick the paper uses, and which lives in `SwinTransformerBlock` rather than here,
+is a cyclic roll: the feature map is rolled by `-M/2` before partitioning and
+rolled back afterwards, which keeps the window count and shape identical to the
+unshifted case. The roll wraps opposite edges of the image into the same physical
+window, so tokens that are not spatially adjacent end up as window-mates, and an
+attention mask must forbid exactly those pairs. Roll and mask are two halves of
+one operation: a roll without its mask lets the left edge attend to the right edge
+as though they touched, and a mask without its roll masks pairs that were never
+brought together. The block derives both from a single resolved shift value for
+that reason, and drops both together when a stage's grid has become smaller than
+the window (at which point one window covers everything and there is nothing to
+shift).
 
-Model Variants:
---------------
-- Swin-Tiny: [2,2,6,2] blocks, [96,192,384,768] dims, [3,6,12,24] heads (28.3M params)
-- Swin-Small: [2,2,18,2] blocks, [96,192,384,768] dims, [3,6,12,24] heads (49.6M params)
-- Swin-Base: [2,2,18,2] blocks, [128,256,512,1024] dims, [4,8,16,32] heads (87.8M params)
-- Swin-Large: [2,2,18,2] blocks, [192,384,768,1536] dims, [6,12,24,48] heads (196.5M params)
+Attention inside a window is position-agnostic on its own, so each head carries a
+learnable relative position bias added to the scores before softmax — indexed by
+the `(2M-1) x (2M-1)` possible relative offsets between two positions in a window
+rather than by absolute coordinates. This is what supplies spatial structure; the
+model adds no absolute positional embedding anywhere.
 
-Architecture Overview:
---------------------
-1. Patch Embedding: Converts input image to non-overlapping patches
-2. Stage 1-4: Each contains multiple Swin Transformer blocks
-3. Patch Merging: Reduces spatial resolution and increases feature dimensions
-4. Classification Head: Global average pooling + linear classifier
+Between stages, `PatchMerging` concatenates each `2x2` neighbourhood of tokens into
+one and projects `4C -> 2C`. Resolution halves and width doubles, the same
+pyramid a CNN builds, which is what makes the network usable as a detection or
+segmentation backbone rather than only a classifier. Four stages take a `H/4`
+patch grid down to `H/32`.
 
-Usage Examples:
---------------
-```python
-# CIFAR-10 model (32x32 input)
-model = SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+This module assembles those parts. The stage schedule is the paper's:
+tiny `[2,2,6,2]` at `embed_dim=96`, small `[2,2,18,2]` at 96, base `[2,2,18,2]` at
+128, large `[2,2,18,2]` at 192, giving 28.3M / 49.6M / 87.8M / 196.5M parameters at
+`num_classes=1000` (measured, not quoted). Shift alternates on the block index
+*within* a stage, so every stage begins unshifted. Stochastic depth is scheduled
+linearly across all blocks of all stages, not restarted per stage, so a block's
+drop rate depends on its global depth.
 
-# ImageNet model (224x224 input)
-model = SwinTransformer.from_variant("base", num_classes=1000)
+Three things about the code would otherwise mislead. The model is *functional*, not
+subclassed: `__init__` builds a `keras.Input` graph and calls
+`super().__init__(inputs, outputs)` at the end, which is why `get_config()`
+deliberately does not merge `super().get_config()` — the functional config would
+collide with the constructor arguments on reload. Between the patch embedding and
+the first block there is a bare `Reshape`: `PatchEmbedding2D` emits a 3D
+`(B, HW, C)` sequence while `SwinTransformerBlock` requires a 4D `(B, H, W, C)`
+grid, and both contracts are load-bearing for other models, so the seam is
+resolved here in the model rather than by changing either layer. And the
+divisibility checks on input height and width only `logger.warning`; they are
+compute notes, not correctness guards. `PatchMerging` ceil-pads an odd grid
+dimension, so a non-divisible input still produces the declared output shape — it
+just carries zero-padded tokens through at least one merge. The single hard
+requirement, `H % patch_size == 0`, is raised by `PatchEmbedding2D`.
 
-# Custom input size model
-model = create_swin_transformer("large", num_classes=100, input_shape=(384, 384, 3))
-```
+The classification head emits raw logits — layer-norm, global average pooling, a
+dense layer with no activation — so compile with `from_logits=True`.
+No checkpoints ship with this package, so `create_swin_transformer(pretrained=True)`
+raises `NotImplementedError`. It used to log a warning and return a randomly
+initialized model, which made an unavailable checkpoint indistinguishable from a
+successful load at the call site; warm-start from a local file with
+`model.load_weights(path)` instead.
+
+References:
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. ICCV 2021. (https://arxiv.org/abs/2103.14030)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Shaw et al., 2018. Self-Attention with Relative Position Representations.
+      (https://arxiv.org/abs/1803.02155)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras
 from keras import layers, initializers, regularizers
-from typing import List, Optional, Union, Tuple, Dict, Any
+from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # Local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
+
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-23T091307-9a110062/D-502
+#: Kernel initializer for every Dense/projection in the model, matching the
+#: official implementation's ``_init_weights``, which applies
+#: ``trunc_normal_(m.weight, std=.02)`` to every ``nn.Linear``:
+#:   https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
+#: Do NOT revert to ``"glorot_uniform"`` (Keras' Dense default, and what this
+#: parameter used to be): that is a DIFFERENT distribution AND a different
+#: scale, fan-dependent rather than fixed. TRAINING-ONLY -- an initializer is
+#: overwritten by any weight load, so no checkpoint changes meaning.
+#:
+#: This is a config DICT, not an ``Initializer`` instance, and that is
+#: load-bearing: a seedless instance bakes its seed at construction and REPLAYS
+#: the identical draw on every call (MEASURED: two calls of one instance at the
+#: same shape differ by exactly 0.0), so an instance used as a default argument
+#: -- evaluated once at import -- would hand every model in the process the same
+#: weights. ``keras.initializers.get`` resolves this dict to a fresh instance
+#: per consumer. Same hazard as D-072 / D-481. See decisions.md D-502.
+REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
+    "class_name": "TruncatedNormal",
+    "config": {"stddev": 0.02},
+}
 
 # ---------------------------------------------------------------------
 
@@ -131,7 +204,10 @@ class SwinTransformer(keras.Model):
             Must be positive. Determines initial downsampling. Defaults to 4.
         use_bias: Boolean, whether to use bias terms in linear layers.
             False can reduce parameters. Defaults to True.
-        kernel_initializer: String or Initializer, weight initialization strategy.
+        kernel_initializer: String, config dict or Initializer, weight
+            initialization strategy. Defaults to ``TruncatedNormal(stddev=0.02)``,
+            the official implementation's ``_init_weights`` convention
+            (https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py).
             Controls model parameter initialization. Defaults to "glorot_uniform".
         bias_initializer: String or Initializer, bias initialization strategy.
             Only used when use_bias=True. Defaults to "zeros".
@@ -238,8 +314,8 @@ class SwinTransformer(keras.Model):
             self,
             num_classes: int = 1000,
             embed_dim: int = 96,
-            depths: List[int] = [2, 2, 6, 2],
-            num_heads: List[int] = [3, 6, 12, 24],
+            depths: Sequence[int] = (2, 2, 6, 2),
+            num_heads: Sequence[int] = (3, 6, 12, 24),
             window_size: int = 7,
             mlp_ratio: float = 4.0,
             qkv_bias: bool = True,
@@ -248,7 +324,7 @@ class SwinTransformer(keras.Model):
             drop_path_rate: float = 0.1,
             patch_size: int = 4,
             use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_initializer: Optional[Union[str, Dict[str, Any], initializers.Initializer]] = None,
             bias_initializer: Union[str, initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
             bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
@@ -340,8 +416,13 @@ class SwinTransformer(keras.Model):
         # Store ALL configuration parameters for serialization
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        self.depths = depths
-        self.num_heads = num_heads
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.depths = list(depths)
+        self.num_heads = list(num_heads)
         self.window_size = window_size
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
@@ -354,6 +435,11 @@ class SwinTransformer(keras.Model):
         self._input_shape = input_shape
 
         # Store serializable initializers and regularizers
+        # A module-level dict is a MUTABLE DEFAULT: bound once at def time and
+        # shared by every caller. Resolved from a None sentinel instead, which
+        # also keeps `initializers.get` producing a FRESH instance per model.
+        if kernel_initializer is None:
+            kernel_initializer = REFERENCE_KERNEL_INITIALIZER
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -413,8 +499,23 @@ class SwinTransformer(keras.Model):
         self.patch_embed = create_embedding_layer(
             embedding_type="patch_2d",
             patch_size=self.patch_size,
+        # DECISION plan-2026-08-23T091307-9a110062/D-540
+        # Each consumer gets its OWN `clone_initializer(...)` copy. Do NOT pass
+        # `self.kernel_initializer` directly: one seedless initializer INSTANCE
+        # replays its draw, so every same-shape kernel it reaches is
+        # bit-identical. MEASURED at HEAD before this change, on a seeded
+        # 4-stage/2-block-per-stage Swin: all 16 same-shape kernel pairs inside a
+        # stage were `max|delta| = 0.0` -- including
+        # `stage_N_block_0/attn/.../qkv/kernel` vs `stage_N_block_1/...`, whose
+        # blocks differ by `shift_size` (regular vs SHIFTED window) and so play
+        # different architectural roles. `seed=` is not the discriminator;
+        # instance identity is. See decisions.md D-540 and initializers/clone.py.
             embed_dim=self.embed_dim,
             use_bias=self.use_bias,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="patch_embed"
         )
         x = self.patch_embed(x)
@@ -459,8 +560,8 @@ class SwinTransformer(keras.Model):
         patch_merge = PatchMerging(
             dim=input_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name=f"patch_merge_{stage_idx}"
@@ -507,8 +608,8 @@ class SwinTransformer(keras.Model):
                 stochastic_depth_rate=current_drop_path_rate,
                 activation="gelu",
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"stage_{stage_idx}_block_{block_idx}"
@@ -540,8 +641,8 @@ class SwinTransformer(keras.Model):
             classifier = layers.Dense(
                 units=self.num_classes,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="classifier"
@@ -581,21 +682,31 @@ class SwinTransformer(keras.Model):
                 f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        config = cls.MODEL_VARIANTS[variant]
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
+        config = cls.MODEL_VARIANTS[variant].copy()
+        config.pop("description", None)
+        config.update(kwargs)
         logger.info(f"Creating Swin Transformer-{variant.upper()} model")
 
         return cls(
             num_classes=num_classes,
-            embed_dim=config["embed_dim"],
-            depths=config["depths"],
-            num_heads=config["num_heads"],
             input_shape=input_shape,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
-        config = {
+        config = super().get_config()
+        config.update({
             # ALL __init__ parameters must be included
             "num_classes": self.num_classes,
             "embed_dim": self.embed_dim,
@@ -615,7 +726,7 @@ class SwinTransformer(keras.Model):
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
             "include_top": self.include_top,
             "input_shape": self._input_shape,
-        }
+        })
         return config
 
     @classmethod
@@ -687,7 +798,8 @@ def create_swin_transformer(
         variant: String, model variant ("tiny", "small", "base", "large").
         num_classes: Integer, number of output classes.
         input_shape: Optional tuple, input shape. Defaults to (224, 224, 3).
-        pretrained: Boolean, load pretrained weights (not implemented yet).
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no Swin checkpoints ship with this package.
         **kwargs: Additional arguments passed to model constructor.
 
     Returns:
@@ -713,8 +825,18 @@ def create_swin_transformer(
         )
         ```
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained Swin Transformer weights are distributed with "
+            f"dl_techniques (requested variant '{variant}'). Build the "
+            f"architecture with pretrained=False and warm-start from a local "
+            f"checkpoint instead: model = create_swin_transformer('{variant}', "
+            f"...); model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
+        )
 
     return SwinTransformer.from_variant(
         variant,

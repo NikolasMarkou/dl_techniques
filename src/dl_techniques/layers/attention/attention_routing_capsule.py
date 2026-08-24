@@ -73,7 +73,6 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.activations.squash import SquashLayer  # noqa: F401  (kept for API parity)
 
 # ---------------------------------------------------------------------
 

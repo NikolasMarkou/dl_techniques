@@ -1,16 +1,11 @@
 """
 ``SAMTrainingModel``: the trainable, traceable wrapper around :class:`SAM`.
-===========================================================================
 
 :meth:`SAM.call` cannot be traced, so it cannot be the inner operation of a
 ``fit()`` step, and a custom ``train_step`` is forbidden by standing
 instruction. This wrapper takes the other route: it calls SAM's submodules
 directly and returns the differentiable tensors as a dict that stock
 ``compile()`` / ``fit()`` trains.
-
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
 
 Key Features:
 ------------
@@ -85,6 +80,9 @@ Measured caveats:
   resolves it. (The old dotted path is deliberately not spelled here: a
   close-out gate for the restructure is a repo-wide grep for it, and writing it
   in prose erodes the instrument as effectively as a real reference would.)
+
+References:
+    Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
 """
 
 from typing import Any, Dict, Optional, Tuple

@@ -246,17 +246,50 @@ class TestSerialization:
         assert len(loaded.weights) == len(model.weights)
         np.testing.assert_allclose(before, after, atol=1e-4)
 
+    # DECISION plan-2026-08-19T070627-a616f581/D-015: perturb ONE ELEMENT of
+    # `decoder_proj/kernel`, keep the `> 1e-2` bound, and assert the un-perturbed
+    # round trip FIRST. The bound was never the problem -- the perturbation was
+    # annihilated by `decoder_norm` and the old bite was TF32 rounding noise.
+    # WHAT NOT TO DO: do not lower the threshold to green this test (the delta it
+    # would then accept is floating-point residue, not an effect); do not restore
+    # the whole-kernel `+1.0`; do not drop arm (0) or arm (2). See decisions.md
+    # D-015.
     def test_round_trip_compare_is_alive(self, fixed_batch, tmp_path):
         """GUARD-BITE: a +1.0 perturbation of ONE loaded weight must break the compare.
 
-        **Perturb a POST-NORM weight** (`decoder_proj`), never `weights[0]`.
-        Measured over all 13 weights of the tiny MIM model: perturbing the
-        patch-embed kernel (`weights[0]`) moves the output by only 9.4e-04 — a
-        ~5x margin over atol=1e-4, i.e. a nearly-dead guard — because
-        `EnergyLayerNorm` heads every one of the T descent steps and normalizes
-        an upstream UNIFORM shift away. `decoder_proj` sits AFTER the last norm,
-        so the same +1.0 moves the output by O(1e0-1e1). Do NOT "simplify" this
-        back to `model.weights[0]`.
+        **Perturb ONE ELEMENT of a POST-NORM kernel** (`decoder_proj`), never
+        `weights[0]`, and never the WHOLE kernel.
+
+        Two separate traps are encoded here, both MEASURED:
+
+        1. `weights[0]` (the patch-embed kernel) is a nearly-dead target: +1.0
+           moves the output by only 9.4e-04, a ~5x margin over atol=1e-4,
+           because `EnergyLayerNorm` heads every one of the T descent steps and
+           normalizes an upstream UNIFORM shift away.
+        2. Adding +1.0 to the *entire* `decoder_proj` kernel -- which is what
+           this guard did until 2026-08-19 -- is ANNIHILATED, for the same
+           reason one level lower. `decoder_norm` is a stock
+           `LayerNormalization` (`beta=0`, `gamma=1` at init), so `x` is
+           EXACTLY zero-mean along the feature axis, and a uniform kernel shift
+           contributes `sum_i x_i == 0` to every output. What survives is pure
+           floating-point cancellation residue, and it is HARDWARE-DEPENDENT:
+           1.6e-05..2.5e-05 over 10 seeds in fp32 on CPU, but 1.8e-02 on an
+           RTX 4090, where the TF32 matmul's ~1e-3 relative epsilon inflates it
+           by three orders of magnitude. The original `> 1e-2` bound was
+           calibrated against that GPU noise (the commit that introduced this
+           test recorded "max|d|=1.92e-02"), so the guard passed on GPU and was
+           RED on CPU while never once observing a real effect.
+
+        A SINGLE-element +1.0 is not annihilated -- it shifts one output
+        channel by `x_0` -- and measures 2.28..3.97 over the same 10 seeds, on
+        both devices. The `> 1e-2` bound is therefore UNCHANGED: it now carries
+        a 228x margin instead of a 1.2x one. Do NOT "simplify" this back to
+        either `model.weights[0]` or a whole-kernel shift.
+
+        The un-perturbed round trip is asserted FIRST (measured bit-identical,
+        max|delta| = 0.0). Without that baseline this guard would also pass
+        when the round trip is BROKEN -- fresh random weights move the output
+        too -- and would then be asserting nothing about the perturbation.
         """
         image, input_mask, _t, _w = fixed_batch
         model = _mim()
@@ -268,9 +301,24 @@ class TestSerialization:
         model.save(path)
         loaded = keras.models.load_model(path)
 
-        target = next(w for w in loaded.weights if "decoder_proj" in w.path)
-        target.assign(keras.ops.add(target.value, 1.0))
+        # (0) BASELINE. The bite below is only attributable to the perturbation
+        # if the round trip itself contributes nothing.
+        np.testing.assert_allclose(
+            before,
+            keras.ops.convert_to_numpy(loaded((image, input_mask), training=False)),
+            atol=1e-4,
+            err_msg="the round trip already differs BEFORE any perturbation",
+        )
 
+        target = next(
+            w for w in loaded.weights if w.path.endswith("decoder_proj/kernel")
+        )
+        pristine = keras.ops.convert_to_numpy(target.value).copy()
+
+        # (1) THE BITE: one element, +1.0.
+        perturbed = pristine.copy()
+        perturbed[0, 0] += 1.0
+        target.assign(perturbed)
         after = keras.ops.convert_to_numpy(
             loaded((image, input_mask), training=False)
         )
@@ -280,6 +328,27 @@ class TestSerialization:
         assert max_delta > 1e-2, f"round-trip guard is dead: max|delta|={max_delta:.3e}"
         with pytest.raises(AssertionError):
             np.testing.assert_allclose(before, after, atol=1e-4)
+
+        # (2) INERTNESS CONTROL, and the reason for (1)'s shape: the uniform
+        # shift this guard used to apply is annihilated by `decoder_norm`.
+        # Stated as a RATIO so the claim holds on CPU (2e-05 vs 2.4) and on a
+        # TF32 GPU (1.8e-02 vs 2.8) alike.
+        target.assign(pristine + 1.0)
+        inert = float(
+            np.max(
+                np.abs(
+                    before
+                    - keras.ops.convert_to_numpy(
+                        loaded((image, input_mask), training=False)
+                    )
+                )
+            )
+        )
+        assert inert < 0.01 * max_delta, (
+            "a WHOLE-kernel +1.0 is supposed to be annihilated by decoder_norm's "
+            f"zero-mean output; it moved the model by {inert:.3e} against the "
+            f"single-element bite's {max_delta:.3e}"
+        )
 
 
 class TestMaskedLossThroughFit:
@@ -731,3 +800,86 @@ class TestOverfitControl:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+#: The ONE weight the classifier legitimately never trains.
+#:
+# DECISION plan-2026-08-19T070627-a616f581/D-013
+# `mask_token/mask_token` is waived HERE (classifier only) BY DESIGN, and the
+# product code says so in as many words. `EnergyTransformerBackbone.build`
+# (`models/energy_transformer/model.py`) carries the literal comment
+# `# ALWAYS built - even in the classifier, which never calls it.` directly
+# above `self.mask_token.build([token_shape, mask_shape])`, and the build
+# docstring gives the reason: "The shapes come from the CONFIG, never from
+# `input_shape`'s optional mask entry, so `mask_token` is built identically
+# whether or not the caller ever passes a mask (I6). A lazily-built sub-layer
+# silently drops its weights on a `.keras` round-trip." `call` then applies it
+# under a TRACE-TIME `if input_mask is not None`, and the classifier passes an
+# image alone, so the token is never on the classifier's forward path.
+#
+# Do NOT widen this to the MIM head: `TestEnergyTransformerMIMGradientFlow`
+# below is the positive half of this waiver and requires the SAME tensor to be
+# live there (13 of 13, no waivers). Waiving a weight that is dead everywhere
+# would be indistinguishable from a defect; waiving one whose sibling head
+# trains it is a real claim about the architecture.
+# Do NOT "fix" this by building the token lazily -- that is the serialization
+# bug the docstring above names.
+# `expect_zero` is two-sided (D-010): if the classifier ever starts masking, the
+# oracle raises "the waiver is obsolete"; if the layer is renamed, "stale
+# waiver".
+# See GF-05 in
+# plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md
+CLASSIFIER_NEVER_MASKS = ("mask_token/mask_token",)
+
+
+class TestEnergyTransformerMIMGradientFlow:
+    """The MIM head: every trainable weight is on the backward graph.
+
+    Runs at the file's REALISTIC geometry (N = 196, T = 12, variant tiny) like
+    everything else here -- a toy N is banned in this suite, and a gradient
+    claim measured at a toy N would be the same kind of non-evidence.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _mim()
+        image, input_mask = _fixed_batch(batch=2)[:2]
+        inputs = [image, input_mask]
+        model(inputs, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, inputs)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        # The positive half of the classifier's waiver below: this head DOES
+        # train the mask token, so a dead token there is a statement about the
+        # classifier's forward path, not about the weight being useless.
+        mask_paths = [p for p in report if "mask_token" in p]
+        assert mask_paths, "no mask_token weight found -- has the backbone changed?"
+        assert all(report[p] is not None and report[p] > 0.0 for p in mask_paths), (
+            f"the MIM head does not train the mask token either: "
+            f"{ {p: report[p] for p in mask_paths} } -- the classifier waiver "
+            f"in CLASSIFIER_NEVER_MASKS is no longer honest"
+        )
+
+
+class TestEnergyTransformerClassifierGradientFlow:
+    """The classifier head: everything trains except the never-called mask token."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _classifier()
+        images = _images(batch=2)
+        model(images, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(
+            model, images, expect_zero=CLASSIFIER_NEVER_MASKS
+        )
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

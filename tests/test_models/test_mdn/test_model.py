@@ -183,12 +183,27 @@ class TestMDNModel:
 
         total = keras.ops.convert_to_numpy(result["total_variance"])
         aleatoric = keras.ops.convert_to_numpy(result["aleatoric_variance"])
-        # Law of total variance: total = aleatoric + epistemic, epistemic >= 0.
-        assert np.all(total >= aleatoric - 1e-6)
-        assert np.all(total >= -1e-6)
+        epistemic = keras.ops.convert_to_numpy(result["epistemic_variance"])
+        # Law of total variance: total = aleatoric + epistemic. The previous
+        # form asserted only `total >= aleatoric - 1e-6` and `total >= -1e-6`,
+        # both of which hold when epistemic is IDENTICALLY ZERO -- i.e. under
+        # exactly the mixture collapse the decomposition exists to expose, and
+        # the second is additionally true of any non-negative quantity. Assert
+        # the identity itself, and that the decomposition is non-degenerate.
+        np.testing.assert_allclose(total, aleatoric + epistemic, rtol=1e-5, atol=1e-6)
+        assert np.all(aleatoric > 0.0), "aleatoric variance is not positive"
+        assert np.all(epistemic >= 0.0), "epistemic variance is negative"
+        assert np.max(epistemic) > 0.0, (
+            "epistemic variance is identically zero: every mixture component "
+            "shares one mean, so the decomposition carries no information"
+        )
         upper = keras.ops.convert_to_numpy(result["upper_bound"])
         lower = keras.ops.convert_to_numpy(result["lower_bound"])
-        assert np.all(upper >= lower)
+        point = keras.ops.convert_to_numpy(result["point_estimates"])
+        assert np.all(upper > lower), "the interval has zero or negative width"
+        assert np.all((lower <= point) & (point <= upper)), (
+            "the point estimate falls outside its own confidence interval"
+        )
         logger.info("MDNModel predict_with_uncertainty test passed.")
 
     # -- 7 -----------------------------------------------------------------
@@ -313,3 +328,35 @@ class TestMDNModel:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-117
+#
+# `predict_with_uncertainty` opened with `predictions = self.predict(inputs)`
+# whose result was never read: `get_point_estimate` and `get_uncertainty` below
+# it each run their OWN forward pass. The method therefore cost three forward
+# passes to use two, and no existing test could see it -- every assertion in
+# this suite is about the returned dict's keys, shapes and finiteness, all of
+# which are identical either way. COUNT THE CALLS.
+# ---------------------------------------------------------------------------
+def test_predict_with_uncertainty_runs_exactly_two_forward_passes(monkeypatch):
+    model = MDNModel(hidden_layers=[8], output_dimension=2, num_mixtures=2)
+    inputs = np.random.RandomState(0).normal(size=(4, 5)).astype("float32")
+    model(inputs, training=False)
+
+    calls = []
+    original = type(model).predict
+
+    def _counting_predict(self, x, *args, **kwargs):
+        calls.append(1)
+        return original(self, x, *args, **kwargs)
+
+    monkeypatch.setattr(type(model), "predict", _counting_predict, raising=True)
+    result = model.predict_with_uncertainty(inputs, confidence_level=0.95)
+
+    assert len(calls) == 2, (
+        f"predict_with_uncertainty ran {len(calls)} forward passes; two are "
+        "used (point estimate, uncertainty) and any third is a discarded result"
+    )
+    assert np.all(np.isfinite(result["point_estimates"]))

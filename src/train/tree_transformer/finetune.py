@@ -21,7 +21,14 @@ from train.common.nlp import (
     create_nlp_callbacks,
 )
 
+from train.tree_transformer.pretrain import (
+    TrainingConfig as _PretrainConfig,
+    pretrained_encoder_path as _pretrained_encoder_path,
+)
+
 from dl_techniques.models.tree_transformer import TreeTransformer  # noqa: F401  (registry)
+
+_PRETRAIN_SAVE_DIR = _PretrainConfig.save_dir
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskType
@@ -36,11 +43,12 @@ class FinetuneConfig:
     """Configuration for TreeTransformer sentiment analysis fine-tuning."""
 
     # Model and paths
-    pretrained_encoder_path: str = (
-        "results/tree_transformer_pretrain/"
-        "pretrained_tree_transformer_encoder_best.keras"
-    )
-    save_dir: str = "results/tree_transformer_sentiment_finetune"
+    # DECISION plan-2026-08-12T123743-e798a9e1/D-023
+    # Derived from the pre-training script's own producer rather than spelled out
+    # here: this default and the encoder save site must name the same file, and
+    # when they were two hand-written strings they silently disagreed (F-24). Do
+    # not inline this back into a literal.
+    pretrained_encoder_path: str = _pretrained_encoder_path(_PRETRAIN_SAVE_DIR)
 
     # Task
     num_classes: int = 2
@@ -157,7 +165,6 @@ def finetune_sentiment_model(
     logger.info("=" * 60)
 
     set_seeds(42)
-    os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(
         config.encoding_name, config.max_seq_length,

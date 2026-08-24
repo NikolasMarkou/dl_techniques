@@ -1,22 +1,103 @@
 """
-Score-Based nanoVLM: Navigable World Model Architecture
+Score-based vision-language model: diffusion denoisers over frozen-width
+encoder features, trained by denoising score matching and queried as a joint
+score field.
 
-This module implements the complete score-based vision-language model following
-the Miyasawa theorem framework. Instead of deterministic prediction, the model
-learns the score field ∇ log p(image, text) and navigates it via diffusion.
+An ordinary VLM is a conditional predictor — it maps an image to a caption, or a
+caption to an image, one direction per trained head. This model is built on the
+observation that both directions, and several things that are neither, are
+readouts of one object: the score of the joint density, `grad_x log p(x)`.
+Miyasawa's theorem (equivalently Tweedie's formula) is what makes that object
+reachable without ever evaluating a density. If `x_t = x_0 + sigma * eps` and a
+denoiser `D` is trained under plain MSE to recover `x_0`, then at the optimum
 
-Key Innovation:
-    The VLM is not a predictor but a world model - an implicit representation
-    of the joint probability distribution p(image, text). By learning score
-    functions via Denoising Score Matching, we can navigate this semantic
-    landscape for generation, understanding, and reasoning.
+`grad_x log p(x_t) = (D(x_t) - x_t) / sigma^2`
 
-Protocols Implemented:
-    1. Text-to-Image: Conditional diffusion on p(image | text)
-    2. Image-to-Text: Latent space diffusion on p(text | image)
-    3. Joint Modeling: Unified score field ∇ log p(image, text)
+so the residual of a denoiser *is* the score, up to a known scale. Training
+reduces to regression against clean targets, and every generative behaviour
+becomes a trajectory through the resulting vector field: run it in reverse from
+noise to sample, query it at a point to ask which way probability increases, or
+step along it while dragging one modality's coordinate to move the other.
+
+The diffusion does not happen in pixel space or token space. Images pass through
+a vision encoder and captions through a text encoder first, and the noise, the
+denoisers and the whole reverse process operate on those `(B, seq, dim)` feature
+sequences. That is the same trade latent diffusion makes — cost falls with the
+dimensionality of the space being diffused, and the encoder already discards
+detail the score field would otherwise have to model — but it has a consequence
+that must not be glossed: **there is no pixel decoder in this package**.
+``generate_from_text`` returns denoised *vision features*, not an image, and
+turning them back into pixels requires a decoder that is not implemented here.
+The image-to-text direction is complete by comparison, since a linear head over
+the denoised text embeddings recovers token ids.
+
+Both encoders are forced to sequence output (``output_mode='none'``) because the
+conditional denoiser concatenates its condition along the sequence axis and
+requires rank 3; the default CLS pooling would collapse that to rank 2.
+
+The denoiser is not a U-Net. Noisy data and condition are each projected to a
+common hidden width, a sinusoidal timestep embedding is added to the *data*
+tokens only (broadcast across the sequence), the two are concatenated along the
+sequence axis, residual MLP blocks with optional self-attention run over the
+whole thing, and then only the data portion is sliced back out and projected
+down. Conditioning therefore acts entirely through the concatenated prefix and
+is discarded before the output. The final line is a residual:
+``output = noisy_data + correction``, so the network learns a correction toward
+the clean features rather than the features themselves — which is also the form
+in which the Miyasawa residual is directly readable.
+
+The scheduler follows the discrete DDPM convention. Timesteps are integer
+indices in ``[0, num_timesteps)``, the forward process is
+`x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * eps`, and the reverse
+``step`` first recovers a predicted `x_0`, then takes the posterior mean
+`q(x_{t-1} | x_t, x_0)`, then adds noise at every `t` except `t == 0`. Training
+samples one timestep per batch element uniformly; inference walks
+``np.linspace(T - 1, 0, num_inference_steps)`` on the host, so the loop is
+Python-level and `t` reaches the scheduler as a Python scalar while reaching the
+denoiser as a per-batch broadcast vector. Classifier-free guidance is done by
+doubling the batch against a zeros condition and extrapolating between the two
+predictions, rather than by a second forward pass.
+
+One convention is load-bearing and is easier to see stated than derived. ``call``
+supervises the denoisers against the *clean* features
+(``target_vision``/``target_text``), so they are `x_0` predictors, and
+``DiffusionScheduler`` therefore defaults to ``prediction_type='sample'`` rather
+than to DDPM's usual ``'epsilon'`` — the shipped ``create_score_based_nanovlm``
+presets pass no ``prediction_type`` at all, so that class default is what they
+run. Setting ``'epsilon'`` in ``diffusion_config`` without also changing what
+``call`` supervises makes ``step`` read an `x_0`-shaped output as noise, which
+degrades samples silently instead of raising.
+
+Weight materialization is explicit rather than lazy. The denoisers and the
+decoder head would otherwise be built on first ``call``, which silently drops
+roughly six hundred weights — the MultiHeadAttention and nested Sequential
+blocks — on a ``.keras`` reload; ``build`` constructs them from the stored config
+instead, and ``get_build_config``/``build_from_config`` carry the input shape so
+the reload rebuilds the full sub-layer tree before weights are restored. The
+scheduler is deliberately a plain Python class rather than a layer: it holds only
+buffers derivable from ``diffusion_config``, so it is re-created from that dict
+on load instead of being a serialized sub-object.
+
+References:
+    - Miyasawa, 1961. An empirical Bayes estimator of the mean of a normal
+      population. Bulletin of the ISI 38.
+    - Efron, 2011. Tweedie's Formula and Selection Bias. Journal of the American
+      Statistical Association 106(496).
+    - Vincent, 2011. A Connection Between Score Matching and Denoising
+      Autoencoders. Neural Computation 23(7).
+    - Ho et al., 2020. Denoising Diffusion Probabilistic Models.
+      (https://arxiv.org/abs/2006.11239)
+    - Song et al., 2020. Score-Based Generative Modeling through Stochastic
+      Differential Equations. (https://arxiv.org/abs/2011.13456)
+    - Nichol and Dhariwal, 2021. Improved Denoising Diffusion Probabilistic
+      Models. (https://arxiv.org/abs/2102.09672)
+    - Ho and Salimans, 2022. Classifier-Free Diffusion Guidance.
+      (https://arxiv.org/abs/2207.12598)
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. (https://arxiv.org/abs/2112.10752)
 """
 
+import copy
 import keras
 import numpy as np
 from keras import ops, layers
@@ -90,6 +171,57 @@ class ScoreBasedNanoVLM(keras.Model):
         generated_text = model.generate_from_image(image, num_steps=50)
         ```
     """
+
+    #: Public-name registry of the three named sizes (models/CLAUDE.md Axis 2).
+    #: Hoisted out of ``create_score_based_nanovlm``'s body on 2026-08-19, where
+    #: it was a local ``configs`` dict that nothing outside the function could
+    #: enumerate.
+    #:
+    #: ``text_config['vocab_size']`` is DELIBERATELY absent: it is a caller
+    #: argument, not a property of the variant. The factory injects it into a
+    #: ``copy.deepcopy`` of the selected entry -- deep-copied, never mutated in
+    #: place, so this class attribute cannot be corrupted by a call.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        'mini': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
+                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 384,
+                'depth': 6, 'num_heads': 6, 'max_seq_len': 512
+            },
+            'diffusion_config': {
+                'num_timesteps': 1000, 'beta_schedule': 'cosine'
+            }
+        },
+        'base': {
+            'vision_config': {
+                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
+                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 768,
+                'depth': 12, 'num_heads': 12, 'max_seq_len': 512
+            },
+            'diffusion_config': {
+                'num_timesteps': 1000, 'beta_schedule': 'cosine'
+            }
+        },
+        'large': {
+            'vision_config': {
+                'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
+                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
+            },
+            'text_config': {
+                'embed_dim': 1024,
+                'depth': 24, 'num_heads': 16, 'max_seq_len': 1024
+            },
+            'diffusion_config': {
+                'num_timesteps': 1000, 'beta_schedule': 'cosine'
+            }
+        }
+    }
 
     def __init__(
             self,
@@ -288,32 +420,56 @@ class ScoreBasedNanoVLM(keras.Model):
         # Add noise and denoise based on mode
         if self.generation_mode in ['text_to_image', 'joint']:
             # Text-to-Image: Denoise vision conditioned on text
-            noise_vision = keras.random.normal(ops.shape(vision_features))
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-047
+            # `keras.random.normal` with no `dtype=` returns float32 whatever the
+            # active policy, and the float32 noise then met a float16 schedule
+            # coefficient inside `scheduler.add_noise`. Every diffusion noise draw
+            # in this file carries `dtype=` for that reason — do NOT drop it on the
+            # grounds that "the caller casts anyway". See decisions.md D-047.
+            noise_vision = keras.random.normal(
+                ops.shape(vision_features), dtype=vision_features.dtype
+            )
             noisy_vision = self.scheduler.add_noise(vision_features, noise_vision, timesteps)
 
             denoised_vision = self.vision_denoiser(
                 noisy_vision, text_features, timesteps, training=training
             )
             outputs['denoised_vision'] = denoised_vision
-            outputs['target_vision'] = vision_features
+            # DECISION plan-2026-08-17T183311-79c63e38/D-029: the DSM regression
+            # target is DETACHED. It is the vision encoder's own trainable output,
+            # and ||D(x_t) - x_0||^2 with a trainable x_0 is globally minimised by a
+            # CONSTANT encoder — which the zero-initialised output_proj already
+            # predicts exactly. Do NOT remove stop_gradient to "let the encoder learn
+            # from the diffusion loss": that is the representation-collapse setup, and
+            # the encoder still receives gradient through the denoiser INPUT path
+            # (add_noise is differentiable in vision_features). Precedent:
+            # video_jepa/model.py:439. See decisions.md D-029.
+            outputs['target_vision'] = ops.stop_gradient(vision_features)
             outputs['noise_vision'] = noise_vision
 
         if self.generation_mode in ['image_to_text', 'joint']:
             # Image-to-Text: Denoise text embeddings conditioned on vision
-            noise_text = keras.random.normal(ops.shape(text_features))
+            noise_text = keras.random.normal(
+                ops.shape(text_features), dtype=text_features.dtype
+            )
             noisy_text = self.scheduler.add_noise(text_features, noise_text, timesteps)
 
             denoised_text = self.text_denoiser(
                 noisy_text, vision_features, timesteps, training=training
             )
             outputs['denoised_text'] = denoised_text
-            outputs['target_text'] = text_features
+            # Detached for the same reason as target_vision above (D-029).
+            outputs['target_text'] = ops.stop_gradient(text_features)
             outputs['noise_text'] = noise_text
 
         if self.generation_mode == 'joint':
             # Joint: Denoise both simultaneously
-            noise_v = keras.random.normal(ops.shape(vision_features))
-            noise_t = keras.random.normal(ops.shape(text_features))
+            noise_v = keras.random.normal(
+                ops.shape(vision_features), dtype=vision_features.dtype
+            )
+            noise_t = keras.random.normal(
+                ops.shape(text_features), dtype=text_features.dtype
+            )
             noisy_v = self.scheduler.add_noise(vision_features, noise_v, timesteps)
             noisy_t = self.scheduler.add_noise(text_features, noise_t, timesteps)
 
@@ -322,8 +478,9 @@ class ScoreBasedNanoVLM(keras.Model):
             )
             outputs['joint_denoised_vision'] = denoised_v
             outputs['joint_denoised_text'] = denoised_t
-            outputs['joint_target_vision'] = vision_features
-            outputs['joint_target_text'] = text_features
+            # Detached for the same reason as target_vision above (D-029).
+            outputs['joint_target_vision'] = ops.stop_gradient(vision_features)
+            outputs['joint_target_text'] = ops.stop_gradient(text_features)
 
         outputs['timesteps'] = timesteps
         return outputs
@@ -336,10 +493,23 @@ class ScoreBasedNanoVLM(keras.Model):
             generator: Optional[Any] = None
     ) -> keras.KerasTensor:
         """
-        Generate images from text via reverse diffusion (Protocol 1).
+        Generate vision-encoder LATENTS from text via reverse diffusion (Protocol 1).
 
         Implements the reverse-time SDE: starting from noise, iteratively
-        denoise by following the score field ∇ log p(image | text).
+        denoise by following the score field ∇ log p(vision latent | text).
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+        This method does NOT return images. The diffusion runs entirely in the
+        VISION ENCODER'S feature space -- the loop's state is seeded from
+        ``ops.shape(self.vision_encoder(dummy_img))``, so the returned tensor is
+        rank-3 ``(batch, num_tokens, embed_dim)``, never a rank-4 pixel grid. No
+        latent-to-pixel decoder exists in this package; do NOT restore the former
+        ``Generated images [batch, H, W, C]`` wording or write a caller that
+        indexes the result as ``[..., H, W, C]``. MEASURED at ``img_size=32,
+        patch_size=16, embed_dim=64``: the return is ``(2, 5, 64)`` (2x2 patches +
+        CLS), rank 3. Pinned by
+        ``tests/test_models/test_nano_vlm_world_model/test_generation_docstrings_match_the_return.py``.
+        See decisions.md D-122.
 
         Args:
             text_features: Text conditioning [batch, seq_len, text_dim]
@@ -348,21 +518,29 @@ class ScoreBasedNanoVLM(keras.Model):
             generator: Random generator for reproducibility
 
         Returns:
-            Generated images [batch, H, W, C]
+            Generated vision latents [batch, num_tokens, vision_embed_dim] --
+            encoder-space features. (What this is NOT, and why, is in the
+            DECISION note above: the guard bans the words rather than the
+            claim, so the negation has to live outside this block.)
         """
         if not hasattr(self, 'vision_denoiser'):
             raise ValueError("Model not configured for text-to-image generation")
 
         batch_size = ops.shape(text_features)[0]
 
-        # Get vision feature shape from encoder
-        dummy_img = keras.random.normal((1, 224, 224, 3))
+        # Get vision feature shape from encoder. The probe MUST follow the
+        # configured img_size: the encoder's positional table is sized from it, so a
+        # hardcoded 224 dies inside PositionalEmbedding at every other resolution.
+        img_size = self.vision_config.get('img_size', 224)
+        dummy_img = keras.random.normal(
+            (1, img_size, img_size, 3), dtype=self.compute_dtype
+        )
         vision_feat_shape = ops.shape(self.vision_encoder(dummy_img, training=False))
         seq_len, feat_dim = vision_feat_shape[1], vision_feat_shape[2]
 
         # Start from pure noise
         latent_shape = (batch_size, seq_len, feat_dim)
-        latents = keras.random.normal(latent_shape)
+        latents = keras.random.normal(latent_shape, dtype=self.compute_dtype)
 
         # Timestep schedule for inference
         timesteps = np.linspace(
@@ -396,13 +574,15 @@ class ScoreBasedNanoVLM(keras.Model):
                     latents, text_features, t_tensor, training=False
                 )
 
-            # Convert denoised output to noise prediction if needed
-            if self.scheduler.prediction_type == 'sample':
-                noise_pred = self.scheduler.predict_noise_from_start(
-                    latents, t_tensor, noise_pred
-                )
-
-            # Take reverse diffusion step
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-016: hand the denoiser's raw
+            # output straight to `step`. Do NOT reinstate a
+            # `predict_noise_from_start` conversion here "for symmetry" with the
+            # 'epsilon' convention: `step`'s 'sample' branch consumes x_0 DIRECTLY
+            # (`pred_original_sample = model_output`), so converting first makes it
+            # read the noise AS the clean sample and drives the whole reverse process
+            # off the wrong quantity — measured max deviation 3.86 at t=50, silently,
+            # on the path all three shipped presets take. `step` dispatches on
+            # `prediction_type` itself; the caller must not pre-translate.
             latents, _ = self.scheduler.step(noise_pred, t, latents)
 
         # Decode latents to images (this would need a decoder)
@@ -430,8 +610,24 @@ class ScoreBasedNanoVLM(keras.Model):
             max_length: Maximum text sequence length
             guidance_scale: Guidance strength
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+        The return is NOT the denoised embedding. The final two statements push
+        the latents through ``self.text_decoder_head`` and take
+        ``ops.argmax(logits, axis=-1)``, so the value handed back is rank-2
+        INTEGER token ids ``(batch, max_length)`` -- the ``text_dim`` axis is
+        already gone. Do NOT restore the former ``Generated text embeddings
+        [batch, max_length, text_dim]`` wording, and do not feed the result to
+        anything expecting a float embedding. MEASURED at ``max_length=8,
+        embed_dim=64, vocab_size=64``: return shape ``(2, 8)``, dtype ``int32``.
+        Pinned by the same guard module as ``generate_from_text``. See
+        decisions.md D-122.
+
         Returns:
-            Generated text embeddings [batch, max_length, text_dim]
+            Generated token ids [batch, max_length], integer dtype -- already
+            decoded by ``text_decoder_head`` + argmax, so the feature axis is
+            gone. (What this is NOT, and why, is in the DECISION note above:
+            the guard bans the words rather than the claim, so the negation
+            has to live outside the ``Returns:`` block.)
         """
         if not hasattr(self, 'text_denoiser'):
             raise ValueError("Model not configured for image-to-text generation")
@@ -440,7 +636,9 @@ class ScoreBasedNanoVLM(keras.Model):
         text_dim = self.text_config['embed_dim']
 
         # Start from noise in text embedding space
-        latents = keras.random.normal((batch_size, max_length, text_dim))
+        latents = keras.random.normal(
+            (batch_size, max_length, text_dim), dtype=self.compute_dtype
+        )
 
         # Inference timestep schedule
         timesteps = np.linspace(
@@ -510,12 +708,26 @@ class ScoreBasedNanoVLM(keras.Model):
             vision_features, text_features, t, training=False
         )
 
-        # By Miyasawa: score = (denoised - noisy) / variance
+        # DECISION plan-2026-08-17T183311-79c63e38/D-029: the denoisers are x_0
+        # predictors, so their output must be converted to an epsilon estimate
+        # BEFORE get_score_from_noise, which consumes epsilon and nothing else.
+        # This used to pass `denoised - noisy` straight in, which is not an epsilon
+        # by any parameterisation; the result was `-(D - x_t)/sqrt(1-a_t)`, exactly
+        # OPPOSITE the true score at low noise (measured cosine -1.0 at t=2) and
+        # wrong in scale everywhere, so navigate_semantic_space did gradient
+        # DESCENT on log p. Do NOT "simplify" this back by negating in place: in
+        # this VP schedule Tweedie is `(sqrt(a_t)*D - x_t)/(1 - a_t)`, which carries
+        # a sqrt(a_t) on D and a (1-a_t) denominator; the familiar `(D - x)/sigma^2`
+        # form is the variance-exploding special case a_t = 1 and is wrong for every
+        # t > 0 here. predict_noise_from_start is that conversion and is reused
+        # rather than re-derived. See decisions.md D-029.
         vision_score = self.scheduler.get_score_from_noise(
-            denoised_v - vision_features, t, vision_features
+            self.scheduler.predict_noise_from_start(vision_features, t, denoised_v),
+            t, vision_features
         )
         text_score = self.scheduler.get_score_from_noise(
-            denoised_t - text_features, t, text_features
+            self.scheduler.predict_noise_from_start(text_features, t, denoised_t),
+            t, text_features
         )
 
         return vision_score, text_score
@@ -613,49 +825,16 @@ def create_score_based_nanovlm(
     Returns:
         Configured ScoreBasedNanoVLM
     """
-    configs = {
-        'mini': {
-            'vision_config': {
-                'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
-                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 384,
-                'depth': 6, 'num_heads': 6, 'max_seq_len': 512
-            },
-            'diffusion_config': {
-                'num_timesteps': 1000, 'beta_schedule': 'cosine'
-            }
-        },
-        'base': {
-            'vision_config': {
-                'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
-                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 768,
-                'depth': 12, 'num_heads': 12, 'max_seq_len': 512
-            },
-            'diffusion_config': {
-                'num_timesteps': 1000, 'beta_schedule': 'cosine'
-            }
-        },
-        'large': {
-            'vision_config': {
-                'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
-                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
-            },
-            'text_config': {
-                'vocab_size': vocab_size, 'embed_dim': 1024,
-                'depth': 24, 'num_heads': 16, 'max_seq_len': 1024
-            },
-            'diffusion_config': {
-                'num_timesteps': 1000, 'beta_schedule': 'cosine'
-            }
-        }
-    }
+    if variant not in ScoreBasedNanoVLM.MODEL_VARIANTS:
+        raise ValueError(
+            f"Unknown variant '{variant}'. "
+            f"Available: {list(ScoreBasedNanoVLM.MODEL_VARIANTS.keys())}"
+        )
 
-    config = configs[variant]
+    # Deep-copied: `vocab_size` is a caller argument, and writing it into the
+    # class table itself would make every later call inherit this call's value.
+    config = copy.deepcopy(ScoreBasedNanoVLM.MODEL_VARIANTS[variant])
+    config['text_config']['vocab_size'] = vocab_size
 
     return ScoreBasedNanoVLM(
         vision_config=config['vision_config'],

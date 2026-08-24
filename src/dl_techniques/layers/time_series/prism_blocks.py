@@ -10,6 +10,7 @@ recursively to capture both global trends and local fine-grained structures.
 """
 
 import keras
+import numpy as np
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
@@ -86,8 +87,51 @@ class FrequencyBandStatistics(keras.layers.Layer):
             numerical stability fixes for padded zeros).
         :type mask: Optional[keras.KerasTensor]
         :return: Statistics tensor of shape [batch, channels, num_stats].
+            Degenerate bands are handled explicitly: a band of length 1 gets
+            ``diff_mean``/``diff_std`` of exactly ``0.0`` (the first difference
+            of a single sample is undefined), and a band of length 0 gets all
+            six statistics as ``0.0``. When the time axis is not known
+            statically (a traced graph over ``[batch, None, channels]``) the
+            same semantics are reproduced by replacing non-finite statistics
+            with ``0.0``; on a statically shaped input a genuine NaN in the data
+            still propagates.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-004
+        # Degenerate band lengths are branched on the STATIC shape, with an
+        # ``is not None`` short-circuit so an unknown time axis falls through to
+        # the unguarded arithmetic below.  Bands shrink as
+        # ``segment_len // 2 ** num_wavelet_levels`` and reach 1, then 0, at
+        # configurations the model accepts; a length-1 band makes the
+        # first-difference tensor EMPTY, and ``ops.mean``/``ops.var`` over an
+        # empty axis return NaN *silently*, which the router's single joint
+        # softmax then spreads across every band.  A length-0 band additionally
+        # makes ``ops.min``/``ops.max`` raise ``InvalidArgumentError`` in eager
+        # and return +/-inf under ``tf.function`` (both measured).
+        # Do NOT rewrite this as a traced-tensor ``ops.cond`` on
+        # ``ops.shape(inputs)[1]``: this repo has measured exactly that rewrite
+        # break under ``@tf.function`` with ``OperatorNotAllowedInGraphError``
+        # (``clifford_block``'s singleton-axis check), and the static-shape form
+        # with an ``is not None`` short-circuit is the form that works.
+        # Do NOT "simplify" it by clamping or padding the slice to fake a
+        # length: that fabricates a first difference from a sample that does not
+        # exist, which is a silently wrong number rather than a defined one.
+        # The DYNAMIC time axis (``static_len is None``) falls through this
+        # branch by design and is closed separately, at the bottom of ``call``,
+        # by a value-level non-finite repair -- see the
+        # ``plan-2026-08-18T111512-29569f8b/D-001`` anchor there for why
+        # ``input_spec`` cannot close it and why the repair is confined to that
+        # path.
+        # See decisions.md D-004, D-012 (and D-002 for the threshold ruling).
+        static_len = inputs.shape[1]
+
+        if static_len is not None and static_len == 0:
+            # Nothing is defined over an empty time axis. ``ops.sum`` over a
+            # zero-length axis is exactly 0.0 and, unlike ``ops.min``/``ops.max``,
+            # does not raise -- it also carries the dynamic batch dimension.
+            zeros = ops.sum(inputs, axis=1)  # [batch, channels], exact zeros
+            return ops.stack([zeros] * self._num_stats, axis=-1)
+
         # Basic statistics along time axis
         mean = ops.mean(inputs, axis=1)  # [batch, channels]
 
@@ -99,19 +143,103 @@ class FrequencyBandStatistics(keras.layers.Layer):
         min_val = ops.min(inputs, axis=1)
         max_val = ops.max(inputs, axis=1)
 
-        # Temporal derivatives (first difference)
-        diff = inputs[:, 1:, :] - inputs[:, :-1, :]
-        diff_mean = ops.mean(diff, axis=1)
+        if static_len is not None and static_len == 1:
+            # mean/std/min/max are well defined on a single sample; only the
+            # first difference is not, and 0.0 is its defined stand-in.
+            diff_mean = ops.zeros_like(mean)
+            diff_std = ops.zeros_like(mean)
+        else:
+            # Temporal derivatives (first difference)
+            diff = inputs[:, 1:, :] - inputs[:, :-1, :]
+            diff_mean = ops.mean(diff, axis=1)
 
-        # FIX: Apply same stability fix to diff_std
-        diff_variance = ops.var(diff, axis=1)
-        diff_std = ops.sqrt(diff_variance + self.epsilon)
+            # FIX: Apply same stability fix to diff_std
+            diff_variance = ops.var(diff, axis=1)
+            diff_std = ops.sqrt(diff_variance + self.epsilon)
 
         # Stack statistics: [batch, channels, num_stats]
         stats = ops.stack(
             [mean, std, min_val, max_val, diff_mean, diff_std],
             axis=-1
         )
+
+        # DECISION plan-2026-08-18T111512-29569f8b/D-001
+        # Dynamic-time-axis fallback.  The branch above is on the STATIC length,
+        # so under a trace with an unknown time axis -- ``TensorSpec([None, None,
+        # C])``, what an ONNX/SavedModel export or a ragged ``tf.data`` pipeline
+        # produces -- neither degenerate case is caught and the band arithmetic
+        # runs raw.  MEASURED before this fallback existed: a built
+        # ``tree_depth=3`` ``PRISMModel`` traced at ``[None, None, 7]`` returned
+        # ``nan_frac == 1.0`` while the SAME model returned ``0.0`` eager.
+        # ``input_spec`` CANNOT close this: Keras'
+        # ``assert_input_compatibility`` tests ``shape[axis] not in {value,
+        # None}``, so an unknown dimension is explicitly ACCEPTED by an ``axes``
+        # constraint (measured, not inferred).  ``ops.cond`` on
+        # ``ops.shape(inputs)[1]`` is also out -- this repo has measured that
+        # rewrite break under ``@tf.function`` with
+        # ``OperatorNotAllowedInGraphError`` (``clifford_block``).
+        # What IS graph-safe is a value-level repair, because in graph mode the
+        # degenerate cases fail *numerically* rather than raising: a length-0
+        # band gives ``ops.min``/``ops.max`` of ``+inf``/``-inf`` (in EAGER the
+        # very same call raises ``InvalidArgumentError``, which is why the static
+        # length-0 branch above must stay -- it cannot be repaired after the
+        # fact) and ``ops.mean``/``ops.var`` of NaN; a length-1 band gives NaN
+        # diff features.  Replacing every non-finite statistic with 0.0 therefore
+        # reproduces EXACTLY the semantics the static branches define, with no
+        # Python branch on a symbolic value.
+        # The ``is None`` test below is a TRACE-TIME branch on a Python object,
+        # not on a tensor value -- it is safe.
+        # Do NOT hoist this sanitization out of the ``is None`` guard to "cover
+        # both paths": on the static path a genuine NaN in user data must keep
+        # propagating, because it is a data defect the caller has to see, not
+        # something a statistics layer may silently rewrite to 0.0.  Laundering
+        # it here would make a corrupt window indistinguishable from a constant
+        # one.  Pinned by
+        # ``test_static_path_still_propagates_genuine_nan_inputs``.
+        # [SUPERSEDED IN PLACE 2026-08-19 by
+        # plan-2026-08-18T140459-7991552f/D-050 -- the repair is now CONDITIONED
+        # on the input series being finite, so the dynamic path no longer
+        # launders a genuine NaN either.  Everything above still holds; only the
+        # predicate of the ``ops.where`` moved.  See the D-050 anchor below.]
+        # See decisions.md D-001 (and D-004/D-012 of
+        # plan-2026-08-18T073231-52a93f8c for the static branch this completes).
+        if static_len is None:
+            # DECISION plan-2026-08-18T140459-7991552f/D-050
+            # The D-001 repair above was unconditional, so on the dynamic path
+            # it rewrote EVERY non-finite statistic to 0.0 -- including the ones
+            # a genuine NaN in the caller's data produced.  MEASURED at the
+            # commit before this one, ``FrequencyBandStatistics`` on a
+            # ``[2, 16, 3]`` all-ones batch with one NaN and one +inf sample
+            # injected: the STATIC path returned 9 NaN statistics, the SAME
+            # batch through ``tf.function([None, None, 3])`` returned 0 -- the
+            # corrupt series came back as exact zeros, indistinguishable from a
+            # constant one.  That is the very laundering the comment above
+            # forbids for the static path, happening one branch over.
+            # The discriminator is NOT the shape and NOT a wider ``input_spec``
+            # (``assert_input_compatibility`` accepts ``None`` -- measured, see
+            # above and ``plans/SYSTEM.md``): it is the INPUT VALUES.  The two
+            # degenerate cases D-001 exists for -- a length-0 or length-1 band
+            # -- are properties of the LENGTH, and in both of them every sample
+            # that does exist is finite.  A non-finite statistic computed from
+            # an all-finite series is therefore a length artifact and is
+            # repaired; a non-finite statistic computed from a series that
+            # already contained a NaN/inf is a data defect and PROPAGATES.
+            # ``ops.all`` over a length-0 axis is ``True`` (the AND identity),
+            # so the length-0 case still repairs -- checked, not assumed.
+            # The reduction is per ``(batch, channel)`` on purpose: a single
+            # corrupt channel must not suppress the repair for its siblings.
+            # Do NOT "simplify" this back to the unconditional ``ops.where``.
+            # Pinned in BOTH directions by
+            # ``TestDynamicPathDoesNotLaunderGenuineNaNs``.
+            # See decisions.md D-050.
+            series_is_finite = ops.all(ops.isfinite(inputs), axis=1)  # [b, c]
+            repairable = ops.expand_dims(series_is_finite, axis=-1)   # [b, c, 1]
+            stats = ops.where(
+                ops.logical_and(ops.logical_not(ops.isfinite(stats)), repairable),
+                ops.zeros_like(stats),
+                stats,
+            )
+
         return stats
 
     def compute_output_shape(
@@ -376,8 +504,13 @@ class PRISMNode(keras.layers.Layer):
                        ▼
         Output: processed [batch, seq_len, channels]
 
-    :param num_wavelet_levels: Number of Haar DWT decomposition levels.
-        Defaults to 3.
+    :param num_wavelet_levels: Number of Haar DWT decomposition levels,
+        producing ``num_wavelet_levels + 1`` bands (one detail band per level
+        plus the final approximation band). Defaults to 3. Each level
+        floor-halves the length, so the deepest band is
+        ``seq_len // 2 ** num_wavelet_levels`` long; at 1 it is statistically
+        degenerate and at 0 the configuration is unrepresentable (see
+        :class:`FrequencyBandStatistics` and ``PRISMModel.__init__``).
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for the router MLP.
         Defaults to 64.
@@ -583,10 +716,18 @@ class PRISMTimeTree(keras.layers.Layer):
     """
     Hierarchical time decomposition with PRISM nodes at each level.
 
-    Builds a binary tree over the time domain by recursively splitting the
-    signal into overlapping segments. Each node processes its segment through
-    wavelet decomposition and adaptive weighting. Segments are stitched back
-    together using linear cross-fade blending in the overlap regions.
+    Builds a binary tree over the time domain by splitting the signal into
+    overlapping segments. Each node processes its segment through wavelet
+    decomposition and adaptive weighting. Segments are stitched back together
+    using linear cross-fade blending in the overlap regions.
+
+    The traversal is a LOOP over levels, not a recursion over children: level
+    ``i`` re-splits the FULL, re-stitched sequence into ``2 ** i`` segments
+    rather than bisecting level ``i - 1``'s outputs. The deepest leaf's length
+    therefore comes from ONE application of :meth:`_segment_len` at
+    ``num_segments = 2 ** tree_depth`` -- not from ``tree_depth`` successive
+    halvings. Anything reasoning about the deepest segment (band lengths,
+    configuration validation) must use the one-shot form.
 
     **Architecture Overview:**
 
@@ -619,13 +760,20 @@ class PRISMTimeTree(keras.layers.Layer):
         Output: [batch, T, channels]
 
     :param tree_depth: Depth of the binary time tree. Depth 0 means single
-        node (no splitting). Defaults to 2.
+        node (no splitting). Defaults to 2. This knob has no valid range of its
+        own: with ``overlap_ratio`` and the input length it fixes the deepest
+        segment length, which ``num_wavelet_levels`` then floor-halves down to
+        the deepest band. ``PRISMModel.__init__`` refuses combinations whose
+        deepest band would have length 0; this layer does not validate.
     :type tree_depth: int
     :param overlap_ratio: Ratio of overlap between adjacent segments.
         Value in [0, 0.5). Defaults to 0.25.
     :type overlap_ratio: float
-    :param num_wavelet_levels: Number of Haar DWT levels per node.
-        Defaults to 3.
+    :param num_wavelet_levels: Number of Haar DWT levels per node, producing
+        ``num_wavelet_levels + 1`` bands. Defaults to 3. Each level floor-halves
+        the band length, so the deepest band of the deepest node is
+        ``segment_len // 2 ** num_wavelet_levels`` -- this trades directly
+        against ``tree_depth`` and the input length.
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for router MLPs.
         Defaults to 64.
@@ -693,6 +841,72 @@ class PRISMTimeTree(keras.layers.Layer):
                 )
                 self.all_nodes.append(node)
 
+    # DECISION plan-2026-08-18T073231-52a93f8c/D-001
+    # Three copies of this arithmetic had drifted apart. ``build()`` sized every
+    # node with ``(seq_len + overlap_size * (n - 1)) // n`` (note the PLUS)
+    # while both runtime sites used ``(seq_len - overlap_size * (n - 1)) // n``.
+    # They disagree on ordinary configurations -- measured at
+    # ``overlap_ratio=0.25``: ``context_len=96`` gives build 28 vs runtime 25 at
+    # level 2 and build 14 vs runtime 12 at level 3; ``context_len=256`` gives
+    # 76/68, 39/33 and 19/16 at levels 2/3/4.
+    # The RUNTIME form is NORMATIVE -- it sizes the tensors the nodes actually
+    # receive -- so this helper reproduces it and ``build()`` now follows it.
+    # Do NOT "restore" the build-time PLUS form, and do NOT "simplify away" the
+    # float round-trip in ``overlap_size``: the runtime path multiplies in the
+    # tensor's compute dtype and truncates toward zero on the cast to int32, and
+    # reproducing that truncation exactly is what keeps the two in step.
+    # See decisions.md D-001.
+    #
+    # SUPERSEDED IN PART 2026-08-18 (plan-2026-08-18T140459-7991552f/D-014):
+    # this helper is still the single source of the geometry and its arithmetic
+    # is UNCHANGED, but the span it describes now applies to segments
+    # ``0 .. num_segments - 2`` only. The LAST segment is extended to end at
+    # ``seq_len`` so the remainder the floor division discards is covered; see
+    # the D-014 anchor in ``_split_with_overlap``.
+    @staticmethod
+    def _segment_len(
+            seq_len: int,
+            overlap_ratio: float,
+            num_segments: int,
+            dtype: str = "float32"
+    ) -> Tuple[int, int, int]:
+        """
+        Compute the overlapping-segment geometry for one split.
+
+        Single source of truth for the segment arithmetic shared by
+        :meth:`build`, :meth:`_split_with_overlap` and
+        :meth:`_stitch_with_crossfade`. Pure Python over ints; it mirrors the
+        runtime expression exactly, including the truncating cast of
+        ``overlap_size`` to int32.
+
+        :param seq_len: Length of the sequence being split.
+        :type seq_len: int
+        :param overlap_ratio: Ratio of overlap between adjacent segments.
+        :type overlap_ratio: float
+        :param num_segments: Number of segments the sequence is split into.
+        :type num_segments: int
+        :param dtype: Float dtype the overlap is computed in, matching the
+            compute dtype of the runtime tensor. Defaults to ``"float32"``.
+        :type dtype: str
+        :return: Tuple of ``(non_overlap_len, overlap_size, segment_len)``,
+            where ``segment_len == non_overlap_len + overlap_size`` and
+            segment ``i`` spans ``[i * non_overlap_len, i * non_overlap_len +
+            segment_len)`` for every ``i`` except the last, which is extended to
+            ``[i * non_overlap_len, seq_len)`` (see ``_split_with_overlap``).
+        :rtype: Tuple[int, int, int]
+        """
+        float_type = np.dtype(keras.backend.standardize_dtype(dtype)).type
+        overlap_size = int(
+            float_type(seq_len)
+            * float_type(overlap_ratio)
+            / float_type(num_segments)
+        )
+        non_overlap_len = (
+            seq_len - overlap_size * (num_segments - 1)
+        ) // num_segments
+        segment_len = non_overlap_len + overlap_size
+        return non_overlap_len, overlap_size, segment_len
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build all PRISM nodes with appropriate segment shapes.
@@ -713,18 +927,38 @@ class PRISMTimeTree(keras.layers.Layer):
             # Determine segment shape for this level
             if seq_len is not None:
                 if num_nodes > 1:
-                    # Compute segment length with overlap
-                    overlap_size = int(seq_len * self.overlap_ratio / num_nodes)
-                    segment_len = (seq_len + overlap_size * (num_nodes - 1)) // num_nodes
+                    # Compute segment length with overlap. Same helper the
+                    # forward pass uses, so a node is built for exactly the
+                    # length it will be handed (see _segment_len's anchor).
+                    non_overlap_len, _, segment_len = self._segment_len(
+                        seq_len, self.overlap_ratio, num_nodes,
+                        dtype=self.compute_dtype
+                    )
                     segment_shape = (batch_size, segment_len, channels)
+                    # The LAST node of the level is handed the remainder the
+                    # floor division in ``non_overlap_len`` discards, so it is
+                    # built LONGER than its siblings. See the D-014 anchor in
+                    # _split_with_overlap.
+                    last_segment_shape = (
+                        batch_size,
+                        seq_len - (num_nodes - 1) * non_overlap_len,
+                        channels
+                    )
                 else:
                     segment_shape = (batch_size, seq_len, channels)
+                    last_segment_shape = segment_shape
             else:
                 segment_shape = (batch_size, None, channels)
+                last_segment_shape = segment_shape
 
             # Build all nodes in this level
-            for _ in range(num_nodes):
-                self.all_nodes[node_idx_counter].build(segment_shape)
+            for node_in_level in range(num_nodes):
+                node_shape = (
+                    last_segment_shape
+                    if node_in_level == num_nodes - 1
+                    else segment_shape
+                )
+                self.all_nodes[node_idx_counter].build(node_shape)
                 node_idx_counter += 1
 
         super().build(input_shape)
@@ -741,30 +975,69 @@ class PRISMTimeTree(keras.layers.Layer):
         :type x: keras.KerasTensor
         :param num_segments: Number of segments to create.
         :type num_segments: int
-        :return: List of segment tensors.
+        :return: List of ``num_segments`` segment tensors. The first
+            ``num_segments - 1`` are ``segment_len`` long; the last runs to the
+            end of the sequence and is therefore ``>= segment_len``, absorbing
+            the remainder discarded by the floor division in
+            ``non_overlap_len``.
         :rtype: List[keras.KerasTensor]
         """
         if num_segments == 1:
             return [x]
 
-        seq_len = ops.shape(x)[1]
-        seq_len_float = ops.cast(seq_len, x.dtype)
+        static_seq_len = x.shape[1]
+        if static_seq_len is not None:
+            non_overlap_len, overlap_size, segment_len = self._segment_len(
+                int(static_seq_len), self.overlap_ratio, num_segments,
+                dtype=x.dtype
+            )
+        else:
+            # Dynamic time axis: the same expression over traced tensors.
+            seq_len = ops.shape(x)[1]
+            seq_len_float = ops.cast(seq_len, x.dtype)
+            overlap_size = ops.cast(
+                seq_len_float * self.overlap_ratio / ops.cast(num_segments, x.dtype),
+                "int32"
+            )
+            non_overlap_len = (
+                seq_len - overlap_size * (num_segments - 1)
+            ) // num_segments
+            segment_len = non_overlap_len + overlap_size
 
-        # Calculate segment parameters
-        overlap_size = ops.cast(
-            seq_len_float * self.overlap_ratio / ops.cast(num_segments, x.dtype),
-            "int32"
-        )
-
-        # Non-overlapping part per segment
-        non_overlap_len = (seq_len - overlap_size * (num_segments - 1)) // num_segments
-        segment_len = non_overlap_len + overlap_size
-
+        # DECISION plan-2026-08-18T140459-7991552f/D-014
+        # The LAST segment runs to the END of the sequence, not to
+        # ``start_idx + segment_len``. ``non_overlap_len`` in ``_segment_len``
+        # is a FLOOR division and the remainder it discards was reclaimed by
+        # nothing: the last segment stopped at
+        # ``num_segments * non_overlap_len + overlap_size`` and
+        # ``_stitch_with_crossfade`` zero-pads out to ``target_len``, so every
+        # trailing position came out EXACTLY 0.0 -- not attenuated, ZERO.
+        # MEASURED at HEAD (``seq_len=96``, ``overlap_ratio=0.25``, all-ones
+        # input, identity segments): ``num_segments=2`` covered exactly (the
+        # control), ``num_segments=4`` left positions 82..95 at 0.0 and
+        # ``num_segments=8`` left positions 75..95 at 0.0.
+        # This is NOT an off-by-one to be "cleaned up" back to a uniform
+        # ``end_idx = start_idx + segment_len``. The last segment is
+        # deliberately LONGER than its siblings (39 vs 25 at ``num_segments=4``,
+        # ``seq_len=96``) and ``build()`` sizes the last node of every level to
+        # match. ``PRISMNode`` carries no weight with a time dimension, so the
+        # longer node is weight-identical to its siblings.
+        # ``_stitch_with_crossfade`` needs no change: it already reads
+        # ``seg_len = ops.shape(segment)[1]`` per segment, the extension is
+        # trailing (past the last fade band, which is anchored at the NEXT
+        # segment's start and is therefore unmoved), and the last segment never
+        # fades out -- so the newly covered tail lands at weight exactly 1.0
+        # with no partner to blend against, and the weights still sum to 1
+        # everywhere. Both the static and the dynamic branch above feed this one
+        # loop, so neither path can drift from the other.
+        # See decisions.md D-014.
         segments = []
         for i in range(num_segments):
             start_idx = i * non_overlap_len
-            end_idx = start_idx + segment_len
-            segment = x[:, start_idx:end_idx, :]
+            if i == num_segments - 1:
+                segment = x[:, start_idx:, :]
+            else:
+                segment = x[:, start_idx:start_idx + segment_len, :]
             segments.append(segment)
 
         return segments
@@ -788,15 +1061,26 @@ class PRISMTimeTree(keras.layers.Layer):
             return segments[0][:, :target_len, :]
 
         num_segments = len(segments)
-        seq_len_float = ops.cast(target_len, segments[0].dtype)
 
-        # Calculate overlap parameters
-        # Use cast to ensure we have integer overlap_size for shape logic
-        overlap_size = ops.cast(
-            seq_len_float * self.overlap_ratio / ops.cast(num_segments, segments[0].dtype),
-            "int32"
-        )
-        non_overlap_len = (target_len - overlap_size * (num_segments - 1)) // num_segments
+        # Calculate overlap parameters. Mirrors _split_with_overlap exactly --
+        # the same helper, so the stitch offsets cannot drift from the split
+        # offsets (see _segment_len's anchor).
+        if isinstance(target_len, int):
+            non_overlap_len, overlap_size, _ = self._segment_len(
+                target_len, self.overlap_ratio, num_segments,
+                dtype=segments[0].dtype
+            )
+        else:
+            # Dynamic time axis: the same expression over traced tensors.
+            seq_len_float = ops.cast(target_len, segments[0].dtype)
+            overlap_size = ops.cast(
+                seq_len_float * self.overlap_ratio
+                / ops.cast(num_segments, segments[0].dtype),
+                "int32"
+            )
+            non_overlap_len = (
+                target_len - overlap_size * (num_segments - 1)
+            ) // num_segments
 
         # Create output tensor
         batch_size = ops.shape(segments[0])[0]

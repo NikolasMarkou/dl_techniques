@@ -120,6 +120,7 @@ from dl_techniques.utils.logger import logger
 from .common import apply_attention_mask
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -334,11 +335,18 @@ class HopfieldAttention(keras.layers.Layer):
         # Following Pattern 2: Composite Layer from the Modern Keras 3 guide
 
         # Projection layers - will be properly dimensioned in build()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
+        # projection. Do NOT "simplify" this back to a bare
+        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE reused
+        # across same-shape weights yields BIT-IDENTICAL tensors (MEASURED here:
+        # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
+        # key projections started life equal and the attention logits started
+        # symmetric. `seed=` is NOT the discriminator -- instance identity is.
         self.query_dense = keras.layers.Dense(
             self.num_heads * self.key_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             activity_regularizer=self.activity_regularizer,
@@ -348,8 +356,8 @@ class HopfieldAttention(keras.layers.Layer):
         self.key_dense = keras.layers.Dense(
             self.num_heads * self.key_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             activity_regularizer=self.activity_regularizer,
@@ -359,8 +367,8 @@ class HopfieldAttention(keras.layers.Layer):
         self.value_dense = keras.layers.Dense(
             self.num_heads * self.value_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             activity_regularizer=self.activity_regularizer,
@@ -444,8 +452,8 @@ class HopfieldAttention(keras.layers.Layer):
             self.output_dense = keras.layers.Dense(
                 input_dim,  # Output same dimension as input
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 activity_regularizer=self.activity_regularizer,

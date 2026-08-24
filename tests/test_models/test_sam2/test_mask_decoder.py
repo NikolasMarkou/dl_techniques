@@ -21,7 +21,7 @@ Two structural choices are deliberate:
   discriminates a swapped delta -- would be unavailable.
 """
 
-import subprocess
+import zlib
 
 import keras
 import numpy as np
@@ -810,19 +810,169 @@ class TestObjectPointer:
 # ---------------------------------------------------------------------
 
 
-class TestSam1Untouched:
-    """G7.5: this step imports SAM 1 internals but must not perturb them."""
+#: SAM 1's decoder driven end-to-end at the geometry above, with every weight
+#: overwritten deterministically. Recorded 2026-08-22 from the CURRENT code on
+#: CPU; bit-identical across 3 separate processes and unaffected by how many
+#: layers other tests created first.
+#:
+#: ``iou_pred`` in full, plus the two spatial corners of ``masks`` across the
+#: mask-index axis, plus the four reductions. The corners and the mask-index
+#: spread are what discriminate: an off-by-one in the token unpack, a swapped
+#: upscaling branch or a dropped skip all move them, while a batch-axis-only
+#: reduction would not.
+_SAM1_GOLDEN_IOU = [
+    [0.04432123899459839, 0.105155348777771, 0.1710558384656906],
+    [0.0488002672791481, 0.10494738817214966, 0.17056283354759216],
+]
+_SAM1_GOLDEN_CORNER_00 = [
+    [-0.017872819676995277, -0.0003347292076796293, 0.0025617904029786587],
+    [-0.018044080585241318, -0.000462561147287488, 0.0024155532009899616],
+]
+_SAM1_GOLDEN_CORNER_LL = [
+    [-0.014312762767076492, -2.941885031759739e-05, 0.0023804446682333946],
+    [-0.014209216460585594, -0.00023770006373524666, 0.0024684127420186996],
+]
+#: ``(mean, std, min, max)`` of the same ``masks`` tensor.
+_SAM1_GOLDEN_STATS = [
+    -0.004290055949240923,
+    0.008074329234659672,
+    -0.02409971132874489,
+    0.004620838910341263,
+]
 
-    def test_sam1_source_tree_has_no_diff(self):
-        """``git diff --stat -- src/dl_techniques/models/SAM/SAM1/`` is empty."""
-        result = subprocess.run(
-            ["git", "diff", "--stat", "--", "src/dl_techniques/models/SAM/SAM1/"],
-            capture_output=True,
-            text=True,
-            check=True,
+#: float32 carries ~7 decimal digits and the golden was recorded in the SAME
+#: dtype on the SAME device, so the only slack needed is reassociation noise
+#: across a ~120-weight forward. ``1e-6`` absolute sits ~3 orders BELOW the
+#: smallest pinned magnitude (``2.9e-05``) and ~4 below the typical one, so a
+#: real change cannot hide under it -- and it is far ABOVE float32 resolution at
+#: these magnitudes (``~1e-9``), so it is not a tolerance that can never pass.
+_SAM1_GOLDEN_ATOL = 1e-6
+
+
+def _sam1_decoder_with_deterministic_weights():
+    """Build SAM 1's decoder and overwrite every weight from a fixed rule.
+
+    Contract: returns ``(decoder, call_kwargs)``, both already warmed up. Every
+    one of the 120 weights is drawn from ``default_rng(1_000_003 * index +
+    crc32(shape))``, so the model's output is a property of SAM 1's ARITHMETIC
+    and its weight LAYOUT, not of any RNG state, seed, or global layer-name
+    counter.
+
+    Two details are load-bearing and were both measured:
+
+    * The warm-up call is not optional. ``build(None)`` materializes only 38 of
+      the 120 weights; the transformer's 82 are created during the first call.
+      Assigning before the warm-up left those 82 randomly initialized, and the
+      "golden" then differed between two identical processes.
+    * Keying the fill by ``w.path`` was tried first and REJECTED: paths carry
+      Keras's process-global name-uniquification counter, so the same model
+      hashes differently depending on how many layers earlier tests built.
+      Index-plus-shape is stable under that.
+    """
+    from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+
+    with tf.device("/CPU:0"):
+        decoder = MaskDecoder(
+            transformer_dim=DIM, transformer=make_transformer()
         )
-        assert result.stdout.strip() == "", (
-            f"SAM 1 source was modified:\n{result.stdout}"
+        decoder.build(None)
+        image, pe, sparse, dense, _f0, _f1 = make_inputs()
+        kwargs = dict(
+            image_embeddings=image,
+            image_pe=pe,
+            sparse_prompt_embeddings=sparse,
+            dense_prompt_embeddings=dense,
+        )
+        decoder(multimask_output=True, **kwargs)
+        for index, weight in enumerate(decoder.weights):
+            rng = np.random.default_rng(
+                1_000_003 * index + zlib.crc32(str(tuple(weight.shape)).encode())
+            )
+            weight.assign(
+                ops.convert_to_tensor(
+                    (rng.standard_normal(weight.shape) * 0.1).astype("float32")
+                )
+            )
+    return decoder, kwargs
+
+
+class TestSam1Untouched:
+    """G7.5: this step imports SAM 1 internals but must not perturb them.
+
+    # DECISION plan-2026-08-22T035419-a11304c8/D-072
+    # WHAT NOT TO DO: do NOT bring back ``test_sam1_source_tree_has_no_diff``,
+    # which asserted that ``git diff --stat -- .../SAM/SAM1/`` was empty. It
+    # pinned worktree TEXT and was wrong in BOTH directions, measured
+    # 2026-08-22: a trailing comment with zero behavioural effect turned it RED,
+    # while ANY genuinely behaviour-changing edit that was ``git add``ed or
+    # committed -- including in the same commit as this very file -- turned it
+    # GREEN. It also failed for reasons unrelated to SAM 2 (any dirty worktree
+    # under that path, a stray formatter run). The replacement below drives SAM
+    # 1's decoder end-to-end and compares against a recorded golden, so it
+    # survives being committed and cannot be fooled by a comment.
+    # See decisions.md D-072.
+    """
+
+    def test_sam1_decoder_output_matches_its_recorded_golden(self):
+        """SAM 1's decoder still computes what it computed, to 1e-6.
+
+        This is the BEHAVIOURAL replacement for the text diff. It reaches the
+        token unpack, the two-way transformer, the output upscaling and both
+        heads, so an edit anywhere on that path fails here by VALUE.
+        """
+        decoder, kwargs = _sam1_decoder_with_deterministic_weights()
+        with tf.device("/CPU:0"):
+            masks, iou = decoder(multimask_output=True, **kwargs)
+        masks, iou = npy(masks), npy(iou)
+
+        assert masks.shape == (BATCH, NUM_MULTIMASK, GRID * 4, GRID * 4)
+        np.testing.assert_allclose(
+            iou, _SAM1_GOLDEN_IOU, atol=_SAM1_GOLDEN_ATOL,
+            err_msg="SAM 1's IoU head changed",
+        )
+        np.testing.assert_allclose(
+            masks[:, :, 0, 0], _SAM1_GOLDEN_CORNER_00,
+            atol=_SAM1_GOLDEN_ATOL, err_msg="SAM 1's mask at (0, 0) changed",
+        )
+        np.testing.assert_allclose(
+            masks[:, :, -1, -1], _SAM1_GOLDEN_CORNER_LL,
+            atol=_SAM1_GOLDEN_ATOL, err_msg="SAM 1's mask at (-1, -1) changed",
+        )
+        np.testing.assert_allclose(
+            [float(masks.mean()), float(masks.std()),
+             float(masks.min()), float(masks.max())],
+            _SAM1_GOLDEN_STATS, atol=_SAM1_GOLDEN_ATOL,
+            err_msg="SAM 1's mask distribution changed",
+        )
+
+    def test_the_golden_is_reproducible_within_the_process(self):
+        """Anti-flake control: two independent builds agree EXACTLY.
+
+        If this ever fails, the golden test above is measuring RNG state rather
+        than SAM 1's arithmetic, and its verdict means nothing either way.
+        """
+        first_decoder, first_kwargs = _sam1_decoder_with_deterministic_weights()
+        second_decoder, second_kwargs = _sam1_decoder_with_deterministic_weights()
+        with tf.device("/CPU:0"):
+            first = npy(first_decoder(multimask_output=True, **first_kwargs)[0])
+            second = npy(second_decoder(multimask_output=True, **second_kwargs)[0])
+        np.testing.assert_array_equal(first, second)
+
+    def test_the_golden_tolerance_is_above_float32_resolution(self):
+        """A tolerance below the dtype's resolution can never pass.
+
+        Recorded because that exact defect was shipped five times elsewhere in
+        this repo and fixed on 2026-08-22 (D-032/D-035/D-036/D-037).
+        """
+        smallest = min(
+            abs(v)
+            for row in _SAM1_GOLDEN_CORNER_LL + _SAM1_GOLDEN_CORNER_00
+            for v in row
+        )
+        assert _SAM1_GOLDEN_ATOL > np.finfo(np.float32).eps * 1.0
+        assert _SAM1_GOLDEN_ATOL < smallest / 10, (
+            f"the tolerance {_SAM1_GOLDEN_ATOL} is not comfortably below the "
+            f"smallest pinned magnitude {smallest}"
         )
 
     def test_sam2_registered_key_cannot_collide_with_sam1(self):

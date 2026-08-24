@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Pyramid Wavelet-Fourier Network (PW-FNet)** in **Keras 3**, based on the paper ["Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration"](https://arxiv.org/abs/2407.13663) by Jiang et al. (2024).
+An implementation of the **Pyramid Wavelet-Fourier Network (PW-FNet)** in **Keras 3**, based on the paper ["Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration"](https://arxiv.org/abs/2407.13663) by Jiang et al. (2024).
 
 The architecture replaces expensive self-attention mechanisms with a highly efficient Fourier Transform-based token mixer within a hierarchical U-Net structure, delivering state-of-the-art performance with a fraction of the computational cost. This implementation is built with modern Keras best practices, ensuring it is robust, easy to understand, and fully serializable.
 
@@ -270,7 +270,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Assuming model.py is in your project directory
-from model import PW_FNet
+from dl_techniques.models.pw_fnet.model import PW_FNet
 
 # 1. Generate dummy data
 def generate_data(num_samples, shape=(64, 64, 3)):
@@ -353,8 +353,16 @@ plt.show()
 | `img_channels` | `int` | Number of channels for input/output images (e.g., 3 for RGB). | `3` |
 | `width` | `int` | The base channel width of the network. Controls model capacity. | `32` |
 | `middle_blk_num` | `int` | Number of `PW_FNet_Block`s in the bottleneck. | `4` |
-| `enc_blk_nums` | `List[int]` | List of block counts for each encoder stage (from high-res to low-res). | `[2, 2]` |
-| `dec_blk_nums` | `List[int]` | List of block counts for each decoder stage (from low-res to high-res). | `[2, 2]` |
+| `enc_blk_nums` | `List[int]` | Block counts for the two encoder stages (high-res, then low-res). **Exactly 2 entries.** | `[2, 2]` |
+| `dec_blk_nums` | `List[int]` | Block counts for the two decoder stages (low-res, then high-res). **Exactly 2 entries.** | `[2, 2]` |
+
+> **The depth is FIXED at 2 levels; these lists do not set it.** The encoder,
+> decoder and the three output heads are written out by name, and the model
+> returns exactly three scales, so a third entry has nowhere to go. Passing a
+> list of any other length raises `ValueError`. Before 2026-08-15 the docstring
+> claimed the length determined the number of scales: `[2, 2, 2]` silently
+> built a 2-level network and dropped the third entry, and `[2]` raised
+> `IndexError` from the middle of the constructor.
 
 ### 6.2 `PW_FNet_Block` (Layer Class)
 

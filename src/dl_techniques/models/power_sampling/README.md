@@ -41,7 +41,7 @@ This package is a refactor and generalization of the original CliffordNet implem
 
 1. **Model-agnostic** via an injected `logits_fn` closure (`make_logits_fn`): any callable LM/VLM returning logits works. CliffordNetLM + tiktoken is just one example.
 2. **Tokenizer-agnostic** via `TokenizerProtocol`: anything exposing `encode`/`decode` drives the sampler. No `import tiktoken` at module load.
-3. **Batched-parallel MCMC**: all MCMC proposals within a block run through the model in a single batched forward pass for high GPU utilization.
+3. **Batched-parallel MCMC, without breaking the chain**: proposals are batched across a run of *rejections* (a rejection leaves the chain state unchanged, so the proposals queued behind it are still valid draws from `q(.|x)`). An *acceptance* moves the state, so everything queued behind it is discarded and re-drawn from the new state. Expected batched forward passes per block: `1 + (number of acceptances)`.
 4. **VLM-aware adapter** (`VLMForwardAdapter`): binds a fixed image and a `text_slice_start` offset so the engine can drive the text suffix while the image prefix stays fixed.
 5. **Three generation methods**: `standard` (nucleus sampling baseline), `power` (MCMC over `p^alpha`), and `max_swap` (deterministic greedy trajectory optimization, approximating `p^infinity`).
 6. **Pure-NumPy post-logit pipeline**: forward passes run on the model's device; sampling math uses NumPy on CPU. No `tf.gather_nd`, no Keras graph retraces.
@@ -97,7 +97,7 @@ Pushing temperature toward 0 to chase quality collapses generation toward greedy
 
 ## 3. How It Works
 
-The engine generates one block of tokens at a time. After each block it samples `mcmc_steps` proposals — each a re-generation from a random cut point to the end — runs them all through the model in a single batched forward pass, and accepts or rejects each via Metropolis-Hastings.
+The engine generates one block of tokens at a time. After each block it samples `mcmc_steps` cut points, re-generates from each cut point to the end, and accepts or rejects each via Metropolis-Hastings. The proposals still owed are generated in one batched forward pass; the batch is discarded and re-generated from the new state whenever a proposal is accepted, so every proposal is drawn from the state the chain is actually in.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -115,16 +115,23 @@ The engine generates one block of tokens at a time. After each block it samples 
 │   └────────────┬─────────────┘                                     │
 │                ▼                                                   │
 │   ┌──────────────────────────┐                                     │
-│   │ sample K=mcmc_steps cut   │  idx_k = randint(c, t-1)           │
-│   │ points; re-generate each  │  prefixes = gen[:idx_k]            │
-│   │ to the end IN PARALLEL    │  ── ONE batched forward per step ──│
-│   │  (_batched_generate)      │                                    │
+│   │ sample K=mcmc_steps cut  │  idx_k = randint(c, t-1)  (once)   │
+│   │ points, ONCE per block   │                                    │
+│   └────────────┬─────────────┘                                     │
+│                ▼                                                   │
+│   ┌──────────────────────────┐  prefixes = gen[:idx_k] for the     │
+│   │ batch the proposals STILL│  cut points not yet consumed        │
+│   │ OWED, all cut from the   │  ── ONE batched forward per step ──│
+│   │ CURRENT gen              │                                    │
+│   │  (_batch_proposals)      │                                    │
 │   └────────────┬─────────────┘                                     │
 │                ▼                                                   │
 │   ┌──────────────────────────┐    accept w.p. min(1, e^{log r})    │
-│   │ Metropolis-Hastings       │    (max_swap: accept iff log r > 0)│
-│   │ accept / reject each       │ ─► on accept: gen = proposal,     │
-│   │ proposal                  │    splice in its log-probs         │
+│   │ Metropolis-Hastings      │    (max_swap: accept iff log r > 0) │
+│   │ accept / reject, in order│ ─► reject: keep consuming the batch │
+│   │                          │ ─► accept: gen = proposal, splice   │
+│   │                          │    its log-probs, DISCARD the rest  │
+│   │                          │    of the batch and re-generate     │
 │   └──────────────────────────┘                                     │
 │                                                                    │
 │  return gen[strip:]  (strip the CLS prefix only if one was added)  │
@@ -135,9 +142,9 @@ The engine generates one block of tokens at a time. After each block it samples 
 
 1. **Tokenize** the prompt via `tokenizer.encode(prompt)`. If `cls_token_id is not None`, prepend it and set `strip = 1`; otherwise `strip = 0`. The context boundary `c = len(prompt_ids)`.
 2. **Per block**, call `naive_temp_generate` to append `jump_size = max_tokens // block_num` tokens at the proposal temperature, recording each token's proposal log-prob and target (power) log-prob.
-3. **Sample `mcmc_steps` cut points** uniformly in `[c, t-1]`; build the prefixes `gen[:idx]` and per-proposal token counts `t - idx`.
-4. **Re-generate all proposals in parallel** via `_batched_generate` — one batched forward pass per generation step across the whole proposal batch.
-5. **Metropolis-Hastings acceptance** for each proposal; on accept, replace `gen` with the proposal and splice in the new log-probs.
+3. **Sample `mcmc_steps` cut points** uniformly in `[c, t-1]`, once per block. `idx ~ Uniform[c, t-1]` does not depend on the chain state, so pre-drawing the cut points changes nothing about the kernel; the *continuations* do depend on it, and are not pre-drawn across an acceptance.
+4. **Re-generate the proposals still owed** via `_batch_proposals` — prefixes `gen[:idx]` cut from the CURRENT `gen`, token counts `t - idx`, one batched forward pass per generation step.
+5. **Metropolis-Hastings acceptance**, in order. On reject, the chain state is unchanged and the next queued proposal is consumed as-is. On accept, replace `gen` with the proposal, splice in the new log-probs, discard the remaining (now stale) proposals and re-generate them from the new state.
 6. **Repeat** for every block, then return the generated tokens with the CLS prefix stripped only when it was prepended.
 
 ---
@@ -181,7 +188,7 @@ Every token is drawn through `_sample_token`, which builds the proposal distribu
 3. **Temperature scaling**: divide by the temperature.
 4. **Nucleus (top-p) sampling**: keep the smallest set of tokens whose cumulative probability reaches `top_p`, renormalize, and sample.
 
-The proposal log-prob is read from the scaled (post-temperature) log-softmax; the target log-prob is the base-model log-softmax divided by temperature.
+The proposal log-prob is returned by the nucleus draw itself — the log probability of the drawn token under the **truncated, renormalized** distribution of step 4, which is the distribution the token actually came from. It is deliberately *not* the scaled (post-temperature) full-vocabulary log-softmax: those two agree only when `top_p = 1.0`, and they are the `q(x|x')/q(x'|x)` factor of the MH ratio, so reading the untruncated one biases acceptance whenever top-p excludes real mass (measured at `top_p = 0.5` over a linear logit ramp: 0.602 nats apart). The target log-prob is the base-model log-softmax divided by temperature — base, i.e. before masking, penalty and truncation, because it must describe `p^alpha` and not the proposal.
 
 ---
 
@@ -332,7 +339,7 @@ Vocabulary metadata (`vocab_size`, special-token ids) is intentionally **not** p
 | `repetition_window` | `50` | Number of recent tokens considered for the repetition penalty. |
 | `special_token_ids` | `set()` | Token ids masked to `-1e9` (never generated). Empty by default — supply your model's ids. |
 | `cls_token_id` | `None` | Token prepended to every prompt. `None` => no prepend and nothing stripped from the output. |
-| `pad_token_id` | `None` | Right-padding token id. Required when `ctx_len` is set; otherwise unused. |
+| `pad_token_id` | `None` | Right-padding token id. Required when `ctx_len` is set, **and** when `mcmc_steps >= 2` on the wrapped-model path (proposal batches are ragged and get right-padded). Both are refused eagerly by `PowerSampler.__init__`. |
 | `ctx_len` | `None` | Fixed context length for fixed-shape models. `None` => variable-length forward, no padding. |
 
 ---
@@ -341,7 +348,7 @@ Vocabulary metadata (`vocab_size`, special-token ids) is intentionally **not** p
 
 ### Example 1: GPT-2 via `tiktoken`
 
-A GPT-2-like model returning `{"logits": float32[B, T, V]}`, driven by the `tiktoken` GPT-2 encoding. GPT-2 needs no CLS prepend; supply `pad_token_id` / `ctx_len` only if your model is fixed-shape.
+A GPT-2-like model returning `{"logits": float32[B, T, V]}`, driven by the `tiktoken` GPT-2 encoding. GPT-2 needs no CLS prepend; supply `ctx_len` only if your model is fixed-shape, and `pad_token_id` if your model is fixed-shape *or* you use MCMC with `mcmc_steps >= 2`.
 
 ```python
 import tiktoken
@@ -355,7 +362,7 @@ config = PowerSamplingConfig(
     mcmc_steps=10,
     block_num=8,
     max_tokens=128,
-    pad_token_id=enc.eot_token,         # only needed for fixed-shape forward
+    pad_token_id=enc.eot_token,         # fixed-shape forward, and MCMC proposal batches
     ctx_len=1024,                       # fixed context window; omit for variable-length
 )
 sampler = PowerSampler(model, enc, config)
@@ -474,7 +481,7 @@ sampler = PowerSampler(model, tokenizer, PowerSamplingConfig(), logits_fn=logits
 
 ### Variable-length forward (`ctx_len=None`)
 
-Leaving `ctx_len=None` (the default) runs an unpadded variable-length forward pass — appropriate for models that accept dynamic sequence lengths. No `pad_token_id` is required in this mode.
+Leaving `ctx_len=None` (the default) runs an unpadded variable-length forward pass — appropriate for models that accept dynamic sequence lengths. No `pad_token_id` is required in this mode **for single-sequence generation** (`generate_standard`, or MCMC at `mcmc_steps=1`). MCMC at `mcmc_steps >= 2` still needs one: the proposals are re-generated from random cut points, so the proposal batch holds prefixes of unequal length and is right-padded to the batch maximum. `PowerSampler.__init__` refuses that combination up front rather than letting it surface mid-run from inside `make_batch_logits_fn`.
 
 ### Supplying a pre-built `logits_fn`
 
@@ -488,10 +495,10 @@ More `block_num` => more frequent refinement (finer granularity, more forward pa
 
 ## 10. Performance Notes
 
-- **Batched MCMC proposals**: all `mcmc_steps` proposals in a block are re-generated in parallel via `_batched_generate`, which issues a single batched forward pass per generation step. A single active sequence short-circuits to the unbatched path to avoid batch overhead.
+- **Batched MCMC proposals**: the proposals still owed in a block are re-generated in parallel via `_batch_proposals`/`_batched_generate`, which issues a single batched forward pass per generation step. A single active sequence short-circuits to the unbatched path to avoid batch overhead. Batching spans a run of rejections only: each acceptance costs one extra batched generation, so a block issues `1 + (acceptances in that block)` proposal batches — one at 0% acceptance, `mcmc_steps` at 100%. This is the price of a chain whose proposals come from the state it is actually in; see `decisions.md` D-018.
 - **GPU forward / CPU NumPy split**: the model forward runs on whatever device the model uses; everything after the logits (`_log_softmax`, special-token masking, repetition penalty, nucleus sampling, the MH acceptance test) is pure NumPy on CPU. This keeps the sampling math out of the compiled graph and avoids retraces.
 - **No KV cache**: each forward pass recomputes all positions, so power sampling is designed for offline/batch inference, not real-time streaming.
-- **Cost model**: roughly `block_num * (jump_size + sum of mcmc_steps proposal lengths)` token-forwards. The `power` and `max_swap` methods cost on the order of ~`(1 + mcmc_steps)`x the token-forwards of the `standard` baseline.
+- **Cost model**: roughly `block_num * (jump_size + sum of mcmc_steps proposal lengths)` token-forwards at a 0% acceptance rate, i.e. on the order of ~`(1 + mcmc_steps)`x the `standard` baseline. Acceptances add speculative waste: the proposals queued behind an accepted one were generated from the pre-acceptance state and are thrown away, so a block generates between `mcmc_steps` (nothing accepted) and `mcmc_steps * (mcmc_steps + 1) / 2` (everything accepted) proposals. At the default `mcmc_steps = 10` and a realistic ~30% acceptance rate that is roughly 2.5-3x the minimum proposal FLOPs, bought in exchange for ~`1 + acceptances` batched call-rounds instead of `mcmc_steps` sequential ones.
 
 ---
 
@@ -544,7 +551,7 @@ A: Almost always a wrong `text_slice_start`. It must equal the vision-token sequ
 
 ## 15. Testing & Validation
 
-The engine is exercised by a keras-free mock suite (a mock model returning `{"logits": ...}` plus a char-level mock tokenizer) covering: config defaults; `_log_softmax`/`_nucleus_sample` numerics; `make_logits_fn` for dict / plain-tensor / VLM-offset outputs; `generate_standard`; `mcmc_power_sample` (acceptance ratio in `[0, 1]`, output length); `max_swap`; `generate_text` dispatch + `ValueError` on a bad method; CLS-prepend on/off; and the no-config-mutation invariant.
+The engine is exercised by a keras-free mock suite (a mock model returning `{"logits": ...}` plus a char-level mock tokenizer) covering: config defaults; `_log_softmax`/`_nucleus_sample` numerics (including that the nucleus draw reports the renormalized density it sampled from, with the degenerate `top_p = 1.0` twin as the anti-vacuity control); the MH chain proposing from the state it just accepted; the eager `pad_token_id` precondition; `make_logits_fn` for dict / plain-tensor / VLM-offset outputs; `generate_standard`; `mcmc_power_sample` (acceptance ratio in `[0, 1]`, output length); `max_swap`; `generate_text` dispatch + `ValueError` on a bad method; CLS-prepend on/off; and the no-config-mutation invariant.
 
 Run the scoped suite (no GPU required):
 

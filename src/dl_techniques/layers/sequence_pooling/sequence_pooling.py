@@ -190,7 +190,7 @@ class SequencePooling(keras.layers.Layer):
         aggregation_method: How to combine multiple strategy outputs.
         attention_hidden_dim: Hidden dimension for attention pooling.
         attention_num_heads: Number of heads for multi-head attention.
-        attention_dropout: Dropout rate for attention mechanisms.
+        attention_dropout_rate: Dropout rate for attention mechanisms.
         weighted_max_seq_len: Maximum sequence length for weighted pooling.
         top_k: Number of top elements for top-k pooling.
         temperature: Temperature for softmax in learnable strategies.
@@ -208,7 +208,7 @@ class SequencePooling(keras.layers.Layer):
         aggregation_method: AggregationMethod = 'concat',
         attention_hidden_dim: int = 256,
         attention_num_heads: int = 1,
-        attention_dropout: float = 0.0,
+        attention_dropout_rate: float = 0.0,
         weighted_max_seq_len: int = 512,
         top_k: int = 10,
         temperature: float = 1.0,
@@ -228,7 +228,7 @@ class SequencePooling(keras.layers.Layer):
         self.aggregation_method = aggregation_method
         self.attention_hidden_dim = attention_hidden_dim
         self.attention_num_heads = attention_num_heads
-        self.attention_dropout = attention_dropout
+        self.attention_dropout_rate = attention_dropout_rate
         self.weighted_max_seq_len = weighted_max_seq_len
         self.top_k = top_k
         self.temperature = temperature
@@ -247,7 +247,7 @@ class SequencePooling(keras.layers.Layer):
                 self.learnable_components[strat] = AttentionPooling(
                     hidden_dim=self.attention_hidden_dim,
                     num_heads=num_heads,
-                    dropout_rate=self.attention_dropout,
+                    dropout_rate=self.attention_dropout_rate,
                     use_bias=self.use_bias,
                     temperature=self.temperature,
                     kernel_initializer=self.kernel_initializer,
@@ -257,7 +257,7 @@ class SequencePooling(keras.layers.Layer):
             elif strat == 'weighted':
                 self.learnable_components[strat] = WeightedPooling(
                     max_seq_len=self.weighted_max_seq_len,
-                    dropout_rate=self.attention_dropout,
+                    dropout_rate=self.attention_dropout_rate,
                     temperature=self.temperature,
                     initializer='ones',
                     regularizer=self.kernel_regularizer,
@@ -799,7 +799,7 @@ class SequencePooling(keras.layers.Layer):
             'aggregation_method': self.aggregation_method,
             'attention_hidden_dim': self.attention_hidden_dim,
             'attention_num_heads': self.attention_num_heads,
-            'attention_dropout': self.attention_dropout,
+            'attention_dropout_rate': self.attention_dropout_rate,
             'weighted_max_seq_len': self.weighted_max_seq_len,
             'top_k': self.top_k,
             'temperature': self.temperature,

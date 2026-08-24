@@ -45,6 +45,10 @@ from typing import Optional, Any, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -126,9 +130,6 @@ class NBeatsBlock(keras.layers.Layer):
     :type input_dim: int
     :param output_dim: Number of output features (channels).
     :type output_dim: int
-    :param share_weights: Whether to share weights across blocks in the same
-        stack. Currently stored but not implemented.
-    :type share_weights: bool
     :param dropout_rate: Dropout rate (0 to 1) applied after each dense layer.
     :type dropout_rate: float
     :param activation: Activation function for hidden layers.
@@ -160,7 +161,6 @@ class NBeatsBlock(keras.layers.Layer):
             forecast_length: int,
             input_dim: int = 1,
             output_dim: int = 1,
-            share_weights: bool = False,
             dropout_rate: float = 0.0,
             activation: Union[str, callable] = 'relu',
             use_bias: bool = False,
@@ -203,9 +203,8 @@ class NBeatsBlock(keras.layers.Layer):
         self.forecast_length = forecast_length
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.share_weights = share_weights
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.use_normalization = use_normalization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -435,9 +434,8 @@ class NBeatsBlock(keras.layers.Layer):
             'forecast_length': self.forecast_length,
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
-            'share_weights': self.share_weights,
             'dropout_rate': self.dropout_rate,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'use_normalization': self.use_normalization,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
@@ -494,7 +492,10 @@ class GenericBlock(NBeatsBlock):
         Backcast             Forecast
         (batch, B*in_dim)    (batch, F*out_dim)
 
-    :param basis_initializer: Initializer for basis matrices.
+    :param basis_initializer: Initializer for the two basis matrices. Defaults to
+        ``Orthogonal(gain=0.1)`` — a small-gain orthogonal map, which keeps the block's
+        contribution to the residual stack small at initialization. Any Keras initializer
+        (or its string name) is honoured; this argument is read, not merely stored.
     :type basis_initializer: str or keras.initializers.Initializer
     :param basis_regularizer: Optional regularizer for basis matrices.
     :type basis_regularizer: keras.regularizers.Regularizer or None
@@ -503,19 +504,27 @@ class GenericBlock(NBeatsBlock):
 
     def __init__(
             self,
-            basis_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            basis_initializer: Union[str, keras.initializers.Initializer, None] = None,
             basis_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-072
+        # `basis_initializer` used to be validated, stored and serialized while both Dense
+        # basis layers hardcoded `Orthogonal(gain=0.1)`, so the argument had no effect.
+        # Do NOT "fix" this by giving the parameter the usual `'glorot_uniform'` default and
+        # passing it through: that silently replaces the small-gain orthogonal map the block
+        # was tuned around and changes every existing GenericBlock's initialization. The
+        # default is `None`, which resolves to the historical `Orthogonal(gain=0.1)`; an
+        # explicit value is now actually used. See decisions.md D-072.
+        if basis_initializer is None:
+            # Small-gain orthogonal init keeps the block's residual contribution small.
+            basis_initializer = keras.initializers.Orthogonal(gain=0.1)
+
         # Store configuration
         self.basis_initializer = keras.initializers.get(basis_initializer)
         self.basis_regularizer = keras.regularizers.get(basis_regularizer)
-
-        # CREATE sub-layers specific to GenericBlock in __init__
-        # Use orthogonal initialization with small gain for stability
-        orthogonal_init = keras.initializers.Orthogonal(gain=0.1)
 
         # For Generic Block, the projection is just a large matrix multiplication
         # We project from flattened theta to flattened time series directly.
@@ -523,7 +532,7 @@ class GenericBlock(NBeatsBlock):
             self.backcast_length * self.input_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=orthogonal_init,
+            kernel_initializer=self.basis_initializer,
             kernel_regularizer=self.basis_regularizer,
             name='backcast_basis'
         )
@@ -531,7 +540,7 @@ class GenericBlock(NBeatsBlock):
             self.forecast_length * self.output_dim,
             activation='linear',
             use_bias=False,
-            kernel_initializer=orthogonal_init,
+            kernel_initializer=self.basis_initializer,
             kernel_regularizer=self.basis_regularizer,
             name='forecast_basis'
         )
@@ -726,24 +735,49 @@ class TrendBlock(NBeatsBlock):
                 backcast_basis[degree] /= scale_factor
                 forecast_basis[degree] /= scale_factor
 
-        # Store as non-trainable weights
-        # Shape: (thetas_dim, time)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-028
+        # Both basis matrices are materialized by an INITIALIZER, never by
+        # `add_weight(initializer='zeros')` followed by `.assign()`.
+        #
+        # WHAT NOT TO DO: do NOT restore
+        #     self.backcast_basis_matrix = self.add_weight(..., initializer='zeros')
+        #     self.backcast_basis_matrix.assign(backcast_basis)
+        # Keras 3 runs a symbolic build pass inside a `StatelessScope` whenever this
+        # block is first reached from a PARENT's `call()` -- which is exactly what
+        # `NBeatsNet.call` does under `predict()`/`fit()` -- and that scope RECORDS
+        # the `.assign()` and then DISCARDS it. The weight therefore kept its
+        # `'zeros'` initializer. Because `backcast = theta @ basis_matrix`, the
+        # polynomial basis IS this block's entire output map, so an all-zero basis
+        # makes the block emit EXACTLY zero for both heads while still training and
+        # still reporting a loss. Measured on CPU 2026-08-15: a trend-only
+        # `NBeatsNet.predict()` returned a forecast that is exactly 0.0 everywhere
+        # and a residual bit-identical to its input (the doubly-residual stack
+        # degenerates to a no-op); the same model called eagerly gave basis rows of
+        # 1.0. Initializers are honoured at variable-CREATION time and so survive
+        # the stateless scope. Same defect and same fix as
+        # `layers/embedding/rotary_position_embedding.py` (D-021) and the four
+        # `layers/embedding/` siblings (D-027). See decisions.md D-028.
+        #
+        # `backcast_basis`/`forecast_basis` are NumPy arrays, so closing over them is
+        # safe: a `keras.ops` tensor computed in `build()` would belong to the
+        # symbolic pass's scratch `FuncGraph` and raise "out of scope" on the eager
+        # pass.
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype=None: ops.cast(
+                ops.convert_to_tensor(backcast_basis), dtype or self.variable_dtype
+            ),
             trainable=False
         )
         self.forecast_basis_matrix = self.add_weight(
             name='forecast_basis_matrix',
             shape=(self.thetas_dim, self.forecast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype=None: ops.cast(
+                ops.convert_to_tensor(forecast_basis), dtype or self.variable_dtype
+            ),
             trainable=False
         )
-
-        # Set the values
-        self.backcast_basis_matrix.assign(backcast_basis)
-        self.forecast_basis_matrix.assign(forecast_basis)
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -975,23 +1009,30 @@ class SeasonalityBlock(NBeatsBlock):
             forecast_basis[basis_idx] = 1.0
             basis_idx += 1
 
-        # Store as non-trainable weights
+        # Store as non-trainable weights. Materialized by an INITIALIZER for the
+        # same reason as `TrendBlock._create_polynomial_basis` -- see the DECISION
+        # anchor there (D-028): an `.assign()` issued during Keras 3's symbolic
+        # build pass is recorded and discarded, and since `backcast = theta @
+        # basis_matrix` the all-zero Fourier basis made this block emit exactly
+        # zero. Measured on CPU 2026-08-15: `backcast_basis_matrix[0, 0]` is
+        # 0.33333334 on a direct `.build(...)` and 0.0 through a parent layer's
+        # `call()`. NumPy arrays are closed over, never `keras.ops` tensors.
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype=None: ops.cast(
+                ops.convert_to_tensor(backcast_basis), dtype or self.variable_dtype
+            ),
             trainable=False
         )
         self.forecast_basis_matrix = self.add_weight(
             name='forecast_basis_matrix',
             shape=(self.thetas_dim, self.forecast_length),
-            initializer='zeros',
+            initializer=lambda shape, dtype=None: ops.cast(
+                ops.convert_to_tensor(forecast_basis), dtype or self.variable_dtype
+            ),
             trainable=False
         )
-
-        # Set the values
-        self.backcast_basis_matrix.assign(backcast_basis)
-        self.forecast_basis_matrix.assign(forecast_basis)
 
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """

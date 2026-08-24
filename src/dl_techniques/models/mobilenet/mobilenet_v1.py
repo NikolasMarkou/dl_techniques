@@ -1,42 +1,67 @@
 """
-MobileNetV1: Efficient Convolutional Neural Networks for Mobile Vision Applications
-================================================================================
+The original MobileNet: a plain stack of depthwise separable convolutions with a
+global width multiplier.
 
-A complete implementation of the original MobileNet architecture using depthwise
-separable convolutions. This implementation follows modern Keras 3 best practices
-for custom models with proper serialization support.
+The generation's whole contribution is a factorization. A standard `KxK`
+convolution does two jobs at once — it filters space and it mixes channels — and
+pays for their product: `K*K*C_in*C_out*H*W` multiply-adds. Depthwise separable
+convolution splits the two jobs into consecutive layers, a depthwise `KxK`
+convolution that filters each input channel independently followed by a `1x1`
+pointwise convolution that mixes the filtered channels:
 
-Based on: "MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications"
-Paper: https://arxiv.org/abs/1704.04861
+`K*K*C_in*H*W  +  C_in*C_out*H*W`
 
-Key Features:
-------------
-- Depthwise separable convolutions for efficiency
-- Width multiplier (α) for model scaling
-- Resolution flexibility through input_shape
-- Modular design with proper serialization support
-- Complete variant support (1.0, 0.75, 0.5, 0.25 width multipliers)
+The cost ratio against the standard convolution is `1/C_out + 1/K^2`, so for `K=3`
+and any realistic channel count the block is roughly 8-9x cheaper, and the paper
+reports it costs about one point of ImageNet top-1. Nothing else in this
+generation is new: there are no residuals, no bottlenecks, no attention. The
+network is 28 layers of that one block repeated, which is precisely why it is the
+right place to read the factorization argument in isolation.
 
-Architecture Overview:
----------------------
-MobileNetV1 consists of:
-1. **Initial Conv**: Standard 3x3 convolution with stride 2
-2. **Depthwise Separable Blocks**: 13 depthwise separable convolution blocks
-3. **Global Average Pooling**: Reduces spatial dimensions
-4. **Classifier**: Fully connected layer for classification
+Two multipliers scale the result rather than retraining a different topology. The
+width multiplier `alpha` thins every layer to `alpha * C` channels, which reduces
+both parameters and compute quadratically. The resolution multiplier `rho` in the
+paper shrinks the input, cutting compute quadratically at zero parameter cost.
+Here `alpha` is the `width_multiplier` argument; `rho` has no argument of its own
+and is expressed simply by passing a smaller `input_shape`, since the model is
+fully convolutional up to the global pooling.
 
-Usage Examples:
---------------
-```python
-# Standard MobileNetV1 (α=1.0) for ImageNet
-model = MobileNetV1.from_variant("1.0", num_classes=1000)
+Architecturally this is a `3x3` stride-2 stem into `32*alpha` channels, then the
+paper's thirteen separable blocks — 64; 128/s2, 128; 256/s2, 256; 512/s2 then five
+at 512; 1024/s2, 1024 — with all downsampling done by the depthwise stride rather
+than by pooling. The head pools globally, reshapes to `1x1xC`, applies dropout and
+then a `1x1` convolution as the classifier, which is the paper's form and is
+arithmetically a dense layer. The global pooling belongs to that head: with
+`include_top=False` the model returns the 4-D feature map of the last block, matching
+V2/V3/V4, and a caller who wants the pooled vector adds the pooling layer.
 
-# Smaller model (α=0.75) for CIFAR-10
-model = MobileNetV1.from_variant("0.75", num_classes=10, input_shape=(32, 32, 3))
+Two implementation details are easy to get wrong. The head's `Reshape` target is
+hardcoded to `int(1024 * width_multiplier)`, so `include_top=True` is bound to the
+final block being 1024-wide: editing `ARCHITECTURE`'s last entry breaks the head
+rather than the body. And widths are scaled with a bare `int()` truncation, not the
+round-to-multiple-of-8 `_make_divisible` rule that V2 and V3 use, so channel counts
+here follow the paper's `alpha` table exactly but will not match TF-slim
+checkpoints for fractional `alpha`.
 
-# Custom configuration
-model = MobileNetV1(num_classes=100, width_multiplier=0.5, input_shape=(128, 128, 3))
-```
+Two deliberate deviations from the reference implementation. The blocks use plain
+unbounded ReLU (the `DepthwiseSeparableBlock` factory default), where the paper's
+released model uses ReLU6, which matters if low-precision quantization is the goal.
+And the classifier ends in a softmax, so this model emits probabilities, not
+logits: compile it with `from_logits=False`.
+
+`pretrained=True` on `create_mobilenetv1` raises `NotImplementedError`. No
+checkpoints are distributed with this package. It used to log a warning and return
+a randomly initialized model; the warning was easy to miss, so the house contract
+elsewhere in `models/` (see `resnet/model.py`) now holds here too. Warm-start from
+a local file with `model.load_weights(path)`.
+
+References:
+    - Howard et al., 2017. MobileNets: Efficient Convolutional Neural Networks for
+      Mobile Vision Applications. (https://arxiv.org/abs/1704.04861)
+    - Sifre and Mallat, 2014. Rigid-Motion Scattering for Image Classification.
+      (the origin of the depthwise separable factorization)
+    - Chollet, 2017. Xception: Deep Learning with Depthwise Separable Convolutions.
+      (https://arxiv.org/abs/1610.02357)
 """
 
 import keras
@@ -49,6 +74,11 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.depthwise_separable_block import DepthwiseSeparableBlock
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 
 # ---------------------------------------------------------------------
 
@@ -165,7 +195,11 @@ class MobileNetV1(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name='conv1'
         )
-        self.initial_bn = layers.BatchNormalization(name='conv1_bn')
+        self.initial_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name='conv1_bn',
+        )
         self.initial_relu = layers.ReLU(name='conv1_relu')
 
         # Build depthwise separable blocks
@@ -178,17 +212,23 @@ class MobileNetV1(keras.Model):
                 filters=actual_filters,
                 stride=stride,
                 block_id=block_id,
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- the block's
+                # norms go through create_normalization_layer, whose OWN default
+                # is epsilon=1e-6, not the reference's 1e-3. Do NOT drop this
+                # kwarg "because batch_norm is the default anyway": the type is
+                # defaulted, the epsilon is not, and without it 183 of this
+                # family's 189 BatchNorm layers silently run at 1e-6.
+                normalization_kwargs={'epsilon': REFERENCE_BN_EPSILON},
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'block_{block_id}'
             )
             self.depthwise_blocks.append(block)
 
-        # Global average pooling
-        self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
-
-        # Classification head
+        # Classification head (the global pool is part of it -- D-066)
         if self.include_top:
+            self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
+
             # Shape layer to ensure correct dimensions
             self.reshape = layers.Reshape((1, 1, int(1024 * self.width_multiplier)), name='reshape')
 
@@ -225,11 +265,17 @@ class MobileNetV1(keras.Model):
         for block in self.depthwise_blocks:
             x = block(x, training=training)
 
-        # Global average pooling
-        x = self.global_avg_pool(x)
-
-        # Classification head
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-066: pooling belongs to the
+        # HEAD. Do NOT move `global_avg_pool` back outside this branch: applied
+        # unconditionally it made `include_top=False` return a 2-D pooled vector,
+        # where V2/V3/V4 all return the 4-D feature map, so a detection or
+        # segmentation head silently received the wrong rank. A caller who wants
+        # the pooled vector adds one GlobalAveragePooling2D. See decisions.md D-066.
         if self.include_top:
+            # Global average pooling
+            x = self.global_avg_pool(x)
+
+            # Classification head
             x = self.reshape(x)
             x = self.dropout(x, training=training)
             x = self.classifier_conv(x)
@@ -315,9 +361,12 @@ class MobileNetV1(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model if it hasn't been built yet
-        if not self.built and self._input_shape:
-            self.build((None, *self._input_shape))
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass.
+        # Do NOT go back to `self.build((None, *self._input_shape))`: for a
+        # subclassed model that only MARKS the model built and materializes no
+        # sub-layer weights, so the summary and the count_params() line below both
+        # reported exactly 0. See decisions.md D-065.
+        materialize_for_summary(self, self._input_shape)
 
         super().summary(**kwargs)
 
@@ -354,7 +403,8 @@ def create_mobilenetv1(
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
         width_multiplier: Float, additional multiplier applied on top of variant default
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no MobileNetV1 checkpoints ship with this package.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -365,8 +415,18 @@ def create_mobilenetv1(
         >>> model = create_mobilenetv1("small", num_classes=10, input_shape=(32, 32, 3))
         >>> model = create_mobilenetv1("pico", num_classes=100)
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented for MobileNetV1")
+        raise NotImplementedError(
+            f"No pretrained MobileNetV1 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobilenetv1('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
+        )
 
     model = MobileNetV1.from_variant(
         variant,

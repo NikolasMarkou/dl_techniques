@@ -1,8 +1,9 @@
 """
 Test suite for PFTSR (permuted self-attention super-resolution).
 
-create_pft_sr(scale, variant) builds the model; window_size=8 so input H/W are
-kept divisible by 8. NHWC float32 input (B, H, W, 3); at scale=2 the output is
+create_pft_sr(scale, variant) builds the model; the paper-sourced variants use
+window_size=32 (repo_medium keeps 8), so input H/W are
+kept divisible by 32. NHWC float32 input (B, H, W, 3); at scale=2 the output is
 the upsampled image (B, 2H, 2W, 3). Covers a forward pass and the M2 full
 .keras save -> load -> identical-output round-trip.
 """
@@ -93,3 +94,167 @@ class TestPFTSR:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestNearestUpsamplerScaleValidation:
+    """`_build_nearest_upsampler` stacks `int(log2(scale))` doubling stages.
+
+    At `scale=3` that is ONE stage — a 2x output for a 3x request. The module docstring
+    named the defect and the model shipped it anyway; `_build_pixelshuffle_upsampler`
+    has always raised for unsupported scales, so only this branch was unguarded.
+    `create_pft_sr` hardcodes `upsampler='pixelshuffle'`, which is why the hole was
+    reachable only through direct `PFTSR(...)` construction.
+    """
+
+    @staticmethod
+    def _build(scale):
+        """The upsampler is constructed in `build()`, not `__init__` — same as the
+        pixelshuffle branch, whose `raise` has always fired at the same moment. So the
+        guard must be reached through a build, not a bare constructor call."""
+        model = PFTSR(
+            scale=scale,
+            upsampler="nearest+conv",
+            embed_dim=16,
+            num_blocks=[1],
+            num_heads=2,
+            window_size=8,
+        )
+        model.build((None, 16, 16, 3))
+        return model
+
+    @pytest.mark.parametrize("scale", [3, 5, 6, 7, 12])
+    def test_a_non_power_of_two_scale_raises(self, scale):
+        with pytest.raises(ValueError, match=r"nearest\+conv"):
+            self._build(scale)
+
+    @pytest.mark.parametrize("scale", [2, 4, 8])
+    def test_a_power_of_two_scale_still_builds(self, scale):
+        """Anti-vacuity: the guard must not simply reject everything."""
+        assert self._build(scale).scale == scale
+
+    def test_the_realized_scale_is_the_requested_one(self):
+        """The property the raise protects: what built must actually upsample by
+        `scale`. A guard that admits a scale it cannot realize is no guard."""
+        model = PFTSR(
+            scale=4,
+            upsampler="nearest+conv",
+            embed_dim=16,
+            num_blocks=[1],
+            num_heads=2,
+            window_size=8,
+        )
+        x = np.random.default_rng(0).random((1, 16, 16, 3)).astype("float32")
+        out = model(x, training=False)
+        assert tuple(out.shape[1:3]) == (64, 64)
+
+    def test_the_pixelshuffle_upsampler_still_supports_three(self):
+        """The guard is specific to `nearest+conv`; scale=3 remains legal elsewhere."""
+        model = PFTSR(
+            scale=3,
+            upsampler="pixelshuffle",
+            embed_dim=16,
+            num_blocks=[1],
+            num_heads=2,
+            window_size=8,
+        )
+        assert model.scale == 3
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestPFTSRGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    232 trainable weights across permuted-attention blocks and a pixel-shuffle
+    upsampler. This is the size at which an AGGREGATE gradient-norm assertion
+    stops meaning anything -- one dead attention projection among 232 live
+    tensors moves a global norm by nothing measurable. The oracle asserts per
+    weight, keyed by ``Variable.path``.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _model()
+        x = _images()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-118
+#
+# `create_pft_sr(scale, variant)` took ZERO `**kwargs` and hard-coded nine
+# `PFTSR` arguments in its `return`, making `window_size`, `drop_path_rate`,
+# `upsampler`, `norm_type`, `use_lepe` and the three dropout knobs unreachable
+# through the only public factory this package exposes. Each hard-coded literal
+# was byte-identical to the constructor's own default, which is why the three
+# variants' parameter counts are UNCHANGED by the repair (measured before and
+# after: light 1_025_027, base 2_180_283, large 4_120_739).
+#
+# Those three numbers were superseded on 2026-08-23 (D-463): `light` and `base`
+# were corrected to the paper's own two released configs and `large` was renamed
+# `repo_medium`. The derivation of each new number, MEASURED at scale=4 on a
+# (1, 32, 32, 3) input:
+#   light  52-wide, [2,4,6,6,6], 4 heads, mlp 1.0, window 32 -> 13_219_603 total
+#          (  636_691 trainable; the rest is 12 shifted blocks x a (1,1024,1024)
+#          non-trainable attention_mask buffer, which count_params() includes)
+#   base   240-wide, [4,4,4,6,6,6], 6 heads, mlp 2.0, window 32 -> 34_384_803 total
+#          (18_656_163 trainable, same mask-buffer inflation)
+#   repo_medium  unchanged in every field from the old `large` -> 4_120_739 total
+#          (2_744_483 trainable), which is the point of asserting it here: the
+#          rename moved no number.
+# ---------------------------------------------------------------------------
+_PFT_VARIANT_PARAMS = {
+    "light": 13_219_603,
+    "base": 34_384_803,
+    "repo_medium": 4_120_739,
+}
+
+
+@pytest.mark.parametrize("variant, expected_params", sorted(_PFT_VARIANT_PARAMS.items()))
+def test_the_variant_parameter_counts_did_not_move(variant, expected_params):
+    keras.utils.set_random_seed(0)
+    model = create_pft_sr(4, variant)
+    model(keras.ops.zeros((1, 32, 32, 3)))
+    assert model.count_params() == expected_params
+
+
+@pytest.mark.parametrize("key, value, default", [
+    # 32, not the constructor's 8: `base` quotes the paper's PFT config, which is a
+    # 32x32-window model, so MODEL_VARIANTS["base"] supplies window_size (D-463).
+    ("window_size", 16, 32),
+    ("upsampler", "pixelshuffledirect", "pixelshuffle"),
+    ("norm_type", "rms_norm", "layer_norm"),
+    ("use_lepe", False, True),
+    ("drop_path_rate", 0.2, 0.0),
+])
+def test_every_constructor_knob_is_reachable_through_the_factory(key, value, default):
+    keras.utils.set_random_seed(0)
+    assert getattr(create_pft_sr(4, "base"), key) == default
+    overridden = create_pft_sr(4, "base", **{key: value})
+    assert getattr(overridden, key) == value, (
+        f"create_pft_sr ignored the documented override {key}={value!r}"
+    )
+
+
+def test_a_factory_override_does_not_write_back_into_the_variant_table():
+    """`.copy()` guards the LOCAL dict `config.update(kwargs)` mutates.
+
+    Note the model-side alias this looks like is NOT the hazard: Keras 3
+    rewraps any list assigned to a Model attribute as a fresh `TrackedList`,
+    so `m.num_blocks.append(99)` leaves `MODEL_VARIANTS` untouched even on the
+    unfixed source (measured). The table entry itself is what needed guarding.
+    """
+    before = list(PFTSR.MODEL_VARIANTS["base"]["num_blocks"])
+    create_pft_sr(4, "base", num_blocks=[1, 1])
+    assert PFTSR.MODEL_VARIANTS["base"]["num_blocks"] == before
+    assert PFTSR.MODEL_VARIANTS["base"]["embed_dim"] == 240

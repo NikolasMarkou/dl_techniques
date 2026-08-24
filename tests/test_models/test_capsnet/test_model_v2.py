@@ -143,15 +143,32 @@ class TestCapsNetV2:
 
     # ---- Stage 2: pretrained-backbone factory ----
 
-    def test_create_capsnet_v2_pretrained_falls_back_to_random_init(self, synth_cifar):
-        """Placeholder URL → ResNet's existing fallback returns a random-init
-        backbone with a logged warning. Wrapper must not raise."""
+    def test_create_capsnet_v2_pretrained_true_raises(self):
+        """`pretrained=True` must RAISE, never return a random-init backbone.
+
+        No public ResNet weights ship with dl_techniques. Before this contract,
+        `ResNet.PRETRAINED_WEIGHTS` held placeholder URLs pointing at a
+        non-existent host, `from_variant` caught the download failure, logged a
+        warning and returned an untrained backbone — so a caller asking for a
+        pretrained stem silently got random weights. Do not reinstate that.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained ResNet weights"):
+            create_capsnet_v2_pretrained(
+                backbone="resnet18",
+                num_classes=10,
+                input_shape=(32, 32, 3),
+                pretrained=True,
+                decay_steps=100,
+            )
+
+    def test_create_capsnet_v2_pretrained_false_builds(self, synth_cifar):
+        """`pretrained=False` still builds a working random-init backbone."""
         x, _ = synth_cifar
         model = create_capsnet_v2_pretrained(
             backbone="resnet18",
             num_classes=10,
             input_shape=(32, 32, 3),
-            pretrained=True,  # exercises the download fallback path
+            pretrained=False,
             decay_steps=100,
         )
         out = model(x)

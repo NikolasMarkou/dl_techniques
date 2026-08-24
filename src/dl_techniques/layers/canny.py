@@ -1,32 +1,66 @@
 """
-Canny Edge Detection Layer
-==========================
+Multi-stage Canny edge detection as a differentiable layer.
 
-A differentiable, multi-stage Canny edge detector (Canny, 1986,
-https://doi.org/10.1109/TPAMI.1986.4767851) as a Keras layer: Gaussian
-smoothing, Sobel gradients, directional non-maximum suppression, double
-thresholding, and iterative hysteresis edge tracking. All convolution kernels
-are stored as non-trainable weights.
+This layer embodies the principle of encoding a classical algorithm as fixed
+network weights, a design paradigm that expresses a hand-designed operator in the
+same computational vocabulary as learned layers so it can be composed into a
+graph, run on the accelerator, and differentiated through. Nothing here is
+trained: every convolution kernel is stored as a non-trainable weight, so the
+layer contributes a fixed, well-understood feature extractor rather than
+additional capacity. Its value is that the Canny operator remains the optimal
+edge detector under Canny's original criteria (good detection, good localization,
+single response per edge), and those criteria are difficult for a learned
+convolution stack to satisfy incidentally.
 
-ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe ``call``):
---------------------------------------------------------------
-The forward path of this layer intentionally uses raw TensorFlow operations and
-is therefore **TensorFlow-backend-only** by design:
+The algorithm proceeds through five stages, each addressing a specific failure
+mode of naive gradient thresholding:
 
-- ``tf.nn.dilation2d`` — directional morphological dilation used both for
-  non-maximum suppression (selecting the per-direction local maximum) and for
-  propagating strong edges into adjacent weak ones during hysteresis.
-  ``keras.ops`` exposes **no morphological-dilation primitive** of any kind, so
-  this cannot be migrated to ``keras.ops``.
-- ``tf.while_loop`` / ``tf.identity`` / ``tf.constant`` — drive the iterative
-  hysteresis fixed-point that connects weak edges to strong ones until
-  convergence. ``keras.ops.while_loop`` exists but the loop body depends on
-  ``tf.nn.dilation2d`` above, which has no backend-agnostic equivalent.
+1.  **Gaussian smoothing.** Differentiation amplifies high-frequency noise, so
+    the image is first convolved with `G(sigma)`. The kernel width is derived
+    from `sigma` rather than specified independently, which is why `sigma >= 0.8`
+    is enforced: smaller values would produce a support smaller than 3x3.
+2.  **Sobel gradients.** Separable 3x3 kernels give `Gx` and `Gy`, from which
+    magnitude and orientation follow:
 
-This is a documented, accepted exception to the "only ``keras.ops`` in ``call``"
-rule (see the production roadmap §5). A backend-agnostic rewrite would require a
-morphological-dilation primitive that ``keras.ops`` does not provide. Do NOT
-"fix" this by forcing a broken ``keras.ops`` rewrite.
+    `|G| = sqrt(Gx^2 + Gy^2)`
+    `theta = (atan2(Gy, Gx) * 180/pi + 90) mod 180`
+
+    Orientation is folded into `[0, 180)` because an edge and its reverse are the
+    same edge; only the axis matters, not the sign.
+3.  **Non-maximum suppression.** A thresholded gradient magnitude produces thick
+    ridges several pixels wide. Suppression thins them to single-pixel responses
+    by retaining a pixel only if it is the local maximum *along the gradient
+    direction*. Orientation is discretized into four bins (0, 45, 90, 135
+    degrees), each with a directional kernel whose off-axis entries are `-inf`,
+    so a morphological dilation returns the maximum over exactly the two
+    neighbours perpendicular to the edge.
+4.  **Double thresholding.** A single threshold forces a choice between missing
+    faint edges and admitting noise. Two thresholds instead partition pixels into
+    strong (above `threshold_max`), weak (between the two), and discarded,
+    deferring the decision on weak pixels to the next stage.
+5.  **Hysteresis tracking.** Weak pixels are promoted only when connected to a
+    strong edge, which recovers faint but genuine contours while rejecting
+    isolated noise. Connectivity is resolved as a fixed point: strong edges are
+    dilated into adjacent weak ones and the result is re-dilated until nothing
+    changes or the iteration cap is reached.
+
+The forward path deliberately uses raw TensorFlow operations and is therefore
+TensorFlow-backend-only. `tf.nn.dilation2d` performs the directional morphology
+required by both stage 3 and stage 5, and `keras.ops` exposes no morphological
+dilation primitive of any kind. The hysteresis fixed point is driven by
+`tf.while_loop`; although `keras.ops.while_loop` exists, the loop body itself
+depends on `dilation2d`, so migrating the loop alone would gain nothing. This is
+an accepted, documented exception to the backend-agnostic rule rather than an
+oversight, and it should not be "fixed" by forcing a rewrite onto operations that
+cannot express the same computation.
+
+References:
+    - Canny, 1986. A Computational Approach to Edge Detection. IEEE TPAMI 8(6).
+      (https://doi.org/10.1109/TPAMI.1986.4767851)
+    - Sobel and Feldman, 1968. A 3x3 Isotropic Gradient Operator for Image
+      Processing. Stanford Artificial Intelligence Project.
+    - Serra, 1982. Image Analysis and Mathematical Morphology. Academic Press.
+
 """
 
 import keras

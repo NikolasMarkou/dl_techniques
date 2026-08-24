@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Graph Learning](https://img.shields.io/badge/Task-Graph%20Learning-green)](https://github.com/topics/graph-neural-networks)
 
-A production-ready, fully-featured implementation of the **Modern Relational Graph Transformer (RELGT)** in **Keras 3**. This architecture integrates multi-element tokenization with a hybrid local-global attention mechanism, designed specifically for complex predictive modeling on relational databases and heterogeneous graphs.
+An implementation of the **Modern Relational Graph Transformer (RELGT)** in **Keras 3**. This architecture integrates multi-element tokenization with a hybrid local-global attention mechanism, designed specifically for complex predictive modeling on relational databases and heterogeneous graphs.
 
 RELGT addresses the limitations of standard Graph Neural Networks (GNNs) by decoupling structural information from feature processing using learnable global centroids, allowing for the capture of long-range dependencies without the quadratic cost of standard transformers.
 
@@ -44,7 +44,7 @@ Its defining feature is the use of **Global Centroids**: learnable "virtual toke
 1.  **Multi-Element Tokenization**: A unified `RELGTTokenEncoder` that fuses raw features, entity types, hop distances, and GNN-based positional encodings into a rich vector representation for every node.
 2.  **Hybrid Local-Global Attention**: Uses a set of learnable global tokens (centroids) to capture graph-level context, avoiding the computational expense of full $O(N^2)$ attention while preventing over-smoothing.
 3.  **Keras 3 Native**: Built with the modern Keras Functional API, ensuring backend agnosticism (JAX, TensorFlow, PyTorch) and full serialization support.
-4.  **Factory Methods**: Includes `create_relgt_model` with presets (`small`, `base`, `large`) for rapid experimentation.
+4.  **Factory Methods**: Includes `create_relgt_model` with presets (`small`, `base`, `repo_medium`) for rapid experimentation.
 
 ### Why RELGT Matters
 
@@ -158,13 +158,13 @@ Build a model for node classification with 5 distinct node types.
 
 ```python
 import keras
-from model import create_relgt_model
+from dl_techniques.models.relgt.model import create_relgt_model
 
 # 1. Create Model (Base configuration)
 model = create_relgt_model(
     output_dim=2,               # Binary classification
     problem_type="classification",
-    model_size="base",          # 128 dim, 4 heads
+    model_size="base",          # 512 dim, 4 heads, 4096 centroids (official defaults)
     num_node_types=5
 )
 
@@ -198,7 +198,7 @@ print(f"Output Shape: {output.shape}") # (2, 2)
 **Purpose**: The main Keras `Model` orchestrating the pipeline.
 
 ```python
-from model import RELGT
+from dl_techniques.models.relgt.model import RELGT
 
 model = RELGT(
     output_dim=10,
@@ -214,19 +214,30 @@ model = RELGT(
 
 #### `create_relgt_model(output_dim, problem_type, model_size)`
 The recommended way to instantiate.
-*   `model_size`: `'small'`, `'base'`, or `'large'`.
+*   `model_size`: `'small'`, `'base'`, or `'repo_medium'`.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-Standard configurations provided by the factory function.
+One of the three is the paper authors' own default configuration, quoted from the
+argparse defaults of [snap-stanford/relgt](https://github.com/snap-stanford/relgt)
+(`main_node_ddp.py`: `--channels 512 --num_heads 4 --num_centroids 4096
+--num_layers 1`). The other two are this repository's own tiers -- the official repo
+publishes no model-size ladder at all, and its own `small`/`large` experiment scripts
+name RelBench *dataset*-size categories, not model sizes.
 
-| Variant | Embed Dim | Heads | Global Centroids | Blocks | Params (Approx) | Use Case |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`small`** | 64 | 2 | 16 | 1 | ~100k | Simple baselines, debugging |
-| **`base`** | 128 | 4 | 32 | 2 | ~500k | Standard tabular/graph tasks |
-| **`large`** | 256 | 8 | 64 | 4 | ~2M+ | Large-scale heterogeneous graphs |
+| Variant | Source | Embed Dim | Heads | Global Centroids | FFN | Blocks | Params | Use Case |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| **`small`** | repo-original | 64 | 2 | 16 | 128 | 1 | 115,778 | Simple baselines, debugging |
+| **`base`** | official defaults | 512 | 4 | 4096 | 1024 | 1 | 8,964,610 | Reproducing the published setup |
+| **`repo_medium`** | repo-original | 256 | 8 | 64 | 512 | 4 | 5,744,642 | Deeper, narrower alternative |
+
+Parameter counts are MEASURED on a `(2, 16, 8)` subgraph batch with `output_dim=2`.
+`base`'s `ffn_dim` is NOT quoted -- the official argparse defines no FFN width, so
+1024 keeps this table's own 2x-embedding ratio. `repo_medium` was called `large`
+until 2026-08-23; once `base` carried the published 512 channels, a 256-wide row
+could no longer honestly be called "large".
 
 ---
 
@@ -238,7 +249,7 @@ Predicting a property (float) for a molecule (graph).
 
 ```python
 import keras
-from model import create_relgt_model
+from dl_techniques.models.relgt.model import create_relgt_model
 
 # 1. Setup
 model = create_relgt_model(
@@ -364,7 +375,7 @@ print(loaded_model.get_config())
 
 ```python
 import keras
-from model import create_relgt_model
+from dl_techniques.models.relgt.model import create_relgt_model
 
 def test_relgt_forward():
     model = create_relgt_model(output_dim=1, model_size="small")

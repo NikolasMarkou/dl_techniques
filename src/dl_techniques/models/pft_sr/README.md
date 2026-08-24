@@ -5,7 +5,7 @@
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 [![CVPR 2025](https://img.shields.io/badge/CVPR-2025-blue.svg)](https://cvpr.thecvf.com/)
 
-A production-ready, fully-featured implementation of the **Progressive Focused Transformer (PFT-SR)** architecture in **Keras 3**. This implementation is based on the CVPR 2025 paper by Long et al. and achieves state-of-the-art performance on single image super-resolution benchmarks.
+An implementation of the **Progressive Focused Transformer (PFT-SR)** architecture in **Keras 3**. This implementation is based on the CVPR 2025 paper by Long et al., who report state-of-the-art performance for the PFT-SR architecture on single image super-resolution benchmarks. This port has not been independently trained or benchmarked, and no performance claim is made for it.
 
 The architecture's core innovation is the **Progressive Focused Attention (PFA)** mechanism, which allows attention maps to be inherited and refined across layers. This enables the network to progressively focus on informative features while suppressing redundancy, leading to better reconstruction quality and computational efficiency.
 
@@ -194,7 +194,7 @@ Super-resolve a low-resolution image by 4x.
 
 ```python
 import keras
-from model import create_pft_sr
+from dl_techniques.models.pft_sr.model import create_pft_sr
 
 # 1. Create the model (Base variant)
 model = create_pft_sr(scale=4, variant='base')
@@ -220,7 +220,7 @@ print(f"SR Shape: {sr_image.shape}")
 **Purpose**: The main Keras `Model` class.
 
 ```python
-from model import PFTSR
+from dl_techniques.models.pft_sr.model import PFTSR
 
 model = PFTSR(
     scale=4,
@@ -238,19 +238,33 @@ model = PFTSR(
 #### `create_pft_sr(scale, variant)`
 The recommended way to instantiate models.
 -   `scale`: 2, 3, or 4.
--   `variant`: `'light'`, `'base'`, or `'large'`.
+-   `variant`: `'light'`, `'base'`, or `'repo_medium'`.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-We provide three standard configurations based on the paper.
+Two of the three configurations are the paper's own, quoted field for field from
+the official training YAMLs in [CVL-UESTC/PFT-SR](https://github.com/CVL-UESTC/PFT-SR)
+(`options/train/001_PFT_SRx2_scratch.yml` and `.../101_PFT_light_SRx2_scratch.yml`).
+The third is this repository's own and is named so it does not read as a published
+size: the official repo ships exactly two configs, PFT and PFT_light.
 
-| Variant | Embed Dim | Blocks Per Stage | Heads | Params | Use Case |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`light`** | 48 | `[4, 4, 4, 4]` | 6 | ~0.8M | Mobile/Edge |
-| **`base`** | 60 | `[4, 4, 4, 6, 6, 6]` | 6 | ~1.1M | General Purpose |
-| **`large`** | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | ~1.8M | High-Quality Benchmarks |
+| Variant | Source | Embed Dim | Blocks Per Stage | Heads | MLP | Window | Trainable params (4x) |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`light`** | paper (PFT_light) | 52 | `[2, 4, 6, 6, 6]` | 4 | 1.0 | 32 | 636,691 |
+| **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 18,656,163 |
+| **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 2,744,483 |
+
+Parameter counts are MEASURED at `scale=4` on a `(1, 32, 32, 3)` input. Quote the
+*trainable* count: `count_params()` also counts each shifted block's
+`(1, window^2, window^2)` non-trainable attention-mask buffer, which at window 32
+dominates the total (13,219,603 for `light`, 34,384,803 for `base`) while adding no
+model capacity.
+
+`repo_medium` was called `large` until 2026-08-23, when `base` was corrected from a
+60-wide model to the paper's 240-wide one; at that point an 80-wide variant sitting
+*between* the two published sizes could no longer honestly be called "large".
 
 ---
 
@@ -260,7 +274,7 @@ We provide three standard configurations based on the paper.
 
 ```python
 import keras
-from model import create_pft_sr
+from dl_techniques.models.pft_sr.model import create_pft_sr
 
 # 1. Setup Model
 model = create_pft_sr(scale=4, variant='base')
@@ -352,7 +366,7 @@ PFT-SR benefits significantly from mixed precision on modern GPUs (Volta/Ampere/
 
 ```python
 keras.mixed_precision.set_global_policy('mixed_float16')
-model = create_pft_sr(scale=4, variant='large')
+model = create_pft_sr(scale=4, variant='repo_medium')
 ```
 
 ### XLA Compilation
@@ -402,7 +416,7 @@ Run a quick shape check to ensure the upsampling logic is correct for your confi
 
 ```python
 import keras
-from model import PFTSR
+from dl_techniques.models.pft_sr.model import PFTSR
 
 def test_pft_sr_shapes():
     scale = 4

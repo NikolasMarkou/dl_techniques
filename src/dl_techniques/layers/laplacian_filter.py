@@ -56,7 +56,6 @@ from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
 
 from .gaussian_filter import GaussianFilter
 from .blur_pool import BlurPool2D
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

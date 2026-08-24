@@ -6,9 +6,40 @@
 [![dl_techniques](https://img.shields.io/badge/dl__techniques-Standard-green.svg)](https://github.com/your-repo/dl_techniques)
 [![arXiv](https://img.shields.io/badge/arXiv-2412.09871-b31b1b.svg)](https://arxiv.org/abs/2412.09871)
 
-A production-ready, fully-featured implementation of the **Byte Latent Transformer (BLT)** built on the **dl_techniques** framework using **Keras 3**. This architecture represents a paradigm shift in Large Language Models (LLMs), moving away from fragile tokenizers to a robust, dynamic, byte-level processing pipeline.
+An implementation of the **Byte Latent Transformer (BLT)** built on the **dl_techniques** framework using **Keras 3**. This architecture represents a paradigm shift in Large Language Models (LLMs), moving away from fragile tokenizers to a robust, dynamic, byte-level processing pipeline.
 
-This implementation leverages `dl_techniques` factories to provide state-of-the-art stability features, including **Zero-Centered RMSNorm**, **SwiGLU FFNs**, and **Grouped Query Attention**, matching the performance of token-based models (like Llama 3) while offering superior robustness and up to **50% greater inference efficiency** via dynamic patching.
+This implementation leverages `dl_techniques` factories to provide modern stability components, including **Zero-Centered RMSNorm**, **SwiGLU FFNs**, and **Grouped Query Attention**. Meta's BLT paper reports parity with token-based models (like Llama 3) alongside greater robustness to input noise; none of that — nor the **50% inference-efficiency** figure — has been reproduced or measured here. Every number in this section is quoted from the paper, and no performance claim is made for this port.
+
+> ### Implementation status — patching IS entropy-based; read this for how it differs
+>
+> Verified against `layers/blt_blocks.py` at `DynamicPatcher.call` on 2026-08-15. An
+> earlier revision of this README said patching was not entropy-based; that was true of
+> the code as it stood on 2026-08-14 and is no longer true.
+>
+> - **Boundaries come from the entropy values.** A byte opens a new patch when its
+>   entropy exceeds `entropy_threshold`, and every row of the batch is segmented
+>   independently — two sequences of the same length get different patch lengths. The
+>   `EntropyModel`'s 3,325,700 parameters and the trainer's separate entropy-pretraining
+>   stage are therefore load-bearing rather than paid for and discarded.
+> - **The `max_patches` budget is spent in POSITION order.** The first `max_patches - 1`
+>   crossings become boundaries and every later one is dropped, merging the tail into the
+>   final patch. This is deliberate and not negotiable: ranking crossings by entropy
+>   magnitude would let a late byte displace an earlier boundary, making an earlier
+>   byte's patch id depend on a future byte, which the next-byte objective forbids. The
+>   in-source anchor at `DynamicPatcher.call` records the measured leak.
+> - **Patch lengths always sum to exactly `seq_len`.** They are occupancy counts of a
+>   per-byte assignment, so the invariant holds for any threshold, including both
+>   degenerate ends. This matters because `compute_patch_ids` does not validate the sum —
+>   it silently misassigns ids instead.
+> - **`entropy_threshold` is a plain constant in nats and must be chosen for the
+>   vocabulary.** The uniform ceiling is `ln(vocab_size)` (5.56 nats at `vocab_size=260`).
+>   A threshold far below the model's typical entropy makes every position a boundary:
+>   one byte per patch, with the whole tail in the last patch. Construction logs a warning
+>   in that regime. A threshold above `ln(vocab_size)` produces no boundary at all and
+>   the whole sequence becomes one patch.
+>
+> Still not implemented from the paper: hash n-gram byte embeddings, and any trained or
+> approximate-monotonicity boundary criterion.
 
 ---
 
@@ -114,7 +145,7 @@ Raw Bytes
 
 ### 4.1 The Entropy Model & Patcher
 *   **EntropyModel**: A lightweight causal transformer.
-*   **Decision Rule**: Uses Shannon entropy thresholding.
+*   **Decision Rule**: Shannon entropy thresholding. A byte whose entropy exceeds `entropy_threshold` (in nats) opens a new patch; once `max_patches - 1` boundaries have been taken, later crossings are dropped and the tail merges into the final patch (position order, for causality — see *Implementation status*).
 *   **Implementation**: Fully configurable via `dl_techniques` config dictionaries.
 
 ### 4.2 Local Encoder

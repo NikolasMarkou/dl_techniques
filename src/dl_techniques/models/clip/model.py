@@ -1,56 +1,97 @@
 """
-CLIP (Contrastive Language-Image Pre-training) Model Implementation.
+Contrastive language-image pretraining over two modernized transformer towers
+(grouped-query attention, RMSNorm, SwiGLU, rotary position embeddings).
 
-CLIP learns a shared, multimodal embedding space where visual and textual
-concepts that correspond to each other are located closely. This is
-achieved through a dual-encoder architecture: a Vision Transformer (ViT)
-processes images, and a standard text Transformer processes natural
-language descriptions. Both encoders project their respective inputs into
-feature vectors within this common space.
+CLIP addresses a supervision problem rather than an architectural one. Labelled
+image datasets are small and their label sets are closed, so a classifier
+trained on one can only ever name the categories somebody enumerated in
+advance. Image-caption pairs are abundant and their supervision is open-ended,
+but a caption is not a label: predicting it token by token is expensive, and two
+captions of the same picture rarely agree word for word. The contrastive
+formulation extracts a usable signal anyway by asking a much weaker question —
+which caption in this batch belongs to which image. Both modalities are mapped
+into one embedding space, each feature is L2-normalized so an inner product is a
+cosine, and a batch of `N` pairs produces an `N x N` similarity matrix whose
+diagonal must dominate both its row and its column:
 
-The model is optimized via a contrastive learning objective. Given a batch
-of N (image, text) pairs, the encoders produce N image features and N text
-features. After L2 normalization, the cosine similarity between every
-image feature and every text feature is calculated, forming an N x N
-similarity matrix. The diagonal of this matrix represents the similarity
-of N correct pairs, while the off-diagonal elements represent the
-N² - N incorrect pairs.
+`S = tau * f_I(I) @ f_T(T)^T`
 
-The learning task is to maximize the similarity on the diagonal (correct
-pairs) while minimizing it on the off-diagonal. This is framed as a
-prediction problem: for a given image, the model predicts which of the N
-text captions is its true partner. A symmetric objective is computed for
-predicting the correct image for each text caption.
+The training objective is the symmetric cross-entropy over `S`'s rows and its
+columns. It scales because the batch supplies its own negatives — the `N^2 - N`
+mismatched pairs cost nothing to construct — and it yields zero-shot
+classification for free, since any set of class names can be encoded as text and
+used directly as a classifier weight matrix. The loss itself is not implemented
+here; this module produces the two logits matrices and the temperature, and the
+loss lives in `dl_techniques.losses`.
 
-A learnable temperature parameter, τ, scales the logits (similarity scores)
-before the softmax operation. This parameter controls the sharpness of the
-predicted probability distribution, effectively tuning the model's focus on
-hard-negative examples. The final training loss is the average of two
-cross-entropy losses: one for image-to-text predictions (computed over
-the rows of the similarity matrix) and one for text-to-image predictions
-(computed over the columns).
+The two towers never see each other. There is no cross-attention, no shared
+trunk and no fusion layer: the only place the modalities meet is the final
+matmul, and the only thing that forces them into agreement is the contrastive
+gradient. Each tower therefore ends in its own bias-free `Dense(embed_dim)`
+projection out of its native width (768 for vision, 512 for text at base scale)
+into the shared space, followed by L2 normalization. Keeping the projection last
+and the normalization after it is what makes the dot product a cosine and the
+temperature the sole scale in the logits.
 
-This approach allows CLIP to learn robust visual representations directly
-from raw text, enabling powerful zero-shot transfer capabilities to a wide
-range of downstream tasks without requiring direct fine-tuning.
+The vision tower is a strided convolution patch embedding, a learnable CLS token
+prepended to the patch sequence, `vision_layers` transformer blocks, and a read
+of position 0. The text tower is a token embedding, `text_layers` blocks, and a
+read of the last non-padding position. Neither tower carries a learned
+positional table: position enters only as RoPE inside the grouped-query
+attention, rotating queries and keys by an angle proportional to index. For the
+image side this means patches are positioned along the flattened raster order
+with the CLS token at index 0, which is a real departure from CLIP's learned
+positional embedding and worth knowing before comparing numbers.
+
+Two pooling details are easy to get wrong. The CLS token is a single
+`(1, 1, vision_width)` weight broadcast across the batch, so every image starts
+from the same query vector and the attention blocks are what make its final
+state image-specific; it is created in `build()` alongside the temperature rather
+than in `__init__`. On the text side the pooled position is found by
+`last_non_pad_token`, which counts non-pad tokens and reads index `count - 1`.
+That assumes right padding and pad id `0` — the id is hard-coded at this call
+site. Left-padded batches, or a tokenizer whose pad id is not zero, will pool the
+wrong position silently rather than raising. Where the tower still differs from
+the reference implementation is *which* position it pools: OpenAI CLIP locates
+the EOT token as the argmax of the token ids, this one counts non-pad tokens.
+The masking now agrees — `encode_text` builds a lower-triangular causal mask and
+passes it to every text block, so the pooled last real token is the only
+position that has read the whole sentence, which is what makes last-token
+pooling meaningful. The mask is constructed in the masking factory's *block*
+semantics and inverted once to the *attend* semantics the attention layers
+expect, and it is broadcast to rank 3 deliberately: a rank-2 mask is read by
+`GroupedQueryAttention` as a `(batch, seq)` padding mask, not as a
+`(seq, seq)` score mask. The vision tower is bidirectional and stays so — there
+is no ordering over image patches to respect.
+
+The temperature is stored as its logarithm. `logit_scale` is an unconstrained
+scalar weight and `exp` is applied on every use, which keeps the multiplier
+strictly positive under ordinary gradient descent without a constraint object.
+Its default init of 2.6592 is `ln(1 / 0.07)`, the CLIP paper's starting
+temperature of roughly 14.3. Unlike the MobileCLIP models in this repository,
+this class applies no upper clamp to `exp(logit_scale)`: a diverging temperature
+here produces `inf` logits and a `nan` loss with no other symptom, so a trainer
+that expects OpenCLIP's clamp must supply it.
+
+`call` is deliberately partial. Passing only `image` or only `text` returns just
+that tower's features and omits the logits keys entirely, so encoding a caption
+bank for retrieval does not require fabricating a dummy image batch. The dict
+output shape is therefore input-dependent, which any consumer indexing the
+result must account for.
 
 References:
-    - Radford, A., et al. (2021). Learning Transferable Visual
-      Representations from Natural Language Supervision. In Proceedings of
-      the 38th International Conference on Machine Learning (ICML).
-      https://arxiv.org/abs/2103.00020
-
-Mathematical Framework:
-    1. Image encoder: f_I(image) → R^d (ViT with patches)
-    2. Text encoder: f_T(text) → R^d (Transformer with tokens)
-    3. Similarity: S = f_I(I) · f_T(T)^T / τ (temperature-scaled cosine)
-    4. Contrastive loss: symmetric cross-entropy on similarity matrix
-
-Model Variants:
-    - "ViT-B/32": Base model with 32x32 patches
-    - "ViT-B/16": Base model with 16x16 patches
-    - "ViT-L/14": Large model with 14x14 patches
-    - "ViT-H/14": Huge model with 14x14 patches
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision. (https://arxiv.org/abs/2103.00020)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer
+      Models from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
 """
 
 import keras
@@ -67,6 +108,7 @@ from dl_techniques.utils.clip_utils import (
     last_non_pad_token,
 )
 from dl_techniques.layers.transformers import TransformerLayer
+from dl_techniques.utils.masking import create_mask
 
 # ---------------------------------------------------------------------
 
@@ -80,7 +122,7 @@ class CLIP(keras.Model):
     and a standard Transformer for text encoding, projecting both into a
     shared embedding space for contrastive learning.
 
-    **Intent**: Provide a production-ready CLIP implementation that follows
+    **Intent**: Provide a complete CLIP implementation that follows
     modern Keras 3 best practices for robust serialization and deployment.
 
     **Architecture**:
@@ -240,13 +282,33 @@ class CLIP(keras.Model):
             "text_kv_heads": 12,
             "embed_dim": 768,
         },
+        # DECISION plan-2026-08-22T035419-a11304c8/D-112
+        # `text_layers` is 24, not 12. FETCHED 2026-08-22 from the only released
+        # ViT-H/14 CLIP,
+        # https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/raw/main/config.json
+        # -- text_config: hidden_size 1024, num_hidden_layers 24,
+        # num_attention_heads 16, projection_dim 1024; vision_config:
+        # hidden_size 1280, num_hidden_layers 32, num_attention_heads 16,
+        # patch_size 14. Every other field in this row already agreed. The 12
+        # was the L/14 row's text depth carried down one line: B/32, B/16 and
+        # L/14 all legitimately have 12 text layers (verified against
+        # `openai/clip-vit-{base-patch32,base-patch16,large-patch14}`), H/14 is
+        # the one scale where the text tower deepens, and copying the previous
+        # row is exactly how that gets missed. Do NOT "restore consistency" by
+        # putting 12 back.
+        # `vision_kv_heads`/`text_kv_heads` are NOT from any released CLIP -- no
+        # CLIP checkpoint uses grouped-query attention. They are this
+        # implementation's declared modernization (GQA + RMSNorm + SwiGLU +
+        # RoPE, module docstring line 3, Ainslie et al. 2023 cited), so they are
+        # deliberately not traced to Radford et al. 2021.
+        # See decisions.md D-112.
         "ViT-H/14": {
             "patch_size": 14,
             "vision_layers": 32,
             "vision_width": 1280,
             "vision_heads": 16,
             "vision_kv_heads": 4,
-            "text_layers": 12,
+            "text_layers": 24,
             "text_width": 1024,
             "text_heads": 16,
             "text_kv_heads": 16,
@@ -511,6 +573,34 @@ class CLIP(keras.Model):
         # Mark as built
         super().build(input_shape)
 
+    def _ensure_built(self) -> None:
+        """Build the model's own weights if a public encoder is called first.
+
+        `class_token`, `logit_scale` and the positional embeddings are created in
+        `build`, which Keras runs on `__call__`. `encode_image` is a public entry point that does NOT go through
+        `__call__`, so on a fresh instance it reads `self.class_token` as None
+        and fails inside `ops.broadcast_to` with
+
+            ValueError: Attempt to convert a value (None) ... to a Tensor
+
+        rather than saying the model is unbuilt. Shapes come from the constructor
+        config, so no input is needed to resolve them.
+
+        `encode_text` deliberately does NOT call this. It touches none of the
+        weights `build` creates, and building there would LOCK the layer, so a
+        caller that swaps or taps `text_transformer_layers` after a first
+        `encode_text` -- which is exactly how the causality probe in
+        `tests/test_models/test_clip/test_model.py` reads per-position hidden
+        states -- would hit "You cannot add new elements of state to a layer
+        that is already built".
+        """
+        if self.built:
+            return
+        self.build({
+            'image': (None, self.image_size, self.image_size, 3),
+            'text': (None, self.context_length),
+        })
+
     def encode_image(
         self,
         images: keras.KerasTensor,
@@ -528,6 +618,7 @@ class CLIP(keras.Model):
         Returns:
             L2-normalized image features with shape `(batch_size, embed_dim)`.
         """
+        self._ensure_built()
         batch_size = ops.shape(images)[0]
 
         # Convert to patches: (batch, num_patches, vision_width)
@@ -581,9 +672,26 @@ class CLIP(keras.Model):
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
 
+        # Causal mask. `create_mask` returns BLOCK semantics (True = mask out);
+        # the attention layers expect ATTEND semantics, hence the inversion.
+        # Without this the tower is bidirectional and the pooled last token is
+        # not the only position that has read the whole sentence -- which is
+        # both a departure from OpenAI CLIP and the reason last-token pooling
+        # is meaningful at all.
+        # The mask is broadcast to rank 3 (batch, seq, seq) on purpose: the
+        # attention layers read a rank-2 mask as a (batch, seq) PADDING mask.
+        batch_size = ops.shape(text_ids)[0]
+        seq_len = ops.shape(text_ids)[1]
+        causal_block = create_mask('causal', seq_len=seq_len, dtype='bool')
+        causal_block = ops.broadcast_to(
+            ops.expand_dims(causal_block, axis=0),
+            (batch_size, seq_len, seq_len),
+        )
+        attend_mask = ops.logical_not(causal_block)
+
         # Apply text transformer layers
         for transformer_layer in self.text_transformer_layers:
-            x = transformer_layer(x, training=training)
+            x = transformer_layer(x, attention_mask=attend_mask, training=training)
 
         # Extract features from the last non-padding token
         # (assuming 0 is the padding id; right-padded sequences).

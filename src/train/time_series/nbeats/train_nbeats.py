@@ -299,7 +299,6 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
             use_normalization=self.config.use_normalization,
             kernel_regularizer=kernel_regularizer,
             dropout_rate=self.config.dropout_rate,
-            reconstruction_weight=self.config.reconstruction_loss_weight,
             input_dim=self.config.input_dim,
             output_dim=1
         )

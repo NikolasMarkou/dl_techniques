@@ -10,10 +10,11 @@ Dataset: GLUE/SST-2 (loaded via tensorflow_datasets)
 
 import os
 import keras
+import argparse
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -66,7 +67,15 @@ def create_tokenizer(config: FinetuneConfig) -> TiktokenPreprocessor:
 
 
 def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, config: FinetuneConfig):
-    """Tokenizes GLUE/SST-2 data."""
+    """Tokenizes GLUE/SST-2 data.
+
+    TFDS' GLUE builder has no supervised structure, so its elements are DICTS,
+    not ``(text, label)`` pairs -- ``tfds.load(..., as_supervised=True)`` raises
+    ``ValueError: as_supervised=True but glue does not support a supervised
+    structure``. The feature names read below are the builder's own
+    (``glue/sst2`` 2.0.0: ``sentence`` -> string, ``label`` -> int64 ClassLabel,
+    plus an unused ``idx``).
+    """
 
     def _tokenize(text, label):
         text_str = text.numpy().decode('utf-8')
@@ -78,10 +87,10 @@ def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, c
             label
         )
 
-    def _wrapper(text, label):
+    def _wrapper(example: Dict[str, tf.Tensor]):
         input_ids, attn_mask, type_ids, label = tf.py_function(
             _tokenize,
-            [text, label],
+            [example['sentence'], example['label']],
             [tf.int32, tf.int32, tf.int32, tf.int64]
         )
 
@@ -105,13 +114,52 @@ def preprocess_glue(dataset: tf.data.Dataset, tokenizer: TiktokenPreprocessor, c
 # Main
 # ---------------------------------------------------------------------
 
-def main():
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse the CLI for GLUE/SST-2 fine-tuning.
+
+    One flag per `FinetuneConfig` field it overrides; no invented knobs.
+    """
+    parser = argparse.ArgumentParser(description="BERT fine-tuning on GLUE/SST-2")
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--batch-size', type=int, default=FinetuneConfig.batch_size,
+                        help='Batch size')
+    parser.add_argument('--epochs', type=int, default=FinetuneConfig.epochs,
+                        help='Fine-tuning epochs')
+    parser.add_argument('--learning-rate', type=float, default=FinetuneConfig.learning_rate,
+                        help='Learning rate')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None):
+    # MUST be first: `--help` has to exit before `tfds.load` (which materializes
+    # or downloads GLUE) and before any model construction.
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # Function-scope import on purpose -- do NOT hoist. `train.common`'s
+    # package init allocates a GPU device at import time (see the fuller note
+    # in `pretrain.py`, and decisions.md D-006).
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: that root
+    # cause is FIXED (`image_text.py`'s constants are plain lists; `import
+    # train.common` emits 0 `Created device` lines). This deferred import is
+    # now harmless, not load-bearing. Kept for the history.
+    from train.common import setup_gpu
+
+    setup_gpu(gpu_id=args.gpu)
+
     config = FinetuneConfig()
+    config.batch_size = args.batch_size
+    config.epochs = args.epochs
+    config.learning_rate = args.learning_rate
+
     os.makedirs(config.save_dir, exist_ok=True)
 
     logger.info("Loading GLUE/SST-2 dataset...")
     # TFDS handles downloading the GLUE benchmark automatically
-    data, info = tfds.load(f'glue/{config.task_name}', with_info=True, as_supervised=True)
+    # NOTE: no `as_supervised=True` -- GLUE has no supervised structure and TFDS
+    # raises on it. `preprocess_glue` consumes the dict elements instead.
+    data, info = tfds.load(f'glue/{config.task_name}', with_info=True)
 
     tokenizer = create_tokenizer(config)
     train_ds = preprocess_glue(data['train'], tokenizer, config)

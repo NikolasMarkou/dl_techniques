@@ -32,6 +32,7 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.attention.factory import assemble_attention_config
 from dl_techniques.layers.transformers import (
     TransformerLayer,
     FFNType,
@@ -82,7 +83,8 @@ class TRMReasoningModule(keras.layers.Layer):
         seq_len (int): The length of the input sequence.
         puzzle_emb_len (int): Length of the puzzle embedding prefix.
         rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
-        attention_type (str): Type of attention mechanism to use.
+        attention_type (str): Type of attention mechanism to use. Defaults to
+            `'group_query'`, the only RoPE-capable plain-self-attention type.
         ffn_type (str): Type of feed-forward network to use.
         normalization_type (str): Type of normalization layer to use.
         normalization_position (str): Position of normalization ('pre'/'post').
@@ -133,7 +135,34 @@ class TRMReasoningModule(keras.layers.Layer):
         seq_len: int,
         puzzle_emb_len: int = 16,
         rope_theta: float = 10000.0,
-        attention_type: AttentionType = 'multi_head',
+        # DECISION plan-2026-08-17T183311-79c63e38/D-007: the default is
+        # 'group_query' with `num_kv_heads == num_heads` (arithmetically plain
+        # MHA) because that is the only registry entry reachable from
+        # `TransformerLayer` that gives plain self-attention AND carries RoPE.
+        #
+        # WHAT NOT TO DO: do NOT "simplify" this back to 'multi_head' with the
+        # rope keys still in `attention_args` below. RoPE is a per-Q/K rotation
+        # applied INSIDE attention; `MultiHeadAttention` declares no RoPE
+        # parameter at all (its registry allowlist is ['dim'] plus nine optional
+        # keys, none of them `max_seq_len` or `rope_theta`), and
+        # `create_attention_layer` USED TO filter kwargs against that allowlist
+        # and drop the rest SILENTLY. So that spelling constructed,
+        # forward-passed, serialized and tested cleanly with RoPE absent — which is
+        # exactly what shipped: with no positional term in the embedding stage
+        # either, `TRMReasoningModule` was exactly permutation-equivariant.
+        # MEASURED on CPU by
+        # `tests/.../test_positional_signal.py::test_reasoning_stack_is_not_permutation_equivariant`:
+        # `max|P f(x) - f(P x)| = 7.7486e-07` (float32 noise) before this
+        # change. Same defect and same fix as ModernBERT's D-007 and DINOv3's
+        # D-010. See decisions.md D-007.
+        #
+        # As of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011)
+        # `create_attention_layer` no longer drops silently — it RAISES on any
+        # key the target type does not declare — so reverting the default to
+        # 'multi_head' would now be a hard ValueError on the rope keys rather
+        # than a silently position-blind model. The fix does not depend on that:
+        # 'group_query' is what actually carries RoPE.
+        attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
         normalization_position: NormalizationPositionType = 'post',
@@ -155,7 +184,8 @@ class TRMReasoningModule(keras.layers.Layer):
             seq_len (int): The length of the input sequence.
             puzzle_emb_len (int): Length of the puzzle embedding prefix.
             rope_theta (float): Theta value for RoPE.
-            attention_type (str): Type of attention mechanism.
+            attention_type (str): Type of attention mechanism. Defaults to
+                `'group_query'`; `'multi_head'` carries no RoPE.
             ffn_type (str): Type of feed-forward network.
             normalization_type (str): Type of normalization layer.
             normalization_position (str): Position of normalization.
@@ -196,6 +226,46 @@ class TRMReasoningModule(keras.layers.Layer):
 
         intermediate_size = int(hidden_size * expansion)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-029
+        # These three keys are THIS MODULE'S OWN generic conveniences derived
+        # from its own hyperparameters, not an end user's expressed intent, so
+        # they are pre-filtered against the target type's registry allowlist
+        # instead of being forwarded unconditionally.
+        #
+        # WHAT NOT TO DO, and why: do NOT go back to a literal
+        # `attention_args={'num_kv_heads': ..., 'max_seq_len': ...,
+        # 'rope_theta': ...}`. Since 2026-08-17
+        # (plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer`
+        # RAISES on any key the target type does not declare, and
+        # `MultiHeadAttention` declares none of these three. MEASURED at
+        # HEAD ae2e2aa0a, both arms:
+        #   * `create_trm(attention_type='multi_head')` ->
+        #     `ValueError: create_attention_layer('multi_head'): 3 unsupported
+        #     parameter(s) ['max_seq_len','num_kv_heads','rope_theta']`, and
+        #     the same for every non-'group_query' type, so the documented
+        #     `attention_type` knob had exactly ONE legal value.
+        #   * A TRM `.keras` saved from commit 1c10e4203 (the last commit
+        #     before the D-007 default flip, whose `TRM.__init__` defaults to
+        #     'multi_head') FAILED to load at HEAD with that same ValueError,
+        #     because `get_config()` serializes `attention_type`. Verified by
+        #     building the artifact in a detached worktree, not by reading.
+        # The registry intersection is what makes both work again: for
+        # 'group_query' all three keys are accepted, so the shipped default
+        # path is byte-identical; for 'multi_head' all three are dropped, which
+        # is correct -- a legacy checkpoint's weights ARE MultiHeadAttention
+        # weights and must be rebuilt as such. No `from_config` string
+        # remapping: rewriting 'multi_head' to 'group_query' on load would
+        # rebuild a DIFFERENT weight tree than the file contains.
+        # See decisions.md D-029.
+        attention_args = assemble_attention_config(
+            attention_type,
+            {
+                'num_kv_heads': num_heads,
+                'max_seq_len': seq_len + puzzle_emb_len,
+                'rope_theta': rope_theta,
+            },
+        )
+
         # CREATE sub-layers in __init__ as per the Golden Rule.
         self.layers_list = [
             TransformerLayer(
@@ -203,10 +273,7 @@ class TRMReasoningModule(keras.layers.Layer):
                 num_heads=num_heads,
                 intermediate_size=intermediate_size,
                 attention_type=attention_type,
-                attention_args={
-                    'max_seq_len': seq_len + puzzle_emb_len,
-                    'rope_theta': rope_theta
-                },
+                attention_args=dict(attention_args),
                 normalization_type=normalization_type,
                 normalization_position=normalization_position,
                 ffn_type=ffn_type,
@@ -362,7 +429,8 @@ class TRMInner(keras.layers.Layer):
         h_layers (int): Number of layers in the high-level reasoning module.
         l_layers (int): Number of layers in the low-level reasoning module.
         rope_theta (float): Theta value for RoPE.
-        attention_type (str): Type of attention mechanism.
+        attention_type (str): Type of attention mechanism. Defaults to
+            `'group_query'`; `'multi_head'` carries no RoPE.
         ffn_type (str): Type of feed-forward network.
         normalization_type (str): Type of normalization layer.
         normalization_position (str): Position of normalization.
@@ -397,7 +465,9 @@ class TRMInner(keras.layers.Layer):
         h_layers: int = 2,
         l_layers: int = 2,
         rope_theta: float = 10000.0,
-        attention_type: AttentionType = 'multi_head',
+        # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
+        # 'multi_head' — see the anchor on TRMReasoningModule.__init__ above.
+        attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
         normalization_position: NormalizationPositionType = 'post',
@@ -421,7 +491,8 @@ class TRMInner(keras.layers.Layer):
             h_layers (int): Number of layers in the H_level module.
             l_layers (int): Number of layers in the L_level module.
             rope_theta (float): Theta value for RoPE.
-            attention_type (str): Type of attention mechanism.
+            attention_type (str): Type of attention mechanism. Defaults to
+                `'group_query'`; `'multi_head'` carries no RoPE.
             ffn_type (str): Type of feed-forward network.
             normalization_type (str): Type of normalization.
             normalization_position (str): Position of normalization.

@@ -61,7 +61,6 @@ from typing import Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

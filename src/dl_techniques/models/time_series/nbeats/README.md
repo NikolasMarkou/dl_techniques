@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **N-BEATS (Neural Basis Expansion Analysis for Time Series)**, a deep learning architecture for time series forecasting that is often competitive with or superior to statistical and recurrent models. This implementation is designed for interpretability and performance, featuring specialized blocks for trend and seasonality decomposition.
+A Keras 3 implementation of **N-BEATS (Neural Basis Expansion Analysis for Time Series)**, a deep learning architecture for time series forecasting that is often competitive with or superior to statistical and recurrent models. This implementation is designed for interpretability and performance, featuring specialized blocks for trend and seasonality decomposition.
 
 ---
 

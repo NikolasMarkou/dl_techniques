@@ -18,15 +18,12 @@ from train.common.nlp import (
     preprocess_mlm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
+    evaluate_mlm_model,
 )
 
 from dl_techniques.models.bert import BERT
-from dl_techniques.models.masked_language_model import (
-    MaskedLanguageModel,
-    visualize_mlm_predictions,
-)
+from dl_techniques.models.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -85,8 +82,8 @@ def create_bert_mlm_model(config: TrainingConfig) -> MaskedLanguageModel:
         variant=config.bert_variant,
         vocab_size=config.vocab_size,
         max_position_embeddings=config.max_seq_length,
-        hidden_dropout_prob=0.1,
-        attention_probs_dropout_prob=0.1,
+        hidden_dropout_rate=0.1,
+        attention_probs_dropout_rate=0.1,
     )
 
     special_token_ids = [
@@ -103,7 +100,7 @@ def create_bert_mlm_model(config: TrainingConfig) -> MaskedLanguageModel:
         special_token_ids=special_token_ids,
         mlm_head_activation="gelu",
         initializer_range=0.02,
-        mlm_head_dropout=0.1,
+        mlm_head_dropout_rate=0.1,
         layer_norm_eps=1e-12,
     )
 
@@ -198,20 +195,11 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
 # ---------------------------------------------------------------------
 
 
-def evaluate_model(
-    mlm_model: MaskedLanguageModel,
-    preprocessor: TiktokenPreprocessor,
-) -> None:
-    """Evaluate the trained model with MLM prediction visualization."""
-    test_texts = [
-        "The movie was really good and entertaining.",
-        "I loved the acting and the storyline was amazing.",
-        "This film was terrible and boring.",
-        "The plot was confusing but the effects were great.",
-    ]
-    test_inputs = preprocessor.batch_encode(test_texts, return_tensors='np')
-    test_batch = {k: tf.constant(v, dtype=tf.int32) for k, v in test_inputs.items()}
-    visualize_mlm_predictions(mlm_model=mlm_model, inputs=test_batch, tokenizer=preprocessor, num_samples=4)
+# The body of this evaluation is shared with the other MLM pre-training
+# script -- see `train.common.nlp.evaluate_mlm_model`. Bound as a plain ALIAS,
+# not a wrapper `def`, so `train.bert.pretrain.evaluate_model` keeps resolving
+# to the SAME object (the convention this consolidation established in D-010).
+evaluate_model = evaluate_mlm_model
 
 
 # ---------------------------------------------------------------------

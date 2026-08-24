@@ -1,8 +1,43 @@
 """
-Energy Transformer image models — backbone, masked-image-completion (MIM) and classifier.
+Energy Transformer image models — a shared backbone plus masked-image-completion and
+classification heads, built on one recurrent energy-descent block.
 
-This module gives the ``EnergyTransformer`` block (``layers/transformers/energy_transformer.py``,
-arXiv:2302.07253) its two image-domain consumers:
+A standard transformer layer is a feedforward map: attention mixes tokens, an MLP
+transforms them, and stacking `L` distinct layers with `L` distinct parameter sets is
+what gives the model depth. Nothing constrains what the stack computes beyond the
+training objective, and there is no scalar quantity the forward pass is known to be
+improving. The Energy Transformer replaces that with a dynamical system. A single
+scalar energy `E` is defined over the token states, and the forward pass is `T` steps
+of gradient descent on it:
+
+`x <- x - alpha * dE/dg`,  `g = EnergyLayerNorm(x)`
+
+so every step is guaranteed to move the tokens toward lower energy, and the "depth" of
+the model is the number of descent steps rather than a number of parameter blocks. One
+block's weights are reused across all `T` steps. Recurrence in place of depth is the
+architectural trade: parameters are constant in `T`, and `T` becomes an inference-time
+knob rather than a training-time commitment.
+
+The energy has two additive terms, and the split is what makes the model useful for
+completion. `E_ATT` is an attention energy,
+`E_ATT = -(1/beta) * sum_h sum_m logsumexp_n(beta * A_{h,n,m})`, whose logsumexp runs
+over the *key* axis; its gradient is a token-mixing update, the analogue of attention,
+and it is what lets an occluded token pull information from its neighbours. `E_HN` is a
+Hopfield associative-memory energy over a tied `(K, D)` memory matrix `xi`, with
+`h = xi g`, and either `-0.5 * sum relu(h)^2` or a softmax/logsumexp form over the
+*memory* axis; it acts strictly per token and pulls each token toward the nearest stored
+pattern. Descending their sum therefore does two things at once — propagate evidence
+between tokens and snap each token to a memorized prototype — which is exactly the
+computation an associative memory performs when completing a corrupted input.
+
+The gradients are hand-derived in closed form with `keras.ops`, not taken by autodiff:
+`keras.ops.grad` does not exist in Keras 3.8 and a backend-specific tape is not
+permitted in `src/`. That means `energy()` is the specification and `update()` must
+match it; correctness is held by an autodiff oracle test rather than by construction,
+and the energy formulas must never be edited to make that oracle pass.
+
+This module supplies the block's image-domain consumers — one shared backbone and two
+task heads:
 
 * :class:`EnergyTransformerBackbone` — patch-embed -> (optional learnable MASK token) ->
   learnable positional embedding -> ONE ``EnergyTransformer`` block running ``T`` internal
@@ -11,6 +46,10 @@ arXiv:2302.07253) its two image-domain consumers:
   ``(B, N, P*P*C)``, the paper's §3 masked-image-completion model.
 * :class:`EnergyTransformerClassifier` — the SAME backbone -> LayerNorm -> mean-pool ->
   ``Dense(num_classes)`` **logits**, warm-startable from an MIM checkpoint.
+
+Classification mean-pools the token states rather than reading a CLS token: no CLS token
+is prepended anywhere in this backbone, and inventing one would change the token count
+the MIM checkpoint was trained with.
 
 **Architecture**::
 
@@ -52,8 +91,24 @@ weight-identical, so ``load_weights_from_checkpoint(..., skip_prefixes=("decoder
 transfers the trunk 1:1. Removing the "dead" mask token from the classifier would silently
 break the warm-start.
 
+**Both heads refuse a ``return_energy=True`` backbone** rather than forwarding the energy
+trace. This is structural, not stylistic: ``EnergyTransformer.energy()`` always computes in
+at least float32 because an O(-1e5) trace is ``-inf`` in fp16 at realistic token counts, and
+a default-policy head that ingested that trace under ``mixed_float16`` would autocast it back
+down and overflow to nan. The fix cannot live in the block, so the constraint is enforced
+where the trace would be consumed.
+
 References:
-    - Hoover et al., "Energy Transformer", NeurIPS 2023, arXiv:2302.07253 (§3, Table 4).
+    - Hoover et al., 2023. Energy Transformer. NeurIPS 2023 (§3, Table 4).
+      (https://arxiv.org/abs/2302.07253)
+    - Ramsauer et al., 2020. Hopfield Networks is All You Need.
+      (https://arxiv.org/abs/2008.02217)
+    - Krotov & Hopfield, 2016. Dense Associative Memory for Pattern Recognition.
+      (https://arxiv.org/abs/1606.01164)
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for Image
+      Recognition at Scale. (https://arxiv.org/abs/2010.11929)
 """
 
 import keras
@@ -132,6 +187,19 @@ def _resolve_scale(variant: str) -> str:
 # the layer tree. `layers/` is frozen for this plan (I8), so the factory cannot be fixed here.
 # WHAT NOT TO DO: do NOT pass `dtype=` to `create_embedding_layer` and assume it landed, and
 # do NOT "simplify" this to `layer.dtype_policy = policy` — see decisions.md D-009.
+#
+# SUPERSEDED 2026-08-14 by plan-2026-08-14T042537-ff96c6c6/D-002 — ONLY on the "SILENTLY"
+# half. `create_embedding_layer` no longer drops an unregistered kwarg: it now RAISES
+# `ValueError: ... unsupported parameter(s) ['dtype']` (embedding/factory.py, the strict
+# dropped-kwarg raise). MEASURED at this plan's HEAD:
+# `create_embedding_layer('patch_2d', patch_size=4, embed_dim=32, dtype='float64')` raises.
+# The original text above is kept verbatim because the HISTORY is the point — the no-op was
+# real, and it is why this helper exists. Everything else in it still holds and this helper is
+# MORE necessary, not less: `dtype=` is now a hard error rather than a quiet miss, so the tree
+# walk below remains the only way to push a policy into the returned layer, and Keras'
+# `Layer.dtype_policy` setter still does not recurse. The WHAT-NOT-TO-DO stands unchanged in
+# force, with a different failure mode: passing `dtype=` no longer silently does nothing, it
+# breaks the call.
 def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.Layer:
     """Force ``policy`` onto ``layer`` AND every sub-layer, before anything is built."""
     if hasattr(layer, "_flatten_layers"):

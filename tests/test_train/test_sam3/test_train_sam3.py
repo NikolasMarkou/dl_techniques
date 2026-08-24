@@ -22,8 +22,10 @@ smallest thing that exercises the real compile and freeze paths.
 """
 
 import argparse
+import dataclasses
 import math
-from typing import Any, Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Set, Tuple
 
 import keras
 import numpy as np
@@ -66,6 +68,25 @@ from train.sam3.train_sam3 import (
     parse_arguments,
     resolved_output_dir,
 )
+
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
+# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
+# shipped config, so the iterator is legitimately exhausted before the epoch
+# ends. Padding the corpus to match would change what the test measures (the
+# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
+# starved input in any other module still fails under `error::UserWarning`.
+# MEASURED 2026-08-23: fires in 3 of the 114 tests here -- the
+# `test_a_..._takes_a_real_training_step` arms of TestDeepSupervision,
+# TestPromptConditionedQueriesCli and TestQuerySelectionCli.
+# The paired positive arm lives in
+# `tests/test_the_deliberate_advisories_still_fire.py`; a new ignore: mark
+# anywhere needs one there in the same commit.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Your input ran out of data:UserWarning"),
+]
 
 #: A `tiny`-variant config small enough to build, compile and step in a test.
 TINY_KWARGS: Dict[str, Any] = dict(
@@ -1394,10 +1415,14 @@ class TestEvaluation:
 
         Two things are pinned, because either alone is insufficient:
         the monitored key must be an ACHIEVED metric this module computes, and
-        the mode must be ``max``. ``train.common.create_callbacks`` derives
-        ``mode`` as ``'max' if 'accuracy' in monitor else 'min'``, so routing
-        ``val_box_iou`` through it unchanged would select the WORST epoch --
-        silently, and in the direction that looks like a result.
+        the mode must be ``max``. ``train.common.create_callbacks`` USED to
+        derive ``mode`` as ``'max' if 'accuracy' in monitor else 'min'``, so
+        routing ``val_box_iou`` through it unchanged would have selected the
+        WORST epoch -- silently, and in the direction that looks like a result.
+        That helper was fixed (plan-2026-08-14T233721-d4f9beb2/D-051, guarded by
+        ``tests/test_train/test_common_callbacks.py``); this test still pins the
+        mode locally because ``build_callbacks`` still constructs these two
+        callbacks itself.
         """
         from train.sam3.train_sam3 import build_callbacks
 
@@ -1967,15 +1992,36 @@ class TestTheDistractorGapReachesTheCsvSchema:
 
     def test_the_real_trainer_hands_the_callback_the_scoring_split(
             self, monkeypatch, tiny_config: Sam3TrainingConfig,
-            tiny_model: Any) -> None:
+            tiny_model: Any, tmp_path) -> None:
         """The wiring `train_sam3` itself does -- the silent-no-op guard.
 
         Everything above passes with a callback constructed BY THE TEST. The
         defect this pins is the production path building the 2-tuple val split
         and handing THAT to the callback, which yields a column of ``nan`` on
         every row of every run while every test here stays green.
+
+        The second guard here is the repo-root ``results/`` snapshot. Only
+        ``fit`` is stubbed: ``build_callbacks`` builds REAL ``ModelCheckpoint``s
+        and ``train_sam3`` ends with a real ``model.save()`` plus a
+        ``training_history.json`` dump. With ``Sam3TrainingConfig.output_dir``
+        at its ``"results"`` default, ``resolved_run_dir`` anchors that
+        relative path to the REPO ROOT, so every run of this test used to
+        deposit a real ``results/sam3_tiny_<timestamp>/`` directory. The config
+        is rebuilt with ``dataclasses.replace`` rather than mutated because
+        ``tiny_config`` is MODULE-SCOPED and shared by every test in this file.
         """
         from train.sam3.train_sam3 import _Sam3EvalCallback
+
+        results_root = Path(__file__).resolve().parents[3] / "results"
+
+        def _snapshot() -> Set[str]:
+            if not results_root.is_dir():
+                return set()
+            return {entry.name for entry in results_root.iterdir()}
+
+        before = _snapshot()
+
+        config = dataclasses.replace(tiny_config, output_dir=str(tmp_path))
 
         seen: List[Any] = []
         real = train_sam3_module.build_callbacks
@@ -1990,7 +2036,14 @@ class TestTheDistractorGapReachesTheCsvSchema:
             lambda self, *args, **kwargs: _StubHistory())
         monkeypatch.setattr(train_sam3_module, "create_training_model",
                             lambda config: tiny_model)
-        train_sam3_module.train_sam3(tiny_config)
+        train_sam3_module.train_sam3(config)
+
+        after = _snapshot()
+        assert after == before, (
+            "train_sam3 wrote into the repo-root results/ directory instead of "
+            f"the configured output_dir: new entries {sorted(after - before)}. "
+            "results/ is gitignored and untracked -- do NOT delete what this "
+            "assertion reports; route the config through tmp_path instead.")
 
         assert len(seen) == 1
         assert len(seen[0].element_spec) == 3, (

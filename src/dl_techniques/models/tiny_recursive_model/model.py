@@ -1,41 +1,66 @@
 """
-Tiny Recursive Model (TRM) with Adaptive Computation Time (ACT).
+Tiny Recursive Model: a small shared reasoning network applied repeatedly under
+Adaptive Computation Time, with optional Q-learned halting.
 
-This model performs recursive reasoning to solve complex tasks by repeatedly
-applying a small, shared neural network over a variable number of steps. It
-integrates the principles of Adaptive Computation Time (ACT) to learn how
-many computational steps are necessary for a given problem, allowing it to
-dynamically allocate resources. The model's `call` method encapsulates
-a single step of this adaptive, recursive process.
+A feedforward network spends the same compute on every input, so its budget must be
+sized for the hardest example it will ever see and is wasted on the rest. On
+puzzle-style tasks that mismatch is extreme — some instances fall out in one pass,
+others need many rounds of revision — and buying the capacity by adding layers pays
+for it in parameters as well as in time. TRM decouples the two. A single small
+network is applied recursively, so depth becomes iteration count rather than
+parameter count, and Adaptive Computation Time lets each example in the batch choose
+its own iteration count. Parameter efficiency comes from the sharing; compute
+efficiency comes from the early halt.
 
-The architecture is conceptually divided into two nested levels of recursion:
-1.  An outer ACT loop, managed externally by the training script, which
-    calls this model's `call` method repeatedly. This loop allows the
-    model to progressively refine its solution over multiple "thought" steps.
-2.  An inner, fixed-cycle reasoning process within the `TRMInner` submodule.
-    During each single call to this model's `call` method, the inner
-    module performs a multi-step update of its latent states (`z_H`, `z_L`),
-    representing a focused burst of computation.
+The recursion has two nested levels. The outer ACT loop is driven by the *training
+script*, not by this model: `call` performs exactly one outer step, taking a `carry`
+dict in and returning the updated one, so the loop lives outside and the model stays
+a stock Keras model with no custom `train_step`. Inside each such step, `TRMInner`
+updates two latent states — the low-level `z_L` from the previous `z_L` and the token
+embeddings, then the high-level `z_H` from the previous `z_H` and the freshly updated
+`z_L`. Each of these is a single update per outer step, not an inner loop; the
+hierarchy is in the *dependency order* (low-level state refreshed against the input,
+high-level state refreshed against the low-level result), not in a cycle count.
 
-The core mathematical principle is Adaptive Computation Time (ACT). At each
-step of the outer loop, the model produces not only a prediction but also a
-halting probability via a dedicated `q_head`. This probability is used to
-decide whether to continue processing or to terminate for a given example
-in the batch. The model's state (the `carry` object) is passed from one
-step to the next. For sequences that have not halted, their latent states
-are updated by the `TRMInner` module. This design makes the model highly
-parameter-efficient, as the same small network is reused across all steps,
-and computationally efficient, as it can stop processing easier inputs
-early.
+Halting is a learned decision, and the model exposes it as two logits from a `q_head`
+read off `z_H`'s first position. Under the default Q-learning mode an example halts
+when `q_halt > q_continue`; with `no_act_continue` the rule degenerates to
+`q_halt > 0`. `halt_max_steps` is a hard ceiling in both cases. During training the
+Q-values are fitted as a Bellman TD target: the model looks one step ahead, takes
+`max(q_halt, q_continue)` at the next state (or `q_halt` alone if that step would be
+the last), and detaches it with `stop_gradient` so the bootstrap is a target rather
+than part of the graph. The lookahead runs with `training=False` deliberately —
+evaluating the next state under dropout would make the target noisy in a way that has
+nothing to do with the state's actual value.
+
+Two behavioural choices are worth stating. Training adds an exploration branch that
+forces a random subset of examples to keep going for at least a randomly drawn number
+of steps; without it the halting head can collapse to halting immediately, and the
+model never sees the states that deeper recursion would reach. Inference has *no*
+exploration but does use the learned halt signal — an earlier version halted only on
+`halt_max_steps` at inference, which contradicted both the paper and this package's
+own README by making the learned head dead weight at the only time it matters.
+
+The carry's latent states are passed forward through `stop_gradient`. Gradients
+therefore flow within one outer step but not across them: each step is trained as a
+one-step improvement on a state treated as given, rather than by backpropagating
+through the whole variable-length recursion. That is what keeps memory constant in
+the number of ACT steps, and it is the approximation the method rests on. A halted
+example's states are reset to the learnable `H_init` / `L_init` on the next call, and
+its `current_data` slot is refilled from the incoming batch, so a single batch slot is
+reused by successive examples as they finish at different times.
 
 References:
-    - Jolicoeur-Martineau, A. (2025). Less is More: Recursive Reasoning
-      with Tiny Networks. arXiv preprint arXiv:2510.04871.
-    - Graves, A. (2016). Adaptive Computation Time for Recurrent Neural
-      Networks. Advances in Neural Information Processing Systems, 29.
-      https://proceedings.neurips.cc/paper/2016/file/bf69145244511593c662c12aee4608c0-Paper.pdf
-    - Wang, G., et al. (2025). Hierarchical Reasoning Model. arXiv
-      preprint arXiv:2506.21734. (Inspirational basis for TRM).
+    - Jolicoeur-Martineau, 2025. Less is More: Recursive Reasoning with Tiny
+      Networks. (https://arxiv.org/abs/2510.04871)
+    - Graves, 2016. Adaptive Computation Time for Recurrent Neural Networks.
+      (https://arxiv.org/abs/1603.08983)
+    - Wang et al., 2025. Hierarchical Reasoning Model.
+      (https://arxiv.org/abs/2506.21734)
+    - Banino et al., 2021. PonderNet: Learning to Ponder.
+      (https://arxiv.org/abs/2107.05407)
+    - Dehghani et al., 2018. Universal Transformers.
+      (https://arxiv.org/abs/1807.03819)
 """
 
 import keras
@@ -101,7 +126,9 @@ class TRM(keras.Model):
             based halting (False). Default is True.
         rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
             Default is 10000.0.
-        attention_type (str): Type of attention mechanism to use. Default is 'multi_head'.
+        attention_type (str): Type of attention mechanism to use. Default is
+            'group_query' (with `num_kv_heads == num_heads`, arithmetically
+            plain MHA) — the only plain-self-attention type that carries RoPE.
         ffn_type (str): Type of feed-forward network to use. Default is 'swiglu'.
         normalization_type (str): Type of normalization layer to use. Default is 'rms_norm'.
         normalization_position (str): Position of normalization ('pre' or 'post').
@@ -126,7 +153,11 @@ class TRM(keras.Model):
         halt_exploration_prob: float = 0.1,
         no_act_continue: bool = True,
         rope_theta: float = 10000.0,
-        attention_type: AttentionType = 'multi_head',
+        # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
+        # 'multi_head' — see the anchor on `TRMReasoningModule.__init__` in
+        # components.py. `TRM` passes this value down explicitly, so it
+        # overrides the component default and must agree with it.
+        attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
         normalization_position: NormalizationPositionType = 'post',
@@ -439,7 +470,12 @@ def create_trm(
     halt_exploration_prob: float = 0.1,
     no_act_continue: bool = True,
     rope_theta: float = 10000.0,
-    attention_type: AttentionType = 'multi_head',
+    # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
+    # 'multi_head' — see the anchor on `TRMReasoningModule.__init__` in
+    # components.py. A 'multi_head' default here would re-impose the defect on
+    # every model built through this factory, because the value is passed down
+    # explicitly and overrides the component default.
+    attention_type: AttentionType = 'group_query',
     ffn_type: FFNType = 'swiglu',
     normalization_type: NormalizationType = 'rms_norm',
     normalization_position: NormalizationPositionType = 'post',
@@ -469,7 +505,8 @@ def create_trm(
         no_act_continue: Use simple halting (True) vs Q-learning (False).
             Default True.
         rope_theta: Theta for Rotary Position Embedding. Default 10000.0.
-        attention_type: Type of attention mechanism.
+        attention_type: Type of attention mechanism. Default 'group_query';
+            'multi_head' carries no RoPE.
         ffn_type: Type of feed-forward network.
         normalization_type: Type of normalization layer.
         normalization_position: ``pre`` or ``post`` normalization.

@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks (ConvNets) that were modernized to compete with and often outperform Vision Transformers (ViTs) by progressively incorporating architectural decisions from ViTs into a standard ResNet.
+A Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks (ConvNets) that were modernized to compete with and often outperform Vision Transformers (ViTs) by progressively incorporating architectural decisions from ViTs into a standard ResNet.
 
 The implementation includes both ConvNeXt V1 and the improved ConvNeXt V2, which introduces Global Response Normalization (GRN).
 
@@ -422,6 +422,13 @@ fine_tune_model = create_convnext_v2(
     input_shape=(128, 128, 3),      # Different input shape
     pretrained="path/to/convnext_v2_base_imagenet.keras"
 )
+
+# Passing `input_shape` here is optional. Until 2026-08-15 it was mandatory in
+# practice: the pre-load dummy forward used `input_shape` verbatim, and the default
+# `(None, None, 3)` made it build `(1, None, None, 3)` and fail, with the enclosing
+# handler re-reporting the failure as "Failed to load weights from ..." and hiding
+# the cause. With no spatial dims given, the load now materializes weights at
+# 224x224 (`PRETRAINED_BUILD_SPATIAL`); the model stays fully convolutional.
 
 # 2. The model will load the backbone weights and skip the original classifier.
 # You can now fine-tune this model on your custom dataset.

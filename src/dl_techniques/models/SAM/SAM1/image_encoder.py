@@ -1,17 +1,10 @@
 """
 SAM 1 Image Encoder: the ViT backbone and its stride-1 channel neck.
-====================================================================
 
 :class:`ImageEncoderViT` turns an image into the single dense embedding every
 other SAM 1 component consumes. It is a plain (non-hierarchical) ViT whose
 attention is windowed everywhere except at a named set of global block indices,
 followed by a two-convolution neck that changes the channel count only.
-
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
-- Dosovitskiy, A. et al. (2020). ViT -- patch embedding, absolute position.
-- Liu, Z. et al. (2021). Swin -- the windowed-attention idea, not the shifts.
 
 Key Features:
 ------------
@@ -65,6 +58,11 @@ Measured caveats:
 - The relative-position path is pinned by a spy in
   ``tests/test_models/test_sam/test_correctness.py`` (call count non-zero with
   the flag on, exactly zero with it off) rather than assumed to be reached.
+
+References:
+    Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+    Dosovitskiy, A. et al. (2020). ViT -- patch embedding, absolute position.
+    Liu, Z. et al. (2021). Swin -- the windowed-attention idea, not the shifts.
 """
 
 import keras
@@ -79,6 +77,10 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -430,7 +432,7 @@ class ViTBlock(layers.Layer):
         self.input_size = input_size
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
 
         # CREATE all sub-layers in __init__
         self.norm1 = create_normalization_layer(normalization_type, name="norm1")
@@ -606,7 +608,7 @@ class ViTBlock(layers.Layer):
             "input_size": self.input_size,
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 
@@ -739,7 +741,7 @@ class ImageEncoderViT(keras.Model):
         self.global_attn_indexes = global_attn_indexes
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.grid_size = img_size // patch_size
 
         # CREATE all sub-layers in __init__.
@@ -800,11 +802,24 @@ class ImageEncoderViT(keras.Model):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Creates the model's own weights.
+        Creates the positional embedding AND materializes every sub-layer.
 
-        For `keras.Model`, sub-layers are built automatically on the first
-        call. We only need to create weights that belong directly to this model,
-        like the positional embedding.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+        The explicit sub-layer builds below are LOAD-PATH CORRECTNESS, not
+        style. The former comment here ("sub-layers are built automatically on
+        the first call") is true of `__call__` and false of
+        `keras.models.load_model`, which builds from the saved `input_shape`
+        and then restores. With `pos_embed` as the only weight `build` created,
+        a reloaded encoder owned **1 of 65** weights at restore time and the
+        other 64 were silently re-initialised: MEASURED on CPU at
+        `img_size=64, patch_size=16, embed_dim=32, depth=4, out_chans=16`,
+        perturb-save-reload gave `max|dOut| = 4.628568e+00` with 64/65 weights
+        back at class defaults. Do NOT "simplify" this away, and do NOT verify
+        it with a post-forward weight count: the SAME broken build reads
+        `len(model.weights) == 65` once anything has called the model, and the
+        `.keras` archive is a red herring too (its `model.weights.h5` held all
+        65 both before and after this fix -- the loss was on the LOAD side).
+        See decisions.md D-122.
 
         Args:
             input_shape: Shape tuple of the input.
@@ -815,6 +830,11 @@ class ImageEncoderViT(keras.Model):
             initializer="zeros",
             trainable=True
         )
+        token_shape = (input_shape[0], self.grid_size, self.grid_size, self.embed_dim)
+        self.patch_embed.build(input_shape)
+        for blk in self.blocks:
+            blk.build(token_shape)
+        self.neck.build(token_shape)
         super().build(input_shape)
 
     def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
@@ -865,7 +885,7 @@ class ImageEncoderViT(keras.Model):
             "global_attn_indexes": self.global_attn_indexes,
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 

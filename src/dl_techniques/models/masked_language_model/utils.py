@@ -1,5 +1,32 @@
+"""
+Construction and inspection helpers for the masked language model.
+
+Two functions, and neither of them is the architecture:
+:func:`create_mlm_training_model` is the package's ``create_*`` factory -- it
+assembles a :class:`MaskedLanguageModel` around a caller-supplied encoder and
+compiles it for training -- and :func:`visualize_mlm_predictions` prints the
+top-k predictions at each masked position for a batch, which is how a
+checkpoint is eyeballed.
+
+The model itself, its masking strategy and its loss live in
+``dl_techniques.models.masked_language_model.mlm``, which carries the full
+architectural description. This module is deliberately thin: anything that
+decides what the model IS belongs there, not here.
+
+References:
+    - Devlin et al., 2019. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding. NAACL 2019.
+      (https://arxiv.org/abs/1810.04805) -- the masked-token objective, the
+      80/10/10 corruption split and the [MASK] convention this package
+      implements.
+    - Liu et al., 2019. RoBERTa: A Robustly Optimized BERT Pretraining
+      Approach. (https://arxiv.org/abs/1907.11692) -- dynamic masking, which is
+      what the masking strategy here does per batch rather than once.
+    - Press and Wolf, 2017. Using the Output Embedding to Improve Language
+      Models. EACL 2017. (https://arxiv.org/abs/1608.05859) -- the weight tying
+      between the embedding and the output head, already cited by ``mlm.py``.
+"""
 import keras
-import tensorflow as tf
 from typing import Dict, Any, Optional, List
 
 # ---------------------------------------------------------------------
@@ -41,11 +68,11 @@ def visualize_mlm_predictions(
     # Get model predictions
     predictions = mlm_model(masked_inputs, training=False)
     predicted_ids = keras.ops.argmax(predictions, axis=-1)
-    predicted_ids = tf.cast(predicted_ids, dtype=tf.int32)
+    predicted_ids = keras.ops.cast(predicted_ids, "int32")
 
-    # Limit to num_samples
-    batch_size = tf.shape(labels)[0]
-    num_samples = tf.minimum(num_samples, batch_size)
+    # Limit to num_samples. Resolved to a Python int: it indexes slices and
+    # drives `range(...)` below, and everything downstream is numpy anyway.
+    num_samples = min(num_samples, int(keras.ops.shape(labels)[0]))
 
     masked_input_ids = masked_inputs["input_ids"][:num_samples]
     predicted_ids = predicted_ids[:num_samples]
@@ -73,7 +100,7 @@ def visualize_mlm_predictions(
         )
 
         # Create filled sequence (use predictions for masked positions only)
-        filled_ids = tf.where(
+        filled_ids = keras.ops.where(
             masked_positions[i],
             predicted_ids[i],
             labels[i]
@@ -152,7 +179,7 @@ def create_mlm_training_model(
         "unchanged_ratio": 0.1,
         "mlm_head_activation": "gelu",
         "initializer_range": 0.02,
-        "mlm_head_dropout": 0.1,
+        "mlm_head_dropout_rate": 0.1,
         "layer_norm_eps": 1e-12,
     }
 
@@ -182,11 +209,18 @@ def create_mlm_training_model(
     # Create optimizer
     optimizer = keras.optimizers.AdamW(**default_optimizer_config)
 
-    # Compile the model
-    mlm_model.compile(
-        optimizer=optimizer,
-        metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
-    )
+    # Compile the model.
+    #
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-131
+    # No `metrics=` here on purpose. This factory used to compile a
+    # SparseCategoricalAccuracy literally named "accuracy", which collides with
+    # MaskedLanguageModel's own tracker of that name and was therefore dropped
+    # by the name dedup in `MaskedLanguageModel.metrics` -- the repo's own
+    # headline factory reproducing the exact defect that property was fixed to
+    # close. It was not inert: it computed 0.015625 while the reported tracker
+    # read 0.055556. Do NOT add it back under the name "accuracy"; the model
+    # already reports masked accuracy under that key.
+    mlm_model.compile(optimizer=optimizer)
 
     logger.info(
         f"Created and compiled MLM training model with "

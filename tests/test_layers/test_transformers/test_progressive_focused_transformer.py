@@ -30,7 +30,7 @@ class TestPFTBlock:
         {"dim": 16, "num_heads": 4, "shift_size": -1},
         {"dim": 16, "num_heads": 5},                                     # not divisible
         {"dim": 16, "num_heads": 4, "mlp_ratio": 0.0},
-        {"dim": 16, "num_heads": 4, "attention_dropout": 1.5},
+        {"dim": 16, "num_heads": 4, "attention_dropout_rate": 1.5},
     ])
     def test_invalid_construction(self, kwargs) -> None:
         with pytest.raises(ValueError):

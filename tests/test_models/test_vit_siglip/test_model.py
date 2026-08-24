@@ -18,6 +18,8 @@ from dl_techniques.models.vit_siglip.model import (
     create_siglip_vision_transformer
 )
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 
 class TestSigLIPInitialization:
     """Test suite for SigLIP ViT model initialization with modern patterns."""
@@ -460,12 +462,66 @@ class TestSigLIPForwardPass:
         assert cls_token.shape == (1, 192)  # tiny embed_dim
         assert not np.any(np.isnan(cls_token.numpy()))
 
-        # CLS token should be the first token
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-113
+        # This assertion USED to be
+        #     np.testing.assert_allclose(cls_token, full_output[:, 0, :])
+        # -- i.e. it compared `get_cls_token` against a re-typing of that
+        # method's own one-line body, `features[:, 0, :]`. It therefore said
+        # nothing about whether sequence position 0 HOLDS the CLS token.
+        # MEASURED 2026-08-21: appending the CLS token at the END of the
+        # sequence instead of prepending it (`concatenate([x, cls_tokens])` at
+        # model.py:604), which makes `get_cls_token` return a PATCH and makes the
+        # include_top head classify off a patch, left the ENTIRE directory at
+        # 62 passed. The tautology is kept -- it does pin the index -- but the
+        # real claim is now stated below it.
         expected_cls = full_output[:, 0, :]
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(cls_token),
             keras.ops.convert_to_numpy(expected_cls),
             rtol=1e-6, atol=1e-6
+        )
+
+        # The claim the line above cannot make: position 0 is the LEARNED,
+        # INPUT-INDEPENDENT token, not a patch. Capture what `call` hands the
+        # first transformer layer for two DIFFERENT images: position 0 must be
+        # bit-identical across them (it is `cls_token + pos[0]`, which no pixel
+        # can reach), while every patch position must differ. Under the append
+        # injection position 0 is a patch embedding and moves with the image.
+        captured = []
+        original_call = model.transformer_layers[0].call
+
+        def capturing_call(x, *args, **kwargs):
+            captured.append(keras.ops.convert_to_numpy(x))
+            return original_call(x, *args, **kwargs)
+
+        model.transformer_layers[0].call = capturing_call
+        try:
+            rng = np.random.default_rng(20260821)
+            for _ in range(2):
+                model(rng.random((1, 64, 64, 3)).astype("float32"), training=False)
+        finally:
+            model.transformer_layers[0].call = original_call
+
+        assert len(captured) == 2, "the capture never fired; it proves nothing"
+        first, second = captured
+        num_patches = (64 // 16) ** 2
+        assert first.shape[1] == num_patches + 1, (
+            f"sequence is {first.shape[1]} long; expected {num_patches} patches "
+            "+ 1 CLS"
+        )
+
+        cls_drift = float(np.max(np.abs(first[:, 0, :] - second[:, 0, :])))
+        assert cls_drift == 0.0, (
+            f"sequence position 0 moved by {cls_drift:.6e} when only the IMAGE "
+            "changed -- it is a patch embedding, not the prepended CLS token"
+        )
+
+        # Control: the patch positions MUST move, or the zero above is a model
+        # that ignores its input rather than a CLS token at position 0.
+        patch_drift = float(np.max(np.abs(first[:, 1:, :] - second[:, 1:, :])))
+        assert patch_drift > 1e-3, (
+            f"no patch position moved either ({patch_drift:.6e}); the CLS "
+            "assertion above is vacuous"
         )
 
     def test_patch_tokens_functionality(self):
@@ -707,12 +763,19 @@ class TestSigLIPFactoryFunctions:
         assert model.num_classes == 1000
 
     def test_factory_function_validation(self):
-        """Test validation in factory functions."""
+        """Test validation in factory functions.
+
+        The factory no longer carries its own copy of these checks (C-15): the
+        duplicate pre-empted the constructor's newer even-patch_size guard, so it
+        was deleted and the constructor is now the single validator. The only
+        visible change is the wording of the input_shape message ("3-tuple"
+        instead of "3-element").
+        """
         # Invalid parameters should raise errors
         with pytest.raises(ValueError, match="num_classes must be positive"):
             create_siglip_vision_transformer(num_classes=-1)
 
-        with pytest.raises(ValueError, match="input_shape must be a 3-element"):
+        with pytest.raises(ValueError, match="input_shape must be a 3-tuple"):
             create_siglip_vision_transformer(input_shape=(224, 224))
 
         with pytest.raises(ValueError, match="patch_size must be positive"):
@@ -886,13 +949,60 @@ class TestSigLIPEdgeCases:
         assert not np.any(np.isnan(output.numpy()))
 
     def test_different_normalization_configurations(self):
-        """Test different normalization configurations using factories."""
+        """Both normalization axes must reach the graph.
+
+        The logits shape is ``(2, 5)`` under all four combinations, so the old
+        assertion was true whether or not either kwarg was honoured -- and the
+        two axes fail differently, so they need different instruments.
+        """
         configs = [
             {"normalization_type": "layer_norm", "normalization_position": "post"},
             {"normalization_type": "layer_norm", "normalization_position": "pre"},
             {"normalization_type": "rms_norm", "normalization_position": "post"},
             {"normalization_type": "rms_norm", "normalization_position": "pre"}
         ]
+
+        input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
+
+        def _build(**kwargs):
+            model = SigLIPVisionTransformer(
+                input_shape=(64, 64, 3),
+                scale="tiny",
+                num_classes=5,
+                **kwargs
+            )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # Axis 1 -- `normalization_type` is STRUCTURAL: RMSNorm has no centering
+        # shift, so it holds strictly fewer weights than LayerNorm. (Measured on
+        # the `tiny` scale: 127 tensors / 5,486,021 params vs 152 / 5,490,821.)
+        type_sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(normalization_type=t))
+             for t in ("layer_norm", "rms_norm")},
+            knob="normalization_type",
+        )
+        assert len(type_sigs["rms_norm"]) < len(type_sigs["layer_norm"])
+
+        # Axis 2 -- `normalization_position`. In `vit` and `vit_hmlp` this is a
+        # pure VALUE knob (same weights, different ordering), but SigLIP's
+        # pre-norm variant adds a final normalization after the last block, so
+        # here it is STRUCTURAL: measured 156 weights pre-norm vs 154 post-norm.
+        # The value instrument is deliberately NOT used -- with two extra
+        # tensors the two configurations draw different random numbers, so an
+        # output difference between them would prove nothing.
+        for norm_type in ("layer_norm", "rms_norm"):
+            pos_sigs = assert_structural_knob_changes_weights(
+                {pos: (lambda pos=pos: _build(
+                    normalization_type=norm_type, normalization_position=pos))
+                 for pos in ("post", "pre")},
+                knob=f"normalization_position ({norm_type})",
+            )
+            assert len(pos_sigs["pre"]) > len(pos_sigs["post"]), (
+                f"{norm_type}: pre-norm should add a final normalization the "
+                f"post-norm stack has not ({len(pos_sigs['pre'])} vs "
+                f"{len(pos_sigs['post'])} weight tensors)"
+            )
 
         for config in configs:
             model = SigLIPVisionTransformer(
@@ -902,23 +1012,43 @@ class TestSigLIPEdgeCases:
                 **config
             )
 
-            input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
 
             assert output.shape == (2, 5)
             assert not np.any(np.isnan(output.numpy()))
 
     def test_different_ffn_types(self):
-        """Test different FFN types using factory integration."""
+        """``ffn_type`` must build the requested FFN.
+
+        The logits shape is ``(1, 3)`` for every FFN, so the old assertion held
+        whether or not the factory ever saw the argument. The three FFNs have
+        genuinely different parameterisations -- SwiGLU fuses gate and up
+        projections, GEGLU adds a third matrix -- so the weight-shape signature
+        pins which one was built.
+        """
         ffn_types = ["mlp", "swiglu", "geglu"]  # Available types
 
-        for ffn_type in ffn_types:
+        def _build(ffn_type):
             model = SigLIPVisionTransformer(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=3,
                 ffn_type=ffn_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(t)) for t in ffn_types}, knob="ffn_type")
+        params = {
+            t: sum(int(np.prod(w)) for w in sigs[t]) for t in ffn_types
+        }
+        # All three parameter counts must be distinct -- two matching counts
+        # would mean two of the three names resolved to the same layer.
+        assert len(set(params.values())) == 3, f"ffn_type parameter counts: {params}"
+
+        for ffn_type in ffn_types:
+            model = _build(ffn_type)
 
             input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
             output = model(input_tensor)
@@ -1141,5 +1271,98 @@ class TestSigLIPArchitectureValidation:
         assert spatial_features.shape == expected_spatial_shape
 
 
+class TestSigLIPPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `SigLIPVisionTransformer.build` used to call
+    `create_embedding_layer('positional_learned', ..., dropout=...)` while
+    the registry and `PositionalEmbedding.__init__` both declare
+    `dropout_rate`; the factory silently dropped unknown keys AT THE TIME, so
+    positional dropout was unconditionally 0.0.
+
+    Asserting `model.pos_dropout_rate` would be VACUOUS (that attribute was
+    always correct). This reads the real `keras.layers.Dropout` instance.
+
+    RE-RUNNING THE ORIGINAL RED-PROOF: the factory no longer drops silently
+    (`plan-2026-08-14T042537-ff96c6c6/D-002`, same iteration as this guard) —
+    it RAISES on an unregistered kwarg. Re-injecting the historical bug at the
+    KEYWORD level (`dropout=` for `dropout_rate=`) therefore now fails with
+    the factory's `ValueError: ... unsupported parameter(s) ['dropout']` at
+    construction, NOT with the `.rate == 0.5` assertion below. Inject at the
+    VALUE level to exercise this assertion.
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer(self):
+        model = SigLIPVisionTransformer(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="tiny",
+            patch_size=8,
+            pos_dropout_rate=0.5,
+        )
+        _ = model(np.zeros((1, 32, 32, 3), dtype=np.float32), training=False)
+
+        pos_dropout = model.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(historically: create_embedding_layer SILENTLY DROPPED an "
+            "unknown kwarg name; it now raises instead, so this assertion "
+            "firing today means a VALUE, not a keyword, went astray)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at scale="tiny", 64x64x3, patch 16 (a 4x4 = 16-patch grid
+# plus CLS): 154 trainable weights, 0 dead, 0 non-finite. No waiver needed and
+# none given. The geometry is the smallest one this file's own configs cover --
+# a gradient claim is per-weight, so it does not need 196 patches to be true,
+# and the suite already pins the 224/384 shapes elsewhere.
+#
+# SigLIP uses a TWO-STAGE patch embedding; a second stage that was
+# constructed but bypassed would keep the output shape identical and every
+# existing test green.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestSigLIPGradientFlow:
+    """Every trainable weight is on the backward graph."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = SigLIPVisionTransformer(input_shape=(64, 64, 3), num_classes=10, scale="tiny", patch_size=16)
+        x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)  # subclassed model: unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == 154, (
+            "the tiny variant's weight set changed shape; re-measure before "
+            "editing this number"
+        )
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_gradients_reach_every_trainable_weight_without_top(self):
+        """``include_top=False`` removes the head, not the trunk's gradient path.
+
+        The pooled/no-head arm is the one a downstream user fine-tunes, and it
+        is a different forward path (no classifier Dense, a pooling reduction
+        instead). A trunk weight that only trains through the classification
+        head would be invisible to the arm above.
+        """
+        model = SigLIPVisionTransformer(input_shape=(64, 64, 3), scale="tiny", patch_size=16, include_top=False, pooling="mean")
+        x = np.random.default_rng(1).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0

@@ -96,6 +96,10 @@ from typing import Optional, Tuple, Any, Dict, List
 
 from ..squeeze_excitation import SqueezeExcitation
 from ..activations import resolve_activation_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -1000,7 +1004,7 @@ class _SEWeights(layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.activation_args = activation_args
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
@@ -1090,7 +1094,7 @@ class _SEWeights(layers.Layer):
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "activation_args": self.activation_args,
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),

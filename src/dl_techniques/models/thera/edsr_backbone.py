@@ -41,14 +41,12 @@ Reference:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

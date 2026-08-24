@@ -1,61 +1,121 @@
 """
-Variational Autoencoder (VAE) Model Implementation
-========================================================
+Residual convolutional variational autoencoder with selectable Gaussian,
+hypersphere or von Mises-Fisher latent geometry.
 
-A complete implementation of the ResNet-based VAE architecture using modern Keras 3 patterns.
-VAE learns latent representations through variational inference with proper reparameterization
-trick, KL divergence regularization, and generative capabilities.
+Fitting a latent-variable generative model by maximum likelihood requires the
+marginal `p(x) = integral p(x|z) p(z) dz`, which no encoder can evaluate. The
+variational bound sidesteps it by introducing an approximate posterior `q(z|x)`
+and optimizing
 
-Based on: "Auto-Encoding Variational Bayes" (Kingma & Welling, 2013)
-https://arxiv.org/abs/1312.6114
+`L = E_q[log p(x|z)] - beta * KL(q(z|x) || p(z))`
 
-Key Features:
-------------
-- ResNet-based encoder and decoder with residual connections
-- Proper reparameterization trick for gradient flow
-- KL divergence regularization with configurable weighting
-- Support for multiple VAE variants for different image sizes
-- Custom training loop with reconstruction + KL losses
-- Numerical stability measures and gradient clipping
-- Complete serialization support with modern Keras 3 patterns
-- Production-ready implementation with comprehensive validation
+a quantity that lower-bounds the log evidence and involves only expectations the
+encoder can produce. The first term is reconstruction; the second pulls the
+per-sample posterior toward the prior, and it is the term that makes the latent
+space a *space* rather than a lookup table — without it nothing stops the encoder
+from scattering each training image to its own isolated coordinate, and decoding an
+unseen point would return noise. `beta` trades the two off explicitly: raise it and
+samples from the prior decode to plausible images while reconstructions blur; lower
+it and the reverse.
 
-Architecture Concept:
--------------------
-VAE learns to encode images into a latent space following a prior distribution
-(typically standard normal), then decodes from this space to reconstruct images.
-The reparameterization trick enables gradient-based optimization through sampling.
+The remaining obstacle is that `z` is sampled, and one cannot differentiate through
+a draw. Reparameterization moves the randomness out of the path: for the Gaussian
+mode `z = mu + exp(0.5 * log_var) * eps` with `eps ~ N(0, I)`, so the sampler is a
+deterministic function of the encoder outputs plus an input-independent noise
+tensor, and gradients reach `mu` and `log_var` normally.
 
-Mathematical Foundation:
-- Encoder: q(z|x) - Approximate posterior distribution
-- Decoder: p(x|z) - Likelihood distribution
-- Prior: p(z) = N(0, I) - Standard normal prior
-- Loss: L = E[log p(x|z)] - β * KL(q(z|x)||p(z))
-- Reparameterization: z = μ + σ * ε, where ε ~ N(0, I)
+`sampling_type` changes the latent geometry, and it changes three things together
+that must stay consistent — the second encoder head, the sampler, and the KL term.
+Under `"gaussian"` the second head emits a full `[B, latent_dim]` diagonal
+log-variance and the KL is the closed-form Gaussian-to-`N(0, I)` divergence, summed
+over the latent axis and averaged over the batch (summing over latents and
+averaging over samples is what keeps the KL comparable across latent widths for a
+fixed `beta`). That comparability is across latent WIDTHS only, and it is worth
+being precise about what it does not cover: the reconstruction term on the other
+side of the trade-off is a **mean** over pixels, not a sum, so `kl_loss_weight` is
+`beta / prod(input_shape)` rather than `beta` -- see the `effective_kl_beta`
+property and the note under `Reconstruction` below. Under `"hypersphere"` the head collapses to a single `[B, 1]` radius
+log-variance: the sampler places `z` on a shell of fixed radius and the only
+learned uncertainty is radial, so the KL is the one-dimensional
+`0.5 * (exp(rlv) - rlv - 1)` on that radius alone. There is deliberately no
+direction term — the direction carries an implicit uniform-sphere prior. This is a
+simplification, not a full S-VAE, and is documented as such because the difference
+matters to anyone comparing against the literature. Under `"vmf"` the head is a
+strictly positive concentration `kappa` (softplus, `[B, 1]`), the sampler draws
+from a von Mises-Fisher distribution around the L2-normalized `z_mean`, and the KL
+is the analytic vMF-to-uniform divergence, which depends only on `kappa` and the
+latent dimension. The `"z_log_var"` output slot is reused across all three modes
+and carries a *different quantity* in each — diagonal log-variance, radius
+log-variance, concentration — a shape-only contract that is worth knowing before
+reading any downstream consumer of that key.
 
-Model Variants:
---------------
-- VAE-Micro: depths=2, filters=[16, 32], latent_dim=32 (small images)
-- VAE-Small: depths=2, filters=[32, 64], latent_dim=64 (MNIST, CIFAR-10)
-- VAE-Medium: depths=3, filters=[32, 64, 128], latent_dim=128 (larger images)
-- VAE-Large: depths=3, filters=[64, 128, 256], latent_dim=256 (high-res images)
-- VAE-XLarge: depths=4, filters=[64, 128, 256, 512], latent_dim=512 (very high-res)
+Two choices in the vMF path exist to defeat posterior collapse, the failure mode
+where the KL drives `q(z|x)` to the prior, the decoder learns to ignore `z`, and
+reconstruction stalls at the data mean. The `kappa` head is initialized with a
+zeros kernel and a bias of 12.0, so concentration starts at roughly 12 — an
+informative posterior from step 0, and predictable at initialization rather than
+determined by whatever the encoder features happen to be. Separately, the KL weight
+is a non-trainable scalar model weight rather than a Python float, so a callback
+can ramp it from 0 to `kl_loss_weight` over the first epochs under `tf.function`.
+Its default equals the constructor value, so with no callback attached behaviour is
+unchanged; the Python attribute remains the `get_config` source of truth.
 
-Usage Examples:
--------------
-```python
-# MNIST VAE
-model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=64)
+`sample()` draws from each mode's *true* prior rather than always from `N(0, I)`:
+uniform-on-sphere at the sampler's radius for the hypersphere mode, and
+uniform-on-the-unit-sphere for vMF, since the vMF prior at `kappa = 0` is exactly
+that. Drawing Gaussian noise for a model trained on a spherical latent decodes
+points the decoder has never seen and makes a working model look broken.
 
-# CIFAR-10 VAE
-model = VAE.from_variant("medium", input_shape=(32, 32, 3), latent_dim=128)
+Architecturally the encoder is a residual convolutional stack: each stage
+downsamples, then applies `steps_per_depth` residual blocks at that width, with the
+filter list setting the width per stage. The decoder mirrors it with upsampling.
+Five presets scale depth, width and latent dimension together and lower
+`kl_loss_weight` as the model grows, since a larger decoder tolerates — and needs —
+a weaker prior pull.
 
-# High-resolution VAE
-model = VAE.from_variant("large", input_shape=(128, 128, 3), latent_dim=256)
+Reconstruction is binary crossentropy on flattened inputs with predictions clipped
+to `[1e-7, 1 - 1e-7]`, which assumes data in `[0, 1]`, reduced by a **mean over
+pixels**. That reduction is the reason `kl_loss_weight` is not `beta`: against the
+standard sum-over-pixels ELBO the model optimizes
+`beta = kl_loss_weight * prod(input_shape)`, which for the shipped presets is
+`micro`/`small` 7.84, `medium`/`large` 3.92 and `xlarge` 0.784 at `(28, 28, 1)`,
+and 30.72 / 15.36 / 3.072 at `(32, 32, 3)` -- a 3.92x swing in regularization
+strength from the input resolution alone, at an unchanged nominal weight. This is a
+known, MEASURED property of the shipped defaults rather than an accident of
+reading: `effective_kl_beta` exposes it, `summary()` logs it, and
+`tests/test_models/test_vae/test_model.py::TestVAEEffectiveBeta` pins it. It is
+deliberately NOT repaired by changing the reduction, because every available repair
+moves the trained behaviour of every existing preset and no re-tuned target could
+be justified without training runs; see decisions.md D-028 of
+plan-2026-08-18T140459-7991552f for the full ruling and the numbers a future
+re-tune needs. The training step is custom
+because the loss depends on intermediate encoder outputs rather than on
+`(y_true, y_pred)` alone; it clips gradients elementwise so that the TRUE gradient
+lands in `[-1, 1]`, a blunt but effective guard against the loss spikes the KL term
+can produce early in training. Read that bound literally only in float32. The clip
+is expressed in the SCALED domain -- the limit is `optimizer.scale_loss(1.0)`, which
+is exactly `1.0` in float32 and the current loss scale under a `LossScaleOptimizer`
+-- because a hard `[-1, 1]` on the scaled gradient would clip essentially every
+component to the limit and, after unscaling, shrink the whole update by the loss
+scale. That is measured, not hypothetical; see the anchor at the clip itself.
+The vMF mode opts out of XLA on every compile path — direct `compile()`, factory,
+and reload — because the beta sampler it uses crashes under jit; that opt-out is
+reapplied on deserialization so a reloaded model does not inherit a stale
+`jit_compile="auto"`.
 
-# Custom VAE
-model = create_vae(input_shape=(64, 64, 3), latent_dim=128, kl_loss_weight=0.01)
-```
+References:
+    - Kingma & Welling, 2013. Auto-Encoding Variational Bayes.
+      (https://arxiv.org/abs/1312.6114)
+    - Rezende et al., 2014. Stochastic Backpropagation and Approximate Inference
+      in Deep Generative Models. (https://arxiv.org/abs/1401.4082)
+    - Higgins et al., 2017. beta-VAE: Learning Basic Visual Concepts with a
+      Constrained Variational Framework. ICLR 2017.
+    - Davidson et al., 2018. Hyperspherical Variational Auto-Encoders.
+      (https://arxiv.org/abs/1804.00891)
+    - Bowman et al., 2015. Generating Sentences from a Continuous Space.
+      (https://arxiv.org/abs/1511.06349)
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
 """
 
 import keras
@@ -68,12 +128,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.sampling import (
-    Sampling,
-    HypersphereSampling,
-    VMFSampling,
-    create_sampling_layer,
-    vmf_kl_divergence,
+from dl_techniques.layers.sampling import create_sampling_layer, vmf_kl_divergence
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
 )
 
 # ---------------------------------------------------------------------
@@ -103,7 +161,11 @@ class VAE(keras.Model):
         depths: Integer, number of depth levels in the encoder/decoder.
         steps_per_depth: Integer, number of residual blocks per depth level.
         filters: List of integers, filter counts for each depth level.
-        kl_loss_weight: Float, weight for KL divergence loss term.
+        kl_loss_weight: Float, weight for KL divergence loss term. This is NOT
+            the `beta` of the standard ELBO: the reconstruction term is a mean
+            over pixels, so the effective `beta` is
+            `kl_loss_weight * prod(input_shape)` (see `effective_kl_beta`) and
+            the same value means different things at different resolutions.
         sampling_type: String, the latent sampling mode. One of:
             ``"gaussian"`` (baseline diagonal-Gaussian reparameterization), or
             ``"hypersphere"`` (a dedicated ``Dense(1)`` radius log-variance head
@@ -261,8 +323,8 @@ class VAE(keras.Model):
         self.use_batch_norm = use_batch_norm
         self.use_bias = use_bias
         self.dropout_rate = dropout_rate
-        self.activation = activation
-        self.final_activation = final_activation
+        self.activation = deserialize_activation(activation)
+        self.final_activation = deserialize_activation(final_activation)
 
         # Validate input dimensions
         height, width, channels = input_shape
@@ -292,12 +354,23 @@ class VAE(keras.Model):
         # (cures vmf posterior collapse; D-007). Default == kl_loss_weight, so
         # with no callback attached behavior is identical to before. The python
         # float self.kl_loss_weight remains the get_config source of truth.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `autocast=False` is load-bearing. `dtype="float32"` alone does NOT
+        # keep a read in float32: Keras autocasts float variables to
+        # `compute_dtype` inside `call`/`train_step`, so under `mixed_float16`
+        # this scalar was read as float16 and
+        # `reconstruction_loss + self.kl_weight * kl_loss` raised
+        # `TypeError: Input 'y' of 'AddV2' ...` (MEASURED, step 5.8). It is a
+        # LOSS WEIGHT (schedule state), not an activation -- it belongs in the
+        # variable dtype. Do NOT drop the explicit `dtype="float32"` either;
+        # the two arguments do different jobs.
         self.kl_weight = self.add_weight(
             name="kl_weight",
             shape=(),
             initializer=keras.initializers.Constant(float(kl_loss_weight)),
             trainable=False,
             dtype="float32",
+            autocast=False,
         )
 
         # Create a reusable decoder model from the main graph. This allows
@@ -334,6 +407,21 @@ class VAE(keras.Model):
         # through our compile() so the vmf jit_compile=False opt-out survives reload.
         config = keras.saving.deserialize_keras_object(config)
         self.compile(**config)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-014: these two lines are the
+        # tail of Keras' own `Trainer.compile_from_config`
+        # (keras/src/trainers/trainer.py:973-975). Overriding the method without
+        # them silently DROPPED the whole saved optimizer state on every reload:
+        # measured 2026-08-22 on a VAE fitted for one epoch, the archive held 122
+        # optimizer variables and the reloaded model's optimizer held 2, so
+        # `BaseOptimizer.load_own_variables` warned ("Skipping variable loading
+        # for optimizer 'adam' ...") and restored NOTHING. A checkpoint resumed
+        # that way restarts Adam from zeroed moments with a zeroed step count.
+        # Do NOT "simplify" this back to `self.compile(**config); return self` --
+        # the override exists only for the D-009 vmf jit_compile opt-out and must
+        # otherwise reproduce the base method exactly. Guarded by
+        # tests/test_models/test_vae/test_the_optimizer_state_survives_reload.py.
+        if hasattr(self, "optimizer") and self.built:
+            self.optimizer.build(self.trainable_variables)
         return self
 
     def _build_model(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
@@ -772,6 +860,28 @@ class VAE(keras.Model):
         )
 
     @property
+    def effective_kl_beta(self) -> float:
+        """The beta this model actually optimizes, in sum-over-pixels ELBO units.
+
+        `kl_loss_weight` is NOT the `beta` of the standard ELBO. This model's
+        reconstruction term is a **mean** over the `prod(input_shape)` pixels while
+        its Gaussian KL is a **sum** over the latent axis, so dividing the standard
+        `sum_pixels(BCE) + beta * sum_latents(KL)` through by the pixel count shows
+        that `kl_loss_weight == beta / prod(input_shape)`. The `beta` a reader of
+        the literature means is therefore this property, not the constructor
+        argument -- and because the pixel count is in it, the SAME nominal
+        `kl_loss_weight` is a different regularization strength at a different
+        input resolution.
+
+        Returns:
+            `kl_loss_weight * prod(input_shape)`.
+        """
+        pixels = 1
+        for dim in self._input_shape:
+            pixels *= int(dim)
+        return float(self.kl_loss_weight) * pixels
+
+    @property
     def metrics(self) -> List[keras.metrics.Metric]:
         """Return metrics tracked by the model."""
         return [
@@ -901,14 +1011,48 @@ class VAE(keras.Model):
             total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
             # Add regularization losses
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # `add_loss` terms carry `compute_dtype` (float16 under
+            # `mixed_float16`) while the running total is float32. Cast the
+            # AUX SUM UP; never reduce the objective in half precision.
             if self.losses:
-                total_loss += ops.sum(self.losses)
+                total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
+
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 9.680747e+01 vs fp16 1.549095e-03, ratio 6.249e+04.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_loss = self.optimizer.scale_loss(total_loss)
 
         # Compute and clip gradients
         trainable_weights = self.trainable_weights
-        gradients = tape.gradient(total_loss, trainable_weights)
+        gradients = tape.gradient(scaled_loss, trainable_weights)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+        # The elementwise clip must be expressed IN THE SCALED DOMAIN, because
+        # `gradients` above are gradients of the SCALED loss and the optimizer
+        # divides them by the same factor afterwards. Do NOT write a bare
+        # `ops.clip(grad, -1.0, 1.0)` here: with a `LossScaleOptimizer` in play
+        # that saturates EVERY gradient component at 1.0 and the subsequent
+        # unscale turns the whole update into lr/32768 -- MEASURED, the
+        # per-element |dW| collapsed to exactly 3.051758e-06 == 0.1 * 2**-15 and
+        # the fp16/float32 ratio read 64.8 with the `scale_loss` call already
+        # in place. `Optimizer.scale_loss(1.0)` returns the CURRENT loss scale,
+        # and returns exactly 1.0 for a plain optimizer, so this restores the
+        # documented "clip the true gradient at 1.0" semantics in both regimes
+        # using only the same public API the scaling itself uses.
+        clip_limit = self.optimizer.scale_loss(1.0)
         gradients = [
-            ops.clip(grad, -1.0, 1.0) if grad is not None else None
+            ops.clip(grad, -clip_limit, clip_limit) if grad is not None else None
             for grad in gradients
         ]
 
@@ -951,8 +1095,9 @@ class VAE(keras.Model):
         total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
         # Add regularization losses
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `train_step`).
         if self.losses:
-            total_loss += ops.sum(self.losses)
+            total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
         # Update metrics
         self.total_loss_tracker.update_state(total_loss)
@@ -983,6 +1128,18 @@ class VAE(keras.Model):
                 f"Shape mismatch: y_true {y_true.shape}, y_pred {y_pred.shape}"
             )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # float32 is a NUMERICS requirement here, not plumbing. The clip below
+        # is the module's stated defence against `log(0)`, and in float16 it
+        # DOES NOT WORK in either direction: `1e-7` is far below the smallest
+        # normal float16 (6.10e-5) and `1.0 - 1e-7` rounds to exactly `1.0`, so
+        # the upper clamp is a no-op and `binary_crossentropy` reaches
+        # `log(0) = -inf`. Casting also removes the
+        # `AddV2 float16 vs float32` raise at `train_step`'s
+        # `reconstruction_loss + self.kl_weight * kl_loss` (step 5.8).
+        y_true = ops.cast(y_true, "float32")
+        y_pred = ops.cast(y_pred, "float32")
+
         # Flatten for loss computation
         y_true_flat = ops.reshape(y_true, (ops.shape(y_true)[0], -1))
         y_pred_flat = ops.reshape(y_pred, (ops.shape(y_pred)[0], -1))
@@ -990,6 +1147,24 @@ class VAE(keras.Model):
         # Clip predictions to avoid log(0)
         y_pred_clipped = ops.clip(y_pred_flat, 1e-7, 1.0 - 1e-7)
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-028: this reduction is a MEAN
+        # over pixels while `_compute_kl_loss`'s gaussian branch SUMS over latents,
+        # so `kl_loss_weight` is `beta / prod(input_shape)`, not `beta`. That is
+        # KNOWN and MEASURED (micro/small 7.84, medium/large 3.92, xlarge 0.784 at
+        # 28x28x1; 30.72 / 15.36 / 3.072 at 32x32x3 -- 3.92x from resolution alone),
+        # and it is deliberately LEFT AS IS rather than switched to a sum. Do not
+        # "fix" it in passing. Switching to a sum multiplies the whole objective by
+        # `prod(input_shape)` (784-3072x) and changes what every shipped
+        # `MODEL_VARIANTS` weight and every saved config MEANS; keeping the mean but
+        # dividing the KL by the pixel count needs new per-variant defaults, and no
+        # resolution-independent default can reproduce today's behaviour at more
+        # than one resolution -- the two goals are mutually exclusive. Choosing a
+        # re-tuned target requires training runs this repair could not do. What IS
+        # fixed is the confusion: `effective_kl_beta` computes the real beta,
+        # `summary()` logs it, the module docstring states the convention, and
+        # `TestVAEEffectiveBeta` pins the arithmetic so a silent change is caught.
+        # See decisions.md D-028.
+        #
         # Binary crossentropy for better numerical stability
         reconstruction_loss = ops.mean(
             keras.losses.binary_crossentropy(y_true_flat, y_pred_clipped)
@@ -1024,6 +1199,22 @@ class VAE(keras.Model):
         # log-variance) -- do NOT clip/exp it or substitute the Gaussian/radius KL;
         # vmf_kl_divergence is the orchestrator-verified analytic vMF->uniform KL
         # (per-row >= 0). See decisions.md D-003.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # The whole KL runs in float32 regardless of `compute_dtype`, and that
+        # is a NUMERICS requirement, not plumbing tidiness. Every branch below
+        # clips its log-variance to [-20, 20] and then exponentiates:
+        # `exp(20) == 4.85e8`, which is finite in float32 and **+inf in
+        # float16** (max 65504). Under `mixed_float16` the inputs arrive as
+        # float16, so without this cast the clip's own stated safety margin is
+        # a lie and the KL can silently become `inf`/`nan`. It also removes the
+        # `AddV2 float32 vs float16` raise at `train_step`'s
+        # `reconstruction_loss + self.kl_weight * kl_loss` (the
+        # `binary_crossentropy` reconstruction term is already float32), which
+        # is what made every VAE unrunnable under mixed precision (step 5.8).
+        # Do NOT instead cast the reconstruction term DOWN to float16.
+        z_mean = ops.cast(z_mean, "float32")
+        z_log_var = ops.cast(z_log_var, "float32")
+
         if self.sampling_type == "vmf":
             kl_loss = ops.mean(vmf_kl_divergence(z_log_var, self.latent_dim))
             return kl_loss
@@ -1054,7 +1245,8 @@ class VAE(keras.Model):
         Returns:
             Configuration dictionary
         """
-        config = {
+        config = super().get_config()
+        config.update({
             "latent_dim": self.latent_dim,
             "input_shape": self._input_shape,
             "depths": self.depths,
@@ -1069,9 +1261,9 @@ class VAE(keras.Model):
             "use_batch_norm": self.use_batch_norm,
             "use_bias": self.use_bias,
             "dropout_rate": self.dropout_rate,
-            "activation": self.activation,
-            "final_activation": self.final_activation,
-        }
+            "activation": serialize_activation(self.activation),
+            "final_activation": serialize_activation(self.final_activation),
+        })
         return config
 
     @classmethod
@@ -1112,6 +1304,10 @@ class VAE(keras.Model):
         logger.info(f"  - Steps per depth: {self.steps_per_depth}")
         logger.info(f"  - Filters: {self.filters}")
         logger.info(f"  - KL loss weight: {self.kl_loss_weight}")
+        logger.info(
+            f"  - Effective beta (sum-over-pixels ELBO): "
+            f"{self.effective_kl_beta:.4g}"
+        )
         logger.info(f"  - Total parameters: {self.count_params():,}")
 
 
@@ -1176,29 +1372,23 @@ def create_vae(
     jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
     model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
 
-    # Validate the model works
-    test_input = keras.random.uniform((2,) + input_shape)
-    test_output = model(test_input, training=False)
-
-    # Validate outputs
-    assert (
-        test_output["reconstruction"].shape == test_input.shape
-    ), "Reconstruction shape mismatch"
-    assert test_output["z_mean"].shape == (
-        2,
-        latent_dim,
-    ), "z_mean shape mismatch"
-    # hypersphere emits a single scalar radius log-variance [B, 1] and vmf a
-    # single scalar concentration kappa [B, 1]; gaussian keeps the full
-    # [B, latent_dim] log_var.
-    expected_log_var_dim = (
-        1 if model.sampling_type in ("hypersphere", "vmf") else latent_dim
-    )
-    assert test_output["z_log_var"].shape == (
-        2,
-        expected_log_var_dim,
-    ), "z_log_var shape mismatch"
-
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory does NOT
+    # self-test. It used to run `keras.random.uniform((2,) + input_shape)`
+    # through the model and `assert` on three output shapes. Three reasons that
+    # was wrong, and do NOT restore it:
+    #   1. `assert` is stripped by `python -O`, so the "validation" was already
+    #      absent in exactly the deployment that most needs it.
+    #   2. It ran a full forward pass on every construction -- cost paid by
+    #      every caller, including the ones that only want the compiled shell.
+    #      (It ALSO drew from the global seed stream via `keras.random.uniform`,
+    #      but do not reach for that as the test: weight initialization draws
+    #      from the same stream, so a seed-stream comparison cannot isolate the
+    #      factory's own draw. That confound killed the first version of the
+    #      test below; the shipped one counts `VAE.call` invocations instead.)
+    #   3. It is a test. It now lives in
+    #      `tests/test_models/test_vae/test_model.py::TestCreateVaeOutputShapes`,
+    #      where it runs over all three sampling types instead of whichever one
+    #      the caller happened to ask for.
     logger.info(f"Created VAE-{variant.upper()} for input shape {input_shape}")
     logger.info(f"Latent dim: {latent_dim}, Parameters: {model.count_params():,}")
 

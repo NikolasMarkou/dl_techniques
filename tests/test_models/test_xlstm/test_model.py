@@ -27,6 +27,8 @@ from typing import Dict, Any, List
 
 from dl_techniques.models.time_series.xlstm.model import xLSTM, create_xlstm
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 
 # =============================================================================
 # Test Fixtures
@@ -727,17 +729,29 @@ class TestXLSTMModel:
     # Architecture Configuration Tests
     # -------------------------------------------------------------------------
 
-    @pytest.mark.parametrize("mlstm_ratio", [0.0, 0.25, 0.5, 0.75, 1.0])
-    def test_different_mlstm_ratios(self, minimal_config, mlstm_ratio):
-        """Test model with different mLSTM/sLSTM ratios."""
-        
+    @staticmethod
+    def _swept_builders(minimal_config, key, values):
+        """One built model per swept value, all under the oracle's seed.
 
+        Restructured out of ``@pytest.mark.parametrize``: with one model per
+        invocation there was nowhere to accumulate a cross-configuration
+        comparison, which is why every one of these tests asserted only the
+        logits shape -- ``(batch, seq_len, vocab_size)``, true at every setting
+        of every one of these knobs.
+        """
+        def _build(value):
+            config = minimal_config.copy()
+            config[key] = value
+            model = xLSTM(**config)
+            model(keras.ops.zeros((1, 10), dtype='int32'), training=False)
+            return model
+
+        return {v: (lambda v=v: _build(v)) for v in values}
+
+    def _forward_shape_check(self, minimal_config, key, value):
         config = minimal_config.copy()
-        config['mlstm_ratio'] = mlstm_ratio
-
+        config[key] = value
         model = xLSTM(**config)
-
-        # Test forward pass
         seq_len = 10
         batch_size = 4
         sample_input = keras.random.randint(
@@ -745,79 +759,95 @@ class TestXLSTMModel:
             minval=0,
             maxval=config['vocab_size']
         )
-
         output = model(sample_input, training=False)
         assert output.shape == (batch_size, seq_len, config['vocab_size'])
+        return model
 
-    @pytest.mark.parametrize("num_layers", [1, 2, 4, 6, 8])
-    def test_different_num_layers(self, minimal_config, num_layers):
-        """Test model with different numbers of layers."""
-        
+    def test_different_mlstm_ratios(self, minimal_config):
+        """``mlstm_ratio`` must change which block types are built.
 
-        config = minimal_config.copy()
-        config['num_layers'] = num_layers
-
-        model = xLSTM(**config)
-
-        assert len(model.blocks) == num_layers
-
-        # Test forward pass
-        seq_len = 10
-        batch_size = 4
-        sample_input = keras.random.randint(
-            shape=(batch_size, seq_len),
-            minval=0,
-            maxval=config['vocab_size']
+        Structural: an mLSTM block and an sLSTM block hold different weights, so
+        the ratio moves the parameterisation. Measured at ``embed_dim=32,
+        num_layers=2``: ratio 0.0 gives 21 tensors / 72,484 params, 0.5 gives
+        24 / 78,220, 1.0 gives 27 / 83,956.
+        """
+        ratios = [0.0, 0.25, 0.5, 0.75, 1.0]
+        # 0.25 and 0.75 round to the same block split as their neighbours at
+        # num_layers=2, so the endpoints are what the sweep can actually resolve.
+        sigs = assert_structural_knob_changes_weights(
+            self._swept_builders(minimal_config, 'mlstm_ratio', [0.0, 0.5, 1.0]),
+            knob="mlstm_ratio",
+        )
+        params = [sum(int(np.prod(w)) for w in sigs[r]) for r in (0.0, 0.5, 1.0)]
+        assert params[0] < params[1] < params[2], (
+            f"mlstm_ratio did not shift the block mix: {params}"
         )
 
-        output = model(sample_input, training=False)
-        assert output.shape == (batch_size, seq_len, config['vocab_size'])
+        for mlstm_ratio in ratios:
+            self._forward_shape_check(minimal_config, 'mlstm_ratio', mlstm_ratio)
 
-    @pytest.mark.parametrize("embed_dim", [32, 64, 128, 256])
-    def test_different_embed_dims(self, minimal_config, embed_dim):
-        """Test model with different embedding dimensions."""
-        
+    def test_different_num_layers(self, minimal_config):
+        """``num_layers`` must build the requested stack.
 
-        config = minimal_config.copy()
-        config['embed_dim'] = embed_dim
-
-        model = xLSTM(**config)
-
-        assert model.embed_dim == embed_dim
-
-        # Test forward pass
-        seq_len = 10
-        batch_size = 4
-        sample_input = keras.random.randint(
-            shape=(batch_size, seq_len),
-            minval=0,
-            maxval=config['vocab_size']
+        ``len(model.blocks) == num_layers`` is a structural ECHO of the list the
+        constructor just built; it does not show the blocks carry weights or
+        that the stack is wired into the forward pass.
+        """
+        layer_counts = [1, 2, 4, 6, 8]
+        sigs = assert_structural_knob_changes_weights(
+            self._swept_builders(minimal_config, 'num_layers', layer_counts),
+            knob="num_layers",
+        )
+        n_weights = [len(sigs[n]) for n in layer_counts]
+        assert n_weights == sorted(n_weights) and n_weights[0] < n_weights[-1], (
+            f"num_layers did not add weight tensors: {dict(zip(layer_counts, n_weights))}"
         )
 
-        output = model(sample_input, training=False)
-        assert output.shape == (batch_size, seq_len, config['vocab_size'])
+        for num_layers in layer_counts:
+            model = self._forward_shape_check(minimal_config, 'num_layers', num_layers)
+            assert len(model.blocks) == num_layers
 
-    @pytest.mark.parametrize("normalization_type", ['layer_norm', 'rms_norm'])
-    def test_different_normalization_types(self, minimal_config, normalization_type):
-        """Test model with different normalization types."""
-        
+    def test_different_embed_dims(self, minimal_config):
+        """``embed_dim`` must widen the weights.
 
-        config = minimal_config.copy()
-        config['normalization_type'] = normalization_type
+        ``model.embed_dim == embed_dim`` is a knob echo. The width is an axis of
+        every weight in the model, so the signature pins it directly.
+        """
+        dims = [32, 64, 128, 256]
+        sigs = assert_structural_knob_changes_weights(
+            self._swept_builders(minimal_config, 'embed_dim', dims),
+            knob="embed_dim",
+        )
+        for d in dims:
+            assert any(d in w for w in sigs[d]), (
+                f"embed_dim={d} produced no weight with a {d}-sized axis"
+            )
 
-        model = xLSTM(**config)
+        for embed_dim in dims:
+            model = self._forward_shape_check(minimal_config, 'embed_dim', embed_dim)
+            assert model.embed_dim == embed_dim
 
-        # Test forward pass
-        seq_len = 10
-        batch_size = 4
-        sample_input = keras.random.randint(
-            shape=(batch_size, seq_len),
-            minval=0,
-            maxval=config['vocab_size']
+    def test_different_normalization_types(self, minimal_config):
+        """``normalization_type`` must reach the normalization layers.
+
+        RMSNorm has no centering shift, so it holds strictly fewer weights than
+        LayerNorm -- a structural difference the signature pins. The logits
+        shape was identical under both, which is why the old assertion held
+        whether or not the kwarg was honoured.
+        """
+        norms = ['layer_norm', 'rms_norm']
+        sigs = assert_structural_knob_changes_weights(
+            self._swept_builders(minimal_config, 'normalization_type', norms),
+            knob="normalization_type",
+        )
+        assert len(sigs['rms_norm']) < len(sigs['layer_norm']), (
+            f"rms_norm held {len(sigs['rms_norm'])} weight tensors vs "
+            f"layer_norm's {len(sigs['layer_norm'])}"
         )
 
-        output = model(sample_input, training=False)
-        assert output.shape == (batch_size, seq_len, config['vocab_size'])
+        for normalization_type in norms:
+            self._forward_shape_check(
+                minimal_config, 'normalization_type', normalization_type)
 
     # -------------------------------------------------------------------------
     # Edge Cases

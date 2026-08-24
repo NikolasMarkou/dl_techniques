@@ -14,8 +14,10 @@ Improvements over V1
   zero.
 * **Configurable backbone.** Stem can be the legacy two-conv stack or any
   ResNet variant from :mod:`dl_techniques.models.resnet`. Stage-2 pretraining
-  flow accepts ``stem_pretrained=True`` (delegates to ResNet's existing
-  download fallback) or a local weights path string.
+  flow accepts a local weights path string; ``stem_pretrained=True`` raises
+  ``NotImplementedError`` from ``create_resnet`` (no public ResNet weights
+  ship with ``dl_techniques``, and it refuses rather than quietly handing back
+  a randomly initialized backbone).
 * **Standard ``compile/fit``.** The model returns the classification length
   tensor directly. Margin / cross-entropy loss flows through the standard
   Keras workflow — no custom ``train_step`` / ``test_step`` and no dict outputs.
@@ -34,15 +36,17 @@ References
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any, List, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
 from dl_techniques.losses.capsule_margin_loss import CapsuleMarginLoss
 from dl_techniques.layers.capsules import PrimaryCapsule
 from dl_techniques.layers.attention.attention_routing_capsule import (
-    AttentionRoutingCapsule,
     CapsuleBlockV2,
 )
 from dl_techniques.optimization import learning_rate_schedule_builder
@@ -69,11 +73,17 @@ class CapsNetV2(keras.Model):
             (``"resnet18"``, ``"resnet34"``, ``"resnet50"``,
             ``"resnet101"``, ``"resnet152"``). Defaults to ``"legacy"``.
         stem_pretrained: Pretrained-weight option for ResNet stems.
-            ``False`` (default) means random init. ``True`` attempts to
-            download weights via the ResNet's URL config (which contains
-            placeholder URLs in this repo — graceful fallback to random
-            init on download failure). A string is treated as a local
-            path to a ``.keras`` weights file.
+            ``False`` (default) means random init. ``True`` **raises
+            ``NotImplementedError``** — no public ResNet weights ship with
+            ``dl_techniques``, and :func:`dl_techniques.models.resnet.create_resnet`
+            refuses unconditionally rather than returning a randomly
+            initialized backbone to a caller who asked for pretrained one.
+            (Until 2026-08-15 this entry promised that a download failure
+            would quietly leave the stem randomly initialized. No such path
+            exists: it went away with the placeholder URL table, and the
+            sibling :func:`create_capsnet_v2_pretrained` docstring has
+            documented the raise since.)
+            A string is treated as a local path to a ``.keras`` weights file.
         primary_capsules: Number of primary capsules per spatial location
             in the legacy stem. Defaults to ``32``.
         primary_capsule_dim: Dimension of each primary capsule. Defaults
@@ -382,15 +392,15 @@ class CapsNetV2(keras.Model):
         digit = self.get_capsules(inputs, training=False)
         lengths = length(digit)
         if mask is None:
-            mask = ops.one_hot(ops.argmax(lengths, axis=1), num_classes=self.num_classes)
+            mask = keras.ops.one_hot(keras.ops.argmax(lengths, axis=1), num_classes=self.num_classes)
         else:
             if mask.shape[-1] != self.num_classes:
                 raise ValueError(
                     f"mask last-dim must be num_classes={self.num_classes}, "
                     f"got {mask.shape[-1]}"
                 )
-        masked = digit * ops.expand_dims(mask, -1)
-        flat = ops.reshape(masked, (-1, self.num_classes * self.digit_capsule_dim))
+        masked = digit * keras.ops.expand_dims(mask, -1)
+        flat = keras.ops.reshape(masked, (-1, self.num_classes * self.digit_capsule_dim))
         return self.decoder(flat)
 
     # ------------------------------------------------------------------
@@ -606,10 +616,13 @@ def create_capsnet_v2_pretrained(
         create_capsnet_v2(num_classes=num_classes, input_shape=input_shape,
                           stem=backbone, stem_pretrained=pretrained, ...)
 
-    The repo's :func:`dl_techniques.models.resnet.create_resnet` handles the
-    download fallback (logs a warning and continues with random init if the
-    URL is unavailable). Pass a local ``.keras`` weights path string to
-    ``pretrained`` to skip the download path entirely.
+    Pass a local ``.keras`` weights path string to ``pretrained``. No public
+    ResNet weights ship with ``dl_techniques``, so ``pretrained=True`` (the
+    default) raises ``NotImplementedError`` from
+    :func:`dl_techniques.models.resnet.create_resnet` rather than silently
+    returning a randomly-initialized backbone, which is what it used to do.
+
+    :raises NotImplementedError: If ``pretrained`` is ``True`` rather than a path.
     """
     if backbone not in CapsNetV2.RESNET_STEMS:
         raise ValueError(

@@ -33,6 +33,10 @@ import keras
 import tensorflow as tf
 from keras import ops, layers
 from typing import List, Dict, Any, Tuple, Optional
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -102,7 +106,7 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
             )
 
         self.hidden_dims = hidden_dims
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
 
         # Create the internal MLP in __init__ (following modern Keras patterns)
         # This MLP learns the scalar Lagrangian L(q, q_dot)
@@ -258,7 +262,7 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "hidden_dims": self.hidden_dims,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 

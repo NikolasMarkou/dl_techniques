@@ -31,9 +31,11 @@ class MemoryStats(keras.callbacks.Callback):
         training batches. Default 1000 (the full block costs an SVD on a
         subsample of V_lt — not free).
     :param probe_dataset: Optional ``tf.data.Dataset`` used to compute
-        retrieval-side stats (top-K hits, gate magnitude). If ``None``
-        only structural stats (key utilization, V_lt effective rank) are
-        computed.
+        retrieval-side stats (top-K hits, gate magnitude). If ``None`` the
+        ONLY stat computed is ``v_lt_effective_rank``. Key utilization is
+        NOT structural despite its name: it reads ``_hit_counter``, which is
+        allocated only inside the probe loop, so with no probe dataset it
+        returns ``None`` and the field never appears in any log line.
     :param probe_batches: Number of probe batches consumed each cycle.
     :param svd_subsample: Max number of V_lt rows used for the effective
         rank SVD. Larger -> tighter estimate, more cost.
@@ -217,7 +219,14 @@ class MemoryStats(keras.callbacks.Callback):
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"MemoryStats: probe loop failed ({exc})")
 
-        # Structural stats (always available).
+        # Only ONE of these two is always available. `_v_lt_effective_rank`
+        # reads `model.lt_memory.V_lt` directly, so it needs nothing else.
+        # `_key_utilization` returns None whenever `_hit_counter` is None, and
+        # the counter is only ever allocated by `_ensure_counter` at the single
+        # call site inside the probe accumulation above -- so with no
+        # `probe_dataset` the `key_utilization=` field is silently absent from
+        # every log line, forever. The comment here used to read "Structural
+        # stats (always available)", which was true of the second call only.
         util = self._key_utilization()
         eff_rank = self._v_lt_effective_rank()
 

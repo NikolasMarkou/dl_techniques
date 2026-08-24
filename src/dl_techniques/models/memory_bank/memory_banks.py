@@ -45,9 +45,11 @@ class LongTermMemoryBank(keras.layers.Layer):
     - ``memory_K_lt`` of shape ``(S_lt, d_k)``.
     - ``memory_V_lt`` of shape ``(S_lt, d_v)``.
 
-    The ``memory_`` name prefix is load-bearing — the custom ``train_step``
-    in :class:`WaveFieldMemoryLLM` splits gradients between the backbone
-    and memory optimizers based on this prefix.
+    The ``memory_`` prefix is load-bearing — the custom ``train_step`` in
+    :class:`WaveFieldMemoryLLM` splits gradients between the backbone and
+    memory optimizers on it. Both weights here are created by a direct
+    ``add_weight``, so they carry the prefix in ``Variable.name`` *and*
+    (via the owning ``memory_lt_bank`` layer) in ``Variable.path``.
     """
 
     def __init__(
@@ -253,8 +255,11 @@ class WorkingMemoryBank(keras.layers.Layer):
         wk_out = num_heads * d_k if multi_head_keys else d_k
         wv_out = num_heads * d_v if multi_head_keys else d_v
 
-        # Variable name prefixes carry `memory_` so the custom train_step
-        # can route gradients to the memory optimizer.
+        # These Dense sublayers are named `memory_...`, but their weights
+        # are named `kernel`/`bias` — the layer name reaches the routing
+        # rule through `Variable.path` (whose leading component is the
+        # enclosing `memory_write_controller`), never through
+        # `Variable.name`.
         self.W_K = keras.layers.Dense(
             wk_out,
             use_bias=False,

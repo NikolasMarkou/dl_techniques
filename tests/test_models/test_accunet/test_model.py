@@ -612,17 +612,16 @@ class TestAccUNetErrorHandling:
         """Test behavior with very small input sizes."""
         model = AccUNet(input_channels=3, num_classes=1)
 
-        # Test with size that might cause issues with pooling
+        # The real assertion used to sit inside `try: ... except Exception:
+        # pass`. `AssertionError` IS an `Exception`, so the test could not fail
+        # for ANY reason -- a broken forward and a wrong output shape both
+        # reported green. MEASURED (2026-08-18, CPU): AccUNet's forward at
+        # 16x16 succeeds and returns (1, 16, 16, 1). 16 is the smallest legal
+        # size (4 pooling levels => the input must be divisible by 16), so this
+        # is the architecture's minimum, not a "might work".
         small_input = keras.random.normal((1, 16, 16, 3))
-
-        # This might work or might fail depending on architecture
-        # If it works, output should have correct shape
-        try:
-            output = model(small_input)
-            assert output.shape == (1, 16, 16, 1)
-        except Exception:
-            # Small inputs may not work with the architecture
-            pass
+        output = model(small_input)
+        assert output.shape == (1, 16, 16, 1)
 
     def test_batch_size_variations(self):
         """Test with different batch sizes including edge cases."""
@@ -642,16 +641,16 @@ class TestAccUNetErrorHandling:
         """Test that model can handle reasonably sized inputs without memory issues."""
         model = AccUNet(input_channels=3, num_classes=1, base_filters=16)  # Smaller model
 
-        # Test with moderately large input
+        # The `except Exception as e: if "memory" not in str(e).lower() ...`
+        # guard re-raised only when the message lacked "memory"/"resource" --
+        # so any OTHER failure whose message merely mentioned either word,
+        # including the AssertionError on the shape itself, passed silently.
+        # MEASURED (2026-08-18): this forward completes on CPU in ~8s at
+        # base_filters=16 and returns (1, 512, 512, 1). There is no memory
+        # failure to tolerate, so nothing is tolerated.
         large_input = keras.random.normal((1, 512, 512, 3))
-
-        try:
-            output = model(large_input)
-            assert output.shape == (1, 512, 512, 1)
-        except Exception as e:
-            # If it fails due to memory, that's acceptable
-            if "memory" not in str(e).lower() and "resource" not in str(e).lower():
-                raise  # Re-raise if it's not a memory issue
+        output = model(large_input)
+        assert output.shape == (1, 512, 512, 1)
 
 class TestAccUNetPublicSurface:
     """Lock the public package surface and the input-divisibility contract."""
@@ -689,3 +688,100 @@ class TestAccUNetPublicSurface:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+class TestDocumentedParameterCounts:
+    """Re-derive every parameter count `model.py`'s module docstring prints.
+
+    `accunet/README.md` used to carry a contradicting set ("**Verified** parameter
+    counts ... ~16.8 M trainable", plus a ~4.5 M / ~16.8 M / ~66.5 M scaling table).
+    Every one of those was wrong. Prose claims are only testable by executing the code,
+    so this class executes it; the shape of the guard follows
+    `tests/test_repo_map_numbers.py`.
+    """
+
+    # The exact figures printed in `models/accunet/model.py`'s module docstring.
+    DOCUMENTED = {
+        16: (3_406_008, 3_376_782),
+        32: (13_426_216, 13_367_806),
+        64: (53_310_216, 53_193_438),
+    }
+
+    @pytest.mark.parametrize("base_filters", sorted(DOCUMENTED))
+    def test_the_documented_count_is_the_measured_count(self, base_filters):
+        expected_total, expected_trainable = self.DOCUMENTED[base_filters]
+        model = create_acc_unet(
+            input_channels=3,
+            num_classes=1,
+            base_filters=base_filters,
+            input_shape=(256, 256),
+        )
+        trainable = int(sum(np.prod(v.shape) for v in model.trainable_weights))
+        assert model.count_params() == expected_total
+        assert trainable == expected_trainable
+
+    def test_the_count_really_is_resolution_independent(self):
+        """The premise that makes a single documented number legitimate.
+
+        All spatial dependence lives in weightless `Resizing` layers, so two input
+        sizes must give the identical count. If this ever fails, the docstring must
+        start naming a resolution.
+        """
+        small = create_acc_unet(
+            input_channels=3, num_classes=1, base_filters=32, input_shape=(128, 128)
+        )
+        large = create_acc_unet(
+            input_channels=3, num_classes=1, base_filters=32, input_shape=(256, 256)
+        )
+        assert small.count_params() == large.count_params()
+
+    def test_the_readme_points_at_the_single_home_rather_than_restating_it(self):
+        """One home for the number. A corrected second copy would just drift again.
+
+        Asserted structurally (the README names `model.py` as the home) rather than by
+        forbidding a substring: the README's own explanation of what was removed
+        necessarily quotes the retired figures, and a substring ban would make that
+        explanation unwriteable.
+        """
+        import pathlib
+
+        readme = (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "src" / "dl_techniques" / "models" / "accunet" / "README.md"
+        ).read_text()
+        assert "Parameter counts are not quoted here" in readme
+        assert "module docstring of\n`model.py`" in readme
+        # No live claim survives in the scaling table.
+        assert "| **32 (Default)** | Good balance" in readme
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestAccUNetGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    ``base_filters=8`` and a 32x32 input rather than this suite's usual 32/64:
+    the weight COUNT (442 tensors) is what this assertion ranges over and it is
+    unchanged by the width, while the tape step drops from tens of seconds to
+    single digits. AccUNet's HANC / ResPath / MLFC blocks are the target -- MLFC
+    in particular mixes every encoder level, so a level that is compiled and then
+    dropped from the mix is invisible to a shape test and visible here.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = create_acc_unet(
+            input_channels=3, num_classes=1, base_filters=8, input_shape=(32, 32)
+        )
+        x = np.random.default_rng(0).random((2, 32, 32, 3)).astype("float32")
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

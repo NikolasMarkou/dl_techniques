@@ -488,6 +488,70 @@ def gaussian_probability(y: keras.KerasTensor, mu: keras.KerasTensor, sigma: ker
 
 # ---------------------------------------------------------------------
 
+# Lanczos approximation coefficients, g = 7, n = 9 (Press et al., Numerical
+# Recipes, 3rd ed., §6.1). Accurate to ~1e-15 relative in float64 for x > 0.
+_LANCZOS_G = 7.0
+_LANCZOS_COEFFS = (
+    0.99999999999980993,
+    676.5203681218851,
+    -1259.1392167224028,
+    771.32342877765313,
+    -176.61502916214059,
+    12.507343278686905,
+    -0.13857109526572012,
+    9.9843695780195716e-6,
+    1.5056327351493116e-7,
+)
+
+
+def log_gamma(x: keras.KerasTensor) -> keras.KerasTensor:
+    """Natural log of the gamma function, differentiable, `keras.ops` only.
+
+    Interface contract (shared helper, 2+ intended callers):
+
+    - **Parameters**: ``x`` — a float tensor of any shape, strictly positive.
+      The computation is elementwise and shape-preserving.
+    - **Returns**: a tensor of the same shape and dtype as ``x`` holding
+      ``log(Gamma(x))``.
+    - **Failure mode**: it does not raise. For ``x <= 0`` the result is
+      mathematically undefined here (the reflection formula is not
+      implemented) and will be ``nan`` or ``inf``; callers must clamp. It is
+      differentiable everywhere it is finite, which is the whole reason this
+      exists.
+
+    `keras.ops` has no ``lgamma`` in Keras 3.8 (verified: ``hasattr(keras.ops,
+    'lgamma')`` is ``False``), and the only in-repo alternative was Python's
+    ``math.lgamma`` on scalar constants, which is not differentiable and does
+    not accept tensors. This is a Lanczos approximation rather than a call to
+    ``tf.math.lgamma`` so the forward path stays backend-agnostic, matching the
+    repository's standing preference for `keras.ops` over raw TensorFlow.
+
+    Accuracy is limited by the input dtype, not by the series: pass float64
+    tensors when a high-accuracy value is wanted.
+
+    Args:
+        x: Strictly positive float tensor.
+
+    Returns:
+        ``log(Gamma(x))``, elementwise.
+
+    References:
+        - Lanczos, 1964. A Precision Approximation of the Gamma Function.
+          J. SIAM Numer. Anal. 1(1): 86-96.
+    """
+    dtype = getattr(x, "dtype", None) or keras.config.floatx()
+    z = ops.cast(x, dtype) - 1.0
+
+    series = ops.full_like(z, _LANCZOS_COEFFS[0])
+    for i, coeff in enumerate(_LANCZOS_COEFFS[1:], start=1):
+        series = series + coeff / (z + float(i))
+
+    t = z + _LANCZOS_G + 0.5
+    half_log_two_pi = 0.5 * float(np.log(2.0 * np.pi))
+    return half_log_two_pi + (z + 0.5) * ops.log(t) - t + ops.log(series)
+
+# ---------------------------------------------------------------------
+
 def length(vectors) -> Any:
     """Compute length of capsule vectors.
 

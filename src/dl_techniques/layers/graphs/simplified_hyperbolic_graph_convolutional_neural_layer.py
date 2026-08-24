@@ -176,8 +176,20 @@ class SHGCNLayer(keras.layers.Layer):
                 trainable=True
             )
         else:
-            # Fixed curvature (backend-agnostic constant; not a trainable weight)
-            self.c_theta = keras.ops.convert_to_tensor(0.54, dtype='float32')
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-028
+            # Fixed curvature is a plain PYTHON FLOAT, deliberately NOT a tensor.
+            # Do NOT restore `keras.ops.convert_to_tensor(0.54, ...)` here, and do
+            # not move it to `__init__` as a tensor either: a tensor materialized
+            # inside `build()` belongs to whatever graph is active at build time,
+            # and Keras builds a layer in a THROWAWAY scratch `FuncGraph`. The
+            # constant is then dead by the time `call()` runs, and every one of
+            # the three shipped `models/shgcn` classes raised
+            # `TypeError: <tf.Tensor 'shgcn_hidden_0/Const:0'> is out of scope`
+            # for `use_curvature=False` -- i.e. the public knob had NO working
+            # forward path in any class, while the default `True` was green.
+            # The `curvature` property converts lazily, in the caller's graph.
+            # See decisions.md D-028.
+            self.c_theta = 0.54
 
         # Build dropout layer
         self.dropout.build(feat_shape)
@@ -191,7 +203,12 @@ class SHGCNLayer(keras.layers.Layer):
         :return: Scalar tensor representing curvature ``c = softplus(c_theta)``.
         :rtype: keras.KerasTensor
         """
-        return keras.ops.softplus(self.c_theta)
+        c_theta = self.c_theta
+        if not self.use_curvature:
+            # Convert lazily so the constant lives in the CALLER's graph.
+            c_theta = keras.ops.convert_to_tensor(
+                c_theta, dtype=self.compute_dtype)
+        return keras.ops.softplus(c_theta)
 
     def call(
             self,

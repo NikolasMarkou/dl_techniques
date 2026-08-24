@@ -7,7 +7,6 @@ from typing import Optional, Union, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
@@ -227,9 +226,33 @@ class MambaLayer(keras.layers.Layer):
             name="x_proj"
         )
 
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-084: the paper's dt_proj
+        # initialization is passed as INITIALIZERS, not applied with `.assign()`
+        # inside `build()`.
+        #
+        # WHAT NOT TO DO: do NOT move this back into `build()` as
+        #     self.dt_proj.kernel.assign(...)   # dt_init_std
+        #     self.dt_proj.bias.assign(inv_dt)  # inverse softplus of a
+        #                                       # log-uniform draw in [dt_min, dt_max]
+        # Keras 3 runs the symbolic build pass of a sublayer first reached from a
+        # PARENT layer's `call()` -- i.e. every real Mamba model, since
+        # `MambaLayer` is reached through `MambaResidualBlock` -- inside a
+        # `StatelessScope`, which RECORDS the `.assign()` and then DISCARDS it.
+        # Measured 2026-08-17, CPU: through a parent's `call()` the bias was
+        # ALL ZERO, so `softplus(bias) == 0.693147` uniformly, against the
+        # `[dt_min=0.001, dt_max=0.1]` range the paper's scheme exists to cover
+        # -- ~7x above dt_max and ~660x above dt_min -- and the kernel was
+        # Dense's default glorot (max 0.391 vs the intended 0.9995). The
+        # selective-SSM timestep initialization that makes Mamba trainable was
+        # simply absent, in every model, with every test green. A direct
+        # `.build(...)` gave the correct values, which is why this was invisible.
+        # Same defect class as D-021 (RoPE tables) and F-9 (N-BEATS bases).
+        # See decisions.md D-084.
         self.dt_proj = keras.layers.Dense(
             self.d_inner,
             use_bias=True,
+            kernel_initializer=self._dt_kernel_initializer(),
+            bias_initializer=self._dt_bias_initializer(),
             name="dt_proj"
         )
 
@@ -243,6 +266,60 @@ class MambaLayer(keras.layers.Layer):
         self.A_log = None
         self.D = None
 
+    def _dt_kernel_initializer(self):
+        """Initializer for ``dt_proj.kernel``: the paper's ``dt_init_std`` scale.
+
+        The whole value is computed INSIDE the returned callable. Do not compute
+        a tensor out here and close over it — under the symbolic build pass that
+        tensor belongs to a scratch ``FuncGraph`` and raises "cannot be accessed
+        from here ... out of scope" on the eager pass (the D-021 trap).
+
+        :return: A callable ``(shape, dtype) -> tensor``.
+        """
+        dt_init_std = self.dt_rank ** -0.5 * self.dt_scale
+        if self.dt_init == "constant":
+            return keras.initializers.Constant(dt_init_std)
+        # A Keras Initializer, NOT a bare `keras.random.uniform` call: inside the
+        # symbolic build pass the global seed generator cannot allocate its state
+        # variable and the call dies with "'NoneType' object has no attribute
+        # 'assign'". Keras initializers handle their own seeding there.
+        return keras.initializers.RandomUniform(
+            minval=-dt_init_std, maxval=dt_init_std
+        )
+
+    def _dt_bias_initializer(self):
+        """Initializer for ``dt_proj.bias``: ``inv_softplus`` of a log-uniform draw.
+
+        Chosen so that ``softplus(bias)`` — the actual SSM timestep — lands
+        log-uniformly in ``[dt_min, dt_max]``, which is what the Mamba paper's
+        initialization is for. This is a RANDOM draw rather than a closed form,
+        which is exactly why it was written as an ``.assign()`` in the first
+        place; an initializer callable handles it just as well and, unlike the
+        assign, survives the stateless build pass.
+
+        :return: A callable ``(shape, dtype) -> tensor``.
+        """
+        log_min = math.log(self.dt_min)
+        log_max = math.log(self.dt_max)
+        floor = self.dt_init_floor
+        # The uniform draw comes from a Keras Initializer rather than a bare
+        # `keras.random.uniform`: inside the symbolic build pass the global seed
+        # generator cannot allocate its state variable and the call dies with
+        # "'NoneType' object has no attribute 'assign'". Everything downstream of
+        # the draw is a pure `keras.ops` transform and is safe there.
+        uniform = keras.initializers.RandomUniform(minval=0.0, maxval=1.0)
+
+        def initializer(shape, dtype=None):
+            u = uniform(shape, dtype=dtype or "float32")
+            dt = keras.ops.exp(u * (log_max - log_min) + log_min)
+            dt = keras.ops.clip(dt, floor, float("inf"))
+            # Inverse of softplus: log(exp(x) - 1). `expm1` keeps this accurate
+            # for the small dt values `dt_min` produces, where `exp(dt) - 1`
+            # loses most of its significant digits.
+            return keras.ops.log(keras.ops.expm1(dt))
+
+        return initializer
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Create layer weights and build sub-layers.
@@ -255,6 +332,24 @@ class MambaLayer(keras.layers.Layer):
         :param input_shape: Shape of input tensor (batch_size, seq_len, d_model).
         :type input_shape: Tuple[Optional[int], ...]
         """
+        # Idempotence guard: a parent that calls `child.build(shape)` directly
+        # (both residual blocks in this package do) would otherwise re-run
+        # `add_weight` on an instance a forward pass already built, and Keras
+        # raises `ValueError: You cannot add new elements of state ... to a
+        # layer that is already built` (MEASURED 2026-08-21). The rationale that
+        # used to stand here -- "Keras traces `call()` more than once on the
+        # first invocation" -- is NOT the live path: `Layer.__call__` checks
+        # `self.built`, so a parent whose `call()` runs this layer twice
+        # succeeds even with no guard at all. A second CORRECTION: the claim
+        # "every sibling in this package already has it" was FALSE --
+        # `Mamba2Layer` had no guard at all until D-123 added one. The two
+        # `add_weight`-owning layers (`MambaLayer`, `Mamba2Layer`) both carry it
+        # now; `MambaResidualBlock` / `Mamba2ResidualBlock` deliberately do not,
+        # because they only delegate to sub-layer `build`s that are themselves
+        # guarded.
+        if self.built:
+            return
+
         # S4D real initialization for state matrix A.
         # Each row of A is initialized to [1, 2, ..., d_state].
         # We use NumPy for initialization to avoid potential graph context issues
@@ -299,35 +394,11 @@ class MambaLayer(keras.layers.Layer):
         out_proj_input_shape = (input_shape[0], input_shape[1], self.d_inner)
         self.out_proj.build(out_proj_input_shape)
 
-        # Special initialization for dt_proj
-        dt_init_std = self.dt_rank**-0.5 * self.dt_scale
-
-        if self.dt_init == "constant":
-            # Use variable's assign method directly
-            self.dt_proj.kernel.assign(
-                keras.ops.full(self.dt_proj.kernel.shape, dt_init_std)
-            )
-        else:  # "random"
-            # Use variable's assign method directly
-            self.dt_proj.kernel.assign(
-                keras.random.uniform(
-                    self.dt_proj.kernel.shape,
-                    minval=-dt_init_std,
-                    maxval=dt_init_std
-                )
-            )
-
-        # Initialize dt bias so that softplus(dt_bias) is between dt_min and dt_max
-        dt = keras.ops.exp(
-            keras.random.uniform((self.d_inner,), dtype="float32")
-            * (math.log(self.dt_max) - math.log(self.dt_min))
-            + math.log(self.dt_min)
-        )
-        dt = keras.ops.clip(dt, self.dt_init_floor, float('inf'))
-        # Inverse of softplus: log(exp(x) - 1)
-        inv_dt = keras.ops.log(keras.ops.exp(dt) - 1)
-        # Use variable's assign method directly
-        self.dt_proj.bias.assign(inv_dt)
+        # dt_proj's special initialization is NOT applied here -- it is carried
+        # by the initializers passed at construction. See the D-084 anchor in
+        # `__init__`: an `.assign()` at this point is silently discarded whenever
+        # this layer is first reached from a parent's `call()`, which is every
+        # real model.
 
         super().build(input_shape)
 
@@ -367,6 +438,27 @@ class MambaLayer(keras.layers.Layer):
         """
         batch_size, d_inner, seq_len = keras.ops.shape(u)
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-044
+        # The recurrent scan runs in the VARIABLE dtype (float32 under
+        # `mixed_float16`), never in the compute dtype. `call()` already casts
+        # `A_log` to float32 on purpose, and `keras.ops.einsum` PROMOTES rather
+        # than raising, so `deltaA` came out float32 while `h` was materialised at
+        # `compute_dtype` — the exception then landed on `deltaA[:, :, t] * h`
+        # inside `body`, two statements away from its cause. Do NOT "fix" this by
+        # casting `A` down to float16: this is a sequential accumulation over
+        # `seq_len` steps and half-precision state is exactly where it drifts.
+        # See decisions.md D-044.
+        scan_dtype = self.variable_dtype
+        u = keras.ops.cast(u, scan_dtype)
+        delta = keras.ops.cast(delta, scan_dtype)
+        A = keras.ops.cast(A, scan_dtype)
+        B = keras.ops.cast(B, scan_dtype)
+        C = keras.ops.cast(C, scan_dtype)
+        D = keras.ops.cast(D, scan_dtype)
+        # `z` is deliberately NOT lifted: the SiLU gate is a `keras.layers.Activation`,
+        # which runs at `compute_dtype`, so the gating is applied AFTER the result
+        # comes back down (see the return statement).
+
         # Discretize continuous parameters A and B
         # A_bar = exp(Δ * A)
         deltaA = keras.ops.exp(
@@ -381,13 +473,13 @@ class MambaLayer(keras.layers.Layer):
         # Initialize hidden state
         h = keras.ops.zeros(
             (batch_size, d_inner, self.d_state),
-            dtype=self.compute_dtype
+            dtype=scan_dtype
         )
 
         # Storage for outputs
         ys = keras.ops.zeros(
             (seq_len, batch_size, d_inner),
-            dtype=self.compute_dtype
+            dtype=scan_dtype
         )
 
         # Time step counter
@@ -438,7 +530,8 @@ class MambaLayer(keras.layers.Layer):
         # Add skip connection: y = y + D * u
         y = y + keras.ops.expand_dims(keras.ops.expand_dims(D, 0), -1) * u
 
-        # Apply gating: y = y * silu(z)
+        # Apply gating: y = y * silu(z), at the layer's compute dtype.
+        y = keras.ops.cast(y, self.compute_dtype)
         return y * self.activation(z)
 
     def call(

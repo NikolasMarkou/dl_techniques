@@ -1,4 +1,5 @@
-"""Generate a multi-scale grid of anchor points for object detection.
+"""
+Generate a multi-scale grid of anchor points for object detection.
 
 This layer serves a critical, albeit simple, role in modern anchor-based
 object detection models. It pre-computes and stores the spatial center

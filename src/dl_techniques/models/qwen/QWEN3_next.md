@@ -1,6 +1,6 @@
 # Qwen3 Next: Mixture of Experts Language Model
 
-A production-ready implementation of the Qwen3 Next architecture featuring Mixture of Experts (MoE) with the correct block structure: 3x Gated DeltaNet + 1x Gated Attention per block, each with individual Zero-Centered RMSNorm and MoE layers.
+An implementation of the Qwen3 Next architecture featuring Mixture of Experts (MoE) with the correct block structure: 3x Gated DeltaNet + 1x Gated Attention per block, each with individual Zero-Centered RMSNorm and MoE layers.
 
 ## Overview
 

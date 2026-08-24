@@ -15,6 +15,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestRepMixerBlock:
@@ -470,6 +471,10 @@ class TestLayerIntegration:
         # Test serialization of combined model
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'combined_model.keras')
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(filepath)
 
             loaded_model = keras.models.load_model(filepath)

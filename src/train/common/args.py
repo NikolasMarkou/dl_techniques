@@ -2,9 +2,19 @@
 
 import sys
 import argparse
-from typing import Optional, List, Sequence, Set
+from pathlib import Path
+from typing import Any, Dict, Optional, List, Mapping, Sequence, Set, Tuple
 
 from dl_techniques.datasets.time_series import TimeSeriesGeneratorConfig
+
+__all__ = [
+    "build_generator_config",
+    "config_values_from_args",
+    "create_base_argument_parser",
+    "create_ts_argument_parser",
+    "explicitly_set_flags",
+    "resolved_run_dir",
+]
 
 
 # ---------------------------------------------------------------------
@@ -158,6 +168,121 @@ def explicitly_set_flags(
             if len(matches) == 1:
                 explicit.add(dest_by_opt[matches[0]])
     return explicit
+
+
+# ---------------------------------------------------------------------
+
+def config_values_from_args(
+        parser: argparse.ArgumentParser,
+        argv: Optional[Sequence[str]],
+        cli_to_config: Mapping[str, str],
+        smoke_preset: Mapping[str, Any],
+) -> Tuple[argparse.Namespace, Dict[str, Any]]:
+    """Parse ``argv`` and resolve it into config-field values, preset included.
+
+    The ``argv -> Namespace -> {config field: value}`` merge shared by the SAM,
+    SAM 2 and SAM 3 trainers, whose bodies were byte-identical modulo the config
+    class name. Each trainer keeps its OWN ``CLI_TO_CONFIG`` and
+    ``SMOKE_PRESET`` (per-model DATA — the flag sets and preset field lists
+    genuinely differ, e.g. SAM 3 deliberately omits ``batch_size``) and its own
+    ``build_parser``; only the merge MECHANISM lives here.
+
+    Interface contract, for the callers that share this:
+
+    * ``parser`` is parsed here, once, with ``argv``. Callers must NOT call
+      ``parser.parse_args`` themselves and pass the result in — the returned
+      Namespace is the one this function parsed, so there is exactly one parse.
+    * Provenance is decided by :func:`explicitly_set_flags` (a raw token scan),
+      never by comparing a parsed value against its default. That is the whole
+      point: a flag typed AT its own default is indistinguishable from an
+      omission in the Namespace.
+    * The preset is applied only when the resolved ``smoke`` value is truthy,
+      and only to fields the caller did not type. Fields absent from
+      ``cli_to_config`` are never produced.
+    * Returns VALUES, not a config: the caller constructs its own dataclass, so
+      that class's ``__post_init__`` validation still runs at the call site.
+    * Failure mode: ``parser.parse_args`` exits the process on a bad argv (its
+      normal behaviour), and :func:`explicitly_set_flags` raises ``ValueError``
+      for a parser carrying a non-long option string.
+
+    Args:
+        parser: The trainer's fully-populated parser.
+        argv: Tokens without the program name. ``None`` reads ``sys.argv[1:]``.
+        cli_to_config: argparse ``dest`` -> config field name. THE wiring table.
+        smoke_preset: config field -> value, applied when ``--smoke`` resolves
+            truthy and the caller did not type that field's flag.
+
+    Returns:
+        ``(namespace, values)``. The namespace is returned so the caller can
+        read process-level dests (``--gpu``) that deliberately do not reach the
+        config; ``values`` is the kwargs dict for the config class.
+    """
+    # DECISION plan-2026-08-12T123743-e798a9e1/D-015
+    # This function PARSES. Do NOT change the signature to accept an
+    # already-parsed Namespace: two parses of the same argv are two chances for
+    # a caller to hand in a Namespace from a DIFFERENT parser than the one
+    # whose actions `explicitly_set_flags` scans, and the provenance answer
+    # would then be computed against the wrong option table -- silently, since
+    # both parsers accept the same flags. And do NOT decide `explicit_fields`
+    # by comparing `getattr(args, dest)` against `parser.get_default(dest)`:
+    # MEASURED on sam3, that reimplementation fires
+    # `test_every_preset_field_can_be_typed_at_its_own_default_and_win` with
+    # `--num-train-samples typed at its own default (512) lost to the preset`
+    # (decisions.md D-013), because an explicitly-typed default and an omission
+    # are the same Namespace. Only the raw token scan can tell them apart.
+    args = parser.parse_args(argv)
+    explicit_dests = explicitly_set_flags(parser, argv)
+    explicit_fields = {
+        cli_to_config[dest] for dest in explicit_dests if dest in cli_to_config
+    }
+
+    values = {
+        field: getattr(args, dest) for dest, field in cli_to_config.items()
+    }
+    if values.get("smoke"):
+        for field, preset_value in smoke_preset.items():
+            if field not in explicit_fields:
+                values[field] = preset_value
+    return args, values
+
+
+# ---------------------------------------------------------------------
+
+def resolved_run_dir(config: Any) -> Path:
+    """Resolve a run directory, anchoring a RELATIVE ``output_dir`` at the repo root.
+
+    Shared by the SAM, SAM 2 and SAM 3 trainers (each imports it under its own
+    local name ``resolved_output_dir``). Reads exactly two attributes off
+    ``config``: ``output_dir`` and ``experiment_name``.
+
+    Args:
+        config: Any object with ``output_dir`` and ``experiment_name``.
+
+    Returns:
+        ``<repo>/<output_dir>/<experiment_name>`` for a relative ``output_dir``,
+        or ``<output_dir>/<experiment_name>`` for an absolute one.
+    """
+    # DECISION plan-2026-08-12T123743-e798a9e1/D-014
+    # `parents[3]` reaches the REPO ROOT from THIS file only because
+    # `src/train/common/args.py` sits at the SAME DEPTH as the
+    # `src/train/<pkg>/train_<x>.py` files this body was moved out of
+    # (parents: [0] common, [1] train, [2] src, [3] <repo>). That is a
+    # COINCIDENCE of layout, not a design invariant. Do NOT move, re-nest or
+    # re-home this function without re-deriving the index: a wrong index does
+    # NOT raise -- `Path.parents` silently yields a shorter path, so every run
+    # would write its results tree somewhere else with no error, and the SAM
+    # suites' `test_the_resolved_path_is_not_under_src` only catches the one
+    # wrong answer that lands under `src/`. And do NOT "simplify" the whole
+    # body to `Path(config.output_dir) / name`: the editable install puts
+    # `<repo>/src` on `sys.path`, so `python -m train.sam.train_sam` resolves
+    # from ANY working directory and the plain form writes a stray `results/`
+    # tree wherever the user happened to be standing -- including
+    # `src/results/`, which the repo convention names explicitly as the wrong
+    # place. See decisions.md D-014 (and the three trainers' own D-041).
+    root = Path(config.output_dir)
+    if not root.is_absolute():
+        root = Path(__file__).resolve().parents[3] / root
+    return root / str(config.experiment_name)
 
 
 # ---------------------------------------------------------------------

@@ -99,6 +99,10 @@ from typing import Any, Dict, Tuple, Optional, Literal, Union
 from .common import compute_attention_scale
 from ..activations import ProbabilityOutput, resolve_activation_layer
 from ..norms.factory import create_normalization_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -278,9 +282,9 @@ class NonLocalAttention(keras.layers.Layer):
         self.qk_norm_kwargs = qk_norm_kwargs
         self.output_norm_type = output_norm_type
         self.output_norm_kwargs = output_norm_kwargs
-        self.intermediate_activation = intermediate_activation
+        self.intermediate_activation = deserialize_activation(intermediate_activation)
         self.intermediate_activation_args = intermediate_activation_args
-        self.output_activation = output_activation
+        self.output_activation = deserialize_activation(output_activation)
         self.output_activation_args = output_activation_args
         self.output_channels = output_channels
         self.dropout_rate = dropout_rate
@@ -659,9 +663,9 @@ class NonLocalAttention(keras.layers.Layer):
             'qk_norm_kwargs': self.qk_norm_kwargs,
             'output_norm_type': self.output_norm_type,
             'output_norm_kwargs': self.output_norm_kwargs,
-            'intermediate_activation': self.intermediate_activation,
+            'intermediate_activation': serialize_activation(self.intermediate_activation),
             'intermediate_activation_args': self.intermediate_activation_args,
-            'output_activation': self.output_activation,
+            'output_activation': serialize_activation(self.output_activation),
             'output_activation_args': self.output_activation_args,
             'output_channels': self.output_channels,
             'dropout_rate': self.dropout_rate,

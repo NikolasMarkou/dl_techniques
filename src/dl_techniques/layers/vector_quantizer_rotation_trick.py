@@ -1,110 +1,106 @@
 """
-Rotation Trick Vector Quantizer.
+Vector quantization with the Rotation Trick gradient estimator.
 
-This module implements the Rotation Trick VQ-VAE (Fifty et al., ICLR 2025) as a
-Keras 3 layer. The Rotation Trick replaces the standard straight-through
-estimator with a rotation + scaling that propagates a more informative gradient
-from the discrete codebook lookup back through the quantization step. Forward
-values are identical to a standard VQ (nearest codebook entry); only the
-gradient path differs.
+This layer embodies the principle of gradient reshaping at a discrete
+bottleneck, a design paradigm that decouples the forward quantization
+semantics from the backward gradient path. The core idea is to leave the
+forward computation identical to standard vector quantization, a nearest
+neighbour lookup in a learned codebook, while replacing the coarse
+straight-through estimator with a transformation that carries the geometric
+relationship between the encoder output and its assigned code back into the
+encoder's gradient.
 
-**Architecture Overview:**
+The motivation is a known deficiency of the straight-through estimator. Because
+`argmin` has zero derivative almost everywhere, the standard formulation copies
+the reconstruction gradient at `z_q` directly onto `z_e`:
 
-.. code-block:: text
+`z_q = z_e + stop_gradient(e_k* - z_e)`
 
-    ┌────────────────────────────────────────┐
-    │  Input z_e [B, ..., D]                 │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Reshape → [N, D]  → split into heads  │
-    │  flat: [N, H, D_h]   D_h = D / H       │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Codebook lookup  E: [H, K, D_h]       │
-    │    'euclidean': k* = argmin ||z - e||  │
-    │    'cosine'   : k* = argmax <ẑ, ê>     │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Gradient transform                    │
-    │    'ste'          : z_e + sg(z_q - z_e)│
-    │    'rotation'     : R(z_e) * scale     │
-    │    'reflection'   : Ref(z_e) * scale   │
-    │    'no_grad_scale': R(z_e)             │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Aux losses (training only)            │
-    │    commitment : ||z_e - sg(z_q)||²     │
-    │    codebook   : ||sg(z_e) - z_q||²     │
-    │                  (skipped if use_ema)  │
-    │    diversity  : -H(p_avg)              │
-    │    orthogonal : ||E Eᵀ - I||²          │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  EMA + dead-code (training, optional)  │
-    │    cluster_size ← decay·EMA            │
-    │    embed_avg    ← decay·EMA            │
-    │    reinit codes with hits < τ          │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Reshape to [B, ..., D]                │
-    └────────────────────────────────────────┘
+Every point inside a Voronoi cell therefore receives the same gradient
+regardless of where it sits relative to its centroid. Directional and
+curvature information about the quantization error is discarded, which
+degrades codebook utilization and encoder conditioning.
 
-``sg`` denotes ``stop_gradient``. Very-efficient rotation form:
+The Rotation Trick instead treats the map from `z_e` to `z_q` as a rotation
+composed with a rescaling, and applies that same linear operator to the
+incoming gradient. Writing `x` for the encoder output and `q` for its assigned
+code, the very-efficient Householder form used here is:
 
-.. code-block:: text
+`u_x = x / ||x||`
+`u_q = q / ||q||`
+`w   = (u_x + u_q) / ||u_x + u_q||`
+`R(x) = x - 2 (x . w) w + 2 (x . u_x) u_q`
+`scale = ||q|| / ||x||`
+`output = R(x) * scale`
 
-    û_x = sg(z_e / ||z_e||);    û_q = sg(z_q / ||z_q||)
-    w   = sg((û_x + û_q) / ||û_x + û_q||)
-    R(z_e) = z_e - 2 (z_e · w) w + 2 (z_e · û_x) û_q
-    scale  = sg(||z_q|| / ||z_e||)            # 'rotation' mode
-    quantized = R(z_e) * scale
+The geometric anchors `u_x`, `u_q`, `w`, and by default `scale` are wrapped in
+`stop_gradient`, which makes `R` a constant linear operator with respect to
+backpropagation. Gradients therefore flow through `R(x)` as a fixed rotation of
+the upstream gradient rather than as an identity, preserving the angular
+relationship that the straight-through estimator collapses. Forward values are
+unchanged: applying `R` and then `scale` to `x` reproduces `q` exactly.
 
-``'reflection'`` drkeras.ops the ``+ 2 (z_e · û_x) û_q`` term.
-``'no_grad_scale'`` keeps ``scale`` differentiable.
+Architecturally, a forward pass proceeds through five stages:
+1.  The input is flattened across all non-channel dimensions and split into
+    `num_heads` independent channel groups, giving `[N, H, D/H]` against a
+    codebook of shape `[H, K, D/H]`. Multi-head factorization raises the
+    effective vocabulary to `K^H` at linear cost in memory.
+2.  A per-head nearest neighbour search selects one code per group, using
+    either squared Euclidean distance or cosine similarity. In cosine mode the
+    lookup is purely angular, so the input's magnitude affects neither which code
+    is selected nor what is emitted: the quantized vector is the stored codebook
+    row itself, as in euclidean mode. Codebook magnitudes are therefore trained by
+    the codebook loss in both modes.
+3.  The selected codes are combined with the encoder output by the chosen
+    gradient transform: `'rotation'` for the full form above, `'reflection'`
+    for the Householder reflection alone, `'no_grad_scale'` to let the scale
+    factor remain differentiable, or `'ste'` to recover classical
+    straight-through behaviour.
+4.  Auxiliary objectives are accumulated. The codebook and commitment terms
+    follow the original VQ-VAE formulation; optional diversity and orthogonal
+    penalties act directly on the codebook gram matrix to discourage
+    collinear or redundant entries.
+5.  The result is reshaped back to the input geometry, so the layer is a
+    shape-preserving drop-in at any point in a network.
 
-Beyond the rotation gradient, this implementation is a strict superset of the
-existing ``VectorQuantizer`` adding:
+Codebook maintenance is handled by three optional mechanisms, each addressing
+a distinct failure mode of discrete bottlenecks. Exponential moving average
+updates treat the codebook as an online k-means problem, tracking per-code
+assignment counts `N` and assigned-vector sums `m` with decay `gamma` and
+setting `e = m / (N + eps)`, which removes codebook adaptation from the
+optimizer's learning rate and momentum state. Dead-code expiration counts
+consecutive calls in which a code receives no assignments and reinitializes
+entries past a threshold from vectors in the current batch, recovering capacity
+lost to codebook collapse. A one-shot k-means warm start seeds the codebook
+from accumulated encoder statistics, avoiding the large initial mismatch between
+a randomly initialized codebook and the encoder distribution. It runs in
+`warm_start_codebook`, eagerly and before training, NOT inside `call`: until
+2026-08-15 it lived in `call`, where reading its own `kmeans_init_done` flag
+meant `np.asarray` on a graph tensor -- which raises the moment anyone calls
+`model.fit()` -- and where its accumulator was a plain Python list appended to
+inside a traced function, so `kmeans_init_steps > 1` collected one trace's worth
+of data rather than N batches. Every k-means test called the layer eagerly, the
+one regime in which neither failure is visible.
 
-- ``gradient_mode``: ``'rotation'`` | ``'reflection'`` | ``'no_grad_scale'`` |
-  ``'ste'`` (back-compat).
-- ``distance_mode``: ``'euclidean'`` (default) | ``'cosine'``. Cosine mode does
-  angular nearest neighbour search and restores magnitude via ``||x||``.
-- Multi-head codebooks (``num_heads``) — channel split into independent groups.
-- EMA codebook updates (``use_ema=True``) with multi-head factorisation.
-- Dead-code expiration (``dead_code_threshold`` + ``dead_code_reinit``).
-- K-means warm start (``kmeans_init=True``, deterministic).
-- Diversity penalty + orthogonal regularisation (optional aux losses).
-
-Mathematical formulation (very-efficient rotation form per the paper):
-
-.. math::
-
-    \\hat{u}_x = x / \\|x\\|, \\quad \\hat{u}_q = q / \\|q\\|
-    w_{unnorm} = \\hat{u}_x + \\hat{u}_q,  \\quad w = w_{unnorm} / \\|w_{unnorm}\\|
-    R(x) = x - 2 (x \\cdot w) w + 2 (x \\cdot \\hat{u}_x) \\hat{u}_q
-    scale = \\|q\\| / \\|x\\|
-    quantized = R(x) \\cdot scale
-
-with ``stop_gradient`` applied to ``w``, ``\\hat{u}_x``, ``\\hat{u}_q`` and
-(depending on mode) ``scale``. The reflection variant drkeras.ops the
-``+2(x \\cdot \\hat{u}_x)\\hat{u}_q`` term.
+This implementation is a strict superset of a standard vector quantizer.
+Setting `gradient_mode='ste'` with `num_heads=1`, `distance_mode='euclidean'`,
+and `use_ema=False` reproduces the classical layer's behaviour to within
+floating point tolerance.
 
 References:
-    - Fifty, C., Junkins, R., Duan, D., et al. (2025). Restructuring Vector
-      Quantization with the Rotation Trick. ICLR 2025.
-    - van den Oord, A., Vinyals, O., Kavukcuoglu, K. (2017). Neural Discrete
-      Representation Learning. NeurIPS 2017. arXiv:1711.00937.
-    - Razavi, A., van den Oord, A., Vinyals, O. (2019). Generating Diverse
-      High-Fidelity Images with VQ-VAE-2. NeurIPS 2019.
-    - Yu, J., Li, X., Koh, J. Y., et al. (2022). Vector-quantized Image Modeling
-      with Improved VQGAN. ICLR 2022.
+    - Fifty et al., 2025. Restructuring Vector Quantization with the Rotation
+      Trick. ICLR 2025. (https://arxiv.org/abs/2410.06424)
+    - van den Oord et al., 2017. Neural Discrete Representation Learning.
+      (https://arxiv.org/abs/1711.00937)
+    - Razavi et al., 2019. Generating Diverse High-Fidelity Images with
+      VQ-VAE-2. (https://arxiv.org/abs/1906.00446)
+    - Yu et al., 2022. Vector-quantized Image Modeling with Improved VQGAN.
+      (https://arxiv.org/abs/2110.04627)
+    - Bengio et al., 2013. Estimating or Propagating Gradients Through
+      Stochastic Neurons for Conditional Computation.
+      (https://arxiv.org/abs/1308.3432)
 """
+
 
 import keras
 import numpy as np
@@ -127,6 +123,53 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     and ``num_heads=1, distance_mode='euclidean', use_ema=False`` recovers the
     existing layer's behaviour bit-equivalently (atol<=1e-6).
 
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌────────────────────────────────────────┐
+        │  Input z_e [B, ..., D]                 │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Reshape → [N, D]  → split into heads  │
+        │  flat: [N, H, D_h]   D_h = D / H       │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Codebook lookup  E: [H, K, D_h]       │
+        │    'euclidean': k* = argmin ||z - e||  │
+        │    'cosine'   : k* = argmax <ẑ, ê>     │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Gradient transform                    │
+        │    'ste'          : z_e + sg(z_q - z_e)│
+        │    'rotation'     : R(z_e) * scale     │
+        │    'reflection'   : Ref(z_e) * scale   │
+        │    'no_grad_scale': R(z_e)             │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Aux losses (training only)            │
+        │    commitment : ||z_e - sg(z_q)||²     │
+        │    codebook   : ||sg(z_e) - z_q||²     │
+        │                  (skipped if use_ema)  │
+        │    diversity  : -H(p_avg)              │
+        │    orthogonal : ||E Eᵀ - I||²          │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  EMA + dead-code (training, optional)  │
+        │    cluster_size ← decay·EMA            │
+        │    embed_avg    ← decay·EMA            │
+        │    reinit codes with hits < τ          │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Reshape to [B, ..., D]                │
+        └────────────────────────────────────────┘
+
     :param num_embeddings: Codebook size per head (``K``).
     :param embedding_dim: Total channel dim ``D``. With multi-head the codebook
         shape is ``(num_heads, K, D/num_heads)``.
@@ -139,8 +182,14 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     :param ema_decay: EMA decay rate.
     :param epsilon: Numerical floor for norms / EMA / cosine.
     :param num_heads: Number of independent codebook heads (channel split).
-    :param kmeans_init: Run a one-shot k-means warm start on first training call.
-    :param kmeans_init_steps: Number of mini-batches to accumulate for k-means.
+    :param kmeans_init: Enable the one-shot k-means warm start. This flag does
+        NOT trigger it: the warm start runs scikit-learn and assigns a variable,
+        neither of which is graph-safe, so it is performed by
+        :meth:`warm_start_codebook`, called eagerly before training.
+        :class:`~dl_techniques.models.vq_vae_rotation.model.VQVAERotationTrick`
+        calls it for you from its ``fit`` override.
+    :param kmeans_init_steps: Number of mini-batches the caller should collect
+        before invoking :meth:`warm_start_codebook`.
     :param kmeans_seed: Deterministic numpy seed for k-means.
     :param dead_code_threshold: Consecutive unused-call count after which a
         code is re-initialised. 0 disables.
@@ -240,14 +289,14 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         self.embeddings = None
         self.ema_cluster_size = None
         self.ema_embeddings = None
+        self.ema_step = None
         self.dead_code_unused = None
         self.kmeans_init_done = None
-        self._kmeans_accum = []  # python list, NOT a weight
 
         # K-means availability check (deferred to first use)
         if self.kmeans_init:
             try:
-                import sklearn.cluster  # noqa: F401
+                import sklearn.cluster
             except ImportError as exc:
                 raise RuntimeError(
                     "kmeans_init=True requires scikit-learn. Install scikit-learn "
@@ -274,25 +323,71 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         )
 
         if self.use_ema:
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # EMA accumulators are STATE, not activations: float32 and NOT
+            # autocast. `cluster_size` counts assignments and float16 is exact
+            # on integers only to 2048, so a large N SILENTLY loses counts from
+            # the denominator of the codebook update; and with autocast on,
+            # `self.ema_decay * self.ema_cluster_size` (float16) +
+            # `(1 - decay) * cluster_size` (float32) raises
+            # `InvalidArgumentError: cannot compute AddV2` at line ~674 under
+            # `mixed_float16` (MEASURED, step 5.8 -- this is what made
+            # `vq_vae_rotation` unrunnable in its `use_ema=True` arm).
+            # `_update_ema` / `_update_dead_codes` cast up to float32 to match.
             self.ema_cluster_size = self.add_weight(
                 name="ema_cluster_size",
                 shape=(self.num_heads, self.num_embeddings),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
+            # DECISION plan-2026-08-18T140459-7991552f/D-012
+            # This accumulator MUST start at ZERO, not at `self.initializer`.
+            # It is the numerator of an EMA that `_update_ema` debiases by
+            # `1 - decay**t`; a non-zero start is a bias the debias step
+            # AMPLIFIES by `decay**t / (1 - decay**t)` = 99x at t=1. MEASURED
+            # on the sibling `vector_quantizer.py` (same defect, same fixture):
+            # `max|codebook|` after 5 epochs was 47283 with this initializer
+            # kept and the debias added, versus 4521 with neither correction
+            # and 0.264 with both. See decisions.md D-012.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.ema_embeddings = self.add_weight(
                 name="ema_embeddings",
                 shape=(self.num_heads, self.num_embeddings, self.head_dim),
-                initializer=self.initializer,
+                initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
+            )
+
+            # DECISION plan-2026-08-18T140459-7991552f/D-012
+            # EMA step counter, read ONLY by `_update_ema`'s bias correction.
+            # Do NOT delete it as an unused scalar and do NOT give it
+            # `dtype="int32"`: TF places an int32 variable on the CPU and the
+            # resulting CPU/GPU split raises `Trying to access resource
+            # .../ema_step ... from device GPU:0` inside the jit-compiled train
+            # function (MEASURED on the sibling layer -- `fit()` died).
+            # It changes the `use_ema=True` weight set from 3 to 4.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
+            self.ema_step = self.add_weight(
+                name="ema_step",
+                shape=(),
+                initializer="zeros",
+                trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
         if self.dead_code_threshold > 0:
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
             self.dead_code_unused = self.add_weight(
                 name="dead_code_unused",
                 shape=(self.num_heads, self.num_embeddings),
                 initializer="zeros",
                 trainable=False,
+                dtype="float32",
+                autocast=False,
             )
 
         if self.kmeans_init:
@@ -349,13 +444,15 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # Flatten everything but channels: (..., D) -> (N, D)
         flat_inputs = keras.ops.reshape(inputs, (-1, self.embedding_dim))
 
-        # K-means warm start (Python side; one-shot)
-        if (
-                self.kmeans_init
-                and training is True
-                and float(keras.ops.convert_to_numpy(self.kmeans_init_done)) < 0.5
-        ):
-            self._maybe_kmeans_init(flat_inputs)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-040
+        # NO k-means work here. `call()` is traced: it ran
+        # `float(keras.ops.convert_to_numpy(self.kmeans_init_done))`, which on
+        # the TF backend is `np.asarray(graph_tensor)` and RAISES under
+        # `model.fit()`, and it appended to a plain Python list, which
+        # accumulates once per TRACE rather than once per batch, so
+        # `kmeans_init_steps > 1` silently saw one batch. The warm start now
+        # lives in `warm_start_codebook`, called eagerly before training.
+        # Do NOT move it back inside `call` in any form. See decisions.md D-040.
 
         # Reshape to (N, H, head_dim)
         flat_heads = keras.ops.reshape(flat_inputs, (-1, self.num_heads, self.head_dim))
@@ -440,19 +537,36 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
 
         # Gather quantized vectors per head.
         # one_hot indices to (N,H,K), then matmul against codebook (H,K,D)
-        encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `dtype=self.compute_dtype`: without it `one_hot` materialises at
+        # float32, the einsum below promotes, and the caller's commitment-loss
+        # `Sub` raises under `mixed_float16` (same shape as the sibling
+        # `vector_quantizer.py`). The EMA/dead-code copies of this line at
+        # `_update_ema` and `_update_dead_codes` deliberately do NOT take this
+        # argument -- those accumulate into float32 EMA state and float32 is
+        # the correct accumulation dtype there.
+        encodings = keras.ops.one_hot(
+            indices, self.num_embeddings, dtype=self.compute_dtype
+        )  # (N,H,K)
         # quantized = sum_k encodings * codebook[h,k] -> (N,H,D)
         quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, codebook)
 
-        if self.distance_mode == "cosine":
-            # Restore magnitude
-            x_mag = keras.ops.sqrt(
-                keras.ops.sum(keras.ops.square(flat_heads), axis=-1, keepdims=True) + self.epsilon
-            )
-            q_mag = keras.ops.sqrt(
-                keras.ops.sum(keras.ops.square(quantized), axis=-1, keepdims=True) + self.epsilon
-            )
-            quantized = quantized * (x_mag / q_mag)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-030: cosine mode returns the RAW
+        # codebook row, exactly like euclidean mode. This branch used to "restore
+        # magnitude" by scaling the row by `x_mag / q_mag`, and it must NOT be put
+        # back. `quantize_from_indices` — the only other producer of a quantized
+        # vector, and the one `models/vq_vae_rotation`'s
+        # `encode_to_indices -> quantize_from_indices -> decode` pair uses — returns
+        # the raw row in every mode and CANNOT reproduce the rescale: an index has
+        # already discarded x_mag by design in cosine mode (that is what cosine
+        # similarity means), so carrying it would require changing
+        # `encode_to_indices`' public return signature. So the rescale, not the raw
+        # row, was the outlier. It also made the "discrete" bottleneck leak a
+        # continuous per-token magnitude channel, leaving codebook MAGNITUDES
+        # untrained (`||sg[x] - (||x||/||e||)e||^2` is direction-only). This is the
+        # same defect class as the reflection-sign bug fixed in
+        # `_apply_gradient_transform` below, for magnitude instead of sign, and the
+        # invariant documented there is the one it violated. See decisions.md D-030.
 
         return indices, quantized
 
@@ -475,21 +589,50 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         q32 = keras.ops.cast(q, "float32")
 
         eps = self.epsilon
+        eps_sq = eps * eps
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-025: the three norms below are
+        # FLOORED (`sqrt(max(sum(x^2), eps^2))` == `max(||x||, eps)`), NOT
+        # eps-regularised. Do NOT put `sqrt(sum(x^2) + eps)` back. That form is not a
+        # floor: it inflates every norm, and since `scale_eff = q_norm / x_norm`
+        # multiplies the output, the inflation does not cancel -- `call()` emits
+        # `(1 + O(eps/||x||^2)) * q` instead of `q`, so the "discrete" bottleneck
+        # leaks a CONTINUOUS per-token magnitude channel and disagrees with
+        # `encode_to_indices -> quantize_from_indices -> decode`, which returns the
+        # raw codebook row. The leak grows as the encoder's scale shrinks, which is
+        # exactly the regime a fresh `Conv2D(embedding_dim, 1)` head produces.
+        # MEASURED at HEAD (num_embeddings=16, embedding_dim=8, seeded N(0,1) input
+        # scaled by s), max|call() - quantize_from_indices()|, all three rotation
+        # modes vs the exact `ste` path:
+        #     s=1.00  (||x||^2~8.2e+00): 5.35e-05  (rel 1.1e-03)   ste 2.98e-08
+        #     s=0.10  (||x||^2~8.2e-02): 6.88e-05  (rel 1.4e-03)   ste 7.45e-09
+        #     s=0.01  (||x||^2~8.2e-04): 1.92e-03  (rel 4.0e-02)   ste 1.86e-09
+        # i.e. a 4% magnitude leak at the small-norm end. With the floor, the same
+        # three measurements are 2.61e-08 / 2.61e-08 / 1.86e-08 -- the float32
+        # arithmetic floor, indistinguishable from the exact `ste` path and no longer
+        # scale dependent. The floor is written on the SQUARED side deliberately: below the
+        # floor the sqrt argument is a constant, so the `no_grad_scale` mode (the one
+        # branch where gradient flows through these norms) cannot see `d/dx sqrt(x)`
+        # blow up at an exactly-zero row. See decisions.md D-025.
+        #
         # Per the paper: the geometric anchors (unit_x, unit_q, w, and scale unless
         # 'no_grad_scale') are computed with stop_gradient so that the rotation
         # matrix R becomes a *constant* w.r.t. backprop. The gradient w.r.t. x
         # then flows through R @ x as a constant linear transform — preserving
         # the curvature/direction information that pure STE discards.
-        x_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(x32), axis=-1, keepdims=True) + eps)
-        q_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(q32), axis=-1, keepdims=True) + eps)
+        x_norm = keras.ops.sqrt(keras.ops.maximum(
+            keras.ops.sum(keras.ops.square(x32), axis=-1, keepdims=True), eps_sq))
+        q_norm = keras.ops.sqrt(keras.ops.maximum(
+            keras.ops.sum(keras.ops.square(q32), axis=-1, keepdims=True), eps_sq))
 
         # Detached unit vectors and w direction.
         unit_x_sg = keras.ops.stop_gradient(x32 / x_norm)
         unit_q_sg = keras.ops.stop_gradient(q32 / q_norm)
         w_unnorm = unit_x_sg + unit_q_sg
-        w_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(w_unnorm), axis=-1, keepdims=True) + eps)
+        w_norm = keras.ops.sqrt(keras.ops.maximum(
+            keras.ops.sum(keras.ops.square(w_unnorm), axis=-1, keepdims=True), eps_sq))
         w_sg = keras.ops.stop_gradient(w_unnorm / w_norm)
+
 
         # x · w and x · unit_x — gradient WILL flow through x here (the whole point).
         x_dot_w = keras.ops.sum(x32 * w_sg, axis=-1, keepdims=True)
@@ -498,7 +641,22 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         if mode == "rotation":
             rotated = x32 - 2.0 * x_dot_w * w_sg + 2.0 * x_dot_ux * unit_q_sg
         elif mode == "reflection":
-            rotated = x32 - 2.0 * x_dot_w * w_sg
+            # A Householder reflection about the hyperplane with normal
+            # (u + v) maps u -> -v, NOT u -> +v. This branch used to return
+            # that reflection unnegated, so its forward output was exactly -q
+            # -- verified numerically -- contradicting the module's contract
+            # that the forward pass emits the codebook vector, and making
+            # call() disagree in SIGN with
+            # encode_to_indices -> quantize_from_indices -> decode.
+            #
+            # Negating recovers u -> +v while keeping the (u + v) normal.
+            # The alternative -- reflecting about (u - v), which maps u -> +v
+            # directly -- is mathematically equivalent but numerically far
+            # worse HERE: (u - v) vanishes exactly when x is close to its
+            # codebook vector, which is the common case, and normalizing a
+            # vanishing normal loses precision (measured ~1e-4 absolute error
+            # on unit-scale codebook entries, versus ~1e-7 for this form).
+            rotated = 2.0 * x_dot_w * w_sg - x32
         elif mode == "no_grad_scale":
             rotated = x32 - 2.0 * x_dot_w * w_sg + 2.0 * x_dot_ux * unit_q_sg
         else:  # pragma: no cover (validated in __init__)
@@ -528,6 +686,12 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         :param flat_heads: ``(N, H, head_dim)``.
         :param indices: ``(N, H)`` int.
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # This one_hot is DELIBERATELY left at the float32 default (unlike the
+        # one in `_lookup`): the EMA accumulators are float32 `autocast=False`
+        # state and float32 is the correct accumulation dtype for assignment
+        # counts. `flat_heads` is cast up for the same reason.
+        flat_heads = keras.ops.cast(flat_heads, "float32")
         encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
         # cluster_size: per (H,K) -> sum over N
         cluster_size = keras.ops.sum(encodings, axis=0)  # (H,K)
@@ -546,8 +710,60 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         )
         self.ema_embeddings.assign(new_embed)
 
-        normalised = self.ema_embeddings / keras.ops.expand_dims(
-            self.ema_cluster_size + self.epsilon, axis=-1
+        # DECISION plan-2026-08-18T140459-7991552f/D-012
+        # Do NOT "simplify" the block below back to
+        #     self.ema_embeddings / (self.ema_cluster_size + self.epsilon)
+        # It looks equivalent and is not. Two corrections, both load-bearing:
+        #
+        # (1) BIAS CORRECTION. Both accumulators start at zero, so at step t
+        #     they carry a factor `1 - decay**t` (0.01 at t=1). The counts and
+        #     the sums are on a common scale only after dividing BOTH by it;
+        #     without it a code that received no assignments evaluates to
+        #     `numerator / 1e-5`, a step-1 blow-up of ~1e5 that collapses every
+        #     input onto a single code. No amount of extra training undoes it.
+        # (2) LAPLACE SMOOTHING. Bare `+ epsilon` is not a stabiliser but an
+        #     unbounded gain: as the count -> 0 the ratio -> numerator / 1e-5.
+        #     Smoothing the counts toward a uniform prior while preserving
+        #     their total keeps every denominator O(N/K).
+        #
+        # AXIS: this quantizer is PER-HEAD, so `debiased_cluster_size` is
+        # `(H, K)` and the Laplace total is summed over the CODEBOOK axis K
+        # with `keepdims=True` -- shape `(H, 1)`, one total per head. The
+        # sibling `vector_quantizer.py` has a 1-D `(K,)` count and a scalar
+        # total; this is the one place the two copies of this fix differ.
+        #
+        # Honest note on how much that choice matters, MEASURED rather than
+        # asserted: `cluster_size = sum(one_hot(indices), axis=0)` sums over N,
+        # so `sum_k cluster_size[h, k] == N` for EVERY head, identically, at
+        # every step. The per-head totals are therefore always equal and
+        # pooling over H would scale numerator and denominator by the same H;
+        # the two answers differ by ~9e-6 (the eps floor alone) at H=3, K=8,
+        # N=64. K is kept because it is the axis that stays correct if the
+        # counts ever become per-head unequal, NOT because H is observably
+        # wrong today. Do not write a test claiming to discriminate them.
+        #
+        # MEASURED (sibling layer, same fixture, 5 epochs): unique codes 1 and
+        # max|codebook| 4521 before, 18 and 0.264 after. See decisions.md D-012.
+        self.ema_step.assign_add(1.0)
+        bias_correction = 1.0 - keras.ops.power(
+            keras.ops.cast(self.ema_decay, self.ema_step.dtype), self.ema_step
+        )
+
+        debiased_cluster_size = self.ema_cluster_size / bias_correction
+        debiased_embeddings = self.ema_embeddings / bias_correction
+
+        # Laplace smoothing of the counts; per-head total mass preserved.
+        total_count = keras.ops.sum(
+            debiased_cluster_size, axis=-1, keepdims=True
+        )  # (H, 1)
+        smoothed_cluster_size = (
+                (debiased_cluster_size + self.epsilon)
+                / (total_count + self.num_embeddings * self.epsilon)
+                * total_count
+        )
+
+        normalised = debiased_embeddings / keras.ops.expand_dims(
+            smoothed_cluster_size, axis=-1
         )
         self.embeddings.assign(normalised)
 
@@ -561,6 +777,14 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
             indices: keras.KerasTensor,
     ) -> None:
         """Track unused codes and re-init expired ones from current batch."""
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # Whole routine runs in float32: `dead_code_unused` is `autocast=False`
+        # float32 counter state, and every blend below mixes it with encoder
+        # activations that are float16 under `mixed_float16`. The casts are the
+        # cheapest place to make the two meet; do NOT instead drop the counter
+        # to `compute_dtype` (an fp16 integer counter stops incrementing
+        # exactly at 2048).
+        flat_heads = keras.ops.cast(flat_heads, "float32")
         encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
         used_this_call = keras.ops.cast(keras.ops.sum(encodings, axis=0) > 0, "float32")  # (H,K)
 
@@ -602,7 +826,9 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         # Blend: new_codebook = dead_mask * replacements + (1 - dead_mask) * embeddings
         dead_mask_exp = keras.ops.expand_dims(dead_mask, axis=-1)  # (H,K,1)
         new_codebook = (
-                dead_mask_exp * replacements + (1.0 - dead_mask_exp) * self.embeddings
+                dead_mask_exp * replacements
+                + (1.0 - dead_mask_exp)
+                * keras.ops.cast(self.embeddings, "float32")
         )
         self.embeddings.assign(new_codebook)
 
@@ -614,8 +840,37 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
     # k-means warm start
     # ------------------------------------------------------------------
 
-    def _maybe_kmeans_init(self, flat_inputs: keras.KerasTensor) -> None:
-        """Accumulate batches then run MiniBatchKMeans once."""
+    def warm_start_codebook(self, batches: Any) -> None:
+        """Initialise the codebook from encoder outputs by MiniBatchKMeans.
+
+        Interface contract (public entry point, called from
+        :meth:`dl_techniques.models.vq_vae_rotation.model.VQVAERotationTrick.warm_start_codebook`
+        and usable directly for a standalone quantizer):
+
+        - **Parameters**: ``batches`` — either one array-like of shape
+          ``(N, embedding_dim)`` or a sequence of such arrays, which are
+          concatenated. These are the ENCODER OUTPUTS the quantizer will see,
+          already flattened over every non-channel axis.
+        - **Returns**: ``None``. It assigns ``self.embeddings`` and sets
+          ``kmeans_init_done`` to 1.0.
+        - **Failure mode**: ``RuntimeError`` if scikit-learn is missing;
+          ``ValueError`` if the layer is not built, if ``kmeans_init`` is
+          ``False`` (there is no ``kmeans_init_done`` variable in that case),
+          or if the last axis is not ``embedding_dim``. A head with fewer
+          samples than clusters logs a warning and pads from the current
+          codebook rather than failing.
+
+        **Call this EAGERLY, before training.** It runs scikit-learn and
+        assigns a variable, neither of which is graph-safe; it must never be
+        reached from inside ``call()``.
+
+        :param batches: Encoder outputs, ``(N, embedding_dim)`` or a sequence
+            of such arrays.
+        :type batches: Any
+        :raises RuntimeError: If scikit-learn is not installed.
+        :raises ValueError: If the layer is unbuilt, ``kmeans_init`` is False,
+            or the feature dimension does not match ``embedding_dim``.
+        """
         try:
             from sklearn.cluster import MiniBatchKMeans
         except ImportError as exc:  # defensive — already checked in __init__
@@ -623,16 +878,36 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
                 "kmeans_init=True requires scikit-learn."
             ) from exc
 
-        # Accumulate this batch's encoder vectors as a numpy array.
-        # flat_inputs shape (N, D); reshape per head to (N*H, head_dim).
-        np_inputs = np.asarray(keras.ops.convert_to_numpy(flat_inputs))
-        np_heads = np_inputs.reshape(-1, self.num_heads, self.head_dim)
-        self._kmeans_accum.append(np_heads)
+        if not self.built:
+            raise ValueError(
+                "warm_start_codebook requires a built layer: the codebook "
+                "variable does not exist yet. Call the layer once, or build "
+                "it explicitly, first."
+            )
+        if not self.kmeans_init:
+            raise ValueError(
+                "warm_start_codebook requires kmeans_init=True; with "
+                "kmeans_init=False there is no kmeans_init_done variable to "
+                "mark, and the codebook keeps its initializer's values."
+            )
 
-        if len(self._kmeans_accum) < self.kmeans_init_steps:
-            return  # need more batches
+        if isinstance(batches, (list, tuple)):
+            arrays = [np.asarray(keras.ops.convert_to_numpy(b)) for b in batches]
+        else:
+            arrays = [np.asarray(keras.ops.convert_to_numpy(batches))]
 
-        all_batches = np.concatenate(self._kmeans_accum, axis=0)  # (N_total, H, D_h)
+        flat = [a.reshape(-1, a.shape[-1]) for a in arrays]
+        for a in flat:
+            if a.shape[-1] != self.embedding_dim:
+                raise ValueError(
+                    f"warm_start_codebook expects vectors of width "
+                    f"embedding_dim={self.embedding_dim}, got {a.shape[-1]}."
+                )
+
+        all_batches = np.concatenate(
+            [a.reshape(-1, self.num_heads, self.head_dim) for a in flat],
+            axis=0,
+        )  # (N_total, H, D_h)
         new_codebook = np.zeros(
             (self.num_heads, self.num_embeddings, self.head_dim), dtype=np.float32
         )
@@ -670,11 +945,21 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
 
         self.embeddings.assign(new_codebook)
         self.kmeans_init_done.assign(1.0)
-        self._kmeans_accum = []
         logger.info(
             f"kmeans_init: codebook initialised from "
             f"{all_batches.shape[0]} samples across {self.num_heads} head(s)."
         )
+
+    @property
+    def is_codebook_warm_started(self) -> bool:
+        """True once :meth:`warm_start_codebook` has run.
+
+        Reads the ``kmeans_init_done`` variable EAGERLY. Never call this from
+        inside ``call()`` -- that is the graph read this defect was.
+        """
+        if not self.kmeans_init or self.kmeans_init_done is None:
+            return False
+        return float(keras.ops.convert_to_numpy(self.kmeans_init_done)) >= 0.5
 
     # ------------------------------------------------------------------
     # aux losses
@@ -758,7 +1043,10 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
             # Spatial shape is idx_shape[:-1] (the last axis is heads).
             spatial_shape_i32 = keras.ops.cast(idx_shape[:-1], "int32")
 
-        encodings = keras.ops.one_hot(flat_indices, self.num_embeddings)  # (N, H, K)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `_lookup`).
+        encodings = keras.ops.one_hot(
+            flat_indices, self.num_embeddings, dtype=self.compute_dtype
+        )  # (N, H, K)
         quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, self.embeddings)  # (N,H,D)
         flat_q = keras.ops.reshape(quantized, (-1, self.embedding_dim))  # (N, D)
 

@@ -57,14 +57,13 @@ Reference:
 import keras
 import numpy as np
 from keras import ops
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers import LinearUpInitializer
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # THERA argument defaults (from the reference ``args/train.py``).
@@ -247,10 +246,15 @@ class HeatField(keras.layers.Layer):
         out_dim: Output channel count (e.g. 3 for RGB residual).
         w0: SIREN frequency multiplier for the field / thermal activation.
             Defaults to 1.0.
-        c: SIREN variance constant; only documents the THERA Dense init scale
-            (``sqrt(c / hidden) / w0``), which here lives in the hypernetwork
-            that produces ``phi_kernel``. Stored for config fidelity.
-            Defaults to 6.0.
+        c: **DEAD KNOB.** In the THERA reference this is the SIREN variance
+            constant behind the last Dense layer's init, ``w_std = sqrt(c /
+            dim_hidden) / w0``. That initialization has **no counterpart
+            anywhere in this port** -- and in particular NOT in the hypernetwork,
+            which this docstring claimed until 2026-08-18:
+            ``ThéraHypernetwork.out_conv`` (the layer that produces
+            ``phi_kernel``) is a plain 1x1 ``keras.layers.Conv2D`` at Keras'
+            default ``glorot_uniform``. Nothing reads ``c``; it is stored and
+            serialized only. Defaults to 6.0.
         k_init: Initial value of the scalar ``k`` weight. Defaults to
             ``sqrt(log 4) / (2*pi^2)`` (THERA reference).
         components_init_scale: Frequency-disk scale passed to

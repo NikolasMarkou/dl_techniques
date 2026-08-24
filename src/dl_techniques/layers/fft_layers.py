@@ -86,8 +86,18 @@ class FFTLayer(keras.layers.Layer):
             representing concatenated real and imaginary frequency components.
         :rtype: keras.KerasTensor
         """
-        # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
-        x_permuted = keras.ops.transpose(inputs, [0, 3, 1, 2])
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
+        # The FFT runs on a float32 ISLAND, not at ``compute_dtype``.
+        # TensorFlow ships no float16 kernel for ``fft2``: under
+        # ``mixed_float16`` this call raised ``TypeError: the `real` and `imag`
+        # components have incorrect types: float16 float16 ... must be one of
+        # [tf.float32, tf.float64]``. Do NOT "fix" this by removing the cast and
+        # letting the autocast dtype through, and do NOT declare the layer
+        # float32-only -- the island costs one cast in and one cast out and the
+        # float32 result is bit-identical. See decisions.md D-054.
+        x_permuted = keras.ops.transpose(
+            keras.ops.cast(inputs, "float32"), [0, 3, 1, 2]
+        )
 
         # Keras FFT requires a tuple of (real, imag)
         # Input is real, so imag part is zero
@@ -101,9 +111,13 @@ class FFTLayer(keras.layers.Layer):
         fft_real_permuted = keras.ops.transpose(fft_real, [0, 2, 3, 1])
         fft_imag_permuted = keras.ops.transpose(fft_imag, [0, 2, 3, 1])
 
-        # Concatenate real and imaginary parts along the channel axis
-        return keras.ops.concatenate(
-            [fft_real_permuted, fft_imag_permuted], axis=-1
+        # Concatenate real and imaginary parts along the channel axis, back at
+        # the layer's own compute dtype (a no-op under the float32 policy).
+        return keras.ops.cast(
+            keras.ops.concatenate(
+                [fft_real_permuted, fft_imag_permuted], axis=-1
+            ),
+            self.compute_dtype,
         )
 
     def compute_output_shape(
@@ -195,8 +209,12 @@ class IFFTLayer(keras.layers.Layer):
             spatial domain.
         :rtype: keras.KerasTensor
         """
-        # Input is a concatenation of real and imaginary parts
-        real_part, imag_part = keras.ops.split(inputs, 2, axis=-1)
+        # Input is a concatenation of real and imaginary parts.
+        # Same float32 island as ``FFTLayer.call`` -- ``ifft2`` has no float16
+        # kernel either. See the DECISION comment there and decisions.md D-054.
+        real_part, imag_part = keras.ops.split(
+            keras.ops.cast(inputs, "float32"), 2, axis=-1
+        )
 
         # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
         real_permuted = keras.ops.transpose(real_part, [0, 3, 1, 2])
@@ -208,7 +226,7 @@ class IFFTLayer(keras.layers.Layer):
         # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
         ifft_permuted = keras.ops.transpose(ifft_real, [0, 2, 3, 1])
 
-        return ifft_permuted
+        return keras.ops.cast(ifft_permuted, self.compute_dtype)
 
     def compute_output_shape(
             self,

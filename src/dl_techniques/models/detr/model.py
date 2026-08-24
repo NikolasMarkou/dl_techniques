@@ -1,50 +1,96 @@
 """
-DETR (DEtection TRansformer) Model Implementation in Keras 3
+DETR object detection: a CNN backbone feeding a transformer encoder-decoder that
+turns a fixed set of learned object queries into a set of box and class
+predictions.
 
-This module provides a Keras 3 implementation of the DETR model, as described in
-"End-to-End Object Detection with Transformers" by Carion et al. (2020).
+Detection had always been posed as a dense surrogate problem. Anchors, region
+proposals and grid cells produce tens of thousands of candidate boxes, almost all
+of them redundant, and a hand-designed non-maximum-suppression stage afterwards
+decides which survive. That pipeline is not end-to-end: NMS is non-differentiable,
+anchor priors encode assumptions about object scale and aspect, and duplicate
+suppression is a rule rather than something the model learns. DETR's premise is
+that detection is *set prediction*, and that a model can be trained to emit a set
+directly if two things are supplied. The first is a decoder that lets predictions
+see each other: `num_queries` learned embeddings pass through self-attention at
+every decoder layer, so a query that is about to claim an object can observe that
+a sibling query has already claimed it and move on. Duplicate suppression becomes
+a learned interaction rather than a post-process. The second is a permutation-
+invariant loss — a Hungarian bipartite matching between the fixed-size prediction
+set and the ground-truth set, with unmatched predictions supervised toward a
+"no object" class. That loss lives in the training loop, not here; this module is
+the forward architecture only, and the extra logit for "no object" is the reason
+the classifier emits `num_classes + 1` outputs.
 
-The implementation follows modern Keras 3 best practices and leverages existing
-components from the dl_techniques framework including:
-- TransformerLayer for encoder blocks
-- TransformerDecoderLayer for decoder blocks
-- Normalization factory for flexible normalization
-- FFN factory for configurable feed-forward networks
-- Attention factory for attention mechanisms
+The queries themselves are the conceptual center. They carry no image content —
+they are a `num_queries x hidden_dim` embedding table, learned once and shared
+across every image. Each one converges during training into a slot with a soft
+spatial and size preference, and cross-attention is what fills that slot with the
+content of whatever object occupies that region of the current image. `num_queries`
+is therefore a hard ceiling on detections per image, which is why the paper sets
+it far above the maximum object count in the dataset.
 
-Key Architectural Features:
----------------------------
-- A CNN backbone (e.g., ResNet-50) for feature extraction.
-- A 2D sinusoidal positional encoding added to the feature map.
-- A standard Transformer architecture with an encoder and a decoder.
-- Learned object queries that attend to image features to detect objects.
-- Prediction heads (FFNs) for bounding boxes and class labels.
+The forward path is backbone, then 1x1 projection to `hidden_dim`, then flatten
+to a sequence, then encoder, then decoder, then two heads: a `Dense` for class
+logits and a three-layer MLP for boxes, the latter passed through `sigmoid` so
+its four outputs are normalized `cxcywh` coordinates in `[0, 1]`. Positional
+encoding is computed on the *projected* feature map rather than on the input
+image, which matters because `PositionEmbeddingSine2D` derives its grid from the
+spatial dimensions of what it is handed; computing it on the full-resolution
+image would produce an encoding of the wrong size for the stride-16 feature map.
+That layer emits channels-first `(B, C, H, W)` and is transposed to `(B, H, W, C)`
+immediately afterwards to match the rest of the graph's NHWC layout.
 
-Usage:
-------
-```python
-# Create a DETR model with a ResNet-50 backbone
-detr_model = create_detr(
-    num_classes=91,
-    num_queries=100,
-    backbone_name="resnet50"
-)
+Several places depart from the paper, deliberately or as unfinished work, and a
+reader comparing against the reference implementation should know which is which.
+The padding mask **is** honoured, but only above the backbone. `call` takes an
+`(images, padding_mask)` tuple with `True` for padding at image resolution,
+nearest-downsamples it onto the stride-16 feature grid, inverts it into a keep
+mask and passes it to encoder self-attention and decoder cross-attention as a
+rank-2 `(B, S)` key mask (both attention layers broadcast it to `(B, 1, 1, S)`
+themselves, so the `(B, T, S)` form is never materialized). What this does NOT
+do is mask the convolutional backbone: a padded canvas still leaks into the
+feature cells within one receptive field of the boundary, exactly as in the
+reference implementation, so masking suppresses the padding's contribution to
+attention and not its contribution to the features. Positional encodings are added to the
+*input* of each encoder layer rather than to queries and keys only, so values
+carry positional content too, and because the addition is applied to the running
+`memory` at every layer the encoding accumulates across the stack instead of being
+re-injected identically; the decoder makes the same simplification with the query
+embeddings, adding them to the whole decoder input rather than to `Q` and `K`.
+The backbone is tapped at `conv4_block6_out` (C4, stride 16) rather than C5, and
+is frozen by default (`backbone_trainable=False`) rather than fine-tuned at a
+reduced learning rate; note also that ImageNet weights *are* downloaded here via
+`keras.applications`, so unlike most of this package the backbone is genuinely
+pretrained, while nothing above it is. There is no final decoder layer
+normalization, so the auxiliary outputs are read raw from each decoder layer.
 
-# The model expects preprocessed images and a padding mask
-image_input = keras.Input(shape=(None, None, 3), dtype="float32")
-mask_input = keras.Input(shape=(None, None), dtype="bool")
+`aux_loss=True`, the default, applies both heads to every decoder layer's output
+and returns the intermediate predictions under `aux_outputs`. This is a training
+aid rather than an architectural feature: supervising every layer with the same
+matching loss pressures each layer to already be producing a usable detection set,
+which measurably speeds convergence for a model that is otherwise slow to train.
+Inference consumes `pred_logits` and `pred_boxes` alone.
 
-outputs = detr_model([image_input, mask_input])
+Both `DetrTransformer` and `DETR` build all of their sub-layers explicitly rather
+than letting Keras build them lazily. This is required for `.keras` round-trip:
+weight restore calls `load_own_variables` on each sub-layer, and an unbuilt
+sub-layer has no variables to receive the saved arrays, so lazy construction
+fails at load time with a weight-count mismatch rather than at save time.
 
-# The model can be saved and loaded seamlessly
-detr_model.save("detr_model.keras")
-loaded_model = keras.models.load_model("detr_model.keras")
-```
-
-Note: The loss function, which involves the Hungarian Matcher for bipartite
-matching, is not part of the model architecture itself and is intended to be
-implemented within the training loop. This file focuses on the forward-pass
-architecture of the DETR model.
+References:
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
+      (https://arxiv.org/abs/2005.12872)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Kuhn, 1955. The Hungarian Method for the Assignment Problem.
+      Naval Research Logistics Quarterly 2(1-2).
+      The bipartite matching the training loop must supply.
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
+      The ResNet-50 backbone.
+    - Zhu et al., 2021. Deformable DETR: Deformable Transformers for End-to-End
+      Object Detection. (https://arxiv.org/abs/2010.04159)
+      Diagnoses DETR's slow convergence and its weakness on small objects.
 """
 
 import keras
@@ -56,9 +102,12 @@ from typing import Optional, Dict, Any, List, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.transformers import TransformerLayer, TransformerDecoderLayer, FFNType, NormalizationType
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import PositionEmbeddingSine2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Transformer Components
@@ -93,7 +142,7 @@ class DetrTransformer(layers.Layer):
         num_encoder_layers: Number of encoder layers. Defaults to 6.
         num_decoder_layers: Number of decoder layers. Defaults to 6.
         ffn_dim: The hidden dimension of the FFN. Defaults to 2048.
-        dropout: The dropout rate. Defaults to 0.1.
+        dropout_rate: The dropout rate. Defaults to 0.1.
         activation: Activation function for FFN. Defaults to "relu".
         normalization_type: Type of normalization. Defaults to "layer_norm".
         ffn_type: Type of FFN to use. Defaults to "mlp".
@@ -117,7 +166,7 @@ class DetrTransformer(layers.Layer):
         num_encoder_layers: int = 6,
         num_decoder_layers: int = 6,
         ffn_dim: int = 2048,
-        dropout: float = 0.1,
+        dropout_rate: float = 0.1,
         activation: str = "relu",
         normalization_type: NormalizationType = "layer_norm",
         ffn_type: FFNType = "mlp",
@@ -137,8 +186,8 @@ class DetrTransformer(layers.Layer):
         self.num_encoder_layers = num_encoder_layers
         self.num_decoder_layers = num_decoder_layers
         self.ffn_dim = ffn_dim
-        self.dropout_rate = dropout
-        self.activation = activation
+        self.dropout_rate = dropout_rate
+        self.activation = deserialize_activation(activation)
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
 
@@ -150,7 +199,7 @@ class DetrTransformer(layers.Layer):
                     hidden_size=hidden_dim,
                     num_heads=num_heads,
                     intermediate_size=ffn_dim,
-                    dropout_rate=dropout,
+                    dropout_rate=dropout_rate,
                     activation=activation,
                     normalization_type=normalization_type,
                     normalization_position='pre',
@@ -168,7 +217,7 @@ class DetrTransformer(layers.Layer):
                     hidden_size=hidden_dim,
                     num_heads=num_heads,
                     intermediate_size=ffn_dim,
-                    dropout_rate=dropout,
+                    dropout_rate=dropout_rate,
                     activation=activation,
                     normalization_type=normalization_type,
                     normalization_position='pre',
@@ -209,7 +258,11 @@ class DetrTransformer(layers.Layer):
 
         Args:
             src: Source features (batch_size, H*W, hidden_dim)
-            mask: Padding mask (batch_size, H*W) -- currently unused (see fix 1i)
+            mask: Key KEEP mask (batch_size, H*W), 1 for a real feature position
+                and 0 for one that came from image padding. ``None`` attends to
+                everything. Note the polarity: this is the inverse of the
+                ``padding_mask`` :class:`DETR` accepts, which is True FOR
+                padding; :meth:`DETR.call` does the inversion.
             query_embed: Object query embeddings (num_queries, hidden_dim)
             pos_embed: Positional encodings (batch_size, H*W, hidden_dim)
             training: Training mode flag
@@ -217,11 +270,21 @@ class DetrTransformer(layers.Layer):
         Returns:
             List of decoder outputs, one per layer
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: a 2-D (B, S) key mask
+        # is passed STRAIGHT THROUGH to both attentions. `MultiHeadCrossAttention`
+        # expands a rank-2 mask to (B, 1, 1, S) itself, so do NOT "fix" this by
+        # materializing the (B, T, S) form the parameter names suggest: at
+        # DETR's stride-16 feature maps S is a few thousand and the square form
+        # costs O(S^2) per image for information the broadcast already carries.
+        # The previous code passed None here and the whole mask was discarded.
+
         # Encoder forward pass
         memory = src
         for encoder_layer in self.encoder_layers:
             # Add positional encoding to the input for each encoder layer
-            memory = encoder_layer(memory + pos_embed, training=training)
+            memory = encoder_layer(
+                memory + pos_embed, attention_mask=mask, training=training
+            )
 
         # Decoder forward pass (fix 1f)
         batch_size = keras.ops.shape(src)[0]
@@ -230,13 +293,21 @@ class DetrTransformer(layers.Layer):
             keras.ops.expand_dims(query_embed, axis=0),
             [batch_size, 1, 1]
         )
-        tgt = keras.ops.zeros((batch_size, num_queries, self.hidden_dim))
+        # Materialise the decoder's zero query slot in the layer's COMPUTE dtype.
+        # `keras.ops.zeros` with no `dtype=` returns float32 regardless of the
+        # active mixed-precision policy, and the resulting float32 tensor meets a
+        # float16 `query_embed_expanded` two statements below, so the raise landed
+        # on the addition rather than here.
+        tgt = keras.ops.zeros(
+            (batch_size, num_queries, self.hidden_dim), dtype=self.compute_dtype
+        )
 
         decoder_outputs = []
         for decoder_layer in self.decoder_layers:
             tgt = decoder_layer(
                 tgt + query_embed_expanded,
                 memory,
+                cross_attention_mask=mask,
                 training=training
             )
             decoder_outputs.append(tgt)
@@ -257,8 +328,8 @@ class DetrTransformer(layers.Layer):
             "num_encoder_layers": self.num_encoder_layers,
             "num_decoder_layers": self.num_decoder_layers,
             "ffn_dim": self.ffn_dim,
-            "dropout": self.dropout_rate,
-            "activation": self.activation,
+            "dropout_rate": self.dropout_rate,
+            "activation": serialize_activation(self.activation),
             "normalization_type": self.normalization_type,
             "ffn_type": self.ffn_type,
         })
@@ -331,15 +402,24 @@ class DETR(models.Model):
         # Prediction heads
         self.class_embed = layers.Dense(num_classes + 1, name="class_embed")
 
-        # Bbox prediction head using FFN factory
-        # Note: MLP with 3 layers for bbox prediction
-        self.bbox_embed = create_ffn_layer(
-            'mlp',
-            hidden_dim=hidden_dim,
-            output_dim=4,
-            activation='relu',
-            dropout_rate=0.0,
-            name="bbox_embed"
+        # Box prediction head: the paper's 3-layer perceptron,
+        # `Dense(d) -> ReLU -> Dense(d) -> ReLU -> Dense(4)`.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-047: built explicitly, NOT
+        # via `create_ffn_layer('mlp', ...)`. That factory key is `MLPBlock`,
+        # which is `fc1 -> act -> dropout -> fc2` — TWO Dense layers
+        # (`layers/ffn/mlp.py:215,225`) — while this comment, the module
+        # docstring and README.md:558 all claimed three, as does the paper. No
+        # depth-configurable MLP exists in `layers/ffn/` (checked the whole
+        # registry), so a local Sequential is the honest construction; do not
+        # "restore reuse" by swapping the factory back in without first adding
+        # a depth parameter there.
+        self.bbox_embed = keras.Sequential(
+            [
+                layers.Dense(hidden_dim, activation='relu', name="bbox_fc1"),
+                layers.Dense(hidden_dim, activation='relu', name="bbox_fc2"),
+                layers.Dense(4, name="bbox_fc3"),
+            ],
+            name="bbox_embed",
         )
 
         # Query embeddings
@@ -431,9 +511,31 @@ class DETR(models.Model):
         # accessing .embeddings before the Embedding layer is built).
         query_embed_weights = self.query_embed(keras.ops.arange(self.num_queries))
 
-        # fix 1i: mask_flat is (B, H*W); TransformerLayer expects (B,T,T) attention_mask shape.
-        # Masking support deferred -- pass None for now.
-        hs = self.transformer(src, None, query_embed_weights, pos_embed_flat, training=training)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: the padding mask is
+        # PROPAGATED. It arrives at image resolution and True means padding, so
+        # it is nearest-downsampled onto the feature grid, flattened and
+        # INVERTED into the keep-mask the attention layers take. Nearest, not
+        # area/bilinear: `apply_attention_mask`'s keep predicate is binary
+        # (`> 0`), so an interpolated 0.5 would read as full keep — a
+        # half-padded boundary cell must be a definite decision, and nearest
+        # keeps it valid, matching the reference implementation's
+        # `interpolate(mask, size)[0] > 0.5` on the padding polarity.
+        key_keep_mask = None
+        if padding_mask is not None:
+            mask_f = keras.ops.cast(padding_mask, projected_features.dtype)
+            if len(mask_f.shape) == 3:
+                mask_f = keras.ops.expand_dims(mask_f, axis=-1)
+            mask_small = keras.ops.image.resize(
+                mask_f, size=(height, width), interpolation="nearest",
+            )
+            key_keep_mask = 1.0 - keras.ops.reshape(
+                mask_small, (batch_size, height * width)
+            )
+
+        hs = self.transformer(
+            src, key_keep_mask, query_embed_weights, pos_embed_flat,
+            training=training,
+        )
 
         # Apply prediction heads to all decoder outputs
         outputs_class = [self.class_embed(h) for h in hs]
@@ -491,7 +593,7 @@ def create_detr(
     num_encoder_layers: int = 6,
     num_decoder_layers: int = 6,
     ffn_dim: int = 2048,
-    dropout: float = 0.1,
+    dropout_rate: float = 0.1,
     aux_loss: bool = True,
     activation: str = "relu",
     normalization_type: str = "layer_norm",
@@ -510,7 +612,7 @@ def create_detr(
         num_encoder_layers: Number of encoder layers.
         num_decoder_layers: Number of decoder layers.
         ffn_dim: Hidden dimension of the FFNs in the transformer.
-        dropout: Dropout rate used in the transformer.
+        dropout_rate: Dropout rate used in the transformer.
         aux_loss: If True, model outputs predictions from intermediate layers.
         activation: Activation function for FFN. Defaults to "relu".
         normalization_type: Type of normalization to use. Defaults to "layer_norm".
@@ -541,7 +643,7 @@ def create_detr(
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
         ffn_dim=ffn_dim,
-        dropout=dropout,
+        dropout_rate=dropout_rate,
         activation=activation,
         normalization_type=normalization_type,
         ffn_type=ffn_type

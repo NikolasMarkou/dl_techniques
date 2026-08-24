@@ -1,5 +1,10 @@
 """Guards for the DINO trainer (``src/train/dino/train_dino.py``).
 
+If this module is ever reported as carrying "pre-existing failures", read
+``research/2026_test_suite_contention_and_false_failures.md`` FIRST: a prior report of
+exactly that was refuted, and the faults were GPU contention from concurrent test runs,
+not defects here. Re-run serially on an idle GPU before diagnosing anything.
+
 Four things are pinned here, each because its failure mode is SILENT:
 
 1. **Every CLI flag reaches ``TrainingConfig``.** A flag that ``parse_arguments()`` defines
@@ -150,6 +155,52 @@ def _build_argv(spec: Dict[str, Tuple[str, Any]]) -> list:
         else:
             argv += [flag, str(value)]
     return argv
+
+
+# ---------------------------------------------------------------------------
+# 0. The shared-symbol identity pin
+# ---------------------------------------------------------------------------
+
+class TestSharedSymbolsAreImportedNotCopied:
+    """`train_dino` must REUSE the shared implementations, not carry copies.
+
+    `train_dino.py` imports `SUPPORTED_DATASETS`, `build_optimizer` and
+    `build_raw_image_dataset` through `train.energy_transformer.common`, which merely
+    RE-EXPORTS them: their homes are `train.common.datasets` and
+    `train.common.optimizer`. Nothing here asserted that before -- BEiT has such a pin
+    (`tests/test_train/test_beit/test_common.py::TestBuildRawImageDataset::
+    test_it_is_the_same_object_as_energy_transformers`) and DINO did not, so a copy
+    pasted into the DINO package, or a re-export hop that quietly stopped forwarding,
+    would have been invisible on this side.
+
+    Why identity and not behaviour: the failure mode is a FORK that still works. A
+    copied `build_raw_image_dataset` passes every behavioural test in this file while
+    drifting away from the three foreign branch-ordering anchors it carries (D-007 /
+    D-008 / D-040, two other plans); a copied `build_optimizer` re-introduces the
+    double-weight-decay guard as a second thing to maintain. `is` is the only assertion
+    a copy fails BY CONSTRUCTION.
+    """
+
+    def test_dataset_symbols_are_the_train_common_datasets_objects(self) -> None:
+        from train.common import datasets as common_datasets
+
+        assert trainer.build_raw_image_dataset is common_datasets.build_raw_image_dataset
+        assert trainer.SUPPORTED_DATASETS is common_datasets.SUPPORTED_DATASETS
+
+    def test_build_optimizer_is_the_train_common_optimizer_object(self) -> None:
+        from train.common import optimizer as common_optimizer
+
+        assert trainer.build_optimizer is common_optimizer.build_optimizer
+
+    def test_the_re_export_hop_forwards_the_same_objects(self) -> None:
+        """The hop DINO actually imports through must not become a second definition."""
+        from train.common import datasets as common_datasets
+        from train.common import optimizer as common_optimizer
+        from train.energy_transformer import common as et_common
+
+        assert et_common.build_raw_image_dataset is common_datasets.build_raw_image_dataset
+        assert et_common.SUPPORTED_DATASETS is common_datasets.SUPPORTED_DATASETS
+        assert et_common.build_optimizer is common_optimizer.build_optimizer
 
 
 # ---------------------------------------------------------------------------

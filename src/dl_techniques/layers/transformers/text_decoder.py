@@ -82,9 +82,10 @@ based on subsequent research, such as:
 
 """
 
+import math
 import keras
 from keras import ops, layers, initializers
-from typing import Optional, Dict, Any, Literal, Tuple
+from typing import Optional, Dict, Any, Literal, Tuple, Union, Callable
 
 # ---------------------------------------------------------------------
 # local imports
@@ -94,6 +95,10 @@ from dl_techniques.utils.masking import create_mask, MaskConfig, combine_masks
 from ..embedding import create_embedding_layer
 from ..norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, FFNType, NormalizationPositionType
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -179,7 +184,25 @@ class TextDecoder(keras.layers.Layer):
     :type attention_dropout_rate: float
     :param initializer_range: Std-dev for TruncatedNormal. Default: 0.02.
     :type initializer_range: float
-    :param layer_norm_eps: Normalization epsilon. Default: 1e-12.
+    :param scale_residual_initializer_by_depth: When True, the two residual-path
+        output projections of every block (the attention output projection and
+        the FFN's contracting projection) are initialized at
+        ``initializer_range / sqrt(2 * depth)`` instead of ``initializer_range``,
+        so that the residual stream's variance does not grow with depth. Q/K/V
+        and the FFN expansion are UNAFFECTED. Default: False, which is the
+        behaviour of every consumer written before 2026-08-22. This is GPT-2's
+        published rule; see ``models/gpt2/gpt2.py`` and
+        ``huggingface/transformers`` ``modeling_gpt2.py::_init_weights``.
+        Requires ``attention_type='multi_head'`` and ``ffn_type='mlp'`` -- any
+        other choice RAISES from the respective layer factory rather than
+        silently ignoring the request.
+    :type scale_residual_initializer_by_depth: bool
+    :param layer_norm_eps: Normalization epsilon. Default: 1e-12. Applies to
+        ``embed_norm``, ``final_norm`` AND every one of the ``2 * depth``
+        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):**
+        the in-block norms previously ignored this knob and ran at the
+        normalization factory's ``1e-6`` default. Weight shapes are unchanged --
+        existing ``.keras`` files still load -- but forward values move slightly.
     :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
@@ -201,10 +224,12 @@ class TextDecoder(keras.layers.Layer):
             normalization_type: NormalizationType = 'layer_norm',
             normalization_position: NormalizationPositionType = 'post',
             ffn_type: FFNType = 'mlp',
+            activation: Union[str, Callable] = 'gelu',
             stochastic_depth_rate: float = 0.0,
             dropout_rate: float = 0.1,
             attention_dropout_rate: float = 0.1,
             initializer_range: float = 0.02,
+            scale_residual_initializer_by_depth: bool = False,
             layer_norm_eps: float = 1e-12,
             **kwargs: Any
     ) -> None:
@@ -274,10 +299,12 @@ class TextDecoder(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
+        self.activation = deserialize_activation(activation)
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range
+        self.scale_residual_initializer_by_depth = bool(scale_residual_initializer_by_depth)
         self.layer_norm_eps = layer_norm_eps
 
         # --- Create Sub-layers in __init__ ---
@@ -291,23 +318,82 @@ class TextDecoder(keras.layers.Layer):
         )
 
         # Create transformer decoder layers
+        # DECISION plan-2026-08-18T140459-7991552f/D-067
+        # `kernel_initializer` below is LOAD-BEARING and must not be dropped as
+        # redundant: before 2026-08-19 this construction passed no initializer at
+        # all, so `initializer_range` reached only the word/positional embeddings
+        # and every attention and FFN weight in all `depth` blocks silently fell
+        # back to `TransformerLayer`'s `glorot_uniform`. Measured at the time:
+        # a 25x change in `initializer_range` moved the block-kernel std by a
+        # factor of 1.00 (0.12245 in both arms). This is a four-line edit with a
+        # wide blast radius -- it changes the initial weight distribution of every
+        # block in `gpt2`, `qwen`, `nano_vlm` and `nano_vlm_world_model`. Post-fix
+        # the GPT-2 blocks' weights are ~1.8x smaller, which attenuated the
+        # two-block cross-position signal ~50x and required
+        # `test_gpt2.py::test_without_the_mask_the_same_tokens_do_leak` to be
+        # re-derived (its bar moved 1e-2 -> 1e-3, still 3900x above the 1e-6 it
+        # must dominate). If that control ever loses its remaining headroom,
+        # RE-DERIVE it against a measurement -- do not loosen the bar again.
+        # See decisions.md D-067.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        # `1/sqrt(2 * depth)`, NOT `1/sqrt(depth)`: the 2 counts the residual
+        # ADDITIONS per block (attention and FFN), which is why the same factor
+        # is applied to both projections. Verbatim upstream --
+        # huggingface/transformers `modeling_gpt2.py::_init_weights`:
+        # `std = self.config.initializer_range / math.sqrt(2 * self.config.n_layer)`
+        # applied to `GPT2Attention.c_proj` and `GPT2MLP.c_proj`; karpathy/nanoGPT
+        # `model.py:145`: `std=0.02/math.sqrt(2 * config.n_layer)` for every
+        # parameter whose name ends `c_proj.weight`.
+        # WHAT NOT TO DO: do not "simplify" by scaling `initializer_range`
+        # itself for the whole block -- that shrinks Q/K/V and the FFN expansion
+        # too, which the reference explicitly does not do, and which was the
+        # documented reason gpt2.py carried this as an unfixed departure until
+        # today. Note also that the std that lands is the TRUNCATED-normal one:
+        # `TruncatedNormal(stddev=s)` has empirical std `0.8796 * s` (2-sigma
+        # truncation), so a test must pin the RATIO or the truncated value, not
+        # the bare `initializer_range / sqrt(2 * depth)`.
+        # See decisions.md D-160.
+        residual_output_kernel_initializer = None
+        if self.scale_residual_initializer_by_depth:
+            residual_output_kernel_initializer = initializers.TruncatedNormal(
+                stddev=self.initializer_range / math.sqrt(2.0 * self.depth)
+            )
+
         self.decoder_layers = []
         for i in range(self.depth):
             # Linearly increase drop rate per layer
             layer_drop_rate = self.stochastic_depth_rate * i / max(1, self.depth - 1)
+            # DECISION plan-2026-08-19T070627-a616f581/D-007
+            # `layer_norm_eps` used to reach ONLY `embed_norm` and `final_norm`.
+            # This loop
+            # passed neither `attention_norm_args` nor `ffn_norm_args`, so all
+            # `2 * depth` block norms inherited
+            # `create_normalization_layer`'s `epsilon=1e-6` default while
+            # `final_norm` ran at this decoder's own 1e-12. MEASURED pre-fix at
+            # `depth=2`: 4 of 4 block norms at 1e-06, final_norm at 1e-12.
+            # WHAT NOT TO DO: do not change the factory's shared 1e-6 default,
+            # and do not hard-code 1e-12 here -- a test asserts the block norms
+            # TRACK `self.layer_norm_eps`. See decisions.md D-007.
             layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=int(self.embed_dim * 4),  # Standard 4x expansion
                 attention_type=self.attention_type,
                 normalization_type=self.normalization_type,
+                attention_norm_args={'epsilon': self.layer_norm_eps},
+                ffn_norm_args={'epsilon': self.layer_norm_eps},
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
+                activation=self.activation,
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=layer_drop_rate,
-                name=f'decoder_layer_{i}'
+                kernel_initializer=initializers.TruncatedNormal(
+                    stddev=self.initializer_range
+                ),
+                residual_output_kernel_initializer=residual_output_kernel_initializer,
+                name=f"decoder_layer_{i}"
             )
             self.decoder_layers.append(layer)
 
@@ -356,7 +442,6 @@ class TextDecoder(keras.layers.Layer):
             self.positional_embeddings = create_embedding_layer(
                 'continuous_sincos',
                 dim=self.embed_dim,
-                max_seq_len=self.max_seq_len,
                 ndim=1,
                 name="positional_embeddings"
             )
@@ -561,10 +646,12 @@ class TextDecoder(keras.layers.Layer):
             'normalization_type': self.normalization_type,
             'normalization_position': self.normalization_position,
             'ffn_type': self.ffn_type,
+            'activation': serialize_activation(self.activation),
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'initializer_range': self.initializer_range,
+            'scale_residual_initializer_by_depth': self.scale_residual_initializer_by_depth,
             'layer_norm_eps': self.layer_norm_eps,
         })
         return config

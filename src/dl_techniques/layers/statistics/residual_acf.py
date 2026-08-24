@@ -316,9 +316,12 @@ class ResidualACFLayer(keras.layers.Layer):
             reg_loss = self.regularization_weight * (l2_loss + threshold_penalty)
 
             # Add regularization loss to the layer's losses
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-084: no logging on the
+            # forward path (R-033/R-041). The removed line interpolated the
+            # SYMBOLIC `reg_loss` tensor into an f-string, so under
+            # `tf.function` it printed a graph node once and nothing thereafter.
+            # `add_loss` already surfaces this value to the training loop.
             self.add_loss(reg_loss)
-
-            logger.debug(f"ResidualACFLayer: Added ACF regularization loss: {reg_loss}")
 
         # Return predictions unchanged (pass-through design)
         return predictions

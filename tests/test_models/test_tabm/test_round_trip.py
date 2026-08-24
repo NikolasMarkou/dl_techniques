@@ -84,3 +84,35 @@ class TestTabMRoundTrip:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestTabMGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    TabM is an ENSEMBLE model: ``call()`` returns ``(B, k, n_classes)`` and the
+    per-member adapters are the whole point of the architecture. A dead adapter
+    is invisible to every shape and finiteness test in this suite -- and the
+    ``arch_type`` collapse this package already suffered once
+    (``test_arch_types.py``, three arch_types building byte-identical models)
+    is exactly the family of defect a per-weight gradient claim detects.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = create_tabm_mini(
+            n_num_features=8, cat_cardinalities=[], n_classes=3
+        )
+        x = _features()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

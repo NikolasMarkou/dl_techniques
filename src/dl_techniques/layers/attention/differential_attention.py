@@ -691,7 +691,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         q_norm: Optional[keras.layers.Layer],
         k_norm: Optional[keras.layers.Layer],
         attn_prob: ProbabilityOutput,
-        attn_dropout: Optional[keras.layers.Dropout],
+        attn_dropout_layer: Optional[keras.layers.Dropout],
         attention_mask: Optional[keras.KerasTensor],
         training: Optional[bool],
     ) -> keras.KerasTensor:
@@ -715,8 +715,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
 
         attn = attn_prob(scores, training=training)
 
-        if attn_dropout is not None:
-            attn = attn_dropout(attn, training=training)
+        if attn_dropout_layer is not None:
+            attn = attn_dropout_layer(attn, training=training)
 
         return ops.matmul(attn, v)
 

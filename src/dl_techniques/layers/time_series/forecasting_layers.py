@@ -20,6 +20,10 @@ import keras
 import numpy as np
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -250,7 +254,7 @@ class ForecastabilityGate(layers.Layer):
         """
         super().__init__(name=name, **kwargs)
         self.hidden_units = hidden_units
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
@@ -354,7 +358,7 @@ class ForecastabilityGate(layers.Layer):
         config = super().get_config()
         config.update({
             "hidden_units": self.hidden_units,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })

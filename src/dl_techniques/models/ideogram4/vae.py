@@ -27,6 +27,21 @@ GroupNorm must be divisible by 32; the config invariant (config.py
 ctor also asserts it defensively.
 
 swish(x) = x * sigmoid(x) is ``keras.activations.silu``.
+
+References:
+    - Kingma and Welling, 2014. Auto-Encoding Variational Bayes.
+      (https://arxiv.org/abs/1312.6114) -- the KL/reparameterization the
+      ``Sampling`` layer implements.
+    - Esser et al., 2021. Taming Transformers for High-Resolution Image
+      Synthesis (VQGAN). (https://arxiv.org/abs/2012.09841) -- the
+      ResnetBlock/AttnBlock encoder-decoder this stack is shaped after.
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. CVPR 2022. (https://arxiv.org/abs/2112.10752) -- the
+      KL-regularized first-stage autoencoder whose layout (GroupNorm32 + swish,
+      attention only at the bottleneck) this reproduces.
+    - Black Forest Labs, 2024. FLUX. (https://github.com/black-forest-labs/flux)
+      -- the ``autoencoder.py`` reference this port follows, channels-FIRST
+      there and channels-LAST here.
 """
 
 from __future__ import annotations
@@ -44,6 +59,7 @@ from dl_techniques.models.ideogram4.config import (
     AutoEncoderParams,
     get_ideogram4_config,
 )
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -72,7 +88,7 @@ def _check_div32(value: int, what: str) -> None:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class ResnetBlock(keras.layers.Layer):
     """Flux2 residual block: (GroupNorm32 + swish + Conv3x3) x2 + skip.
 
@@ -187,7 +203,7 @@ class ResnetBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class AttnBlock(keras.layers.Layer):
     """Spatial self-attention block (Flux2 mid-block only).
 
@@ -292,7 +308,7 @@ class AttnBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable(package="dl_techniques.ideogram4")
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
 
@@ -362,7 +378,7 @@ class Downsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable(package="dl_techniques.ideogram4")
 class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
 
@@ -431,7 +447,7 @@ class Upsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class Encoder(keras.layers.Layer):
     """Flux2 KL-VAE encoder: image -> ``2 * z_channels`` latent params.
 
@@ -617,7 +633,7 @@ class Encoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class Decoder(keras.layers.Layer):
     """Flux2 KL-VAE decoder: ``z_channels`` latent -> reconstructed image.
 
@@ -805,7 +821,7 @@ class Decoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class AutoEncoder(keras.Model):
     """Flux2 KL-VAE: Encoder + KL ``Sampling`` reparameterization + Decoder.
 
@@ -910,6 +926,22 @@ class AutoEncoder(keras.Model):
     ) -> keras.KerasTensor:
         """Decode a latent ``(B, H', W', z_channels)`` to an image."""
         return self.decoder(z, training=training)
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method AutoEncoder inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,

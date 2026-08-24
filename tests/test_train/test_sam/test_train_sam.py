@@ -45,6 +45,42 @@ from train.sam.train_sam import (
 )
 
 
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `trainers/epoch_iterator.py:151`. These tests run the REAL trainer over
+# a deliberately tiny synthetic corpus while `steps_per_epoch` comes from the
+# shipped config, so the iterator is legitimately exhausted before the epoch
+# ends. Padding the corpus to match would change what the test measures (the
+# config -> `fit()` wiring), so the advisory is suppressed HERE only; a real
+# starved input in any other module still fails under `error::UserWarning`.
+# MEASURED 2026-08-23 (with `warnings.warn` wrapped AHEAD of the filter
+# machinery, so a suppressed hit is still recorded): fires in 5 of the 79 tests
+# here, all in `TestEveryCLIExpressibleCombinationTrains::
+# test_the_pipeline_and_the_model_agree_on_every_axis`. Independently confirmed
+# by flipping this `ignore:` to `error:`, which turned 79 passed into 5 failed.
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `saving/saving_api.py:107`. `TestConfigToConsumptionWiring` observes the
+# `ModelCheckpoint` CALL, not the archive, so its probe deliberately hands the
+# callback a model that was never built. Building it would cost a full vit_b
+# materialization for an observation that does not read the file.
+# MEASURED 2026-08-23: fires TWICE in each of the 3
+# `TestConfigToConsumptionWiring::test_the_config_field_reaches_a_consumer`
+# parametrizations -- the paragraph above is accurate, not a ghost.
+
+# Both marks were once reported STALE on the strength of stripping them and
+# seeing a green re-run. That inference is invalid: a suppressed warning leaves
+# no record anywhere, so a green run is evidence of nothing unless you can also
+# show the provoking test ran. Both are load-bearing. The paired positive arms
+# live in `tests/test_the_deliberate_advisories_still_fire.py`; a new `ignore:`
+# mark anywhere under `tests/` needs one there in the same commit.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Your input ran out of data:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:You are saving a model that has not yet been built:UserWarning"),
+]
+
+
 # ---------------------------------------------------------------------------
 # Sentinels
 # ---------------------------------------------------------------------------

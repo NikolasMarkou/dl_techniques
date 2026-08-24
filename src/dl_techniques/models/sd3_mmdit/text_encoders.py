@@ -42,6 +42,26 @@ PyTorch references (faithfully ported, structure only):
 ``openai/CLIP`` ``model.py`` (``Transformer`` / ``ResidualAttentionBlock``),
 ``open_clip`` ``transformer.py``, HuggingFace ``transformers`` ``T5Stack`` /
 ``T5Attention`` / ``T5LayerFF`` (gated-GELU ``T5DenseGatedActDense``).
+
+References:
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision (CLIP). ICML 2021.
+      (https://arxiv.org/abs/2103.00020) -- the ViT-L/14 text tower, its causal
+      mask, QuickGELU MLPs and pooled-EOS projection.
+    - Cherti et al., 2023. Reproducible Scaling Laws for Contrastive
+      Language-Image Learning (OpenCLIP). CVPR 2023.
+      (https://arxiv.org/abs/2212.07143) -- the ViT-bigG text tower this
+      subclasses CLIP for.
+    - Raffel et al., 2020. Exploring the Limits of Transfer Learning with a
+      Unified Text-to-Text Transformer (T5). JMLR 21(140).
+      (https://arxiv.org/abs/1910.10683) -- the T5-v1.1 XXL encoder, its
+      RMSNorm, gated-GELU FFN and relative-position buckets.
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202) -- the gated-GELU FFN.
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis (SD3). ICML 2024.
+      (https://arxiv.org/abs/2403.03206) -- why these three towers, and how
+      their outputs are combined.
 """
 
 import keras
@@ -94,7 +114,7 @@ def _resolve_act(act_fn: str):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class CLIPTextEncoder(keras.Model):
     """OpenAI-CLIP text tower (from-scratch, token-id input, causal-masked).
 
@@ -398,7 +418,7 @@ class CLIPTextEncoder(keras.Model):
         return config
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class OpenCLIPTextEncoder(CLIPTextEncoder):
     """OpenCLIP (ViT-bigG) text tower: larger dims, standard GELU.
 
@@ -460,7 +480,7 @@ class OpenCLIPTextEncoder(CLIPTextEncoder):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@keras.saving.register_keras_serializable()
 class T5Encoder(keras.Model):
     """T5-v1.1 encoder (from-scratch, relative-position-bucket bias).
 
@@ -711,12 +731,46 @@ class T5Encoder(keras.Model):
         # --- shared relative-position bias (+ additive padding mask) ----
         position_bias = self._compute_bias(L)  # (1, H, L, L)
         if attention_mask is not None:
-            # Additive key mask: 0 where keep, large-negative where padded.
-            key_mask = ops.cast(attention_mask, "float32")  # (B, L)
-            min_val = float(np.finfo(np.float32).min)
-            add_mask = (1.0 - key_mask) * min_val  # (B, L)
-            add_mask = add_mask[:, None, None, :]  # (B, 1, 1, L)
-            position_bias = position_bias + add_mask  # (B, H, L, L)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-033
+            # SELECT the masked positions with `ops.where`; do NOT go back to
+            # the additive form `position_bias + (1 - mask) * min_val`. That
+            # form has TWO independent fp16 defects, and repairing only the
+            # visible one makes the model SILENTLY WRONG instead of loudly
+            # broken. Both are MEASURED, not assumed:
+            #   1. `np.finfo(np.float32).min` (-3.40e+38) is not representable
+            #      in float16. Under `mixed_float16` the float32 sentinel
+            #      meeting a float16 bias RAISED `InvalidArgumentError` whenever
+            #      a mask was supplied (no-mask green at 2.552734e+00; float32
+            #      green both ways).
+            #   2. The obvious repair -- cast that same sentinel to the bias
+            #      dtype -- makes it `-inf` in float16, and then
+            #      `(1 - keep) * -inf` is `0 * -inf = NaN` on the KEPT
+            #      positions, the ones the mask exists to preserve. MEASURED on
+            #      `bias = [-1.0, 0.5, -3.0, 2.0]`, `keep = [1, 1, 0, 0]`:
+            #        additive, finfo(f32).min cast -> [nan, nan, -inf, -inf],
+            #                                         softmax 4 NaN of 4
+            #        additive, finfo(f16).min      -> [-1.0, 0.5, -65504, -65504]
+            #        ops.where, finfo(f16).min     -> [-1.0, 0.5, -65504, -65504]
+            #      A *fully* dtype-aware additive form would also be NaN-free,
+            #      so `ops.where` is not the only correct answer -- it is chosen
+            #      because it never multiplies by the sentinel at all, so
+            #      neither failure mode is reachable, and because it is the only
+            #      one of the three that survives an ALL-MASKED row
+            #      (additive with -inf: softmax 4 NaN of 4; where: 0 NaN).
+            # See decisions.md D-033.
+            keep = ops.cast(attention_mask, "bool")[:, None, None, :]  # (B,1,1,L)
+            # The sentinel is the minimum of the BIAS's OWN dtype, so it is
+            # always representable: -3.40e+38 in float32, -65504.0 in float16.
+            # `getattr(dtype, "name", dtype)` rather than
+            # `keras.backend.standardize_dtype`: the repo-wide guard in
+            # `tests/test_models/test_package_api_contract.py` forbids any
+            # `keras.backend.*` call under `models/` (Keras-2 residue rule), and
+            # a backend tensor's dtype already carries its own `.name`.
+            bias_dtype = getattr(position_bias.dtype, "name", position_bias.dtype)
+            masked_value = ops.cast(
+                float(np.finfo(bias_dtype).min), position_bias.dtype)
+            position_bias = ops.where(
+                keep, position_bias, masked_value)  # (B, H, L, L)
 
         def split_heads(t: keras.KerasTensor) -> keras.KerasTensor:
             B = ops.shape(t)[0]

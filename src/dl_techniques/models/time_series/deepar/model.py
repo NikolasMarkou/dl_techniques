@@ -1,14 +1,91 @@
 """
-DeepAR Probabilistic Forecasting Model.
+Autoregressive recurrent forecaster that emits a likelihood, Gaussian or negative
+binomial, instead of a point prediction.
 
-This module implements the DeepAR model for probabilistic time series forecasting.
-DeepAR learns a global model from multiple related time series and produces
-probabilistic forecasts through Monte Carlo sampling.
+The problem DeepAR addresses is that a forecast is a decision input, and a decision
+needs the spread as much as the level. A network trained on squared error returns
+`E[z_t | history]` and nothing else, so the width of the outcome is unavailable
+exactly where it matters — inventory, capacity, risk. DeepAR instead factorizes the
+joint over the horizon into one-step conditionals and models each one explicitly:
 
-Reference:
-    DeepAR: Probabilistic Forecasting with Autoregressive Recurrent Networks
-    Salinas et al., 2019
-    https://arxiv.org/abs/1704.04110
+`p(z_{t0:T} | z_{1:t0-1}, x) = prod_t p(z_t | theta(h_t))`,
+`h_t = LSTM([z_{t-1} / nu, x_t], h_{t-1})`
+
+The recurrent state is the whole of the conditioning; the head maps it to
+distribution parameters `theta` and the loss is the negative log-likelihood of the
+observed value under those parameters. Nothing about this is Gaussian by necessity:
+swapping the head swaps the assumed observation process, which is why the count case
+gets a negative binomial (mean `mu`, variance `mu + alpha * mu^2`) rather than a
+Gaussian that would put mass on negative counts.
+
+Training and inference run the same recurrence under two different input policies.
+Training is teacher-forced: the true lagged target is fed in, every step is scored
+in parallel, and the pass is one symbolic forward — this is what `call` does, and it
+returns the parameter dict rather than a prediction. Inference is ancestral: at each
+horizon step a value is drawn from the current predictive distribution and fed back
+as the next input, so uncertainty compounds across the horizon the way it actually
+does. There is no closed form for the multi-step predictive distribution under that
+recurrence; `num_samples` independent trajectories are drawn and quantiles are read
+off as empirical percentiles. The sampling path is deliberately kept out of `call`
+and lives in `predict_step` / `_prediction_mode`, so `call` stays a single symbolic
+dict-returning function instead of a mode-switched one.
+
+Scale is the second thing the architecture handles explicitly. Across a large panel
+the magnitudes of individual series follow a power law, and a shared network cannot
+fit both a series in the single digits and one in the millions with the same weights.
+Each series gets `nu = mean(z over the conditioning range) + scale_epsilon`; inputs
+are divided by it and likelihood parameters are multiplied back. `scale_epsilon`
+defaults to 1.0 and is not a numerical fudge — it keeps `nu` away from zero for
+near-empty series and makes `nu >> 1` the normal case. The Gaussian `sigma` is
+un-scaled by `nu`, NOT `sqrt(nu)`: the forward path divides `z` by `nu` exactly once,
+so if `z~ = z / nu` then both `mu = nu * mu~` and `sigma = nu * sigma~` — `sigma` is
+a first-moment-scale quantity here, not a variance. The `sqrt` belongs only to the
+negative-binomial shape, where `alpha = alpha~ / sqrt(nu)`. Training and sampling
+must agree on this, so both sites carry the same reasoning inline.
+
+Which window `nu` is computed over is a correctness question, not a detail. Inference
+only ever sees the conditioning range, so the scale must come from there. If
+`conditioning_length` is left `None` the training-time scale is the mean of the full
+target window, which makes every teacher-forced step a function of the steps being
+predicted and simultaneously puts training and serving on different `nu`
+distributions. The constructor accepts `conditioning_length` for exactly this, and
+the model emits a warning rather than silently proceeding when it is absent; passing
+a precomputed `inputs['scale']` bypasses the question entirely.
+
+Two implementation properties are worth knowing before trusting long horizons. The
+sampling loop re-runs the whole stacked LSTM over the conditioning window plus every
+draw made so far, once per horizon step per sample, because a stacked
+`keras.layers.LSTM` does not carry state across separate invocations here, so the
+prefix has to be replayed rather than resumed. That costs `num_samples *
+prediction_len` full-sequence passes over a sequence that grows from
+`conditioning_len + 1` to `conditioning_len + prediction_len`, which is the price of
+being ancestral: until 2026-08-15 the context was the conditioning range plus only
+the *single most recent* draw, which made an H-step forecast H nearly independent
+one-step-ahead forecasts and multi-step quantiles too narrow. Separately, the negative
+binomial path samples by moment matching to a Gaussian clipped at zero rather than by
+a Gamma-Poisson draw — an approximation, marked as such at the call site.
+`negative_binomial_loss` is no longer among the approximations: it dropped
+`lgamma(z + r) - lgamma(r)`, and since `r = 1 / alpha` those terms are not constant
+in the parameters, so the gradient with respect to `alpha` was wrong rather than
+merely offset and dispersion was mis-estimated for every count model. Only the
+parameter-free `-lgamma(z + 1)` normalizer is now omitted, which shifts the value by
+a constant and leaves the gradient exact.
+
+Both loss functions ignore `y_true` and read the target out of `y_pred`, because
+`call` returns the target alongside the parameters. That keeps the likelihood
+parameters and the value they are scored against in one structure and makes
+`model.compile(loss=model.gaussian_loss)` work with any placeholder `y`. And
+`_forecast` forces a single `predict` batch: `predict_step` returns `(S, B, H, D)`
+with samples on axis 0, and Keras' default multi-batch concatenation would append
+along that same axis, scrambling the result.
+
+References:
+    - Salinas et al., 2020. DeepAR: Probabilistic Forecasting with Autoregressive
+      Recurrent Networks. (https://arxiv.org/abs/1704.04110)
+    - Hochreiter and Schmidhuber, 1997. Long Short-Term Memory. Neural Computation
+      9(8): 1735-1780.
+    - Bengio et al., 2015. Scheduled Sampling for Sequence Prediction with Recurrent
+      Neural Networks. (https://arxiv.org/abs/1506.03099)
 """
 
 import keras
@@ -20,11 +97,12 @@ from typing import Optional, Union, Literal, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import log_gamma
 from dl_techniques.layers.time_series.deepar_blocks import (
     ScaleLayer,
     GaussianLikelihoodHead,
     NegativeBinomialLikelihoodHead,
-    DeepARCell
 )
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 
@@ -92,8 +170,24 @@ class DeepAR(keras.Model, ForecastMixin):
         target_dim: Dimensionality of target variable (typically 1 for
             univariate forecasting). Defaults to 1.
         num_samples: Number of Monte Carlo samples to draw during prediction.
-            Defaults to 100.
+            Defaults to 100. **The default is expensive and the cost is not
+            obvious**: the sampling loop Python-unrolls `num_samples *
+            prediction_len` stacked-LSTM passes into ONE traced graph, so at the
+            defaults (`num_samples=100`, `num_layers=3`, `H=24`) that is 7,200
+            `LSTM.__call__` sites in a single graph -- a long trace/compile and a
+            large graph, before any arithmetic runs. `predict()` is the only
+            supported inference path, so this cost cannot be routed around; lower
+            `num_samples` (quantile precision degrades as `1/sqrt(num_samples)`)
+            or shorten the horizon. See the module docstring for why the prefix is
+            replayed rather than resumed.
         scale_epsilon: Small constant added to scale computation. Defaults to 1.0.
+        conditioning_length: Number of leading steps used to compute the
+            per-series scale nu during training. Set this to the context length.
+            If None (default) the scale is computed over the FULL target window,
+            which leaks the prediction range into nu and disagrees with
+            inference, where the scale comes from the conditioning range only;
+            a warning is emitted in that case. Passing a precomputed
+            ``inputs['scale']`` bypasses this entirely.
         **kwargs: Additional arguments for Model base class.
 
     Input shape:
@@ -171,6 +265,7 @@ class DeepAR(keras.Model, ForecastMixin):
             target_dim: int = 1,
             num_samples: int = 100,
             scale_epsilon: float = 1.0,
+            conditioning_length: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -189,8 +284,12 @@ class DeepAR(keras.Model, ForecastMixin):
                 f"Unknown likelihood: {likelihood}. "
                 f"Must be one of {self.SUPPORTED_LIKELIHOODS}"
             )
+        if conditioning_length is not None and conditioning_length <= 0:
+            raise ValueError(
+                f"conditioning_length must be > 0, got {conditioning_length}")
 
         # Store configuration
+        self.conditioning_length = conditioning_length
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout_rate
@@ -346,9 +445,32 @@ class DeepAR(keras.Model, ForecastMixin):
         covariates = inputs['covariates']  # (batch, seq_len, covariate_dim)
         scale = inputs.get('scale', None)
 
-        # Compute scale if not provided
+        # Compute scale if not provided.
+        #
+        # `conditioning_length` MUST be honoured here. Without it the scale is
+        # mean(z_1..z_T) over the whole window -- including the steps being
+        # predicted -- so every teacher-forced step t is divided by a nu that is
+        # a function of z_{t+1..T}, and the likelihood parameters are multiplied
+        # back by that same nu. Both the inputs and the output scale then carry
+        # information about the future of the window.
+        #
+        # _prediction_mode has always done this correctly (it passes only the
+        # conditioning target), so leaving it out here also made training and
+        # inference use different nu distributions -- leakage AND train/serve
+        # skew. The `conditioning_length` argument of compute_scale existed for
+        # exactly this purpose and no caller ever supplied it.
         if scale is None:
-            scale = self.compute_scale(target)
+            if self.conditioning_length is None:
+                logger.warning(
+                    "DeepAR: computing the scale over the FULL target window "
+                    "because conditioning_length is None. This leaks the "
+                    "prediction range into the scale and does not match "
+                    "_prediction_mode, which scales from the conditioning range "
+                    "only. Pass conditioning_length=<context steps> to the "
+                    "constructor, or supply a precomputed inputs['scale']."
+                )
+            scale = self.compute_scale(
+                target, conditioning_length=self.conditioning_length)
 
         # Scale the target
         target_scaled = self.scale_layer(target, scale=scale, inverse=False)
@@ -374,13 +496,21 @@ class DeepAR(keras.Model, ForecastMixin):
         if self.likelihood == 'gaussian':
             mu_scaled, sigma_scaled = self.likelihood_head(hidden)
 
-            # Inverse scale for mu and sigma
+            # Inverse scale for mu and sigma.
+            #
+            # sigma uses `scale`, NOT sqrt(scale). The forward path divides the
+            # target by nu exactly once (`target_scaled = z / nu` above), so if
+            # z~ = z/nu then mu = nu*mu~ AND sigma = nu*sigma~ -- sigma is a
+            # first-moment-scale quantity, not a variance. Salinas et al. §3.2
+            # gives mu = nu*mu~, sigma = nu*softplus(sigma~).
+            #
+            # The sqrt belongs only to the NegBinomial branch below, where
+            # alpha = alpha~/sqrt(nu) is correct; it was copied across to the
+            # Gaussian head, where it under-scaled sigma by sqrt(nu) and left
+            # every predictive interval mis-calibrated by a scale-dependent
+            # factor (nu = mean(z)+1, so nu >> 1 is the normal case).
             mu = self.scale_layer(mu_scaled, scale=scale, inverse=True)
-            sigma = self.scale_layer(
-                sigma_scaled,
-                scale=ops.sqrt(scale),
-                inverse=True
-            )
+            sigma = self.scale_layer(sigma_scaled, scale=scale, inverse=True)
 
             return {'mu': mu, 'sigma': sigma, 'target': target}
 
@@ -453,16 +583,10 @@ class DeepAR(keras.Model, ForecastMixin):
             axis=-1
         )
 
-        # Pass through LSTM to get final hidden state
-        hidden = encoder_inputs
-        for lstm in self.lstm_layers:
-            hidden = lstm(hidden, training=training)
-
-        # Get last hidden state to initialize decoder
-        # For prediction, we need to maintain LSTM states across steps
-        # However, Keras LSTM doesn't easily expose this in functional API
-        # We'll use a simpler approach: use the last encoder output
-        last_hidden = hidden[:, -1:, :]  # (batch, 1, hidden_dim)
+        # No encoder-only pass here: the decoder loop below replays
+        # `encoder_inputs` as the prefix of every sequence it runs, so a
+        # separate pass would be a whole stacked-LSTM forward whose result is
+        # discarded. One was computed here (`last_hidden`) and never read.
 
         # Generate samples
         all_samples = []
@@ -472,6 +596,16 @@ class DeepAR(keras.Model, ForecastMixin):
             current_value = conditioning_scaled[:, -1:, :]  # (batch, 1, target_dim)
 
             sample_trajectory = []
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-038
+            # The decoder steps consumed SO FAR, kept so step t's context is the
+            # conditioning window plus draws 1..t. Until 2026-08-15 the context
+            # was `[encoder_inputs, decoder_input]` -- the window plus only the
+            # single most recent draw -- which made an H-step forecast H nearly
+            # independent one-step-ahead forecasts and multi-step quantiles too
+            # narrow. Do NOT drop this list to shorten the sequence: ancestral
+            # sampling is defined by conditioning on the whole drawn prefix.
+            # See decisions.md D-038.
+            decoder_history = []
 
             for t in range(prediction_len):
                 # Get covariates for this time step
@@ -482,11 +616,14 @@ class DeepAR(keras.Model, ForecastMixin):
                     [current_value, current_covariates],
                     axis=-1
                 )
+                decoder_history.append(decoder_input)
 
-                # Extend last_hidden to match sequence length
-                # This is a simplified approach; ideally we'd maintain LSTM state
+                # Re-run the stacked LSTM over the conditioning window plus
+                # every decoder step drawn so far. A stacked `keras.layers.LSTM`
+                # does not carry state across separate invocations here, so the
+                # prefix has to be replayed rather than resumed.
                 decoder_input_seq = ops.concatenate(
-                    [encoder_inputs, decoder_input],
+                    [encoder_inputs] + decoder_history,
                     axis=1
                 )
 
@@ -502,13 +639,11 @@ class DeepAR(keras.Model, ForecastMixin):
                 if self.likelihood == 'gaussian':
                     mu_scaled, sigma_scaled = self.likelihood_head(hidden_t_current)
 
-                    # Inverse scale
+                    # Inverse scale. sigma uses `scale`, not sqrt(scale) --
+                    # same reasoning as _training_mode; the two sites must agree
+                    # or sampling would not match the trained likelihood.
                     mu = self.scale_layer(mu_scaled, scale=scale, inverse=True)
-                    sigma = self.scale_layer(
-                        sigma_scaled,
-                        scale=ops.sqrt(scale),
-                        inverse=True
-                    )
+                    sigma = self.scale_layer(sigma_scaled, scale=scale, inverse=True)
 
                     # Sample from Gaussian
                     epsilon = keras.random.normal(ops.shape(mu))
@@ -657,29 +792,47 @@ class DeepAR(keras.Model, ForecastMixin):
         """
         Negative Binomial negative log-likelihood loss.
 
+        With shape ``r = 1 / alpha`` and success probability
+        ``p = r / (r + mu) = 1 / (1 + alpha * mu)``, the log-pmf is::
+
+            log p(z) = lgamma(z + r) - lgamma(r) - lgamma(z + 1)
+                       + r * log(p) + z * log(1 - p)
+
+        and this returns the mean of its negation, less the parameter-free
+        ``-lgamma(z + 1)`` normalizer. Dropping a term that does not depend on
+        ``mu`` or ``alpha`` shifts the value by a constant and leaves the
+        gradient exact; it is dropped because it is ``nan`` for any target
+        below ``-1``, and a mis-specified target should not turn the loss into
+        a ``nan`` when it can simply be a large number.
+
         Args:
             y_true: Not used (target is in y_pred).
             y_pred: Dictionary with 'mu', 'alpha', 'target'.
 
         Returns:
-            Negative log-likelihood.
+            Negative log-likelihood, up to an additive constant.
         """
         mu = y_pred['mu']
         alpha = y_pred['alpha']
         target = y_pred['target']
 
-        # Negative Binomial NLL (simplified, ignoring Gamma terms)
-        # Full formula involves lgamma functions
-        # Approximation: -log p(z|μ,α) ≈ key terms
-
-        # p = 1 / (1 + α*μ)
-        # r = 1 / α
-
         eps = 1e-7
         p = 1.0 / (1.0 + alpha * mu + eps)
+        r = 1.0 / (alpha + eps)
 
-        # Simplified NLL (main terms)
-        nll = -ops.log(p + eps) / alpha - target * ops.log(1.0 - p + eps)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-039
+        # The `lgamma(z + r) - lgamma(r)` pair is NOT a constant that may be
+        # dropped for training: `r = 1 / alpha`, so both terms depend on alpha
+        # and their omission makes d(loss)/d(alpha) systematically wrong rather
+        # than merely offset -- dispersion is mis-estimated for every count
+        # model. It was omitted here as "simplified, ignoring Gamma terms".
+        # Do NOT drop it again. `log_gamma` exists because `keras.ops` has no
+        # `lgamma` in Keras 3.8. See decisions.md D-039.
+        log_binomial = log_gamma(target + r) - log_gamma(r)
+
+        nll = -(log_binomial
+                + r * ops.log(p + eps)
+                + target * ops.log(1.0 - p + eps))
 
         return ops.mean(nll)
 
@@ -694,6 +847,7 @@ class DeepAR(keras.Model, ForecastMixin):
             'target_dim': self.target_dim,
             'num_samples': self.num_samples,
             'scale_epsilon': self.scale_epsilon,
+            'conditioning_length': self.conditioning_length,
         })
         return config
 

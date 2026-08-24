@@ -24,6 +24,7 @@ from dl_techniques.losses.wasserstein_loss import (
     create_wgan_losses,
     create_wgan_gp_losses
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 @pytest.fixture
@@ -409,6 +410,10 @@ def test_loss_serialization_and_deserialization() -> None:
     # Save and load the model
     with tempfile.TemporaryDirectory() as tmp_dir:
         model_path = os.path.join(tmp_dir, 'wasserstein_model.keras')
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(model_path)
         logger.info(f"Model saved to {model_path}")
 

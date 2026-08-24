@@ -1,3 +1,15 @@
+> **SUPERSEDED.** This is v1. The canonical guide is now
+> **`research/2026_keras_custom_models_instructions_v2.md`** — read that instead.
+>
+> v1's construction mechanics are correct and were carried into v2. What v1 lacks is the half that
+> matters most in practice: how to prove a layer does what it claims. Several rules below are also
+> corrected in v2 — notably `build()` and constant tables (v1 permits an `.assign()` in `build()`
+> that Keras silently discards), the registration decorator (v1 omits `package=`, whose absence
+> causes silent key collisions), and §8.2's serialization test and §12's test suite, both of which
+> pass on models that are measurably broken.
+>
+> This file is retained only because commit messages and analyses reference it. Do not follow it.
+
 # Complete Guide to Keras 3 Custom Layers and Models
 
 A comprehensive, authoritative guide for creating robust, serializable, and production-ready custom Layers and Models in Keras 3 for the dl-techniques framework.

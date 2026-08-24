@@ -242,7 +242,7 @@ class CustomAlignmentMetrics(AlignmentMetrics):
 ### Multi-Modal Alignment
 
 ```python
-from dl_techniques.models.mobile_clip import MobileCLIPModel
+from dl_techniques.models.mobile_clip import MobileClipModel
 from dl_techniques.utils.alignment import Alignment
 
 # Extract vision and language features

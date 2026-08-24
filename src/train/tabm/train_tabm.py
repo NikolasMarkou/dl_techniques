@@ -1,5 +1,6 @@
 """Training pipeline for TabM models with ensemble evaluation and selection."""
 
+import argparse
 import keras
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from dl_techniques.models.tabm import (
 from dl_techniques.datasets.tabular import TabularDataProcessor
 from dl_techniques.utils.logger import logger
 
-from train.common import setup_gpu
+# `setup_gpu` is imported INSIDE main(); see the anchor there.
 
 
 class TabMTrainer:
@@ -505,7 +506,11 @@ def example_ensemble_analysis():
 
         plt.tight_layout()
         plt.savefig('ensemble_analysis.png', dpi=150, bbox_inches='tight')
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore `plt.show()`. This repo mandates MPLBACKEND=Agg for
+        # headless safety, so the call cannot render; it only warned and leaked
+        # the figure. The figure is already on disk one line above.
+        plt.close()
 
     return model, trainer, results
 
@@ -602,23 +607,69 @@ def example_custom_data_pipeline():
     return results_comparison
 
 
-def main():
-    """Run all examples."""
-    setup_gpu()
+EXAMPLES = {
+    "synthetic-classification": example_synthetic_classification,
+    "real-dataset": example_real_dataset,
+    "regression": example_regression,
+    "ensemble-analysis": example_ensemble_analysis,
+    "custom-pipeline": example_custom_data_pipeline,
+}
+
+
+def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse the CLI.
+
+    This script had NO parser at all, so `python -m train.tabm.train_tabm
+    --help` ignored the flag, ran every example to completion (minutes of
+    training) and exited 0 without printing a usage line -- the same footgun
+    the three bert/wikipedia scripts carried. Keep this the first thing
+    `main()` does.
+    """
+    parser = argparse.ArgumentParser(
+        description="Run the TabM example pipelines (synthetic + real tabular data)."
+    )
+    parser.add_argument(
+        "--gpu", type=int, default=None,
+        help="GPU id to use. NOTE: repo-wide, this only logs -- device "
+             "selection is the CUDA_VISIBLE_DEVICES=N shell prefix.",
+    )
+    parser.add_argument(
+        "--examples", nargs="+", choices=sorted(EXAMPLES), default=sorted(EXAMPLES),
+        help="Which example pipelines to run (default: all).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Run the selected examples."""
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # `setup_gpu` is imported HERE, not at module scope. Do NOT hoist it back
+    # up: `train/common/__init__.py` re-exports `image_text.py`, whose
+    # module-level `tf.constant` (image_text.py:53) initializes TF's eager
+    # context and ALLOCATES a GPU device at import time. A top-level
+    # `from train.common import setup_gpu` therefore makes `--help` allocate a
+    # GPU before argparse ever runs, defeating the point of this whole change.
+    # Measured: `Created device` count 1 -> 0 on `--help` after the move.
+    # Guarded by
+    # tests/test_train/test_tabm/test_cli_contract.py::test_setup_gpu_is_wired_and_imported_lazily.
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: the root
+    # cause above is FIXED. `IMAGE_MEAN`/`IMAGE_STD` are plain Python lists now
+    # (image_text.py:53 is that decision's anchor), and `import train.common`
+    # emits 0 `Created device` lines. This deferred import is therefore
+    # HARMLESS but no longer load-bearing. The original text is kept because
+    # the history is the point: do not re-derive the module-scope eager-op
+    # trap. The test above still pins the pattern.
+    from train.common import setup_gpu
+    setup_gpu(args.gpu)
 
     logger.info("TabM Model Examples")
 
-    examples = [
-        ("synthetic classification", example_synthetic_classification),
-        ("real dataset", example_real_dataset),
-        ("regression", example_regression),
-        ("ensemble analysis", example_ensemble_analysis),
-        ("custom pipeline", example_custom_data_pipeline),
-    ]
-
-    for name, fn in examples:
+    for name in args.examples:
         try:
-            fn()
+            EXAMPLES[name]()
         except Exception as e:
             logger.error(f"Error in {name} example: {e}")
 

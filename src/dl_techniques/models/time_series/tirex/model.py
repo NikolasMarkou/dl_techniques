@@ -1,60 +1,117 @@
 """
-TiRex hybrid architecture for probabilistic time series forecasting,
-combining recurrent state modeling with attention-based global context.
+TiRex-style probabilistic forecaster: patch tokens processed by a stack of blocks
+that mix LSTM recurrence with self-attention, decoded in one shot into
+non-crossing quantiles under reversible per-instance normalization.
 
-This class realizes a "Mixed Sequential" architecture designed to address the
-dichotomy between local temporal dynamics and long-range global dependencies
-in time series data. It synthesizes the inductive biases of Recurrent Neural
-Networks (LSTMs) and Transformers into a unified, configurable pipeline.
+The design answers three problems at once, and each answer costs something worth
+knowing about.
 
-Architecture Overview:
-    The model processes data through four distinct stages:
-    1.  **Reversible Normalization**: Input data is normalized (z-score) per-instance
-        to handle non-stationary statistics (shifting mean/variance), a technique
-        crucial for robust forecasting across diverse regimes.
-    2.  **Patch Tokenization**: The time series is segmented into sub-sequences
-        (patches) and projected into an embedding space. This reduces the effective
-        sequence length, enabling the processing of long horizons with reduced
-        computational complexity relative to point-wise attention.
-    3.  **Mixed Sequential Encoding**: A stack of configurable blocks processes
-        the tokenized sequence. These blocks can be pure LSTMs, pure Transformers,
-        or "Mixed" blocks.
-        -   **LSTM Layers** enforce a sequential inductive bias, carrying a running
-            state $h_t$ that captures local evolution and short-term causality.
-        -   **Transformer Layers** utilize Self-Attention to model global
-            dependencies ($Attention(Q, K, V)$), allowing the model to attend to
-            distant patches (e.g., yearly seasonality) regardless of their
-            position in the sequence.
-    4.  **Probabilistic Head**: The decoder projects the encoded representation
-        into a distribution of quantiles, approximating the inverse cumulative
-        distribution function (quantile function) of the target.
+The first is *scale*. A forecaster trained across many series sees windows whose
+level and amplitude differ by orders of magnitude; a network fed those raw learns
+the scale instead of the shape. Every window is therefore z-scored along its own
+time axis before anything else touches it and the prediction is mapped back
+afterwards, `y = q * std + mean`. The statistics are per-series and per-feature,
+computed over `axis=1` — never over the batch — so the model becomes indifferent to
+level and scale without any leakage between examples. Missing data is folded into
+the same step: NaNs are located, replaced by zeros, and the mean/variance sums are
+divided by the *count of valid steps* rather than the window length, so a gap
+neither poisons the statistics nor propagates a NaN forward. The validity mask is
+not then discarded — it is concatenated onto the feature axis, doubling it, so the
+encoder can tell an imputed zero from an observed zero. This is why the patch
+embedding is constructed at `embed_dim * 2` and immediately projected back down to
+`embed_dim`: the doubled width carries the mask, and shape threading in `build`
+must mirror that doubling or the restored weights will not fit.
 
-Mathematical Intuition:
-    Standard Transformers suffer from a lack of inherent sequential bias, often
-    requiring complex positional encodings. LSTMs suffer from the vanishing gradient
-    problem over long horizons. TiRex addresses this by applying recurrence *within*
-    or *before* attention.
+The second is *sequence length*. Point-wise attention over a long lookback is
+quadratic in the number of timesteps and spends most of its capacity on
+neighbouring samples that carry nearly identical information. Segmenting the
+series into patches of `patch_size` and embedding each as one token cuts the
+sequence by that factor and gives each token a local waveform rather than a scalar
+— the same trade PatchTST makes.
 
-    Mathematically, the mixed block computes:
-    $$ H_{local} = \text{LSTM}(X_{patches}) $$
-    $$ H_{global} = \text{SelfAttention}(H_{local}) $$
+The third is *inductive bias*. Attention has no notion of order beyond what a
+positional encoding supplies, while an LSTM has order built in but struggles to
+reach across a long context. A `mixed` block runs both in series, pre-normalized
+and residual at each stage: `x = x + LSTM(norm(x))`, then `x = x + Attn(norm(x))`,
+then `x = x + FFN(norm(x))`. Attention therefore operates on tokens that already
+carry recurrent state, so the ordering information it needs is inside the values
+rather than added to them, and no positional embedding exists anywhere in this
+model. Per-block `block_types` let the stack be tuned from purely recurrent to
+purely attentional; the `lstm` and `transformer` variants are the same block with
+one of the two sub-layers omitted.
 
-    This structure ensures that the tokens fed into the attention mechanism
-    already contain rich, context-aware local state information, stabilizing
-    optimization and improving zero-shot generalization capabilities.
+Attention follows the published TiRex by default and the windowed divergence is now
+an opt-in, chosen through `attention_type`. The default `'multi_head'` is the
+factory's key for standard full self-attention — there is no key spelled `'global'`
+— so every patch token attends to every other, at `O(L^2)` in the number of patches.
+Passing `attention_type='window'` restores the earlier behaviour: each token then
+attends only within `attention_window_size` tokens (default 8) at `O(L*w)`, and
+long-range coupling falls back onto the LSTM path and the stacking of windows across
+depth. The knob exists because the two answers differ in kind, not degree — a
+windowed stack cannot form a single long-range association at any depth cheaply, and
+a global stack pays quadratically for one it may not need — and because a model whose
+attention span is fixed in the source cannot be compared against the paper it cites.
+`attention_window_size` stays wired through `attention_args` under both settings, and as
+of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011) it is `MixedSequentialBlock`, not the
+attention factory, that scopes it. `create_attention_layer` used to filter keyword
+arguments against the target type's own parameter list and drop the rest rather than
+raising; it is now STRICT and raises on any key the target type does not declare, which
+this model's unconditional `attention_args={'window_size': ...}` would otherwise trip at
+its own `'multi_head'` default. The block treats `window_size` as a documented-conditional
+key and removes it on the branches whose attention type does not accept it, so both paths
+now behave as this docstring has always described:
+`'multi_head'` genuinely ignores the knob, and `'window'` genuinely uses it. That second
+half was itself broken until the same commit — the block's `'window'` branch was injecting
+a `normalization='softmax'` key `WindowAttention` has no parameter for, which the old
+silent drop hid. Every OTHER `attention_args` key still reaches the factory verbatim, so a
+misspelled one is now a loud `ValueError` instead of a silent no-op. The remaining block
+internals are fixed rather than exposed: RMSNorm, GeGLU feed-forward and Mish
+activations throughout.
+
+Decoding is one-shot and pooled. After the final normalization the patch axis is
+collapsed by a mean — the whole encoded history becomes a single `(B, 1, embed_dim)`
+summary — and the head projects that summary directly to
+`prediction_length * num_quantiles` values, reshaped to `(B, H, Q)`. There is no
+autoregressive loop, so horizon cost is constant and no error compounds across
+steps; the price is that the head cannot condition step `h` on step `h-1`, and that
+mean-pooling discards *which* patch a pattern came from. Pooling with
+`keepdims=True` is load-bearing rather than cosmetic: the head flattens its input,
+which requires a statically known sequence length, and a length of exactly 1
+supplies one. Quantile crossing is structurally prevented instead of penalized —
+the head emits `r`, then `Q_0 = r_0` and `Q_i = Q_{i-1} + softplus(r_i)`, so the
+outputs are non-decreasing by construction and no loss term or post-hoc sort is
+needed. For multivariate input the de-normalization uses the statistics of the
+**last** feature, which is the model's standing convention for which column is the
+target.
+
+`predict_quantiles` maps user-requested levels onto the levels the model was
+actually trained with, falling back to the nearest trained level and logging a
+warning rather than interpolating: an interpolated 0.95 from a model that only
+learned 0.9 would look like a calibrated quantile while being nothing of the kind.
+The median is extracted as the point forecast because it is the minimizer of
+absolute error under the quantile loss. When `use_layer_norm=False` the output
+normalization becomes `keras.layers.Identity` rather than a `Lambda` identity —
+lambdas serialize as pickled Python and do not survive a portable `.keras`
+round-trip.
 
 References:
-    -   **TiRex Architecture**: Auer, A., et al. (2025). "TiRex: Zero-Shot
-        Forecasting Across Long and Short Horizons with Enhanced In-Context Learning."
-        arXiv preprint arXiv:2505.23719.
-    -   **Patching**: Nie, Y., et al. (2023). "A Time Series is Worth 64 Words:
-        Long-term Forecasting with Transformers." ICLR.
+    - Auer et al., 2025. TiRex: Zero-Shot Forecasting Across Long and Short
+      Horizons with Enhanced In-Context Learning.
+      (https://arxiv.org/abs/2505.23719)
+    - Nie et al., 2023. A Time Series is Worth 64 Words: Long-term Forecasting
+      with Transformers. ICLR 2023. (https://arxiv.org/abs/2211.14730)
+    - Kim et al., 2022. Reversible Instance Normalization for Accurate Time-Series
+      Forecasting against Distribution Shift. ICLR 2022.
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
+      (https://arxiv.org/abs/2004.05150)
+    - Wen et al., 2017. A Multi-Horizon Quantile Recurrent Forecaster.
+      (https://arxiv.org/abs/1711.11053)
 """
 
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Union, List, Any, Tuple, Dict, Literal
+from typing import Optional, Union, List, Any, Sequence, Tuple, Dict, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -78,7 +135,16 @@ BlockType = Literal['lstm', 'transformer', 'mixed']
 # Canonical source list; also exposed as the class attr `TiRexCore.DEFAULT_QUANTILES`
 # (which references this list). Kept module-level for backward-compat: external
 # modules (e.g. model_extended.py) import this name directly.
-DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: this is a TUPLE, and it must
+# stay one. It was a `List[float]`, aliased by the class attribute below, so the
+# module constant and `TiRexCore.DEFAULT_QUANTILES` were ONE object under two
+# names -- and a caller who took the parameter default and mutated it in place
+# silently changed the default for every later caller in the process. Do NOT
+# "fix" that by copying in `__init__`: a copy in the constructor leaves the two
+# ALIASES pointing at the same mutable object and repairs nothing. A tuple kills
+# the parameter default (R-009 S1), the `ast.Name` default (S2) and the class
+# alias (S3) together, which is why the remedy is the type and not the copy.
+DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 # ---------------------------------------------------------------------
 
@@ -115,6 +181,21 @@ class TiRexCore(keras.Model, ForecastMixin):
         prediction_length: Integer, length of prediction horizon.
         dropout_rate: Float, dropout rate for regularization.
         use_layer_norm: Boolean, whether to use layer normalization.
+        use_normalization: Boolean, whether to apply reversible per-instance
+            normalization to the inputs.
+        attention_window_size: Integer, window width in tokens, used only when
+            `attention_type='window'`. Wired through `attention_args`
+            unconditionally; `MixedSequentialBlock` drops it on the attention
+            types that do not accept it (see the module docstring), so on every
+            other setting it is genuinely inert rather than merely tolerated.
+        attention_type: String, attention factory key used by every block.
+            Defaults to `'multi_head'` — full/global self-attention, `O(L^2)` in the
+            number of patch tokens, matching the published TiRex. `'window'` selects
+            the local-window variant at `O(L*attention_window_size)`. Any other key
+            from `layers/attention/factory.py`'s registry is accepted and validated
+            there — note that the factory is now STRICT about parameters it does
+            not declare, so a type whose constructor rejects `dim`/`num_heads`
+            fails loudly at construction instead of silently.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -150,7 +231,7 @@ class TiRexCore(keras.Model, ForecastMixin):
     # References the single module-level source list (defined above the class)
     # so the value lives in exactly one place; model_extended.py imports the
     # module-level name, which remains a backward-compat alias for the same list.
-    DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES
+    DEFAULT_QUANTILES: Tuple[float, ...] = DEFAULT_QUANTILES
 
     # Model variant configurations following ConvNeXt V2 pattern
     MODEL_VARIANTS = {
@@ -193,12 +274,13 @@ class TiRexCore(keras.Model, ForecastMixin):
         lstm_units: Optional[int] = None,
         ff_dim: Optional[int] = None,
         block_types: Optional[List[BlockType]] = None,
-        quantile_levels: List[float] = DEFAULT_QUANTILES,
+        quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         prediction_length: int = 32,
         dropout_rate: float = 0.1,
         use_layer_norm: bool = True,
         use_normalization: bool = True,
         attention_window_size: int = 8,
+        attention_type: str = 'multi_head',
         name: str = "TiRex",
         **kwargs: Any
     ) -> None:
@@ -224,12 +306,29 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.lstm_units = lstm_units if lstm_units is not None else embed_dim
         self.ff_dim = ff_dim if ff_dim is not None else embed_dim * 4
         self.block_types = block_types if block_types is not None else ['mixed'] * num_blocks
-        self.quantile_levels = quantile_levels
+        # Materialize as a LIST: the default is now an immutable tuple (D-079),
+        # and `get_config()` must keep round-tripping the same JSON type it
+        # always has. Every consumer below uses `.index()` / `len()` / `in`,
+        # which both types answer identically.
+        self.quantile_levels = list(quantile_levels)
         self.prediction_length = prediction_length
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
         self.use_normalization = use_normalization
         self.attention_window_size = attention_window_size
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-008
+        # `attention_type` deliberately carries NO membership check here, unlike
+        # every other argument above. `create_attention_layer` already raises
+        # `ValueError: Unknown attention type '<value>'. Available types: [...]`
+        # for an unregistered key, and it does so eagerly — the blocks below are
+        # constructed in `__init__`, not lazily in `build`. A local whitelist would
+        # either duplicate that raise or, worse, freeze this model to the two keys
+        # anyone happened to test, locking out the other 29 registry entries for no
+        # reason. Do NOT "fix" this by adding `if attention_type not in
+        # ('multi_head', 'window')`. The one gap is an all-`'lstm'` `block_types`
+        # stack, which builds no attention layer at all and so cannot validate the
+        # key; there it is inert and round-trips unused.
+        self.attention_type = attention_type
 
         if len(self.block_types) != num_blocks:
             raise ValueError(
@@ -255,6 +354,24 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.blocks = []
         for i, block_type in enumerate(self.block_types):
             # --- DIVERGENCE FROM TIREX: WINDOW ATTENTION INSTEAD OF GLOBAL ATTENTION ---
+            # Kept as history, no longer as behaviour: this line hardcoded
+            # `attention_type='window'`, so no caller could build the paper's global
+            # attention. The divergence is now OPT-IN via the constructor argument
+            # and the default is the paper's `'multi_head'` (the factory's key for
+            # full self-attention; there is no key spelled `'global'`). Existing
+            # windowed behaviour is one keyword away, and `window_size` stays wired
+            # unconditionally.
+            #
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011
+            # That last clause used to be justified by the attention factory
+            # filtering unknown kwargs against the target type's parameter list.
+            # It no longer does: `create_attention_layer` RAISES on any key the
+            # type does not declare. `MixedSequentialBlock` is now what scopes
+            # `window_size` (its `_CONDITIONAL_ATTENTION_ARG_KEYS` allowlist).
+            # Do NOT "fix" this by making the line below conditional on
+            # `self.attention_type` -- that pushes registry knowledge into every
+            # block consumer, which is exactly what the block-side repair
+            # exists to avoid.
             block = MixedSequentialBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
@@ -264,7 +381,7 @@ class TiRexCore(keras.Model, ForecastMixin):
                 dropout_rate=self.dropout_rate,
                 use_layer_norm=self.use_layer_norm,
                 normalization_type='rms_norm',
-                attention_type='window',
+                attention_type=self.attention_type,
                 ffn_type='geglu',
                 activation='mish',
                 attention_args={'window_size': self.attention_window_size},
@@ -642,7 +759,7 @@ class TiRexCore(keras.Model, ForecastMixin):
         cls,
         variant: str,
         prediction_length: int = 32,
-        quantile_levels: List[float] = DEFAULT_QUANTILES,
+        quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         **kwargs
     ) -> "TiRexCore":
         """
@@ -702,6 +819,7 @@ class TiRexCore(keras.Model, ForecastMixin):
             "use_layer_norm": self.use_layer_norm,
             "use_normalization": self.use_normalization,
             "attention_window_size": self.attention_window_size,
+            "attention_type": self.attention_type,
         })
         return config
 
@@ -722,7 +840,7 @@ def create_tirex_model(
     embed_dim: int = 256,
     num_blocks: int = 6,
     num_heads: int = 8,
-    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     block_types: Optional[List[str]] = None,
     **kwargs
 ) -> TiRexCore:
@@ -754,9 +872,9 @@ def create_tirex_model(
         **kwargs
     )
 
-    # Build the model with a dummy input to initialize weights and shapes
-    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
-    _ = model(dummy_input)
+    # See the D-078 note on `create_tirex_by_variant`: `build()` replaces a
+    # dummy forward pass and is byte-identical at the same seed.
+    model.build((None, input_length, 1))
 
     logger.info(
         f"Created TiRex model: input_length={input_length}, "
@@ -770,7 +888,7 @@ def create_tirex_by_variant(
     variant: str = "medium",
     input_length: int = 128,
     prediction_length: int = 32,
-    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     **kwargs
 ) -> TiRexCore:
     """
@@ -800,9 +918,16 @@ def create_tirex_by_variant(
         **kwargs
     )
 
-    # Build the model with a dummy input
-    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
-    _ = model(dummy_input)
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: materialize with
+    # `build()`, not with a dummy forward pass. This used to be
+    # `model(np.zeros((1, input_length, 1)))`, which R-051 charges as logic in a
+    # factory. It is NOT dead code -- `input_length` exists only to size this
+    # call, and dropping it outright would make the parameter a silent no-op and
+    # hand back a lazily-built model whose sublayers can lose weights on a
+    # `.keras` round trip. `build()` is the byte-identical substitute, measured
+    # at the same seed: the SAME 47 weight paths, `max|weight delta| == 0.0`,
+    # and `max|forward delta| == 0.0`.
+    model.build((None, input_length, 1))
 
     logger.info(
         f"Created TiRex-{variant.upper()}: input_length={input_length}, "

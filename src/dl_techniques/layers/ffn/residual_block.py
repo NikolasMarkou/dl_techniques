@@ -67,6 +67,8 @@ introduced in the seminal paper:
 import keras
 from typing import Optional, Union, Any, Tuple, Callable
 
+from dl_techniques.initializers.clone import clone_initializer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -189,12 +191,16 @@ class ResidualBlock(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         # Hidden transformation with activation
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per layer.
+        # Do NOT restore the shared instance: the skip PROJECTION and the main-path
+        # output layer had bit-identical kernels (MEASURED max|delta| = 0.0), which
+        # makes the residual branch a copy of the transform it is supposed to bypass.
         self.hidden_layer = keras.layers.Dense(
             units=self.hidden_dim,
             activation=self.activation,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="hidden_layer"
@@ -205,8 +211,8 @@ class ResidualBlock(keras.layers.Layer):
             units=self.output_dim,
             activation=None,  # Linear output
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="output_layer"
@@ -217,8 +223,8 @@ class ResidualBlock(keras.layers.Layer):
             units=self.output_dim,
             activation=None,  # Linear projection
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="residual_layer"

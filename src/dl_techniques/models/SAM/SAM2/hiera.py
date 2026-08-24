@@ -67,6 +67,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -721,7 +725,7 @@ class HieraBlock(keras.layers.Layer):
             (int(q_stride[0]), int(q_stride[1])) if q_stride is not None else None
         )
         self.window_size = int(window_size)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.layer_norm_epsilon = float(layer_norm_epsilon)
 
         # Derived, non-config.
@@ -891,7 +895,7 @@ class HieraBlock(keras.layers.Layer):
             "drop_path": self.drop_path,
             "q_stride": self.q_stride,
             "window_size": self.window_size,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "layer_norm_epsilon": self.layer_norm_epsilon,
         })
         return config
@@ -1060,7 +1064,7 @@ class Hiera(keras.layers.Layer):
         self.patch_kernel_size = int(patch_kernel_size)
         self.patch_stride = int(patch_stride)
         self.patch_padding = int(patch_padding)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.layer_norm_epsilon = float(layer_norm_epsilon)
 
         # Derived, non-config.
@@ -1291,7 +1295,7 @@ class Hiera(keras.layers.Layer):
             "patch_kernel_size": self.patch_kernel_size,
             "patch_stride": self.patch_stride,
             "patch_padding": self.patch_padding,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "layer_norm_epsilon": self.layer_norm_epsilon,
         })
         return config

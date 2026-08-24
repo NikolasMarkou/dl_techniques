@@ -210,11 +210,23 @@ class BiasFreeBatchNorm(keras.layers.Layer):
         # moving_mean subtraction (and any additive beta) is exactly what makes it
         # NON-homogeneous (findings/norm-homogeneity-mechanics.md, rel err 500+).
         # Adding either weight would reintroduce the audited bug. See decisions.md D-001.
+        # DECISION plan-2026-08-18T123346-c3c4a681/D-002: moving statistics live
+        # in the VARIABLE dtype, never the compute dtype, and are read with
+        # autocast DISABLED. Under `mixed_float16` the variable dtype is float32
+        # while the compute dtype is float16; a plain `self.running_var` read
+        # inside `call()` is auto-cast to float16 by Keras, which both destroys
+        # the EMA's precision and mixes dtypes in the update. Do NOT "simplify"
+        # by dropping `dtype=`/`autocast=False` here, and do NOT force the
+        # statistics to the compute dtype to make the dtypes line up - that
+        # silently downgrades the mixed_float16 path to a float16 accumulator.
+        # This mirrors keras.layers.BatchNormalization.build. See decisions.md D-002.
         self.running_var = self.add_weight(
             name="running_var",
             shape=(dim,),
             initializer="ones",
             trainable=False,
+            dtype=self.variable_dtype,
+            autocast=False,
         )
 
         if self.use_scale:
@@ -223,6 +235,8 @@ class BiasFreeBatchNorm(keras.layers.Layer):
                 shape=(dim,),
                 initializer="ones",
                 trainable=True,
+                dtype=self.variable_dtype,
+                autocast=False,
             )
 
         logger.debug(f"Built BiasFreeBatchNorm weights for channel dim {dim}")
@@ -250,12 +264,18 @@ class BiasFreeBatchNorm(keras.layers.Layer):
         """
         original_dtype = inputs.dtype
 
-        # Compute in float32 for numerical stability under mixed precision.
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here made the layer raise a dtype TypeError
+        # under any non-float32 policy. See D-002 in build().
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         ndims = len(inputs.shape)
         channel_axis = self.axis % ndims
         reduction_axes = [i for i in range(ndims) if i != channel_axis]
+
+        running_var = ops.cast(self.running_var, stat_dtype)
 
         if training:
             # Per-batch variance over all non-channel axes (shape: (C,)).
@@ -263,15 +283,16 @@ class BiasFreeBatchNorm(keras.layers.Layer):
 
             # EMA update of the fixed inference statistic (VARIANCE ONLY, mirroring
             # keras BatchNormalization's moving-stat update - but no moving_mean).
+            # `assign` casts back down to the variable dtype.
             self.running_var.assign(
-                self.momentum * self.running_var
+                self.momentum * running_var
                 + (1.0 - self.momentum) * batch_var
             )
             var_for_norm = batch_var
         else:
             # Inference: fixed constant -> output is linear in inputs -> degree-1
             # homogeneous.
-            var_for_norm = self.running_var
+            var_for_norm = running_var
 
         # Broadcast the per-channel variance (and gamma) to the input rank. The
         # channel dim is static (enforced in build), so this reshape is safe.
@@ -284,7 +305,7 @@ class BiasFreeBatchNorm(keras.layers.Layer):
         output = inputs_fp32 / ops.sqrt(var_b + self.epsilon)
 
         if self.use_scale:
-            gamma_b = ops.reshape(self.gamma, broadcast_shape)
+            gamma_b = ops.reshape(ops.cast(self.gamma, stat_dtype), broadcast_shape)
             output = output * gamma_b
 
         return ops.cast(output, original_dtype)

@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of a **Vector Quantized Variational Autoencoder (VQ-VAE)** in **Keras 3**, based on the foundational paper ["Neural Discrete Representation Learning"](https://arxiv.org/abs/1711.00937) by van den Oord et al. (2017).
+An implementation of a **Vector Quantized Variational Autoencoder (VQ-VAE)** in **Keras 3**, based on the foundational paper ["Neural Discrete Representation Learning"](https://arxiv.org/abs/1711.00937) by van den Oord et al. (2017).
 
 The architecture separates the encoder, decoder, and a custom `VectorQuantizer` layer, enabling flexible and powerful discrete representation learning.
 

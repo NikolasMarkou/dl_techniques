@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of **Deep Residual Networks (ResNet)** in **Keras 3**, based on the groundbreaking paper ["Deep Residual Learning for Image Recognition"](https://arxiv.org/abs/1512.03385) by He et al. (2015).
+An implementation of **Deep Residual Networks (ResNet)** in **Keras 3**, based on the groundbreaking paper ["Deep Residual Learning for Image Recognition"](https://arxiv.org/abs/1512.03385) by He et al. (2015).
 
 This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices, featuring pretrained weight support, deep supervision training, and full serialization capabilities that work seamlessly across TensorFlow, PyTorch, and JAX backends.
 
@@ -550,9 +550,14 @@ from dl_techniques.models.resnet import ResNet
 model = ResNet.from_variant('resnet50', num_classes=1000)
 print("✓ ResNet-50 created successfully!")
 
-# 2. Check model summary
+# 2. Check model summary. `count_params()` needs the model to be BUILT --
+#    ResNet is subclassed, so no weights exist until a shape is known:
+#       ValueError: You tried to call `count_params` on layer 'res_net', but
+#       the layer isn't built.
+model.build((1, 224, 224, 3))
 print(f"\nModel: {model.name}")
 print(f"Total parameters: {model.count_params():,}")
+# Total parameters: 25,610,152   (see section 17 for the full table)
 
 # 3. Test with random input
 test_input = keras.random.normal(shape=(1, 224, 224, 3))
@@ -560,21 +565,33 @@ output = model(test_input, training=False)
 
 print(f"\nInput shape: {test_input.shape}")
 print(f"Output shape: {output.shape}")
+
+# The classifier is a bare Dense with NO activation, so `output` holds LOGITS.
+# Apply softmax before reading anything as a probability.
+probabilities = keras.ops.softmax(output, axis=-1)
 print(f"Output predictions (top-5):")
-top5_indices = np.argsort(output[0])[-5:][::-1]
+top5_indices = np.argsort(np.asarray(output[0]))[-5:][::-1]
 for i, idx in enumerate(top5_indices, 1):
-    print(f"  {i}. Class {idx}: {output[0, idx]:.4f}")
+    print(f"  {i}. Class {idx}: logit {output[0, idx]:.4f}, "
+          f"p={probabilities[0, idx]:.4f}")
 ```
+
+> **The model emits logits.** Every head in this package -- the primary
+> classifier and every deep-supervision head -- is a `Dense` with no
+> activation. Compile with `from_logits=True`, and softmax yourself before
+> displaying a confidence.
 
 ### Load Pretrained Model
 
 ```python
+import keras
+import numpy as np
 from dl_techniques.models.resnet import ResNet
 
 # Load ResNet-50 with ImageNet pretrained weights
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000
 )
 
@@ -584,9 +601,11 @@ print("✓ Pretrained model loaded!")
 image = load_and_preprocess_image('elephant.jpg')  # Your image
 predictions = model(image, training=False)
 
-# Get top prediction
-top_class = np.argmax(predictions[0])
-confidence = predictions[0, top_class]
+# Get top prediction. `predictions` are LOGITS -- softmax first, or the
+# "confidence" printed below is an unbounded score that can be negative.
+probabilities = keras.ops.softmax(predictions, axis=-1)
+top_class = np.argmax(np.asarray(probabilities[0]))
+confidence = probabilities[0, top_class]
 print(f"Predicted class: {top_class} (confidence: {confidence:.2%})")
 ```
 
@@ -596,7 +615,7 @@ print(f"Predicted class: {top_class} (confidence: {confidence:.2%})")
 # Load pretrained ResNet as feature extractor
 base_model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     include_top=False  # Remove classification head
 )
 
@@ -632,17 +651,43 @@ ResNet comes in 5 standard sizes, each optimized for different compute/accuracy 
 
 ### Variant Comparison Table
 
-| Variant | Blocks | Type | Params | FLOPs | Top-1 Acc* | Top-5 Acc* | Use Case |
-|---------|--------|------|--------|-------|------------|------------|----------|
-| **ResNet-18** | [2,2,2,2] | Basic | 11.7M | 1.8G | 69.8% | 89.1% | Mobile, embedded |
-| **ResNet-34** | [3,4,6,3] | Basic | 21.8M | 3.7G | 73.3% | 91.4% | Edge devices |
-| **ResNet-50** | [3,4,6,3] | Bottleneck | 25.6M | 4.1G | 76.1% | 93.0% | **Most popular** |
-| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.5M | 7.8G | 77.4% | 93.6% | High accuracy |
-| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.2M | 11.6G | 78.3% | 94.1% | Best accuracy |
+| Variant | Blocks | Type | `count_params()` | Use Case |
+|---------|--------|------|--------|----------|
+| **ResNet-18** | [2,2,2,2] | Basic | 11.7M | Mobile, embedded |
+| **ResNet-34** | [3,4,6,3] | Basic | 21.8M | Edge devices |
+| **ResNet-50** | [3,4,6,3] | Bottleneck | 25.6M | **Most popular** |
+| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.7M | High accuracy |
+| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.3M | Best accuracy |
 
-*ImageNet validation accuracy with single crop
+> **No accuracy numbers are quoted anywhere in this README, and that is deliberate.**
+> This table used to carry `Top-1 Acc*` and `Top-5 Acc*` columns footnoted "*ImageNet
+> validation accuracy with single crop", and the per-variant sections below repeated a
+> `Performance (ImageNet)` block each. Those were the figures from He et al. (2015),
+> presented as though they described this implementation. **No pretrained weights exist
+> for any architecture in this repository** — `resnet/model.py`'s `_download_weights`
+> raises `NotImplementedError` by design, as do all nine sibling packages since
+> `5d62167d0` — so nothing here has ever been evaluated on ImageNet and no accuracy
+> claim about it can be true. This package is an **architecture**, like
+> [`mobile_clip/`](../mobile_clip/README.md) §17. For the reference numbers, read the
+> paper (linked at the end of this file); to obtain numbers for *this* code, train it
+> and measure.
+>
+> The parameter column is architectural, not measured on a checkpoint. It is
+> `count_params()` at `num_classes=1000`, re-derivable with
+> `m = create_resnet(variant, num_classes=1000); m.build((1, 224, 224, 3));
+> m.count_params()` — the `build` is required, and without it the call raises
+> `ValueError: You tried to call count_params on layer 'res_net', but the layer
+> isn't built`. **Section 17 has the exact figures**, split into trainable and
+> non-trainable; the last two rows here read 44.7M / 60.3M rather than the
+> 44.5M / 60.2M they used to, because those two were the *trainable* subtotals
+> while the first three rows were `count_params()`. One column, one meaning.
 
 ### Detailed Variant Specifications
+
+> The `Initial: Conv 7×7 + MaxPool` line in each block below describes the
+> **default** `stem_type='imagenet'`. With `stem_type='cifar'` the stem is a
+> single 3×3 stride-1 convolution and there is no max pool, so the whole
+> network downsamples by 8× instead of 32×. See section 8 Example 1.
 
 #### ResNet-18 (Lightweight)
 
@@ -668,12 +713,6 @@ Best for:
   • When inference speed is critical
   • Mobile and embedded systems
 
-Performance (ImageNet):
-  • Top-1 accuracy: 69.8%
-  • Inference time*: ~5ms per image
-  • Memory: ~45MB
-  
-* On NVIDIA V100 GPU
 ```
 
 #### ResNet-34 (Balanced Lightweight)
@@ -700,10 +739,6 @@ Best for:
   • Video analysis
   • When you need better than ResNet-18 but can't afford ResNet-50
 
-Performance (ImageNet):
-  • Top-1 accuracy: 73.3%
-  • Inference time*: ~8ms per image
-  • Memory: ~83MB
 ```
 
 #### ResNet-50 (Most Popular)
@@ -731,11 +766,6 @@ Best for:
   • General-purpose image classification
   • Pretrained weights widely available
 
-Performance (ImageNet):
-  • Top-1 accuracy: 76.1%
-  • Inference time*: ~12ms per image
-  • Memory: ~98MB
-  
 Why most popular:
   • Sweet spot for accuracy vs. efficiency
   • Extensive pretrained weights
@@ -768,10 +798,6 @@ Best for:
   • Fine-grained classification
   • Research and benchmarking
 
-Performance (ImageNet):
-  • Top-1 accuracy: 77.4%
-  • Inference time*: ~20ms per image
-  • Memory: ~171MB
 ```
 
 #### ResNet-152 (Maximum Accuracy)
@@ -799,11 +825,6 @@ Best for:
   • Offline processing with time budget
   • Research on very deep networks
 
-Performance (ImageNet):
-  • Top-1 accuracy: 78.3%
-  • Inference time*: ~30ms per image
-  • Memory: ~232MB
-  
 Historical note:
   • Won ImageNet 2015 competition
   • First to break 80% top-5 accuracy barrier
@@ -824,7 +845,7 @@ resnet152 = ResNet.from_variant('resnet152', num_classes=1000)
 # With pretrained weights
 resnet50_pretrained = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000
 )
 
@@ -980,136 +1001,151 @@ Inference: Use only Output 0 (primary)
 
 ### Using Deep Supervision
 
+> Every line below was **extracted from this file and executed** before it was committed.
+> Each `# Output:` comment is the program's own stdout, not a description of it.
+
 ```python
-from dl_techniques.models.resnet import ResNet
 import keras
+import numpy as np
+from dl_techniques.models.resnet import ResNet
+from dl_techniques.utils.deep_supervision import get_model_output_info
 
 # 1. Create model with deep supervision
 model = ResNet.from_variant(
-    'resnet50',
+    'resnet18',
     num_classes=10,
-    enable_deep_supervision=True  # Enable deep supervision
+    input_shape=(32, 32, 3),
+    stem_type='cifar',
+    enable_deep_supervision=True,
 )
 
-# 2. Check outputs
-print(f"Number of outputs: {len(model.output)}")
+# 2. Check outputs.
+#    `model.output` RAISES here. ResNet is a subclassed keras.Model, so Keras
+#    never populates `.output` / `.input` / `.output_names`:
+#       AttributeError: The layer res_net has never been called and thus has
+#                       no defined output.
+#    -- and it says that even after you have called the model. Ask the helper
+#    instead, passing the per-sample input_shape it needs to trace `call()`.
+info = get_model_output_info(model, input_shape=(32, 32, 3))
+num_outputs = info['num_outputs']
+print(f"Number of outputs: {num_outputs}")
 # Output: Number of outputs: 4
 
-# 3. Define losses for each output
-losses = {
-    'output_0': 'categorical_crossentropy',  # Primary output
-    'output_1': 'categorical_crossentropy',  # Stage 3 aux
-    'output_2': 'categorical_crossentropy',  # Stage 2 aux
-    'output_3': 'categorical_crossentropy',  # Stage 1 aux
-}
+# 3. Losses: ONE PER OUTPUT, POSITIONALLY, in a LIST.
+#    There are no output names to key a dict on -- see the note under step 7.
+#    The heads emit LOGITS (a bare Dense, no activation), hence from_logits=True.
+losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
 
-# 4. Define loss weights (primary output has highest weight)
-loss_weights = {
-    'output_0': 1.0,   # Primary output (most important)
-    'output_1': 0.3,   # Stage 3 auxiliary
-    'output_2': 0.2,   # Stage 2 auxiliary
-    'output_3': 0.1,   # Stage 1 auxiliary
-}
+# 4. Loss weights, same order. Index 0 is the primary (deepest) head; indices
+#    1..n-1 are the auxiliary heads, deepest first.
+loss_weights = [1.0, 0.3, 0.2, 0.1]
 
-# 5. Compile with multiple outputs
+# 5. Metrics are per-output too. Give the primary head its metrics and the
+#    auxiliary heads an empty list -- an aux head's accuracy is not a number
+#    anyone acts on, and NAMING the metric is what makes it monitorable below.
+metrics = [[keras.metrics.SparseCategoricalAccuracy(name='primary_accuracy')]]
+metrics += [[] for _ in range(num_outputs - 1)]
+
 model.compile(
     optimizer='adam',
     loss=losses,
     loss_weights=loss_weights,
-    metrics=['accuracy']
+    metrics=metrics,
 )
 
-# 6. Prepare data
-# Each batch should have labels for all outputs
-def prepare_deep_supervision_data(x, y):
-    """Replicate labels for each output."""
-    return x, {
-        'output_0': y,  # Primary
-        'output_1': y,  # Aux outputs get same labels
-        'output_2': y,
-        'output_3': y
-    }
+# 6. Replicate the labels once per output -- again a LIST, not a dict.
+x_train = np.random.rand(8, 32, 32, 3).astype('float32')
+y_train = np.random.randint(0, 10, (8,)).astype('int32')
 
-# Apply to dataset
-train_dataset = train_dataset.map(prepare_deep_supervision_data)
+# With a tf.data pipeline the same shape applies:
+#     train_dataset.map(lambda x, y: (x, tuple([y] * num_outputs)))
 
 # 7. Train
 history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=100
+    x_train,
+    [y_train] * num_outputs,
+    validation_data=(x_train, [y_train] * num_outputs),
+    epochs=1,
+    verbose=0,
 )
+print(sorted(history.history.keys()))
+# Output: ['loss', 'primary_accuracy', 'sparse_categorical_crossentropy_loss',
+#          'val_loss', 'val_primary_accuracy',
+#          'val_sparse_categorical_crossentropy_loss']
+#
+# Note what is NOT there: no 'output_0_accuracy', and no per-output loss keys.
+# This model has no output names at all, so a ModelCheckpoint has to monitor a
+# metric name YOU chose -- 'val_primary_accuracy' above.
 
-# 8. Convert to inference model (single output)
+# 8. Convert to inference model (single output). `input_shape` is required for
+#    the same reason as in step 2.
 from dl_techniques.models.resnet import create_inference_model_from_training_model
 
-inference_model = create_inference_model_from_training_model(model)
+inference_model = create_inference_model_from_training_model(
+    model, input_shape=(32, 32, 3)
+)
 print(f"Inference model outputs: {inference_model.output.shape}")
 # Output: Inference model outputs: (None, 10)
 
 # 9. Use for inference
-predictions = inference_model(test_images, training=False)
+predictions = inference_model(x_train, training=False)
+print(predictions.shape)
+# Output: (8, 10)
 ```
+
+> **Why lists and not `{'output_0': ...}`?** The dict-keyed form that used to
+> stand here is not merely unidiomatic -- it cannot run. Keras resolves a
+> dict-keyed `loss`/`fit` spec against `model.output_names`, and on a subclassed
+> model that attribute does not exist. MEASURED, `compile(loss={'output_0': ...})`
+> followed by `fit(x, {'output_0': y, ...})` raises
+> `TypeError: 'NoneType' object is not iterable`.
+> `tests/test_models/test_resnet/test_the_readme_deep_supervision_pattern_runs.py`
+> pins both halves: the list form trains, the dict form raises.
 
 ### Loss Weighting Strategies
 
+Every strategy is a LIST in output order: index 0 is the primary (deepest)
+head, the rest are auxiliary heads from deep to shallow.
+
 ```python
 # Strategy 1: Equal weights
-loss_weights = {
-    'output_0': 1.0,
-    'output_1': 1.0,
-    'output_2': 1.0,
-    'output_3': 1.0,
-}
+loss_weights = [1.0, 1.0, 1.0, 1.0]
 
-# Strategy 2: Decay from shallow to deep
-loss_weights = {
-    'output_0': 1.0,   # Deepest (most important)
-    'output_1': 0.3,
-    'output_2': 0.1,
-    'output_3': 0.03,  # Shallowest (least important)
-}
+# Strategy 2: Decay from deep to shallow
+loss_weights = [1.0, 0.3, 0.1, 0.03]
+#               ^ deepest / primary        ^ shallowest (least important)
 
 # Strategy 3: Curriculum learning (change over time)
-def get_loss_weights(epoch):
+def get_loss_weights(epoch, num_outputs):
     """Gradually reduce auxiliary loss weights."""
     aux_weight = max(0.5 - epoch * 0.01, 0.0)
-    return {
-        'output_0': 1.0,
-        'output_1': aux_weight,
-        'output_2': aux_weight,
-        'output_3': aux_weight,
-    }
+    return [1.0] + [aux_weight] * (num_outputs - 1)
 
-# Apply in training loop
+# Apply in training loop. Re-compiling is what makes the new weights take
+# effect -- mutating the list in place does nothing.
 for epoch in range(num_epochs):
-    weights = get_loss_weights(epoch)
     model.compile(
         optimizer=optimizer,
         loss=losses,
-        loss_weights=weights
+        loss_weights=get_loss_weights(epoch, num_outputs),
+        metrics=metrics,
     )
     model.fit(train_dataset, epochs=1)
 ```
 
 ### Performance Impact
 
+> An "Empirical Results (ResNet-50 on CIFAR-10)" block used to stand here, quoting
+> 93.5% vs 94.2% final accuracy and 45 vs 48 minutes of training time. **No such run
+> exists.** It was never produced by this code, no result directory or checkpoint
+> backs it, and it was removed for the same reason as the ImageNet table in §6: a
+> number in a README is indistinguishable from a measurement to every reader. The
+> qualitative benefits below are architectural claims about deep supervision and are
+> stated as such.
+
 ```
-Empirical Results (ResNet-50 on CIFAR-10):
-
-Without Deep Supervision:
-  • Convergence: 80 epochs to 92% accuracy
-  • Final accuracy: 93.5%
-  • Training time: 45 minutes
-
-With Deep Supervision:
-  • Convergence: 50 epochs to 92% accuracy  (38% faster!)
-  • Final accuracy: 94.2%  (0.7% improvement)
-  • Training time: 48 minutes  (minimal overhead)
-
-Benefits:
-  ✓ 38% faster convergence
-  ✓ 0.7% better final accuracy
+Benefits (qualitative, from the deep-supervision literature — not measured here):
+  ✓ Faster convergence
   ✓ More stable training (lower variance)
   ✓ Better intermediate features
 ```
@@ -1121,6 +1157,14 @@ Benefits:
 ### Example 1: Basic Image Classification
 
 Train ResNet on a custom dataset from scratch.
+
+**`stem_type='cifar'` is load-bearing here, not decoration.** The default
+ImageNet stem (7x7 stride 2, then a 3x3 stride-2 max pool) downsamples by 4x
+before stage 1 begins, so a 32x32 input reaches the global average pool at
+`(1, 1, 512)` -- MEASURED -- and the last two stages stride a feature map that
+has already collapsed to a single pixel. `stem_type='cifar'` is He et al.'s own
+CIFAR configuration (section 4.2: one 3x3 stride-1 convolution, no pooling) and
+leaves a `(4, 4, 512)` map for the head.
 
 ```python
 import keras
@@ -1138,11 +1182,12 @@ x_test = x_test.astype('float32') / 255.0
 y_train = keras.utils.to_categorical(y_train, 10)
 y_test = keras.utils.to_categorical(y_test, 10)
 
-# 2. Create model (ResNet-18 for smaller images)
+# 2. Create model (ResNet-18 with the CIFAR stem, for 32x32 images)
 model = ResNet.from_variant(
     'resnet18',
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
+    stem_type='cifar'
 )
 
 # 3. Compile
@@ -1184,7 +1229,7 @@ from dl_techniques.models.resnet import ResNet
 # 1. Load pretrained model without top
 base_model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     include_top=False,  # Remove classification head
     input_shape=(224, 224, 3)
 )
@@ -1224,117 +1269,121 @@ print(f"✓ Feature extraction training complete!")
 
 Unfreeze and fine-tune the pretrained model.
 
-```python
-import keras
-from dl_techniques.models.resnet import ResNet
-
-# 1. Start with pretrained model
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained=True,
-    num_classes=1000  # Original ImageNet classes
-)
-
-# 2. Replace top layer for your task
-# Remove last layer
-model.layers.pop()
-
-# Add new classification head
-x = model.layers[-1].output
-x = keras.layers.Dense(100, activation='softmax', name='new_predictions')(x)
-
-model = keras.Model(inputs=model.input, outputs=x)
-
-# 3. Freeze early layers, train only late layers initially
-for layer in model.layers[:-20]:  # Freeze all but last 20 layers
-    layer.trainable = False
-
-# 4. Compile with lower learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-4),  # Lower LR for fine-tuning
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# 5. Train with frozen layers
-print("Stage 1: Training with frozen layers")
-history1 = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=10
-)
-
-# 6. Unfreeze all layers
-for layer in model.layers:
-    layer.trainable = True
-
-# 7. Continue training with very low learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-5),  # Even lower LR
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-print("Stage 2: Fine-tuning all layers")
-history2 = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=30
-)
-
-print("✓ Fine-tuning complete!")
-```
-
-### Example 4: Training with Deep Supervision
+> `ResNet` is a **subclassed** `keras.Model`, so the "pop the top layer and
+> re-wire from `model.input`" idiom that used to stand here cannot work.
+> MEASURED: `model.layers` is a freshly computed property, so
+> `model.layers.pop()` mutates a throwaway list -- it raises nothing,
+> `len(model.layers)` is *unchanged* afterwards, and `model(x)` still runs the
+> classifier with `max|delta| == 0.0`. It is a silent no-op, which is worse than
+> an error. `model.input` does raise:
+> `AttributeError: The layer res_net has never been called and thus has no
+> defined input.` Ask for `include_top=False` and wrap, exactly as Example 2 does.
 
 ```python
 import keras
 import numpy as np
 from dl_techniques.models.resnet import ResNet
 
+# 1. Start from the pretrained backbone WITHOUT its classification head.
+base_model = ResNet.from_variant(
+    'resnet18',
+    pretrained='/path/to/resnet18_weights.keras',  # pretrained=True raises -- see section 9
+    include_top=False,
+    input_shape=(32, 32, 3),
+    stem_type='cifar',
+)
+
+# 2. Attach the new head by WRAPPING. The Functional graph starts from a
+#    keras.Input you own, because the backbone has no `.input` to borrow.
+inputs = keras.Input(shape=(32, 32, 3))
+x = base_model(inputs)
+x = keras.layers.GlobalAveragePooling2D()(x)
+outputs = keras.layers.Dense(100, activation='softmax', name='new_predictions')(x)
+
+model = keras.Model(inputs, outputs)
+
+# 3. Freeze the early layers, train the late ones first.
+#    Slice `base_model.layers` -- NOT `model.layers`, which holds the entire
+#    backbone as ONE layer alongside the wrapper's own:
+print(len(model.layers), [l.name for l in model.layers])
+# Output: 4 ['input_layer', 'res_net', 'global_average_pooling2d', 'new_predictions']
+# (Keras appends a numeric suffix to auto-generated names when other models
+#  were built earlier in the same process -- the LENGTH is the point: 4, not
+#  the backbone's own 13.)
+for layer in base_model.layers[:-4]:
+    layer.trainable = False
+
+# 4. Compile with a lower learning rate
+model.compile(
+    optimizer=keras.optimizers.Adam(1e-4),
+    loss='categorical_crossentropy',
+    metrics=['accuracy'],
+)
+
+# 5. Stage 1: train with the early layers frozen
+x_train = np.random.rand(8, 32, 32, 3).astype('float32')
+y_train = keras.utils.to_categorical(np.random.randint(0, 100, (8,)), 100)
+history1 = model.fit(x_train, y_train, epochs=1, verbose=0)
+
+# 6. Unfreeze everything. Set the flag on the backbone AND re-set the per-layer
+#    flags -- `base_model.trainable = True` alone does not undo step 3.
+base_model.trainable = True
+for layer in base_model.layers:
+    layer.trainable = True
+
+# 7. Stage 2: continue at a much lower learning rate. Re-compiling is REQUIRED
+#    for the changed trainable flags to take effect.
+model.compile(
+    optimizer=keras.optimizers.Adam(1e-5),
+    loss='categorical_crossentropy',
+    metrics=['accuracy'],
+)
+history2 = model.fit(x_train, y_train, epochs=1, verbose=0)
+print(f"{len(model.trainable_weights)} trainable weight tensors after unfreezing")
+# Output: 62 trainable weight tensors after unfreezing
+```
+
+### Example 4: Training with Deep Supervision
+
+Section 7 covers this end to end; this is the same recipe at ImageNet scale.
+Note the list-indexed `loss` / `loss_weights` / `metrics` and the list of
+replicated labels -- the dict-keyed form raises, see the note in section 7.
+
+```python
+import keras
+from dl_techniques.models.resnet import ResNet
+from dl_techniques.utils.deep_supervision import get_model_output_info
+
 # 1. Create model with deep supervision
 model = ResNet.from_variant(
     'resnet50',
     num_classes=100,
-    enable_deep_supervision=True
+    input_shape=(224, 224, 3),
+    enable_deep_supervision=True,
 )
+num_outputs = get_model_output_info(model, input_shape=(224, 224, 3))['num_outputs']
 
-# 2. Define multi-output losses
-losses = {
-    'output_0': 'categorical_crossentropy',  # Primary
-    'output_1': 'categorical_crossentropy',  # Auxiliary
-    'output_2': 'categorical_crossentropy',
-    'output_3': 'categorical_crossentropy',
-}
+# 2. One loss per output, in order. The heads emit logits.
+losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
+loss_weights = [1.0, 0.3, 0.2, 0.1]
 
-loss_weights = {
-    'output_0': 1.0,   # Primary (most important)
-    'output_1': 0.3,
-    'output_2': 0.2,
-    'output_3': 0.1,
-}
+# 3. Metrics on the primary head only; auxiliary heads get an empty list.
+metrics = [[keras.metrics.SparseCategoricalAccuracy(name='primary_accuracy')]]
+metrics += [[] for _ in range(num_outputs - 1)]
 
-# 3. Compile
 model.compile(
     optimizer=keras.optimizers.SGD(0.1, momentum=0.9, nesterov=True),
     loss=losses,
     loss_weights=loss_weights,
-    metrics=['accuracy']
+    metrics=metrics,
 )
 
-# 4. Prepare dataset with replicated labels
-def prepare_batch(x, y):
-    return x, {
-        'output_0': y,
-        'output_1': y,
-        'output_2': y,
-        'output_3': y
-    }
+# 4. Replicate the labels once per output -- a tuple/list, never a dict.
+train_ds = train_ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
+val_ds = val_ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
 
-train_ds = train_ds.map(prepare_batch)
-val_ds = val_ds.map(prepare_batch)
-
-# 5. Train
+# 5. Train. The checkpoint monitors the metric NAME chosen above; there is no
+#    'val_output_0_accuracy' because this model has no output names.
 history = model.fit(
     train_ds,
     validation_data=val_ds,
@@ -1346,14 +1395,16 @@ history = model.fit(
         keras.callbacks.ModelCheckpoint(
             'best_model_ds.keras',
             save_best_only=True,
-            monitor='val_output_0_accuracy'  # Monitor primary output
-        )
-    ]
+            monitor='val_primary_accuracy',
+        ),
+    ],
 )
 
 # 6. Create inference model (single output)
 from dl_techniques.models.resnet import create_inference_model_from_training_model
-inference_model = create_inference_model_from_training_model(model)
+inference_model = create_inference_model_from_training_model(
+    model, input_shape=(224, 224, 3)
+)
 
 # 7. Use for inference
 predictions = inference_model.predict(test_images)
@@ -1364,6 +1415,7 @@ predictions = inference_model.predict(test_images)
 Create a custom ResNet variant for your specific needs.
 
 ```python
+import keras
 from dl_techniques.models.resnet import ResNet
 
 # Custom architecture for specific use case
@@ -1381,16 +1433,18 @@ custom_resnet = ResNet(
     include_top=True
 )
 
-# Compile and train
+# Compile and train. The head is a bare Dense, so from_logits=True.
 custom_resnet.compile(
     optimizer='adam',
-    loss='categorical_crossentropy',
+    loss=keras.losses.CategoricalCrossentropy(from_logits=True),
     metrics=['accuracy']
 )
 
+custom_resnet.build((1, 512, 512, 3))   # required before count_params()
 print(f"Custom ResNet created:")
 print(f"  Total blocks: {sum([4, 6, 12, 4])}")
 print(f"  Parameters: {custom_resnet.count_params():,}")
+# Output: Parameters: 8,894,693
 ```
 
 ### Example 6: Progressive Resizing
@@ -1399,6 +1453,7 @@ Train with progressively larger image sizes for better performance.
 
 ```python
 import keras
+import numpy as np
 from dl_techniques.models.resnet import ResNet
 
 def train_progressive_resize(initial_size=128, final_size=224, num_stages=3):
@@ -1410,7 +1465,7 @@ def train_progressive_resize(initial_size=128, final_size=224, num_stages=3):
     # Create model for final size
     model = ResNet.from_variant(
         'resnet50',
-        pretrained=True,
+        pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
         num_classes=100,
         input_shape=(final_size, final_size, 3)
     )
@@ -1456,7 +1511,7 @@ from dl_techniques.models.resnet import ResNet
 # 1. Load large teacher model
 teacher = ResNet.from_variant(
     'resnet152',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=1000
 )
 teacher.trainable = False  # Freeze teacher
@@ -1584,69 +1639,74 @@ print("✓ Mixed precision training complete!")
 
 ## 9. Pretrained Weights & Transfer Learning
 
+> WARNING: **`pretrained=True` raises `NotImplementedError`. There are no ResNet
+> weights to download, from this repository or anywhere else in a format this
+> package loads.** `ResNet._download_weights` raises by design (`model.py`), and
+> that raise replaced an earlier table of placeholder URLs pointing at a
+> non-existent host, whose failure was caught and turned into a warning -- so
+> `pretrained=True` used to hand back a randomly-initialized model that *looked*
+> pretrained. Every runnable example in this README -- 14 of them, across sections
+> 5, 6, 9 and 12 -- has been rewritten to the only form that works, a local
+> checkpoint path:
+>
+> ```python
+> model = ResNet.from_variant('resnet50', pretrained='/path/to/your.keras')
+> ```
+>
+> The transfer-learning techniques those examples demonstrate are real and
+> correct; what was wrong was the claim that the weights arrive by themselves.
+>
+> Verified 2026-08-23: `ResNet.from_variant('resnet50', pretrained=True)` ->
+> `NotImplementedError: No pretrained ResNet weights are distributed with
+> dl_techniques ...`. The same is true of nine sibling packages (`bert`,
+> `distilbert`, `gpt2`, `modern_bert`, `mobilenet`, `tree_transformer`, `vit`,
+> `wave_field`, `bias_free_denoisers`), each of which says so in its own README.
+
 ### Why Use Pretrained Weights?
 
-Pretrained weights offer significant advantages:
+Transfer learning from a checkpoint trained on a large dataset generally needs
+less data, less compute and less tuning than training the same architecture from
+scratch, and converges more stably. That is why the strategies below are worth
+the trouble -- once you have a checkpoint.
 
-```
-Training from Scratch:
-┌─────────────────────────────────────────┐
-│ • Requires large dataset (100K+ images) │
-│ • Takes days/weeks to train             │
-│ • May not converge well                 │
-│ • Needs careful hyperparameter tuning   │
-│ • Results: 70-80% accuracy on           │
-│   custom datasets                       │
-└─────────────────────────────────────────┘
-
-Using Pretrained Weights:
-┌─────────────────────────────────────────┐
-│ • Works with small datasets (1K images) │
-│ • Trains in hours instead of days       │
-│ • More stable convergence               │
-│ • Less tuning needed                    │
-│ • Results: 85-95% accuracy on           │
-│   custom datasets                       │
-└─────────────────────────────────────────┘
-
-Benefit: 10-25% better accuracy, 100× faster training!
-```
+> **No accuracy numbers are quoted here, and that is deliberate.** This section
+> used to draw two boxes comparing "Results: 70-80% accuracy" from scratch
+> against "Results: 85-95% accuracy" pretrained, and to conclude "Benefit: 10-25%
+> better accuracy, 100x faster training!". Those figures described neither this
+> implementation nor any measurement taken in this repository -- nothing here has
+> ever been trained or evaluated -- and they advertised the payoff of a path that
+> raises. Same rule as the variant table in section 5: for reference numbers read
+> the paper; for numbers about *this* code, train it and measure.
 
 ### Loading Pretrained Models
 
 ```python
 from dl_techniques.models.resnet import ResNet
 
-# Method 1: Load from URL (if weights are hosted)
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained=True,
-    weights_dataset='imagenet',
-    num_classes=1000
-)
-
-# Method 2: Load from local file
+# Method 1: from a local checkpoint -- THE ONLY WORKING FORM.
 model = ResNet.from_variant(
     'resnet50',
     pretrained='/path/to/resnet50_weights.keras',
     num_classes=1000
 )
 
-# Method 3: Load with different number of classes
-# (will skip classifier weights)
+# Method 2: a local checkpoint with a different number of classes.
+# The incompatible classifier layer is skipped rather than refused.
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
-    num_classes=100  # Different from pretrained (1000)
+    pretrained='/path/to/resnet50_weights.keras',
+    num_classes=100  # Different from the checkpoint's 1000
 )
-# Automatically skips incompatible classification layer
 
-# Method 4: Load as feature extractor
+# Method 3: as a feature extractor.
 feature_extractor = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',
     include_top=False  # Remove classification head
 )
+
+# DOES NOT WORK -- raises NotImplementedError, no download exists:
+#   ResNet.from_variant('resnet50', pretrained=True, weights_dataset='imagenet')
 ```
 
 ### Transfer Learning Strategies
@@ -1659,7 +1719,7 @@ Best for: Small datasets (< 1000 images per class)
 # Load pretrained model without top
 base_model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     include_top=False
 )
 
@@ -1694,7 +1754,7 @@ Best for: Medium datasets (1000-10000 images per class)
 # Load pretrained model
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=num_classes
 )
 
@@ -1720,7 +1780,7 @@ Best for: Large datasets (> 10000 images per class)
 # Load pretrained model
 model = ResNet.from_variant(
     'resnet50',
-    pretrained=True,
+    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
     num_classes=num_classes
 )
 
@@ -1783,7 +1843,7 @@ def progressive_unfreeze(model, train_dataset, val_dataset):
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=10)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
 model = progressive_unfreeze(model, train_ds, val_ds)
 ```
 
@@ -1867,7 +1927,7 @@ def domain_adaptation_strategy(
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=5)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=5)
 model = domain_adaptation_strategy(
     model,
     imagenet_medical_subset,  # Similar medical images from ImageNet
@@ -2043,51 +2103,63 @@ callbacks = [
 
 ### Discriminative Learning Rates
 
-Different layers need different learning rates:
+> **Measured correction.** The version of this section that used to stand here
+> grouped layers by hard-coded index ranges (`model.layers[10:40]`,
+> `[40:80]`, ... `[180:]`) as if `ResNet` exposed ~180 flat layers. It does
+> not. `ResNet` is subclassed and `model.layers` lists its **direct children**
+> only -- MEASURED, `resnet50` has **22**:
+> `['stem_conv', 'stem_bn', 'stem_act', 'stem_pool', 'stage1_block1', ...,
+> 'stage4_block3', 'global_avg_pool', 'classifier']`.
+> Those index ranges therefore produced `{'stem': 10, 'stage1': 12,
+> 'stage2': 0, 'stage3': 0, 'stage4': 0, 'head': 0}` -- four of the six groups
+> EMPTY, and 'stem' silently swallowing six residual blocks. The old snippet
+> also finished by assigning `layer._custom_lr`, an attribute nothing in this
+> repository reads, under a comment admitting it "requires custom optimizer
+> implementation".
+
+Group by NAME, never by index -- the names are stable and the counts are not:
 
 ```python
-# Create layer groups with different LRs
+from dl_techniques.models.resnet import ResNet
+
+
 def create_layer_groups(model):
-    """Group layers by depth."""
-    groups = {
-        'stem': model.layers[0:10],      # Initial layers
-        'stage1': model.layers[10:40],   # Early stage
-        'stage2': model.layers[40:80],   # Mid stage  
-        'stage3': model.layers[80:140],  # Late stage
-        'stage4': model.layers[140:180], # Final stage
-        'head': model.layers[180:],      # Classification
-    }
+    """Group a ResNet's direct child layers by the stage they belong to."""
+    groups = {'stem': [], 'stage1': [], 'stage2': [],
+              'stage3': [], 'stage4': [], 'head': []}
+    for layer in model.layers:
+        if layer.name.startswith('stem'):
+            groups['stem'].append(layer)
+        elif layer.name.startswith('stage'):
+            groups[layer.name.split('_')[0]].append(layer)
+        else:                                    # global_avg_pool, classifier
+            groups['head'].append(layer)
     return groups
 
-def set_discriminative_lrs(model, base_lr=1e-5):
-    """Set different LRs for different layer groups."""
-    groups = create_layer_groups(model)
-    
-    # Earlier layers: lower LR (more general features)
-    # Later layers: higher LR (more task-specific)
-    lrs = {
-        'stem': base_lr * 0.1,
-        'stage1': base_lr * 0.3,
-        'stage2': base_lr * 0.5,
-        'stage3': base_lr * 0.8,
-        'stage4': base_lr * 1.0,
-        'head': base_lr * 2.0,
-    }
-    
-    # Apply learning rates
-    for group_name, layers in groups.items():
-        lr = lrs[group_name]
-        for layer in layers:
-            if hasattr(layer, 'kernel'):
-                # Set custom LR for this layer
-                # Note: Requires custom optimizer implementation
-                layer._custom_lr = lr
-    
-    return model
 
-# Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=10)
-model = set_discriminative_lrs(model, base_lr=1e-5)
+model = ResNet.from_variant('resnet50', num_classes=10, input_shape=(224, 224, 3))
+model.build((1, 224, 224, 3))
+print({name: len(layers) for name, layers in create_layer_groups(model).items()})
+# Output: {'stem': 4, 'stage1': 3, 'stage2': 4, 'stage3': 6, 'stage4': 3, 'head': 2}
+```
+
+**Keras 3 has no per-layer learning rate.** There is no supported attribute to
+set, which is why the old snippet's `layer._custom_lr` did nothing. Two routes
+actually work:
+
+```python
+# Route 1 (recommended): staged unfreezing. Freeze the early groups, train,
+# then unfreeze and re-compile at a lower LR -- see section 8 Example 3, which
+# runs end to end. `trainable` is the flag Keras really honours, and a
+# re-compile is REQUIRED for a change to it to take effect.
+groups = create_layer_groups(model)
+for name in ('stem', 'stage1', 'stage2'):
+    for layer in groups[name]:
+        layer.trainable = False
+
+# Route 2: two optimizers over disjoint variable sets, applied in a custom
+# training loop. Note this repository's convention is to AVOID a custom
+# `train_step`; prefer Route 1 unless you genuinely need per-group LRs.
 ```
 
 ### Gradual Unfreezing
@@ -2131,7 +2203,7 @@ def gradual_unfreeze(model, train_dataset, val_dataset, stages=4):
     return model
 
 # Usage
-model = ResNet.from_variant('resnet50', pretrained=True, num_classes=10)
+model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
 model = gradual_unfreeze(model, train_ds, val_ds, stages=4)
 ```
 
@@ -2451,25 +2523,101 @@ A:
 
 ## 17. Technical Details
 
-### Parameter Counts
+### Parameter Counts and FLOPs
 
-```
-ResNet-18:  11,689,512 parameters
-ResNet-34:  21,797,672 parameters
-ResNet-50:  25,557,032 parameters
-ResNet-101: 44,549,160 parameters
-ResNet-152: 60,192,808 parameters
+**MEASURED on this implementation**, 2026-08-24, `num_classes=1000`,
+`input_shape=(224, 224, 3)`, `include_top=True`, default `stem_type='imagenet'`.
+Not quoted from a paper -- re-derive them with the two snippets below.
+
+| Variant | Trainable params | Non-trainable (BN stats) | `count_params()` | MACs | FLOPs (2xMACs) |
+|:---|---:|---:|---:|---:|---:|
+| ResNet-18  | 11,689,512 |   9,600 | 11,699,112 |  1.818 G |  3.636 G |
+| ResNet-34  | 21,797,672 |  17,024 | 21,814,696 |  3.669 G |  7.338 G |
+| ResNet-50  | 25,557,032 |  53,120 | 25,610,152 |  4.104 G |  8.208 G |
+| ResNet-101 | 44,549,160 | 105,344 | 44,654,504 |  7.823 G | 15.646 G |
+| ResNet-152 | 60,192,808 | 151,424 | 60,344,232 | 11.544 G | 23.088 G |
+
+**Read the unit before comparing.** "ResNet-50 is 4.1 GFLOPs" in the
+literature is a count of multiply-**accumulates**; the profiler used here
+counts the multiply and the add separately, so it reports 8.208 G for the same
+network. The **MACs** column is the one to compare against a published figure.
+On that column this implementation agrees with the usual quoted values
+(1.8 / 3.6 / 4.1 / 7.8 / 11.6) to within rounding.
+
+**The Trainable column also reconciles exactly** with the widely quoted
+torchvision counts -- all five match to the digit. This README previously
+printed those same figures under the heading "parameters", which is *not* what
+`model.count_params()` returns here: Keras counts BatchNorm's `moving_mean` and
+`moving_variance` and PyTorch does not, and that difference is the entire
+Non-trainable column (e.g. ResNet-18: 11,689,512 + 9,600 = 11,699,112).
+Both numbers are now printed so neither can be mistaken for the other.
+
+Re-derive the parameter columns:
+
+```python
+import numpy as np
+from dl_techniques.models.resnet import ResNet
+
+for variant in ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]:
+    model = ResNet.from_variant(variant, num_classes=1000, input_shape=(224, 224, 3))
+    model.build((1, 224, 224, 3))
+    trainable = sum(int(np.prod(w.shape)) for w in model.trainable_weights)
+    non_trainable = sum(int(np.prod(w.shape)) for w in model.non_trainable_weights)
+    print(f"{variant}: {trainable:,} + {non_trainable:,} = {model.count_params():,}")
 ```
 
-### FLOPs (for 224×224 input)
+Re-derive the FLOPs column:
 
+```python
+import tensorflow as tf
+from tensorflow.python.framework.convert_to_constants import (
+    convert_variables_to_constants_v2,
+)
+from dl_techniques.models.resnet import ResNet
+
+
+def profile_flops(model, input_shape):
+    """Total float ops of one forward pass, counted on the FROZEN GRAPH.
+
+    Counting on the frozen graph is what makes this trustworthy for this
+    package: a layer-tree walk stops at a custom subclassed layer and silently
+    undercounts, whereas tracing dissolves ResNet's BasicBlock/BottleneckBlock
+    into primitive ops before anything is counted.
+    """
+    fn = tf.function(lambda x: model(x, training=False))
+    concrete = fn.get_concrete_function(tf.TensorSpec([1, *input_shape], tf.float32))
+    graph_def = convert_variables_to_constants_v2(concrete).graph.as_graph_def()
+
+    opts = tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
+    opts["output"] = "none"
+    with tf.Graph().as_default() as graph:
+        tf.graph_util.import_graph_def(graph_def, name="")
+        result = tf.compat.v1.profiler.profile(
+            graph=graph, run_meta=tf.compat.v1.RunMetadata(), cmd="scope", options=opts
+        )
+    return result.total_float_ops
+
+
+model = ResNet.from_variant("resnet50", num_classes=1000, input_shape=(224, 224, 3))
+flops = profile_flops(model, (224, 224, 3))
+print(f"{flops / 1e9:.3f} GFLOPs = {flops / 2e9:.3f} GMACs")
+# Output: 8.208 GFLOPs = 4.104 GMACs
 ```
-ResNet-18:  1.8 GFLOPs
-ResNet-34:  3.6 GFLOPs
-ResNet-50:  4.1 GFLOPs
-ResNet-101: 7.8 GFLOPs
-ResNet-152: 11.6 GFLOPs
-```
+
+**Why these numbers are trusted.** Two arms ran before any model was profiled,
+and both are kept as permanent tests in
+`tests/test_models/test_resnet/test_the_readme_flops_table_reproduces.py`:
+
+1. **Calibration.** A single `Conv2D(64, 7, strides=2, use_bias=False)` on a
+   224x224x3 input has an analytically known 112x112x64x3x7x7 = 118,013,952
+   MACs. The profiler returned **236,027,904 = exactly 2x that, 0.0000% error**
+   -- which is also how the unit above was established rather than assumed.
+2. **Descent.** A two-convolution `keras.layers.Layer` subclass profiles to
+   **exactly** the same total as the identical two convolutions written
+   flat in a Functional model, and both equal the analytic value. This repo has
+   a recorded case of a layer-tree MAC walk reaching only 2 convolutions and
+   reporting a **~50x undercount**, so "the instrument descends" is measured
+   here, not assumed.
 
 ---
 

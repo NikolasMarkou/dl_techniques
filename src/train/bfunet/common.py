@@ -33,6 +33,9 @@ from dl_techniques.losses.jacobian_symmetry import jacobian_symmetry_penalty
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.models.convunext.model import (
+    POSITIVELY_HOMOGENEOUS_ACTIVATIONS,
+)
 from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 from dl_techniques.utils.multiplicative_miyasawa import (
     apply_multiplicative_gaussian,
@@ -945,7 +948,20 @@ def _read_current_lr(model: keras.Model) -> float:
 # elu, tanh, sigmoid, mish or swish to this set -- they have scale-dependent curvature and
 # silently break Miyasawa compliance, which the existing homogeneity probes would NOT catch
 # for the frozen stem alone.
-GABOR_ACTIVATIONS = frozenset({"relu", "leaky_relu", "linear"})
+#
+# DECISION plan-2026-08-14T092357-0e3d792d/D-012: this set is DERIVED from the library's
+# single allowlist, not re-spelled here. It used to be a hand-written
+# `frozenset({"relu", "leaky_relu", "linear"})` -- an exact duplicate of the set
+# `models/convunext/model.py` now enforces at the builder, kept in lockstep by hand. Two
+# copies of the same homogeneity rule is a defect, not a pattern: widening one and not
+# the other makes the trainer and the builder disagree about what bias-free means. The
+# `None` member is dropped here because this set feeds argparse `choices=` (where the
+# absent flag, not a literal None, expresses "no activation"). Do NOT re-inline the
+# literal, and do NOT invert the import direction -- `src/dl_techniques/` must never
+# import from `src/train/`. See decisions.md D-012.
+GABOR_ACTIVATIONS = frozenset(
+    a for a in POSITIVELY_HOMOGENEOUS_ACTIVATIONS if a is not None
+)
 
 
 @dataclass

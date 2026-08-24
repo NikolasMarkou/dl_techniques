@@ -175,6 +175,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     :param kernel_initializer: String or Initializer for kernel weights.
         Defaults to "glorot_uniform".
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param output_kernel_initializer: Optional initializer for the OUTPUT
+        projection (``proj``) alone. ``None`` (the default) leaves ``proj`` on
+        ``kernel_initializer``, i.e. the historical behaviour. Supply it only
+        when the residual-path projection needs a different scale from Q/K/V --
+        GPT-2's ``1/sqrt(2 * n_layer)`` rule is the motivating case.
+    :type output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param bias_initializer: String or Initializer for bias vectors.
         Defaults to "zeros".
     :type bias_initializer: Union[str, keras.initializers.Initializer]
@@ -217,6 +223,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             shared_qk_projections: bool = False,
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -249,6 +256,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.shared_qk_projections = shared_qk_projections
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.output_kernel_initializer = (
+            keras.initializers.get(output_kernel_initializer)
+            if output_kernel_initializer is not None else None
+        )
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
@@ -292,7 +303,22 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self.kv_dense = keras.layers.Dense(self.dim * 2, name="kv", **dense_kwargs)
             self.qkv_dense = None
 
-        self.proj_dense = keras.layers.Dense(self.dim, name="proj", **dense_kwargs)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160
+        # `proj` is the attention block's RESIDUAL-path projection (GPT-2's
+        # `attn.c_proj`), so it is the one Dense here that may need a different
+        # initializer scale from Q/K/V. Two things must not be "cleaned up":
+        # (1) when `output_kernel_initializer` is None the kwargs dict is passed
+        # UNCHANGED, so this line stays byte-equivalent to its pre-2026-08-22
+        # form for every existing caller -- including the fact that `proj` then
+        # shares the SAME initializer INSTANCE as `qkv`/`q`/`kv` (measured: a
+        # shared instance replays its draw, max|delta| = 0.0 at equal shape);
+        # (2) the override replaces, never merges, and reaches `proj` ONLY --
+        # letting it reach Q/K/V would shrink them too, which the GPT-2
+        # reference explicitly does not do. See decisions.md D-160.
+        proj_kwargs = dict(dense_kwargs)
+        if self.output_kernel_initializer is not None:
+            proj_kwargs["kernel_initializer"] = self.output_kernel_initializer
+        self.proj_dense = keras.layers.Dense(self.dim, name="proj", **proj_kwargs)
         self.dropout_layer = keras.layers.Dropout(
             self.dropout_rate, name="dropout"
         ) if self.dropout_rate > 0.0 else None
@@ -760,6 +786,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "shared_qk_projections": self.shared_qk_projections,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "output_kernel_initializer": (
+                keras.initializers.serialize(self.output_kernel_initializer)
+                if self.output_kernel_initializer is not None else None
+            ),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),

@@ -81,7 +81,6 @@ class TrainingConfig:
 
     # Monitoring
     monitor_every_n_epochs: int = 5
-    save_best_only: bool = True
     early_stopping_patience: int = 15
     validation_steps: Optional[int] = None
 
@@ -93,8 +92,6 @@ class TrainingConfig:
     # Output
     output_dir: str = "results"
     experiment_name: Optional[str] = None
-    save_training_samples: bool = True
-    save_model_checkpoints: bool = True
 
     # Convergence guard (DECISION plan_2026-05-12_f2d29729/D-007)
     # If None, threshold auto-derives to min(max(2/num_classes, 0.05), 0.95).

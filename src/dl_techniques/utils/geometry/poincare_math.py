@@ -22,9 +22,17 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import ops
-import tensorflow as tf
-from typing import Union
+from typing import Any, Union
+
+# ---------------------------------------------------------------------
+
+# How many units-in-the-last-place of the compute dtype the boundary margin must
+# span. Four is the smallest value that keeps `arctanh` finite in float16 for
+# every representable radius while costing float32 nothing (in float32 the fixed
+# `boundary_eps` is ~839x larger than 4 ULP and therefore still wins).
+_BOUNDARY_ULP_SAFETY = 4.0
 
 # ---------------------------------------------------------------------
 
@@ -98,8 +106,119 @@ class PoincareMath:
         Mathematical Operation:
             ||x|| = max(sqrt(sum(x_i^2)), eps)
         """
+        _raw, floored = self.norm_and_floored_norm(x, axis=axis, keepdims=keepdims)
+        return floored
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-056
+    # `safe_norm` FLOORS its result at `eps`, so a caller that then tests
+    # `safe_norm(...) < eps` is testing `eps < eps` -- never true. That is
+    # exactly what `exp_map_0` and `log_map_0` did, which made the documented
+    # `tanh(x)/x -> 1` and `atanh(x)/x -> 1` limiting branches at the origin
+    # DEAD: the stated protection was not the protection in force. This helper
+    # returns BOTH norms so the branch test uses the RAW norm and the division
+    # uses the floored one. DO NOT go back to a single return value and test the
+    # result against `eps`.
+    #
+    # NOT part of this fix, and do not resurrect it: an earlier review claimed
+    # this function produced NaN GRADIENTS at the origin. That claim was
+    # WITHDRAWN after measurement -- TF 2.18's `tf.norm` backward returns 0, not
+    # NaN, at the origin. The defect here is the dead branch, nothing else.
+    # See decisions.md D-056.
+    def norm_and_floored_norm(
+            self,
+            x: keras.KerasTensor,
+            axis: int = -1,
+            keepdims: bool = False
+    ) -> tuple:
+        """Return ``(raw_norm, max(raw_norm, eps))`` for ``x``.
+
+        Args:
+            x: Input tensor of shape (..., D).
+            axis: Axis along which to compute the norm. Defaults to -1.
+            keepdims: Whether to keep the reduced dimension. Defaults to False.
+
+        Returns:
+            A 2-tuple. The FIRST element is the true Euclidean norm and is what
+            a near-origin test must be compared against; the SECOND is that
+            norm floored at ``self.eps`` and is what a division must use.
+
+        Failure mode: none -- pure arithmetic, no raise, no state. Callers that
+        need only the floored value should call :meth:`safe_norm`.
+        """
         norm = ops.norm(x, axis=axis, keepdims=keepdims)
-        return ops.maximum(norm, self.eps)
+        return norm, ops.maximum(norm, self.eps)
+
+    @staticmethod
+    def _as_compute_dtype(
+            c: Union[float, keras.KerasTensor],
+            reference: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Return the curvature in the dtype of the tensor it will be combined with.
+
+        A Python float or a float32 curvature tensor combined with a float16
+        activation PROMOTES the whole expression to float32, which then meets a
+        float16 tensor two statements later and raises ``cannot compute Mul as
+        input #1 was expected to be a half tensor``. Casting `c` at entry keeps
+        every derived quantity -- ``sqrt_c``, the ball radius and the boundary
+        margin -- in the compute dtype.
+
+        Args:
+            c: Curvature parameter (c > 0), scalar or tensor.
+            reference: The activation tensor whose dtype the result must match.
+
+        Returns:
+            `c` as a tensor of ``reference``'s dtype.
+        """
+        return ops.cast(c, reference.dtype)
+
+    def boundary_margin(
+            self,
+            dtype: Any,
+            radius: Union[float, keras.KerasTensor]
+    ) -> Union[float, keras.KerasTensor]:
+        """Safety margin from the ball boundary, in units the dtype can represent.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-027
+        The margin is ``max(boundary_eps, 4 ULP(radius))`` and NOT the fixed
+        ``self.boundary_eps``. Do NOT simplify this back to a constant, and do
+        NOT "fix" a boundary problem by merely enlarging that constant: the
+        defect this replaces was not that 1e-4 was too small in absolute terms,
+        it was that 1e-4 is SMALLER THAN ONE ULP of the dtype. float16's ULP at
+        1.0 is 9.765625e-04, **9.77x larger than the margin**, so
+        ``(1/sqrt(c)) - 1e-4`` rounds back to exactly ``1/sqrt(c)``, the clamp in
+        `log_map_0` becomes an identity and ``arctanh(1.0) = inf`` propagates as
+        NaN through every downstream op. MEASURED before this fix: all three
+        shipped `models/shgcn` classes returned **100% NaN** under
+        ``mixed_float16`` -- 96/96, 36/36 and 5/5 elements -- while float32 was
+        green with ``arctanh`` reading 4.9521313 at the boundary. Any constant
+        chosen without reference to the dtype is one precision change away from
+        being void again. See decisions.md D-027.
+
+        Args:
+            dtype: The compute dtype the margin will be used in.
+            radius: The ball radius ``1/sqrt(c)`` the margin is subtracted from.
+
+        Returns:
+            The margin, as a Python float when `radius` is a Python float and as
+            a tensor otherwise.
+        """
+        # `getattr(dtype, "name", dtype)` rather than
+        # `keras.backend.standardize_dtype`: the repo-wide Keras-2-residue guard
+        # forbids `keras.backend.*` calls, and a backend tensor's dtype already
+        # carries its own `.name`.
+        standardized = getattr(dtype, "name", dtype)
+        try:
+            ulp_at_one = float(np.finfo(standardized).eps)
+        except (TypeError, ValueError):
+            ulp_at_one = float(np.finfo("float32").eps)
+
+        # `np.finfo().eps` is the spacing at 1.0; the spacing at `radius` scales
+        # with the magnitude, so a curvature far from 1.0 is covered too.
+        spacing = ulp_at_one * ops.maximum(ops.abs(radius), 1.0)
+        return ops.maximum(
+            ops.cast(self.boundary_eps, standardized),
+            ops.cast(_BOUNDARY_ULP_SAFETY * spacing, standardized),
+        )
 
     def project(
             self,
@@ -132,11 +251,12 @@ class PoincareMath:
             where max_radius = (1/sqrt(c)) - boundary_eps
         """
         norm_x = self.safe_norm(x, axis=-1, keepdims=True)
-        max_r = (1.0 / ops.sqrt(c)) - self.boundary_eps
+        radius = 1.0 / ops.sqrt(self._as_compute_dtype(c, x))
+        max_r = radius - self.boundary_margin(x.dtype, radius)
 
         cond = norm_x >= max_r
         projected = x * (max_r / norm_x)
-        return tf.where(cond, projected, x)
+        return ops.where(cond, projected, x)
 
     def exp_map_0(
             self,
@@ -170,12 +290,32 @@ class PoincareMath:
         Note:
             This operation is differentiable and preserves the origin: exp_0(0) = 0.
         """
-        sqrt_c = ops.sqrt(c)
-        norm_v = self.safe_norm(v, axis=-1, keepdims=True)
+        sqrt_c = ops.sqrt(self._as_compute_dtype(c, v))
+        # The branch test uses the RAW norm; the division uses the floored one.
+        # See the D-056 anchor on `norm_and_floored_norm`.
+        raw_norm_v, norm_v = self.norm_and_floored_norm(v, axis=-1, keepdims=True)
 
-        scale = ops.tanh(sqrt_c * norm_v) / (sqrt_c * norm_v)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-061
+        # The DOUBLE `where`. `ops.where` evaluates BOTH branches in the
+        # backward pass, so a non-finite gradient in the branch that is NOT
+        # selected still poisons the result via `0 * nan = nan`. At the origin
+        # the floored norm is `eps = 1e-5`, which is SUBNORMAL in float16 (min
+        # normal 6.10e-5); the derivative of `tanh(u)/u` carries a `1/u**2`
+        # whose `u**2 ~ 1e-10` underflows to EXACTLY zero in half precision.
+        # MEASURED on a zero bias vector: `d/d_theta` is `nan` under float16
+        # and exactly `0.0` under float32, with the FORWARD finite in both --
+        # `SHGCNNodeClassifier` produced 2 non-finite gradient norms of 8 under
+        # `mixed_float16` (`curvature_theta` in both layers) while its float32
+        # control was clean. Feeding a SAFE `1.0` into the discarded branch
+        # makes the unselected gradient finite. The forward is unchanged
+        # bit-for-bit: when `raw >= eps` this selects `norm_v` itself.
+        # Do NOT collapse this back to a single `where`. See decisions.md D-061.
+        safe_norm_v = ops.where(
+            raw_norm_v < self.eps, ops.ones_like(norm_v), norm_v
+        )
+        scale = ops.tanh(sqrt_c * safe_norm_v) / (sqrt_c * safe_norm_v)
 
-        return tf.where(norm_v < self.eps, v, v * scale)
+        return ops.where(raw_norm_v < self.eps, v, v * scale)
 
     def log_map_0(
             self,
@@ -210,14 +350,23 @@ class PoincareMath:
             Input points are clamped to stay within valid ball radius to prevent
             atanh(1) = infinity. This operation inverts exp_map_0: log_0(exp_0(v)) = v.
         """
-        sqrt_c = ops.sqrt(c)
-        norm_y = self.safe_norm(y, axis=-1, keepdims=True)
+        sqrt_c = ops.sqrt(self._as_compute_dtype(c, y))
+        # The branch test uses the RAW norm; the division uses the floored one.
+        # See the D-056 anchor on `norm_and_floored_norm`.
+        raw_norm_y, norm_y = self.norm_and_floored_norm(y, axis=-1, keepdims=True)
 
-        max_r = (1.0 / sqrt_c) - self.boundary_eps
+        radius = 1.0 / sqrt_c
+        max_r = radius - self.boundary_margin(y.dtype, radius)
         norm_y = ops.minimum(norm_y, max_r)
 
-        scale = ops.arctanh(sqrt_c * norm_y) / (sqrt_c * norm_y)
-        return tf.where(norm_y < self.eps, y, y * scale)
+        # The same double-`where` as `exp_map_0`; the argument is identical and
+        # `arctanh(u)/u` carries the same `1/u**2` in its derivative. See the
+        # D-061 anchor above and decisions.md D-061.
+        safe_norm_y = ops.where(
+            raw_norm_y < self.eps, ops.ones_like(norm_y), norm_y
+        )
+        scale = ops.arctanh(sqrt_c * safe_norm_y) / (sqrt_c * safe_norm_y)
+        return ops.where(raw_norm_y < self.eps, y, y * scale)
 
     def mobius_add(
             self,
@@ -258,6 +407,8 @@ class PoincareMath:
             - Identity: x ⊕ 0 = x
             - Preserves the ball: if x,y in D^n_c, then x ⊕ y in D^n_c
         """
+        c = self._as_compute_dtype(c, x)
+
         xy = ops.sum(x * y, axis=-1, keepdims=True)
         x2 = ops.sum(ops.square(x), axis=-1, keepdims=True)
         y2 = ops.sum(ops.square(y), axis=-1, keepdims=True)

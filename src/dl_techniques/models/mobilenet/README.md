@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the entire **MobileNet** family of models, from **V1 to V4**. These models represent a lineage of highly efficient convolutional neural networks designed specifically for on-device and mobile vision applications where computational resources are limited.
+A Keras 3 implementation of the entire **MobileNet** family of models, from **V1 to V4**. These models represent a lineage of highly efficient convolutional neural networks designed specifically for on-device and mobile vision applications where computational resources are limited.
 
 The implementations for V2, V3, and V4 leverage a flexible `UniversalInvertedBottleneck` layer, showcasing how a unified building block can be configured to create a wide range of modern architectures.
 
@@ -173,7 +173,7 @@ from dl_techniques.models.mobilenet.mobilenet_v4 import create_mobilenetv4
 
 # 1. Create a small MobileNetV4 model for CIFAR-10 (32x32 images, 10 classes)
 model = create_mobilenetv4(
-    variant="conv_small",  # A very small and fast V4 variant
+    variant="small",  # A very small and fast V4 variant
     num_classes=10,
     input_shape=(32, 32, 3)
 )
@@ -234,8 +234,14 @@ Each MobileNet version comes with several pre-configured variants.
 `"large"`, `"small"` (both can be scaled with `width_multiplier`)
 
 ### MobileNetV4 Variants
--   **Conv-Only**: `"conv_small"`, `"conv_medium"`, `"conv_large"`
+-   **Conv-Only**: `"small"`, `"medium"`, `"large"`
 -   **Hybrid (with Attention)**: `"hybrid_medium"`, `"hybrid_large"`
+
+These five strings are the complete key set of `MobileNetV4.MODEL_VARIANTS`. There
+is no `"conv_small"`, `"conv_medium"` or `"conv_large"` -- `from_variant` raises
+`ValueError` on them. (The names are deliberately not the paper's MNv4-Conv-S/M/L:
+these ladders are hand-written depth/width tables, not the NAS-found specifications
+-- see `mobilenet_v4.py`'s module docstring.)
 
 ---
 
@@ -293,7 +299,19 @@ backbone = create_mobilenetv4(
 
 # The output is the feature map from the final stage
 # For a 256x256 input, the output shape will be (None, 8, 8, 320)
-backbone.summary()```
+backbone.summary()
+```
+
+All four versions share this contract: `include_top=False` returns the **4-D feature map**,
+never a pooled vector. Until 2026-08-15 V1 alone applied its global average pooling
+unconditionally and returned `(batch, channels)`, so a detection or segmentation head built
+against V2/V3/V4 silently received the wrong rank from V1. If you want the pooled vector,
+add one `keras.layers.GlobalAveragePooling2D()` yourself.
+
+`summary()` on a never-called model now runs a real dummy forward pass to materialize the
+weights. `keras.Model.build(...)` alone does not: on a subclassed model it only marks the
+model built, and all four versions previously printed a summary whose parameter count was
+exactly 0.
 
 ---
 
@@ -304,8 +322,9 @@ backbone.summary()```
 While this implementation does not ship with pre-trained weights, it is designed to load them easily. If you have a `.keras` file with ImageNet weights, you can load them and fine-tune on a new task.
 
 ```python
-# Assume you have downloaded pre-trained weights for MobileNetV4-ConvMedium
-# and saved them to "mobilenet_v4_conv_medium_imagenet.keras"
+# Assume you TRAINED a MobileNetV4-Medium yourself and saved it to
+# "mobilenet_v4_medium.keras". Nothing is downloadable: `pretrained=True`
+# raises `NotImplementedError` and no checkpoint ships with dl_techniques.
 
 # 1. Create a new model for a custom task (e.g., 20 classes)
 # The `from_config` logic in the custom model classes handles this.
@@ -336,7 +355,7 @@ All MobileNet models are well-suited for mixed precision training, which uses 16
 keras.mixed_precision.set_global_policy('mixed_float16')
 
 # Create model (will automatically use mixed precision)
-model = create_mobilenetv4("conv_medium", num_classes=1000)
+model = create_mobilenetv4("medium", num_classes=1000)
 model.compile(...)
 
 # When training, use a LossScaleOptimizer to prevent numeric underflow
@@ -415,7 +434,7 @@ def test_creation_all_variants():
 
 def test_forward_pass_shape():
     """Test the output shape of a forward pass."""
-    model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(96, 96, 3))
+    model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(96, 96, 3))
     dummy_input = np.random.rand(4, 96, 96, 3).astype("float32")
     output = model.predict(dummy_input)
     assert output.shape == (4, 10)
@@ -442,7 +461,7 @@ if __name__ == '__main__':
 **Q: Which MobileNet version should I use?**
 
 A:
--   **For the best accuracy/latency trade-off on modern hardware**: Start with **MobileNetV4**. The `conv_small` or `conv_medium` variants are excellent general-purpose backbones.
+-   **For the best accuracy/latency trade-off on modern hardware**: Start with **MobileNetV4**. The `small` or `medium` variants are excellent general-purpose backbones.
 -   **For a robust, well-understood baseline**: **MobileNetV2** is a fantastic choice and is widely supported in production environments.
 -   **If you need a CPU-optimized model with good performance**: **MobileNetV3** is still highly competitive.
 -   **For legacy systems or maximum simplicity**: **MobileNetV1** is the original, but V2 generally offers better performance for a similar cost.
@@ -473,9 +492,31 @@ The innovation in the MobileNet family can be seen by comparing the structure of
     (Also uses `h-swish` and different kernel sizes found by NAS)
 
 -   **MobileNetV4 Block (Universal Inverted Bottleneck)**:
-    The UIB is highly flexible. For example, the `"ExtraDW"` variant looks like this:
-    `Input -> 1x1 Conv (Expand) -> BN -> Act -> 3x3 DWConv -> BN -> Act -> 5x5 DWConv -> BN -> Act -> 1x1 Conv (Project) -> ...`
+    The UIB is highly flexible. It has an optional depthwise convolution on *either
+    side* of the expansion, and which of the two positions is occupied is what
+    names the block:
+
+    | `block_type` | start DW (pre-expansion) | middle DW (post-expansion) |
+    |---|---|---|
+    | `"FFN"`      | –       | –   |
+    | `"IB"`       | –       | 3x3 |
+    | `"ConvNext"` | 7x7     | –   |
+    | `"ExtraDW"`  | 3x3     | 3x3 |
+
+    So `"ExtraDW"` is:
+    `Input -> 3x3 DWConv -> BN -> Act -> 1x1 Conv (Expand) -> BN -> Act -> 3x3 DWConv -> BN -> Act -> 1x1 Conv (Project) -> ...`
     This adds more spatial mixing capability compared to the V2/V3 blocks.
+
+    **What matters is the position, not the count.** `"IB"` and `"ConvNext"` both
+    own exactly one depthwise convolution and are different architectures: the
+    start DW mixes space at the *unexpanded* channel count, before the block goes
+    wide, which is the ConvNeXt ordering and the reason it conventionally uses a
+    larger kernel. An earlier version of this section described `"ExtraDW"` as
+    `Expand -> 3x3 DWConv -> 5x5 DWConv -> Project`, with *both* depthwise convs
+    after the expansion. That is not the paper's ExtraDW — it is an inverted
+    bottleneck with two stacked middle depthwise convs. The layer can still build
+    that shape (`use_dw1=True, use_dw2=True`), but it is an extra degree of freedom
+    this implementation offers, not one of the four named structures.
 
 ---
 

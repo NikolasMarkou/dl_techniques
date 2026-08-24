@@ -456,12 +456,19 @@ class AlignmentLogger:
         """
         return self.scores.copy()
     
-    def plot_scores(self, save_path: Optional[str] = None):
+    def plot_scores(
+        self,
+        save_path: Optional[str] = None,
+        show: bool = False,
+    ):
         """
         Plot alignment scores over training.
         
         Args:
             save_path: Optional path to save figure
+            show: If ``True``, call ``plt.show()``. Defaults to ``False`` -- this
+                is library code and must not decide to block on a GUI. See
+                decisions.md D-051.
         """
         try:
             import matplotlib.pyplot as plt
@@ -486,7 +493,12 @@ class AlignmentLogger:
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"Saved plot to {save_path}")
-        else:
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore the `else: plt.show()`. Not saving is not the same as
+        # wanting a blocking GUI window; on the headless hosts this repo runs on
+        # it only emitted "FigureCanvasAgg is non-interactive".
+        if show:
             plt.show()
-        
+
         plt.close()

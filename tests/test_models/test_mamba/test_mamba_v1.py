@@ -24,6 +24,11 @@ from typing import Dict, Any
 
 from dl_techniques.models.mamba import Mamba
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestMambaModelInitialization:
     """Test Mamba model initialization and parameter validation."""
@@ -130,26 +135,41 @@ class TestMambaModelVariants:
         assert model.num_layers == 24
         assert model.vocab_size == 50257
 
+    # These three pinned the pre-2026-08-14 MODEL_VARIANTS table, which did not
+    # match the paper: 370m carried 24 layers instead of 48, 790m d_model 1024
+    # instead of 1536, and 1.4b d_model 1536 instead of 2048. The tests asserted
+    # those numbers, so they pinned the defect rather than the specification.
+    # They now assert Gu and Dao 2023's Table 9.
     def test_mamba_370m_variant(self):
         """Test 370M parameter variant."""
         model = Mamba.from_variant("370m", vocab_size=50257)
         assert model.d_model == 1024
-        assert model.num_layers == 24
+        assert model.num_layers == 48
         assert model.vocab_size == 50257
 
     def test_mamba_790m_variant(self):
         """Test 790M parameter variant."""
         model = Mamba.from_variant("790m", vocab_size=50257)
-        assert model.d_model == 1024
+        assert model.d_model == 1536
         assert model.num_layers == 48
         assert model.vocab_size == 50257
 
     def test_mamba_1_4b_variant(self):
         """Test 1.4B parameter variant."""
         model = Mamba.from_variant("1.4b", vocab_size=50257)
-        assert model.d_model == 1536
+        assert model.d_model == 2048
         assert model.num_layers == 48
         assert model.vocab_size == 50257
+
+    def test_pretrained_true_raises(self):
+        """`pretrained=True` must fail loudly, not return a random model.
+
+        It used to log a warning and hand back randomly initialized weights,
+        which is exactly the silent-untrained-model failure the house contract
+        (models/CLAUDE.md, Axis 3) forbids.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained weights"):
+            Mamba.from_variant("base", vocab_size=1000, pretrained=True)
 
     def test_mamba_2_8b_variant(self):
         """Test 2.8B parameter variant."""
@@ -708,8 +728,29 @@ class TestMambaIntegration:
         grad_A_np = keras.ops.convert_to_numpy(grad_A)
         grad_D_np = keras.ops.convert_to_numpy(grad_D)
 
-        assert not np.allclose(grad_A_np, 0), "A_log gradient is all zeros"
-        assert not np.allclose(grad_D_np, 0), "D gradient is all zeros"
+        # `np.allclose(x, 0)` is the WRONG instrument here: its default
+        # atol=1e-8 is an ABSOLUTE floor, and A_log's gradient has no reason to
+        # live above it. In the discretization `A_bar = exp(dt * A)` the
+        # gradient w.r.t. A_log scales with dt, and the paper's initialization
+        # puts dt in [dt_min=0.001, dt_max=0.1] -- so a CORRECTLY initialized
+        # model produces a small A_log gradient by construction.
+        #
+        # This assertion used to read `not np.allclose(grad_A_np, 0)` and passed
+        # only because dt was stuck at softplus(0) = 0.693147, ~7x above dt_max,
+        # from the discarded-assign defect fixed in D-084. Measured at
+        # d_model=32: max|grad_A| was 1.06e-06 with the broken dt=0.693 and is
+        # 3.17e-08 with a correct dt -- both non-zero, but only the first clears
+        # an absolute 1e-8. Restoring the old form would re-pin the defect.
+        #
+        # What "gradients flow" actually means is: not identically zero, and not
+        # NaN. Test that, relative to each tensor's own scale.
+        for name, grad in (("A_log", grad_A_np), ("D", grad_D_np)):
+            assert np.isfinite(grad).all(), f"{name} gradient has non-finite entries"
+            assert np.abs(grad).max() > 0.0, f"{name} gradient is identically zero"
+            assert np.count_nonzero(grad) > grad.size // 2, (
+                f"{name} gradient is mostly zeros "
+                f"({np.count_nonzero(grad)}/{grad.size} non-zero)"
+            )
 
     def test_training_integration(self, small_model):
         """Test the model in a minimal training loop."""
@@ -841,13 +882,32 @@ class TestMambaAdvancedFeatures:
     """Test advanced Mamba features and SSM-specific functionality."""
 
     def test_different_expansion_factors(self):
-        """Test model with different expansion factors."""
+        """``expand`` must reach the SSM's inner width.
+
+        ``last_hidden_state`` is ``(2, 16, 128)`` at every expansion, and
+        ``first_mamba.d_inner == expand * 128`` is a knob ECHO -- it proves the
+        constructor stored the kwarg, not that the weights got wider. `expand`
+        is structural, so the weight-shape signature is the discriminating fact.
+        """
         base_config = {
             "vocab_size": 1000,
             "d_model": 128,
             "num_layers": 2,
             "d_state": 8
         }
+
+        def _build(**kw):
+            model = Mamba(**base_config, **kw)
+            model({"input_ids": keras.ops.zeros((1, 16), dtype="int32")}, training=False)
+            return model
+
+        builders = {e: (lambda e=e: _build(expand=e)) for e in [2, 3, 4]}
+        sigs = assert_structural_knob_changes_weights(builders, knob="expand")
+        # Stronger than "different": d_inner = expand * d_model, so the
+        # in-projection's output width must scale with `expand`.
+        assert max(w[-1] for w in sigs[2] if len(w) == 2) * 2 == max(
+            w[-1] for w in sigs[4] if len(w) == 2
+        ), "expand did not scale the widest projection"
 
         for expand in [2, 3, 4]:
             model = Mamba(**base_config, expand=expand)
@@ -862,13 +922,32 @@ class TestMambaAdvancedFeatures:
             assert first_mamba.d_inner == expected_d_inner
 
     def test_different_state_dimensions(self):
-        """Test model with different state space dimensions."""
+        """``d_state`` must reach the SSM state tensors.
+
+        The hidden-state shape is ``(2, 16, 256)`` at every setting and
+        ``first_mamba.d_state == d_state`` is a knob echo. `d_state` is
+        structural -- it is an axis of ``A_log`` -- so the weight-shape
+        signature carries the claim.
+        """
         base_config = {
             "vocab_size": 1000,
             "d_model": 256,
             "num_layers": 2,
             "expand": 2
         }
+
+        def _build(d_state):
+            model = Mamba(**base_config, d_state=d_state)
+            model({"input_ids": keras.ops.zeros((1, 16), dtype="int32")}, training=False)
+            return model
+
+        builders = {d: (lambda d=d: _build(d)) for d in [8, 16, 32, 64]}
+        sigs = assert_structural_knob_changes_weights(builders, knob="d_state")
+        # A_log / D live at (d_inner, d_state); the state axis must be present.
+        for d in [8, 16, 32, 64]:
+            assert any(d in w for w in sigs[d]), (
+                f"d_state={d} produced no weight with a {d}-sized axis"
+            )
 
         for d_state in [8, 16, 32, 64]:
             model = Mamba(**base_config, d_state=d_state)
@@ -882,7 +961,12 @@ class TestMambaAdvancedFeatures:
             assert first_mamba.d_state == d_state
 
     def test_different_convolution_sizes(self):
-        """Test model with different convolution kernel sizes."""
+        """``d_conv`` must reach the depthwise convolution kernel.
+
+        The output shape is ``(2, 16, 128)`` at every kernel length and
+        ``first_mamba.d_conv == d_conv`` is a knob echo. The kernel length is a
+        weight axis, so the signature pins it.
+        """
         base_config = {
             "vocab_size": 1000,
             "d_model": 128,
@@ -890,6 +974,19 @@ class TestMambaAdvancedFeatures:
             "d_state": 8,
             "expand": 2
         }
+
+        def _build(d_conv):
+            model = Mamba(**base_config, d_conv=d_conv)
+            model({"input_ids": keras.ops.zeros((1, 16), dtype="int32")}, training=False)
+            return model
+
+        builders = {d: (lambda d=d: _build(d)) for d in [2, 4, 8, 16]}
+        sigs = assert_structural_knob_changes_weights(builders, knob="d_conv")
+        # The depthwise conv kernel's length axis IS d_conv.
+        for d in [2, 4, 8, 16]:
+            assert any(w[0] == d for w in sigs[d] if len(w) == 3), (
+                f"d_conv={d} produced no rank-3 conv kernel of length {d}"
+            )
 
         for d_conv in [2, 4, 8, 16]:
             model = Mamba(**base_config, d_conv=d_conv)
@@ -972,9 +1069,24 @@ class TestMambaAdvancedFeatures:
         assert len(layer_names) == len(set(layer_names)), "Layer names are not unique"
 
     def test_different_norm_epsilon(self):
-        """Test model with different normalization epsilon values."""
-        for epsilon in [1e-5, 1e-6, 1e-8]:
-            model = Mamba(
+        """``norm_epsilon`` must reach the normalization arithmetic.
+
+        ``model.norm_epsilon == epsilon`` is a knob echo: it reads back the
+        attribute the constructor stored. `norm_epsilon` is a VALUE knob -- the
+        parameterisation is identical at every setting -- so under one seed the
+        models hold bit-identical weights and the entire output difference is
+        the epsilon.
+
+        Measured on CPU with identical seeds: 1e-5 vs 1e-6 moves the hidden
+        state by 2.365e-02 and 1e-6 vs 1e-8 by 2.623e-03. The 1e-5 bar is set
+        from that defect signal with ~260x margin on the smaller of the two;
+        the inert value would be exactly 0.0 (same weights, same input).
+        """
+        epsilons = [1e-5, 1e-6, 1e-8]
+        input_ids = keras.random.randint((2, 16), minval=0, maxval=1000, dtype="int32")
+
+        def _build(epsilon):
+            return Mamba(
                 vocab_size=1000,
                 d_model=128,
                 num_layers=2,
@@ -982,7 +1094,17 @@ class TestMambaAdvancedFeatures:
                 norm_epsilon=epsilon
             )
 
-            input_ids = keras.random.randint((2, 16), minval=0, maxval=1000, dtype="int32")
+        builders = {e: (lambda e=e: _build(e)) for e in epsilons}
+        deltas = assert_value_knob_changes_output(
+            builders,
+            {"input_ids": input_ids},
+            knob="norm_epsilon",
+            extract=lambda out: out['last_hidden_state'],
+        )
+        assert min(deltas.values()) > 1e-5
+
+        for epsilon in epsilons:
+            model = _build(epsilon)
             output = model({"input_ids": input_ids}, training=False)
 
             assert output['last_hidden_state'].shape == (2, 16, 128)
@@ -993,22 +1115,23 @@ class TestMambaComparison:
     """Comparison tests between different Mamba configurations."""
 
     def test_variant_parameter_counts(self):
-        """Test that different variants have expected parameter differences."""
-        vocab_size = 50257
+        """Larger named variants must be larger models.
 
-        variants = ["130m", "370m", "790m"]
-        param_counts = []
-
-        for variant in variants:
-            model = Mamba.from_variant(variant, vocab_size=vocab_size)
-            input_ids = keras.random.randint((1, 16), minval=0, maxval=vocab_size, dtype="int32")
-            _ = model({"input_ids": input_ids}, training=False)
-
-            param_count = model.count_params()
-            param_counts.append(param_count)
-
-        # Each larger variant should have more parameters
-        assert param_counts[0] < param_counts[1] < param_counts[2]
+        This used to materialize 130m/370m/790m and forward a batch through
+        each. Once MODEL_VARIANTS was corrected to the paper's sizes, 790m is a
+        real 790M-parameter model and the build exhausted a 12GB card
+        (RESOURCE_EXHAUSTED inside the depthwise Conv1D). The claim under test
+        is about the *table*, so it is checked against the table; the real
+        build-and-count claim is covered at toy sizes by
+        `test_deeper_model_has_more_params` and `test_wider_model_has_more_params`.
+        """
+        sizes = [
+            (v, Mamba.MODEL_VARIANTS[v]["d_model"], Mamba.MODEL_VARIANTS[v]["num_layers"])
+            for v in ["130m", "370m", "790m", "1.4b", "2.8b"]
+        ]
+        # Parameter count grows as d_model^2 * num_layers for the block stack.
+        scores = [d * d * n for _, d, n in sizes]
+        assert scores == sorted(scores) and len(set(scores)) == len(scores), sizes
 
     def test_deeper_model_has_more_params(self):
         """Test that deeper models have more parameters."""

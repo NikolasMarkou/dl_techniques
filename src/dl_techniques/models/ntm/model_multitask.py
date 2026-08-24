@@ -1,6 +1,45 @@
+"""
+Neural Turing Machine conditioned on a task identity for multi-task sequence
+learning.
+
+The NTM's algorithmic tasks — copy, repeat-copy, associative recall, priority sort
+— share an input format but demand different memory disciplines, and a single NTM
+trained on their union has no way to know which discipline the current sequence
+calls for. Task conditioning supplies that missing bit. A one-hot task vector is
+broadcast across the temporal axis and concatenated onto every timestep's features,
+so the controller sees the task identity at the same moment it sees the first
+symbol, and the head parameters it emits — key, sharpness, interpolation gate,
+shift, erase and add vectors — can be functions of the task from step one.
+
+Broadcasting rather than prepending a task token is the deliberate choice here. A
+prepended token would make the task identity a memory the controller has to hold
+across the whole sequence, competing for exactly the recurrent capacity that
+external memory exists to relieve; carrying it on every timestep instead makes it a
+free-standing input the controller can consult without remembering. The cost is
+`num_tasks` extra input features at every step, which is negligible against the
+controller width.
+
+The wrapper is otherwise thin: it computes the fused feature dimension
+(`feature_dim + num_tasks`) in `build` and hands it to the inner
+`NeuralTuringMachine`, which is the fully unrolled sequence-level NTM rather than
+the RNN cell. Output is always a sequence — these tasks are supervised at every
+timestep, not at the end — so `return_sequences=True` is fixed rather than exposed,
+and `return_state=False` keeps the memory matrix out of the model's outputs. The
+broadcast target shape is built from `ops.shape(x)` rather than static dimensions
+so a variable sequence length survives graph tracing.
+
+See `dl_techniques.layers.memory.baseline_ntm` for the addressing, shift and
+erase-then-add mechanics the inner NTM implements.
+
+References:
+    - Graves et al., 2014. Neural Turing Machines.
+      (https://arxiv.org/abs/1410.5401)
+    - Caruana, 1997. Multitask Learning. Machine Learning 28, 41-75.
+"""
+
 import keras
 from keras import ops
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -97,7 +136,30 @@ class NTMMultiTask(keras.Model):
 
         super().build(input_shape)
 
-    def call(self, inputs: List[keras.KerasTensor]) -> keras.KerasTensor:
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-059
+    # `call` MUST declare `training` and forward it explicitly. Keras 3
+    # propagates `training` through a single mutable `CallContext` slot that
+    # every nested `__call__` overwrites, so a `call` that neither accepts nor
+    # forwards it leaves `NeuralTuringMachine` reading whatever the slot last
+    # held rather than what this model was invoked with.
+    #
+    # MEASURED, and it CORRECTS the finding that prompted this: `NTMConfig` has
+    # NO dropout knob and there is no dropout, batch norm or any other
+    # training-sensitive layer anywhere in the NTM stack today, so this is a
+    # LATENT fix -- it changes no number now, and the "configured dropout never
+    # activated during fit()" harm the review described does not exist. It is
+    # shipped because the next training-sensitive sub-layer added below this
+    # point would be silently stuck in inference mode with nothing to catch it.
+    # The guard therefore records the propagated VALUE
+    # (`tests/test_models/test_ntm/test_determinism_and_training_flag.py`)
+    # rather than asserting a numeric difference there is no mechanism to
+    # produce. DO NOT replace it with a dropout-based assertion.
+    # See decisions.md D-059.
+    def call(
+            self,
+            inputs: List[keras.KerasTensor],
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
         """
         Forward pass.
 
@@ -105,6 +167,10 @@ class NTMMultiTask(keras.Model):
             inputs: List containing:
                 - sequence_input: Tensor of shape (Batch, Seq_Len, Dim)
                 - task_id_input: Tensor of shape (Batch, Num_Tasks)
+            training: Training-mode flag, forwarded explicitly to the NTM layer
+                rather than left to Keras' ambient ``CallContext``. Nothing in
+                the NTM stack is training-sensitive today, so this currently
+                changes no output; see the ``D-059`` anchor above.
 
         Returns:
             Output tensor of shape (Batch, Seq_Len, Output_Dim)
@@ -131,7 +197,7 @@ class NTMMultiTask(keras.Model):
         ntm_input = ops.concatenate([x, task_broadcasted], axis=-1)
 
         # 4. Pass to NTM
-        return self.ntm_layer(ntm_input)
+        return self.ntm_layer(ntm_input, training=training)
 
     def compute_output_shape(self, input_shape: List[Tuple]) -> Tuple[int, int, int]:
         """

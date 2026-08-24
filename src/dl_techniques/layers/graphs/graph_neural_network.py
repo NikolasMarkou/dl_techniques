@@ -240,6 +240,24 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.gnn_layers = []
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-091
+        # GraphSAGE's two per-block transforms live in TWO FLAT, PARALLEL
+        # LISTS -- one per role, indexed by block -- and NOT in the obvious
+        # `self.gnn_layers.append({'self': Dense(...), 'neighbor': Dense(...)})`.
+        # Do NOT "tidy" them back into a list of dicts: Keras 3.8 does not
+        # write a layer container nested two or more levels deep to
+        # `model.weights.h5` when its owner is a `keras.layers.Layer`, and this
+        # class IS a `Layer`. MEASURED on this exact class at
+        # `message_passing='graphsage'`, num_layers=2: the list-of-dicts form
+        # archived 12 of 20 tensors -- ALL EIGHT GraphSAGE Dense weights absent
+        # -- and a perturb / save / reload comparison came back with
+        # max|dW| = 1.407037e+00 and max|dOut| = 1.659781e+00, i.e. a different
+        # model. The other three modes hold a layer ONE level deep and were
+        # clean in both arms (gcn 16/16, gat 28/28, gin 21/21, all at exactly
+        # 0.0). See decisions.md D-091 and D-026 (the same mechanism in
+        # `models/masked_autoencoder/conv_decoder.py`).
+        self.sage_self_layers = []
+        self.sage_neighbor_layers = []
         self.dropout_layers = []
         self.norm_layers = []
 
@@ -260,8 +278,9 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 )
             elif self.message_passing == 'graphsage':
                 # GraphSAGE uses separate transformations for self and neighbors
-                self.gnn_layers.append({
-                    'self': keras.layers.Dense(
+                # DECISION plan-2026-08-19T163559-499b6f0e/D-091 (see __init__)
+                self.sage_self_layers.append(
+                    keras.layers.Dense(
                         self.concept_dim,
                         activation=None,
                         kernel_initializer=self.kernel_initializer,
@@ -269,8 +288,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                         kernel_regularizer=self.kernel_regularizer,
                         bias_regularizer=self.bias_regularizer,
                         name=f'sage_self_{i}'
-                    ),
-                    'neighbor': keras.layers.Dense(
+                    )
+                )
+                self.sage_neighbor_layers.append(
+                    keras.layers.Dense(
                         self.concept_dim,
                         activation=None,
                         kernel_initializer=self.kernel_initializer,
@@ -279,7 +300,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                         bias_regularizer=self.bias_regularizer,
                         name=f'sage_neighbor_{i}'
                     )
-                })
+                )
+                # index alignment with `gnn_layers` is preserved so every
+                # `for i in range(self.num_layers)` loop below stays uniform.
+                self.gnn_layers.append(None)
             elif self.message_passing == 'gat':
                 # GAT uses multi-head attention
                 self.gnn_layers.append(
@@ -376,8 +400,8 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
             elif self.message_passing == 'graphsage':
                 # Build both self and neighbor transformations
-                self.gnn_layers[i]['self'].build(node_shape)
-                self.gnn_layers[i]['neighbor'].build(node_shape)
+                self.sage_self_layers[i].build(node_shape)
+                self.sage_neighbor_layers[i].build(node_shape)
 
             elif self.message_passing == 'gat':
                 # GAT attention expects query and key inputs
@@ -440,9 +464,9 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
             elif self.message_passing == 'graphsage':
                 # GraphSAGE: H' = σ(W_self * H + W_neighbor * AGG(A * H))
-                self_features = self.gnn_layers[i]['self'](h)
+                self_features = self.sage_self_layers[i](h)
                 neighbor_messages = keras.ops.matmul(normalized_adj, h)
-                neighbor_features = self.gnn_layers[i]['neighbor'](neighbor_messages)
+                neighbor_features = self.sage_neighbor_layers[i](neighbor_messages)
                 h_new = self_features + neighbor_features
 
             elif self.message_passing == 'gat':

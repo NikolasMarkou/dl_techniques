@@ -30,6 +30,53 @@ class TestFFTNet:
         assert {"last_hidden_state", "cls_token", "patch_features"} <= set(out)
         assert not np.any(np.isnan(keras.ops.convert_to_numpy(out["last_hidden_state"])))
 
+    def test_mixer_actually_mixes_tokens(self):
+        """FFTMixer must transform the TOKEN axis, not the feature axis.
+
+        RED-proof: ``tf.signal.fft`` transforms the INNERMOST axis, so calling
+        it on (B, N, D) transformed D. Every token was then processed
+        independently and the layer was exactly permutation-EQUIVARIANT — the
+        one property a token mixer must not have. The adaptive filter's
+        ``mean(x, axis=1)`` is itself permutation-invariant, so it does not
+        rescue the property either.
+
+        Asserting the output shape, finiteness, or that the output merely
+        differs from the input would all be VACUOUS here — all three held with
+        the FFT on the wrong axis.
+
+        The permutation must be neither a cyclic shift nor a reversal. A DFT is
+        equivariant to both of those (they map to multiplication by a
+        unit-modulus phase and to conjugation, and modReLU rescales by a
+        function of the magnitude alone, which both preserve), so a reversal
+        probe fails identically with and without the fix — it is a false guard,
+        and the first version of this test was exactly that.
+        """
+        from dl_techniques.models.fftnet.model import FFTMixer
+
+        rng = np.random.default_rng(0)
+        x = rng.random((2, 8, 16)).astype("float32")
+
+        # A scrambled permutation: not the identity, not a reversal, not any
+        # cyclic shift.
+        perm = np.array([3, 1, 7, 0, 5, 2, 6, 4])
+        assert not np.array_equal(perm, np.arange(8))
+        assert not np.array_equal(perm, np.arange(8)[::-1])
+        assert all(not np.array_equal(perm, np.roll(np.arange(8), s))
+                   for s in range(8)), "permutation must not be a cyclic shift"
+        inverse = np.argsort(perm)
+
+        mixer = FFTMixer(embed_dim=16, mlp_hidden_dim=32)
+        mixer.build((None, 8, 16))
+
+        y = keras.ops.convert_to_numpy(mixer(x, training=False))
+        # Permute the tokens, push through, then undo the permutation.
+        y_perm = keras.ops.convert_to_numpy(
+            mixer(x[:, perm, :].copy(), training=False))[:, inverse, :]
+
+        assert not np.allclose(y, y_perm, atol=1e-5), (
+            "FFTMixer is permutation-equivariant over tokens, so it performs no "
+            "token mixing — the FFT is being applied to the feature axis")
+
     def test_unknown_variant_raises(self):
         with pytest.raises(ValueError):
             FFTNet.from_variant("nonexistent")
@@ -51,3 +98,32 @@ class TestFFTNet:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestFFTNetGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    FFTNet's mixer runs a documented raw-``tf.signal`` FFT path (an accepted
+    L2-5 exception). A complex-valued detour is a classic place for a gradient to
+    be silently dropped -- and this suite's own history shows the forward-side
+    version of that failure (the FFT was on the feature axis, and every shape and
+    finiteness test passed). The per-weight claim is the backward-side analogue.
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = _model()
+        x = _images()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

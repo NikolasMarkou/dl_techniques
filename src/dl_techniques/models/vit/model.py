@@ -1,14 +1,84 @@
 """
-Vision Transformer (ViT) Model Implementation
+The Vision Transformer, which treats an image as a short sequence of patch
+tokens and hands it to a plain transformer encoder.
 
-The implementation supports different scales and configurations similar to the original
-"An Image is Worth 16x16 Words" paper and its variants, with enhanced flexibility
-through factory-based component creation.
+This model embodies the principle that the convolutional priors -- locality,
+translation equivariance, a hierarchy of scales -- are useful shortcuts rather
+than requirements, and that with enough data a general architecture can learn
+whatever spatial structure the task actually needs. A ConvNet builds those
+priors into its weight sharing, which is what makes it sample-efficient on
+small datasets and what caps it on large ones. ViT removes them entirely: the
+image is cut into non-overlapping `patch_size` squares, each is flattened and
+linearly projected to `embed_dim`, and from that point the network has no
+notion of two dimensions at all. Every layer sees a set of tokens, and any
+geometry it uses it must learn.
+
+Two consequences follow directly. Because the patch grid is discarded, spatial
+position must be re-injected explicitly, which is what the learned positional
+embedding does -- remove it and the model becomes permutation-invariant over
+patches, seeing an image and its shuffled version identically. And because
+self-attention is global from the first layer, receptive field is not something
+that grows with depth; a token at one corner can attend to the opposite corner
+immediately, which is precisely the long-range interaction a ConvNet needs many
+downsampling stages to reach.
+
+The sequence carries a prepended learnable CLS token, a position with no image
+content whose only job is to accumulate a whole-image summary through
+attention. That gives the classification head a single vector to read without
+imposing any pooling rule on the patch tokens. Pooled feature extraction is
+also available and is where the code does something non-obvious: `mean` and
+`max` pooling exclude position 0, because averaging the CLS token into the
+patch statistics mixes a summary vector into the thing it is summarizing. Only
+`cls` pooling reads position 0, and it reads it alone.
+
+Cost is quadratic in the number of patches, which is `(H/P) x (W/P)`, so patch
+size is the architecture's central efficiency knob -- halving it quadruples the
+sequence and roughly sixteen-times the attention cost. Five scales span tiny
+(192d, 3 heads, 12 layers) through huge (1280d, 16 heads, 32 layers). Block
+internals -- attention type, FFN type, normalization type and position -- are
+supplied through the `dl_techniques` factories rather than hard-coded, so a
+variant can be swapped in without forking the file. The scale table
+(`ViT.MODEL_VARIANTS`) reproduces the published widths, depths and head counts;
+the BLOCK defaults do not, in one named respect.
+
+**`normalization_position` defaults to `"post"`, and published ViT is pre-LN.**
+Dosovitskiy et al. 2020 normalize BEFORE each sub-layer; the default here takes
+`TransformerLayer.call`'s post-LN branch (`SubLayer -> Add -> Norm`) instead. So
+`ViT(scale='base')`, `create_vit()` and `ViT.from_variant('vit_large')` are a
+different function from any checkpoint ported from the paper's release, and at
+the deeper scales they are the configuration the pre-LN literature reports as
+needing warmup to converge at all. Pass `normalization_position='pre'` for the
+published architecture. The sibling `vit_hmlp/model.py` defaults to `"pre"`, so
+the repository's two ViTs deliberately disagree on this one knob: the default is
+NOT flipped here because it would silently change the function every existing
+`vit` checkpoint and training script was fitted under, and nothing in the
+package can tell which of the two a saved model used beyond its own stored
+config. This is a documented divergence, not an oversight -- see
+`plans/plan-2026-08-18T140459-7991552f/decisions.md` D-047.
+
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: a placeholder URL 404s into an
+HTML payload that masquerades as a `.keras` file, and swallowing that failure
+makes an unavailable checkpoint indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead; the classifier head and any
+input-shape-dependent layers are skipped by name when the target task differs
+from the checkpoint's.
+
+References:
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Touvron et al., 2021. Training data-efficient image transformers &
+      distillation through attention. (https://arxiv.org/abs/2012.12877)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. (https://arxiv.org/abs/2002.04745)
 """
+
 
 import os
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -16,14 +86,16 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.utils.deep_supervision import (
-    create_inference_model_from_training_model,
-)
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -33,6 +105,30 @@ PoolingMode = Literal['cls', 'mean', 'max']
 VitScale = Literal['pico', 'tiny', 'small', 'base', 'large', 'huge']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
+
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-23T091307-9a110062/D-503
+#: Kernel initializer for every layer, matching the ViT convention this port
+#: follows: HuggingFace's ``ViTConfig.initializer_range`` defaults to ``0.02``
+#: and is applied as ``TruncatedNormal(std=0.02)`` to every weight matrix:
+#:   https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py
+#: Do NOT revert to ``"he_normal"`` (what this parameter used to be):
+#: ``he_normal`` is ``VarianceScaling(scale=2.0, mode='fan_in')``, i.e. a
+#: FAN-DEPENDENT scale, so it disagrees with the reference by a different factor
+#: in every layer rather than by a constant. TRAINING-ONLY -- an initializer is
+#: overwritten by any weight load, so no checkpoint changes meaning.
+#:
+#: A config DICT, not an ``Initializer`` instance: a seedless instance bakes its
+#: seed at construction and REPLAYS the identical draw (MEASURED: two calls of
+#: one instance at the same shape differ by exactly 0.0), so an instance used as
+#: a default argument -- evaluated once at import -- would hand every model in
+#: the process the same weights. Same hazard as D-072 / D-481.
+#: See decisions.md D-503.
+REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
+    "class_name": "TruncatedNormal",
+    "config": {"stddev": 0.02},
+}
 
 # ---------------------------------------------------------------------
 
@@ -103,8 +199,10 @@ class ViT(keras.Model):
             Applied within attention mechanisms. Defaults to 0.0.
         pos_dropout_rate: Float, dropout rate after positional embeddings.
             Defaults to 0.0.
-        kernel_initializer: Union[str, Initializer], weight initializer for all layers.
-            Defaults to 'he_normal'.
+        kernel_initializer: Union[str, dict, Initializer], weight initializer for
+            all layers. Defaults to ``TruncatedNormal(stddev=0.02)``, the ViT
+            convention (HuggingFace ``ViTConfig.initializer_range = 0.02``,
+            https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py).
         kernel_regularizer: Optional[Regularizer], weight regularizer for all layers.
             Defaults to None.
         bias_initializer: Union[str, Initializer], bias initializer for all layers.
@@ -119,9 +217,13 @@ class ViT(keras.Model):
             - 'dynamic_tanh': Dynamic Tanh normalization
             Defaults to 'layer_norm'.
         normalization_position: Literal['pre', 'post'], normalization position in transformer.
-            - 'post': Post-normalization (original Transformer)
-            - 'pre': Pre-normalization (often more stable)
-            Defaults to 'post'.
+            - 'post': Post-normalization (Vaswani et al. 2017's original Transformer)
+            - 'pre': Pre-normalization (Dosovitskiy et al. 2020's published ViT,
+              and what the `References` block above cites)
+            Defaults to 'post', which is NOT the published ViT configuration.
+            Pass 'pre' to reproduce the paper or to load a checkpoint ported
+            from its release. See the module docstring for why the default is
+            deliberately not flipped.
         ffn_type: FFNType, feed-forward network type for transformer layers.
             Uses factory for consistent creation. Available options:
             - 'mlp': Standard MLP with intermediate expansion (default)
@@ -232,13 +334,6 @@ class ViT(keras.Model):
         "vit_huge":  {"scale": "huge"},
     }
 
-    # Pretrained weights URLs (placeholder -- no public ViT weights are
-    # distributed for this implementation; see `_download_weights`).
-    PRETRAINED_WEIGHTS: Dict[str, Dict[str, str]] = {
-        "vit_base":  {"imagenet": "https://example.com/vit_base_imagenet.keras"},
-        "vit_large": {"imagenet": "https://example.com/vit_large_imagenet.keras"},
-    }
-
     def __init__(
             self,
             input_shape: Tuple[int, int, int] = (224, 224, 3),
@@ -250,10 +345,10 @@ class ViT(keras.Model):
             dropout_rate: float = 0.0,
             attention_dropout_rate: float = 0.0,
             pos_dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]] = None,
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: NormalizationType = "layer_norm",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             normalization_position: Literal['pre', 'post'] = "post",
@@ -326,9 +421,14 @@ class ViT(keras.Model):
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        # A module-level dict is a MUTABLE DEFAULT: bound once at def time and shared
+        # by every caller. Resolved from a None sentinel instead, which also keeps
+        # `initializers.get` producing a FRESH instance per model.
+        if kernel_initializer is None:
+            kernel_initializer = REFERENCE_KERNEL_INITIALIZER
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.bias_regularizer = bias_regularizer
         self.normalization_type = str(normalization_type)
         # DECISION plan_2026-05-18_6776f8ba/D-003
@@ -341,6 +441,26 @@ class ViT(keras.Model):
         # the ResNet path in `dl_techniques/models/resnet/model.py` for the
         # rms_variants_train Phase 3 `param_matched` mode (use_scale=False).
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
+        # DECISION plan-2026-08-18T140459-7991552f/D-047
+        # `normalization_position` DEFAULTS TO `"post"` while this file's
+        # `References` block cites Dosovitskiy et al. 2020, which is PRE-LN.
+        # The mismatch is real and is documented in the module docstring; the
+        # resolution taken was to correct the documentation, NOT to flip the
+        # default (see the plan's Assumption A2).
+        # WHAT NOT TO DO: do not "fix" this by changing the default here or in
+        # `create_vit` to `"pre"` to match the sibling `vit_hmlp/model.py`.
+        # `normalization_position` selects between two different functions
+        # (`TransformerLayer.call`'s pre-LN and post-LN branches), and every
+        # `vit` checkpoint, training script and result in this repository was
+        # fitted under `"post"`. A saved model records the value in its config,
+        # so a flipped default silently rebuilds only the models that DID NOT
+        # store one -- i.e. every fresh construction -- while old artifacts keep
+        # loading as post-LN, which is the worst possible split. The flip
+        # remains a one-line change plus one test edit
+        # (`tests/test_models/test_vit/test_model.py:46`) if it is ever taken
+        # deliberately. Related: `ViT.call`'s final `self.norm` over the whole
+        # sequence is the pre-LN idiom and is redundant (not wrong) under the
+        # post-LN default. See decisions.md D-047.
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
         self.activation = activation
@@ -363,10 +483,35 @@ class ViT(keras.Model):
         # Using factories for consistent component creation
 
         # Patch embedding using factory
+        # DECISION plan-2026-08-18T140459-7991552f/D-022
+        # The four initializer/regularizer knobs are forwarded; `activation` is
+        # deliberately NOT, although 'patch_2d' declares one and `self.activation`
+        # exists. ViT's `activation` is the FFN activation (see this class's
+        # docstring and the TransformerLayer construction below); forwarding its
+        # default 'gelu' into the patch projection would make the stem
+        # nonlinear, which no ViT is. It is a name collision, not a dropped
+        # knob, and is recorded as one in
+        # tests/test_models/test_package_api_contract.py::_NAME_COLLISIONS.
+        # See D-022 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
+        # DECISION plan-2026-08-23T091307-9a110062/D-540
+        # Every sub-layer gets its OWN `clone_initializer(...)` copy. Do NOT
+        # "simplify" this back to passing `self.kernel_initializer` directly:
+        # a single seedless initializer INSTANCE replays its draw, so every
+        # same-shape kernel it reaches is bit-identical. MEASURED at HEAD
+        # before this change, on a seeded ViT-tiny/12L: all 12
+        # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
+        # pairwise `max|delta| = 0.0` (66 pairs), likewise the 12 `.../proj/kernel`
+        # (66 pairs) -- i.e. the 12 blocks started as 12 COPIES of one block.
+        # `seed=` is not the discriminator; instance identity is. See
+        # decisions.md D-540 and initializers/clone.py.
         self.patch_embed = create_embedding_layer(
             'patch_2d',
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             name="patch_embed"
         )
 
@@ -375,7 +520,7 @@ class ViT(keras.Model):
             'positional_learned',
             max_seq_len=self.max_seq_len,
             dim=self.embed_dim,
-            dropout=self.pos_dropout_rate,
+            dropout_rate=self.pos_dropout_rate,
             name="pos_embed"
         )
 
@@ -396,8 +541,8 @@ class ViT(keras.Model):
                 attention_dropout_rate=self.attention_dropout_rate,
                 activation=self.activation,
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 use_layer_scale=self.use_layer_scale,
@@ -418,12 +563,12 @@ class ViT(keras.Model):
         self.head = None
         if self.include_top:
             if self.dropout_rate > 0.0:
-                self.head_dropout = layers.Dropout(self.dropout_rate, name="head_dropout")
+                self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
 
-            self.head = layers.Dense(
+            self.head = keras.layers.Dense(
                 self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="head"
@@ -519,9 +664,9 @@ class ViT(keras.Model):
         x = self.patch_embed(inputs, training=training)
 
         # 2. Prepend the CLS token
-        batch_size = ops.shape(x)[0]
-        cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)
+        batch_size = keras.ops.shape(x)[0]
+        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        x = keras.ops.concatenate([cls_tokens, x], axis=1)
 
         # 3. Add learned positional embeddings
         x = self.pos_embed(x, training=training)
@@ -594,19 +739,62 @@ class ViT(keras.Model):
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "pos_dropout_rate": self.pos_dropout_rate,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            # DECISION plan-2026-08-23T091307-9a110062/D-400
+            # D-205 inlined this as a 17-line `isinstance(str)`-guarded
+            # expression at three sites. It is now the single shared pair in
+            # `dl_techniques.utils.activation_serialization`, which ~50 other
+            # classes in this tree also call. Do NOT re-inline it: the string
+            # passthrough is load-bearing (`keras.activations.serialize` REJECTS
+            # a bare string, and many callers store a dl_techniques
+            # activation-factory key such as 'mish' that is not a Keras
+            # activation at all), and a second copy of that rule is exactly the
+            # kind of hand-maintained lockstep this centralisation removes.
+            "activation": serialize_activation(self.activation),
             "use_layer_scale": self.use_layer_scale,
             "layer_scale_init_value": self.layer_scale_init_value,
         })
         return config
+
+    @classmethod
+    def from_config(
+            cls,
+            config: Dict[str, Any],
+            custom_objects: Optional[Dict[str, Any]] = None
+    ) -> "ViT":
+        """
+        Recreate a model from its serialized configuration.
+
+        ViT had NO ``from_config`` at all before D-205. That was survivable only
+        because every other serialized key (`initializers`, `regularizers`) is
+        resolved by ``keras.initializers.get`` / ``keras.regularizers.get``
+        inside ``__init__``. ``activation`` is not: it is handed straight to
+        ``TransformerLayer``, so a serialized callable has to be turned back
+        into one here.
+
+        Args:
+            config: Configuration dictionary from ``get_config``.
+            custom_objects: Optional mapping of names to custom callables, used
+                to resolve an activation that is not registered with
+                ``keras.saving.register_keras_serializable``.
+
+        Returns:
+            A new ``ViT`` instance.
+        """
+        config = dict(config)
+        activation = config.get("activation")
+        if activation is not None and not isinstance(activation, str):
+            config["activation"] = deserialize_activation(
+                activation, custom_objects=custom_objects
+            )
+        return cls(**config)
 
     def get_feature_extractor(self) -> "ViT":
         """
@@ -718,6 +906,14 @@ class ViT(keras.Model):
         )
         logger.info(f"Weight transfer report: {report}")
 
+    # `_download_weights` raises instead of falling back to random init. A
+    # vestigial `PRETRAINED_WEIGHTS` table of placeholder URLs on a non-existent
+    # host used to sit on the class; it was never read, because this method has
+    # raised since D-002, but it advertised
+    # downloads that could never happen. Do NOT reinstate it, and do NOT widen
+    # the except clause in `from_variant` into a warn-and-return branch -- that
+    # combination is what makes `pretrained=True` silently return an untrained
+    # model. Pass a local path via `pretrained="/path/to/file.keras"` instead.
     @staticmethod
     def _download_weights(
             variant: str,
@@ -764,13 +960,10 @@ class ViT(keras.Model):
     ) -> "ViT":
         """Create a ViT model from a predefined variant.
 
-        # DECISION plan_2026-05-12_f2d29729/D-003
-        Resnet-template parity. The ``except (IOError, OSError, ValueError)``
-        around ``_download_weights`` is narrow on purpose so a
-        :class:`NotImplementedError` from ``_download_weights`` propagates
-        (LESSONS L53 -- silent fallbacks hide bugs). A user who sets
-        ``pretrained=True`` without providing a local checkpoint path
-        gets a clear error.
+        A user who sets ``pretrained=True`` without providing a local checkpoint
+        path gets a clear :class:`NotImplementedError` straight out of
+        ``_download_weights``; see the ``# DECISION ... D-122`` note at that call
+        site for why no ``except`` clause guards it.
 
         Args:
             variant: One of the keys in :attr:`MODEL_VARIANTS`
@@ -819,19 +1012,28 @@ class ViT(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # boolean True -- delegate to _download_weights, narrow except.
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir,
-                    )
-                except (IOError, OSError, ValueError) as e:
-                    logger.warning(
-                        f"Failed to acquire pretrained weights via download: {e}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                # DECISION plan-2026-08-19T163559-499b6f0e/D-122
+                # `_download_weights` is called BARE on purpose. It raises
+                # `NotImplementedError` unconditionally, and `NotImplementedError`
+                # inherits from `RuntimeError`, NOT from `OSError`/`ValueError`
+                # (MEASURED: `issubclass(NotImplementedError, OSError)` is False,
+                # `issubclass(NotImplementedError, ValueError)` is False; `IOError`
+                # IS `OSError` on Python 3, so the deleted 3-tuple was really a
+                # 2-tuple). The former
+                # `except (IOError, OSError, ValueError): warn + random init`
+                # therefore could not fire from ANY reachable state -- a
+                # warn-and-continue branch whose own `# DECISION` comment argued it
+                # was "narrow on purpose" while closing nothing. Do NOT reinstate it
+                # and do NOT broaden the tuple to `RuntimeError`/`Exception` "to make
+                # it work": broadening is the ONE edit that turns this into a silent
+                # fallback that hands the caller a randomly initialised model when
+                # `pretrained=True` (LESSONS L53), and the repo-wide guard added at
+                # step 6 fires on exactly that shape. See decisions.md D-122.
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir,
+                )
 
             # Decide whether to enable shape-mismatch skipping.
             include_top = kwargs.get("include_top", True)
@@ -885,10 +1087,10 @@ def create_vit(
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         pos_dropout_rate: float = 0.0,
-        kernel_initializer: Union[str, initializers.Initializer] = "he_normal",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_initializer: Union[str, initializers.Initializer] = "zeros",
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Optional[Union[str, Dict[str, Any], keras.initializers.Initializer]] = None,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         normalization_type: NormalizationType = "layer_norm",
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         normalization_position: Literal['pre', 'post'] = "post",
@@ -918,12 +1120,15 @@ def create_vit(
         dropout_rate: Dropout rate for general regularization.
         attention_dropout_rate: Dropout rate for attention weights.
         pos_dropout_rate: Dropout rate for positional embeddings.
-        kernel_initializer: Weight initializer for all layers.
+        kernel_initializer: Weight initializer for all layers. Defaults to
+            ``TruncatedNormal(stddev=0.02)`` -- see :data:`REFERENCE_KERNEL_INITIALIZER`.
         kernel_regularizer: Weight regularizer for all layers.
         bias_initializer: Bias initializer for all layers.
         bias_regularizer: Bias regularizer for all layers.
         normalization_type: Type of normalization layer to use.
         normalization_position: Position of normalization in transformer layers.
+            Defaults to 'post', which is NOT the published ViT configuration
+            ('pre'); see the module docstring.
         ffn_type: Type of feed-forward network for transformer layers.
         activation: Activation function for feed-forward networks.
         **kwargs: Additional arguments for ViT constructor.
@@ -954,41 +1159,19 @@ def create_vit(
         )
         ```
     """
-    # Validate basic parameters before model creation
-    if num_classes <= 0:
-        raise ValueError(f"num_classes must be positive, got {num_classes}")
-
-    if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
-        raise ValueError(f"input_shape must be a 3-element tuple/list, got {input_shape}")
-
-    if any(dim <= 0 for dim in input_shape):
-        raise ValueError(f"All input_shape dimensions must be positive, got {input_shape}")
-
-    # Validate patch_size and ensure compatibility with input_shape
-    if isinstance(patch_size, int):
-        if patch_size <= 0:
-            raise ValueError(f"patch_size must be positive, got {patch_size}")
-        patch_h = patch_w = patch_size
-    else:
-        if not isinstance(patch_size, (tuple, list)) or len(patch_size) != 2:
-            raise ValueError(f"patch_size must be int or 2-element tuple/list, got {patch_size}")
-        patch_h, patch_w = patch_size
-        if patch_h <= 0 or patch_w <= 0:
-            raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
-
-    img_h, img_w = input_shape[:2]
-    if img_h % patch_h != 0:
-        raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
-    if img_w % patch_w != 0:
-        raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
-
-    # Calculate and validate number of patches
-    num_patches = (img_h // patch_h) * (img_w // patch_w)
-    if num_patches <= 0:
-        raise ValueError(f"Number of patches must be positive, got {num_patches}")
-    if num_patches > 10000:  # Reasonable upper limit
-        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
-
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory validates
+    # NOTHING. It used to carry eight `raise ValueError` branches -- num_classes
+    # sign, input_shape arity, input_shape sign, patch_size sign, patch_size
+    # type, patch_size element sign, and the two divisibility checks -- and
+    # `ViT.__init__` was MEASURED to raise its own `ValueError` for every one of
+    # the eight, with a near-identical message. They were dead duplication and
+    # the exact shape R-051 names. Do NOT re-add a check here "for a clearer
+    # message": two copies of a rule drift, and the copy the caller hits is the
+    # one that is NOT next to the code it constrains. Add it to `ViT.__init__`.
+    #
+    # `num_patches <= 0` was additionally UNREACHABLE: it followed the positive
+    # -dimension and divisibility checks, so the product was already >= 1.
+    #
     # Delegate to from_variant for unified pretrained-weights handling.
     model = ViT.from_variant(
         variant=variant,
@@ -1015,6 +1198,16 @@ def create_vit(
         activation=activation,
         **kwargs,
     )
+
+    # Reporting only -- derived AFTER construction, so an invalid `patch_size`
+    # has already been rejected by `ViT.__init__` and never reaches this line.
+    patch_h, patch_w = (
+        (patch_size, patch_size) if isinstance(patch_size, int) else patch_size
+    )
+    img_h, img_w = input_shape[:2]
+    num_patches = (img_h // patch_h) * (img_w // patch_w)
+    if num_patches > 10000:  # Reasonable upper limit
+        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
 
     logger.info(f"ViT variant '{variant}' created successfully")
     logger.info(f"Configuration: {num_patches} patches ({img_h // patch_h}x{img_w // patch_w}), {num_classes} classes")

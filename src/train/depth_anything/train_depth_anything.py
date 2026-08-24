@@ -112,9 +112,13 @@ class DepthAnythingTrainingConfig:
     decoder_dims: Tuple[int, ...] = (256, 128, 64, 32)
     output_channels: int = 1
     use_feature_alignment: bool = False    # see Known Issue #2 in model README
-    enable_semi_supervised: bool = False   # adds FAL term on unlabeled batches inside train_step
+    enable_semi_supervised: bool = False   # adds pseudo-label consistency on unlabeled batches inside train_step
     cutmix_prob: float = 0.5
     color_jitter_strength: float = 0.2
+    # MegaDepthDataset emits RGB in [-1, +1] (src/train/common/megadepth.py, module
+    # docstring). `None` disables the color-jitter clip: clipping this data to
+    # [0, 1] would zero every negative pixel on the training path only.
+    input_value_range: Optional[Tuple[float, float]] = None
 
     # Training
     batch_size: int = 16
@@ -145,7 +149,8 @@ class DepthAnythingTrainingConfig:
     pretrained_encoder_weights: Optional[str] = None
     # Semi-supervised: glob for unlabeled RGB images
     unlabeled_image_glob: Optional[str] = None
-    # EMA schedule for teacher updates (used when use_feature_alignment=True)
+    # EMA schedule for teacher updates (used when either use_feature_alignment
+    # or enable_semi_supervised is True — both read the teacher)
     ema_schedule: str = "none"          # one of {'cosine', 'linear', 'none'}
     ema_decay_start: float = 0.5
     ema_decay_end: float = 0.999
@@ -383,6 +388,7 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
         use_feature_alignment=config.use_feature_alignment,
         cutmix_prob=config.cutmix_prob,
         color_jitter_strength=config.color_jitter_strength,
+        input_value_range=config.input_value_range,
         encoder_kind=config.encoder_kind,
         enable_semi_supervised=config.enable_semi_supervised,
     )
@@ -524,7 +530,15 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     output_dir = Path(results_dir)
 
     # Optional EMA teacher callback (engages on-step decay schedule).
-    if config.ema_schedule != "none" and config.use_feature_alignment:
+    # DECISION plan-2026-08-17T183311-79c63e38/D-033
+    # `enable_semi_supervised` alone is enough to need the EMA teacher: the
+    # pseudo-label consistency term reads it, and the model now builds it under
+    # either flag. Gating this on `use_feature_alignment` alone left the teacher
+    # pinned at the student's initial weights for the whole run under
+    # `--enable-semi-supervised --no-use-feature-alignment`.
+    if config.ema_schedule != "none" and (
+        config.use_feature_alignment or config.enable_semi_supervised
+    ):
         total_ema_steps = max(1, steps_per_epoch * config.epochs - config.ema_warmup_steps)
         if config.ema_schedule == "cosine":
             schedule_fn = cosine_ema_schedule(
@@ -675,7 +689,10 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cutmix-prob", type=float, default=0.5,
-        help="Probability of applying CutMix during training",
+        help=(
+            "Probability of applying CutMix during training. The depth target is "
+            "mixed by the same box as the image (model.train_step)."
+        ),
     )
     parser.add_argument(
         "--color-jitter-strength", type=float, default=0.2,

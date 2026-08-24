@@ -19,6 +19,7 @@ from dl_techniques.losses.capsule_margin_loss import (
     CapsuleMarginLoss,
     analyze_margin_loss_components
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 @pytest.fixture
@@ -341,6 +342,10 @@ def test_capsule_margin_loss_serialization() -> None:
     # Save the model to a temporary file
     with tempfile.TemporaryDirectory() as tmp_dir:
         model_path = os.path.join(tmp_dir, 'capsule_model.keras')
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(model)
         model.save(model_path)
         logger.info(f"Model saved to {model_path}")
 

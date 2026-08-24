@@ -19,6 +19,12 @@ from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
 from dl_techniques.utils.tensors import length
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    build_seeded,
+    as_array,
+)
+
 
 class TestCapsuleAccuracy:
     """Test suite for CapsuleAccuracy metric."""
@@ -348,11 +354,28 @@ class TestCapsNet:
             assert outputs["length"].shape == (2, num_classes)
 
     def test_different_capsule_configurations(self, mnist_input_shape):
-        """Test with different capsule configurations."""
+        """The capsule counts and dims must reach the parameterisation.
+
+        These are structural knobs, so an output-difference check between the
+        two configs would be satisfied by the different random draw alone. The
+        weight-shape signature is the discriminating fact; the per-config shape
+        assertions below are kept because they pin the *contract* (which the
+        signature does not).
+        """
         configs = [
             {"num_classes": 5, "primary_capsules": 16, "primary_capsule_dim": 4, "digit_capsule_dim": 8},
             {"num_classes": 20, "primary_capsules": 64, "primary_capsule_dim": 16, "digit_capsule_dim": 32},
         ]
+
+        def _build(cfg):
+            model = CapsNet(input_shape=mnist_input_shape, reconstruction=False, **cfg)
+            model(tf.zeros([1] + list(mnist_input_shape)))
+            return model
+
+        builders = {
+            i: (lambda cfg=cfg: _build(cfg)) for i, cfg in enumerate(configs)
+        }
+        assert_structural_knob_changes_weights(builders, knob="capsule configuration")
 
         for config in configs:
             capsnet = CapsNet(
@@ -368,12 +391,40 @@ class TestCapsNet:
             assert outputs["length"].shape == (2, config["num_classes"])
 
     def test_different_conv_filters(self, num_classes, mnist_input_shape):
-        """Test with different convolutional filter configurations."""
+        """``conv_filters`` must build the requested conv stack.
+
+        `length` has shape ``(2, num_classes)`` for every filter list, so the
+        old shape assertion was true whether or not the list reached the graph.
+        The stack depth is structural: one more entry means strictly more conv
+        weight tensors.
+        """
         filter_configs = [
             [128],
             [256, 128],
             [64, 128, 256],
         ]
+
+        def _build(filters):
+            model = CapsNet(
+                num_classes=num_classes,
+                input_shape=mnist_input_shape,
+                conv_filters=filters,
+                reconstruction=False,
+            )
+            model(tf.zeros([1] + list(mnist_input_shape)))
+            return model
+
+        builders = {
+            tuple(f): (lambda f=f: _build(f)) for f in filter_configs
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="conv_filters")
+        for f in filter_configs:
+            widths = [w[-1] for w in sigs[tuple(f)] if len(w) == 4]
+            for requested in f:
+                assert requested in widths, (
+                    f"conv_filters={f} produced no conv with {requested} output "
+                    f"channels; conv widths were {widths}"
+                )
 
         for filters in filter_configs:
             capsnet = CapsNet(
@@ -458,19 +509,38 @@ class TestCapsNet:
         assert metrics["reconstruction_loss"].numpy() == 0.0
 
     def test_different_margin_parameters(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
-        """Test with different margin loss parameters."""
-        capsnet = CapsNet(
-            num_classes=num_classes,
-            input_shape=mnist_input_shape,
-            positive_margin=0.95,
-            negative_margin=0.05,
-            downweight=0.3,
-            reconstruction=False
-        )
-        capsnet.compile(optimizer="adam")
+        """The margin parameters must change the margin loss they parameterise.
 
-        metrics = capsnet.train_step((sample_mnist_data, sample_labels))
-        assert "margin_loss" in metrics
+        ``"margin_loss" in metrics`` is true for every margin setting, including
+        one that never reaches the loss. These are value knobs -- they do not
+        touch the parameterisation -- so two identically seeded models differ
+        only in the margins, and the loss they report must differ.
+        """
+        margins = {
+            "default": dict(positive_margin=0.9, negative_margin=0.1, downweight=0.5),
+            "tight": dict(positive_margin=0.95, negative_margin=0.05, downweight=0.3),
+        }
+
+        def _loss(cfg):
+            model = build_seeded(lambda: CapsNet(
+                num_classes=num_classes,
+                input_shape=mnist_input_shape,
+                reconstruction=False,
+                **cfg,
+            ))
+            model.compile(optimizer="adam")
+            metrics = model.train_step((sample_mnist_data, sample_labels))
+            assert "margin_loss" in metrics
+            return float(as_array(metrics["margin_loss"]))
+
+        losses = {k: _loss(cfg) for k, cfg in margins.items()}
+        delta = abs(losses["default"] - losses["tight"])
+        # Same seed, same parameterisation, same batch: the only difference is
+        # the margins, so this delta is entirely attributable to them.
+        assert delta > 1e-5, (
+            f"margin parameters are a no-op: margin_loss was {losses} "
+            f"(delta {delta:.3e})"
+        )
 
     def test_serialization(self, num_classes, mnist_input_shape):
         """Test serialization and deserialization."""
@@ -511,7 +581,34 @@ class TestCapsNet:
         assert recreated_capsnet.reconstruction_weight == original_capsnet.reconstruction_weight
 
     def test_model_save_load(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
-        """Test saving and loading a CapsNet model."""
+        """Test saving and loading a CapsNet model.
+
+        HISTORY -- this test carried `xfail(strict=True)` from 2026-08-18 until
+        plan-2026-08-18T073231-52a93f8c/iter-1/step-8. The pinned defect: CapsNet
+        lost EVERY kernel on a `.keras` round trip. Weight paths and shapes all
+        matched (16 weights, identical paths) while the values did not --
+        conv_1/kernel differed by 0.686, conv_2/kernel by 0.080,
+        primary_caps/primary_conv/kernel by 0.045,
+        digit_caps/capsule_transformation_weights by 0.022, i.e. the restored
+        kernels were FRESH. Only the tensors whose trained value still equalled
+        their initializer (biases, BN gamma/beta/moving stats) "matched", and
+        only by coincidence. Cause: `CapsNet.build()` overrode `keras.Model.build`
+        without building its sub-layer tree, which disables Keras'
+        `is_default(self.build)` build-by-run fallback while `build_from_config`
+        swallows the incomplete build in a bare `try/except` -- so the loss was
+        silent. Fixed by `CapsNet._build_sublayer_tree` (see that method's
+        `# DECISION .../D-006` anchor and decisions.md D-006).
+
+        The pin was strict, so removing it is itself the red-proof. It is kept
+        removed rather than deleted-and-forgotten because the original
+        instrument -- SHAPE equality only -- was blind to this failure mode
+        (reference_nested_sublayer_list_loses_weights.md). This test therefore
+        now asserts the DISCRIMINATING quantity: the weight count BEFORE the
+        first `call()` on the loaded model. A post-`call()` count is 16 either
+        way, because lazy build re-creates fresh variables; only the pre-call
+        count separates fixed from broken (measured: 0 before the fix, 16
+        after). Per-weight VALUES are compared too, not just outputs.
+        """
         # Create and compile model
         capsnet = CapsNet(
             num_classes=num_classes,
@@ -526,6 +623,11 @@ class TestCapsNet:
 
         # Generate prediction before saving
         original_outputs = capsnet(sample_mnist_data, training=False)
+
+        donor_weights = {w.path: keras.ops.convert_to_numpy(w) for w in capsnet.weights}
+        assert len(donor_weights) == 16, (
+            f"expected 16 donor weights for this configuration, got {len(donor_weights)}"
+        )
 
         # Create temporary directory for model
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -547,12 +649,227 @@ class TestCapsNet:
                 }
             )
 
+            # THE DISCRIMINATING MEASUREMENT, and it must run BEFORE the first
+            # `call()` on the loaded model: a broken build lazily materializes
+            # fresh variables on first call, so a post-call count is 16 either
+            # way. Measured 0 before the step-8 fix, 16 after.
+            assert len(loaded_capsnet.weights) == 16, (
+                "loaded model has "
+                f"{len(loaded_capsnet.weights)} weights before its first call, "
+                "expected 16 -- the sub-layer tree was not built by "
+                "`build_from_config`, so the saved arrays had nowhere to land"
+            )
+
+            # Per-weight VALUE equality. Shape equality was the ONLY check here,
+            # and it is exactly the instrument that misses this repo's recorded
+            # `List[List[Layer]]` round-trip failure, where weight count, layer
+            # paths and parameter totals all matched while the restored kernels
+            # were FRESH (reference_nested_sublayer_list_loses_weights.md).
+            loaded_weights = {
+                w.path: keras.ops.convert_to_numpy(w) for w in loaded_capsnet.weights
+            }
+            assert set(loaded_weights.keys()) == set(donor_weights.keys())
+            for path, donor_value in donor_weights.items():
+                np.testing.assert_allclose(
+                    donor_value,
+                    loaded_weights[path],
+                    rtol=1e-6, atol=1e-7,
+                    err_msg=f"weight '{path}' was not restored from the checkpoint",
+                )
+
             # Generate prediction with loaded model
             loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
 
-            # Check output shapes match
+            assert set(original_outputs.keys()) == set(loaded_outputs.keys())
             for key in original_outputs.keys():
-                assert original_outputs[key].shape == loaded_outputs[key].shape
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(original_outputs[key]),
+                    keras.ops.convert_to_numpy(loaded_outputs[key]),
+                    rtol=1e-5, atol=1e-6,
+                    err_msg=f"'{key}' differs after a save/load round trip",
+                )
+
+    def test_model_save_load_with_reconstruction(
+        self, num_classes, mnist_input_shape, sample_mnist_data
+    ):
+        """Round-trip the RECONSTRUCTION path, whose decoder was never probed.
+
+        The decoder is a `keras.Sequential`, and `Sequential` normally builds its
+        own sublayers by running them, so it was an open question whether it
+        rescued itself. It does NOT, and this test can fail: measured
+        2026-08-18 against a subclass that builds the whole tree EXCEPT the
+        decoder, `loaded.weights` holds 16 of 22 before the first call and the
+        six decoder tensors come back FRESH (decoder_hidden_1/kernel off by
+        0.521, decoder_hidden_2/kernel by 0.302, decoder_output/kernel by
+        0.219, the three biases by exactly the perturbation), which moves
+        `reconstructed` by 0.582 while `digit_caps` and `length` stay at exactly
+        0.0 -- so `test_model_save_load`, which runs `reconstruction=False`,
+        cannot see this at all. The decoder's explicit build in
+        `CapsNet._build_sublayer_tree` is therefore load-bearing, not
+        belt-and-braces.
+        """
+        capsnet = CapsNet(
+            num_classes=num_classes,
+            input_shape=mnist_input_shape,
+            reconstruction=True,
+            name="recon_capsnet",
+        )
+
+        # Build, then move every weight off its initializer. A restored tensor
+        # that still equals its initializer is indistinguishable from one that
+        # was never loaded, which is how the biases "matched" under the defect.
+        _ = capsnet(sample_mnist_data, training=False)
+        for weight in capsnet.weights:
+            weight.assign(weight + 0.02)
+
+        donor_weights = {w.path: keras.ops.convert_to_numpy(w) for w in capsnet.weights}
+        assert len(donor_weights) == 22, (
+            f"expected 22 donor weights with reconstruction on, got {len(donor_weights)}"
+        )
+
+        original_outputs = capsnet(sample_mnist_data, training=False)
+        assert "reconstructed" in original_outputs
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "capsnet_reconstruction.keras")
+            capsnet.save(model_path)
+
+            loaded_capsnet = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "CapsNet": CapsNet,
+                    "PrimaryCapsule": PrimaryCapsule,
+                    "RoutingCapsule": RoutingCapsule,
+                    "CapsuleAccuracy": CapsuleAccuracy,
+                    "capsule_margin_loss": capsule_margin_loss,
+                    "length": length,
+                },
+            )
+
+            # BEFORE the first call: the discriminating count. 16 (not 22) is
+            # the signature of an unbuilt decoder specifically.
+            assert len(loaded_capsnet.weights) == 22, (
+                f"loaded model has {len(loaded_capsnet.weights)} weights before "
+                "its first call, expected 22 -- 16 means the decoder Sequential "
+                "was not built, so its six tensors had nowhere to land"
+            )
+
+            loaded_weights = {
+                w.path: keras.ops.convert_to_numpy(w) for w in loaded_capsnet.weights
+            }
+            assert set(loaded_weights.keys()) == set(donor_weights.keys())
+            for path, donor_value in donor_weights.items():
+                np.testing.assert_allclose(
+                    donor_value,
+                    loaded_weights[path],
+                    rtol=1e-6, atol=1e-7,
+                    err_msg=f"weight '{path}' was not restored from the checkpoint",
+                )
+
+            loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
+
+            assert set(original_outputs.keys()) == set(loaded_outputs.keys())
+            for key in original_outputs.keys():
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(original_outputs[key]),
+                    keras.ops.convert_to_numpy(loaded_outputs[key]),
+                    rtol=1e-5, atol=1e-6,
+                    err_msg=f"'{key}' differs after a save/load round trip",
+                )
+
+    def test_save_load_reconstruction_without_input_shape(
+        self, num_classes, sample_mnist_data
+    ):
+        """The D-007 deviation branch: decoder created in ``build()``.
+
+        Every other ``reconstruction=True`` call site in this suite passes
+        ``input_shape=`` to ``__init__``, so the decoder is created eagerly
+        there and the ANCHORED deviation -- the one branch where creation
+        genuinely cannot happen in ``__init__``, because the decoder's output
+        width is ``prod(input_shape[1:])`` and nothing knows it yet -- had no
+        coverage at all.
+
+        What this pins, in order: the decoder really is ``None`` after
+        ``__init__`` (otherwise the branch is not being exercised);
+        ``get_config()`` reports the shape captured during ``build()`` rather
+        than ``None`` (otherwise the reload constructs a different model); the
+        loaded model carries all 22 weights BEFORE its first ``call()`` (16
+        would mean the decoder Sequential was never built); and all three
+        outputs match exactly.
+        """
+        capsnet = CapsNet(
+            num_classes=num_classes,
+            reconstruction=True,
+            name="recon_no_shape_capsnet",
+        )
+        assert capsnet.decoder is None, (
+            "the decoder must NOT exist after __init__ when input_shape was "
+            "not supplied -- otherwise this test is not exercising the D-007 "
+            "deviation branch at all"
+        )
+
+        _ = capsnet(sample_mnist_data, training=False)
+        assert capsnet.decoder is not None, "build() must have created it"
+
+        config = capsnet.get_config()
+        assert tuple(config["input_shape"]) == tuple(sample_mnist_data.shape[1:]), (
+            f"get_config must report the shape captured in build(), got "
+            f"{config['input_shape']!r}"
+        )
+
+        for weight in capsnet.weights:
+            weight.assign(weight + 0.02)
+
+        donor_weights = {
+            w.path: keras.ops.convert_to_numpy(w) for w in capsnet.weights
+        }
+        assert len(donor_weights) == 22
+
+        original_outputs = capsnet(sample_mnist_data, training=False)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "capsnet_recon_no_shape.keras")
+            capsnet.save(model_path)
+
+            loaded_capsnet = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "CapsNet": CapsNet,
+                    "PrimaryCapsule": PrimaryCapsule,
+                    "RoutingCapsule": RoutingCapsule,
+                    "CapsuleAccuracy": CapsuleAccuracy,
+                    "capsule_margin_loss": capsule_margin_loss,
+                    "length": length,
+                },
+            )
+
+            assert len(loaded_capsnet.weights) == 22, (
+                f"loaded model has {len(loaded_capsnet.weights)} weights before "
+                "its first call, expected 22"
+            )
+
+            loaded_weights = {
+                w.path: keras.ops.convert_to_numpy(w)
+                for w in loaded_capsnet.weights
+            }
+            assert set(loaded_weights.keys()) == set(donor_weights.keys())
+            for path, donor_value in donor_weights.items():
+                np.testing.assert_allclose(
+                    donor_value,
+                    loaded_weights[path],
+                    rtol=1e-6, atol=1e-7,
+                    err_msg=f"weight '{path}' was not restored",
+                )
+
+            loaded_outputs = loaded_capsnet(sample_mnist_data, training=False)
+            assert set(original_outputs.keys()) == set(loaded_outputs.keys())
+            for key in original_outputs.keys():
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(original_outputs[key]),
+                    keras.ops.convert_to_numpy(loaded_outputs[key]),
+                    rtol=1e-5, atol=1e-6,
+                    err_msg=f"'{key}' differs after a save/load round trip",
+                )
 
     def test_training_integration(self, num_classes, mnist_input_shape, sample_mnist_data, sample_labels):
         """Test training integration with fit() method."""
@@ -756,7 +1073,11 @@ class TestCapsNet:
         capsnet.summary()
 
     def test_save_model_method(self, num_classes, mnist_input_shape):
-        """Test the save_model method."""
+        """The archive must contain the WEIGHTS, not just exist.
+
+        Before D-053 this test asserted only ``os.path.exists`` and passed
+        against a 31,587-byte archive holding zero weights.
+        """
         capsnet = CapsNet(
             num_classes=num_classes,
             input_shape=mnist_input_shape
@@ -765,14 +1086,28 @@ class TestCapsNet:
         with tempfile.TemporaryDirectory() as tmpdirname:
             model_path = os.path.join(tmpdirname, "test_model.keras")
 
-            # Should not raise an error
+            # `save_model` builds an unbuilt model from its own `input_shape`.
             capsnet.save_model(model_path)
 
-            # File should exist
             assert os.path.exists(model_path)
+            assert capsnet.built, "save_model must leave the model built"
+            assert len(capsnet.trainable_weights) > 0
+
+    def test_saving_an_unbuildable_capsnet_is_refused(self, num_classes):
+        """No `input_shape` anywhere means no weights to save -- say so."""
+        capsnet = CapsNet(num_classes=num_classes, reconstruction=False)
+        assert not capsnet.built
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "empty.keras")
+            with pytest.raises(ValueError, match="unbuilt CapsNet"):
+                capsnet.save_model(model_path)
+            assert not os.path.exists(model_path), (
+                "an empty archive was written before the refusal"
+            )
 
     def test_load_model_method(self, num_classes, mnist_input_shape):
-        """Test the load_model class method."""
+        """The round trip must carry the weight VALUES, not just the class."""
         capsnet = CapsNet(
             num_classes=num_classes,
             input_shape=mnist_input_shape,
@@ -790,6 +1125,19 @@ class TestCapsNet:
 
             assert isinstance(loaded_capsnet, CapsNet)
             assert loaded_capsnet.num_classes == num_classes
+
+            original = capsnet.get_weights()
+            restored = loaded_capsnet.get_weights()
+            assert len(original) > 0, "the source model held no weights"
+            assert len(restored) == len(original), (
+                f"round trip restored {len(restored)} weight arrays, "
+                f"saved {len(original)}"
+            )
+            for index, (before, after) in enumerate(zip(original, restored)):
+                np.testing.assert_allclose(
+                    before, after, rtol=0, atol=0,
+                    err_msg=f"weight array {index} changed across the round trip"
+                )
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

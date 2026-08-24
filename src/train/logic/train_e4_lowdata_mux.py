@@ -35,6 +35,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from train.common import set_seeds
 from train.logic.train_benchmark import (
     build_circuit,
     build_mlp,
@@ -68,8 +69,7 @@ def _train_keras(model, x_tr, y_tr, x_te, y_te, epochs):
 def run_cell(N: int, model_name: str, seed: int) -> Dict[str, Any]:
     logger.info(f"--- MUX-11 N={N} / {model_name} / seed={seed} ---")
     t0 = time.time()
-    keras.utils.set_random_seed(seed)
-    np.random.seed(seed)
+    set_seeds(seed)
 
     rng_tr = np.random.default_rng(seed)
     rng_te = np.random.default_rng(999 + seed)

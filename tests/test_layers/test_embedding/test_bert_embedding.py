@@ -604,9 +604,45 @@ class TestOptionalBranches:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-        assert err_f64 < 1e-13, (
-            f"float64 policy yields only {err_f64:.3e} error against a float64 "
-            f"oracle -- the table is still being computed in float32"
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-080
+        # The threshold used to be a literal 1e-13 and this test was RED at 4.529e-13
+        # for its whole lifetime. The layer is NOT computing in float32 -- that was the
+        # conjecture, and it is REFUTED by measurement. `bert_embeddings.py` gates on
+        # `variable_dtype` and computes the table in genuine float64. The residual comes
+        # from `ops.exp` and `np.exp` disagreeing by ONE ULP on `div_term` (measured
+        # relative difference 2.06e-16), which is then MULTIPLIED by the position index:
+        # at position 4095 that 1-ulp seed becomes an angle difference of 4.547e-13, and
+        # sin/cos are 1-Lipschitz, so it arrives essentially undiminished at the output.
+        # `ops.sin`/`np.sin` themselves agree BIT-EXACTLY at every position tested, so
+        # the trigonometry is not the source.
+        #
+        # The bound is therefore derived from the position, not pasted:
+        #     max_position * eps_f64 * TAIL
+        # Do NOT restore a position-independent literal: raise `max_position` and a fixed
+        # number silently becomes unattainable again, which is how this line got here.
+        # See decisions.md D-080.
+        max_position = float(positions.max())
+        eps_f64 = float(np.finfo(np.float64).eps)
+        bound = 4.0 * max_position * eps_f64
+        assert err_f64 < bound, (
+            f"float64 policy yields {err_f64:.3e} error against a float64 oracle, above "
+            f"the {bound:.3e} bound implied by a 1-ulp div_term difference amplified by "
+            f"position {max_position:.0f} -- the table is being computed too narrowly"
+        )
+
+        # Anti-vacuity: the bound must still SEE a float32 computation. Recompute the
+        # same table with a float32 div_term and require it to blow the bound by orders
+        # of magnitude.
+        angles_f32 = positions[0].astype('float64')[:, None] * np.exp(
+            np.arange(0, d, 2, dtype='float32') * np.float32(-(np.log(10000.0) / d))
+        ).astype('float64')
+        narrow = np.zeros_like(oracle)
+        narrow[:, 0::2] = np.sin(angles_f32)
+        narrow[:, 1::2] = np.cos(angles_f32)
+        err_f32 = float(np.max(np.abs(narrow - oracle)))
+        assert err_f32 > 100.0 * bound, (
+            f"a float32 div_term yields only {err_f32:.3e} error, not comfortably above "
+            f"the {bound:.3e} bound -- the bound would be vacuous"
         )
 
         # Control: the float32 policy is UNCHANGED (float32 is a floor, not a

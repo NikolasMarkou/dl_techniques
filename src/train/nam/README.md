@@ -471,6 +471,7 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
 | `--w-operator` | 3.0 | Operator classification loss weight |
 | `--w-reduction` | 5.0 | Reduction target loss weight (keep high) |
 | `--result-loss-weight` | 1.0 | Result head loss weight |
+| `--w-halt` | 0.5 | ACT halting BCE weight (S6). `q_halt` is trained to predict whether the current step is already within 1% relative error — the same threshold the eval path reports as `exact_acc`. Before 2026-08-15 there was NO halting loss in this file: `q_halt_logits` / `q_continue_logits` were collected into lists nothing consumed, so the head was untrained and (in the model) unread at inference, and `--halt-exploration-prob` / `halt_max_steps` had no measurable effect. `--w-halt 0` reproduces that. Only the `q_halt` arm exists: NAM halts on `q_halt > 0`, so `q_continue` is not on the decision path. |
 | `--clip-norm` | 10.0 | Global gradient clip norm |
 | `--eval-interval` | 1000 | Digit accuracy matrix eval frequency |
 | `--min-val` / `--max-val` | from phase | Override operand value range |

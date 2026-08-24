@@ -1,114 +1,80 @@
 """
-Rigid Simplex Layer with learnable rotation and bounded scaling.
+Rigid simplex projection with learnable rotation and bounded scaling.
 
-This module implements a constrained projection layer that maintains fixed
-geometric structure while allowing training for rotation alignment and scaling.
+This layer embodies the principle of constrained geometric parameterization, a
+design paradigm that fixes the geometry of a weight matrix and lets training
+adjust only how the input is presented to it. The core idea is to replace a
+freely learned linear map with a frozen Equiangular Tight Frame, so the layer
+performs template matching against a rigid simplex of maximally separated
+directions rather than discovering arbitrary filter shapes. The learnable
+degrees of freedom collapse from a full `input_dim x units` matrix to a rotation
+and a single scalar, which constrains what the layer can express while
+guaranteeing properties that an unconstrained matrix must learn by luck.
 
-Mathematical Background: Equiangular Tight Frames (ETF)
-========================================================
+The frozen matrix is a regular simplex centered at the origin, which is the
+canonical ETF. Its defining property is maximum repulsion: `N` dimensions admit
+only `N` mutually orthogonal vectors, so fitting `N+1` symmetric directions into
+the same space forces them past orthogonality into mutual obtuseness. For unit
+rows `v_i`:
 
-In Linear Algebra, a Regular Simplex centered at the origin is a specific type
-of matrix called an **Equiangular Tight Frame (ETF)**.
+`v_i . v_i = 1`
+`v_i . v_j = -1/N`   for `i != j`
 
-1. The Vectors: "Maximum Repulsion"
------------------------------------
+The corresponding Gram matrix carries ones on its diagonal and `-1/N` elsewhere,
+which is the theoretical minimum coherence achievable for `N+1` vectors. Three
+consequences follow, each of which matters for a network:
 
-Geometrically, a simplex consists of points equidistant from each other. In
-Linear Algebra, we treat these points as vectors originating from the origin.
+1.  **Maximal diversity.** Because off-diagonal coherence is at its lower bound,
+    no two output directions are more aligned than geometry permits, so no pair
+    of units is redundant by construction.
+2.  **Rank deficiency and equilibrium.** With `N+1` rows in `N`-dimensional
+    space the matrix has rank `N`, and the rows are linearly dependent in the
+    strongest possible way: `sum_i v_i = 0`. The frame is in exact equilibrium,
+    with no net direction favored.
+3.  **Isometry and whiteness.** The covariance matrix is a scaled identity,
+    `V^T V = ((N+1)/N) I`, so the map neither stretches nor shrinks signal
+    magnitude and its columns are perfectly uncorrelated. This is the
+    initialization property that gradient-preserving schemes approximate; here
+    it holds exactly and is never degraded by training, since the frame is
+    non-trainable.
 
-If you have N dimensions, you can fit N orthogonal (perpendicular) vectors
-with dot product exactly 0. However, if you want to squeeze **N+1** vectors
-into that same space while keeping them perfectly symmetric, they cannot be
-orthogonal (90 degrees). They must "push away" from each other as much as
-mathematically possible.
+Architecturally, the forward pass composes three stages:
 
-**The Linear Algebra Rule:**
+`output = s * (x R) S`
 
-For a regular simplex centered at the origin with unit vectors v_i:
+where `S` is the frozen simplex of shape `(input_dim, units)`, `R` is a
+trainable `(input_dim, input_dim)` rotation, and `s` is a scalar. Because the
+simplex is fixed, alignment is entirely the rotation's job: `R` learns which
+directions of the input space should map onto which vertices of the simplex.
+Orthogonality of `R` is enforced softly, by an auxiliary penalty rather than a
+hard reparameterization:
 
-- **Self-alignment:** v_i . v_i = 1 (Length is 1)
-- **Cross-alignment:** v_i . v_j = -1/N (for i != j)
+`L_ortho = lambda * ||R^T R - I||^2`
 
-This negative dot product means every vector is slightly pointing *away*
-from every other vector.
+A soft constraint is the pragmatic choice here because hard orthogonalization
+would require a matrix decomposition or a Cayley/exponential map on every step,
+and small departures from orthogonality are harmless: they perturb the isometry
+of the composite map slightly rather than breaking it. The scale `s` is held
+inside `[scale_min, scale_max]` by a value-range constraint applied after each
+update, which restores the one degree of magnitude freedom the frozen frame
+removes while preventing it from growing without bound and defeating the purpose
+of the fixed geometry.
 
-2. The Gram Matrix
-------------------
+When `units` exceeds the `input_dim + 1` vertices a simplex provides, the frame
+is tiled and truncated to the requested width. This necessarily repeats
+directions, so the equiangular and isometry guarantees hold only within each
+tile rather than across the full output.
 
-If you stack these vectors into a matrix V (where each row is a point), and
-calculate the correlation matrix (Gram Matrix G = V @ V.T), you get a very
-specific, beautiful structure.
+References:
+    - Papyan et al., 2020. Prevalence of Neural Collapse during the Terminal
+      Phase of Deep Learning Training. (https://arxiv.org/abs/2008.08186)
+    - Strohmer and Heath, 2003. Grassmannian Frames with Applications to Coding
+      and Communication. Applied and Computational Harmonic Analysis 14(3).
+    - Saxe et al., 2014. Exact Solutions to the Nonlinear Dynamics of Learning
+      in Deep Linear Networks. (https://arxiv.org/abs/1312.6120)
+    - Bansal et al., 2018. Can We Gain More from Orthogonality Regularizations
+      in Training Deep Networks? (https://arxiv.org/abs/1810.09102)
 
-For a 2D Simplex (Triangle, 3 points), N=2::
-
-    G = [[ 1.0, -0.5, -0.5],
-         [-0.5,  1.0, -0.5],
-         [-0.5, -0.5,  1.0]]
-
-For an N-dimensional Simplex (N+1 points)::
-
-    G[i,i] = 1      (diagonal)
-    G[i,j] = -1/N   (off-diagonal, i != j)
-
-**Why this matters for Neural Networks:**
-
-Minimizing the off-diagonal elements of this matrix is called "minimizing
-coherence." The Simplex is the theoretical limit of how small you can make
-the off-diagonal elements for N+1 vectors. This maximizes the **diversity**
-of the neurons.
-
-3. Linear Dependence (Rank)
----------------------------
-
-This is the most counter-intuitive part:
-
-- You have N+1 vectors (rows)
-- You are in N dimensional space (columns)
-
-Therefore, the matrix is **Rank Deficient**. The Rank is N, not N+1.
-This means the vectors are **Linearly Dependent**::
-
-    sum(v_i for i in 1..N+1) = 0
-
-**In English:** If you sum up all the vectors in a simplex, they perfectly
-cancel each other out to zero.
-
-**In Physics:** It is a state of perfect equilibrium. If you put identical
-springs between all the vertices, the net force on the center is zero.
-
-4. Eigenvalues (The "Isometry")
--------------------------------
-
-If V is our simplex matrix (shape (N+1, N)):
-
-1. **V @ V.T (Gram Matrix):** Describes the angles between points.
-   Has 1s on diagonal and -1/N elsewhere.
-
-2. **V.T @ V (Covariance Matrix):** Describes how the space is stretched.
-
-For a regular simplex::
-
-    V.T @ V = ((N+1) / N) * I
-
-This is the "Holy Grail" property for Deep Learning initialization:
-
-- **Isometry:** The matrix preserves the magnitude of gradients. It doesn't
-  stretch or shrink the signal as it passes through.
-- **Whiteness:** The features defined by these vectors are perfectly
-  uncorrelated in the embedding space.
-
-Summary
--------
-
-This module generates a matrix W such that:
-
-1. **Rows are normalized:** ||w_i|| = 1
-2. **Rows are maximally separated:** w_i . w_j = -1/N
-3. **Columns are orthogonal:** W.T @ W is proportional to I
-
-It creates a "rigid crystal" of vectors that are perfectly balanced in space,
-ensuring that no direction is favored over another and every neuron is as
-different from its neighbors as mathematically possible.
 """
 
 import keras

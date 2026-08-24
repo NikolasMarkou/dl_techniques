@@ -1,49 +1,49 @@
 """
-Vision Transformer with Hierarchical MLP Stem - Modern Implementation
+Vision Transformer with a hierarchical MLP (hMLP) patch stem.
 
-This module provides a Vision Transformer model with Hierarchical MLP (hMLP) stem,
-designed for compatibility with the dl-techniques framework. The implementation follows
-modern Keras 3 lifecycle patterns and leverages the framework's factory system for
-consistent component creation.
+A standard ViT embeds each patch with a single linear projection. Replacing that
+with a small convolutional stem improves supervised accuracy, but it also breaks
+masked self-supervised pretraining: a convolutional stem has a receptive field
+wider than one patch, so a masked patch's neighbours leak into its embedding and
+the model can partially see what it is being asked to reconstruct. The hMLP stem
+resolves the tension by keeping the improvement and refusing the leak.
 
-PAPER REFERENCE:
----------------
-"Three things everyone should know about Vision Transformers"
-Hugo Touvron, Matthieu Cord, Alaaeldin El-Hassany, Matthijs Douze, Armand Joulin, Hervé Jégou
-https://arxiv.org/abs/2203.09795
+It processes each patch INDEPENDENTLY through a hierarchy of linear projections
+with normalization and non-linearity between them, halving the token grid at each
+step. As implemented (`layers/hierarchical_mlp_stem.py`) the hierarchy starts with
+a 4x4 stride-4 convolution and then stacks 2x2 stride-2 stages, so for the default
+16-pixel patch it is THREE stages covering 4x4 -> 8x8 -> 16x16 pixels; there is no
+2x2-pixel stage. Because no
+operation ever crosses a patch boundary, masking before the stem and masking
+after it produce identical results — which is exactly the property BeiT and MAE
+need, and exactly what a convolutional stem cannot offer. The cost is under 1%
+of FLOPs.
 
-HIERARCHICAL MLP STEM OVERVIEW:
-------------------------------
-The hMLP stem is a revolutionary patch preprocessing technique that addresses key limitations
-of traditional Vision Transformers while maintaining compatibility with masked self-supervised
-learning approaches. Unlike convolutional stems that cause information leakage between patches,
-the hMLP stem processes each patch independently through a hierarchical structure.
+`stem_norm_layer` chooses between BatchNorm and LayerNorm inside the stem.
+BatchNorm performs better but couples examples within a batch; LayerNorm is the
+stable choice at small batch sizes. Everything after the stem is a conventional
+pre-norm transformer encoder built from the repo's `TransformerLayer`, so the
+attention, FFN and normalization types are all selectable through the same
+factories the rest of the library uses.
 
-STEM ARCHITECTURE:
-- Progressive patch processing: 2×2 → 4×4 → 8×8 → 16×16 pixels
-- Independent patch processing (no cross-patch information leakage)
-- Linear projections with normalization and non-linearity at each stage
-- Minimal computational overhead (<1% FLOPs increase vs standard ViT)
-- Compatible with both BatchNorm (better performance) and LayerNorm (stable for small batches)
+`pooling` selects how a sequence becomes a vector when `include_top=False`:
+`cls` takes the class token, `mean` averages the patch tokens, `max` takes their
+maximum. Note that positional-mode pooling over a padded sequence is a known
+hazard elsewhere in this library; here the sequence length is fixed by the patch
+grid, so the modes are unambiguous.
 
-KEY ADVANTAGES:
---------------
-1. **Masked Self-Supervised Learning Compatibility**:
-   - Perfect compatibility with BeiT, MAE, and other mask-based approaches
-   - Masking can be applied before or after stem with identical results
-   - No information leakage between patches (unlike convolutional stems)
+Variants follow the standard ViT ladder as `(embed_dim, num_heads, num_layers,
+mlp_ratio)`, from tiny at 192 wide to huge at 1280.
 
-2. **Performance Benefits**:
-   - Supervised learning: ~0.3% accuracy improvement over standard ViT
-   - BeiT pre-training: +0.4% accuracy improvement over linear projection
-   - Matches or exceeds convolutional stem performance for supervised learning
-
-EXPERIMENTAL RESULTS FROM PAPER:
--------------------------------
-- Supervised ViT-B with Linear stem: 82.2% top-1 accuracy on ImageNet
-- Supervised ViT-B with hMLP stem: 82.5% top-1 accuracy (+0.3%)
-- BeiT+FT ViT-B with Linear stem: 83.1% top-1 accuracy
-- BeiT+FT ViT-B with hMLP stem: 83.4% top-1 accuracy (+0.3%)
+References:
+    - Touvron et al., 2022. Three things everyone should know about Vision
+      Transformers. (https://arxiv.org/abs/2203.09795)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
+      Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Bao et al., 2021. BEiT: BERT Pre-Training of Image Transformers.
+      (https://arxiv.org/abs/2106.08254)
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
 """
 
 import keras
@@ -55,12 +55,17 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -86,7 +91,7 @@ class ViTHMLP(keras.Model):
     dl-techniques framework's factory system for consistent component creation and follows modern
     Keras 3 best practices for robust serialization and deployment.
 
-    **Intent**: Provide a production-ready Vision Transformer implementation with hMLP stem that
+    **Intent**: Provide a configurable Vision Transformer implementation with hMLP stem that
     leverages the dl-techniques framework's modular components while following modern Keras 3 best
     practices for robust serialization and deployment. The hMLP stem provides superior performance
     for both supervised learning and masked self-supervised learning approaches.
@@ -96,7 +101,7 @@ class ViTHMLP(keras.Model):
     Input Images (batch, height, width, channels)
            ↓
     HierarchicalMLPStem → Patches (batch, num_patches, embed_dim)
-      ↓ 2×2 → 4×4 → 8×8 → 16×16 pixel processing
+      ↓ 4×4 → 8×8 → 16×16 pixel processing (three stages, 4x4 stride-4 first)
            ↓
     Add CLS Token → (batch, seq_len, embed_dim)
            ↓
@@ -112,7 +117,7 @@ class ViTHMLP(keras.Model):
     ```
 
     **hMLP Stem Processing**:
-    1. **Progressive Resolution**: Patches processed at 2×2, 4×4, 8×8, 16×16 pixel scales
+    1. **Progressive Resolution**: Patches processed at 4×4, 8×8, 16×16 pixel scales
     2. **Independent Processing**: No cross-patch information leakage (SSL compatible)
     3. **Hierarchical Features**: Each scale contributes to final patch representation
     4. **Efficient Implementation**: <1% computational overhead vs standard linear projection
@@ -277,6 +282,12 @@ class ViTHMLP(keras.Model):
         "huge": (1280, 16, 32, 4.0),  # ViT-Huge
     }
 
+    # `MODEL_VARIANTS` is the canonical name across `models/` (see
+    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` is kept as
+    # the definition because tests and the `scale=` constructor argument already
+    # name it; this is an alias to the same dict, not a copy.
+    MODEL_VARIANTS = SCALE_CONFIGS
+
     def __init__(
             self,
             input_shape: Tuple[int, int, int] = (224, 224, 3),
@@ -418,7 +429,7 @@ class ViTHMLP(keras.Model):
             'positional_learned',
             max_seq_len=self.max_seq_len,
             dim=self.embed_dim,
-            dropout=self.pos_dropout_rate,
+            dropout_rate=self.pos_dropout_rate,
             name="pos_embed"
         )
 
@@ -447,9 +458,20 @@ class ViTHMLP(keras.Model):
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. MEASURED at HEAD before this change,
+                # on a seeded 12-layer build: 132 of 264 same-shape kernel
+                # pairs at `max|delta| = 0.0` -- all 12
+                # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
+                # pairwise identical (66 pairs), likewise the 12 `.../proj/kernel`.
+                # `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
@@ -471,8 +493,8 @@ class ViTHMLP(keras.Model):
 
             self.head = layers.Dense(
                 self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="head"
@@ -649,11 +671,101 @@ class ViTHMLP(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            # DECISION plan-2026-08-23T091307-9a110062/D-400
+            # D-205 inlined this as a 17-line `isinstance(str)`-guarded
+            # expression at three sites. It is now the single shared pair in
+            # `dl_techniques.utils.activation_serialization`, which ~50 other
+            # classes in this tree also call. Do NOT re-inline it: the string
+            # passthrough is load-bearing (`keras.activations.serialize` REJECTS
+            # a bare string, and many callers store a dl_techniques
+            # activation-factory key such as 'mish' that is not a Keras
+            # activation at all), and a second copy of that rule is exactly the
+            # kind of hand-maintained lockstep this centralisation removes.
+            "activation": serialize_activation(self.activation),
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
+
+    @classmethod
+    def from_config(
+            cls,
+            config: Dict[str, Any],
+            custom_objects: Optional[Dict[str, Any]] = None
+    ) -> "ViTHMLP":
+        """
+        Recreate a model from its serialized configuration.
+
+        `get_config` serializes the initializers and regularizers, so they must
+        be deserialized back into objects here; without this, the raw config
+        dicts reach `__init__` and are stored (and re-serialized) as dicts.
+
+        ``activation`` was NOT handled here before D-205, even though this method
+        already existed -- the presence of a `from_config` is not evidence that
+        every serialized key is covered by it.
+
+        Args:
+            config: Configuration dictionary from `get_config`.
+            custom_objects: Optional mapping of names to custom callables, used
+                to resolve an activation that is not registered with
+                ``keras.saving.register_keras_serializable``.
+
+        Returns:
+            ViTHMLP model instance.
+        """
+        config = dict(config)
+        for key in ("kernel_initializer", "bias_initializer"):
+            if config.get(key) is not None:
+                config[key] = initializers.deserialize(config[key])
+        for key in ("kernel_regularizer", "bias_regularizer"):
+            if config.get(key) is not None:
+                config[key] = regularizers.deserialize(config[key])
+        activation = config.get("activation")
+        if activation is not None and not isinstance(activation, str):
+            config["activation"] = deserialize_activation(
+                activation, custom_objects=custom_objects
+            )
+        return cls(**config)
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            num_classes: int = 1000,
+            input_shape: Tuple[int, int, int] = (224, 224, 3),
+            **kwargs: Any
+    ) -> "ViTHMLP":
+        """
+        Create a ViTHMLP from a predefined variant.
+
+        Args:
+            variant: One of 'tiny', 'small', 'base', 'large', 'huge'.
+            num_classes: Number of output classes.
+            input_shape: Input image shape (height, width, channels).
+            **kwargs: Additional arguments passed to the constructor.
+
+        Returns:
+            ViTHMLP model instance.
+
+        Raises:
+            ValueError: If the variant is not recognized.
+
+        Example:
+            >>> model = ViTHMLP.from_variant("base", num_classes=1000)
+            >>> model = ViTHMLP.from_variant("small", num_classes=10,
+            ...                              input_shape=(32, 32, 3), patch_size=4)
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+        return cls(
+            input_shape=input_shape,
+            num_classes=num_classes,
+            scale=variant,
+            **kwargs
+        )
 
     def get_feature_extractor(self) -> "ViTHMLP":
         """
@@ -722,7 +834,7 @@ class ViTHMLP(keras.Model):
         patch_h, patch_w = self.patch_size
         img_h, img_w = self.input_shape_config[:2]
         logger.info(f"Patches per dimension: {img_h // patch_h} x {img_w // patch_w}")
-        logger.info("hMLP Stem Processing: 2×2 → 4×4 → 8×8 → 16×16 pixels")
+        logger.info("hMLP Stem Processing: 4×4 → 8×8 → 16×16 pixels (patch_size=16)")
 
 
 # ---------------------------------------------------------------------

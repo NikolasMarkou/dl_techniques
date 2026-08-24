@@ -76,6 +76,7 @@ from typing import Optional, Tuple, Dict, Any, Union, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.vector_quantizer import VectorQuantizer
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -228,7 +229,6 @@ class VQVAEModel(keras.Model):
         """Initialize the VQ-VAE model."""
         super().__init__(**kwargs)
 
-        # Validate inputs
         if num_embeddings <= 0:
             raise ValueError(
                 f"num_embeddings must be positive, got {num_embeddings}"
@@ -243,11 +243,9 @@ class VQVAEModel(keras.Model):
                 f"got {reconstruction_loss_weight}"
             )
 
-        # Store networks
         self.encoder = encoder
         self.decoder = decoder
 
-        # Create quantizer
         self.quantizer = VectorQuantizer(
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
@@ -258,7 +256,6 @@ class VQVAEModel(keras.Model):
             name="vector_quantizer"
         )
 
-        # Store configuration
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
@@ -271,12 +268,28 @@ class VQVAEModel(keras.Model):
         else:
             self.quantizer_initializer = quantizer_initializer
 
-        # Create metrics for tracking losses
         self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
         self.reconstruction_loss_tracker = keras.metrics.Mean(
             name="reconstruction_loss"
         )
         self.vq_loss_tracker = keras.metrics.Mean(name="vq_loss")
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method VQVAEModel inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        Args:
+            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
             self,
@@ -293,13 +306,10 @@ class VQVAEModel(keras.Model):
         Returns:
             Reconstructed outputs with same shape as inputs.
         """
-        # Encode to continuous latents
         z_e = self.encoder(inputs, training=training)
 
-        # Quantize to discrete latents
         z_q = self.quantizer(z_e, training=training)
 
-        # Decode from quantized latents
         reconstructed = self.decoder(z_q, training=training)
 
         return reconstructed
@@ -316,15 +326,23 @@ class VQVAEModel(keras.Model):
         Returns:
             Dictionary mapping metric names to their current values.
         """
-        # Unpack data
         if isinstance(data, tuple):
             x = data[0]
         else:
             x = data
 
         with tf.GradientTape() as tape:
-            # Forward pass
             x_recon = self(x, training=True)
+
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # Reduce the loss in float32. `x` arrives from the dataset at
+            # float32 while `x_recon` is `compute_dtype`; under
+            # `mixed_float16` the subtraction below raised
+            # `TypeError: Input 'y' of 'Sub' has type float16 ...` and no
+            # VQ-VAE could take a single mixed-precision step (step 5.8).
+            # Cast the PREDICTION UP, never the data down: a squared-error
+            # mean accumulated in float16 underflows for small residuals.
+            x_recon = ops.cast(x_recon, "float32")
 
             # Compute reconstruction loss (MSE)
             reconstruction_loss = ops.mean((x - x_recon) ** 2)
@@ -332,25 +350,56 @@ class VQVAEModel(keras.Model):
                     self.reconstruction_loss_weight * reconstruction_loss
             )
 
-            # Get VQ losses from quantizer
-            vq_losses = self.quantizer.losses
-            # Sum vq_losses if multiple (e.g. codebook + commitment)
-            vq_loss = ops.sum(ops.stack(vq_losses))
+            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
+            # `self.quantizer.losses`. Do NOT narrow this back to the quantizer.
+            # `self.losses` is the whole model's `add_loss` collection -- it already
+            # CONTAINS the quantizer's codebook + commitment terms, and it
+            # additionally carries every regularizer on the caller-supplied encoder
+            # and decoder. With the narrow form, a BYO encoder built with
+            # `kernel_regularizer=l2(1e-1)` contributed EXACTLY NOTHING: MEASURED at
+            # HEAD, `train_step` reported the identical 0.326447 with and without the
+            # regularizer, while `sum(self.losses)` was 0.912722 against
+            # `sum(self.quantizer.losses)` 0.236841, and the encoder-kernel gradient
+            # differed by max 5.30e-02 between the two objectives. The module's own
+            # architecture diagram already said `total_loss = recon + sum(layer.losses)`;
+            # only the code disagreed. See decisions.md D-026.
+            aux_losses = self.losses
+            # Sum aux_losses if multiple (e.g. codebook + commitment + regularizers)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # `add_loss` terms carry `compute_dtype`; the reconstruction term
+            # is float32. Cast the AUX SUM UP so the objective is reduced in
+            # float32 (step 5.8).
+            vq_loss = (
+                ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
+                if aux_losses else 0.0
+            )
 
-            # Total loss
             total_loss = reconstruction_loss + vq_loss
 
-        # Compute gradients and update weights
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 1.380558e+00 vs fp16 4.532856e-05, ratio 3.046e+04.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_loss = self.optimizer.scale_loss(total_loss)
+
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(total_loss, trainable_vars)
+        gradients = tape.gradient(scaled_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        # Update metrics
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(reconstruction_loss)
         self.vq_loss_tracker.update_state(vq_loss)
 
-        # Return metrics
         return {
             "loss": self.total_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result(),
@@ -369,27 +418,27 @@ class VQVAEModel(keras.Model):
         Returns:
             Dictionary mapping metric names to their current values.
         """
-        # Unpack data
         if isinstance(data, tuple):
             x = data[0]
         else:
             x = data
 
-        # Forward pass
         x_recon = self(x, training=False)
 
         # Compute reconstruction loss
         reconstruction_loss = ops.mean((x - x_recon) ** 2)
         reconstruction_loss = self.reconstruction_loss_weight * reconstruction_loss
 
-        # Get VQ losses from quantizer
-        vq_losses = self.quantizer.losses
-        vq_loss = ops.sum(ops.stack(vq_losses))
+        # DECISION plan-2026-08-18T140459-7991552f/D-026: `self.losses`, not
+        # `self.quantizer.losses` -- same reason and same measurement as the
+        # anchor in `train_step` above. `test_step` must report the SAME
+        # objective `train_step` optimizes, or val_loss and loss are not
+        # comparable. See decisions.md D-026.
+        aux_losses = self.losses
+        vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
 
-        # Total loss
         total_loss = reconstruction_loss + vq_loss
 
-        # Update metrics
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(reconstruction_loss)
         self.vq_loss_tracker.update_state(vq_loss)
@@ -535,14 +584,82 @@ class VQVAEModel(keras.Model):
         Returns:
             New VQVAEModel instance.
         """
-        # Deserialize encoder and decoder models
         encoder_config = config.pop("encoder")
         encoder = keras.saving.deserialize_keras_object(encoder_config)
 
         decoder_config = config.pop("decoder")
         decoder = keras.saving.deserialize_keras_object(decoder_config)
 
-        # Pass reconstituted models to init
         return cls(encoder=encoder, decoder=decoder, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_vq_vae(
+        encoder: keras.Model,
+        decoder: keras.Model,
+        num_embeddings: int = 512,
+        embedding_dim: int = 64,
+        commitment_cost: float = 0.25,
+        use_ema: bool = False,
+        ema_decay: float = 0.99,
+        reconstruction_loss_weight: float = 1.0,
+        quantizer_initializer: Union[str, initializers.Initializer] = "uniform",
+        **kwargs: Any
+) -> VQVAEModel:
+    """
+    Create a VQ-VAE model over a caller-supplied encoder and decoder.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: VQ-VAE is a
+    quantization scheme wrapped around an arbitrary autoencoder, so this package
+    deliberately takes the encoder and decoder as arguments and has no
+    architecture of its own to give named scales to. ``encoder`` and ``decoder``
+    stay required here for the same reason -- inventing a default backbone would
+    silently pick an architecture the paper does not specify.
+
+    Args:
+        encoder: Network mapping inputs to continuous latents whose last axis
+            is ``embedding_dim``.
+        decoder: Network mapping quantized latents back to the input space.
+        num_embeddings: Codebook size K. Must be positive.
+        embedding_dim: Codebook vector dimension D. Must be positive and match
+            the encoder's output channel count.
+        commitment_cost: Weight beta of the commitment term.
+        use_ema: If True the codebook is updated by EMA rather than gradient.
+        ema_decay: EMA decay used when ``use_ema`` is True.
+        reconstruction_loss_weight: Weight of the MSE reconstruction term.
+            Must be positive.
+        quantizer_initializer: Initializer for the codebook embeddings.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured VQVAEModel instance.
+
+    Raises:
+        ValueError: If ``num_embeddings``, ``embedding_dim`` or
+            ``reconstruction_loss_weight`` is not positive.
+
+    Example:
+        >>> enc = keras.Sequential([keras.layers.Dense(16)])
+        >>> dec = keras.Sequential([keras.layers.Dense(8)])
+        >>> model = create_vq_vae(enc, dec, num_embeddings=32, embedding_dim=16)
+        >>> model(keras.random.normal((2, 8))).shape
+        (2, 8)
+    """
+    return VQVAEModel(
+        encoder=encoder,
+        decoder=decoder,
+        num_embeddings=num_embeddings,
+        embedding_dim=embedding_dim,
+        commitment_cost=commitment_cost,
+        use_ema=use_ema,
+        ema_decay=ema_decay,
+        reconstruction_loss_weight=reconstruction_loss_weight,
+        quantizer_initializer=quantizer_initializer,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------

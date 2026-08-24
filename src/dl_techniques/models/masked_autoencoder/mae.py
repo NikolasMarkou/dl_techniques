@@ -1,15 +1,90 @@
 """
-Masked Autoencoder (MAE) Framework
-===================================
+Masked autoencoder wrapper turning a convolutional feature extractor into a
+self-supervised reconstruction model.
 
-A flexible framework for training masked autoencoders with any encoder architecture.
-Supports patch-based masking and works seamlessly with ConvNeXt V2, ViT, and ResNet.
+Masked image modelling works because of an asymmetry between language and vision.
+Removing one word from a sentence leaves a puzzle with few plausible answers;
+removing one patch of an image leaves a puzzle a bilinear interpolation solves.
+The signal only becomes semantic when the mask ratio is high enough that local
+extrapolation fails — around 75% — at which point filling the holes requires
+knowing what the object is, not merely what its neighbours look like. The loss is
+therefore computed on masked patches only: scoring the visible ones would reward
+copying the input, which the model can do perfectly and learns nothing from.
 
-Key Features:
-- Asymmetric Encoder-Decoder architecture
-- Efficient masked training (loss computed only on masked patches)
-- Mixed Precision compatible (explicit casting in loss)
-- **Deep Supervision Support**: Handles encoders returning lists of outputs.
+`mask_ratio` (default 0.75) and `patch_size` set that difficulty; `mask_value`
+chooses what a removed patch is replaced with — a single learnable token shared
+across all masked positions (the default), zeros, fresh Gaussian noise, or a
+constant.
+
+**How this differs from the MAE paper, and it matters.** In the paper the
+asymmetry is that the *encoder never sees the masked patches at all*: masked
+tokens are dropped from the sequence, the encoder runs on roughly a quarter of
+the tokens, and a small decoder re-inserts mask tokens to reconstruct. That is
+where MAE's training-speed advantage comes from. Here masking happens in **pixel
+space** — `PatchMasking` substitutes the mask value into the image and returns a
+full-size image — so the encoder processes every pixel at full cost. The
+asymmetry that remains is only the lightweight `ConvDecoder`, which is enough to
+push representational work into the encoder but yields none of the compute
+saving. This design is what makes the wrapper encoder-agnostic: any model that
+maps an image to a feature map can be dropped in without teaching it to consume a
+sparse token set.
+
+The consequence is a hard shape contract that has no other statement in the code.
+The encoder must return a **4-D** `(B, H', W', C)` feature map — a constructor
+`ValueError` fires otherwise, so a standard token-sequence ViT does not fit — and
+`ConvDecoder` upsamples exactly 2x per entry in `decoder_dims`. The encoder's
+total downsampling factor must therefore equal `2 ** len(decoder_dims)`, which is
+`2 ** decoder_depth` (16x by default) when `decoder_dims` is auto-configured.
+The constructor now checks this and raises a `ValueError` naming both the
+encoder's actual feature-map size and the decoder's upsampling factor. Until
+2026-08-15 it did not, and a mismatch surfaced only as a broadcast failure
+inside `compute_loss` on the first training step — `call()` itself succeeds and
+returns a reconstruction at the wrong resolution, so a shape-only forward test
+passes on a model that cannot train.
+
+Two behaviours are deliberate and look like bugs from the outside. `PatchMasking`
+generates a mask only when `training` is true, returning an all-zero mask
+otherwise; combined with a loss denominator of `sum(mask) + 1e-6`, an inference-mode
+loss would divide by nearly zero. `test_step` therefore calls the model with
+`training=True` on purpose, so validation measures reconstruction of genuinely
+masked patches rather than an identity map. Separately, `non_mask_value` raises
+the per-pixel weight floor on *unmasked* patches above zero while the denominator
+still counts masked pixels only, so it is a knob for leaking a little
+visible-region reconstruction into the loss, not a normalized reweighting.
+
+`norm_pix_loss` normalizes each target patch to zero mean and unit variance
+before the MSE, following the paper, and leaves the reconstruction unnormalized —
+the model is asked to predict a locally standardized patch. Its patch reshaping
+reads `H, W, C` from the configured `input_shape`, so it requires inputs at
+exactly that resolution. Mixed precision is handled by casting explicitly at two
+points: the masked image is cast to the compute dtype before the encoder (the
+masking ops return float32 and would otherwise propagate a dtype mismatch), and
+target, reconstruction and mask are all cast to float32 inside the loss.
+
+This model overrides `train_step` and `test_step` with a hand-written
+`tf.GradientTape` loop, which is a deviation from this repository's standing
+preference for stock `fit()`. The cost is that compiled losses, compiled metrics
+and `sample_weight` are bypassed — the only reported metrics are `loss` and the
+tracked `reconstruction_loss`. Note also that `train_step`'s import of
+`tensorflow` makes this path TensorFlow-specific even though the rest of the
+module is written against `keras.ops`.
+
+Deep supervision is supported only in the shape probe: when an encoder reports a
+list of output shapes the constructor takes the first as the main feature map. The
+forward path passes the encoder's output to `ConvDecoder` unchanged, and
+`ConvDecoder` expects a single tensor, so an encoder that actually *returns* a
+list of tensors does not work end to end.
+
+References:
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
+    - Xie et al., 2021. SimMIM: A Simple Framework for Masked Image Modeling
+      (masking in the input rather than by token dropping).
+      (https://arxiv.org/abs/2111.09886)
+    - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
+      Masked Autoencoders. (https://arxiv.org/abs/2301.00808)
+    - Bao et al., 2021. BEiT: BERT Pre-Training of Image Transformers.
+      (https://arxiv.org/abs/2106.08254)
 """
 
 import keras
@@ -99,6 +174,9 @@ class MaskedAutoencoder(keras.Model):
 
         self.encoder_channels = main_shape[-1]
 
+        self._resolve_decoder_dims()
+        self._validate_scale_contract(main_shape)
+
         # 1. Masking Layer
         self.masking = PatchMasking(
             patch_size=patch_size,
@@ -113,10 +191,15 @@ class MaskedAutoencoder(keras.Model):
         # Metrics
         self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
 
-    def _create_decoder(self) -> ConvDecoder:
-        """Create or configure the decoder."""
+    def _resolve_decoder_dims(self) -> None:
+        """Auto-configure `decoder_dims` when it was left unspecified.
+
+        Split out of `_create_decoder` so the effective list — and therefore the
+        decoder's `2 ** len(decoder_dims)` upsampling factor — exists before the
+        scale contract is checked and before any sub-layer is constructed.
+        """
         if self.decoder_dims is None:
-            # Auto-configure decoder dimensions: gradually reduce from encoder dim
+            # Gradually reduce from the encoder's channel count.
             decoder_dims = []
             current_dim = self.encoder_channels
             for _ in range(self.decoder_depth):
@@ -124,11 +207,101 @@ class MaskedAutoencoder(keras.Model):
                 decoder_dims.append(current_dim)
             self.decoder_dims = decoder_dims
 
+    def _validate_scale_contract(
+        self,
+        main_shape: Tuple[Optional[int], ...]
+    ) -> None:
+        """Check the encoder's downsampling against the decoder's upsampling.
+
+        `ConvDecoder` upsamples exactly 2x per entry in `decoder_dims`, so the
+        encoder must downsample by exactly `2 ** len(decoder_dims)` for the
+        reconstruction to come back out at the input resolution. A mismatch is
+        not caught anywhere downstream: `call()` succeeds, and only
+        `compute_loss` fails, as a broadcast error between two spatial shapes
+        that names neither the encoder nor the decoder.
+        """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-035
+        # Validate the resolved SPATIAL sizes, not a downsampling ratio. A ratio
+        # comparison silently accepts a 33x33 -> 8x8 encoder (floor division
+        # gives 4 either way) whose decoder then emits 128x128 against a 33x33
+        # target. Do NOT "simplify" this back to `in_h // enc_h == factor`.
+        # See decisions.md D-035.
+        upsample_factor = 2 ** len(self.decoder_dims)
+        input_h, input_w = self.input_shape_config[0], self.input_shape_config[1]
+        encoder_h, encoder_w = main_shape[1], main_shape[2]
+
+        if encoder_h is None or encoder_w is None:
+            # A dynamic encoder feature map cannot be checked statically; the
+            # 4-D check above is all this constructor can promise.
+            return
+
+        decoded_h = encoder_h * upsample_factor
+        decoded_w = encoder_w * upsample_factor
+        if decoded_h == input_h and decoded_w == input_w:
+            return
+
+        ratio = input_h // encoder_h if encoder_h else 0
+        is_power_of_two = ratio > 0 and ratio & (ratio - 1) == 0
+        suggestion = (
+            f"decoder_depth={int(np.log2(ratio))}"
+            if is_power_of_two and encoder_h * ratio == input_h
+            else "an encoder whose downsampling factor is a power of two"
+        )
+
+        raise ValueError(
+            f"Encoder/decoder scale mismatch. The encoder maps "
+            f"{input_h}x{input_w} to a {encoder_h}x{encoder_w} feature map, "
+            f"but the decoder upsamples by {upsample_factor}x "
+            f"({len(self.decoder_dims)} decoder_dims entries, 2x each), so the "
+            f"reconstruction would be {decoded_h}x{decoded_w} against a "
+            f"{input_h}x{input_w} target. Use {suggestion} (or pass a "
+            f"decoder_dims list of that length), or change the encoder's "
+            f"strides so it downsamples by exactly {upsample_factor}x."
+        )
+
+    def _create_decoder(self) -> ConvDecoder:
+        """Create the decoder over the already-resolved `decoder_dims`."""
         return ConvDecoder(
             decoder_dims=self.decoder_dims,
             output_channels=self.input_shape_config[-1],
             name="conv_decoder"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Materialise every sub-layer from the input shape alone.
+
+        Args:
+            input_shape: Shape tuple ``(batch, height, width, channels)``.
+        """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-048
+        # This model had NO `build()` at all, so `.build(shape)` reached only the
+        # encoder that the CONSTRUCTOR happens to build eagerly: 8 of 51 tensors
+        # and 1,976 of 203,643 parameters, with Keras' own
+        # "`build()` was called ... however the layer does not have a `build()`
+        # method implemented" warning as the only symptom. Do NOT rely on the
+        # constructor's `self.encoder.build(...)` as the model's build contract —
+        # it is there to READ the encoder's output shape, it does not run for a
+        # caller-supplied already-built encoder, and it reaches neither
+        # `PatchMasking` nor `ConvDecoder`. See decisions.md D-048.
+        if self.built:
+            return
+
+        resolved = tuple(input_shape)
+        if len(resolved) == 4 and any(d is None for d in resolved[1:]):
+            resolved = (resolved[0],) + self.input_shape_config
+
+        self.masking.build(resolved)
+
+        if not self.encoder.built:
+            self.encoder.build(resolved)
+
+        encoder_output_shape = self.encoder.compute_output_shape(resolved)
+        if isinstance(encoder_output_shape, list):
+            encoder_output_shape = encoder_output_shape[0]
+
+        self.decoder.build(encoder_output_shape)
+
+        super().build(input_shape)
 
     def compute_output_shape(
         self,
@@ -283,14 +456,40 @@ class MaskedAutoencoder(keras.Model):
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
             loss = self.compute_loss(x=x, y=None, y_pred=y_pred)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
+            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
+            # the SCALED value is what `tape.gradient` differentiates while the
+            # UNSCALED value is what is reported. Do NOT "simplify" this back
+            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
+            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
+            # every gradient by `dynamic_scale` (2**15 initially)
+            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
+            # precision -- it divides the whole update by the loss scale, with
+            # no warning of any kind. In float32 it is a provable no-op: the
+            # base `Optimizer.scale_loss` returns `loss` unchanged unless
+            # `loss_scale_factor` is set. Keras' own default TF `train_step`
+            # does exactly this; overriding `train_step` silently opts out.
+            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
+            # float32 2.506961e+02 vs mixed_float16 2.850456e-02, ratio 8.795e+03
+            # See decisions.md D-036, and the same ruling at
+            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            scaled_loss = self.optimizer.scale_loss(loss)
 
         # Gradient Application
-        gradients = tape.gradient(loss, self.trainable_variables)
+        gradients = tape.gradient(scaled_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
         self.reconstruction_loss_tracker.update_state(loss)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-133
+        # Both keys carry the SAME quantity, so both must carry the same
+        # AGGREGATION. Reporting the raw `loss` here made the headline metric
+        # the LAST BATCH's value while `reconstruction_loss` -- literally the
+        # tracker fed from that same variable one line up -- was the epoch mean.
+        # Do NOT "restore" `"loss": loss`: it makes the two keys disagree for a
+        # reason no reader can see, and it is the only Keras model in the repo
+        # whose `history["loss"]` is not an epoch mean. See decisions.md D-133.
         return {
-            "loss": loss,
+            "loss": self.reconstruction_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result()
         }
 
@@ -305,8 +504,16 @@ class MaskedAutoencoder(keras.Model):
         loss = self.compute_loss(x=x, y=None, y_pred=y_pred)
 
         self.reconstruction_loss_tracker.update_state(loss)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-133
+        # Both keys carry the SAME quantity, so both must carry the same
+        # AGGREGATION. Reporting the raw `loss` here made the headline metric
+        # the LAST BATCH's value while `reconstruction_loss` -- literally the
+        # tracker fed from that same variable one line up -- was the epoch mean.
+        # Do NOT "restore" `"loss": loss`: it makes the two keys disagree for a
+        # reason no reader can see, and it is the only Keras model in the repo
+        # whose `history["loss"]` is not an epoch mean. See decisions.md D-133.
         return {
-            "loss": loss,
+            "loss": self.reconstruction_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result()
         }
 

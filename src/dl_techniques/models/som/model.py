@@ -95,7 +95,7 @@ class SOMModel(keras.Model):
     nearby neurons, forming a structured memory system suitable for clustering,
     visualization, and associative recall tasks.
 
-    **Intent**: Provide a complete, production-ready implementation of Self-Organizing
+    **Intent**: Provide a complete implementation of Self-Organizing
     Maps that can function as an associative memory system for data visualization,
     clustering, dimensionality reduction, and classification tasks while maintaining
     topological relationships in the learned representation.
@@ -264,7 +264,6 @@ class SOMModel(keras.Model):
         """Initialize the SOM model with configuration parameters."""
         super().__init__(name=name, **kwargs)
 
-        # Validate inputs
         if len(map_size) != 2 or any(dim <= 0 for dim in map_size):
             raise ValueError(f"map_size must be tuple of two positive integers, got {map_size}")
         if input_dim <= 0:
@@ -279,7 +278,6 @@ class SOMModel(keras.Model):
                 f"got {neighborhood_function!r}"
             )
 
-        # Store configuration for serialization and introspection
         self.map_size = map_size
         self.input_dim = input_dim
         self.initial_learning_rate = initial_learning_rate
@@ -289,10 +287,13 @@ class SOMModel(keras.Model):
         self.regularizer = regularizer
         self.class_prototypes = class_prototypes
 
-        # Track build state
         self._is_built = False
 
         # Create the SOM layer - instantiated in __init__, built in build()
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit and
+        # is the auto-name of the first instance in a process, so the weight
+        # paths do not move; what it removes is the per-process counter that
+        # made two instances of this model disagree by path.
         self.som_layer = SOM2dLayer(
             map_size=map_size,
             input_dim=input_dim,
@@ -300,7 +301,8 @@ class SOMModel(keras.Model):
             sigma=sigma,
             neighborhood_function=neighborhood_function,
             weights_initializer=weights_initializer,
-            regularizer=regularizer
+            regularizer=regularizer,
+            name="som2d_layer"
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -315,11 +317,9 @@ class SOMModel(keras.Model):
             input_shape: Shape tuple of input data, typically (batch_size, input_dim).
         """
         if not self._is_built:
-            # Explicitly build the SOM layer for proper serialization
             self.som_layer.build(input_shape)
             self._is_built = True
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -348,6 +348,57 @@ class SOMModel(keras.Model):
                 distances between inputs and their BMUs (quantization error).
         """
         return self.som_layer(inputs, training=training)
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-062
+    # EVERY inference-time BMU lookup goes through here, in CHUNKS.
+    # `SOMLayer._find_bmu` broadcasts to `(batch, num_neurons, input_dim)`, so
+    # passing an entire unbatched dataset materializes one intermediate of that
+    # size: the class docstring's own MNIST example (`map_size=(20,20)`,
+    # `input_dim=784`, 60000 samples) is a ~75 GB float32 tensor. Five call
+    # sites did exactly that. DO NOT call `self.som_layer(...)` directly on a
+    # full dataset again -- `train()` already batches its own loop, and these
+    # sites now mirror it. The chunking is mathematically inert: BMU assignment
+    # is per-sample and `training=False` updates nothing, so results are
+    # IDENTICAL to the unbatched path, not merely close.
+    # See decisions.md D-062.
+    def _bmu_indices_in_batches(
+            self,
+            x: np.ndarray,
+            batch_size: int = 1024
+    ) -> np.ndarray:
+        """Return the BMU grid coordinates for ``x``, one chunk at a time.
+
+        Args:
+            x: Samples of shape ``(n_samples, ...)``. Flattened to
+                ``(n_samples, input_dim)`` before lookup, matching what
+                :meth:`train` does per batch.
+            batch_size: Rows per forward pass. Must be positive. The default
+                1024 keeps the ``(batch, num_neurons, input_dim)`` intermediate
+                bounded regardless of dataset size.
+
+        Returns:
+            Integer array of shape ``(n_samples, 2)`` with the grid coordinates
+            of each sample's Best Matching Unit -- exactly what a single
+            unbatched ``self.som_layer(x, training=False)`` would return.
+
+        Failure mode: raises ``ValueError`` for a non-positive ``batch_size``.
+        An empty ``x`` returns an empty ``(0, 2)`` array rather than raising.
+        """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+        if x.shape[0] == 0:
+            # Before the reshape: `np.reshape(0, -1)` cannot infer a dimension
+            # from an empty array and raises.
+            return np.zeros((0, 2), dtype="int32")
+        flat = x.reshape(x.shape[0], -1)
+
+        chunks = []
+        for start in range(0, flat.shape[0], batch_size):
+            chunk = ops.convert_to_tensor(flat[start:start + batch_size])
+            bmu_indices, _ = self.som_layer(chunk, training=False)
+            chunks.append(ops.convert_to_numpy(bmu_indices))
+        return np.concatenate(chunks, axis=0)
 
     def train(
             self,
@@ -417,16 +468,43 @@ class SOMModel(keras.Model):
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Configure total training iterations for decay schedules
-        total_iterations = epochs * (len(x_train) // batch_size)
-        if total_iterations == 0 and len(x_train) > 0:
-            total_iterations = epochs  # Handle case where batch_size > dataset size
+        # Configure total training iterations for decay schedules.
+        #
+        # This MUST be in the same units the layer counts in. SOMLayer.call does
+        # ``iterations.assign_add(shape(inputs)[0])`` -- it counts SAMPLES
+        # (presentations). This used to write ``epochs * (len(x) // batch_size)``
+        # -- BATCHES -- so the counter outran its own budget by a factor of
+        # batch_size**2 / len(x) per epoch.
+        #
+        # Measured with the repo's own test config (64 samples, batch 32,
+        # 5 epochs): max_iterations was 10 while iterations reached 32 after the
+        # first batch, so the learning rate went NEGATIVE from the second batch
+        # (+0.1000, then -0.2200, -0.5400, ... -2.7800) and sigma sat pinned at
+        # its 1e-4 floor. A negative rate moves every neuron AWAY from its
+        # input, so the map anti-organised for 9 of 10 batches.
+        total_iterations = epochs * len(x_train)
+        if total_iterations == 0:
+            total_iterations = epochs  # Degenerate case: empty training set.
         self.som_layer.max_iterations.assign(float(total_iterations))
 
-        # Initialize training history
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-061
+        # RESET the counter, not just the budget. `SOMLayer.call` does
+        # `iterations.assign_add(...)`, so after a first `train(x, epochs=E)`
+        # the counter sits exactly AT `max_iterations`. Rewriting the same
+        # budget on a SECOND `train()` call therefore left the decayed learning
+        # rate clamped at 0 for the whole run: the second call performed ZERO
+        # adaptation and reported a flat quantization error, silently. Every
+        # existing test calls `train()` exactly once, so nothing saw it.
+        # DO NOT "fix" this by enlarging the budget instead, and DO NOT touch
+        # the units of `total_iterations` above -- that earlier fix (samples,
+        # not batches) is CORRECT and is what made this reachable, by changing
+        # the budget from a value the counter overran to one it lands exactly
+        # on. Reverting it would re-hide this defect behind a worse one.
+        # See decisions.md D-061.
+        self.som_layer.iterations.assign(0.0)
+
         history = {'mean_quantization_error': []}
 
-        # Training loop over epochs
         for epoch in range(epochs):
             start_time = time.time()
             epoch_quant_errors = []
@@ -439,7 +517,6 @@ class SOMModel(keras.Model):
             else:
                 x_train_shuffled = x_train
 
-            # Process data in batches
             for i in range(0, len(x_train_shuffled), batch_size):
                 x_batch = x_train_shuffled[i:i + batch_size]
                 if x_batch.shape[0] == 0:
@@ -456,7 +533,6 @@ class SOMModel(keras.Model):
                 avg_error = ops.mean(quant_errors)
                 epoch_quant_errors.append(ops.convert_to_numpy(avg_error))
 
-            # Compute and store epoch statistics
             avg_error = np.mean(epoch_quant_errors) if epoch_quant_errors else 0.0
             history['mean_quantization_error'].append(avg_error)
 
@@ -526,12 +602,8 @@ class SOMModel(keras.Model):
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Find BMU for each training sample
-        x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_train)
 
-        # Get unique class labels
         unique_classes = np.unique(y_train)
 
         # Map each class to its most representative BMU
@@ -551,8 +623,6 @@ class SOMModel(keras.Model):
             # Find the most frequently activated BMU for this class
             bmu_counts = Counter(bmu_tuples)
             most_common_bmu = bmu_counts.most_common(1)[0][0]
-
-            # Store as class prototype
             class_to_bmu[c] = most_common_bmu
 
         self.class_prototypes = class_to_bmu
@@ -614,10 +684,7 @@ class SOMModel(keras.Model):
                 "Call fit_class_prototypes() first."
             )
 
-        # Find BMU for each test sample
-        x_test_tensor = ops.convert_to_tensor(x_test.reshape(x_test.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_test_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_test)
 
         # Convert BMUs to tuples for lookup
         bmu_tuples = [tuple(bmu) for bmu in bmu_indices]
@@ -625,7 +692,6 @@ class SOMModel(keras.Model):
         # Create reverse mapping from BMU to class
         bmu_to_class = {bmu: c for c, bmu in self.class_prototypes.items()}
 
-        # Predict class for each sample
         predictions = []
         for bmu in bmu_tuples:
             # Check for exact prototype match
@@ -646,8 +712,9 @@ class SOMModel(keras.Model):
             self,
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis',
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Visualize the learned SOM grid showing neuron prototype memories.
 
@@ -667,9 +734,16 @@ class SOMModel(keras.Model):
             cmap: Matplotlib colormap name for visualization. Used for image
                 grids ('gray' for grayscale images) or heatmaps ('viridis').
                 Defaults to 'viridis'.
-            save_path: Optional file path to save the visualization. If None,
-                displays interactively. Supports formats like .png, .pdf, .svg.
-                Defaults to None.
+            save_path: Optional file path to save the visualization.
+                Supports formats like .png, .pdf, .svg. Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -696,11 +770,10 @@ class SOMModel(keras.Model):
             proper topological preservation. Abrupt changes suggest discontinuities
             in the learned representation.
         """
-        # Get neuron weights as grid: (height, width, input_dim)
         weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, input_dim = weights.shape
 
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         # Check if input dimension is a perfect square (likely images)
         side_length_f = np.sqrt(input_dim)
@@ -735,7 +808,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def visualize_class_distribution(
             self,
@@ -745,8 +831,9 @@ class SOMModel(keras.Model):
             cmap: str = 'tab10',
             alpha: float = 0.5,
             marker_size: int = 100,
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Visualize how different classes distribute across the SOM grid topology.
 
@@ -775,6 +862,14 @@ class SOMModel(keras.Model):
                 Defaults to 100.
             save_path: Optional file path to save visualization.
                 Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -803,12 +898,9 @@ class SOMModel(keras.Model):
 
             The legend is placed outside the plot area to avoid obscuring data.
         """
-        # Find BMU for each sample
-        x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_data)
 
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         # Convert one-hot encoded labels to class indices if needed
         if len(y_data.shape) > 1 and y_data.shape[1] > 1:
@@ -858,14 +950,28 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def visualize_u_matrix(
             self,
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis_r',
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Visualize the Unified Distance Matrix (U-Matrix) revealing cluster boundaries.
 
@@ -885,6 +991,14 @@ class SOMModel(keras.Model):
                 'hot', 'plasma_r', etc. Defaults to 'viridis_r'.
             save_path: Optional file path to save visualization.
                 Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -940,7 +1054,7 @@ class SOMModel(keras.Model):
                     u_matrix[i, j] = avg_distance
 
         # Visualize
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
         plt.imshow(u_matrix, cmap=cmap, interpolation='nearest')
         plt.colorbar(label='Average Distance to Neighbors')
         plt.title('U-Matrix: Memory Cluster Boundaries')
@@ -950,7 +1064,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def visualize_hit_histogram(
             self,
@@ -958,8 +1085,9 @@ class SOMModel(keras.Model):
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis',
             log_scale: bool = False,
-            save_path: Optional[str] = None
-    ) -> np.ndarray:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> Tuple[np.ndarray, "plt.Figure"]:
         """
         Visualize activation frequency across the SOM grid (hit histogram).
 
@@ -976,15 +1104,21 @@ class SOMModel(keras.Model):
             log_scale: Whether to use logarithmic color scaling. Useful when
                 activation frequencies vary by orders of magnitude. Defaults to False.
             save_path: Optional file path to save visualization. Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
 
         Returns:
-            Array of shape (grid_height, grid_width) containing hit counts for
-            each neuron. Useful for quantitative analysis of map utilization.
+            A ``(hit_histogram, figure)`` tuple. ``hit_histogram`` is an array of
+            shape (grid_height, grid_width) containing hit counts for each
+            neuron, useful for quantitative analysis of map utilization; the
+            ``matplotlib`` ``Figure`` is already closed when ``show=False``.
 
         Example:
             ```python
             # Basic hit histogram
-            hits = som.visualize_hit_histogram(x_train)
+            hits, fig = som.visualize_hit_histogram(x_train)
 
             # With log scale for large variance
             som.visualize_hit_histogram(x_train, log_scale=True)
@@ -1004,10 +1138,7 @@ class SOMModel(keras.Model):
             The hit histogram helps diagnose training issues and choose appropriate
             map sizes for the dataset.
         """
-        # Find BMU for each sample
-        x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
-        bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
-        bmu_indices = ops.convert_to_numpy(bmu_indices)
+        bmu_indices = self._bmu_indices_in_batches(x_data)
 
         # Create histogram
         hit_histogram = np.zeros((self.som_layer.map_size[0], self.som_layer.map_size[1]))
@@ -1016,7 +1147,7 @@ class SOMModel(keras.Model):
             hit_histogram[bmu[0], bmu[1]] += 1
 
         # Visualize
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         if log_scale and np.max(hit_histogram) > 0:
             # Use log scale for better visualization of varying frequencies
@@ -1035,9 +1166,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
-        return hit_histogram
+        return hit_histogram, fig
 
     def visualize_memory_recall(
             self,
@@ -1047,8 +1189,9 @@ class SOMModel(keras.Model):
             y_train: Optional[np.ndarray] = None,
             figsize: Tuple[int, int] = (15, 3),
             cmap: str = 'gray',
-            save_path: Optional[str] = None
-    ) -> None:
+            save_path: Optional[str] = None,
+            show: bool = False
+    ) -> "plt.Figure":
         """
         Demonstrate associative memory recall for a query sample.
 
@@ -1076,6 +1219,14 @@ class SOMModel(keras.Model):
             cmap: Matplotlib colormap for visualization. Use 'gray' for grayscale
                 images. Defaults to 'gray'.
             save_path: Optional file path to save visualization. Defaults to None.
+            show: If ``True``, call ``plt.show()`` before returning. Defaults to
+                ``False``: this is library code, so it never blocks on a GUI
+                unless the caller asks. When ``False`` the figure is closed, so
+                repeated calls do not leak figures.
+
+        Returns:
+            The ``matplotlib`` ``Figure``. It is already closed when
+            ``show=False``; use ``show=True`` or ``save_path`` to render it.
 
         Example:
             ```python
@@ -1130,9 +1281,7 @@ class SOMModel(keras.Model):
 
         if x_train is not None:
             # Find BMUs for all training samples
-            x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
-            train_bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
-            train_bmu_indices = ops.convert_to_numpy(train_bmu_indices)
+            train_bmu_indices = self._bmu_indices_in_batches(x_train)
 
             # Find samples with BMUs close to the query's BMU
             distances = np.sum((train_bmu_indices - bmu_index) ** 2, axis=1)
@@ -1149,7 +1298,7 @@ class SOMModel(keras.Model):
             side_length = int(side_length_f)
 
         # Create visualization
-        plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize)
 
         # Plot test sample (query)
         plt.subplot(1, n_similar + 2, 1)
@@ -1191,7 +1340,20 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.show()
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051
+        # Do NOT restore an unconditional ``plt.show()`` here. This is library
+        # code: it must not decide to block on a GUI, and on the headless hosts
+        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
+        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
+        # Measured before the repair: four visualize_* calls left four figures
+        # open and emitted ten UserWarnings. The caller gets the Figure back and
+        # decides. See decisions.md D-051.
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return fig
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -1243,7 +1405,6 @@ class SOMModel(keras.Model):
         Returns:
             New instance of SOMModel with the saved configuration.
         """
-        # Deserialize complex objects
         if config.get('weights_initializer'):
             config['weights_initializer'] = keras.initializers.deserialize(
                 config['weights_initializer']
@@ -1262,5 +1423,68 @@ class SOMModel(keras.Model):
             }
 
         return cls(**config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_som(
+        map_size: Tuple[int, int] = (10, 10),
+        input_dim: int = 784,
+        initial_learning_rate: float = 0.1,
+        sigma: float = 1.0,
+        neighborhood_function: str = 'gaussian',
+        weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
+        regularizer: Optional[keras.regularizers.Regularizer] = None,
+        class_prototypes: Optional[Dict[int, Tuple[int, int]]] = None,
+        **kwargs: Any
+) -> SOMModel:
+    """
+    Create a Self-Organizing Map model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: a SOM is
+    specified entirely by its grid extent and input dimension, both of which
+    are continuous problem-specific quantities. Kohonen defines no named scale
+    family, so this factory constructs the class directly.
+
+    Args:
+        map_size: (height, width) of the neuron grid. Both entries must be
+            positive.
+        input_dim: Dimensionality of the input vectors. Must be positive.
+        initial_learning_rate: Starting learning rate for the adaptation step.
+            Must be positive; it decays over the configured iteration budget.
+        sigma: Initial neighborhood radius. Must be positive.
+        neighborhood_function: Either ``'gaussian'`` or ``'bubble'``.
+        weights_initializer: Initializer for the neuron prototype vectors.
+        regularizer: Optional regularizer applied to the prototype weights.
+        class_prototypes: Optional pre-fitted class -> BMU coordinate mapping.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SOMModel instance. Calling it returns
+        ``(bmu_coordinates, quantization_errors)``.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+
+    Example:
+        >>> model = create_som(map_size=(4, 4), input_dim=8)
+        >>> bmu, err = model(keras.random.normal((6, 8)), training=False)
+        >>> tuple(bmu.shape)
+        (6, 2)
+    """
+    return SOMModel(
+        map_size=map_size,
+        input_dim=input_dim,
+        initial_learning_rate=initial_learning_rate,
+        sigma=sigma,
+        neighborhood_function=neighborhood_function,
+        weights_initializer=weights_initializer,
+        regularizer=regularizer,
+        class_prototypes=class_prototypes,
+        **kwargs
+    )
 
 # ------------------------------------------------------------------------

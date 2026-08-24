@@ -24,7 +24,7 @@ from pathlib import Path
 from train.common import setup_gpu, set_seeds, json_numpy_default
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.byte_latent_transformer.model import create_blt_model
-from dl_techniques.layers.blt_blocks import ByteTokenizer, EntropyModel
+from dl_techniques.layers.blt_blocks import ByteTokenizer, DynamicPatcher, EntropyModel
 
 
 # ---------------------------------------------------------------------
@@ -362,6 +362,34 @@ class BLTTrainer:
 
         logger.info(f"Entropy model final loss: {entropy_history.history['loss'][-1]:.4f}")
 
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # The degeneracy diagnostic runs HERE, on the entropy this run actually
+        # produced, and not at model construction. A construction-time check can
+        # only do arithmetic on vocab_size -- which at vocab_size=260 fires on
+        # this trainer's own entropy_threshold=1.3 and on the library default of
+        # 1.5, i.e. on every run ever made. This call fires only when the trained
+        # entropy model puts a boundary at every position, or at none.
+        # The probe MUST be masked to real bytes. `prepare_training_data` pads
+        # every sample to max_sequence_length (64/512/2048 by preset) from a cap
+        # of max_text_length=256, so at least 50% (small) and 87.5% (large) of
+        # every probed position is padding, whose entropy a trained model drives
+        # to ~0. Unmasked, the observed rate is capped at ~0.125 on the `large`
+        # preset and the `rate == 1.0` arm cannot fire even when every real byte
+        # is a boundary -- the exact regime this check exists to catch. Pad id is
+        # 0 (`ByteTokenizer.pad_id`); bos=1/eos=2 are real positions and are
+        # correctly kept.
+        probe_batch = train_x[: min(len(train_x), max(self.config.batch_size, 8))]
+        probe_entropy = self.entropy_model.compute_entropy(
+            self.entropy_model(keras.ops.convert_to_tensor(probe_batch), training=False)
+        )
+        DynamicPatcher(
+            entropy_threshold=self.config.entropy_threshold,
+            max_patches=self.config.max_patches,
+        ).warn_if_segmentation_is_degenerate(
+            probe_entropy,
+            mask=keras.ops.convert_to_tensor((probe_batch != 0).astype("float32")),
+        )
+
         entropy_path = Path(self.config.output_dir) / "entropy_model.keras"
         entropy_train_model.save(str(entropy_path))
         return self.entropy_model
@@ -372,6 +400,23 @@ class BLTTrainer:
         model_config['entropy_model'] = self.entropy_model
 
         self.blt_model = create_blt_model(**model_config)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-034
+        # `jit_compile` is DELIBERATELY LEFT AT KERAS' DEFAULT ("auto", i.e. XLA
+        # on GPU) -- and that default was BROKEN here until the model-side fix in
+        # the same commit as this comment. `fit()` raised
+        # `InvalidArgumentError: ... op Range must be a compile-time constant`
+        # from `PatchingLayer.compute_patch_ids`, so this shipped pipeline could
+        # not train on GPU at all.
+        # This file deliberately does NOT follow the five in-repo precedents
+        # (`superpoint`, `sam2`, `sam3`, `lewm`, `deepar`) that pin
+        # `jit_compile=False` under their own anchors. Those models are
+        # genuinely dynamic (a dynamic rollout, a sparse descriptor head);
+        # BLT's dynamic shape was RECOVERABLE, because the patch lengths sum to
+        # the sequence length structurally, so the correct fix was to make the
+        # model XLA-compatible rather than to switch XLA off for everyone.
+        # Validated by running `fit()` end to end under an EXPLICIT
+        # `jit_compile=True` on GPU 1 (loss 6.102067), not by deleting the
+        # `arange`. See decisions.md D-034.
         self.blt_model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=self.config.learning_rate),
             loss='sparse_categorical_crossentropy',

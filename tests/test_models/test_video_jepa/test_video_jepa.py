@@ -219,7 +219,7 @@ class TestTubeMaskGenerator:
 def _default_encoder_kwargs() -> dict:
     return dict(
         embed_dim=32, patch_size=8, img_size=32, img_channels=3,
-        depth=1, shifts=(1, 2), dropout=0.0,
+        depth=1, shifts=(1, 2), dropout_rate=0.0,
     )
 
 
@@ -290,7 +290,7 @@ def _make_predictor(
         dim_head=dim_head,
         mlp_dim=mlp_dim,
         shifts=(1, 2),
-        dropout=0.0,
+        dropout_rate=0.0,
         name="pred",
     )
     pred.build((2, T, Hp, Hp, embed_dim))
@@ -415,7 +415,7 @@ class TestPredictor:
         pred = VideoJEPAPredictor(
             embed_dim=D, num_frames_max=T, patches_per_side=Hp,
             depth=2, num_heads=2, dim_head=16, mlp_dim=64,
-            shifts=(1, 2), dropout=0.0, name="pred",
+            shifts=(1, 2), dropout_rate=0.0, name="pred",
         )
         out = pred(z_in)
         model = keras.Model(z_in, out, name="pred_wrap")
@@ -493,7 +493,7 @@ def _small_config(**overrides) -> VideoJEPAConfig:
         predictor_depth=1, predictor_num_heads=2, predictor_dim_head=16,
         predictor_mlp_dim=64, predictor_shifts=(1, 2),
         sigreg_knots=17, sigreg_num_proj=8, sigreg_weight=0.09,
-        dropout=0.0,
+        dropout_rate=0.0,
     )
     defaults.update(overrides)
     return VideoJEPAConfig(**defaults)
@@ -938,44 +938,30 @@ class TestVideoJEPAIter2:
             f"unexpected advisory warning at strong EMA; captured={captured}"
         )
 
-    # PRE-EXISTING FAILURE, attributed 2026-08-10 (plan-2026-08-10-3649c19e,
-    # iter-2/step-13, decisions.md D-031). NOT caused by the clifford cleanup.
-    #
-    # The test no longer reaches the predictor Dropout site it was written for:
-    # it dies EARLIER, in the encoder, at
-    #   layers/geometric/clifford_block.py `self.ctx_norm(z_ctx, training=training)`
-    # with `OperatorNotAllowedInGraphError`, because `training` is a symbolic
-    # tensor and Keras `BatchNormalization.call` does a Python `if training:`.
+    # FIXED 2026-08-19 (plan-2026-08-18-7991552f/iter-1/step-18, D-056). This
+    # test carried an `xfail(strict=True)` from 2026-08-10 because it never
+    # reached the predictor Dropout site it was written for: it died EARLIER,
+    # in the encoder, at `layers/geometric/clifford_block.py`
+    # `self.ctx_norm(z_ctx, training=training)` with
+    # `OperatorNotAllowedInGraphError` — Keras 3.8's `BatchNormalization.call`
+    # branches on `training` with a Python `if`, and
     # `normalization_type="batch_norm"` is the CliffordNetBlock default the
     # video_jepa encoder uses.
     #
-    # Attribution is MEASURED, not inferred: the same single test was run in a
-    # read-only `git worktree --detach 1ac2c6365` (the commit immediately before
-    # this plan's first commit) and fails there identically — same exception,
-    # same call site, `clifford_block.py:1074` at that commit vs `:1297` here,
-    # the line having moved with the module rewrite. 1 failed / 52 deselected in
-    # both trees.
-    #
-    # Deliberately NOT fixed here: a graph-safe `training` gate inside
-    # CliffordNetBlock is a change to the repo's highest-blast-radius geometric
-    # module (21 importers across 10 packages) and is outside a test-integrity
-    # round. `strict=True` so the marker cannot outlive the defect.
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "PRE-EXISTING at 1ac2c6365 (measured in a detached worktree): "
-            "CliffordNetBlock's BatchNormalization ctx_norm cannot take a "
-            "symbolic `training` tensor under @tf.function "
-            "(OperatorNotAllowedInGraphError). The failure is in the ENCODER, "
-            "before the predictor Dropout site this test targets."
-        ),
-    )
+    # The framework constraint is real and was MEASURED (BatchNormalization and
+    # Dropout both raise for `tf.constant(False)` and `tf.constant(True)`;
+    # LayerNormalization does not), so clifford_block routes those two norm
+    # calls through `_call_with_training_gate`, which expresses the gate as
+    # `keras.ops.cond` when and only when the flag is a tensor. The marker is
+    # removed rather than re-worded: a strict xfail that starts passing is
+    # itself a failure, and this test now covers the encoder gate as well as
+    # the predictor Dropout site it was named for.
     def test_predictor_graph_mode_dropout_zero(self) -> None:
-        """F9 regression (iter-3 D-005): at production default dropout=0.0,
+        """F9 regression (iter-3 D-005): at production default dropout_rate=0.0,
         @tf.function-wrapped inference must not raise at the predictor MLP
         Dropout site. Pre-D-005 this raised OperatorNotAllowedInGraphError at
         predictor.py `self.mlp_drop(h, training=<symbolic tensor>)`. Post-fix
-        `self.mlp_drop` is None at dropout=0.0 so the call site short-circuits
+        `self.mlp_drop` is None at dropout_rate=0.0 so the call site short-circuits
         and the trace succeeds for Python bool / None / tf.constant.
 
         Sibling test to `test_graph_mode_tracing_with_tensor_training` which
@@ -985,7 +971,7 @@ class TestVideoJEPAIter2:
         import tensorflow as tf
 
         cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6,
-                            dropout=0.0)
+                            dropout_rate=0.0)
         model = VideoJEPA(config=cfg)
         pixels = np.random.RandomState(0).randn(
             2, cfg.num_frames, cfg.img_size, cfg.img_size, cfg.img_channels
@@ -997,7 +983,7 @@ class TestVideoJEPAIter2:
         def fn(inputs, training):
             return model(inputs, training=training)
 
-        # All three callers must succeed at dropout=0.0 with the D-005 guard:
+        # All three callers must succeed at dropout_rate=0.0 with the D-005 guard:
         # Python None, Python False, tf.constant(False).
         y_none = fn(inputs, None)
         y_false = fn(inputs, False)
@@ -1005,14 +991,14 @@ class TestVideoJEPAIter2:
 
         assert y_none.shape[0] == 2, y_none.shape
         # All inference paths must produce the same output (no masking,
-        # no dropout) — bit-equal up to atol=1e-6.
+        # no dropout_rate) — bit-equal up to atol=1e-6.
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(y_none),
             keras.ops.convert_to_numpy(y_tensor_false),
             atol=1e-6,
             err_msg=(
                 "@tf.function with tf.constant(False) training must equal "
-                "training=None inference at predictor dropout=0.0"
+                "training=None inference at predictor dropout_rate=0.0"
             ),
         )
         np.testing.assert_allclose(

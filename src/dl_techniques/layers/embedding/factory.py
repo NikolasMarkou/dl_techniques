@@ -354,6 +354,18 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
             raise ValueError(f"temperature must be positive, got {kwargs['temperature']}")
 
 
+#: The stable substring every strict dropped-key ``ValueError`` from
+#: :func:`create_embedding_layer` carries. Guards match on THIS constant rather
+#: than re-typing the phrase, so rewording the message cannot silently blind them
+#: (and so the phrase has exactly one home). Mirrors
+#: ``layers/ffn/factory.py``'s constant of the same name -- same contract, same
+#: wording, deliberately.
+#: NOTE for test authors: the ``(s)`` makes this string a REGEX with a group, so
+#: ``pytest.raises(match=...)`` needs ``re.escape()`` around it (or use a plain
+#: ``in str(excinfo.value)`` substring check, as the FFN tests do).
+STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
+
+
 def create_embedding_layer(
     embedding_type: EmbeddingType,
     name: Optional[str] = None,
@@ -373,7 +385,9 @@ def create_embedding_layer(
         documentation or use ``get_embedding_info()`` for details.
     :return: A configured Keras embedding layer instance.
     :rtype: keras.layers.Layer
-    :raises ValueError: If embedding_type is invalid, parameters are missing or invalid.
+    :raises ValueError: If embedding_type is invalid, parameters are missing or
+        invalid, or any supplied keyword is not a parameter of ``embedding_type``
+        (the message then carries :data:`STRICT_DROPPED_KEY_MARKER`).
     :raises TypeError: If parameter types are incorrect for the layer.
     """
     try:
@@ -392,6 +406,52 @@ def create_embedding_layer(
         # Filter out any unknown parameters to avoid "Unrecognized keyword arguments"
         valid_param_names = set(embed_info['required_params']) | set(embed_info['optional_params'].keys())
         final_params = {key: val for key, val in params.items() if key in valid_param_names}
+
+        # DECISION plan-2026-08-14T042537-ff96c6c6/D-002
+        # RAISE, do not drop silently. Ported from `ffn/factory.py`'s identical
+        # predicate (plan-2026-07-30T140922-8af1028f/D-023). The silent filter
+        # above turned `ViT(pos_dropout_rate=0.5)` into a permanent 0.0 at four
+        # production call sites -- MEASURED, not hypothesised -- because
+        # `dropout=` is not `dropout_rate=`. All 32 statically-resolvable call
+        # sites in `src/` AND `tests/` were swept clean, and all 12 splat /
+        # dynamic-type sites resolved by hand, BEFORE this raise landed;
+        # re-softening it to a warning re-opens exactly that trap.
+        #
+        # BOTH halves of the predicate are load-bearing:
+        #
+        # * subtract `valid_param_names` (required | optional), NEVER just
+        #   `required_params`. The narrower right-hand side is the tempting
+        #   "simplification" and it is CATASTROPHIC: every optional parameter
+        #   anyone legitimately passes becomes an error. MEASURED here (step 3's
+        #   injection B): with `set(kwargs) - set(required_params)` the
+        #   all-optional-params control fires for 11 of the 13 registered
+        #   embedding types -- i.e. EVERY type that declares an optional param at
+        #   all; the two survivors (`modern_bert_embeddings`, `mrope_ideogram4`)
+        #   have an empty `optional_params` and so have nothing to break. 22
+        #   tests went red in total. The same narrowing was measured at 21/21
+        #   types on the FFN side.
+        # * read `kwargs` (what the CALLER actually supplied), not the merged
+        #   `params`. They are extensionally equal today -- `params` is
+        #   `optional_params` updated with `kwargs`, and `optional_params`'s keys
+        #   are a subset of `valid_param_names` by construction -- but the
+        #   `kwargs` form stays correct if that subset relation ever breaks, i.e.
+        #   if a registry entry gains an `optional_params` key its class does not
+        #   accept. The `params` form would then blame the caller for the
+        #   registry's own bug.
+        #
+        # Placement is also load-bearing: AFTER `validate_embedding_config`, so
+        # unknown-type / missing-required / bad-value calls keep their existing,
+        # earlier failure mode (3 negative-path tests depend on that ordering).
+        dropped = sorted(set(kwargs) - valid_param_names)
+        if dropped:
+            raise ValueError(
+                f"create_embedding_layer('{embedding_type}'): "
+                f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
+                f"'{embedding_type}' ({embed_class.__name__}) accepts only "
+                f"{sorted(valid_param_names)}. "
+                f"Either you mistyped one of those names, or you chose the "
+                f"wrong embedding_type for the parameters you are passing."
+            )
 
         # Add layer name if provided
         if name is not None:

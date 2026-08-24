@@ -40,9 +40,25 @@ class DiffusionScheduler:
             Defaults to 'linear'.
         beta_start: Starting value of β at t=0. Defaults to 0.0001.
         beta_end: Ending value of β at t=T. Defaults to 0.02.
-        clip_sample: Whether to clip samples to [-1, 1]. Defaults to True.
+        clip_sample: Whether to clip predicted x_0 to [-1, 1]. Defaults to **False**,
+            which is a deliberate departure from the DDPM convention this class
+            otherwise follows. `[-1, 1]` is DDPM's *pixel*-space range, and nothing in
+            this package diffuses pixels: `ScoreBasedNanoVLM.call` noises the output of
+            `VisionEncoder`/`TextEncoder`, both of which end in a LayerNormalization,
+            so a unit-variance coordinate falls outside `[-1, 1]` roughly a third of
+            the time. Clipping also applied only on the reverse path — `add_noise`
+            never clipped — so the train and inference domains disagreed. Pass True
+            explicitly when the samples really are pixels in `[-1, 1]`.
         prediction_type: What the model predicts ('epsilon', 'sample', 'v_prediction').
-            Defaults to 'epsilon'.
+            Defaults to 'sample', which is a deliberate departure from the DDPM
+            convention this class otherwise follows. Every denoiser in this package is
+            an x_0 predictor — ``ScoreBasedNanoVLM.call`` supervises them against the
+            *clean* vision/text features — and none of the three shipped
+            ``create_score_based_nanovlm`` presets overrides this argument, so an
+            'epsilon' default would make ``step`` read an x_0-shaped output as noise
+            and return silently wrong samples rather than raising. Pass 'epsilon'
+            explicitly when the denoiser really predicts noise. Note that the value is
+            not validated here: an unknown one raises only when ``step`` runs.
 
     References:
         - Ho et al. "Denoising Diffusion Probabilistic Models" (2020)
@@ -50,14 +66,32 @@ class DiffusionScheduler:
         - Song et al. "Denoising Diffusion Implicit Models" (2021)
     """
 
+    # DECISION plan-2026-08-14T183218-f4c612aa/D-006: prediction_type defaults to
+    # 'sample', NOT the DDPM-conventional 'epsilon'. Do NOT "restore" 'epsilon' here on
+    # the grounds that it matches DDPM/diffusers: the denoisers in this package are
+    # supervised against clean features by ScoreBasedNanoVLM.call, so they emit x_0, and
+    # the three shipped create_score_based_nanovlm presets pass no prediction_type at
+    # all — this default is their only route. With 'epsilon', step() feeds x_0 into
+    # predict_start_from_noise and returns wrong samples with no error. The alternative
+    # fix — rewriting call() to supervise against noise — was rejected: it would change
+    # what every existing model in this package learns.
     def __init__(
             self,
             num_timesteps: int = 1000,
             beta_schedule: Literal['linear', 'cosine', 'quadratic'] = 'linear',
             beta_start: float = 0.0001,
             beta_end: float = 0.02,
-            clip_sample: bool = True,
-            prediction_type: Literal['epsilon', 'sample', 'v_prediction'] = 'epsilon',
+            # DECISION plan-2026-08-17T183311-79c63e38/D-029: clip_sample defaults
+            # False, NOT the DDPM-conventional True. Do NOT "restore" True on the
+            # grounds that it matches DDPM/diffusers: this scheduler only ever runs
+            # over LayerNorm'd ENCODER FEATURES, not pixels, so [-1, 1] projects away
+            # ~a third of every coordinate axis while add_noise (training) clips
+            # nothing. The knob is deliberately KEPT rather than deleted — a
+            # pixel-space caller may legitimately want it, and the three shipped
+            # create_score_based_nanovlm presets pass no clip_sample at all, so this
+            # default is their only route. See decisions.md D-029.
+            clip_sample: bool = False,
+            prediction_type: Literal['epsilon', 'sample', 'v_prediction'] = 'sample',
     ) -> None:
         if num_timesteps <= 0:
             raise ValueError(f"num_timesteps must be positive, got {num_timesteps}")
@@ -221,6 +255,56 @@ class DiffusionScheduler:
 
         return pred_original
 
+    def predict_noise_from_start(
+            self,
+            x_t: keras.KerasTensor,
+            t: keras.KerasTensor,
+            x_0: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Predict the noise ε from x_t and a predicted x_0 — the exact inverse of
+        :meth:`predict_start_from_noise`.
+
+        Rearranging that method's `x_0 = (x_t - √(1-ᾱ_t) · ε) / √ᾱ_t` for ε gives
+
+        `ε = (x_t - √ᾱ_t · x_0) / √(1-ᾱ_t)`
+
+        This is the conversion callers need when they hold an x_0 estimate and
+        need the ε consistent with it — e.g. converting an x_0-predicting denoiser
+        into an ε-predicting one, or recovering the noise that `add_noise` used.
+        `ScoreBasedNanoVLM.compute_score_field` is its in-repo caller: it composes
+        this with :meth:`get_score_from_noise` to turn a denoiser's x_0 output into
+        a score, which is the only correct route because `get_score_from_noise`
+        consumes ε and nothing else.
+
+        It is deliberately not used by `ScoreBasedNanoVLM.generate_from_text`: an
+        earlier version of that method converted x_0 to ε here before calling
+        :meth:`step`, on the false premise (previously recorded in this docstring)
+        that `step`'s `prediction_type='sample'` branch consumes ε. It does not —
+        that branch consumes x_0 directly, so the conversion made the reverse
+        process read noise as the clean sample. Do not reintroduce it.
+
+        Note the inversion is exact only when `clip_sample` is False. With
+        clipping enabled `predict_start_from_noise` is a projection, not a
+        bijection: any x_0 driven outside [-1, 1] is clamped, and the ε that
+        produced it cannot be recovered from the clamped value.
+
+        Args:
+            x_t: Noisy samples at timestep t
+            t: Timestep indices
+            x_0: Predicted clean samples
+
+        Returns:
+            The noise ε consistent with (x_t, x_0) at timestep t
+        """
+        sqrt_alpha_prod = self._extract(self.sqrt_alphas_cumprod, t, x_t)
+        sqrt_one_minus_alpha_prod = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, t, x_t
+        )
+
+        # ε = (x_t - √ᾱ_t · x_0) / √(1-ᾱ_t)
+        return (x_t - sqrt_alpha_prod * x_0) / sqrt_one_minus_alpha_prod
+
     def get_score_from_noise(
             self,
             noise_pred: keras.KerasTensor,
@@ -303,7 +387,7 @@ class DiffusionScheduler:
         # 3. Add noise for stochastic sampling (not needed at t=0)
         if t > 0:
             variance = self._get_variance(t)
-            noise = keras.random.normal(ops.shape(sample))
+            noise = keras.random.normal(ops.shape(sample), dtype=sample.dtype)
             pred_prev_sample = pred_prev_sample + ops.sqrt(variance) * noise
 
         return pred_prev_sample, pred_original_sample
@@ -357,5 +441,17 @@ class DiffusionScheduler:
         # Reshape for broadcasting: [batch, 1, 1, ...]
         while len(ops.shape(res)) < len(ops.shape(broadcast_shape)):
             res = ops.expand_dims(res, -1)
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-047
+        # The gather runs in float32 — the schedule tables are float32 constants
+        # and their tail values are small enough that float16 rounding matters —
+        # but the coefficient is RETURNED in the dtype of the tensor it is about
+        # to be multiplied with. Every caller writes `coef * sample`, so a
+        # hard-coded float32 return raised under `mixed_float16` at the caller's
+        # multiply, not here. Do NOT instead cast `arr` down before the gather.
+        # See decisions.md D-047.
+        target_dtype = getattr(broadcast_shape, "dtype", None)
+        if target_dtype is not None:
+            res = ops.cast(res, getattr(target_dtype, "name", target_dtype))
 
         return res

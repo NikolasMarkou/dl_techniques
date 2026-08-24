@@ -1,20 +1,67 @@
 """
-Dropout with a drop probability that moves over the course of training.
+Dropout with a drop probability that varies over the course of training.
 
-`ScheduledDropout` is `keras.layers.Dropout` with one difference: instead of a
-fixed float, the drop probability at training step ``t`` is produced by a
-`keras.optimizers.schedules.LearningRateSchedule` evaluated at ``t`` and clipped
-into ``[0, 1 - 1e-6]``. That gives curriculum-style regularization (strong
-dropout early, weak or none late) with no callback and no trainer wiring, and it
-adds no new decay math -- every curve Keras ships is reused verbatim as the rate
-engine. The "LearningRateSchedule" name is a historical misnomer here: it is a
-generic ``step -> scalar`` mapping with nothing learning-rate specific in it.
+This layer embodies the principle of curriculum regularization, a design
+paradigm that treats the strength of a regularizer as a quantity to be annealed
+rather than a constant to be tuned. The core idea is that the optimal amount of
+noise is not the same at every point in training: heavy dropout early prevents
+premature co-adaptation while the network is still exploring, whereas the same
+amount late in training merely obstructs the fine-grained convergence that
+determines final accuracy. Decaying the rate over training resolves the tension
+between those two regimes instead of settling on a single compromise value.
 
-The step index is layer-internal: a non-trainable ``int64`` weight created in
-``build()`` and incremented once per training-mode forward pass. Being a real
-weight, it lands in `.keras` checkpoints, so a resumed run picks its decay back
-up where it stopped instead of silently restarting it.
+The mechanism reuses existing infrastructure rather than introducing new decay
+math. The drop probability at training step `t` is produced by evaluating a
+`keras.optimizers.schedules.LearningRateSchedule` at `t` and clipping the
+result:
+
+`rate(t) = clip(schedule(t), 0.0, 1.0 - 1e-6)`
+
+Every curve Keras ships (cosine, exponential, polynomial, piecewise) therefore
+becomes available verbatim as a dropout schedule. The `LearningRateSchedule`
+name is a historical misnomer in this context: the interface is a generic
+`step -> scalar` mapping with nothing learning-rate specific about it. A plain
+float is also accepted, in which case the layer is a drop-in replacement for
+`keras.layers.Dropout`. The upper clip bound exists because a rate of exactly
+1.0 would divide by zero in the inverted-dropout rescale; it bounds the rate,
+not the activation magnitude, and is not a safety net against a badly
+parameterized schedule.
+
+Architecturally, the significant decision is that the step index is
+layer-internal rather than supplied by the trainer. A non-trainable scalar
+`int64` weight is created in `build()` and incremented once per training-mode
+forward pass, giving curriculum behaviour with no callback, no custom training
+loop, and no coupling to the optimizer. Because the counter is a real weight it
+is captured in `.keras` checkpoints, so a resumed run continues its decay from
+where it stopped instead of silently restarting it. During inference the layer
+is a pure identity: no mask, no rescale, no RNG draw, and no counter increment.
+
+Two consequences of that design deserve attention. First, the counter tracks
+*this instance's* training-mode calls, not global optimizer steps, so an
+instance invoked multiple times per step or shared across several call sites
+advances faster than the step count. This matters most for the MC-dropout idiom
+`model(x, training=True)`, where repeated sampling both advances the decay and
+draws each sample at a different rate, making the samples non-i.i.d.; pinning
+and restoring the counter around the sampling loop avoids both problems.
+Second, the counter round-trips exactly through serialization but the RNG stream
+*position* does not, since `Layer.weights` excludes random-seed state by design.
+A reloaded model resumes its decay at the correct step yet draws a fresh mask
+sequence, matching stock `keras.layers.Dropout` behaviour.
+
+The training horizon is owned entirely by the schedule's own `decay_steps`; the
+layer never learns a total step count independently, which avoids a second
+source of truth for something the schedule already specifies.
+
+References:
+    - Srivastava et al., 2014. Dropout: A Simple Way to Prevent Neural Networks
+      from Overfitting. JMLR 15(56).
+    - Morerio et al., 2017. Curriculum Dropout.
+      (https://arxiv.org/abs/1703.06229)
+    - Loshchilov and Hutter, 2017. SGDR: Stochastic Gradient Descent with Warm
+      Restarts. (https://arxiv.org/abs/1608.03983)
+
 """
+
 
 import keras
 from typing import Any, Dict, Optional, Sequence, Tuple, Union

@@ -952,11 +952,14 @@ class TestBeitAttentionFactory:
     """The ``'beit'`` door onto :class:`BeitAttention` in ``attention/factory.py``.
 
     ``create_attention_layer`` FILTERS the caller's kwargs against
-    ``required_params | optional_params`` and SILENTLY DROPS anything undeclared
-    (``factory.py``; the registry entry is the single source of truth for what
-    reaches the constructor). So the important assertions here are not "a layer came
-    back" but "every value the caller passed is observable on the layer that came
-    back".
+    ``required_params | optional_params`` (``factory.py``; the registry entry is the
+    single source of truth for what reaches the constructor). Anything undeclared
+    used to be SILENTLY DROPPED; since 2026-08-17
+    (plan-2026-08-17T183311-79c63e38/D-011) the factory RAISES on it instead. Either
+    way the registry entry decides what reaches the constructor, so the important
+    assertions here are not "a layer came back" but "every value the caller passed is
+    observable on the layer that came back" -- a DECLARED-but-unwired parameter is
+    still silent, and the raise does not catch it.
     """
 
     # -- the registry entry itself ---------------------------------------------
@@ -1037,10 +1040,13 @@ class TestBeitAttentionFactory:
 
         Why this can fail if the implementation is wrong: this is the concrete guard
         for the registry filter. If any of these names were missing from
-        ``optional_params`` the value would be discarded with no error and the
-        assertion for it would see the class default instead. Each pair below is a
-        DIFFERENT value from the registry default, so a dropped kwarg cannot pass by
-        coincidence.
+        ``optional_params`` the call would now RAISE (the factory became strict on
+        2026-08-17, plan-2026-08-17T183311-79c63e38/D-011; before that the value was
+        discarded with no error and the assertion for it saw the class default).
+        Each pair below is a DIFFERENT value from the registry default, so a dropped
+        kwarg cannot pass by coincidence -- which still matters, because a parameter
+        that is DECLARED but never wired to the constructor is invisible to the
+        raise and only these assertions catch it.
         """
         non_default = {
             "use_relative_position_bias": False,
@@ -1096,9 +1102,17 @@ class TestBeitAttentionFactory:
 
         Why this can fail if the implementation is wrong: the assertions above pass
         trivially if `create_attention_layer` did not filter at all, in which case
-        they would prove nothing about the registry. This reproduces the filter with
-        `qv_bias` withheld from the declared set and shows the caller's ``False``
-        vanishing -- i.e. it demonstrates the RED that the entry above prevents.
+        they would prove nothing about the registry. This reproduces the filter
+        LOCALLY -- it never calls the factory with an undeclared key -- with
+        `qv_bias` withheld from the declared set, and shows the caller's ``False``
+        vanishing, i.e. it demonstrates the RED that the entry above prevents.
+
+        The local reproduction is why this control survived the factory becoming
+        strict on 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011): through the
+        real factory an undeclared `qv_bias` would now RAISE rather than vanish, so
+        the failure this models is the one that reached the CONSTRUCTOR before the
+        raise existed, and is still exactly what a missing registry declaration
+        would cost any wrapper that pre-filters its own defaults.
         """
         entry = ATTENTION_REGISTRY["beit"]
         declared = (

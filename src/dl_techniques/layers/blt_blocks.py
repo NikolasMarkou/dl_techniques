@@ -223,8 +223,44 @@ from typing import Optional, Dict, Any, List, Tuple
 # ---------------------------------------------------------------------
 
 from .transformers.transformer import TransformerLayer
-from .attention.multi_head_attention import MultiHeadAttention
 from .embedding.positional_embedding import PositionalEmbedding
+from ..utils.masking import create_mask
+from ..utils.logger import logger
+
+# ---------------------------------------------------------------------
+
+
+def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
+    """Build the lower-triangular self-attention mask for a BLT stack.
+
+    Every stack in BLT -- the entropy model, the local encoder, the global
+    transformer over patches and the local decoder's self-attention -- is
+    consumed under a next-byte objective, and none of them constructed a mask:
+    each called ``TransformerLayer(x, training=...)``, ``TransformerLayer``
+    defaults ``attention_mask=None`` and the attention layers mask only with
+    what they are handed. Position ``i`` therefore attended to the very byte it
+    was asked to predict.
+
+    The mask is built in the masking factory's BLOCK semantics (``True`` means
+    "mask out") and inverted once to the ATTEND semantics the attention layers
+    expect. It is returned at rank 3 on purpose: a rank-2 mask is interpreted
+    by the attention layers as a ``(batch, seq_len)`` *padding* mask, not as a
+    ``(seq_len, seq_len)`` score mask, so a rank-2 causal mask would be
+    silently misread.
+
+    :param hidden_states: Sequence tensor of shape ``(batch, seq_len, dim)``.
+    :type hidden_states: keras.KerasTensor
+    :return: Boolean mask ``(batch, seq_len, seq_len)``, ``True`` = may attend.
+    :rtype: keras.KerasTensor
+    """
+    batch_size = ops.shape(hidden_states)[0]
+    seq_len = ops.shape(hidden_states)[1]
+    blocked = create_mask('causal', seq_len=seq_len, dtype='bool')
+    blocked = ops.broadcast_to(
+        ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
+    )
+    return ops.logical_not(blocked)
+
 
 # ---------------------------------------------------------------------
 
@@ -473,9 +509,12 @@ class EntropyModel(keras.layers.Layer):
         # Add positional embedding
         x = self.positional_embedding(x, training=training)
 
-        # Apply transformer layers
+        # Apply transformer layers. The entropy model predicts the NEXT byte,
+        # so it is causal: without the mask its "surprise" at position i is
+        # computed from a state that has already read byte i+1.
+        attend_mask = causal_attend_mask(x)
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # Final layer norm and projection
         x = self.layer_norm(x)
@@ -544,12 +583,33 @@ class DynamicPatcher(keras.layers.Layer):
     ```
 
     **Patching Algorithm**:
-    1. **Global Threshold**: H(x_t) > θ_g creates patch boundary
-    2. **Monotonic Check**: H(x_t) - H(x_{t-1}) > θ_r for trend detection
-    3. **Length Constraints**: Min/max patch sizes for stability
-    4. **Dynamic Allocation**: Variable patches per sequence
 
-        :param entropy_threshold: Threshold for creating patch boundaries.
+    A position ``t`` opens a new patch when ``H(x_t) > entropy_threshold``.
+    Each byte is then assigned the number of boundaries at or before it,
+    saturated at ``max_patches - 1``; the patch lengths are the occupancy
+    counts of that assignment. Two consequences are deliberate, not
+    incidental:
+
+    - Rows sum to ``seq_len`` **by construction** — every byte is counted
+      into exactly one patch. This matters because ``compute_patch_ids``
+      does not validate the sum; a row that summed to less would silently
+      misassign ids rather than raise.
+    - The cap is a POSITION-ordered truncation, not a magnitude ranking.
+      Everything after the ``(max_patches - 1)``-th boundary merges into
+      the final patch. See the ``call`` anchor for why the alternative is
+      inadmissible rather than merely worse.
+
+    A leading zero-length patch is legal and occurs whenever position 0 is
+    itself a boundary; trailing patches are zero-length whenever a sequence
+    produces fewer boundaries than ``max_patches - 1``. Both leave the patch
+    ids non-decreasing, which is what ``LocalDecoder``'s preceding-patch
+    gather requires.
+
+        :param entropy_threshold: Entropy (in nats) above which a byte opens a
+            new patch. Note the scale: for a vocabulary of size ``V`` the
+            entropy of a uniform distribution is ``ln(V)``, so a threshold at
+            or below the model's typical entropy makes EVERY position a
+            boundary and a threshold above ``ln(V)`` makes none.
         :param max_patches: Maximum number of patches to create.
             **kwargs: Additional layer arguments.
     """
@@ -570,59 +630,246 @@ class DynamicPatcher(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Create patch lengths from entropy values.
+        Derive patch lengths from the entropy values, per row.
 
-        This is a simplified implementation that creates roughly equal patches.
-        A full implementation would use more sophisticated boundary detection.
+        Each row is segmented independently: sequences with different content
+        get different boundaries. This is what makes the shipped
+        ``EntropyModel`` and the trainer's entropy-pretraining stage
+        load-bearing — before this, only ``ops.shape(entropy)`` was read and
+        every row of the batch received the same equal-length partition.
 
-            :param entropy: Entropy tensor of shape (batch_size, seq_len).
-            :param training: Whether in training mode.
+            :param entropy: Entropy tensor of shape (batch_size, seq_len), in
+                the same units as ``entropy_threshold`` (nats, as produced by
+                ``EntropyModel.compute_entropy``).
+            :param training: Whether in training mode. Unused — the
+                segmentation is deterministic.
 
-            :return: Patch lengths tensor of shape (batch_size, max_patches).
+            :return: Patch lengths tensor of shape (batch_size, max_patches),
+                ``int32``, non-negative, each row summing to exactly
+                ``seq_len``.
         """
-        batch_size = ops.shape(entropy)[0]
-        seq_len = ops.shape(entropy)[1]
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-012
+        # ---------------------------------------------------------------
+        # The cap is applied BY POSITION (`ops.minimum` on a running count),
+        # never by entropy MAGNITUDE. DO NOT "improve" this into an
+        # `ops.top_k` over the entropy values to keep the max_patches-1
+        # "most informative" boundaries. That variant is INADMISSIBLE, not
+        # merely a different trade-off: a late high-entropy position would
+        # displace an earlier boundary, so an EARLIER byte's patch id would
+        # depend on a LATER byte. BLT is trained under a next-byte
+        # objective, and
+        # tests/test_models/test_byte_latent_transformer/test_model.py
+        # ::TestCausality::test_future_byte_does_not_change_the_past
+        # requires the logits before the perturbed byte to be EXACTLY
+        # unchanged. The top-k variant was written and measured: it moves
+        # them by 4.85e-01. The price paid here is real and accepted — a
+        # sequence whose most informative positions are all late gets one
+        # long final patch — but it buys causality structurally rather than
+        # by test.
+        #
+        # Two further spellings are load-bearing:
+        #  * The count runs in INT32, not in the compute dtype. A float
+        #    count reduction is the failure `activations/sparsemax.py`'s
+        #    D-017 anchor records as Defect E (an fp16 tree reduction
+        #    counted 2049 as 2048 and 2051 as 2052), and this count is the
+        #    patch id itself.
+        #  * The lengths are OCCUPANCY COUNTS of a per-byte assignment, not
+        #    differences of boundary positions. That is what makes the row
+        #    sum exactly `seq_len` structurally: every byte is counted into
+        #    exactly one patch, for any threshold, including the degenerate
+        #    ends (no boundary at all, or a boundary at every position).
+        #    `compute_patch_ids` does NOT validate the sum, so a
+        #    construction that merely usually sums correctly would fail
+        #    silently.
+        # ---------------------------------------------------------------
+        is_boundary = ops.cast(entropy > self.entropy_threshold, 'int32')
 
-        # Simple patch creation: divide sequence into roughly equal parts
-        # Uses pure tensor ops for graph-mode compatibility
-        avg_patch_size = ops.maximum(seq_len // self.max_patches, 1)
+        # Patch id of byte t = number of boundaries at positions <= t,
+        # saturated so that everything past the last admissible boundary
+        # merges into the final patch. Depends only on entropy[..., :t + 1].
+        patch_index = ops.cumsum(is_boundary, axis=1)
+        patch_index = ops.minimum(patch_index, self.max_patches - 1)
 
-        # Each of the first (max_patches-1) patches gets avg_patch_size tokens
-        # Last patch gets the remainder
-        num_full_patches = ops.minimum(seq_len // avg_patch_size, self.max_patches - 1)
-        remainder = seq_len - num_full_patches * avg_patch_size
+        # (batch, seq_len, max_patches) -> (batch, max_patches) occupancy.
+        # `compute_patch_ids` already materializes a tensor of this exact
+        # shape, so this is not a new memory regime.
+        occupancy = ops.one_hot(patch_index, self.max_patches, dtype='int32')
 
-        # Build patch lengths: [avg, avg, ..., avg, remainder, 0, 0, ...]
-        patch_indices = ops.arange(self.max_patches)
-        full_mask = ops.cast(patch_indices < num_full_patches, 'int32')
-        last_mask = ops.cast(patch_indices == num_full_patches, 'int32')
-        single_row = full_mask * avg_patch_size + last_mask * remainder
+        return ops.sum(occupancy, axis=1)
 
-        # Broadcast to batch dimension
-        patch_lengths = ops.broadcast_to(
-            ops.expand_dims(single_row, 0),
-            (batch_size, self.max_patches)
-        )
+    def warn_if_segmentation_is_degenerate(
+            self,
+            entropy: keras.KerasTensor,
+            mask: Optional[keras.KerasTensor] = None,
+    ) -> bool:
+        """Report a degenerate segmentation MEASURED on a concrete batch.
 
-        return ops.cast(patch_lengths, 'int32')
+        **Contract**: pure except for the log record; returns ``True`` iff a
+        warning was emitted, so a caller (or a test) asserts on the decision
+        rather than on log text. Never raises and never changes behaviour.
+        Requires an EAGER tensor — it reads the entropy values.
+
+        **Pass a ``mask`` whenever the batch is padded.** The rate is a MEAN
+        over positions, so padding dilutes it toward the padding's own
+        behaviour and can put the informative end structurally out of reach: a
+        batch that is 87.5% right-padding (a 256-byte cap padded to a
+        2048-position window — the shipped ``large`` BLT preset) caps the
+        observed rate at ~0.125 even when EVERY real byte is a boundary, so the
+        ``rate == 1.0`` arm can never fire. Measured on that shape with
+        all-boundary real content: **0.1250 unmasked** (silent) against
+        **1.0000 masked** (warns). A trained entropy model drives pad-after-pad
+        to near-zero entropy, which is why the dilution is systematic rather
+        than incidental.
+
+        Degenerate means one of the two ends, and only those:
+
+        - **boundary rate 1.0** — every position opens a patch, so patch 0 is
+          empty, one byte lands in each patch after it, and the whole remaining
+          tail merges into the final patch. This is what an untrained entropy
+          model produces (its output sits near the uniform ceiling
+          ``ln(vocab_size)``) against any threshold below that ceiling.
+        - **boundary rate 0.0** — no position opens a patch, so the entire
+          sequence is one patch and ``max_patches`` is inert.
+
+        Both are legal, silent, and worse than the fixed equal-length split
+        this layer replaced. Rates strictly between the ends are NOT reported:
+        that is an ordinary segmentation, and how coarse or fine it should be
+        is a modelling choice this layer has no basis to second-guess.
+
+        :param entropy: Concrete (eager) entropy tensor, ``(batch, seq_len)``,
+            in nats — the same tensor ``call`` consumes.
+        :param mask: Optional concrete (eager) tensor broadcastable to
+            ``entropy``, non-zero at REAL positions and zero at padding. When
+            given, the rate is computed over the non-zero positions only. When
+            omitted, every position counts — correct only for an unpadded
+            batch.
+        :return: ``True`` if a warning was logged. Note this includes the
+            no-real-positions case (an all-zero ``mask``), which is a defect in
+            the CALLER's probe rather than a degenerate segmentation, and is
+            reported as such.
+        """
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # This is an EXPLICIT, opt-in diagnostic and it is deliberately NOT
+        # called from `call()`. Two reasons, the second measured:
+        #  * `call()` is `keras.ops`-only with a static `max_patches` (I-1/I-2/
+        #    I-3). A Python-level branch on a tensor value is not expressible
+        #    there without raw `tf`.
+        #  * A once-per-instance warning inside `call()` cannot observe the
+        #    rate at all under tracing: reading it raises
+        #    `NotImplementedError: Cannot convert a symbolic tf.Tensor
+        #    (Mean:0) to a numpy array`, and a Python side effect in a traced
+        #    `call` fires once per RETRACE regardless of the data.
+        # It replaces `warn_if_entropy_threshold_is_degenerate`, which compared
+        # the threshold to `0.5 * ln(vocab_size)` — vocabulary arithmetic that
+        # never looked at the entropy and therefore fired on 100% of shipped
+        # configurations (1.5 and 1.3 against a 2.78-nat floor at
+        # vocab_size=260), including the one D-015 argues is probably right.
+        # Do NOT reintroduce a construction-time variant: at construction there
+        # is no entropy to measure. See decisions.md D-018.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-024
+        # The rate is computed over REAL positions when a mask is supplied, and
+        # the only shipped caller supplies one. Do NOT drop the mask parameter
+        # "because the unmasked mean is the same thing": it is not. Padding is
+        # not a neutral filler here -- a trained entropy model predicts
+        # pad-after-pad with near-zero entropy, so padded positions are
+        # systematically NON-boundaries, and the mean over them is an average of
+        # the signal with a constant. MEASURED on the shipped `large` shape
+        # (256 real bytes padded to 2048) with every real byte a boundary:
+        # unmasked 0.1250 -> silent; masked 1.0000 -> warns. The informative arm
+        # of this diagnostic was unreachable at its own call site. See
+        # decisions.md D-024.
+        is_boundary = ops.cast(entropy > self.entropy_threshold, 'float32')
+
+        if mask is None:
+            rate = float(ops.convert_to_numpy(ops.mean(is_boundary)))
+            scope = "this batch"
+        else:
+            weights = ops.cast(ops.cast(mask, 'bool'), 'float32')
+            counted = float(ops.convert_to_numpy(ops.sum(weights)))
+            if counted == 0.0:
+                logger.warning(
+                    f"{type(self).__name__}: the supplied mask selects NO "
+                    f"positions, so no boundary rate could be measured and this "
+                    f"diagnostic saw nothing. Check the caller's mask."
+                )
+                return True
+            rate = float(
+                ops.convert_to_numpy(ops.sum(is_boundary * weights))
+            ) / counted
+            scope = (
+                f"this batch (measured over its {int(counted)} non-padding "
+                f"positions; padding excluded)"
+            )
+
+        if rate == 1.0:
+            logger.warning(
+                f"{type(self).__name__}: entropy_threshold="
+                f"{self.entropy_threshold:.4g} nats is below the entropy at "
+                f"EVERY position of {scope} (observed boundary rate 1.0), "
+                f"so patch 0 is empty, each patch after it holds one byte, and "
+                f"the whole remaining sequence collapses into the final patch "
+                f"of max_patches={self.max_patches}. Raise the threshold, or "
+                f"pretrain the entropy model before relying on the "
+                f"segmentation."
+            )
+            return True
+
+        if rate == 0.0:
+            logger.warning(
+                f"{type(self).__name__}: entropy_threshold="
+                f"{self.entropy_threshold:.4g} nats is above the entropy at "
+                f"every position of {scope} (observed boundary rate 0.0), "
+                f"so the whole sequence is a single patch and "
+                f"max_patches={self.max_patches} is inert. Lower the threshold."
+            )
+            return True
+
+        return False
 
     def compute_patch_ids(
             self,
-            patch_lengths: keras.KerasTensor
+            patch_lengths: keras.KerasTensor,
+            seq_len: Optional[int] = None
     ) -> keras.KerasTensor:
         """
         Convert patch lengths to patch IDs for each position.
 
             :param patch_lengths: Patch lengths tensor of shape (batch_size, max_patches).
+            :param seq_len: The sequence length to expand to. PASS THIS from the
+                caller's own byte tensor whenever it is known -- see the
+                D-034 anchor below. When ``None``, it is recovered from the data
+                as ``max(sum(patch_lengths))``, which makes the layer's OUTPUT
+                SHAPE data-dependent and therefore XLA-incompatible.
 
             :return: Patch IDs tensor of shape (batch_size, seq_len).
         """
-        batch_size = ops.shape(patch_lengths)[0]
         max_patches = ops.shape(patch_lengths)[1]
 
-        # Calculate total sequence length
-        total_lengths = ops.sum(patch_lengths, axis=1)
-        max_seq_len = ops.max(total_lengths)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-034
+        # PASS `seq_len` IN. Do NOT delete this parameter and go back to
+        # `ops.max(ops.sum(patch_lengths, axis=1))` unconditionally: that value
+        # is a TENSOR whose contents are only known at run time, it feeds
+        # `ops.arange` below, and so THIS LAYER'S OUTPUT SHAPE DEPENDS ON ITS
+        # INPUT DATA. XLA rejects that outright --
+        #   `InvalidArgumentError: Input 1 to node .../range with op Range must
+        #    be a compile-time constant. XLA compilation requires that operator
+        #    arguments that represent shapes ... be evaluated to concrete
+        #    values`
+        # -- so `model.fit()` could not run on GPU at Keras' default
+        # `jit_compile="auto"`, i.e. the shipped `src/train/blt/` pipeline was
+        # broken. The `arange` is merely where XLA notices FIRST; the defect is
+        # the data-dependent shape, which is why the remedy supplies the length
+        # rather than rewriting the `arange`.
+        # The value is not a guess: `PatchingLayer` builds patch lengths as
+        # OCCUPANCY COUNTS of a per-byte assignment, so the row sum is exactly
+        # `seq_len` STRUCTURALLY, for any threshold, including the degenerate
+        # ends (see the anchor in `call`). The caller's byte tensor already
+        # carries that number as a static dimension.
+        # See decisions.md D-034.
+        if seq_len is None:
+            max_seq_len = ops.max(ops.sum(patch_lengths, axis=1))
+        else:
+            max_seq_len = seq_len
 
         # Vectorized patch ID computation using cumulative sums
         # cumulative_lengths[b, p] = sum of patch_lengths[b, :p+1]
@@ -678,7 +925,8 @@ class PatchPooling(keras.layers.Layer):
     ```
 
     **Pooling Methods**:
-    1. **Max Pooling**: max(h_bytes) per patch
+    1. **Max Pooling**: max(h_bytes) per patch; an EMPTY patch pools to a zero
+       vector, NOT to the internal `-1e9` masking sentinel (D-039).
     2. **Mean Pooling**: mean(h_bytes) per patch
     3. **Attention Pooling**: Learnable queries attend to patch bytes
 
@@ -796,6 +1044,23 @@ class PatchPooling(keras.layers.Layer):
             # Apply mask and get max (set masked positions to large negative value)
             masked_hiddens = ops.where(mask_expanded, byte_hiddens, -1e9)
             patch_max = ops.max(masked_hiddens, axis=1)  # (batch_size, hidden_dim)
+
+            # DECISION plan-2026-08-18T140459-7991552f/D-039: EMPTY patches are
+            # the NORM here, not an edge case -- `DynamicPatcher` always emits
+            # `max_patches` slots and fills only as many as there were entropy
+            # crossings (~120 of 128 empty for a 16-byte sequence at `micro`).
+            # For an empty patch `mask` is all-False, so the `-1e9` sentinel
+            # above SURVIVES the max and the slot becomes `[-1e9] * hidden_dim`,
+            # which the output `Dense` turns into O(1e9) activations and the
+            # downstream `GlobalTransformer`'s LayerNorm then normalizes almost
+            # entirely against, annihilating the real patches. Do NOT drop this
+            # `where` and do NOT "fix" it by making the sentinel smaller (a
+            # finite sentinel is still an arbitrary non-zero constant in every
+            # empty slot). The neutral value is 0.0, matching `_mean_pooling`
+            # (which divides a zero sum by `max(count, 1)`) and
+            # `_attention_pooling` (zeroed keys/values).
+            has_any = ops.any(mask, axis=1, keepdims=True)  # (batch_size, 1)
+            patch_max = ops.where(has_any, patch_max, ops.zeros_like(patch_max))
 
             patch_reps.append(patch_max)
 
@@ -1061,8 +1326,9 @@ class LocalEncoder(keras.layers.Layer):
         x = self.positional_embedding(x, training=training)
 
         # Apply causal transformer layers
+        attend_mask = causal_attend_mask(x)
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # Apply layer normalization
         x = self.layer_norm(x)
@@ -1201,9 +1467,11 @@ class GlobalTransformer(keras.layers.Layer):
         # Add patch positional embeddings
         x = self.patch_positional_embedding(patch_representations, training=training)
 
-        # Apply global transformer layers
+        # Apply global transformer layers, causal over the PATCH axis: patch p's
+        # contextualized representation must not depend on patches after it.
+        attend_mask = causal_attend_mask(x)
         for layer in self.transformer_layers:
-            x = layer(x, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # Apply final layer norm
         x = self.layer_norm(x)
@@ -1425,11 +1693,12 @@ class LocalDecoder(keras.layers.Layer):
             global_context = self.context_projection(global_context)
 
         # Apply decoder layers with cross-attention
+        attend_mask = causal_attend_mask(x)
         for i, (decoder_layer, cross_attention, cross_norm) in enumerate(
                 zip(self.decoder_layers, self.cross_attention_layers, self.cross_attention_norms)
         ):
-            # Self-attention within byte sequence
-            x = decoder_layer(x, training=training)
+            # Self-attention within byte sequence (causal)
+            x = decoder_layer(x, attention_mask=attend_mask, training=training)
 
             # Cross-attention to global context
             cross_attended = self._masked_cross_attention(
@@ -1457,27 +1726,56 @@ class LocalDecoder(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply cross-attention with patch-based masking.
+        Apply cross-attention to the PRECEDING patch's global representation.
 
-        Each byte position can only attend to the global representation
-        of the patch it belongs to.
+        Byte ``i`` reads the contextualized representation of patch
+        ``patch_ids[i] - 1``, not of its own patch, and the attention is
+        additionally masked causally over the gathered byte-length key
+        sequence. Both restrictions are needed for the decoder to be causal:
+
+        * gathering the byte's *own* patch leaks the future, because a patch
+          representation is pooled over every byte of that patch, including
+          the bytes after ``i`` -- and including the target byte itself;
+        * even with the previous-patch gather, key ``j`` for ``j > i`` may
+          carry patch ``patch_ids[j] - 1``, which can be ``patch_ids[i]`` or
+          later, so the causal mask over the key axis is not redundant.
+
+        Bytes in patch 0 have no preceding patch. Their gather index is clamped
+        to 0 and the gathered vector is then zeroed, so they receive no global
+        context at all rather than reading their own patch. Zeroing the key
+        rather than masking the query row also avoids a fully-masked softmax
+        row.
         """
         batch_size = ops.shape(decoder_hidden)[0]
         seq_len = ops.shape(decoder_hidden)[1]
-        num_patches = ops.shape(global_context)[1]
 
-        # For each byte position, gather its corresponding patch representation
-        # patch_ids shape: (batch, seq_len) -> expand for gathering from (batch, num_patches, dim)
-        gather_idx = ops.expand_dims(patch_ids, axis=-1)  # (batch, seq_len, 1)
+        # Previous-patch gather, clamped at 0 for the first patch.
+        prev_patch_ids = ops.maximum(patch_ids - 1, 0)  # (batch, seq_len)
+        gather_idx = ops.expand_dims(prev_patch_ids, axis=-1)  # (batch, seq_len, 1)
         global_dim = ops.shape(global_context)[-1]
-        gather_idx = ops.broadcast_to(gather_idx, (batch_size, seq_len, global_dim))  # (batch, seq_len, dim)
-        position_context = ops.take_along_axis(global_context, gather_idx, axis=1)  # (batch, seq_len, dim)
+        gather_idx = ops.broadcast_to(gather_idx, (batch_size, seq_len, global_dim))
+        position_context = ops.take_along_axis(global_context, gather_idx, axis=1)
 
-        # Apply cross-attention
+        # Patch-0 bytes get a zero context vector instead of their own patch.
+        has_prev = ops.cast(
+            ops.expand_dims(ops.greater(patch_ids, 0), axis=-1),
+            position_context.dtype,
+        )
+        position_context = position_context * has_prev
+
+        # Causal mask over the gathered key sequence. keras MultiHeadAttention
+        # takes ATTEND semantics (True = may attend) at shape (B, T_q, T_k).
+        blocked = create_mask('causal', seq_len=seq_len, dtype='bool')
+        blocked = ops.broadcast_to(
+            ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
+        )
+        cross_attend_mask = ops.logical_not(blocked)
+
         attended = cross_attention(
             query=decoder_hidden,
             value=position_context,
             key=position_context,
+            attention_mask=cross_attend_mask,
             training=training
         )
 

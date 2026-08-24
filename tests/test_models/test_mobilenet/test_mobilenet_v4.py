@@ -255,6 +255,98 @@ class TestMobileNetV4:
         assert model._input_shape == (32, 32, 3)
 
     # ============================================================================
+    # block_type -> structure Tests
+    # ============================================================================
+
+    # The stage width is the stem output, so the block's INPUT channel count is
+    # `_STRUCT_DIM` and its expanded count is `_STRUCT_DIM * 4` (the layer's
+    # default expansion_factor). Both numbers are needed to tell a start DW from
+    # a middle one, and they must not coincide -- hence a non-unit expansion.
+    _STRUCT_DIM = 16
+    _STRUCT_EXPANSION = 4
+
+    def _single_stage_block(self, block_type: str):
+        """Build a one-stage, one-block MobileNetV4 and return its UIB block."""
+        model = MobileNetV4(
+            num_classes=4,
+            depths=[1],
+            dims=[self._STRUCT_DIM],
+            block_types=[block_type],
+            strides=[1],
+            use_attention=False,
+            input_shape=(32, 32, 3),
+        )
+        model(keras.random.normal(shape=(2, 32, 32, 3)))
+        return model, model.stages[0][0]
+
+    @pytest.mark.parametrize("block_type,expected_dw_count", [
+        ("FFN", 0),
+        ("IB", 1),
+        ("ConvNext", 1),
+        ("ExtraDW", 2),
+    ])
+    def test_block_types_build_structurally_different_blocks(
+        self, block_type, expected_dw_count
+    ):
+        """The four block types must not build the same block.
+
+        Before `block_type` was wired into `_build_stage` it was an inert label:
+        all four of these built the layer's default IB, so this parametrization
+        was 0/1/1/2 against a measured 1/1/1/1.
+
+        A depthwise COUNT alone cannot carry the assertion, because `IB` and
+        `ConvNext` both own exactly one -- and a parameter count cannot either,
+        since two depthwise convs of the same kernel size differ only by the
+        channel count. What separates them is WHERE that one depthwise sits,
+        which is visible in the channel dimension of its built kernel: the start
+        DW is built on the block input, a middle DW on the expanded tensor.
+        """
+        expanded = self._STRUCT_DIM * self._STRUCT_EXPANSION
+        _, block = self._single_stage_block(block_type)
+
+        dws = [dw for dw in (block.start_dw, block.dw1, block.dw2) if dw is not None]
+        assert len(dws) == expected_dw_count, (
+            f"block_type={block_type!r} built {len(dws)} depthwise convs, "
+            f"expected {expected_dw_count}"
+        )
+
+        if block_type == "ConvNext":
+            assert block.start_dw is not None and block.dw1 is None
+            assert block.start_dw.kernel.shape[2] == self._STRUCT_DIM, (
+                "ConvNext's depthwise must be PRE-expansion (it sees the block's "
+                "input channels); a post-expansion one would see "
+                f"{expanded}"
+            )
+        elif block_type == "IB":
+            assert block.dw1 is not None and block.start_dw is None
+            assert block.dw1.kernel.shape[2] == expanded, (
+                "IB's depthwise must be POST-expansion (it sees the expanded "
+                f"channels); a pre-expansion one would see {self._STRUCT_DIM}"
+            )
+        elif block_type == "ExtraDW":
+            assert block.start_dw.kernel.shape[2] == self._STRUCT_DIM
+            assert block.dw1.kernel.shape[2] == expanded
+
+    @pytest.mark.parametrize("block_type", ["IB", "ConvNext", "ExtraDW", "FFN"])
+    def test_block_types_forward_pass_and_round_trip(self, block_type):
+        """Every block type must forward-pass and survive a config round trip.
+
+        `ConvNext` and `FFN` appear in no shipped `MODEL_VARIANTS` row, so
+        nothing else in this suite ever builds them; before this test they were
+        reachable only through the validator that accepts their names.
+        """
+        model, _ = self._single_stage_block(block_type)
+        x = keras.random.normal(shape=(2, 32, 32, 3))
+
+        out = model(x)
+        assert out.shape == (2, 4)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+        rebuilt = MobileNetV4.from_config(model.get_config())
+        assert rebuilt.block_types == [block_type]
+        assert rebuilt(x).shape == (2, 4)
+
+    # ============================================================================
     # Forward Pass and Output Shape Tests
     # ============================================================================
 

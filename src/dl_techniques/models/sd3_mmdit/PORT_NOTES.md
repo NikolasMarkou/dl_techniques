@@ -84,8 +84,11 @@ mechanical convention swap; this one removes the repo's reason-for-being
 (inference with released weights) and replaces it with from-scratch training.
 
 ### 4.2 VAE latent-normalization convention (scalar vs per-channel) — **D-008**
-SD3 normalizes the VAE latent with **scalars** (`scaling_factor = 0.13025`,
-`shift_factor = 0.0`; diffusers' `StableDiffusion3Pipeline` convention). The
+SD3 normalizes the VAE latent with **scalars** (`scaling_factor = 1.5305`,
+`shift_factor = 0.0609`; diffusers' `StableDiffusion3Pipeline` convention, read
+from the SD3/SD3.5 `vae/config.json`). This port shipped SDXL's pair
+(`0.13025` / `0.0`) until 2026-08-19; SDXL has no shift, which is why the
+shift-bearing formula looked self-consistent beside it.) The
 reused ideogram4 `AutoEncoder` ships a `latent_norm.py` with **128-element
 per-channel** `LATENT_SHIFT` / `LATENT_SCALE` vectors derived for a
 `z_channels=32` *patchified* latent (`128 = 32 × patch_size²`). Those vectors are

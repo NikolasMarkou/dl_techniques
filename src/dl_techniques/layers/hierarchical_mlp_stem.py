@@ -53,6 +53,10 @@ from typing import Tuple, Optional, Union, Any, Dict, Callable, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -176,7 +180,17 @@ class HierarchicalMLPStem(keras.layers.Layer):
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.norm_layer = norm_layer
-        self.activation_name = activation if isinstance(activation, str) else 'custom'
+        # DECISION plan-2026-08-23T091307-9a110062/D-401
+        # This site did NOT merely store the activation raw -- it stored the
+        # literal string ``'custom'`` for every non-string value, so a callable
+        # activation was silently DISCARDED at ``get_config`` time and the
+        # reload then died in ``keras.activations.get('custom')``. Do NOT
+        # "restore" an ``activation_name`` placeholder here: a name is not a
+        # value, and the round-trip needs the value. The real activation is kept
+        # and (de)serialized symmetrically through
+        # ``dl_techniques.utils.activation_serialization`` -- see decisions.md
+        # D-400 for why the string branch must pass through untouched.
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -185,7 +199,7 @@ class HierarchicalMLPStem(keras.layers.Layer):
         # Calculate derived values
         self.dim1 = embed_dim // 4
         self.num_patches = (img_size[0] // p_size) * (img_size[1] // p_size)
-        self.activation_fn = keras.activations.get(activation)
+        self.activation_fn = keras.activations.get(self.activation)
 
         # Dynamically create hierarchical stages
         self.conv_stages = []
@@ -325,7 +339,7 @@ class HierarchicalMLPStem(keras.layers.Layer):
             'patch_size': self.patch_size,
             'in_channels': self.in_channels,
             'norm_layer': self.norm_layer,
-            'activation': self.activation_name,
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),

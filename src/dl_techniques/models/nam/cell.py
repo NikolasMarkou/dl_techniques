@@ -4,7 +4,7 @@ Neural Arithmetic Module Cell — single reduction step.
 Performs one step of expression reduction:
 1. Tree induction via GroupAttention (identifies sub-expression structure)
 2. Sub-expression scoring (which sub-expression to reduce)
-3. Operand extraction via NTM read heads
+3. Operand assembly from the RAW token ids, split at that position
 4. Operator classification (which fixed arithmetic op to apply)
 5. Fixed arithmetic execution with validity tracking
 6. Result writeback to NTM memory
@@ -12,8 +12,18 @@ Performs one step of expression reduction:
 
 Arithmetic operations are FIXED (not learned). The cell learns to parse,
 route, and decide when to halt.
+
+**Scope: single-operator, integer-only.** Step 3 reads ``token_ids`` and
+nothing else — the NTM read heads (step 6/step 11) feed the *controller*, not
+the operands, so the step-6 writeback can move WHICH position is selected but
+can never supply a numeric operand. A multi-operator expression therefore
+concatenates the far side's digits rather than reducing them (``"1 + 2 * 3"``
+-> ``(1, 23)`` at the ``+``), and ``DOT_ID`` is excluded from ``is_digit`` so
+decimals lose their point (``"1.5 + 2"`` -> ``(15, 2)``). See the ``NAM`` module
+docstring and ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
 """
 
+import numpy as np
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
@@ -133,7 +143,8 @@ class NAMCell(keras.layers.Layer):
     expression. The cell combines:
 
     - **Tree Transformer** (GroupAttention + TreeMHA) for structural parsing
-    - **NTM Memory** for intermediate result storage and operand retrieval
+    - **NTM Memory** as the controller's recurrent context (it does NOT supply
+      the operands — those come from the raw tokens; see the module docstring)
     - **Fixed arithmetic units** (add, sub, mul, div) with validity flags
     - **Halting head** for adaptive computation time
 
@@ -149,7 +160,9 @@ class NAMCell(keras.layers.Layer):
                               ▼
                     ┌── Reduction Scorer ──► select sub-expression
                     │
-                    ├── NTM Read Heads ──► extract operands (left, right)
+                    ├── Token split at that position ──► operands (left, right)
+                    │
+                    ├── NTM Read Heads ──► controller context (NOT operands)
                     │
                     ├── Op Classifier ──► identify operator (+,-,*,/)
                     │
@@ -245,21 +258,45 @@ class NAMCell(keras.layers.Layer):
             epsilon=config.epsilon,
             name="ntm_memory",
         )
+        # DECISION plan-2026-08-17T183311-79c63e38/D-014
+        # CONTENT addressing is NAM's design, not an oversight — both heads have
+        # been CONTENT since the package's first commit, and NAM's memory is a
+        # content-keyed scratchpad for an expression evaluator, with no notion of
+        # an adjacent slot for a circular shift to reach.
+        #
+        # WHAT NOT TO DO: do not restore `shift_range=config.shift_range` here.
+        # Under CONTENT, `NTMReadHead.__init__` does not create `shift_dense`
+        # (D-073), so the argument reached a branch NAM never takes and
+        # `NAMConfig.shift_range` configured nothing at all. It has been deleted
+        # from the config rather than reinstated. Switching these two sites to
+        # `AddressingMode.HYBRID` to "use" it would be the opposite change: it
+        # adds three trained projections and changes the memory semantics of a
+        # shipped model to give a copy-pasted knob something to do.
+        # See decisions.md D-014.
         self.read_heads = [
             NTMReadHead(
                 memory_size=config.memory_size,
                 memory_dim=h,
                 addressing_mode=AddressingMode.CONTENT,
-                shift_range=config.shift_range,
                 name=f"read_head_{i}",
             )
             for i in range(config.num_read_heads)
         ]
+        # DECISION plan-2026-08-18T140459-7991552f/D-035
+        # ONE write head, deliberately, and there is no `config.num_write_heads`
+        # to loop over any more. Do NOT re-add that field and wrap this in a
+        # comprehension mirroring `read_heads` above: the field existed for
+        # months as a default, three identical variant entries and a serialized
+        # key while this line stayed a bare attribute, so every model that ever
+        # advertised it wrote through exactly one head. Honouring it now would
+        # silently change the memory semantics and the weight tree of every
+        # shipped checkpoint to give a copy-pasted knob something to do — the
+        # same trade D-014 refused for `shift_range`. `num_read_heads` above IS
+        # live and stays. See decisions.md.
         self.write_head = NTMWriteHead(
             memory_size=config.memory_size,
             memory_dim=h,
             addressing_mode=AddressingMode.CONTENT,
-            shift_range=config.shift_range,
             name="write_head",
         )
 
@@ -394,10 +431,41 @@ class NAMCell(keras.layers.Layer):
         token_mask_float = ops.cast(token_mask, self.compute_dtype)
 
         scores = ops.squeeze(self.reduction_scorer(hidden), axis=-1)  # (B, L)
-        scores = scores + (1.0 - token_mask_float) * (-1e9)
+        # DECISION plan-2026-08-17T183311-79c63e38/D-024
+        # dtype-aware mask sentinel. `-1e9` is below float16's finite floor
+        # (~-6.55e4), so under `mixed_float16` it converts to `-inf` and this
+        # line produced NaN TWICE OVER: a fully-masked row softmaxes
+        # `[-inf, ...]` to NaN, and — the one a "check the masked positions"
+        # guard misses — an UNMASKED position computes `0.0 * -inf`, which is
+        # also NaN. The corruption therefore lands on the positions the mask is
+        # meant to KEEP, in a row with a perfectly ordinary right-padding mask.
+        #
+        # The idiom is the LOCAL one from `tree_transformer/components.py:283`
+        # (`GroupAttention`, D-001) and `:481`, not
+        # `layers/attention/common.apply_attention_mask`. That helper has zero
+        # call sites anywhere inside `models/`, and this is a reduction SCORER
+        # rather than attention — importing it would open a models/ -> attention
+        # internals dependency edge for a two-token change. `sequence_pooling`
+        # made the same call for the same reason (SYSTEM.md). This cell already
+        # composes the tree_transformer components that use this exact idiom, so
+        # the two now agree instead of differing inside one call graph.
+        neg_inf = -1e4 if self.compute_dtype == "float16" else -1e9
+        scores = scores + (1.0 - token_mask_float) * neg_inf
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
         # --- 5. Deterministic number assembly from tokens ---
+        # DECISION plan-2026-08-18T140459-7991552f/D-055
+        # This split is the WHOLE numeric path, and it is single-operator,
+        # integer-only BY CONSTRUCTION. Do NOT add a docstring, README line or
+        # example that promises multi-step reduction or decimals without first
+        # building the mechanism: `token_ids` is the raw input, re-read
+        # unchanged by `NAM.call` on every ACT step, so a previous step's
+        # result cannot become an operand at ANY weights, and `is_digit`
+        # excludes DOT_ID so a decimal point is silently dropped
+        # ("1.5 + 2" assembles 15). The docs were corrected to match rather
+        # than the machine built (Assumption A1). Pinned by
+        # tests/test_models/test_nam/test_documented_scope.py and measured by
+        # test_operand_derivation_through_call.py. See decisions.md D-055.
         # The operator position is the argmax of reduction_weights (already
         # trained to 100% accuracy). Given the position, we split the tokens
         # into left-of-operator and right-of-operator digit masks, then
@@ -531,7 +599,12 @@ class NAMCell(keras.layers.Layer):
 
         # --- 13. Halt decision ---
         halt_input = ops.sum(hidden * ops.expand_dims(token_mask_float, -1), axis=1)
-        halt_input = halt_input / (ops.sum(token_mask_float, axis=-1, keepdims=True) + 1e-9)
+        # Dtype-aware floor, same ruling as `NAM.call`'s pooled mean:
+        # `np.float16(1e-9)` is exactly 0.0. See decisions.md D-050.
+        halt_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
+        halt_input = halt_input / (
+            ops.sum(token_mask_float, axis=-1, keepdims=True) + halt_eps
+        )
         halt_logits = self.halt_head(halt_input)  # (B, 2)
         q_halt = halt_logits[..., 0]  # (B,)
         q_continue = halt_logits[..., 1]  # (B,)
@@ -542,8 +615,26 @@ class NAMCell(keras.layers.Layer):
             "memory_usage": ops.stop_gradient(memory_state.usage),
             "read_weights": [ops.stop_gradient(w) for w in new_read_weights],
             "write_weights": ops.stop_gradient(write_weights_new),
-            "accumulated_result": carry["accumulated_result"] + result,
-            "accumulated_valid": carry["accumulated_valid"] * valid,
+            # DECISION plan-2026-08-17T183311-79c63e38/D-024 (second fp16
+            # blocker, found by the mask fix's own RED proof and sitting AFTER
+            # it in this same function). The deterministic number assembly above
+            # pins itself to "float32" ON PURPOSE — exact digit arithmetic must
+            # not run in fp16 — while Keras autocasts the incoming `carry` to
+            # `compute_dtype`. Under `mixed_float16` the two met here and raised
+            # `InvalidArgumentError: cannot compute AddV2 as input #1 was
+            # expected to be a half tensor but is a float tensor`. Cast BOTH
+            # sides to `compute_dtype` rather than casting only one: the carry is
+            # float32 when this layer is called without autocast, so a one-sided
+            # cast just moves the mismatch. `outputs["result"]` below keeps the
+            # exact float32 value — only the accumulator is normalised.
+            "accumulated_result": (
+                ops.cast(carry["accumulated_result"], self.compute_dtype)
+                + ops.cast(result, self.compute_dtype)
+            ),
+            "accumulated_valid": (
+                ops.cast(carry["accumulated_valid"], self.compute_dtype)
+                * ops.cast(valid, self.compute_dtype)
+            ),
             "steps": carry["steps"] + 1,
         }
 

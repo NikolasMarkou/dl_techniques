@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Tree Transformer** in **Keras 3**. This implementation is based on the paper "Tree Transformer: Integrating Tree Structures into Self-Attention," which introduces a novel attention mechanism capable of learning soft constituency trees from raw text without explicit syntactic supervision.
+An implementation of the **Tree Transformer** in **Keras 3**. This implementation is based on the paper "Tree Transformer: Integrating Tree Structures into Self-Attention," which introduces a novel attention mechanism capable of learning soft constituency trees from raw text without explicit syntactic supervision.
 
 The architecture's key innovation is its **Hierarchical Group Attention** mechanism, which enables the model to infer syntactic structure as a byproduct of standard language modeling.
 
@@ -358,7 +358,7 @@ This implementation includes a `pytest` suite at `tests/test_models/test_tree_tr
 
 ## 12. Known Limitations
 
--   **No public pretrained weights**: `PRETRAINED_WEIGHTS` is empty. Calling
+-   **No public pretrained weights**: there is no weight-URL table. Calling
     `TreeTransformer.from_variant(..., pretrained=True)` raises a clear
     `NotImplementedError`. Pass `pretrained=path/to/checkpoint.keras` to load
     locally-trained weights, or omit the argument for random init.

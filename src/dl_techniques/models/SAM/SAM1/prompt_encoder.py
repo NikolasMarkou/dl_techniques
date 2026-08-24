@@ -67,6 +67,10 @@ from typing import Optional, Tuple, Any, Dict, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -370,7 +374,7 @@ class PromptEncoder(layers.Layer):
         self.input_image_size = input_image_size
         self.mask_in_chans = mask_in_chans
         self.normalization_type = normalization_type
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
 
         # CREATE all sub-layers in __init__
         self.pe_layer = PositionEmbeddingRandom(embed_dim // 2, name="pe_layer")
@@ -731,7 +735,7 @@ class PromptEncoder(layers.Layer):
             "input_image_size": self.input_image_size,
             "mask_in_chans": self.mask_in_chans,
             "normalization_type": self.normalization_type,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
         })
         return config
 

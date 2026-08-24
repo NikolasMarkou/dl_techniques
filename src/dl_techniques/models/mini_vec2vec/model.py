@@ -1,9 +1,89 @@
 """
-Mini-Vec2Vec Alignment Model for Unsupervised Embedding Space Alignment.
+Unsupervised alignment of two embedding spaces by a single square linear map, fitted
+with clustering, quadratic assignment and Procrustes rather than by gradient descent.
 
-This module implements the mini-vec2vec algorithm for aligning two embedding
-spaces without parallel data, following the procedure described in
-"mini-vec2vec: Scaling Universal Geometry Alignment with Linear Transformations".
+The premise is the universal-geometry, or Platonic representation, hypothesis:
+independently trained encoders of the same underlying data arrive at nearly the same
+*relative* geometry, differing mainly in the arbitrary coordinate frame they express it
+in. If that holds, the map from space A to space B needs no capacity beyond a rotation
+and reflection, and the entire difficulty moves from function fitting to correspondence:
+knowing which point of A is which point of B. Every stage below exists to manufacture a
+correspondence, because once one exists the map is closed-form. Orthogonal Procrustes
+solves `min_W ||X_A W - X_B||_F` subject to `W^T W = I` by `W = U V^T` where
+`U S V^T = SVD(X_A^T X_B)` - no learning rate, no adversarial game, no convergence
+question.
+
+`align` runs five stages over numpy arrays; nothing here is a gradient step.
+
+Preprocessing mean-centers each space over the arrays it is given and then L2-normalizes
+every row onto the unit sphere. Note what is *not* stored: the two mean vectors are
+local to `align`, and `call` applies only `X @ W`. A caller transforming new embeddings
+must reproduce the same centering and normalization themselves, or the map is being
+applied in a frame it was not fitted in.
+
+Approximate matching produces the first correspondence. Each of `approx_runs` (30)
+rounds clusters both spaces independently into `approx_clusters` (20) centroids, then
+matches the two centroid sets using only frame-invariant information: the centroid Gram
+matrices `C_A C_A^T` and `C_B C_B^T` are unchanged by any orthogonal transform of their
+space, so the permutation that makes them agree is recoverable without knowing the
+transform. That is a quadratic assignment problem, solved by scipy's 2-opt heuristic;
+the first argument is negated because `quadratic_assignment` minimizes, and minimizing
+against `-sim_A` maximizes `tr(P sim_A P^T sim_B)`. With B's centroids permuted into A's
+order, every embedding is re-expressed by its similarities to its own anchor set
+(`X_A C_A^T`, `X_B C_B_perm^T`), coordinates that by construction mean the same thing in
+both spaces. One round of k-means plus a heuristic QAP is far too noisy to trust, so the
+rounds are concatenated along the feature axis: the ensemble of 30 imperfect anchor sets
+is a much more discriminative descriptor than any single one. Pseudo-pairs then come
+from a cosine nearest-neighbour search in that descriptor space, and each source row's
+pseudo-target is the *mean* of its `approx_neighbors` (50) neighbours in B, trading
+precision for immunity to individual mismatches. Every source row is paired; nothing is
+filtered on match quality, and the neighbour distances are discarded.
+
+Refinement then alternates correspondence and map, the self-learning loop that makes
+unsupervised bilingual dictionary induction work. Refine-1 repeats `refine1_iterations`
+(75) times: sample rows from A, push them through the current `W`, take the mean of
+their `refine1_neighbors` cosine neighbours in B as targets, re-solve Procrustes, and
+blend. Because neighbours are recomputed under the improved map each iteration, the
+correspondence and the map bootstrap each other. Refine-2 runs once and gets its
+correspondence for free rather than by search: cluster A into `refine2_clusters` (500)
+centroids, push them through `W`, and use the result as the *initialization* of a
+single-restart k-means on B (`n_init=1`). The i-th B centroid is then by definition the
+one seeded from the i-th A centroid, so the 500 centroid pairs are matched with no
+assignment step at all. The progression is deliberate: 20 coarse anchors to establish
+the frame, 500 fine ones to sharpen it.
+
+The orthogonality of the result is the subtle point. Every Procrustes solve returns an
+exactly orthogonal matrix, but each update is an exponential-smoothing blend
+`W <- (1 - alpha) W + alpha W_new`, and a convex combination of two orthogonal matrices
+is not orthogonal - the orthogonal group is not convex. No re-orthogonalization follows
+the blend. The shipped `W` is therefore only approximately orthogonal, and the
+approximation is good exactly to the extent the iterates have converged and the two
+blended matrices already agree. Treat `W` as a general linear map: in particular do not
+assume `W^-1 = W^T` when mapping back from B to A. The trade is what buys stability,
+since undamped updates would let one bad neighbour draw discard the whole map.
+
+`W` is registered through `add_weight` with an identity initializer and is nominally
+trainable, but it is only ever written by `assign` from numpy; `fit` is not the entry
+point and `align` is. All heavy work runs on CPU through scikit-learn and scipy, so
+sequence length and dimensionality drive the cost, not accelerator memory. `align`
+returns the matrix at three checkpoints (`initial_W`, `refine1_W`, `final_W`), which is
+the practical way to see whether refinement helped or drifted. `get_config` carries only
+`embedding_dim`; the fitted matrix travels in the weights of the saved file.
+
+References:
+    - mini-vec2vec: Scaling Universal Geometry Alignment with Linear Transformations,
+      2025. (https://arxiv.org/abs/2510.02348)
+    - Huh et al., 2024. The Platonic Representation Hypothesis.
+      (https://arxiv.org/abs/2405.07987)
+    - Jha et al., 2025. Harnessing the Universal Geometry of Embeddings.
+    - Schonemann, 1966. A Generalized Solution of the Orthogonal Procrustes Problem.
+      Psychometrika 31(1):1-10.
+    - Conneau et al., 2017. Word Translation Without Parallel Data.
+      (https://arxiv.org/abs/1710.04087)
+    - Artetxe et al., 2018. A Robust Self-Learning Method for Fully Unsupervised
+      Cross-Lingual Mappings of Word Embeddings. ACL 2018.
+    - Moschella et al., 2022. Relative Representations Enable Zero-Shot Latent Space
+      Communication. (https://arxiv.org/abs/2209.15430)
 """
 
 import keras
@@ -63,11 +143,9 @@ class MiniVec2VecAligner(keras.Model):
             of the model.
 
     Example:
-        >>> # Create aligner
+        >>> # Create aligner. `align` builds it; an explicit build() is only
+        >>> # needed to read `W` before fitting.
         >>> aligner = MiniVec2VecAligner(embedding_dim=128)
-        >>>
-        >>> # Build model
-        >>> aligner.build(input_shape=(None, 128))
         >>>
         >>> # Align two embedding spaces
         >>> history = aligner.align(
@@ -78,8 +156,14 @@ class MiniVec2VecAligner(keras.Model):
         ...     refine1_iterations=50
         ... )
         >>>
-        >>> # Transform new embeddings
-        >>> aligned_embeddings = aligner(source_embeddings)
+        >>> # Transform new embeddings IN THE FITTED FRAME: `align` centered
+        >>> # and L2-normalized both spaces and did not keep the means, so
+        >>> # reproduce them from the alignment set (see the module docstring
+        >>> # and `example_alignment.align_frame`).
+        >>> mean_A = source_embeddings.mean(axis=0, keepdims=True)
+        >>> centered = source_embeddings - mean_A
+        >>> in_frame = centered / np.linalg.norm(centered, axis=1, keepdims=True)
+        >>> aligned_embeddings = aligner(in_frame)
         >>>
         >>> # Save model
         >>> aligner.save('mini_vec2vec_aligner.keras')
@@ -237,13 +321,24 @@ class MiniVec2VecAligner(keras.Model):
             sim_A = centroids_A @ centroids_A.T
             sim_B = centroids_B @ centroids_B.T
 
-            # Step 3: Find correspondence with QAP (using 2-OPT)
-            # We maximize Tr(P @ sim_A @ P.T @ sim_B) by setting A=-sim_A
+            # Step 3: Find correspondence with QAP.
+            # We maximize Tr(P @ sim_A @ P.T @ sim_B) by setting A=-sim_A.
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-050: `method='faq'`,
+            # NOT `'2opt'`. MEASURED on EXACTLY solvable instances (sim_B is a
+            # true permutation of sim_A, so the optimum is known and reachable):
+            # over 12 instances at k in {5, 8, 12, 20}, '2opt' recovered the
+            # permutation in 6 and returned a strictly WORSE objective in the
+            # other 6 — at k = 20, this package's own `approx_clusters` default,
+            # it failed 2 of 3 (objective 25.97 vs the optimal 30.72). 'faq'
+            # was exact in 12 of 12. With the anchor permutation wrong the
+            # relative representations of the two spaces are not comparable,
+            # every pseudo-pair is noise, and the whole pipeline returns a map
+            # no better than chance. Do not revert to '2opt' without re-running
+            # that comparison.
             res = quadratic_assignment(
                 -sim_A,
                 sim_B,
-                method='2opt',
-                options={'rng': None}
+                method='faq',
             )
             permutation_indices = res.col_ind
 
@@ -455,6 +550,19 @@ class MiniVec2VecAligner(keras.Model):
             raise ValueError(
                 f"smoothing_alpha must be in (0, 1], got {smoothing_alpha}"
             )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-049: `align` builds the
+        # model itself. Every stage below writes through `self.W.assign(...)`,
+        # so on a FRESH aligner — the state both this method's and the class's
+        # docstring examples start from — it used to die with
+        # `AttributeError: 'NoneType' object has no attribute 'assign'`, from
+        # inside stage 3, after minutes of k-means and QAP work. The shape is
+        # fully determined by `embedding_dim`, which is a constructor argument,
+        # so there is nothing to infer and nothing for the caller to decide.
+        # Do NOT replace this with a raise: `build` takes no information the
+        # object does not already have.
+        if not self.built:
+            self.build((None, self.embedding_dim))
 
         # Ensure input is numpy for sklearn/scipy compatibility
         XA = ops.convert_to_numpy(XA)

@@ -361,14 +361,26 @@ class TestWindowedVersusGlobal:
         """
         assert self._near_token_response(self._block(TINY["window_size"])) > 1e-4
 
+    # DECISION plan-2026-08-22T035419-a11304c8/D-036
+    # The response is bounded in ULP of the output, NOT pinned at `== 0.0`.
+    # The exact-zero form was RED at baseline
+    # (`assert 1.7881393432617188e-07 == 0.0`) and is unsatisfiable: the
+    # mean-centring is exact in real arithmetic and only sub-ulp-exact in fp32.
+    # Measured over 20 freshly initialized blocks: the residual is
+    # 5.960464e-08 .. 2.980232e-07, which is **0.25 .. 2.50 ulp** of the output
+    # amplitude at that seed -- it never reached 0.0 in any of the 20. Over the
+    # same 20 blocks the SINGLE-CHANNEL bump this trap is contrasted with moves
+    # the distant token by 5.393e-03 .. 3.937e-02, four to five orders of
+    # magnitude more, so an 8-ulp budget (3.2x over the worst residual observed)
+    # cannot swallow the real signal and the vacuity claim survives intact.
     def test_a_uniform_across_channel_bump_is_mean_centred_away(self):
         """MEASURED: the naive form of the probe above is VACUOUS.
 
         A perturbation applied to every channel of one token is removed by
         `norm1`'s per-token mean subtraction, so a global block's distant-token
-        response measures exactly 0.0 -- indistinguishable from a windowed
-        block's. This test pins that trap permanently so the probe above cannot
-        silently regress to the vacuous form.
+        response collapses to fp32 rounding -- indistinguishable from a windowed
+        block's exact zero. This test pins that trap permanently so the probe
+        above cannot silently regress to the vacuous form.
         """
         block = self._block(0)
         x = np.random.RandomState(3).randn(
@@ -378,7 +390,16 @@ class TestWindowedVersusGlobal:
         uniform = x.copy()
         uniform[0, TINY_GRID - 1, TINY_GRID - 1] += 25.0
         moved = keras.ops.convert_to_numpy(block(uniform, training=False))
-        assert float(np.max(np.abs(moved[0, 0, 0] - base[0, 0, 0]))) == 0.0
+
+        response = float(np.max(np.abs(moved[0, 0, 0] - base[0, 0, 0])))
+        amplitude = float(np.max(np.abs(base[0, 0, 0])))
+        ulp = float(np.spacing(np.float32(amplitude)))
+        assert response <= 8 * ulp, (
+            f"a uniform across-channel bump moved the distant token by "
+            f"{response:.6e} = {response / ulp:.2f} ulp of the output amplitude "
+            f"{amplitude:.4f}; `norm1` is no longer mean-centring it away, so "
+            "the single-channel form of this probe is no longer necessary"
+        )
 
     def test_backbone_assigns_windows_and_globals_as_configured(self, tiny_trunk):
         for i, block in enumerate(tiny_trunk.blocks):
@@ -463,19 +484,27 @@ class TestTrunkOutputArity:
         earlier = TINY["global_att_blocks"][0]
         assert np.max(np.abs(got - maps[earlier])) > 1e-4
 
-    def test_blocks_after_the_last_global_block_are_not_run(self):
-        trunk = Sam3ViTDetBackbone(**{**TINY, "depth": 6,
-                                      "global_att_blocks": (1, 3)})
-        image = np.random.RandomState(5).randn(
-            1, TINY["img_size"], TINY["img_size"], 3
-        ).astype("float32")
-        trunk.build((None, TINY["img_size"], TINY["img_size"], 3))
-        base = keras.ops.convert_to_numpy(trunk(image, training=False))
-        # Zero every weight of block 5 (past the last global block, index 3).
-        for var in trunk.blocks[5].weights:
-            var.assign(ops.zeros_like(var))
-        after = keras.ops.convert_to_numpy(trunk(image, training=False))
-        assert np.max(np.abs(after - base)) == 0.0
+    def test_a_trunk_with_blocks_past_the_last_global_one_cannot_be_BUILT(self):
+        """F-17: this construction is now REFUSED, not merely wasteful.
+
+        This test previously asserted the opposite -- it BUILT a
+        ``depth=6, global_att_blocks=(1, 3)`` trunk and measured that zeroing
+        block 5 moved the output by exactly 0.0, i.e. it PINNED the dead-block
+        behaviour as if it were a feature. It was documenting the early return,
+        but the configuration it used to do so is one no caller should be able
+        to create: blocks 4 and 5 (1,744 parameters, measured) were built,
+        parameter-counted and handed to the optimizer while contributing
+        nothing.
+
+        The early-return behaviour it meant to test is still covered, by
+        ``test_output_equals_the_last_global_block_not_an_earlier_one`` above,
+        which reads the LEGAL ``TINY`` trunk. The refusal itself, and the proof
+        that every shipped variant survives it, live in
+        ``test_vitdet_last_block_is_global.py``.
+        """
+        with pytest.raises(ValueError, match="must name the LAST block"):
+            Sam3ViTDetBackbone(**{**TINY, "depth": 6,
+                                  "global_att_blocks": (1, 3)})
 
 
 class TestLnPrePlacement:

@@ -17,6 +17,12 @@ from typing import Tuple, List
 from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+from tests.optimizer_state import build_optimizer_state
+
 
 class TestConvNeXtV2:
     """Test suite for ConvNeXt V2 model implementation."""
@@ -198,7 +204,14 @@ class TestConvNeXtV2:
             assert outputs.shape == (2, num_classes)
 
     def test_different_depths_configurations(self, num_classes, cifar_input_shape):
-        """Test with different depth configurations."""
+        """``depths`` must build the requested number of blocks.
+
+        The logits shape is ``(2, num_classes)`` for every depth list, so the
+        old assertion held whether or not `depths` reached the graph. `depths`
+        is structural: the weight-shape signature carries the claim, and an
+        output-difference check would not (different depths draw different
+        random numbers).
+        """
         depth_configs = [
             [1, 1, 2, 1],     # Very small
             [2, 2, 4, 2],     # Small
@@ -207,8 +220,27 @@ class TestConvNeXtV2:
             [3, 3, 9, 3],     # Tiny (default)
         ]
 
+        dims = [32, 64, 128, 256]  # Keep dims small for testing
+
+        def _build(depths):
+            model = ConvNeXtV2(
+                num_classes=num_classes,
+                depths=depths,
+                dims=dims,
+                input_shape=cifar_input_shape  # Specify correct input shape
+            )
+            model(tf.zeros([1] + list(cifar_input_shape)))
+            return model
+
+        builders = {tuple(d): (lambda d=d: _build(d)) for d in depth_configs}
+        sigs = assert_structural_knob_changes_weights(builders, knob="depths")
+        # Stronger than "different": more blocks in total means more weights.
+        by_total = sorted(depth_configs, key=sum)
+        assert len(sigs[tuple(by_total[0])]) < len(sigs[tuple(by_total[-1])]), (
+            "depths did not change the number of weight tensors"
+        )
+
         for depths in depth_configs:
-            dims = [32, 64, 128, 256]  # Keep dims small for testing
             model = ConvNeXtV2(
                 num_classes=num_classes,
                 depths=depths,
@@ -221,10 +253,15 @@ class TestConvNeXtV2:
             assert outputs.shape == (2, num_classes)
 
     def test_different_activations(self, num_classes, cifar_input_shape, cifar_sample_data):
-        """Test with different activation functions."""
+        """The activation must reach the forward pass.
+
+        A value knob: the parameterisation is identical for every activation, so
+        under one seed the models hold bit-identical weights and the entire
+        output difference is attributable to the activation.
+        """
         activations = ["relu", "gelu", "leaky_relu", "elu", "swish"]
 
-        for activation in activations:
+        def _build(activation):
             model = ConvNeXtV2(
                 num_classes=num_classes,
                 depths=[1, 1, 2, 1],  # Small for faster testing
@@ -232,7 +269,17 @@ class TestConvNeXtV2:
                 activation=activation,
                 input_shape=cifar_input_shape  # Specify correct input shape
             )
+            model(tf.zeros_like(cifar_sample_data[:1]))
+            return model
 
+        builders = {a: (lambda a=a: _build(a)) for a in activations}
+        deltas = assert_value_knob_changes_output(
+            builders, cifar_sample_data, knob="activation",
+        )
+        assert min(deltas.values()) > 1e-5
+
+        for activation in activations:
+            model = _build(activation)
             outputs = model(cifar_sample_data)
             assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
 
@@ -478,6 +525,10 @@ class TestConvNeXtV2:
             model_path = os.path.join(tmpdirname, "convnext_v2_model.keras")
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load the model
@@ -492,9 +543,60 @@ class TestConvNeXtV2:
             # Generate prediction with loaded model
             loaded_outputs = loaded_model(cifar_sample_data, training=False)
 
-            # Check outputs match (shapes should be identical)
+            # Shape and parameter count are the two quantities the nested-sublayer
+            # weight-loss trap is documented to PRESERVE while restoring fresh kernels
+            # (SYSTEM.md framework behaviour 1), and `ConvNeXtV2` has exactly that
+            # container shape: `self.stages_list` is `List[List[Dict[str, Layer]]]` and
+            # `self.downsample_layers_list` is `List[List[Layer]]`. So they cannot be the
+            # whole assertion — the VALUE comparison below is.
             assert original_outputs.shape == loaded_outputs.shape
             assert loaded_model.count_params() == model.count_params()
+
+            # `training=False` is load-bearing (SYSTEM.md framework behaviour 3): a bare
+            # `model(x)` runs the stochastic-depth path and fabricates round-trip deltas
+            # that are indistinguishable from reinitialized weights.
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_outputs),
+                keras.ops.convert_to_numpy(loaded_outputs),
+                atol=1e-5,
+                err_msg=(
+                    "ConvNeXtV2 output changed across a .keras round-trip: the restored "
+                    "model computes something different from the saved one."
+                ),
+            )
+
+    def test_output_values_depend_on_every_stage(
+        self, num_classes, cifar_input_shape
+    ):
+        """A non-local receptive-field probe (see the V1 twin for the rationale).
+
+        Perturbing one interior pixel must move a spatially distant output cell, which
+        no shape or finiteness assertion can establish.
+        """
+        keras.utils.set_random_seed(1234)
+        model = ConvNeXtV2(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,
+            include_top=False,
+        )
+
+        x = np.zeros((1, *cifar_input_shape), dtype="float32")
+        base = keras.ops.convert_to_numpy(model(x, training=False))
+
+        bumped = x.copy()
+        bumped[0, 2, 2, :] = 10.0
+        moved = keras.ops.convert_to_numpy(model(bumped, training=False))
+
+        delta = np.abs(moved - base)
+        assert delta.max() > 1e-4, "one interior pixel moved nothing at all"
+
+        far_corner = delta[0, -1, -1, :]
+        assert far_corner.max() > 1e-6, (
+            "a corner perturbation did not reach the opposite corner of the feature "
+            "map — the stage ladder is not propagating information"
+        )
 
     def test_training_integration(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test training integration with a small dataset."""
@@ -584,17 +686,20 @@ class TestConvNeXtV2:
             assert model.depths == expected_config["depths"]
             assert model.dims == expected_config["dims"]
 
-    def test_factory_with_pretrained_warning(self, num_classes):
-        """Test factory function with pretrained warning."""
-        # This should log a warning but still create the model
-        model = create_convnext_v2(
-            variant="base",
-            num_classes=num_classes,
-            pretrained=True
-        )
+    def test_factory_with_pretrained_true_raises(self, num_classes):
+        """`pretrained=True` must RAISE, never return a random-init model.
 
-        assert isinstance(model, ConvNeXtV2)
-        assert model.depths == [3, 3, 27, 3]  # Base variant
+        Before this contract, `PRETRAINED_WEIGHTS` held placeholder URLs on a
+        non-existent host, `from_variant` caught the download failure, logged a
+        warning and returned an untrained model — so a caller asking for
+        pretrained weights silently got random ones. Do not reinstate that.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained ConvNeXt V2 weights"):
+            create_convnext_v2(
+                variant="base",
+                num_classes=num_classes,
+                pretrained=True
+            )
 
     def test_numerical_stability(self, num_classes):
         """Test model stability with extreme input values."""

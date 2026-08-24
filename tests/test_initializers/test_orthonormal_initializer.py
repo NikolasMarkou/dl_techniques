@@ -23,6 +23,7 @@ from typing import Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import validate_orthonormality
 from dl_techniques.initializers.orthonormal_initializer import OrthonormalInitializer
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestOrthonormalInitializer:
@@ -288,7 +289,6 @@ class TestOrthonormalInitializer:
         layer = keras.layers.Dense(
             units=output_dim,  # 10 units
             kernel_initializer=initializer,
-            input_shape=(input_dim,)  # 5 inputs
         )
 
         # Build the layer
@@ -312,7 +312,6 @@ class TestOrthonormalInitializer:
                 units=32,  # 32 outputs from 16 inputs: creates 16 vectors in 32D space (valid: 16 <= 32)
                 activation="relu",
                 kernel_initializer=OrthonormalInitializer(seed=42),
-                input_shape=(16,)
             ),
             keras.layers.Dense(
                 units=32,  # 32 outputs from 32 inputs: creates 32 vectors in 32D space (valid: 32 <= 32)
@@ -353,7 +352,6 @@ class TestOrthonormalInitializer:
                 units=16,  # 16 outputs from 8 inputs: creates 8 vectors in 16D space (valid: 8 <= 16)
                 activation="relu",
                 kernel_initializer=OrthonormalInitializer(seed=42),
-                input_shape=(8,)
             ),
             keras.layers.Dense(units=1, activation="sigmoid")
         ])
@@ -373,6 +371,10 @@ class TestOrthonormalInitializer:
             model_path = os.path.join(tmpdirname, "orthonormal_model.keras")
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load the model with custom objects

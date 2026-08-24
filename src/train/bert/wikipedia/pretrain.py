@@ -15,6 +15,7 @@ Features:
 
 import os
 import keras
+import argparse
 import numpy as np
 import tensorflow as tf
 import datasets  # Hugging Face datasets library
@@ -68,9 +69,8 @@ class PretrainConfig:
     save_freq: int = 5000
 
     # Data Source Config
-    # If False, streams from internet (requires stable connection)
-    # If True, looks for local arrow files
-    load_from_disk: bool = False
+    # Loading is always streaming (`datasets.load_dataset(..., streaming=True)`);
+    # there is no local-arrow-file branch, so there is no knob to select one.
     wikipedia_date: str = "20220301.en"
 
 
@@ -201,8 +201,63 @@ def create_tf_dataset(
 # Training Setup
 # ---------------------------------------------------------------------
 
-def main():
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse the CLI for Wikipedia+BookCorpus BERT pre-training.
+
+    Kept deliberately small: one flag per `PretrainConfig` field it overrides,
+    no invented knobs. `--gpu` is interface parity with every other trainer --
+    `setup_gpu`'s `set_memory_growth` is a known repo-wide no-op, so device
+    selection is still the `CUDA_VISIBLE_DEVICES=N` shell prefix.
+    """
+    parser = argparse.ArgumentParser(
+        description="BERT MLM Pre-training on Wikipedia + BookCorpus"
+    )
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--variant', type=str, default=PretrainConfig.bert_variant,
+                        help='BERT variant')
+    parser.add_argument('--batch-size', type=int, default=PretrainConfig.global_batch_size,
+                        help='Global batch size')
+    parser.add_argument('--total-steps', type=int, default=PretrainConfig.total_steps,
+                        help='Total training steps')
+    parser.add_argument('--learning-rate', type=float, default=PretrainConfig.learning_rate,
+                        help='Peak learning rate')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None):
+    # MUST be first: `--help` has to exit before MirroredStrategy, before the
+    # dataset build (a live streaming HF Hub fetch) and before model
+    # construction. Anything moved above this line makes `--help` expensive
+    # again -- guarded by tests/test_train/test_bert_wikipedia/.
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # `setup_gpu` is imported HERE, not at module scope. Do NOT hoist it back
+    # up: `train/common/__init__.py` re-exports `image_text.py`, whose
+    # module-level `tf.constant` (image_text.py:53) initializes TF's eager
+    # context and ALLOCATES a GPU device at import time. A top-level
+    # `from train.common import setup_gpu` therefore makes `--help` allocate a
+    # GPU before argparse ever runs, defeating the point of this whole change.
+    # Measured: `import train.common` -> 1 "Created device" line; `import
+    # keras, tensorflow`, `dl_techniques.models.bert`, `datasets` and
+    # `tensorflow_datasets` -> 0. See decisions.md D-006.
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: the root
+    # cause above is FIXED. `IMAGE_MEAN`/`IMAGE_STD` are plain Python lists now
+    # (image_text.py:53 is that decision's anchor), and `import train.common`
+    # emits 0 `Created device` lines. This deferred import is therefore
+    # HARMLESS but no longer load-bearing. The original text is kept because
+    # the history is the point: do not re-derive the module-scope eager-op
+    # trap.
+    from train.common import setup_gpu
+
+    setup_gpu(gpu_id=args.gpu)
+
     config = PretrainConfig()
+    config.bert_variant = args.variant
+    config.global_batch_size = args.batch_size
+    config.total_steps = args.total_steps
+    config.learning_rate = args.learning_rate
 
     # 1. Hardware Strategy
     try:
@@ -226,11 +281,16 @@ def main():
     # 4. Model Initialization (Inside Strategy Scope)
     with strategy.scope():
         # Base Encoder
+        # `BERT.__init__` has no `dropout_rate` parameter; it takes the two
+        # separate probabilities below (both already default to 0.1). Passing
+        # `dropout_rate=` raised `ValueError: Unrecognized keyword arguments`.
+        # Call shape matches the working sibling `train/bert/pretrain.py:85-86`.
         bert_encoder = BERT.from_variant(
             variant=config.bert_variant,
             vocab_size=config.vocab_size,
             max_position_embeddings=config.max_seq_length,
-            dropout_rate=0.1
+            hidden_dropout_rate=0.1,
+            attention_probs_dropout_rate=0.1,
         )
 
         # MLM Wrapper
@@ -259,14 +319,52 @@ def main():
             "warmup_start_lr": 0.0,
         })
 
+        # DECISION plan-2026-08-13T045759-fde437ba/D-004
+        # Do NOT pass `jit_compile=` to a Keras 3 optimizer constructor, and do
+        # NOT "fix" that by moving it to `mlm_model.compile(jit_compile=True)`.
+        #
+        # This line used to read `jit_compile=True  # XLA Compilation for speed`.
+        # Keras 3 optimizers have no such parameter, so it raised
+        # `ValueError: Argument(s) not recognized: {'jit_compile': True}` on an
+        # unconditional path -- this script and `pretrain_english.py` crashed at
+        # model compilation on EVERY run, and had since they were written. The
+        # `--help` gate never saw it (train-time raise) and neither did the suite.
+        #
+        # The obvious repair is wrong. XLA cannot compile this training step
+        # under a distribution strategy, MEASURED 2026-08-13 on TF 2.18 / Keras
+        # 3.8, one GPU, tiny BERT + this exact MaskedLanguageModel:
+        #   * `MaskedLanguageModel.train_step` calls `optimizer.apply_gradients`,
+        #     which under ANY strategy emits `CollectiveGatherV2`. There is no
+        #     `CollectiveGatherV2` OpKernel for XLA_GPU_JIT, so tf2xla conversion
+        #     fails hard: `InvalidArgumentError: Detected unsupported operations`.
+        #     Reproduced in BOTH float32 and mixed_float16 -- it is architectural,
+        #     not a precision problem.
+        #   * Under mixed_float16 there is a second, independent blocker:
+        #     `LossScaleOptimizer`'s finite-gradient `Cond` triggers
+        #     `merge_call called while defining a new graph or a tf.function`.
+        # A single-replica `MirroredStrategy` fails identically -- and step 1 of
+        # this script builds `MirroredStrategy()` unconditionally, falling back
+        # only if construction throws. So on any GPU host the XLA path is
+        # unreachable by construction; `model.compile(jit_compile=True)` would
+        # merely move the guaranteed crash from compile time to step 1.
+        #
+        # A `--jit-compile` flag was considered and rejected: it could only ever
+        # refuse on the hardware this script targets, i.e. a knob that does
+        # nothing -- the dead-config-field class that
+        # `tests/test_train/test_config_fields_are_live.py` exists to prevent.
+        #
+        # What DOES work (all measured, same probe): fp16 + XLA with NO strategy;
+        # fp16 + strategy with NO XLA (the configuration below). If XLA here ever
+        # becomes worth the effort, the prerequisite is removing the collective
+        # from the training step, not re-adding a keyword.
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
-            jit_compile=True  # XLA Compilation for speed
         )
 
-        # Mixed precision loss scaling is handled automatically by Keras in modern TF
+        # Mixed precision loss scaling is handled automatically by Keras in modern TF.
+        # No `jit_compile=` here either -- see the DECISION note above.
         mlm_model.compile(optimizer=optimizer)
 
     # 5. Callbacks

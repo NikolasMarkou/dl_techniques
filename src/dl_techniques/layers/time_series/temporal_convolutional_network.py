@@ -1,5 +1,9 @@
 import keras
 from keras import layers
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -89,7 +93,7 @@ class TemporalBlock(layers.Layer):
         self.kernel_size = kernel_size
         self.dilation_rate = dilation_rate
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.kernel_initializer = kernel_initializer
 
         # Padding 'causal' in Keras handles the Chomp1d logic automatically
@@ -189,7 +193,7 @@ class TemporalBlock(layers.Layer):
             'kernel_size': self.kernel_size,
             'dilation_rate': self.dilation_rate,
             'dropout_rate': self.dropout_rate,
-            'activation': self.activation,
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': self.kernel_initializer
         })
         return config
@@ -269,7 +273,7 @@ class TemporalConvNet(layers.Layer):
         self.kernel_size = kernel_size
         self.num_levels = num_levels
         self.dropout_rate = dropout_rate
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
 
         self.blocks = []
         for i in range(num_levels):
@@ -343,6 +347,6 @@ class TemporalConvNet(layers.Layer):
             'kernel_size': self.kernel_size,
             'num_levels': self.num_levels,
             'dropout_rate': self.dropout_rate,
-            'activation': self.activation
+            'activation': serialize_activation(self.activation)
         })
         return config

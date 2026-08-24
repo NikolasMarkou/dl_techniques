@@ -6,7 +6,7 @@
 
 An implementation of the **DistilBERT** *architecture* in **Keras 3**, based on the paper *"DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter"* by Sanh et al.
 
-> **No trained weights ship with this package and none can be downloaded.** Every URL in `DistilBERT.PRETRAINED_WEIGHTS` is an `example.com` placeholder, so `pretrained=True` returns a **randomly initialized** model after logging a warning — measured in [§8](#8-comprehensive-usage-examples). Loading a local file *does* work: `pretrained="<path>.keras"` (or `keras.models.load_model(path)`, which is simpler). Everything below describes an architecture you must train yourself.
+> **No trained weights ship with this package and none can be downloaded.** `pretrained=True` raises `NotImplementedError` — see [§8](#8-comprehensive-usage-examples). Loading a local file *does* work: `pretrained="<path>.keras"` (or `keras.models.load_model(path)`, which is simpler). Everything below describes an architecture you must train yourself.
 
 The published DistilBERT checkpoint retains approximately **97% of BERT's performance** while being **40% smaller and 60% faster**, by distilling knowledge from a large "teacher" BERT model into a smaller "student" model during pre-training. Those are the paper's numbers for the paper's checkpoint; nothing in this repo reproduces or measures them.
 
@@ -316,14 +316,9 @@ Parameter counts are measured with `count_params()` on a built model at the defa
 
 ### Example 1: What `pretrained=` actually does
 
-**`pretrained=True` does not download weights.** Every entry of `DistilBERT.PRETRAINED_WEIGHTS` is an `https://example.com/...` placeholder. Measured behaviour of `DistilBERT.from_variant("tiny", pretrained=True)`:
+**`pretrained=True` raises `NotImplementedError`.** No public DistilBERT checkpoint ships with `dl_techniques`, and `_download_weights` says so rather than attempting a fetch.
 
-1.  `keras.utils.get_file` fails on the placeholder URL.
-2.  `from_variant` catches the exception and emits exactly one warning — *"Failed to download pretrained weights: ... Continuing with random initialization."*
-3.  `load_pretrained_weights` is invoked **0 times**, and every non-constant weight of the returned model differs from an independently constructed one.
-4.  A `DistilBERT` is returned, **randomly initialized**, and nothing raises.
-
-A caller who does not read logs cannot tell this apart from a successful load. The machinery is kept deliberately (it is the wiring a real checkpoint would use); only the URLs are missing.
+It used to behave differently, and the old behaviour is why the contract now raises. A `PRETRAINED_WEIGHTS` table held placeholder URLs on a non-existent host; `keras.utils.get_file` failed on them, `from_variant` caught the exception and emitted exactly one warning — *"Failed to download pretrained weights: ... Continuing with random initialization."* — `load_pretrained_weights` was invoked **0 times**, and a **randomly initialized** `DistilBERT` was returned without anything raising. A caller who does not read logs could not tell that apart from a successful load.
 
 **`pretrained="<path>.keras"` DOES work** (repaired 2026-08-11; it previously raised on both of its paths — the "build the model first" dummy input used `keras.random.uniform` with `dtype="int32"`, which Keras rejects, and the built path forwarded a `by_name=True` that Keras 3's `Model.load_weights` does not accept). `from_variant` forwards the path to `load_pretrained_weights`, which loads into **this** configuration:
 
@@ -485,7 +480,7 @@ A: DistilBERT removed them to simplify the architecture. It does not distinguish
 A: Not directly. While the architectures are similar, the layer count is different (6 vs 12), and the weight matrices are not 1:1 mappable without the specific distillation selection process.
 
 **Q: Where do I get trained weights, then?**
-A: You train them, or you convert them yourself. This package ships no checkpoint and contains no HuggingFace converter. `pretrained=True` reaches placeholder URLs and falls back to random init; `pretrained="<path>"` raises. Save with `model.save(path)` and reload with `keras.models.load_model(path)` (§8).
+A: You train them, or you convert them yourself. This package ships no checkpoint and contains no HuggingFace converter. `pretrained=True` raises `NotImplementedError` (it does not fetch anything and does not fall back to random init); `pretrained="<path>.keras"` on a file you saved yourself **does** work. Save with `model.save(path)` and reload with `keras.models.load_model(path)` (§8).
 
 **Q: Why is there no Pooler output?**
 A: The original DistilBERT removed the pre-training "Next Sentence Prediction" task, and thus removed the dense pooler layer associated with the `[CLS]` token. You should simply take the 0-th index of `last_hidden_state` for classification tasks.

@@ -87,7 +87,7 @@ ANOMALY_SPEC: Dict[str, Tuple[str, Any]] = {
     "num_steps": ("--num-steps", 3),                 # default: 2
     "step_size": ("--step-size", 0.05),              # default: 0.1
     "mlp_hidden_dim": ("--mlp-hidden-dim", 32),      # default: 64
-    "mlp_dropout": ("--mlp-dropout", 0.3),           # default: 0.0
+    "mlp_dropout_rate": ("--mlp-dropout-rate", 0.3),  # default: 0.0
     "epochs": ("--epochs", 3),                       # default: 100
     "learning_rate": ("--learning-rate", 1e-5),      # default: 1e-3
     "optimizer": ("--optimizer", "sgd"),             # default: adam
@@ -120,7 +120,7 @@ CLS_SPEC: Dict[str, Tuple[str, Any]] = {
     "num_steps": ("--num-steps", 5),                 # default: 12
     "step_size": ("--step-size", 0.05),              # default: 0.01
     "noise_std": ("--noise-std", 0.05),              # default: 0.02
-    "head_dropout": ("--head-dropout", 0.3),         # default: 0.0
+    "head_dropout_rate": ("--head-dropout-rate", 0.3),  # default: 0.0
     "use_weighted_adjacency": ("--use-weighted-adjacency", True),  # default: False (store_true)
     "adjacency_kernel_size": ("--adjacency-kernel-size", 3),       # default: 1
     "adjacency_proj_dim": ("--adjacency-proj-dim", 16),            # default: None

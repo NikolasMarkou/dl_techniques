@@ -4,10 +4,28 @@ FastVLM Model Implementation
 This module provides the FastVLM (Fast Vision Language Model) architecture,
 a hybrid vision_heads model that efficiently combines convolutional and transformer-based
 components for high-performance image classification and feature extraction.
+
+References:
+    - Vasu et al., 2023. FastViT: A Fast Hybrid Vision Transformer using
+      Structural Reparameterization. ICCV 2023.
+      (https://arxiv.org/abs/2303.14189) -- the token-mixing idea this model's
+      convolutional stages follow.
+    - Vasu et al., 2023. MobileOne: An Improved One Millisecond Mobile Backbone.
+      CVPR 2023. (https://arxiv.org/abs/2206.04040) -- the reparameterizable
+      mobile block family.
+    - Dosovitskiy et al., 2021. An Image is Worth 16x16 Words (ViT).
+      (https://arxiv.org/abs/2010.11929) -- the transformer stage.
+
+    PROVENANCE, stated because the name invites the wrong reading: this is a
+    hybrid conv+transformer classifier assembled from this repo's own blocks and
+    NOT a weight-compatible port of any published FastViT/FastVLM checkpoint.
+    In particular ``dl_techniques.layers.repmixer_block.RepMixerBlock`` shares a
+    NAME with FastViT's RepMixer and is a different construction; the faithful
+    FastViT port lives in ``dl_techniques.layers.fastvit``. No pretrained
+    weights are distributed for this package.
 """
 
 import keras
-from keras import layers, initializers
 from typing import Optional, Union, List, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
@@ -32,9 +50,9 @@ class FastVLM(keras.Model):
     and transformer-based attention for high-performance vision_heads tasks while
     maintaining computational efficiency.
 
-    **Intent**: Provide a state-of-the-art vision_heads model that achieves excellent
-    performance on image classification and other vision_heads tasks while being
-    suitable for both research and production deployment scenarios.
+    **Intent**: Provide a configurable hybrid convolution/transformer vision model
+    for image classification and other vision tasks. The model has not been trained
+    or benchmarked in this repository; no performance claim is made for it.
 
     **Architecture**:
     ```
@@ -87,9 +105,17 @@ class FastVLM(keras.Model):
             Defaults to False.
         attention_type: String, type of attention mechanism for attention blocks.
             Options: 'multi_head', 'window', 'group_query'.
-            Defaults to 'multi_head'.
+            Defaults to 'group_query' (with `num_kv_heads == num_heads`, i.e.
+            plain MHA arithmetic) because that is the only wired type that
+            carries positional information into stage 3 -- see D-044. THIS IS
+            A WEIGHT-PATH CHANGE relative to models built before 2026-08-19.
         use_layer_scale: Boolean, whether to use layer scaling in attention blocks.
             Defaults to True.
+        attention_max_seq_len: Integer, RoPE table length for the stage-3
+            attention blocks. Only consumed when `attention_type` is
+            'group_query'. The stage-3 grid is `(H/16) * (W/16)` tokens, so the
+            2048 default covers inputs up to ~720px; a larger encoder input
+            needs a larger value or RoPE will raise. Defaults to 2048.
         activation: String or callable, activation function used throughout.
             Defaults to 'gelu'.
         kernel_initializer: String or initializer, initializer for conv kernels.
@@ -207,26 +233,30 @@ class FastVLM(keras.Model):
     def __init__(
             self,
             num_classes: int = 1000,
-            embed_dims: List[int] = [64, 128, 256],
-            depths: List[int] = [3, 4, 6],
+            embed_dims: Optional[List[int]] = None,
+            depths: Optional[List[int]] = None,
             num_heads: Optional[List[int]] = None,
             mlp_ratio: float = 4.0,
             dropout_rate: float = 0.0,
             drop_path_rate: float = 0.1,
             use_se: bool = False,
-            attention_type: AttentionType = 'multi_head',
+            attention_type: AttentionType = 'group_query',
             use_layer_scale: bool = True,
+            attention_max_seq_len: int = 2048,
             activation: Union[str, callable] = 'gelu',
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs: Any
     ) -> None:
-        # Set default input shape
+        # None sentinels, not shared mutable list defaults.
         if input_shape is None:
             input_shape = (224, 224, 3)
+        if embed_dims is None:
+            embed_dims = [64, 128, 256]
+        if depths is None:
+            depths = [3, 4, 6]
 
-        # Validate inputs
         if num_classes < 0:
             raise ValueError(f"num_classes must be non-negative, got {num_classes}")
         if len(embed_dims) != 3:
@@ -246,13 +276,11 @@ class FastVLM(keras.Model):
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        # Set default num_heads if not provided
         if num_heads is None:
             num_heads = [max(1, dim // 32) for dim in embed_dims]
         elif len(num_heads) != 3:
             raise ValueError(f"num_heads must have 3 elements, got {len(num_heads)}")
 
-        # Validate num_heads divisibility
         for i, (dim, heads) in enumerate(zip(embed_dims, num_heads)):
             if heads <= 0:
                 raise ValueError(f"All num_heads must be positive, got {heads} at index {i}")
@@ -261,7 +289,6 @@ class FastVLM(keras.Model):
                     f"embed_dims[{i}] ({dim}) must be divisible by num_heads[{i}] ({heads})"
                 )
 
-        # Store configuration
         self.num_classes = num_classes
         self.embed_dims = embed_dims
         self.depths = depths
@@ -270,20 +297,39 @@ class FastVLM(keras.Model):
         self.dropout_rate = dropout_rate
         self.drop_path_rate = drop_path_rate
         self.use_se = use_se
+        # DECISION plan-2026-08-18T140459-7991552f/D-044: the DEFAULT is
+        # `'group_query'`, not `'multi_head'`. `TransformerLayer`'s
+        # `'multi_head'` branch builds `MultiHeadAttention` with no RoPE and no
+        # relative bias, and neither `AttentionBlockVLM` nor this model adds a
+        # positional embedding anywhere, so with `'multi_head'` EVERY stage-3
+        # block was exactly permutation-equivariant over the (H/16, W/16) grid:
+        # stage 3 could not represent WHERE anything was. MEASURED on CPU at a
+        # 14x14 grid, `max|f(Px) - Pf(x)|` over a random spatial permutation:
+        # `'multi_head'` 5.36e-07 (the float32 floor, i.e. EXACTLY equivariant)
+        # vs `'group_query'` 5.48e-01 on |y|max 4.03.
+        # Two traps this measurement had to dodge, both of which make the fix
+        # look like a no-op:
+        #   (1) the shipped head is `GlobalAveragePooling2D`, itself
+        #       permutation-INVARIANT, so the probe must read
+        #       `include_top=False` output (or the block directly);
+        #   (2) at the shipped `layer_scale_init=1e-4` the block is ~identity at
+        #       init, which attenuates the SAME delta to 4.88e-05 -- present,
+        #       but small enough to be mistaken for noise. Probe with
+        #       `use_layer_scale=False`.
+        # `num_kv_heads` is left at `None`, which `TransformerLayer` resolves to
+        # `num_heads` -- so this is MHA arithmetic plus RoPE, not a capacity cut.
         self.attention_type = attention_type
+        self.attention_max_seq_len = attention_max_seq_len
         self.use_layer_scale = use_layer_scale
         self.activation = activation
         self.kernel_initializer = kernel_initializer
         self.include_top = include_top
         self._input_shape = input_shape
 
-        # Create inputs
         inputs = keras.Input(shape=input_shape)
 
-        # Build model
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
@@ -292,10 +338,37 @@ class FastVLM(keras.Model):
         )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the FastVLM model architecture."""
+        """Build the FastVLM model architecture.
+
+        The ``training=None`` on every sublayer call below is TRACE-ONLY and
+        deliberately not ``training=training``: this method runs exactly once,
+        from ``__init__``, to produce the ``outputs`` tensor handed to
+        ``super().__init__(inputs=, outputs=)``. It builds the layer objects and
+        records their shapes; it is never executed again.
+        """
+        # DECISION plan-2026-08-22T035419-a11304c8/D-010
+        # Do NOT "fix" the hard-coded ``training=None`` calls in this method to
+        # thread a ``training`` argument. The source text reads like a defect --
+        # ``call()`` below passes ``training=training`` at every step while this
+        # method pins ``None`` -- and it was carried forward twice as one. It is
+        # not: ``type(model).call is FastVLM.call`` is True and
+        # ``type(model).__mro__`` is ``(FastVLM, Functional, Function, Model,
+        # ...)``, so Keras dispatches to the overriding ``call()`` and the traced
+        # functional graph is never the forward path. MEASURED (CPU, seed 3,
+        # ``embed_dims=[16,32,64]``, ``depths=[1,1,1]``, ``input_shape=(32,32,3)``,
+        # ``dropout_rate=0.9``): two ``training=True`` calls diverge by 400.48,
+        # ``training=True`` vs ``False`` by 224.41, two ``training=False`` calls
+        # are bit-identical at 0.0, and one ``training=True`` forward moved all
+        # 10 ``BatchNormalization`` ``moving_mean`` tensors. Dropout and BN both
+        # reach training mode through the real path. Independently: with the
+        # ``call()`` override DELETED the same divergence is measured (400.475,
+        # unchanged), because Keras 3's ``Functional.call`` injects the caller's
+        # ``training`` into every operation of the traced graph -- the value
+        # recorded here is overridden at runtime either way. Guarded by
+        # tests/test_models/test_fastvlm/test_training_mode_reaches_the_forward_path.py.
+        # See D-010 in decisions.md.
         x = inputs
 
-        # Convolutional stem
         self.stem = ConvolutionalStem(
             out_channels=self.embed_dims[0],
             use_se=self.use_se,
@@ -305,7 +378,6 @@ class FastVLM(keras.Model):
         )
         x = self.stem(x, training=None)
 
-        # Create stages
         self.stages = []
         self.downsample_layers = []
 
@@ -326,7 +398,7 @@ class FastVLM(keras.Model):
         x = stage1(x, training=None)
 
         # Downsample 1->2
-        downsample_1_2 = layers.Conv2D(
+        downsample_1_2 = keras.layers.Conv2D(
             filters=self.embed_dims[1],
             kernel_size=3,
             strides=2,
@@ -354,7 +426,7 @@ class FastVLM(keras.Model):
         x = stage2(x, training=None)
 
         # Downsample 2->3
-        downsample_2_3 = layers.Conv2D(
+        downsample_2_3 = keras.layers.Conv2D(
             filters=self.embed_dims[2],
             kernel_size=3,
             strides=2,
@@ -395,6 +467,7 @@ class FastVLM(keras.Model):
                     use_stochastic_depth=True,
                     stochastic_depth_rate=block_drop_rate,
                     use_layer_scale=self.use_layer_scale,
+                    max_seq_len=self.attention_max_seq_len,
                     name=f'stage3_attention_{i}'
                 )
             )
@@ -405,8 +478,8 @@ class FastVLM(keras.Model):
         # Classification head
         if self.include_top and self.num_classes > 0:
             head_layers = [
-                layers.GlobalAveragePooling2D(name='gap'),
-                layers.Dense(
+                keras.layers.GlobalAveragePooling2D(name='gap'),
+                keras.layers.Dense(
                     self.num_classes,
                     kernel_initializer=self.kernel_initializer,
                     name='classifier'
@@ -414,7 +487,7 @@ class FastVLM(keras.Model):
             ]
 
             if self.dropout_rate > 0.0:
-                head_layers.insert(-1, layers.Dropout(self.dropout_rate, name='head_dropout'))
+                head_layers.insert(-1, keras.layers.Dropout(self.dropout_rate, name='head_dropout'))
 
             self.head = keras.Sequential(head_layers, name='classification_head')
             x = self.head(x, training=None)
@@ -540,7 +613,6 @@ class FastVLM(keras.Model):
         logger.info(f"Creating FastVLM-{variant.upper()} model")
         logger.info(f"Configuration: {config}")
 
-        # Override with any user-provided arguments
         config.update(kwargs)
 
         return cls(
@@ -551,7 +623,8 @@ class FastVLM(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        config = {
+        config = super().get_config()
+        config.update({
             'num_classes': self.num_classes,
             'embed_dims': self.embed_dims,
             'depths': self.depths,
@@ -561,16 +634,17 @@ class FastVLM(keras.Model):
             'drop_path_rate': self.drop_path_rate,
             'use_se': self.use_se,
             'attention_type': self.attention_type,
+            'attention_max_seq_len': self.attention_max_seq_len,
             'use_layer_scale': self.use_layer_scale,
             'activation': keras.activations.serialize(
                 keras.activations.get(self.activation)
             ),
-            'kernel_initializer': initializers.serialize(
-                initializers.get(self.kernel_initializer)
+            'kernel_initializer': keras.initializers.serialize(
+                keras.initializers.get(self.kernel_initializer)
             ),
             'include_top': self.include_top,
             'input_shape': self._input_shape,
-        }
+        })
         return config
 
     @classmethod
@@ -585,7 +659,7 @@ class FastVLM(keras.Model):
         """
         # Deserialize initializer if present
         if 'kernel_initializer' in config:
-            config['kernel_initializer'] = initializers.deserialize(
+            config['kernel_initializer'] = keras.initializers.deserialize(
                 config['kernel_initializer']
             )
 
@@ -611,5 +685,50 @@ class FastVLM(keras.Model):
         logger.info(f"  - Include top: {self.include_top}")
         if self.include_top and self.num_classes > 0:
             logger.info(f"  - Number of classes: {self.num_classes}")
+
+# ---------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_fastvlm(
+        variant: str = "base",
+        num_classes: int = 1000,
+        input_shape: Optional[Tuple[int, ...]] = None,
+        **kwargs: Any
+) -> FastVLM:
+    """
+    Create a FastVLM model from a named variant.
+
+    Args:
+        variant: String, one of ``FastVLM.MODEL_VARIANTS``
+            ("nano", "tiny", "small", "base", "large", "huge").
+        num_classes: Integer, number of output classes for classification.
+        input_shape: Tuple, input shape. ``None`` defaults to (224, 224, 3).
+        **kwargs: Additional arguments passed to the model constructor; they
+            override the variant's entries.
+
+    Returns:
+        A configured FastVLM instance.
+
+    Raises:
+        ValueError: If ``variant`` is not a known variant name, or if any
+            resolved argument is out of range.
+
+    Example:
+        ```python
+        model = create_fastvlm("tiny", num_classes=10, input_shape=(32, 32, 3))
+        backbone = create_fastvlm("base", include_top=False)
+        ```
+    """
+    return FastVLM.from_variant(
+        variant=variant,
+        num_classes=num_classes,
+        input_shape=input_shape,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------

@@ -78,9 +78,6 @@ class TiRexTrainingConfig(BaseTimeSeriesTrainingConfig):
     # step-6); the prior local override was identical to the base default
     # ([0.1, 0.25, 0.5, 0.75, 0.9]) so it is dropped (deliverable D-consume).
 
-    # TiRex-specific pattern selection
-    min_data_length: int = 2000
-
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
         if self.model_type not in ['core', 'extended']:

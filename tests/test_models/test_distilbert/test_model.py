@@ -408,7 +408,14 @@ class TestMaskingContract:
         # (c) The mask is passed through unchanged for downstream heads.
         out = model({"input_ids": ids, "attention_mask": pad_mask}, training=False)
         np.testing.assert_array_equal(_np(out["attention_mask"]), pad_mask)
-        assert model({"input_ids": ids}, training=False)["attention_mask"] is None
+        # (d) An OMITTED mask is echoed back as all ones, not as `None`
+        # (decisions.md D-062). This assertion used to read `... is None`,
+        # i.e. it pinned the defect that made `predict()` unusable. The echo
+        # is a return-site substitution only: the encoder still sees `None`,
+        # which is exactly what (b) above measures.
+        echoed = _np(model({"input_ids": ids}, training=False)["attention_mask"])
+        np.testing.assert_array_equal(echoed, np.ones_like(echoed))
+        assert echoed.shape == ids.shape
 
 
 class TestHeadIntegration:
@@ -625,8 +632,12 @@ class TestPretrainedWeightLoading:
         mismatched = DistilBERT.from_variant(
             "tiny", vocab_size=512, max_position_embeddings=128
         )
-        with caplog.at_level(logging.WARNING, logger="dl"):
-            mismatched.load_pretrained_weights(path, skip_mismatch=True)
+        # R-038 / D-054: the embedding tables really cannot be restored here,
+        # and Keras says so with `A total of N objects could not be loaded`.
+        # That warning is the subject of this test, so it is asserted.
+        with pytest.warns(UserWarning, match="could not be loaded"):
+            with caplog.at_level(logging.WARNING, logger="dl"):
+                mismatched.load_pretrained_weights(path, skip_mismatch=True)
 
         text = caplog.text
         assert "skip_mismatch=True" in text
@@ -675,5 +686,59 @@ class TestPretrainedWeightLoading:
             np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
 
 
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `DistilBERT.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained DistilBERT weights"):
+            DistilBERT.from_variant("tiny", pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = DistilBERT.from_variant("tiny", vocab_size=128,
+                                        max_position_embeddings=32)
+        assert isinstance(model, DistilBERT)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(DistilBERT, "PRETRAINED_WEIGHTS")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 10)
+# ---------------------------------------------------------------------
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestDistilBERTGradientFlow:
+    """Every trainable weight must be on the backward graph.
+
+    ``default_loss`` is a mean-of-squares over the FLOAT tensors of the output
+    dict, so it lands on ``last_hidden_state`` and skips the integer
+    ``attention_mask`` -- which is what we want: DistilBERT has no head here, and
+    a labelled loss would need one. The two documented traps are both avoided by
+    construction (no ``from_logits`` mismatch is possible without a softmax, and
+    the assertion is per weight rather than an aggregate norm).
+    """
+
+    def test_gradients_reach_every_trainable_weight(self):
+        keras.utils.set_random_seed(SEED)
+        model = _model()
+        x = _tokens()
+        model(x, training=False)  # a subclassed model is unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+        assert max(v for v in report.values() if v is not None) > 0.0

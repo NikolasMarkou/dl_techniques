@@ -1,55 +1,91 @@
 """
-CoShNet (Complex Shearlet Network) Implementation
-================================================================
+A complex-valued classifier over a fixed shearlet frontend, in six size variants.
 
-This module implements  CoShNet architecture, following modern Keras 3 patterns
-and best practices. CoShNet is a hybrid complex-valued neural network that combines
-fixed shearlet transforms with learnable complex-valued layers for efficient image
-classification.
+The design question CoShNet answers is which part of a vision model actually has
+to be learned. The first layers of a trained CNN reliably converge to oriented,
+band-limited edge detectors — a filter bank that harmonic analysis can write down
+in closed form and that costs nothing to fit. Shearlets are the principled choice
+for that bank: built from anisotropic scaling paired with shearing rather than
+the isotropic dilation of wavelets, their elements are elongated and oriented,
+and under parabolic scaling (support `~2^j` along one axis, `~2^(j/2)` along the
+other) they are provably optimal at sparsifying cartoon-like images — piecewise
+smooth with curved discontinuities, which is a fair caricature of natural images.
+Fixing the frontend removes those parameters from the optimization entirely and
+hands the network a strong geometric prior instead of asking it to rediscover
+one.
 
-Key Features:
-------------
-1. Hybrid Architecture:
-   - Fixed shearlet transform frontend for multi-scale feature extraction
-   - Learnable complex-valued convolutional and dense layers
-   - Global Average Pooling for spatial dimension reduction
-   - Efficient parameter usage through fixed transform
-   - Built-in multi-scale and directional sensitivity
+The transform is applied as a non-trainable filter bank in the frequency domain:
+FFT, elementwise multiply against `1 + scales * (directions + 1)` filters, and an
+inverse FFT per filter. At the defaults (`scales=4`, `directions=8`) that is 37
+filters, so a 3-channel input leaves the frontend with 111 channels at unchanged
+spatial resolution. The filter bank is built for one static `(height, width)`;
+this frontend cannot be traced with unknown spatial dims.
 
-2. Technical Advantages:
-   - Fewer parameters than traditional CNNs
-   - Faster training convergence
-   - Better gradient flow through complex-valued operations
-   - Natural handling of phase information
-   - Self-regularizing behavior
+What follows is complex-valued, and it is worth being precise about where the
+complexity comes from, because the layer names invite the wrong reading. The
+transform returns the *real part* of the inverse FFT, so the phase of the
+shearlet coefficients is not propagated; the model casts that real tensor to
+`complex64` with an identically zero imaginary part. The imaginary channel is
+populated only by the first complex convolution, whose kernel is genuinely
+complex — so phase here is a learned quantity mixed by complex multiplication,
+not the analytic phase of the transform. Complex multiplication is what makes the
+layer more than two real convolutions: it couples the two components
+(`(a + ib)(c + id)`), and that coupling is the architecture's stated source of
+parameter efficiency.
 
-Architecture Variants:
----------------------
-- CoShNet-Nano: Minimal model for resource-constrained environments
-- CoShNet-Tiny: Small model (~50k parameters)
-- CoShNet-Base: Standard model (~800k parameters)
-- CoShNet-Large: Larger model for complex datasets
-- CoShNet-CIFAR10: Optimized for CIFAR-10 classification
-- CoShNet-ImageNet: Scaled for ImageNet-style inputs
+The body is two (or three, at `large`/`imagenet`) complex convolutions with
+stride 2, each followed by a split ReLU applied independently to the real and
+imaginary parts — the simplest complex activation, and not a modulus-based one
+such as modReLU. Global average pooling over the spatial axes then collapses the
+feature map before the dense stack, a deliberate substitution for flattening: it
+drops the first dense layer's parameter count by the spatial area and makes the
+dense widths independent of input resolution, at the cost of discarding where in
+the image a response occurred. The dense stack alternates complex dense,
+activation and complex dropout.
 
-Performance Characteristics:
--------------------------
-1. Model Efficiency:
-   - Reduced parameters compared to traditional CNNs
-   - Fast convergence in 20-50 epochs
-   - Memory efficient through global pooling
-   - Optimal for small to medium-sized datasets
+The classifier head takes `ops.abs` of the final complex vector before a real
+`Dense`, so the phase learned through the network reaches the decision only
+through the magnitude it produces. That Dense applies `softmax` itself: the model
+emits probabilities, not logits, and must be compiled with `from_logits=False`.
+With `include_top=False` the model returns the `complex64` convolutional feature
+map instead, which most downstream real-valued Keras layers will refuse.
 
-2. Computational Benefits:
-   - Reduced FLOPs through fixed shearlet transform
-   - Efficient forward pass
-   - Lower memory footprint
+Six variants ladder the same shape rather than changing it. THIS PARAGRAPH IS THE
+ONLY HOME FOR THE PARAMETER COUNTS in this package — a second, contradicting set
+lived 620 lines below in `create_coshnet`'s docstring (it claimed ~50k for `tiny`
+and ~800k for `base`, which are neither variant's number; the labels had shifted
+one rung when `nano` was added) and was DELETED rather than corrected, because a
+count restated in two places is a hand-maintained invariant that will drift again.
+Re-derive with:
+
+    create_coshnet(v, num_classes=10, input_shape=(32, 32, 3)).count_params()
+
+Measured 2026-08-17: `nano` 55,282, `tiny` 101,850, `base` 927,632, `large`
+4,630,858, `cifar10` 592,282, `imagenet` 5,627,466 total parameters. Only about
+40-90% of those are trainable — the shearlet transform contributes a large fixed,
+non-trainable filter bank (`nano`: 22,514 trainable of 55,282). Pinned by
+`tests/test_models/test_coshnet/test_model.py::TestDocumentedParameterCounts`.
+`imagenet` restates `conv_strides=2`, which is already the constructor default, so
+that entry is inert.
+
+Construction is functional, not subclassed: `__init__` traces the graph and hands
+`inputs`/`outputs` to `keras.Model.__init__`, which is what registers the
+weights. The `self.conv_layers` / `self.dense_layers` attribute lists the
+builders leave behind are for introspection; the functional graph is the
+authority. The model name is fixed to `"coshnet"` at that call, so a `name=`
+kwarg cannot be threaded through the constructor.
 
 References:
-----------
-1. "CoShNet: A Hybrid Complex Valued Neural Network Using Shearlets"
-2. "Deep Complex Networks" (Trabelsi et al., 2018)
-3. "CoShRem: Faithful Digital Shearlet Transforms based on Compactly Supported Shearlets"
+    - Ko, Panchal, Andrade-Loarca & Mendez-Vazquez, 2022. CoShNet: A Hybrid
+      Complex Valued Neural Network using Shearlets.
+    - Trabelsi et al., 2018. Deep Complex Networks. ICLR 2018.
+      (https://arxiv.org/abs/1705.09792)
+    - Guo, Kutyniok & Labate, 2006. Sparse Multidimensional Representations
+      using Anisotropic Dilation and Shear Operators.
+    - Kutyniok & Labate, 2012. Shearlets: Multiscale Analysis for Multivariate
+      Data. Birkhauser.
+    - Reisenhofer et al., 2016. Shearlab 3D / CoShREM: Faithful Digital Shearlet
+      Transforms Based on Compactly Supported Shearlets.
 """
 
 import keras
@@ -67,8 +103,7 @@ from dl_techniques.layers.complex_layers import (
     ComplexConv2D,
     ComplexReLU,
     ComplexDropout,
-    ComplexAveragePooling2D,
-    ComplexGlobalAveragePooling2D
+    ComplexGlobalAveragePooling2D,
 )
 
 # ---------------------------------------------------------------------
@@ -122,7 +157,17 @@ class CoShNet(keras.Model):
 
         # Advanced options
         include_top: Whether to include the classification head. Default True.
-        epsilon: Small value for numerical stability in complex operations. Default 1e-7.
+        epsilon: **DEAD KNOB.** Validated, stored, serialized and forwarded to
+            every complex layer -- and never used in a computation. `grep -n
+            "epsilon" layers/complex_layers.py` returns 6 hits, all of them
+            docstring / signature / validation / `get_config`; no complex layer
+            performs a division at all, so there is no numerical-stability term
+            for it to be. MEASURED 2026-08-18 on ONE built `nano` (so the weights
+            are held fixed -- rebuilding under `set_random_seed` does NOT
+            reproduce them here, and that invalid instrument reported a spurious
+            0.023): forward is deterministic self-vs-self at exactly 0.0, and
+            after mutating all 4 live `epsilon` attributes from 1e-7 to 1e-1 the
+            output changes by exactly **0.0**. Kept for config compatibility.
 
         **kwargs: Additional arguments for Model base class.
 
@@ -296,7 +341,15 @@ class CoShNet(keras.Model):
         outputs = self._build_model(inputs)
 
         # Initialize the Model
-        super().__init__(inputs=inputs, outputs=outputs, name="coshnet", **kwargs)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-066
+        # `name` is a DEFAULT here, not a constant. Hard-coding it made two
+        # things impossible at once: `CoShNet(name="x")` raised `TypeError: got
+        # multiple values for keyword argument 'name'`, and -- now that
+        # `get_config` calls `super().get_config()` -- a round trip would feed
+        # the restored `name` straight back into this call and raise. Do NOT
+        # restore the literal. See decisions.md D-066.
+        kwargs.setdefault("name", "coshnet")
+        super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
             f"Created CoShNet model for input {input_shape} "
@@ -539,7 +592,19 @@ class CoShNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
         config = cls.MODEL_VARIANTS[variant].copy()
+        config.pop("description", None)
+        config.update(kwargs)
 
         # Set default input shape based on variant if not provided
         if input_shape is None:
@@ -554,8 +619,7 @@ class CoShNet(keras.Model):
         return cls(
             num_classes=num_classes,
             input_shape=input_shape,
-            **config,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:
@@ -564,7 +628,8 @@ class CoShNet(keras.Model):
         Returns:
             Configuration dictionary containing all model parameters
         """
-        config = {
+        config = super().get_config()
+        config.update({
             # Core configuration
             "num_classes": self.num_classes,
             "input_shape": self._input_shape,
@@ -586,7 +651,7 @@ class CoShNet(keras.Model):
             # Advanced options
             "include_top": self.include_top,
             "epsilon": self.epsilon,
-        }
+        })
         return config
 
     @classmethod
@@ -651,8 +716,8 @@ def create_coshnet(
     Args:
         variant: String, model variant. Options:
             - "nano": Minimal model for resource-constrained environments
-            - "tiny": Small model (~50k parameters)
-            - "base": Standard model (~800k parameters)
+            - "tiny": Small model
+            - "base": Standard model
             - "large": Larger model for complex datasets
             - "cifar10": Optimized for CIFAR-10 classification
             - "imagenet": Scaled for ImageNet-style inputs

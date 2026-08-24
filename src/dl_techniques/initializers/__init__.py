@@ -31,6 +31,12 @@ Available Initializers:
     matrices only -- a near-identity start for a mixing/coupling matrix that is
     meant to begin as (close to) a no-op. `stddev=0` gives the exact identity.
     Used by `WaveFieldAttention`'s cross-head `field_coupling` matrix.
+-   `clone_initializer`: returns an INDEPENDENT copy of an initializer. A single
+    seedless initializer INSTANCE reused across several weights emits the SAME
+    tensor at every matching shape (Keras 3 behaviour -- the instance
+    self-assigns a seed), which is how `PowerMLPLayer`'s two branches came to
+    start bit-identical. Clone per site where the two weights play DIFFERENT
+    architectural roles.
 -   `KANInitializer`: variance-controlled init for Kolmogorov-Arnold Network
     residual (`base_scaler`) and spline (`spline_weight`) roles, using the
     Rigas et al. (2026) per-role variance schemes (`power_law`,
@@ -51,12 +57,14 @@ from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from .polar_initializer import PolarInitializer
 from .linear_up_initializer import LinearUpInitializer
 from .identity_plus_noise import IdentityPlusNoise
+from .clone import clone_initializer
 from .kan_initializer import (
     KANInitializer,
     create_kan_initializers,
 )
 
 __all__ = [
+    "clone_initializer",
     "HaarWaveletInitializer",
     "create_haar_depthwise_conv2d",
     "GaborFiltersInitializer",

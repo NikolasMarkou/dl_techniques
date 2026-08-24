@@ -8,8 +8,18 @@ controlled by the `partition_mode` parameter.
 
 The layer takes a 1D sequence, internally reshapes it, partitions it
 according to the chosen mode, and computes self-attention within each local
-window. This approach maintains linear complexity with respect to sequence
-length while offering different locality biases.
+window, offering different locality biases.
+
+**Read the cost model before reaching for this layer as an "efficient
+attention".** Every window is padded up to exactly ``M = window_size ** 2``
+positions, so the cost is ``O(max(N, M) * M)`` — asymptotically linear in
+``N`` only *above* ``N = M``, and pinned at a constant floor of ``M ** 2 =
+window_size ** 4`` below it. Whenever ``N <= M`` the padded grid is a single
+window and the layer computes **dense attention over an M-token padded
+sequence**, which costs ``(M / N) ** 2`` times *more* than plain global
+attention on the ``N`` real tokens, not less. At ``window_size = 128``
+(``M = 16384``) that threshold sits above any sequence most callers will
+ever pass. See "Foundational Mathematics" below for the derivation.
 
 Architecture:
     One pipeline, one branch. Both partition modes share the same five-stage
@@ -45,11 +55,40 @@ Architecture:
 Foundational Mathematics:
     Full self-attention over ``N`` tokens costs ``O(N^2)``. Restricting
     attention to non-overlapping windows of ``M = window_size ** 2`` tokens
-    leaves ``N / M`` independent ``O(M^2)`` problems, i.e. ``O(N * M)`` total —
-    linear in ``N`` for fixed ``M``. The price is that information cannot cross
-    a window boundary within one layer; both modes address this the same way a
-    Swin stack does, by relying on the *caller* to alternate partitions (or
-    shift them) between layers rather than by widening any single window.
+    leaves ``ceil(N / M)`` independent ``O(M^2)`` problems. The ``ceil`` is the
+    whole story and is *not* a rounding detail:
+
+    ``_call_grid`` pads ``N`` up to ``H * W`` with ``H = W = ceil(sqrt(N))``,
+    then pads ``H`` and ``W`` up to a multiple of ``window_size``. The window
+    count is therefore ``ceil(H / window_size) ** 2``, which has a **floor of
+    1** — never zero windows, and never a window holding fewer than ``M``
+    positions, because the shortfall is made up with padding. Total cost:
+
+        ``cost(N, M) = ceil(H / window_size)^2 * M^2  =  O(max(N, M) * M)``
+
+    Two regimes follow, and only one of them is the advertised one:
+
+    * ``N > M`` — the intended regime. ``O(N * M)``, linear in ``N`` for fixed
+      ``M``, cheaper than ``O(N^2)`` global attention by a factor ``N / M``.
+    * ``N <= M`` — **degenerate**. ``H <= window_size``, so ``pad_h =
+      window_size - H``, the padded grid is exactly one ``window_size x
+      window_size`` tile, ``_window_partition`` yields a single window, and the
+      layer computes dense attention over ``M`` positions of which ``M - N``
+      are padding. The cost is the constant ``M^2`` regardless of ``N``, i.e.
+      ``(M / N)^2`` times *more* than global attention over the ``N`` real
+      tokens. At ``window_size = 128`` this covers every ``N <= 16384``: the
+      per-layer score matrix is ``16384 x 16384 ~ 2.7e8`` entries per head per
+      sample whether ``N`` is 128 or 8192.
+
+    Choosing ``window_size`` is therefore choosing a *minimum* cost, not a
+    maximum one: a window size picked to be "generous" makes the layer
+    strictly more expensive than the global attention it replaces at every
+    sequence length that fits inside one window.
+
+    The other price is that information cannot cross a window boundary within
+    one layer; both modes address this the same way a Swin stack does, by
+    relying on the *caller* to alternate partitions (or shift them) between
+    layers rather than by widening any single window.
 
 ================================================
 Partition Mode 1: 'grid' (Swin Transformer-style)
@@ -134,13 +173,21 @@ Complete Architecture Flow (`partition_mode='zigzag'`)::
 Complexity Analysis
 -------------------
 
-============== ============== =================================
-Operation      Complexity     Notes
-============== ============== =================================
-Partitioning   O(N)           Linear reshape/reorder
-Attention      O(N × k²)      k = window_size, N = seq_len
-Total          O(N × k²)      Linear in sequence length
-============== ============== =================================
+``M = window_size²`` is the number of token slots in one window; ``N`` is the
+sequence length. Windows are padded to ``M`` positions, so ``M`` — not ``N`` —
+sets the floor.
+
+============== ================== ==============================================
+Operation      Complexity         Notes
+============== ================== ==============================================
+Partitioning   O(max(N, M))       Reshape/reorder over the PADDED grid
+Attention      O(max(N, M) × M)   ceil(N/M) windows, each an M×M score matrix
+Total          O(max(N, M) × M)   Linear in N only for N > M
+--             --                 --
+N > M          O(N × M)           The intended regime; beats O(N²) by N/M
+N <= M         O(M²)              ONE padded window: dense attention, and
+                                  (M/N)² times MORE work than global O(N²)
+============== ================== ==============================================
 
 References:
     - Liu, Z., et al. (2021). "Swin Transformer: Hierarchical Vision
@@ -161,6 +208,10 @@ from typing import Any, Dict, Literal, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from .single_window_attention import SingleWindowAttention
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Probability types not supported in window attention (score-level routing
@@ -188,8 +239,19 @@ class WindowAttention(keras.layers.Layer):
     ``'grid'`` (Swin Transformer-style 2D spatial windowing) and
     ``'zigzag'`` (2D zigzag scan grouping frequency-proximate tokens).
     All padding, reshaping, partitioning, and merging are handled
-    internally, yielding ``O(N * k^2)`` complexity (linear in sequence
-    length, quadratic in window size ``k``).
+    internally.
+
+    **Cost.** With ``M = window_size ** 2`` token slots per window, the cost is
+    ``O(max(N, M) * M)``: linear in ``N`` only while ``N > M``, and a constant
+    ``O(M^2)`` floor below that. For ``N <= M`` the internal grid pads up to a
+    single ``window_size x window_size`` tile, so this layer performs **dense
+    attention over M padded positions** — ``(M / N) ** 2`` times more work than
+    global attention over the ``N`` real tokens. This is a property of the
+    padding, not an approximation: see the module docstring's "Foundational
+    Mathematics" section, and
+    ``tests/test_models/test_modern_bert/test_shipped_window_size.py``, which
+    pins the degeneracy at the ``window_size = 128`` that ``ModernBERT``
+    actually ships.
 
     **Architecture Overview:**
 
@@ -342,7 +404,7 @@ class WindowAttention(keras.layers.Layer):
         self.proj_bias = proj_bias
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
-        self.kan_activation = kan_activation
+        self.kan_activation = deserialize_activation(kan_activation)
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -383,6 +445,24 @@ class WindowAttention(keras.layers.Layer):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-081: the name is
+            # EXPLICIT, and it is spelled as the auto-name Keras would have
+            # produced for the first instance in a process. Without it the
+            # global `auto_name` counter numbers this sub-layer per process, so
+            # two instances of the SAME builder disagree by weight path
+            # (`single_window_attention` vs `single_window_attention_12`) and
+            # R-072 build parity cannot be asserted for any consumer.
+            #
+            # MEASURED consequence, and it is not free: a model holding MORE
+            # than one window-attention layer had them numbered
+            # (`single_window_attention_1`, `_12`, `_19`); they now all read
+            # `single_window_attention` and are distinguished by their parent,
+            # so the weight PATHS move for `swin_transformer`, `scunet` and
+            # `modern_bert`. A `.keras` archive is positional and round-trips
+            # unaffected -- CPU-eager forward delta measured EXACTLY 0.0 for all
+            # three -- but a by-NAME load against a checkpoint written before
+            # this line will not find these tensors.
+            name="single_window_attention",
         )
 
         # Attributes for zigzag mode, computed in build()
@@ -724,7 +804,7 @@ class WindowAttention(keras.layers.Layer):
                 "proj_bias": self.proj_bias,
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
-                "kan_activation": self.kan_activation,
+                "kan_activation": serialize_activation(self.kan_activation),
                 "probability_type": self.probability_type,
                 "probability_config": self.probability_config,
                 "qk_norm_type": self.qk_norm_type,

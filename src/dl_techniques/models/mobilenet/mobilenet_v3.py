@@ -1,47 +1,81 @@
 """
-MobileNetV3: Efficient Mobile Networks with Hardware-Aware NAS
-==============================================================
+MobileNetV3 image classifier: the searched Large/Small layer tables, with
+squeeze-and-excitation and hard-swish, assembled from `UniversalInvertedBottleneck`.
 
-A complete implementation of MobileNetV3 architecture built with the flexible
-Universal Inverted Bottleneck (UIB) layer. This version follows modern
-Keras 3 best practices for custom models with proper serialization support.
+Where V2 contributed a block, V3 contributes a *layout*. The block is still V2's
+inverted residual with a linear bottleneck; what changed is that the per-layer
+expansion factors, kernel sizes, widths and strides stopped being hand-designed and
+became the output of a search — platform-aware NAS over a MnasNet-style
+factorized space to fix the block structure, then NetAdapt to trim each layer's
+channel count against measured on-device latency rather than against FLOPs. The
+resulting tables are irregular in a way no human schedule is: expansion sizes like
+200, 184, 480, 672 that are not integer multiples of their input width, `5x5`
+depthwise kernels in some stages and `3x3` in others, and ReLU in the early
+high-resolution stages switching to hard-swish only once resolution has dropped.
 
-Based on: "Searching for MobileNetV3"
-Paper: https://arxiv.org/abs/1905.02244
+`LARGE_CONFIG` and `SMALL_CONFIG` here are those tables transcribed
+row-for-row from the paper (Table 1 and Table 2 of *Searching for MobileNetV3*),
+`(exp_size, out_channels, kernel, stride, use_se, activation)` per row, and they do
+match it — including the details a re-derivation usually gets wrong: Large's first
+block having expansion 16 into 16 channels, Small starting with a stride-2 SE block,
+and the ReLU-to-hard-swish switch landing at the 240/80 block in Large and at the
+96/40 block in Small.
 
-Key Features:
-------------
-- Universal Inverted Bottleneck blocks configured to replicate MobileNetV3's design
-- Squeeze-and-Excite attention modules (via UIB)
-- Hard-swish (h-swish) activation for efficiency
-- Optimized first and last layers
-- Support for Large and Small variants
-- Complete variant configurations
+Two mechanisms are grafted onto the block. Squeeze-and-excitation, applied inside
+the expanded space after the depthwise convolution and before the projection,
+pools each channel to a scalar and predicts a per-channel gate from it, which lets
+the block reweight channels using global context that a depthwise filter can never
+see; V3 enables it only in the rows the search selected, at a reduction of `1/4` of
+the *expanded* channels. Hard-swish replaces swish/SiLU with
 
-Architecture Overview:
----------------------
-MobileNetV3 consists of:
-1. **Stem**: Initial convolution with hard-swish
-2. **Body**: Stack of `UniversalInvertedBottleneck` blocks with optional SE
-3. **Head**: Efficient last stage with optimized structure
+`h-swish(x) = x * ReLU6(x + 3) / 6`
 
-Model Variants:
---------------
-- MobileNetV3-Large: High accuracy model for powerful devices
-- MobileNetV3-Small: Lightweight model for resource-constrained devices
+which keeps swish's smooth non-monotonic shape but needs no sigmoid or exponential,
+so it costs a few piecewise-linear ops and quantizes cleanly. It is used only in
+the later, lower-resolution half of the network, because the activation's cost is
+paid per spatial position and the early stages have the most of those.
 
-Usage Examples:
---------------
-```python
-# ImageNet model (224x224 input)
-model = MobileNetV3.from_variant("large", num_classes=1000)
+The head is the third contribution and is a pure latency optimization: rather than
+running the final `1x1` expansion at `7x7` and then pooling, V3 pools first and
+runs the expensive 1280-wide projection on a `1x1` tensor, deleting the previous
+generation's bottleneck-and-projection pair entirely. This module implements that
+head as `GlobalAveragePooling -> Dense(1280 or 1024) -> hard-swish -> dropout ->
+Dense(num_classes)`, which is arithmetically the paper's post-pool `1x1`
+convolutions; the last block convolution (960 for Large, 576 for Small) still runs
+pre-pool with batch norm and hard-swish, as in the paper.
 
-# CIFAR-10 model (32x32 input)
-model = MobileNetV3.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+Three deviations follow from building on the shared universal block rather than a
+bespoke one, and none of them is visible from the variant tables. The
+squeeze-and-excitation gate in `UniversalInvertedBottleneck` is a plain **sigmoid**,
+where the paper specifies hard-sigmoid — same shape, different numerics and a
+different quantization story. The universal block always constructs its expansion
+`1x1` + norm + activation, so Large's first row (expansion 16 into 16 channels,
+where the paper omits the expansion convolution) carries an extra `C -> C`
+projection here. And the classifier ends in softmax, so this model emits
+probabilities rather than logits: compile with `from_logits=False`.
 
-# Custom configuration
-model = MobileNetV3(num_classes=100, variant="large", width_multiplier=0.75)
-```
+`width_multiplier` scales both the expansion sizes and the output widths through
+the same round-to-multiple-of-8 rule V2 uses, so it reproduces the paper's
+`alpha` family; it does not scale the head's 1280/1024 projection independently of
+that rule.
+
+`pretrained=True` on `create_mobilenetv3` raises `NotImplementedError`. No
+checkpoints ship with this package. It used to succeed with random weights, with
+only a log line distinguishing that from a real load; the contract in
+`resnet/model.py` now holds here too. Warm-start from a local file with
+`model.load_weights(path)`.
+
+References:
+    - Howard et al., 2019. Searching for MobileNetV3.
+      (https://arxiv.org/abs/1905.02244)
+    - Tan et al., 2019. MnasNet: Platform-Aware Neural Architecture Search for
+      Mobile. (https://arxiv.org/abs/1807.11626)
+    - Yang et al., 2018. NetAdapt: Platform-Aware Neural Network Adaptation for
+      Mobile Applications. (https://arxiv.org/abs/1804.03230)
+    - Hu et al., 2017. Squeeze-and-Excitation Networks.
+      (https://arxiv.org/abs/1709.01507)
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
+      (https://arxiv.org/abs/1801.04381)
 """
 
 import keras
@@ -55,6 +89,11 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.hard_swish import HardSwish
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 
 # ---------------------------------------------------------------------
 # MobileNetV3 Model
@@ -218,7 +257,11 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        self.stem_bn = layers.BatchNormalization(name="stem_bn")
+        self.stem_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name="stem_bn",
+        )
         self.stem_activation = HardSwish(name="stem_hard_swish")
 
         # Build inverted residual blocks using UniversalInvertedBottleneck
@@ -241,6 +284,10 @@ class MobileNetV3(keras.Model):
                 use_squeeze_excitation=use_se,
                 activation_type=activation,
                 normalization_type='batch_norm',
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- see
+                # mobilenet_v1.py. `normalization_type` alone leaves epsilon at
+                # the factory's 1e-6, not the fetched reference's 1e-3.
+                normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                 use_bias=False,
                 use_dw1=True,  # Standard inverted bottleneck structure
                 use_dw2=False,
@@ -265,7 +312,11 @@ class MobileNetV3(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="last_conv"
         )
-        self.last_bn = layers.BatchNormalization(name="last_bn")
+        self.last_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name="last_bn",
+        )
         self.last_activation = HardSwish(name="last_hard_swish")
 
         # Head
@@ -376,10 +427,10 @@ class MobileNetV3(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model if it hasn't been built yet
-        if not self.built:
-            input_tensor = keras.Input(shape=self.input_shape_config)
-            self.build(input_tensor.shape)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass; the
+        # keras.Input + build(shape) route marked the model built without creating
+        # any sub-layer weights. See decisions.md D-065.
+        materialize_for_summary(self, self.input_shape_config)
 
         super().summary(**kwargs)
 
@@ -414,7 +465,8 @@ def create_mobilenetv3(
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
         width_multiplier: Float, multiplier for filter dimensions
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no MobileNetV3 checkpoints ship with this package.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -430,8 +482,18 @@ def create_mobilenetv3(
         >>> # Create with custom width multiplier
         >>> model = create_mobilenetv3("large", width_multiplier=0.75)
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained MobileNetV3 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobilenetv3('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
+        )
 
     model = MobileNetV3.from_variant(
         variant,

@@ -1,153 +1,106 @@
 """
-Hierarchical Reasoning Model: Adaptive Computation Time with Multi-Level Reasoning
-================================================================================
+Hierarchical Reasoning Model: a two-timescale recurrent reasoning core under Adaptive
+Computation Time with Q-learned halting.
 
-A complete implementation of the Hierarchical Reasoning Model (HRM) with Adaptive
-Computation Time (ACT), providing dynamic computational depth allocation for complex
-reasoning tasks through a stateful wrapper around hierarchical reasoning cores.
+A fixed-depth transformer spends identical compute on every input. For multi-step
+reasoning that is doubly wrong: easy instances are over-served, and hard ones are
+capped by a depth chosen at training time. HRM makes depth a runtime quantity in two
+independent ways. Within one step, a small core iterates its own latent states rather
+than passing through distinct layers, so effective depth is `h_cycles * l_cycles`
+applications of a fixed parameter set. Across steps, Adaptive Computation Time lets
+each sequence in the batch decide for itself how many steps to take.
 
-The HRM addresses the computational efficiency challenges in complex reasoning by
-learning to adaptively allocate computation time based on input complexity, using
-Q-learning to determine optimal halting decisions and hierarchical processing
-for multi-scale reasoning.
+The hierarchy is a separation of timescales. Two latent states are maintained: a
+low-level `z_l` that is refreshed against the input on every inner iteration, and a
+high-level `z_h` that is refreshed only once per outer `h_cycle`, from the low-level
+state that the inner loop just settled. `z_l` sees `z_h + input_emb`, so the
+high-level state acts as a slowly-varying context that conditions fast local
+computation, while the fast state supplies the evidence the slow state integrates.
+This is the structure that lets a small network behave like a deep one without a deep
+one's parameter count.
 
-Architecture Overview:
----------------------
-The HRM employs a stateful wrapper architecture with adaptive computation:
+Gradients are truncated deliberately, and where they are truncated is the
+non-obvious part. Every cycle *except the last* runs under `stop_gradient`; the
+states are then detached and one final `l_reasoning` / `h_reasoning` pair runs with
+gradients recorded. Backpropagation therefore covers a single update applied to a
+converged state, not the whole `h_cycles * l_cycles` unroll. Memory is constant in
+the cycle counts, which is what makes large cycle settings affordable, and the
+assumption being made is that the earlier cycles are approximating a fixed point
+whose gradient the last step adequately represents. One consequence is worth naming
+because it looks like an omission: the core's `h_init` / `l_init` initial states are
+NON-TRAINABLE. They are read only when a halted sequence's carry is reset, so they
+enter as cycle 0's state and every path from them to the loss crosses that same
+`stop_gradient`. They were declared `trainable=True` for a long time and never once
+received a gradient; they are buffers in the reference implementation too.
 
-```
-Input(batch: {token_ids, puzzle_ids})
-       ↓
-   ┌─────────────────────────┐
-   │  Hierarchical Reasoning │
-   │         Model           │
-   │                         │
-   │  ┌─────────────────────┐│
-   │  │ Reasoning Core      ││  ← High/Low Level Processing
-   │  │ - High-level layers ││  ← Attention & FFN Blocks
-   │  │ - Low-level layers  ││  ← Multi-cycle Processing
-   │  │ - Q-learning head   ││  ← Halt/Continue Decisions
-   │  └─────────────────────┘│
-   │                         │
-   │  ┌─────────────────────┐│
-   │  │   ACT Controller    ││  ← Adaptive Computation
-   │  │ - Halting Logic     ││  ← Q-value Based Decisions
-   │  │ - State Management  ││  ← Carry State Tracking
-   │  │ - Step Counting     ││  ← Iteration Control
-   │  └─────────────────────┘│
-   └─────────────────────────┘
-       ↓
-   Output(logits, q_values, carry_state)
-```
+Halting is learned as a two-action Q-value problem. A `q_head` reads `z_h`'s first
+position and emits `q_halt` and `q_continue`; a sequence halts when
+`q_halt > q_continue`, with `halt_max_steps` as a hard ceiling. The Q-values are
+trained against a Bellman target formed by looking one step ahead and taking
+`sigmoid(max(q_halt', q_continue'))`, or `sigmoid(q_halt')` when that step would be
+the last. Note there is no discount factor: the target is the raw bootstrapped value,
+not `gamma * max(...)`. The lookahead runs with `training=False` and the target is
+`stop_gradient`-ed, so it is neither stochastic nor differentiable — without both, the
+TD loss can be minimized by dragging the target toward the prediction, the standard
+target-network collapse.
 
-Key Features:
-------------
-- **Adaptive Computation**: Variable reasoning steps based on problem complexity
-- **Hierarchical Processing**: Multi-level reasoning with high and low-level cycles
-- **Q-Learning Halting**: Learned stopping decisions via Q-value optimization
-- **State Management**: Stateful carry mechanism for iterative computation
-- **Exploration Strategy**: Configurable exploration for halting decisions
-- **Model Variants**: Pre-configured architectures for different complexity levels
-- **Full Keras Compatibility**: Complete Model class with compile/fit workflow
-- **Dual Call Interface**: Support for complete and single-step execution modes
+Training adds an exploration branch that forces a random subset of sequences to run
+for at least a randomly drawn minimum number of steps, so the model observes states
+that a greedy halting head would never reach. Inference uses the same learned halt
+signal but no exploration. An earlier version halted at inference on `halt_max_steps`
+alone, which made the trained `q_head` inert at exactly the time adaptivity is
+claimed; that is fixed, and the two code paths are now deliberately symmetric apart
+from exploration.
 
-Core Concepts:
--------------
+Two implementation details exist because this must run under `tf.function`, which is
+the regime `fit()` uses. The complete-forward loop has a STATIC trip count of
+`halt_max_steps` and no Python `break`: `all_finished` is a symbolic scalar, so an
+`if` on it raises `OperatorNotAllowedInGraphError` and only ever worked eagerly.
+Instead, once a sequence is done its carry and outputs are frozen by `ops.where`, which
+reproduces the break exactly — continuing to step would reset the halted sequence
+(a halted sequence's states are reset on the next step) and silently restart its
+reasoning, returning a different answer. That freeze is keyed on the *per-sequence*
+`carry["halted"]` mask, not on the batch-global `all_finished` scalar: gating on
+`ops.all(halted)` meant an early-halting sequence kept being restarted until the
+batch's slowest member finished, and the caller received its restarted partial run
+instead of the answer it halted on. For the same reason `is_last_step` is used
+inside an `ops.where` rather than a Python `if`: it is a per-sequence `(batch,)`
+tensor and a truth-test on it is ambiguous eagerly and illegal in graph mode.
 
-**1. Wrapper Architecture:**
-The model acts as a stateful controller managing an inner HierarchicalReasoningCore,
-orchestrating iterative reasoning processes with dynamic computation allocation.
+The carry is a dict of `inner_carry` (the two latent states), a per-sequence `steps`
+counter, a `halted` mask, and `current_data`. That last field is what lets a batch
+slot be recycled: when a sequence halts, its slot is refilled from the incoming batch
+and its states are reset, so a batch is never blocked waiting for its slowest member.
+The model exposes both a complete mode (`call(batch)`, run to halting) and a
+single-step mode (`call((carry, batch))`) so an external training loop can drive the
+recursion itself.
 
-**2. Adaptive Computation Time (ACT):**
-Unlike fixed-depth models, HRM learns to perform variable reasoning steps, allowing
-longer computation for more complex problems while efficiently handling simpler cases.
+Positional information enters through attention, not through the input stream. With
+`pos_encodings="rope"` (the default) the reasoning modules run grouped-query attention
+with `num_kv_heads == num_heads` — arithmetically plain multi-head attention, chosen
+because it is the only plain self-attention type in this repo's attention registry that
+also applies RoPE to Q and K. `pos_encodings="learned"` is the alternative and works the
+other way round: it adds a learned positional embedding to the token embedding and runs
+position-blind attention. The core does NOT own a rotary-embedding layer of its own; it
+once did, was never handed a Q or K tensor by any code path, and the model was measured
+exactly permutation-equivariant while advertising RoPE.
 
-**3. State Management (Carry):**
-The model maintains a carry state dictionary tracking:
-- `inner_carry`: High-level (z_h) and low-level (z_l) reasoning states
-- `steps`: Computation step count for each sequence in the batch
-- `halted`: Boolean flags indicating completion status
-- `current_data`: Cached input data for iterative processing
+Six preset variants scale layers, heads and cycle counts together, from 2+2 layers
+with 2+2 cycles to 16+16 layers with 4+4 cycles.
 
-**4. Q-Learning Halting:**
-The core produces Q-values for "halt" and "continue" actions, with training using:
-- Bootstrap targets from next-step Q-values
-- Exploration strategy encouraging diverse computation depths
-- Hard limits preventing infinite computation loops
-
-Model Variants:
---------------
-- **micro**: 2+2 layers, 4+4 heads, 2+2 cycles - Minimal reasoning (1.2M params)
-- **tiny**: 4+4 layers, 4+4 heads, 2+2 cycles - Basic reasoning (4.8M params)
-- **small**: 6+6 layers, 8+8 heads, 2+3 cycles - Standard reasoning (18.3M params)
-- **base**: 8+8 layers, 8+8 heads, 3+3 cycles - Advanced reasoning (52.1M params)
-- **large**: 12+12 layers, 12+12 heads, 3+4 cycles - Complex reasoning (156.7M params)
-- **xlarge**: 16+16 layers, 16+16 heads, 4+4 cycles - Expert reasoning (421.2M params)
-
-Performance Characteristics:
----------------------------
-Compared to fixed-depth transformers:
-- Computational Efficiency: 2-5x reduction in average FLOPs
-- Problem Adaptation: Dynamic allocation based on complexity
-- Reasoning Quality: Superior performance on multi-step reasoning tasks
-- Training Stability: Q-learning provides stable halting gradients
-
-Usage Examples:
---------------
-```python
-# Mathematical reasoning model
-model = HierarchicalReasoningModel.from_variant(
-    "base",
-    vocab_size=32000,
-    seq_len=512,
-    num_puzzle_identifiers=1000
-)
-
-# Custom reasoning architecture
-model = HierarchicalReasoningModel(
-    vocab_size=50000,
-    seq_len=1024,
-    embed_dim=768,
-    h_layers=8,
-    l_layers=8,
-    halt_max_steps=12,
-    halt_exploration_prob=0.15
-)
-
-# Logical reasoning with high exploration
-model = create_hierarchical_reasoning_model(
-    vocab_size=30000,
-    seq_len=256,
-    variant="large",
-    halt_exploration_prob=0.2
-)
-```
-
-Mathematical Foundation:
------------------------
-The HRM implements iterative reasoning with learned halting:
-
-For step t:
-1. s_t+1, o_t = Core(s_t, x)  # Reasoning step
-2. Q_halt_t, Q_cont_t = Q-head(o_t)  # Halting Q-values
-3. halt_t = Q_halt_t > Q_cont_t  # Halting decision
-4. Target_t = γ * max(Q_halt_t+1, Q_cont_t+1)  # Bootstrap target
-
-Where s_t is the carry state and o_t are the step outputs.
-
-Research References:
--------------------
-[1] "Adaptive Computation Time for Recurrent Neural Networks" (Graves, 2016)
-[2] "Universal Transformers" (Dehghani et al., 2019)
-[3] "Hierarchical Neural Story Generation" (Fan et al., 2018)
-[4] "Q-Learning for Adaptive Computation" (Various, 2020-2023)
-
-Technical Notes:
----------------
-- Requires careful Q-learning hyperparameter tuning
-- Exploration probability should decrease during training
-- Hard step limits prevent runaway computation
-- Carry state management is critical for gradient flow
+References:
+    - Wang et al., 2025. Hierarchical Reasoning Model.
+      (https://arxiv.org/abs/2506.21734)
+    - Graves, 2016. Adaptive Computation Time for Recurrent Neural Networks.
+      (https://arxiv.org/abs/1603.08983)
+    - Dehghani et al., 2018. Universal Transformers.
+      (https://arxiv.org/abs/1807.03819)
+    - Banino et al., 2021. PonderNet: Learning to Ponder.
+      (https://arxiv.org/abs/2107.05407)
+    - Bai et al., 2019. Deep Equilibrium Models.
+      (https://arxiv.org/abs/1909.01377)
+    - Mnih et al., 2015. Human-level control through deep reinforcement learning.
+      Nature 518, 529-533.
 """
 
 import keras
@@ -158,6 +111,7 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.layers.reasoning.hrm_reasoning_core import HierarchicalReasoningCore
 
 # ---------------------------------------------------------------------
@@ -171,7 +125,7 @@ class HierarchicalReasoningModel(keras.Model):
     steps based on input complexity, using Q-learning to determine optimal halting
     decisions while maintaining hierarchical processing capabilities.
 
-    **Intent**: Provide a production-ready adaptive computation model that can
+    **Intent**: Provide a configurable adaptive computation model that can
     efficiently handle reasoning tasks of varying complexity by learning to allocate
     computational resources dynamically, combining the benefits of hierarchical
     processing with adaptive computation time.
@@ -213,7 +167,11 @@ class HierarchicalReasoningModel(keras.Model):
             Must be positive and divide evenly into embed_dim.
         ffn_expansion_factor: Integer, expansion factor for feed-forward networks.
             Typically 4 for standard transformer architectures.
-        pos_encodings: String, type of positional encodings ("rope" or "learned").
+        pos_encodings: String, type of positional encodings ("rope" or
+            "learned"). "rope" (the default) runs the reasoning modules on
+            grouped-query attention, which rotates Q and K by their own
+            positions inside attention; "learned" adds a learned positional
+            embedding to the input stream instead.
         rope_theta: Float, theta parameter for RoPE positional encodings.
             Only used when pos_encodings="rope".
         halt_max_steps: Integer, maximum computation steps before forced halt.
@@ -287,7 +245,19 @@ class HierarchicalReasoningModel(keras.Model):
         you need full control over the reasoning loop or prefer automatic execution.
     """
 
-    # Model variant configurations
+    # Model variant configurations.
+    #
+    # Only "small" has an upstream counterpart: it is the sole official config,
+    # sapientinc/HRM `config/arch/hrm_v1.yaml`, and its fields are pinned to that file
+    # verbatim (hidden_size 512, num_heads 8, H_cycles 2, L_cycles 2, H_layers 4,
+    # L_layers 4, halt_max_steps 16). Source, re-verifiable without searching:
+    #   https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml
+    # The class __init__ defaults below carry the same numbers, which is why "small"
+    # is the row that claims fidelity. Every OTHER row (micro/tiny/base/large/xlarge)
+    # is a repo-invented size tier with NO published counterpart -- the paper and the
+    # official repo publish exactly one architecture, so those rows must not be read
+    # as reproducing anything. Pinned by
+    # tests/test_variant_tables_match_upstream_references.py.
     MODEL_VARIANTS = {
         "micro": {
             "embed_dim": 256,
@@ -307,14 +277,20 @@ class HierarchicalReasoningModel(keras.Model):
             "num_heads": 6,
             "halt_max_steps": 6
         },
+        # DECISION plan-2026-08-23T091307-9a110062/D-460
+        # hrm_v1.yaml verbatim -- do not "scale" these to fit a size ladder, and do
+        # NOT resolve a future mismatch by renaming this row (e.g. to "small_compact"):
+        # the class __init__ defaults already carry these same official numbers, so
+        # this package's fidelity claim is structural, not just nominal. Correct the
+        # numbers, never the name.
         "small": {
             "embed_dim": 512,
-            "h_layers": 6,
-            "l_layers": 6,
+            "h_layers": 4,
+            "l_layers": 4,
             "h_cycles": 2,
-            "l_cycles": 3,
+            "l_cycles": 2,
             "num_heads": 8,
-            "halt_max_steps": 8
+            "halt_max_steps": 16
         },
         "base": {
             "embed_dim": 768,
@@ -629,14 +605,67 @@ class HierarchicalReasoningModel(keras.Model):
             Final outputs dictionary.
         """
         carry = self.initial_carry(batch)
-        outputs = None
 
-        # Run steps until all sequences halt
-        max_iterations = self.halt_max_steps * 2  # Safety limit
-        for _ in range(max_iterations):
-            carry, outputs, all_finished = self._forward_step(carry, batch, training=training)
-            if all_finished:
-                break
+        # The trip count is STATIC and the early exit is a tensor-valued freeze,
+        # not a Python ``break``.
+        #
+        # The previous form was ``for _ in range(halt_max_steps * 2): ... if
+        # all_finished: break``. ``all_finished`` is ``ops.all(halted)`` — a
+        # symbolic scalar — so the ``if`` raises OperatorNotAllowedInGraphError
+        # the moment this runs under ``tf.function``, which is the regime
+        # ``fit()`` uses. It only ever worked eagerly.
+        #
+        # ``is_last_step`` forces every sequence to halt by ``halt_max_steps``,
+        # so that is the true bound (the ``* 2`` safety factor was dead). Once
+        # a sequence is done we freeze its carry and its outputs, which
+        # reproduces the old break exactly: continuing to step would otherwise
+        # RESET the halted sequence (``_forward_step`` resets on ``halted``) and
+        # restart its reasoning, silently returning a different answer.
+        #
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-031: the freeze predicate is
+        # the PER-SEQUENCE ``carry["halted"]`` mask, NOT the batch-global
+        # ``all_finished`` scalar (``ops.all(halted)``) that ``_forward_step``
+        # returns as its third value. With the scalar, a sequence that halts at
+        # step 2 in a batch whose slowest member runs to step 8 was reset and
+        # re-run six more times, and the dict returned to the caller held, for
+        # that sequence, the output of a RESTARTED PARTIAL RUN — not the answer
+        # it halted on. Nothing raised; the batch-global gate is only correct
+        # for a batch that halts in lockstep, which is exactly what an ACT model
+        # is built not to do. ``all_finished`` is deliberately left in
+        # ``_forward_step``'s return tuple: it is that method's PUBLIC step-mode
+        # contract (``call`` returns it to external drivers), and narrowing the
+        # tuple here would be an unrelated API break.
+        #
+        # Do NOT hoist ``ops.reshape(done, ...)`` out of ``_freeze``: the leaves
+        # of ``carry``/``outputs`` have DIFFERENT ranks (``steps`` is
+        # ``(batch,)``, ``logits`` is ``(batch, seq, vocab)``), so the broadcast
+        # shape must be derived per leaf. This is the same idiom
+        # ``_forward_step`` already uses for ``reset_mask``. See decisions.md
+        # D-031.
+        carry, outputs, _ = self._forward_step(carry, batch, training=training)
+        done = carry["halted"]
+
+        def _freeze(mask, held, fresh):
+            broadcast = keras.ops.reshape(
+                mask, [-1] + [1] * (len(held.shape) - 1))
+            return keras.ops.where(broadcast, held, fresh)
+
+        for _ in range(self.halt_max_steps - 1):
+            next_carry, next_outputs, _ = self._forward_step(
+                carry, batch, training=training)
+
+            frozen = done
+            carry = keras.tree.map_structure(
+                lambda held, fresh: _freeze(frozen, held, fresh),
+                carry, next_carry)
+            outputs = keras.tree.map_structure(
+                lambda held, fresh: _freeze(frozen, held, fresh),
+                outputs, next_outputs)
+
+            # Post-merge, ``carry["halted"]`` is ``where(frozen, True, fresh)``
+            # for an already-frozen sequence and the fresh halt decision
+            # otherwise — i.e. the accumulated per-sequence done mask.
+            done = carry["halted"]
 
         return outputs
 
@@ -691,38 +720,64 @@ class HierarchicalReasoningModel(keras.Model):
             # Halt if q_halt > q_continue
             halted = halted | (q_halt > q_continue)
 
-            # Exploration: random minimum halt steps
+            # Exploration: random minimum halt steps.
+            # ``keras.random.uniform`` REQUIRES a floating point dtype and raises
+            # unconditionally on an integer one (keras/src/random/random.py:121),
+            # so the integer draw must come from ``keras.random.randint``. This
+            # mirrors tiny_recursive_model/model.py:341, which has always been
+            # correct; HRM was the un-migrated copy.
             if self.halt_exploration_prob > 0:
                 explore_mask = keras.random.uniform(keras.ops.shape(q_halt)) < self.halt_exploration_prob
-                min_steps = keras.random.uniform(
+                min_steps = keras.random.randint(
                     keras.ops.shape(new_steps),
                     minval=2,
-                    maxval=self.halt_max_steps + 1,
-                    dtype="int32"
+                    maxval=self.halt_max_steps + 1
                 )
                 min_halt_steps = keras.ops.where(explore_mask, min_steps, 1)
                 halted = halted & (new_steps >= min_halt_steps)
 
-            # Compute target Q for bootstrapping (as in original)
-            if not is_last_step:
-                # Get next step Q values for target computation
-                next_inner_carry, next_outputs = self.core(
-                    new_inner_carry,
-                    {"token_ids": new_current_data["token_ids"],
-                     "puzzle_ids": new_current_data["puzzle_ids"]},
-                    training=training
-                )
+            # Compute target Q for bootstrapping (as in original).
+            # NOTE: there is deliberately no ``if not is_last_step:`` guard here.
+            # ``is_last_step`` is a per-sequence ``(batch,)`` bool tensor, so a
+            # Python truth-test on it raises (ambiguous truth value eagerly,
+            # OperatorNotAllowedInGraphError under tf.function). The per-sequence
+            # branch is already expressed by the ``ops.where`` below, which is
+            # what the guard was trying and failing to do.
+            #
+            # The lookahead runs with ``training=False`` and the target is
+            # ``stop_gradient``-ed, so the Bellman target is neither stochastic
+            # nor differentiable — otherwise the TD loss can be minimised by
+            # dragging the target toward the prediction (standard target-network
+            # collapse). Ported from tiny_recursive_model/model.py:346-363 (B-3).
+            next_inner_carry, next_outputs = self.core(
+                new_inner_carry,
+                {"token_ids": new_current_data["token_ids"],
+                 "puzzle_ids": new_current_data["puzzle_ids"]},
+                training=False
+            )
 
-                next_q_halt = next_outputs["q_halt_logits"]
-                next_q_continue = next_outputs["q_continue_logits"]
+            next_q_halt = next_outputs["q_halt_logits"]
+            next_q_continue = next_outputs["q_continue_logits"]
 
-                # Target Q: if last step, use halt; otherwise use max
-                target_q = keras.ops.where(
-                    is_last_step,
-                    keras.ops.sigmoid(next_q_halt),
-                    keras.ops.sigmoid(keras.ops.maximum(next_q_halt, next_q_continue))
-                )
-                outputs["target_q_continue"] = target_q
+            # Target Q: if last step, use halt; otherwise use max
+            target_q = keras.ops.where(
+                is_last_step,
+                keras.ops.sigmoid(next_q_halt),
+                keras.ops.sigmoid(keras.ops.maximum(next_q_halt, next_q_continue))
+            )
+            outputs["target_q_continue"] = keras.ops.stop_gradient(target_q)
+
+        if not training and self.halt_max_steps > 1:
+            # Inference: halt on the learned signal OR max-steps, mirroring
+            # training-mode halting minus the exploration branch. Previously
+            # ``halted`` was ``is_last_step`` alone at inference, so ACT always
+            # ran the full budget and the trained q_head was inert — which
+            # contradicts the module docstring at :133 and the "Adaptive
+            # Computation" claim at :45. Ported from
+            # tiny_recursive_model/model.py:365-382 (B-5).
+            halted = is_last_step | (
+                outputs["q_halt_logits"] > outputs["q_continue_logits"]
+            )
 
         # Create new carry
         new_carry = {
@@ -783,12 +838,18 @@ class HierarchicalReasoningModel(keras.Model):
         logger.info(f"Creating Hierarchical Reasoning Model-{variant.upper()}")
         logger.info(f"Architecture: {config}")
 
+        # DECISION plan-2026-08-17T183311-79c63e38/D-025: MERGE, do not splat.
+        # `**config, **kwargs` raises `TypeError: got multiple values for
+        # keyword argument` for ANY override of a variant key, and every key in
+        # MODEL_VARIANTS is one. `create_hierarchical_reasoning_model`'s own
+        # Sudoku example (`variant="base", halt_max_steps=16`) is exactly this
+        # call and could not run. Copied from `models/gpt2/gpt2.py:464`.
+        config.update(kwargs)
         return cls(
             vocab_size=vocab_size,
             seq_len=seq_len,
             num_puzzle_identifiers=num_puzzle_identifiers,
-            **config,
-            **kwargs
+            **config
         )
 
     def get_config(self) -> Dict[str, Any]:
@@ -898,6 +959,7 @@ def create_hierarchical_reasoning_model(
         variant: Optional[str] = None,
         optimizer: Union[str, keras.optimizers.Optimizer] = "adamw",
         learning_rate: float = 1e-4,
+        loss: Optional[keras.losses.Loss] = None,
         **kwargs: Any
 ) -> HierarchicalReasoningModel:
     """Create and optionally compile a Hierarchical Reasoning Model.
@@ -911,7 +973,8 @@ def create_hierarchical_reasoning_model(
     - **base**: Paper configuration (27M params, 40.3% ARC-AGI)
     - **AdamW optimizer**: Scale-invariant optimization with bounded parameters
     - **Learning rate 1e-4**: Optimal for hierarchical convergence training
-    - **Post-Norm architecture**: With RMSNorm, RoPE, GLU (Llama-style)
+    - **Post-Norm architecture**: With RMSNorm, SwiGLU, and RoPE applied to Q/K
+      inside the reasoning modules' grouped-query attention (Llama-style)
 
     Args:
         vocab_size: Size of vocabulary for token embeddings.
@@ -923,11 +986,21 @@ def create_hierarchical_reasoning_model(
             - "base": 27M params, paper configuration, 40.3% ARC-AGI
             - "large": 156.7M params, high-capacity reasoning
         optimizer: Optimizer for compilation. Paper uses Adam-atan2 (scale-invariant).
+            Pass `None` to skip compilation and drive the model from your own
+            training loop (this is what `src/train/hrm/train_hrm.py` does).
         learning_rate: Learning rate. Paper uses 1e-4 with linear warmup.
+        loss: Loss used when compiling. Defaults to
+            `{"logits": StableMaxCrossEntropy()}`, so the compiled model trains
+            with `fit(batch, {"logits": labels})`. This supervises the LM head
+            ONLY — the Q-learning halting term couples two model *outputs* and
+            cannot be expressed as a per-output Keras loss, so ACT supervision
+            requires `src/train/hrm/train_hrm.py`'s loop (or your own `loss=`
+            plus a `compute_loss` override). Ignored when `optimizer` is
+            `None`.
         **kwargs: Additional arguments for HierarchicalReasoningModel constructor.
 
     Returns:
-        HierarchicalReasoningModel instance, optionally compiled.
+        HierarchicalReasoningModel instance, compiled unless `optimizer=None`.
 
     Example:
         >>> # Reproduce paper ARC-AGI results
@@ -972,18 +1045,70 @@ def create_hierarchical_reasoning_model(
             **kwargs
         )
 
-    # Optional compilation
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-032: this branch now actually
+    # CALLS `model.compile(...)`. It used to resolve the optimizer, set its
+    # learning rate, log it and DISCARD it, while both this function's summary
+    # line and its `Returns:` promised an "optionally compiled" model — so a
+    # caller who followed the docstring got an uncompiled model and
+    # `ValueError: You must call compile() before using the model.` on `.fit()`
+    # (measured). The default loss is a PER-OUTPUT dict keyed on `"logits"`, so
+    # `fit(batch, {"logits": labels})` works with the stock `fit` and no custom
+    # `train_step` / `compute_loss`.
+    #
+    # It is deliberately NOT the package's own `HRMLoss`. `HRMLoss.call` takes
+    # the model's whole output DICT and a `{"labels": ...}` target, but Keras 3's
+    # `CompileLoss` BROADCASTS a single `Loss` object across each output key and
+    # then pairs it against a same-keyed target — measured, both
+    # `fit(batch, {"labels": ...})` and `fit(batch, labels)` raise
+    # `KeyError: The path: ('logits',) ... can't be found in either the model's
+    # output (y_pred) or in the labels (y_true)`. The Q-learning term cannot be
+    # written as a per-output Keras loss at all, because it couples
+    # `q_halt_logits` with `target_q_continue` and BOTH are model outputs, not
+    # labels. So ACT/Q supervision needs a loop that calls `HRMLoss` directly —
+    # which is exactly why `src/train/hrm/train_hrm.py` exists and drives this
+    # model with its own `create_hrm_loss` and `GradientTape`.
+    #
+    # Do NOT "upgrade" this default to `create_hrm_loss()` without also adding a
+    # `compute_loss` override; it will compile and then fail at the first
+    # `fit()` step. Do NOT restore the "log the optimizer and return" form to
+    # keep the factory loss-agnostic: `optimizer=None` is already the
+    # loss-agnostic route and returns an uncompiled model. See decisions.md
+    # D-032.
     if optimizer is not None:
         if isinstance(optimizer, str):
             optimizer = keras.optimizers.get(optimizer)
-            if hasattr(optimizer, 'learning_rate'):
-                optimizer.learning_rate = learning_rate
+        if hasattr(optimizer, 'learning_rate'):
+            optimizer.learning_rate = learning_rate
 
-        # Note: Actual loss and metrics would depend on the specific use case
-        logger.info(f"Created Hierarchical Reasoning Model with optimizer {optimizer}")
+        model.compile(
+            optimizer=optimizer,
+            loss=loss if loss is not None else {
+                "logits": StableMaxCrossEntropy()
+            },
+        )
+        logger.info(
+            f"Created and compiled Hierarchical Reasoning Model with optimizer "
+            f"{optimizer}"
+        )
 
     else:
         logger.info("Created Hierarchical Reasoning Model (uncompiled)")
+
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-051
+    # The factory BUILDS the model before returning it. `HierarchicalReasoningModel`
+    # has a correct `build()` (it materialises the reasoning core's `h_init`/
+    # `l_init` before any `reset_carry`), but nothing CALLED it, so this factory
+    # handed back `built == False` and every public method that reads a
+    # build-created quantity raised — measured: `src/train/hrm/train_hrm.py:61`
+    # `self.model.count_params()` inside `HRMTrainer.__init__` died with
+    # "count_params ... isn't built", i.e. the trainer module could not start.
+    # `build()` here takes no shape (the model derives everything from
+    # `seq_len` / `vocab_size` in its config), so this is safe for every caller.
+    # Do NOT replace it with a dummy forward pass: a forward pass also advances
+    # the ACT carry and, under a `StatelessScope`, would not persist the
+    # variables it creates. See decisions.md D-051.
+    if not model.built:
+        model.build()
 
     return model
 

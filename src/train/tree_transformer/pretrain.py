@@ -14,9 +14,9 @@ import os
 
 import keras
 import tensorflow as tf
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -28,6 +28,57 @@ from train.common.nlp import (
 from dl_techniques.models.tree_transformer import TreeTransformer
 from dl_techniques.models.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+# Shared paths
+# ---------------------------------------------------------------------
+
+PRETRAINED_ENCODER_FILENAME = "pretrained_tree_transformer_encoder_best.keras"
+
+
+def save_pretrained_encoder(encoder: Any, results_dir: str, save_dir: str) -> Tuple[str, str]:
+    """Write the pre-trained encoder to BOTH hand-off locations.
+
+    Args:
+        encoder: The trained encoder to save.
+        results_dir: The timestamped per-run directory -- that run's own evidence.
+        save_dir: The static directory fine-tuning reads by default.
+
+    Returns:
+        ``(run_copy_path, handoff_copy_path)``.
+    """
+    run_copy = pretrained_encoder_path(results_dir)
+    encoder.save(run_copy)
+
+    # DECISION plan-2026-08-12T123743-e798a9e1/D-023
+    # The second, STATIC copy is the whole point: `results_dir` carries a per-run
+    # timestamp, so `finetune.py` cannot name it ahead of time. Writing only the
+    # run copy is what left `finetune`'s default pointing at an empty directory
+    # (F-24). Keep BOTH -- dropping the run copy loses provenance, dropping this
+    # one re-breaks the default hand-off.
+    os.makedirs(save_dir, exist_ok=True)
+    handoff_copy = pretrained_encoder_path(save_dir)
+    encoder.save(handoff_copy)
+    return run_copy, handoff_copy
+
+
+def pretrained_encoder_path(root: str) -> str:
+    """Path of the pre-trained encoder checkpoint inside ``root``.
+
+    Single producer of this filename, so the write site here and the read site in
+    ``finetune.FinetuneConfig.pretrained_encoder_path`` cannot drift apart. See the
+    ``D-023`` anchor at the encoder save site in :func:`train_tree_transformer_mlm`.
+
+    Args:
+        root: Directory to place the checkpoint in -- either a timestamped run
+            directory (per-run evidence) or the static ``config.save_dir`` (the
+            hand-off location fine-tuning reads by default).
+
+    Returns:
+        The joined checkpoint path.
+    """
+    return os.path.join(root, PRETRAINED_ENCODER_FILENAME)
+
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -106,7 +157,7 @@ def create_tree_transformer_mlm_model(config: TrainingConfig) -> MaskedLanguageM
         special_token_ids=special_token_ids,
         mlm_head_activation="gelu",
         initializer_range=0.02,
-        mlm_head_dropout=0.1,
+        mlm_head_dropout_rate=0.1,
         layer_norm_eps=1e-12,
     )
 
@@ -167,8 +218,7 @@ def train_tree_transformer_mlm(
     logger.info("Tree Transformer MLM Pre-training with Tiktoken")
     logger.info("=" * 60)
 
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
+    set_seeds(42)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(
@@ -209,12 +259,12 @@ def train_tree_transformer_mlm(
     # Save full MLM model and encoder separately
     final_path = os.path.join(results_dir, "tree_transformer_mlm_final_best.keras")
     mlm_model.save(final_path)
-    encoder_path = os.path.join(
-        results_dir, "pretrained_tree_transformer_encoder_best.keras"
+    _, handoff_path = save_pretrained_encoder(
+        mlm_model.encoder, results_dir, config.save_dir
     )
-    mlm_model.encoder.save(encoder_path)
 
     logger.info(f"Models saved to: {results_dir}")
+    logger.info(f"Encoder for fine-tuning: {handoff_path}")
     return mlm_model, history
 
 

@@ -352,8 +352,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prediction_length", type=int, default=24)
     parser.add_argument("--hidden_dim", type=int, default=None)
     parser.add_argument("--num_layers", type=int, default=2)
-    parser.add_argument("--tree_depth", type=int, default=2)
-    parser.add_argument("--num_wavelet_levels", type=int, default=3)
+    # --tree_depth and --num_wavelet_levels are NOT independently bounded: with
+    # --input_length and overlap_ratio they fix the deepest band length
+    # (min_band_len), and PRISMModel.__init__ raises ValueError when it hits 0.
+    parser.add_argument(
+        "--tree_depth", type=int, default=2,
+        help="Time-tree depth (2 ** tree_depth segments per layer). Jointly "
+             "constrained with --input_length and --num_wavelet_levels; see "
+             "L-5 in the PRISM README.",
+    )
+    parser.add_argument(
+        "--num_wavelet_levels", type=int, default=3,
+        help="Haar DWT levels per node (yields num_wavelet_levels + 1 bands). "
+             "Each level floor-halves band length, so raising this on a short "
+             "--input_length is what drives the deepest band to 0.",
+    )
     parser.add_argument("--use_quantile_head", action="store_true")
     parser.add_argument("--no_monotonicity", dest="enforce_monotonicity", action="store_false")
     parser.set_defaults(enforce_monotonicity=True)

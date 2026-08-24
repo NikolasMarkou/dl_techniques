@@ -21,6 +21,12 @@ from dl_techniques.models.bias_free_denoisers.bfcnn import (
 )
 from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
+from .conftest import HOMOGENEITY_RTOL, HOMOGENEITY_SCALES, fit_one_step
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestBFCNNDenoiser:
     """Test suite for Bias-Free CNN Denoiser implementation."""
@@ -253,33 +259,42 @@ class TestBFCNNDenoiser:
         assert not np.any(np.isnan(output.numpy()))
         assert not np.any(np.isinf(output.numpy()))
 
-    def test_scaling_invariance_property(self, test_image_grayscale):
-        """Test the scaling invariance property of the bias-free model."""
+    def test_scaling_invariance_property(self, test_image_grayscale, homogeneity_probe):
+        """A TRAINED, factory-built BFCNN is degree-1 homogeneous.
+
+        Reaches the model through ``create_bfcnn_denoiser`` at its defaults -- NOT through
+        ``src/train/bfunet/train_bfcnn_denoiser.py``, which is where the ``'batchnorm'`` ->
+        ``BiasFreeBatchNorm`` remap used to live and which therefore masked this defect
+        from every trainer-side test.
+
+        The ``fit_one_step`` call is the entire point: on an untrained model stock
+        ``BatchNormalization`` has ``moving_mean == 0`` and is exactly homogeneous, so the
+        pre-2026-08-15 version of this test passed against a model that did not have the
+        property. See ``conftest.py`` for the tolerance derivation and the measured
+        pre-fix / post-fix numbers.
+        """
         model = create_bfcnn_denoiser(
             input_shape=(64, 64, 1),
-            num_blocks=3,
-            filters=32,
-            final_activation='linear'  # Important for scaling invariance
+            num_blocks=2,
+            filters=8,
+            final_activation='linear',  # required: any other activation is not homogeneous
         )
+        fit_one_step(model)
 
-        # Test scaling invariance: if input is scaled by α, output is scaled by α
-        alpha = 2
-        scaled_input = alpha * test_image_grayscale
+        for c in HOMOGENEITY_SCALES:
+            err = homogeneity_probe(model, test_image_grayscale, c)
+            assert err < HOMOGENEITY_RTOL, (
+                f"homogeneity violated at c={c}: relative error {err:.3e} exceeds "
+                f"{HOMOGENEITY_RTOL:.0e}. A trained bias-free denoiser must satisfy "
+                "f(c*x) = c*f(x) to float32 round-off"
+            )
 
-        original_output = model(test_image_grayscale)
-        scaled_output = model(scaled_input)
-
-        # The outputs should be related by the same scaling factor
-        # Allow for numerical tolerance - real implementations may have small deviations
-        # due to batch normalization, numerical precision, etc.
-        expected_scaled_output = alpha * original_output
-
-        # Use more relaxed tolerance to account for implementation details
-        np.testing.assert_allclose(
-            scaled_output.numpy(),
-            expected_scaled_output.numpy(),
-            rtol=1e-1,  # Relaxed tolerance for practical implementations
-            atol=1e-1   # Increased for numerical stability
+        moving_means = [w for w in model.weights if 'moving_mean' in w.path]
+        assert not moving_means, (
+            "the factory-built BFCNN still contains "
+            f"{len(moving_means)} moving_mean variable(s) -- it is using stock "
+            "BatchNormalization, whose moving_mean subtraction is an additive constant "
+            "that breaks f(c*x) = c*f(x)"
         )
 
     def test_different_batch_sizes(self, grayscale_input_shape):
@@ -601,7 +616,13 @@ class TestBFCNNParameterized:
         ((256, 256, 3), 6, 128),
     ])
     def test_various_configurations(self, input_shape, num_blocks, filters):
-        """Test model creation with various valid configurations."""
+        """Each configuration builds and forwards without NaN.
+
+        This is a build smoke only; the shape is the input's shape by
+        construction and says nothing about whether ``num_blocks``/``filters``
+        reached the graph. That claim is made by
+        :meth:`test_num_blocks_and_filters_change_the_parameterisation`.
+        """
         model = create_bfcnn_denoiser(
             input_shape=input_shape,
             num_blocks=num_blocks,
@@ -616,39 +637,70 @@ class TestBFCNNParameterized:
         assert output.shape == (batch_size,) + input_shape
         assert not np.any(np.isnan(output.numpy()))
 
-    @pytest.mark.parametrize("activation", [
-        'relu', 'elu', 'swish', 'gelu'
-    ])
-    def test_different_activations(self, activation):
-        """Test model with different activation functions."""
-        model = create_bfcnn_denoiser(
-            input_shape=(64, 64, 1),
-            num_blocks=2,
-            filters=32,
-            activation=activation
-        )
+    def test_num_blocks_and_filters_change_the_parameterisation(self):
+        """``num_blocks`` and ``filters`` must reach the parameterisation.
 
+        Structural knobs: they change the weight shapes, so an output-difference
+        check would be satisfied by the different random draw alone. The weight
+        signature is the discriminating fact.
+        """
+        blocks = {
+            n: (lambda n=n: create_bfcnn_denoiser(
+                input_shape=(32, 32, 1), num_blocks=n, filters=16))
+            for n in (2, 4, 8)
+        }
+        sigs = assert_structural_knob_changes_weights(blocks, knob="num_blocks")
+        # Stronger than "different": more blocks means strictly more weights.
+        assert len(sigs[2]) < len(sigs[4]) < len(sigs[8])
+
+        widths = {
+            f: (lambda f=f: create_bfcnn_denoiser(
+                input_shape=(32, 32, 1), num_blocks=2, filters=f))
+            for f in (16, 32, 64)
+        }
+        wsigs = assert_structural_knob_changes_weights(widths, knob="filters")
+        # Same layer count, strictly wider tensors.
+        assert len(wsigs[16]) == len(wsigs[32]) == len(wsigs[64])
+        assert wsigs[16][0][-1] * 2 == wsigs[32][0][-1] == wsigs[64][0][-1] // 2
+
+    def test_different_activations(self):
+        """The activation must reach the forward pass.
+
+        A value knob: every activation gives the same weight shapes, so under a
+        fixed seed the models hold bit-identical weights and any output
+        difference is the activation and nothing else.
+        """
         test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("kernel_size", [1, 3, 5, 7])
-    def test_different_kernel_sizes(self, kernel_size):
-        """Test model with different kernel sizes."""
-        model = create_bfcnn_denoiser(
-            input_shape=(64, 64, 1),
-            num_blocks=2,
-            filters=32,
-            kernel_size=kernel_size
+        builders = {
+            a: (lambda a=a: create_bfcnn_denoiser(
+                input_shape=(64, 64, 1), num_blocks=2, filters=32, activation=a))
+            for a in ('relu', 'elu', 'swish', 'gelu')
+        }
+        deltas = assert_value_knob_changes_output(
+            builders, test_input, knob="activation",
         )
+        assert min(deltas.values()) > 1e-5
 
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
+    def test_different_kernel_sizes(self):
+        """``kernel_size`` must reach the convolution kernels.
 
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
+        Structural: the kernel's spatial extent is a weight dimension, so the
+        signature carries the claim directly.
+        """
+        builders = {
+            k: (lambda k=k: create_bfcnn_denoiser(
+                input_shape=(64, 64, 1), num_blocks=2, filters=32, kernel_size=k))
+            for k in (1, 3, 5, 7)
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="kernel_size")
+        for k, sig in sigs.items():
+            # bfcnn.py fixes the stem at `initial_kernel_size=5` (line 152) and
+            # the output projection at 1x1 (line 177); `kernel_size` governs the
+            # residual blocks only, so those two extents are always present.
+            spatial = {s[:2] for s in sig if len(s) == 4}
+            assert spatial == {(5, 5), (k, k), (1, 1)}, (
+                f"kernel_size={k} produced conv extents {sorted(spatial)}"
+            )
 
     @pytest.mark.parametrize("variant", ["tiny", "small", "base", "large", "xlarge"])
     def test_all_variants(self, variant):

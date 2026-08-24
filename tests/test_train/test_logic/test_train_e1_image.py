@@ -19,6 +19,7 @@ from train.logic.train_e1_image import (
     evaluate_hard_extraction,
     find_cnn_filters_for_param_budget,
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 # ---------------------------------------------------------------------
@@ -94,6 +95,10 @@ class TestKerasRoundtrip:
     def test_mnist_circuit_save_load(self, tmp_path):
         m = build_image_circuit((28, 28, 1), num_classes=10, stem_filters=(32,))
         save_path = str(tmp_path / "circuit_full.keras")
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(m)
         m.save(save_path)
         m2 = keras.models.load_model(save_path)
         x = np.random.RandomState(0).rand(4, 28, 28, 1).astype(np.float32)

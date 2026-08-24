@@ -1,4 +1,5 @@
-"""Bias-free 1D convolutional building block for scaling-invariant networks.
+"""
+Bias-free 1D convolutional building block for scaling-invariant networks.
 
 Removes all additive constants (convolution bias and batch normalization
 center/beta) to enable better generalization across noise levels in time
@@ -12,14 +13,13 @@ signals.
 """
 
 import keras
-from keras import layers
 from typing import Optional, Union, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -109,7 +109,7 @@ class BiasFreeConv1D(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         # Bias-free convolution
-        self.conv = layers.Conv1D(
+        self.conv = keras.layers.Conv1D(
             filters=self.filters,
             kernel_size=self.kernel_size,
             padding='same',
@@ -121,7 +121,7 @@ class BiasFreeConv1D(keras.layers.Layer):
 
         # Bias-free batch normalization (if enabled)
         if self.use_batch_norm:
-            self.batch_norm = layers.BatchNormalization(
+            self.batch_norm = keras.layers.BatchNormalization(
                 center=False,  # Key: no bias/beta parameter
                 scale=True,    # Keep gamma/scale parameter for feature scaling
                 name=f'{self.name}_bn'
@@ -131,7 +131,7 @@ class BiasFreeConv1D(keras.layers.Layer):
 
         # Activation layer (if specified)
         if self.activation is not None:
-            self.activation_layer = layers.Activation(
+            self.activation_layer = keras.layers.Activation(
                 self.activation,
                 name=f'{self.name}_activation'
             )
@@ -344,11 +344,11 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         self.shortcut_conv = None
 
         # Addition layer for residual connection
-        self.add_layer = layers.Add(name=f'{self.name}_add')
+        self.add_layer = keras.layers.Add(name=f'{self.name}_add')
 
         # Final activation after addition
         if self.activation is not None:
-            self.final_activation = layers.Activation(
+            self.final_activation = keras.layers.Activation(
                 self.activation,
                 name=f'{self.name}_final_activation'
             )
@@ -386,7 +386,7 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
 
         # Create and build shortcut connection if needed (input filters != output filters)
         if input_filters != self.filters:
-            self.shortcut_conv = layers.Conv1D(
+            self.shortcut_conv = keras.layers.Conv1D(
                 filters=self.filters,
                 kernel_size=1,
                 padding='same',

@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of the **SqueezeNet V1** and **SqueezeNodule-Net (V2)** architectures. SqueezeNet models are pioneering, efficient convolutional networks (ConvNets) designed to achieve high accuracy with a dramatically reduced parameter count and model size.
+A Keras 3 implementation of the **SqueezeNet V1** and **SqueezeNodule-Net (V2)** architectures. SqueezeNet models are pioneering, efficient convolutional networks (ConvNets) designed to achieve high accuracy with a dramatically reduced parameter count and model size.
 
 This implementation includes the original SqueezeNet V1 with its innovative **Fire Module**, and SqueezeNodule-Net, an evolution optimized for medical imaging tasks that uses a **Simplified Fire Module** and supports 3D convolutions.
 
@@ -387,7 +387,9 @@ bypass_model = create_squeezenet_v1(
     input_shape=(224, 224, 3)
 )
 
-# The Add layers in the summary show where the bypass connections are
+# The Add layers in the summary show where the bypass connections are:
+# add_fire3, add_fire5, add_fire7, add_fire9 -- the four positions where the
+# input and output widths of a Fire module match (128, 256, 384, 512).
 bypass_model.summary()
 ```
 

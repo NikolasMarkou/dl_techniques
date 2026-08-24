@@ -50,12 +50,24 @@ from dl_techniques.utils.logger import logger
 # models trained with these constants are directly compatible with the
 # CLIP ecosystem's preprocessing expectations.
 
-IMAGE_MEAN: tf.Tensor = tf.constant(
-    [0.48145466, 0.4578275, 0.40821073], dtype=tf.float32
-)
-IMAGE_STD: tf.Tensor = tf.constant(
-    [0.26862954, 0.26130258, 0.27577711], dtype=tf.float32
-)
+# DECISION plan-2026-08-13T045759-fde437ba/D-003
+# Keep these as plain Python lists. Do NOT restore `tf.constant(...)` here (or
+# any other eager op at module scope): building a tensor at import time
+# initializes TF's eager context and ALLOCATES A GPU DEVICE for every importer
+# of `train.common`, because the package `__init__.py` re-exports these names
+# and therefore runs this module on any `import train.common.<anything>`. That
+# cost `--help` a GPU on 125 entry points, forced four trainers to carry local
+# deferred-import workarounds, and produced a false 12-error test regression
+# from cudaSetDevice() self-contention. Measured: "Created device" lines on
+# `import train.common` went 1 -> 0 with this change. TF promotes the RHS to
+# the LHS float32 at the subtraction site (`:104`), so a list is numerically
+# identical to a tensor here — verified bit-exact inside a real
+# `tf.data.Dataset.map()` by tests/test_train/test_common_image_text.py.
+# Same convention as the sibling constants in datasets.py:21-22,34-35, whose
+# datasets.py:139 subtracts a list RHS exactly this way.
+# See decisions.md D-003.
+IMAGE_MEAN: list[float] = [0.48145466, 0.4578275, 0.40821073]
+IMAGE_STD: list[float] = [0.26862954, 0.26130258, 0.27577711]
 
 
 def read_decode_resize_uint8(

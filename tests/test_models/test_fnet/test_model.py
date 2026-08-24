@@ -37,7 +37,7 @@ class TestFNetModel:
             'num_layers': 2,
             'intermediate_size': 64,
             'max_position_embeddings': 16,
-            'hidden_dropout_prob': 0.1,
+            'hidden_dropout_rate': 0.1,
         }
 
     @pytest.fixture
@@ -100,11 +100,11 @@ class TestFNetModel:
         """Test from_variant with configuration overrides."""
         model = FNet.from_variant(
             'tiny',
-            hidden_dropout_prob=0.2,
+            hidden_dropout_rate=0.2,
             normalization_type='rms_norm'
         )
 
-        assert model.hidden_dropout_prob == 0.2
+        assert model.hidden_dropout_rate == 0.2
         assert model.normalization_type == 'rms_norm'
 
     def test_model_serialization(self, small_config, sample_inputs):
@@ -134,7 +134,7 @@ class TestFNetModel:
         # Verify all expected keys are present
         expected_keys = {
             'vocab_size', 'hidden_size', 'num_layers', 'intermediate_size',
-            'hidden_dropout_prob', 'max_position_embeddings'
+            'hidden_dropout_rate', 'max_position_embeddings'
         }
         assert expected_keys.issubset(set(config.keys()))
 
@@ -230,7 +230,7 @@ class TestFNetStochasticDepth:
             'num_layers': 4,
             'intermediate_size': 64,
             'max_position_embeddings': 16,
-            'hidden_dropout_prob': 0.0,
+            'hidden_dropout_rate': 0.0,
         }
 
     @pytest.fixture
@@ -388,6 +388,28 @@ class TestFNetWithHeadFactory:
         assert isinstance(output, dict)
         assert "logits" in output
         assert output["logits"].shape == (2, 16, 9)
+
+
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `FNet.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained FNet weights"):
+            FNet.from_variant("tiny", pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = FNet.from_variant("tiny", vocab_size=128, max_position_embeddings=32)
+        assert isinstance(model, FNet)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(FNet, "PRETRAINED_WEIGHTS")
 
 
 if __name__ == "__main__":

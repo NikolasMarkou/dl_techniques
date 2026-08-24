@@ -26,6 +26,7 @@ from train.logic.train_e3_faithfulness import (
     gen_parity_k8,
     gen_random_dnf,
 )
+from tests.optimizer_state import build_optimizer_state
 
 
 # ---------------------------------------------------------------------
@@ -129,6 +130,10 @@ class TestKerasRoundtrip:
     def test_save_load_circuit(self, tmp_path):
         m = build_circuit(num_bits=11, num_outputs=1)
         path = str(tmp_path / "circ.keras")
+        # The optimizer's slot variables are allocated lazily, so a compiled-but-
+        # unfitted model would otherwise save an optimizer the reload cannot match.
+        # See tests/optimizer_state.py (D-016).
+        build_optimizer_state(m)
         m.save(path)
         m2 = keras.models.load_model(path)
         rng = np.random.default_rng(0)

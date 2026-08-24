@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of **CoShNet** (Complex Shearlet Network). CoShNet is a hybrid neural network architecture that combines mathematically rigorous, fixed geometric transforms (Shearlets) with the learning capacity of deep complex-valued neural networks (CVNNs).
+A Keras 3 implementation of **CoShNet** (Complex Shearlet Network). CoShNet is a hybrid neural network architecture that combines mathematically rigorous, fixed geometric transforms (Shearlets) with the learning capacity of deep complex-valued neural networks (CVNNs).
 
 By leveraging the physics-inspired properties of shearlets and the phase-preserving nature of complex algebra, CoShNet achieves high classification accuracy with significantly fewer parameters and faster convergence than traditional CNNs.
 
@@ -105,15 +105,26 @@ CoShNet processes data through a unique pipeline involving domain transformation
 
 CoShNet is available in several configurations optimized for different resource constraints and dataset complexities.
 
-| Variant | Scales | Directions | Conv Filters | Dense Units | Params (Est) | Use Case |
-|:---|:---:|:---:|:---|:---|:---:|:---|
-| **`nano`** | 3 | 4 | `[16, 24]` | `[128, 64]` | ~15k | IoT / Microcontrollers |
-| **`tiny`** | 3 | 6 | `[16, 32]` | `[256, 128]` | ~50k | MNIST / Simple Tasks |
-| **`base`** | 4 | 8 | `[32, 64]` | `[1250, 500]` | ~800k | CIFAR-10 / General |
-| **`large`** | 5 | 12 | `[64, 128, 256]`| `[2k, 1k, 512]`| ~2.5M | Difficult textures |
-| **`imagenet`**| 5 | 16 | `[64, 128, 256]`| `[2k, 1k]` | ~3M | High-Res Inputs |
+| Variant | Scales | Directions | Conv Filters | Dense Units | Use Case |
+|:---|:---:|:---:|:---|:---|:---|
+| **`nano`** | 3 | 4 | `[16, 24]` | `[128, 64]` | IoT / Microcontrollers |
+| **`tiny`** | 3 | 6 | `[16, 32]` | `[256, 128]` | MNIST / Simple Tasks |
+| **`cifar10`** | 4 | 8 | `[32, 64]` | `[800, 400]` | CIFAR-10 |
+| **`base`** | 4 | 8 | `[32, 64]` | `[1250, 500]` | General |
+| **`large`** | 5 | 12 | `[64, 128, 256]`| `[2048, 1024, 512]`| Difficult textures |
+| **`imagenet`**| 5 | 16 | `[64, 128, 256]`| `[2048, 1024]` | High-Res Inputs |
 
 *Note: `Scales` and `Directions` refer to the Shearlet Transform configuration.*
+
+**Parameter counts are deliberately not in this table.** `model.py`'s module
+docstring is the only home for them; a count restated in two places is a
+hand-maintained invariant, and this table's estimates had drifted to being wrong on
+every row (`nano` was estimated at roughly a quarter of its measured 55,282). Re-derive
+with:
+
+```python
+create_coshnet(variant, num_classes=10, input_shape=(32, 32, 3)).count_params()
+```
 
 ---
 

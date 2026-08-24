@@ -15,6 +15,7 @@ import os
 from typing import Tuple, Dict, Any
 
 from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule, create_squeezenet_v1
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestSqueezeNetV1:
@@ -169,7 +170,13 @@ class TestSqueezeNetV1:
         ]
 
         for shape in test_shapes:
-            # Use the less aggressive v1.1 for small inputs to avoid pooling errors
+            # v1.1 pools later, so it keeps more spatial resolution on small
+            # inputs. (The 2026-08-15 note that "'1.0' at (32, 32, 3) does build
+            # and forward" was true and MISLEADING: it forwarded an all-NaN
+            # tensor of the correct shape. "1.0" walks 32 -> 13 -> 6 -> 2 -> 0
+            # and its computed floor is 35; "1.1"'s is 31. Since 2026-08-18 the
+            # constructor raises below the floor, so this selection is load-
+            # bearing, not a resolution preference.)
             variant = "1.1" if shape[0] < 64 else "1.0"
 
             model = SqueezeNetV1.from_variant(
@@ -240,6 +247,10 @@ class TestSqueezeNetV1:
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model_path = os.path.join(tmpdirname, "squeezenet_model.keras")
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             loaded_model = keras.models.load_model(
@@ -304,10 +315,17 @@ class TestSqueezeNetV1:
         assert model.conv1_filters == SqueezeNetV1.MODEL_VARIANTS["1.1"]["conv1_filters"]
         assert model.dropout_rate == 0.4
 
-    def test_factory_with_weights_warning(self, num_classes, caplog):
-        """Test factory function with weights warning."""
-        _ = create_squeezenet_v1(variant="1.0", num_classes=num_classes, weights="imagenet")
-        assert "Pretrained weights are not yet implemented" in caplog.text
+    def test_factory_with_weights_raises(self, num_classes):
+        """A non-None `weights` must RAISE, not log and return random weights.
+
+        The previous behaviour logged "Pretrained weights are not yet
+        implemented" and returned a randomly-initialized model, so a caller
+        asking for ImageNet weights silently trained from scratch.
+        """
+        with pytest.raises(NotImplementedError, match="No pretrained SqueezeNet weights"):
+            create_squeezenet_v1(
+                variant="1.0", num_classes=num_classes, weights="imagenet"
+            )
 
     def test_numerical_stability(self, num_classes, small_input_shape):
         """Test model stability with extreme input values."""

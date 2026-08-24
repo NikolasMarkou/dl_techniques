@@ -23,6 +23,22 @@ from typing import Dict, Any
 from dl_techniques.models.bert.bert import BERT, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
+# exactly 1.0. Every site in this module feeds that axis a size of 1 ON PURPOSE
+# -- single class, single token, single head, single anchor, single cluster,
+# minimum sequence length -- so the advisory describes the test's own input, not
+# a defect. Suppressed HERE rather than in `pyproject.toml` so an ACCIDENTAL
+# size-1 softmax anywhere else still fails under `error::UserWarning`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:You are using a softmax over axis:UserWarning"),
+]
+
 
 class TestBERTModelInitialization:
     """Test BERT model initialization and parameter validation."""
@@ -60,13 +76,13 @@ class TestBERTModelInitialization:
         with pytest.raises(ValueError, match="hidden_size must be positive"):
             BERT(vocab_size=1000, hidden_size=-100, num_layers=4, num_heads=8)
 
-        with pytest.raises(ValueError, match="hidden_dropout_prob must be between"):
+        with pytest.raises(ValueError, match="hidden_dropout_rate must be between"):
             BERT(
                 vocab_size=1000,
                 hidden_size=256,
                 num_layers=4,
                 num_heads=8,
-                hidden_dropout_prob=1.5
+                hidden_dropout_rate=1.5
             )
 
     def test_initialization_with_custom_config(self):
@@ -77,15 +93,15 @@ class TestBERTModelInitialization:
             num_layers=8,
             num_heads=8,
             intermediate_size=2048,
-            hidden_dropout_prob=0.2,
-            attention_probs_dropout_prob=0.1,
+            hidden_dropout_rate=0.2,
+            attention_probs_dropout_rate=0.1,
             normalization_type="rms_norm",
             normalization_position="pre"
         )
         assert model.vocab_size == 25000
         assert model.hidden_size == 512
         assert model.num_layers == 8
-        assert model.hidden_dropout_prob == 0.2
+        assert model.hidden_dropout_rate == 0.2
         assert model.normalization_type == "rms_norm"
 
 
@@ -302,10 +318,14 @@ class TestBERTIntegrationFactory:
             'token_type_ids': keras.ops.zeros((2, 32), 'int32'),
         }
         outputs = model(inputs, training=False)
-        assert isinstance(outputs, dict)
-        assert "logits" in outputs
-        assert "probabilities" in outputs
-        assert outputs["logits"].shape == (2, 3)
+        # The factory drops the head's `probabilities` entry -- it is exactly
+        # `softmax(logits)` -- and exposes the one surviving tensor bare. That
+        # is what makes the model compilable; see
+        # `test_the_head_model_output_is_compilable.py`, which owns the full
+        # contract. These assertions pinned the dict-output defect until
+        # 2026-08-24.
+        assert not isinstance(outputs, dict)
+        assert outputs.shape == (2, 3)
 
     def test_create_with_token_classification_head(self):
         """Test creating a BERT model for token classification."""
@@ -321,9 +341,10 @@ class TestBERTIntegrationFactory:
             'token_type_ids': keras.ops.zeros((2, 32), 'int32'),
         }
         outputs = model(inputs, training=False)
-        assert isinstance(outputs, dict)
-        assert "logits" in outputs
-        assert outputs["logits"].shape == (2, 32, 9)
+        # `TokenClassificationHead` emits `{'logits'}` alone, so the single
+        # surviving key is likewise exposed bare.
+        assert not isinstance(outputs, dict)
+        assert outputs.shape == (2, 32, 9)
 
 
 class TestBERTIntegration:
@@ -342,30 +363,72 @@ class TestBERTIntegration:
         )
 
     def test_gradient_flow_integration(self, classification_model):
-        """Test that gradients flow through the entire integrated model."""
+        """Test that gradients flow through the entire integrated model.
+
+        The per-weight assertions live in
+        ``tests/test_models/gradient_flow_oracle.py`` (this test's body was the
+        pattern they were extracted from; its own RED proofs are in
+        ``tests/test_models/test_gradient_flow_oracle.py``). What stays here is
+        the part that is BERT-specific: the real labelled loss.
+        """
         batch_size, seq_length = 2, 16
         inputs = {
             'input_ids': keras.ops.cast(keras.random.uniform((batch_size, seq_length), maxval=1000), 'int32'),
             'attention_mask': keras.ops.ones((batch_size, seq_length), 'int32'),
             'token_type_ids': keras.ops.zeros((batch_size, seq_length), 'int32'),
         }
+        targets = keras.ops.one_hot(keras.ops.array([0, 2]), 3)
 
-        with tf.GradientTape() as tape:
-            outputs = classification_model(inputs, training=True)
-            logits = outputs['logits']
-            targets = keras.ops.one_hot(keras.ops.array([0, 2]), 3)
-            loss = keras.ops.mean(keras.losses.categorical_crossentropy(targets, logits))
+        # `from_logits=True` is REQUIRED here and was missing. With the
+        # default `False`, Keras treats these logits as probabilities:
+        # it renormalizes by their sum and CLIPS to [eps, 1-eps], and for
+        # some input draws every element lands in the clipped region, where
+        # the loss is constant and EVERY gradient is exactly 0.0. MEASURED
+        # 2026-08-18: 61 of 61 trainable weights had identically-zero
+        # gradients on one such draw, which is why this test was
+        # order-dependent -- importing a sibling test module shifts the RNG
+        # stream and changes the ids. The old `all(norm >= 0.0)` assertion
+        # reported green either way; the oracle below convicts it by name.
+        def loss_fn(outputs):
+            return keras.ops.mean(
+                keras.losses.categorical_crossentropy(
+                    targets, outputs, from_logits=True
+                )
+            )
 
-        gradients = tape.gradient(loss, classification_model.trainable_weights)
-        non_none_grads = [g for g in gradients if g is not None]
-        assert len(non_none_grads) > 0
-        assert len(non_none_grads) == len(classification_model.trainable_weights)
-        grad_norms = [keras.ops.sqrt(keras.ops.sum(keras.ops.square(g))) for g in non_none_grads]
-        assert all(norm >= 0.0 for norm in grad_norms)
+        report = assert_gradients_reach_every_trainable_weight(
+            classification_model, inputs, loss_fn=loss_fn
+        )
+        # Anti-vacuity: the oracle raises on an empty weight set, but pin the
+        # count here too so a future refactor that hands it a sub-model instead
+        # of the full classification stack is visible.
+        assert len(report) == len(classification_model.trainable_weights)
+        assert len(report) > 0
 
     def test_training_integration(self, classification_model):
-        """Test the integrated model in a minimal training loop."""
-        optimizer = keras.optimizers.Adam(learning_rate=1e-6)
+        """A 100-step loop on a fixed batch must drive the loss down.
+
+        The original body ran the same 100 steps, assigned ``initial_loss`` and
+        then asserted NOTHING -- it could not fail for any model, including one
+        whose gradients were all zero. It also used ``learning_rate=1e-6``,
+        which over 100 steps on a tiny model cannot move the loss measurably;
+        that reads as a decrease assertion that was written, found flaky, and
+        deleted rather than fixed.
+
+        The bar is derived from the trivial baseline, not chosen: after 100 Adam
+        steps at 1e-3 on ONE fixed batch of 4 examples, the model must be far
+        better than the constant predictor that outputs the uniform
+        distribution, whose loss is ``ln(3) = 1.0986``. MEASURED over 4
+        independent runs of exactly this body: initial 1.1041 / 1.0639 /
+        1.0646 / 1.0858 (i.e. the uniform value, as random logits should give)
+        and final 0.0334 / 0.0363 / 0.0371 / 0.0272 -- the batch is memorised,
+        a ~30x drop. The bar below is a QUARTER of the uniform baseline
+        (0.2747), roughly 7x above the worst measurement.
+
+        NOTE the ``from_logits=True`` above: without it this loop's gradients
+        can be identically zero. See the comment at ``test_gradient_flow_integration``.
+        """
+        optimizer = keras.optimizers.Adam(learning_rate=1e-3)
         batch_size, seq_length = 4, 16
         inputs = {
             'input_ids': keras.ops.cast(keras.random.uniform((batch_size, seq_length), maxval=1000), 'int32'),
@@ -375,23 +438,63 @@ class TestBERTIntegration:
         labels = keras.ops.cast(keras.random.uniform((batch_size,), maxval=3), 'int32')
 
         initial_loss = None
+        loss_value = None
         for step in range(100):
             with tf.GradientTape() as tape:
                 outputs = classification_model(inputs, training=True)
                 loss = keras.ops.mean(
-                    keras.losses.sparse_categorical_crossentropy(labels, outputs['logits'])
+                    keras.losses.sparse_categorical_crossentropy(
+                        labels, outputs, from_logits=True
+                    )
                 )
+            loss_value = float(loss)
+            assert np.isfinite(loss_value), f"loss became {loss_value} at step {step}"
             if initial_loss is None:
-                initial_loss = loss
+                initial_loss = loss_value
             gradients = tape.gradient(loss, classification_model.trainable_weights)
             optimizer.apply_gradients(zip(gradients, classification_model.trainable_weights))
+
+        uniform_baseline = float(np.log(3.0))
+        assert loss_value < initial_loss, (
+            f"100 Adam steps at 1e-3 on a single fixed batch did not reduce the "
+            f"loss at all: {initial_loss:.4f} -> {loss_value:.4f}."
+        )
+        assert loss_value < 0.25 * uniform_baseline, (
+            f"after 100 steps the loss is {loss_value:.4f}; the constant "
+            f"uniform predictor scores {uniform_baseline:.4f} and a model that "
+            f"memorises this 4-example batch measures ~0.03. Initial was "
+            f"{initial_loss:.4f}."
+        )
 
 
 class TestBERTAdvancedFeatures:
     """Test advanced BERT features from dl-techniques framework."""
 
     def test_different_normalization_types(self):
+        """``normalization_type`` must reach the normalization layers.
+
+        ``last_hidden_state`` is ``(2, 16, 128)`` under both settings, so the
+        old assertion held whether or not the kwarg was honoured. RMSNorm has no
+        centering shift, so it holds strictly FEWER weights than LayerNorm --
+        a structural difference the weight-shape signature pins directly. (An
+        output-difference check would not: different signatures consume
+        different RNG draws, so the outputs differ either way.)
+        """
         base_config = {"vocab_size": 1000, "hidden_size": 128, "num_layers": 2, "num_heads": 8}
+
+        def _build(norm_type):
+            model = BERT(**base_config, normalization_type=norm_type)
+            model(keras.ops.zeros((1, 16), dtype='int32'), training=False)
+            return model
+
+        builders = {n: (lambda n=n: _build(n)) for n in ["layer_norm", "rms_norm"]}
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="normalization_type")
+        assert len(sigs["rms_norm"]) < len(sigs["layer_norm"]), (
+            "rms_norm should drop one weight per norm layer (no beta), but held "
+            f"{len(sigs['rms_norm'])} vs layer_norm's {len(sigs['layer_norm'])}"
+        )
+
         for norm_type in ["layer_norm", "rms_norm"]:
             model = BERT(**base_config, normalization_type=norm_type)
             input_ids = keras.ops.cast(keras.random.uniform((2, 16), maxval=1000), 'int32')

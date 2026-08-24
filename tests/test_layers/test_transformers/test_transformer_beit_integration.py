@@ -158,7 +158,19 @@ class TestBeitAttentionParams:
 
     def test_exact_param_dict(self):
         block = _beit_block(attention_dropout_rate=0.3)
-        assert block._get_attention_params('attn') == {
+        params = block._get_attention_params('attn')
+        # D-600: `kernel_initializer` is now forwarded to this branch. It was
+        # ABSENT here, which is exactly the defect -- BEiT's
+        # TruncatedNormal(stddev=initializer_range) never reached q/k/v/proj and
+        # they drew at BeitAttention's own glorot_uniform (MEASURED: realized
+        # std 0.125238 vs 0.017609 for every other kernel in the same model).
+        # It is a CLONE, not the block's own instance: one shared instance
+        # replays a single draw across blocks.
+        forwarded = params.pop('kernel_initializer')
+        assert type(forwarded) is type(block.kernel_initializer)
+        assert forwarded.get_config() == block.kernel_initializer.get_config()
+        assert forwarded is not block.kernel_initializer
+        assert params == {
             'dim': HIDDEN,
             'num_heads': HEADS,
             'window_size': (WH, WW),
@@ -167,14 +179,17 @@ class TestBeitAttentionParams:
         }
 
     def test_attention_dropout_rate_actually_reaches_the_layer(self):
-        """The kwarg NAME matters: 'dropout_rate' would be dropped without a word.
+        """The kwarg NAME matters: 'dropout_rate' is not a ``BeitAttention`` parameter.
 
         Why this can fail if the implementation is wrong: ``BeitAttention`` declares
-        ``attn_dropout_rate``/``proj_dropout_rate``, not ``dropout_rate``, and
-        ``create_attention_layer`` filters undeclared kwargs out SILENTLY. A branch
-        copied from ``'window'`` would pass ``dropout_rate=0.3``, the value would
-        vanish, and the block's attention dropout would sit at 0.0 forever with no
-        error anywhere. This reads the rate off the built sub-layer.
+        ``attn_dropout_rate``/``proj_dropout_rate``, not ``dropout_rate``. A branch
+        copied from ``'window'`` would pass ``dropout_rate=0.3``; before 2026-08-17
+        ``create_attention_layer`` filtered undeclared kwargs out SILENTLY, so the
+        value vanished and the block's attention dropout sat at 0.0 forever with no
+        error anywhere. That factory now RAISES on the undeclared name
+        (plan-2026-08-17T183311-79c63e38/D-011), so the copied branch would fail
+        loudly instead. This test still reads the rate off the BUILT sub-layer,
+        because the raise cannot tell you the right name arrived and was WIRED.
         """
         block = _beit_block(attention_dropout_rate=0.3)
         assert block.attention.attn_dropout_rate == 0.3

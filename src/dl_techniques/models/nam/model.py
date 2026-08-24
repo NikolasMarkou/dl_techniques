@@ -4,11 +4,36 @@ Neural Arithmetic Module (NAM) — full model.
 Merges three architectures for arithmetic expression evaluation:
 
 1. **Tree Transformer** (GroupAttention) — parses expression structure
-2. **Neural Turing Machine** (memory + addressing) — stores/retrieves intermediates
-3. **Tiny Recursive Model** (ACT loop) — iterative expression reduction
+2. **Neural Turing Machine** (memory + addressing) — a recurrent context vector
+   for the controller
+3. **Tiny Recursive Model** (ACT loop) — iterative re-scoring of the expression
 
 Arithmetic operations are FIXED — the model learns parsing, routing, and halting.
 Each operation outputs both a result and a validity flag (e.g., division by zero → invalid).
+
+.. warning::
+
+   **Scope: single-operator, integer-only.** MEASURED 2026-08-19, pinned by
+   ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
+   The two operands are assembled **exclusively** from the raw ``token_ids``
+   (``cell.py`` step 5), split at ``argmax(reduction_weights)``, and
+   ``NAM.call`` re-reads ``batch["input_ids"]`` unchanged on every ACT step.
+   Nothing written to NTM memory ever re-enters ``left_val`` / ``right_val``.
+   Two consequences, neither of which is reachable at ANY weights:
+
+   * **Multi-operator expressions do not chain.** ``"1 + 2 * 3"`` splits at the
+     ``+`` into ``1`` and the *concatenated* digits ``23``; at the ``*`` into
+     ``12`` and ``3``. The answer 7 is not a candidate at any position.
+     Parentheses (ids 18/19) are not digits, so they neither delimit nor group
+     an operand: ``"( 1 + 2 ) * 3"`` gives ``(12, 3)`` at the ``*``.
+   * **Decimals are dropped.** ``is_digit`` is ``4 <= id <= 13``; ``DOT_ID = 20``
+     is tokenized and round-trips, but number assembly has no fractional
+     branch, so ``"1.5 + 2"`` assembles ``15`` and ``2`` and computes 17 with
+     ``valid = 1.0``. There is no error and no validity flag for this.
+
+   Supporting either would be a new mechanism (an operand path from a previous
+   step's result; a fractional branch in ``_assemble_number_from_tokens``), not
+   a bug fix. Until then this docstring is the contract.
 
 Architecture::
 
@@ -25,8 +50,26 @@ Architecture::
                                     └────────────────────────────────────────┘
                                               │
                                     Result Head → (scalar, validity)
+
+References:
+    - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
+      Self-Attention. EMNLP 2019. (https://arxiv.org/abs/1909.06639) -- the
+      GroupAttention that parses expression structure.
+    - Graves et al., 2014. Neural Turing Machines.
+      (https://arxiv.org/abs/1410.5401) -- the addressed external memory that
+      supplies the controller's context vector.
+    - Jolicoeur-Martineau, 2025. Less is More: Recursive Reasoning with Tiny
+      Networks. (https://arxiv.org/abs/2510.04871) -- the Tiny Recursive Model
+      whose ACT loop this re-scores expressions with.
+    - Graves, 2016. Adaptive Computation Time for Recurrent Neural Networks.
+      (https://arxiv.org/abs/1603.08983) -- the halting mechanism itself.
+    - Trask et al., 2018. Neural Arithmetic Logic Units.
+      (https://arxiv.org/abs/1808.00508) -- the prior line on learned
+      arithmetic; NAM differs by FIXING the operators and learning only
+      parsing, routing and halting.
 """
 
+import numpy as np
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -56,10 +99,32 @@ class NAM(keras.Model):
     - **valid**: 1.0 if the operation is valid, 0.0 if invalid
       (e.g., division by zero).
 
+    **Scope: single-operator, integer-only** — see the module docstring for the
+    measurement. A multi-operator expression does not chain (step N's result
+    cannot reach step N+1's operands at any weights) and the decimal point is
+    tokenized but dropped by number assembly.
+
     The model uses Adaptive Computation Time (ACT) from TRM to dynamically
-    decide how many reduction steps are needed. Simple expressions like
-    ``1 + 2`` take 1 step; complex expressions like ``(1 + 2) * (3 + 4)``
-    take 3 steps.
+    decide how many ACT steps to run. Extra steps re-score the SAME token
+    sequence — they do not reduce it, so a second step cannot consume the
+    first step's answer. That halting is live at inference as well as during
+    training: both branches halt on ``q_halt > 0`` (D-033). It was NOT true
+    before 2026-08-15 — inference halted on ``halt_max_steps`` alone, so every
+    sequence ran the full budget and the sentence above was false. Note that
+    ``q_halt`` only earns its keep if the trainer supervises it;
+    ``src/train/nam/train_nam.py`` does so via ``--w-halt`` (D-034), and
+    ``--w-halt 0`` reproduces the untrained-head behaviour.
+
+    .. note::
+
+       **This model is driven by a training loop, not by Keras.** ``call``
+       takes ``(carry, batch)`` rather than an ``inputs``-first signature, so
+       ``predict()``, ``fit()`` and ``.save()``-with-build-config cannot drive
+       it; ``src/train/nam/train_nam.py`` calls it directly in a hand-rolled
+       ACT unroll. This is an accepted limitation, not an oversight: the
+       recursion needs a carry no single input tensor can supply, and
+       reordering the parameters would break the trainer and every saved build
+       config for a benefit nothing here asks for.
 
     :param config: NAM configuration (dataclass or dict).
     :type config: Union[NAMConfig, Dict[str, Any]]
@@ -342,7 +407,26 @@ class NAM(keras.Model):
             step_ok = ops.greater_equal(steps, min_steps)
             new_halted = ops.logical_and(new_halted, step_ok)
         else:
-            new_halted = is_last_step
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-033: inference consults
+            # the LEARNED `q_halt` too, mirroring the training branch above minus
+            # the exploration term. This used to be `new_halted = is_last_step`
+            # alone, so every sequence ran the full `halt_max_steps` at eval and
+            # the trained ACT head was INERT at exactly the moment adaptivity is
+            # claimed — contradicting this class's own docstring ("simple
+            # expressions like ``1 + 2`` take 1 step"). `halt_exploration_prob`
+            # and `halt_max_steps` bought nothing measurable.
+            #
+            # The predicate is `q_halt > 0`, NOT `q_halt > q_continue`: that is
+            # what the training branch uses, and the two branches must agree or
+            # the head is trained against one rule and read under another. It is
+            # the same choice `tiny_recursive_model` exposes as
+            # `no_act_continue=True`. `q_continue` is therefore NOT on NAM's
+            # halting path at all; do not "restore symmetry" by switching this
+            # to a two-action comparison without also changing the training
+            # branch and adding the Bellman arm to the trainer's `L_halt`.
+            # See decisions.md D-033.
+            halt_signal = ops.greater(q_halt, ops.cast(0.0, q_halt.dtype))
+            new_halted = ops.logical_or(is_last_step, halt_signal)
 
         # --- Result readout ---
         # Pool hidden state for final prediction
@@ -352,7 +436,20 @@ class NAM(keras.Model):
             cell_outputs["hidden"] * ops.expand_dims(token_mask_float, -1),
             axis=1,
         )
-        pooled = pooled / (ops.sum(token_mask_float, axis=-1, keepdims=True) + 1e-9)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-050
+        # The masked-mean denominator floor is `max(1e-9, finfo(dtype).tiny)`,
+        # not the bare literal. `np.float16(1e-9)` is EXACTLY 0.0, so under
+        # `mixed_float16` this guard did not exist at all and an all-padding row
+        # gave 0/0 = NaN — MEASURED 8 NaN of 8 at HEAD, with the float32 control
+        # green. Do NOT "just make the constant bigger": a literal chosen without
+        # reference to the dtype is one precision change away from being void
+        # again, which is exactly how this one became void. The float32 path is
+        # INERT by construction — `max(1e-9, 1.18e-38) == 1e-9`.
+        # Same instrument as D-027. See decisions.md D-050.
+        mean_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
+        pooled = pooled / (
+            ops.sum(token_mask_float, axis=-1, keepdims=True) + mean_eps
+        )
 
         # Concatenate the cell's intermediate arithmetic result as a hint
         # so the result head can refine it rather than compute from scratch.
@@ -393,6 +490,11 @@ class NAM(keras.Model):
 
         return new_carry, outputs
 
+    #: House-shape canonical name for the variant table. This is an ALIAS to
+    #: ``config.NAM_VARIANTS`` -- the same dict object, not a copy -- because
+    #: trainers and tests reference the module-level spelling.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = NAM_VARIANTS
+
     @classmethod
     def from_variant(
         cls,
@@ -426,3 +528,35 @@ class NAM(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> "NAM":
         nam_config = config.pop("config")
         return cls(config=nam_config, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_nam(
+    variant: str = "base",
+    **kwargs: Any,
+) -> NAM:
+    """
+    Create a NAM model from a preset variant.
+
+    :param variant: One of ``NAM.MODEL_VARIANTS`` ("tiny", "small", "base").
+    :type variant: str
+    :param kwargs: Individual ``NAMConfig`` field overrides applied on top of
+        the variant.
+    :return: A configured NAM instance.
+    :rtype: NAM
+    :raises ValueError: If ``variant`` is not a known variant name, or if the
+        resulting config fails ``NAMConfig`` validation.
+
+    Example::
+
+        model = create_nam("tiny", halt_max_steps=4)
+        carry = model.initial_carry(batch)
+        carry, outputs = model(carry, batch)
+    """
+    return NAM.from_variant(variant, **kwargs)
+
+# ---------------------------------------------------------------------

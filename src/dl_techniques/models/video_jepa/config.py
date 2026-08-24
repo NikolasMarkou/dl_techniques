@@ -48,7 +48,7 @@ class VideoJEPAConfig:
         :class:`SIGRegLayer`. Smoke default 64 (LeWM precedent).
     :param sigreg_weight: Weight applied to SIGReg loss when added via
         ``add_loss`` (D-005).
-    :param dropout: Dropout rate used inside the temporal attention block.
+    :param dropout_rate: Dropout rate used inside the temporal attention block.
     :param mask_prediction_enabled: If True, V-JEPA-style tube-masked latent
         prediction runs alongside next-frame prediction (iter-2, D-008/D-009).
         When False, the model degrades to iter-1-equivalent two-loss behavior
@@ -101,7 +101,7 @@ class VideoJEPAConfig:
     sigreg_weight: float = 0.09
 
     # --- Dropout / regularization ---
-    dropout: float = 0.0
+    dropout_rate: float = 0.0
 
     # --- Iter-2: V-JEPA-style tube-masked latent prediction (D-008..D-012) ---
     mask_prediction_enabled: bool = True

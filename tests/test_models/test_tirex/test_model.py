@@ -9,6 +9,10 @@ from typing import Dict, Any, Tuple
 
 from dl_techniques.models.time_series.tirex.model import TiRexCore, create_tirex_model, create_tirex_by_variant
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+)
+
 
 class TestTiRexCore:
     """Comprehensive test suite for TiRex model following modern Keras 3 patterns."""
@@ -329,7 +333,14 @@ class TestTiRexCore:
             model(invalid_4d_input)
 
     def test_different_block_configurations(self, sample_univariate_input):
-        """Test different block type configurations."""
+        """``block_types`` must build blocks of the requested TYPES.
+
+        The output shape is ``(B, 12, 3)`` for every layout and
+        ``len(model.blocks) == len(block_types)`` echoes the list's length, not
+        its contents -- six configurations all of length two would pass that
+        assertion even if every block were the same type. `block_types` is
+        structural, so the weight-shape signature carries the claim.
+        """
         base_config = {
             'patch_size': 8,
             'embed_dim': 64,
@@ -348,6 +359,22 @@ class TestTiRexCore:
             ['transformer', 'mixed'],
             ['mixed', 'lstm']
         ]
+
+        def _build(block_types):
+            config = base_config.copy()
+            config['block_types'] = block_types
+            model = TiRexCore(**config)
+            model(sample_univariate_input[:1])
+            return model
+
+        builders = {tuple(b): (lambda b=b: _build(b)) for b in configs}
+        sigs = assert_structural_knob_changes_weights(builders, knob="block_types")
+        # Stronger than "different": an LSTM block and a transformer block are
+        # not just differently shaped, they hold different NUMBERS of tensors.
+        assert len(sigs[('lstm', 'lstm')]) != len(sigs[('transformer', 'transformer')]), (
+            "an all-LSTM stack and an all-transformer stack held the same "
+            "number of weight tensors"
+        )
 
         for block_types in configs:
             config = base_config.copy()
@@ -664,5 +691,250 @@ class TestTiRexFactory:
         assert model.patch_size == small_config['patch_size']
         assert model.embed_dim == small_config['embed_dim']
 
+
+class TestTiRexAttentionType:
+    """`attention_type` is a real constructor knob, not a hardcoded literal.
+
+    Until this suite existed the attention type was pinned to `'window'` inside
+    `__init__`, so no caller could build the paper's global attention. These tests
+    pin BOTH ends of the knob: the string that goes in, and the compute profile that
+    comes out. The string alone is deliberately not enough — a `get_config`
+    round-trip would keep passing if the value never reached the attention factory.
+    """
+
+    def _block_config(self, attention_type: str, window_size: int) -> Dict[str, Any]:
+        """A single `transformer` block: no LSTM path, so attention is the ONLY
+        route by which one token can influence another. With a `mixed` block the
+        LSTM would carry position 0 forward regardless of the attention span and
+        the receptive-field probe below would be vacuous."""
+        return {
+            'patch_size': 4,
+            'embed_dim': 16,
+            'num_blocks': 1,
+            'num_heads': 2,
+            'block_types': ['transformer'],
+            'quantile_levels': [0.5],
+            'prediction_length': 4,
+            'dropout_rate': 0.0,
+            'attention_type': attention_type,
+            'attention_window_size': window_size,
+        }
+
+    def test_default_attention_type_is_multi_head(self):
+        """The default is global/full attention — `'multi_head'` is the factory's
+        key for it; there is no key spelled `'global'`."""
+        model = TiRexCore(patch_size=4, embed_dim=16, num_blocks=1, num_heads=2,
+                          prediction_length=4, quantile_levels=[0.5])
+
+        assert model.attention_type == 'multi_head'
+        assert type(model.blocks[0].attention_layer).__name__ == 'MultiHeadAttention'
+
+    def test_attention_type_survives_config_round_trip(self):
+        """A constructor parameter absent from `get_config()` restores as the
+        default and the loss of the caller's choice is silent."""
+        model = TiRexCore(**self._block_config('window', 2))
+
+        config = model.get_config()
+        assert config['attention_type'] == 'window'
+
+        restored = TiRexCore.from_config(config)
+        assert restored.attention_type == 'window'
+        assert type(restored.blocks[0].attention_layer).__name__ == 'WindowAttention'
+
+    def test_window_still_builds_and_forward_passes(self):
+        """`'window'` remains selectable end-to-end. `attention_window_size` stays
+        wired through `attention_args` for BOTH types, so the global path does not
+        need a branch — but the reason CHANGED on 2026-08-17
+        (plan-2026-08-17T183311-79c63e38/D-011). It used to be the attention factory
+        dropping keyword arguments the target type does not declare; that factory now
+        RAISES on them, and it is `MixedSequentialBlock` that scopes `window_size` to
+        the types accepting it. This test is what would go red if that scoping were
+        removed."""
+        window_model = TiRexCore(**self._block_config('window', 2))
+        global_model = TiRexCore(**self._block_config('multi_head', 2))
+
+        assert window_model.blocks[0].attention_args == {'window_size': 2}
+        assert global_model.blocks[0].attention_args == {'window_size': 2}
+
+        x = keras.random.normal(shape=(2, 32, 1))
+        assert ops.shape(window_model(x, training=False)) == (2, 4, 1)
+        assert ops.shape(global_model(x, training=False)) == (2, 4, 1)
+
+    def test_attention_span_actually_changes(self):
+        """The compute profile, not the string.
+
+        Perturb token 0 of a block's input and read the LAST token's output. Under
+        global attention every token reads every other, so the last token moves.
+        Under a window of 2 it cannot see token 0 at all, so it moves by EXACTLY
+        zero. The `perturbed_position_moves` arm is the liveness control: without
+        it a block that returned a constant would satisfy the window assertion.
+        """
+        seq_len, embed_dim = 16, 16
+
+        def probe(attention_type: str) -> Tuple[float, float]:
+            model = TiRexCore(**self._block_config(attention_type, 2))
+            block = model.blocks[0]
+
+            tokens = keras.random.normal((1, seq_len, embed_dim), seed=0)
+            baseline = ops.convert_to_numpy(block(tokens, training=False))
+
+            perturbed = ops.convert_to_numpy(tokens).copy()
+            perturbed[0, 0, :] += 10.0
+            after = ops.convert_to_numpy(
+                block(ops.convert_to_tensor(perturbed), training=False))
+
+            delta = np.abs(after - baseline)
+            return float(delta[0, -1].max()), float(delta[0, 0].max())
+
+        global_last, global_first = probe('multi_head')
+        window_last, window_first = probe('window')
+
+        # liveness: the perturbation landed, under both spans
+        assert global_first > 1.0, "perturbed_position_moves (multi_head)"
+        assert window_first > 1.0, "perturbed_position_moves (window)"
+
+        # the assertion that proves the wiring
+        assert window_last == 0.0, (
+            "window_span_excludes_distant_token: token 0 reached the last "
+            f"position through a window of 2 (delta {window_last})")
+        assert global_last > 1e-4, (
+            "global_span_reaches_distant_token: token 0 did NOT reach the last "
+            f"position under 'multi_head' (delta {global_last}) — attention_type "
+            "is not reaching the factory")
+
+
+class TestTiRexUnderTheStrictAttentionFactory:
+    """TiReX still constructs now that `create_attention_layer` REFUSES undeclared keys.
+
+    `TiRexCore` wires `attention_args={'window_size': ...}` unconditionally, at every
+    `attention_type`, and documents the knob as "used only when
+    `attention_type='window'`". Before 2026-08-17 that worked because the attention
+    factory silently dropped the key on the types that do not declare it. Since
+    plan-2026-08-17T183311-79c63e38/D-011 it raises, and `MixedSequentialBlock` is
+    what scopes the key instead.
+
+    Two failure modes are pinned here, because they are on DIFFERENT paths and only
+    one of them was foreseen:
+
+    * the DEFAULT path (`'multi_head'`), which does not declare `window_size`;
+    * the `'window'` path, which was ALSO broken -- for a different reason. The
+      block's `'window'` branch injected `normalization='softmax'`, a key
+      `WindowAttention` has no parameter for, so it breaks with an EMPTY caller
+      dict. That is the configuration the knob exists for.
+    """
+
+    def _config(self, **overrides) -> Dict[str, Any]:
+        config = {
+            'patch_size': 4,
+            'embed_dim': 16,
+            'num_blocks': 1,
+            'num_heads': 2,
+            'block_types': ['transformer'],
+            'quantile_levels': [0.5],
+            'prediction_length': 4,
+            'dropout_rate': 0.0,
+        }
+        config.update(overrides)
+        return config
+
+    def test_default_construction_survives_the_strict_factory(self):
+        """RED before the block-side repair: ValueError naming `window_size`."""
+        model = TiRexCore(**self._config())
+
+        assert model.attention_type == 'multi_head'
+        assert model.blocks[0].attention_args == {'window_size': 8}
+        attention = model.blocks[0].attention_layer
+        assert type(attention).__name__ == 'MultiHeadAttention'
+        # the conditional key was scoped away, not smuggled in
+        assert not hasattr(attention, 'window_size')
+
+        x = keras.random.normal(shape=(2, 32, 1))
+        assert ops.shape(model(x, training=False)) == (2, 4, 1)
+
+    def test_window_construction_survives_the_strict_factory(self):
+        """RED before the `normalization` removal: ValueError naming it."""
+        model = TiRexCore(**self._config(
+            attention_type='window', attention_window_size=2
+        ))
+
+        attention = model.blocks[0].attention_layer
+        assert type(attention).__name__ == 'WindowAttention'
+        # the knob the parameter doc scopes to this type actually arrives
+        assert attention.window_size == 2
+
+        x = keras.random.normal(shape=(2, 32, 1))
+        assert ops.shape(model(x, training=False)) == (2, 4, 1)
+
+    def test_a_misspelled_attention_arg_is_now_loud(self):
+        """The scoping allowlist is one key wide, not a licence to swallow the dict.
+
+        Why this can fail if the implementation is wrong: if the block filtered its
+        whole merged kwarg dict against the registry instead of only its own
+        defaults plus the documented-conditional `window_size`, this would build
+        cleanly and the strict factory would be unreachable from here.
+        """
+        from dl_techniques.layers.time_series.mixed_sequential_block import (
+            MixedSequentialBlock,
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            MixedSequentialBlock(
+                embed_dim=16, num_heads=2, block_type='transformer',
+                attention_type='multi_head',
+                attention_args={'dropout_ratee': 0.5},
+            )
+        assert 'dropout_ratee' in str(excinfo.value)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestTheFactoriesBuildWithoutRunning:
+    """R-051 / D-078: both TiRex factories materialize with ``build()``, not a forward pass.
+
+    ``create_tirex_model`` and ``create_tirex_by_variant`` used to call
+    ``model(np.zeros((1, input_length, 1)))``. ``build()`` was measured to be a
+    byte-identical substitute at the same seed -- the same 47 weight paths,
+    ``max|weight delta| == 0.0`` and ``max|forward delta| == 0.0`` -- so the
+    forward pass went and ``build()`` stayed. It could NOT simply be deleted:
+    ``input_length`` exists only to size this call, and an unbuilt subclassed
+    model can lose lazily-created sublayer weights on a ``.keras`` round trip.
+
+    These are the RED proofs for that edit. Delete the ``build()`` line and
+    ``test_the_returned_model_is_built`` goes red; restore the forward pass and
+    ``test_no_forward_pass_is_run`` goes red.
+    """
+
+    @pytest.mark.parametrize("factory", ["by_variant", "direct"])
+    def test_the_returned_model_is_built(self, factory):
+        if factory == "by_variant":
+            model = create_tirex_by_variant("tiny", input_length=64, prediction_length=8)
+        else:
+            model = create_tirex_model(input_length=64, prediction_length=8, embed_dim=32,
+                                 num_blocks=1, num_heads=2, patch_size=8)
+        assert model.built, f"{factory} returned an UNBUILT model"
+        assert len(model.weights) > 0
+
+    @pytest.mark.parametrize("factory", ["by_variant", "direct"])
+    def test_no_forward_pass_is_run(self, factory):
+        calls = []
+        original_call = TiRexCore.call
+
+        def counting_call(self, *args, **kwargs):
+            calls.append(1)
+            return original_call(self, *args, **kwargs)
+
+        TiRexCore.call = counting_call
+        try:
+            if factory == "by_variant":
+                create_tirex_by_variant("tiny", input_length=64, prediction_length=8)
+            else:
+                create_tirex_model(input_length=64, prediction_length=8, embed_dim=32,
+                             num_blocks=1, num_heads=2, patch_size=8)
+        finally:
+            TiRexCore.call = original_call
+
+        assert calls == [], (
+            f"the {factory} factory invoked the model {len(calls)} time(s); it "
+            "should materialize with build() alone."
+        )

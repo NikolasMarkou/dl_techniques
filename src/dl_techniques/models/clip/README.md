@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of the **CLIP (Contrastive Language-Image Pre-training)** model. CLIP learns rich visual representations from natural language supervision by training a vision and text encoder in parallel to predict which images were paired with which texts in a large dataset. This enables powerful zero-shot transfer capabilities for a wide range of vision tasks.
+A Keras 3 implementation of the **CLIP (Contrastive Language-Image Pre-training)** model. CLIP learns rich visual representations from natural language supervision by training a vision and text encoder in parallel to predict which images were paired with which texts in a large dataset. This enables powerful zero-shot transfer capabilities for a wide range of vision tasks.
 
 The implementation is based on a highly configurable and modern `TransformerLayer` that uses state-of-the-art components like RMS Normalization, SwiGLU activations, and Grouped-Query Attention.
 

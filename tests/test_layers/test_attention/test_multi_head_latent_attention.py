@@ -1097,6 +1097,19 @@ if __name__ == "__main__":
 
 from dl_techniques.layers.attention.common import MASK_BIAS_VALUE
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
+# exactly 1.0. Every site in this module feeds that axis a size of 1 ON PURPOSE
+# -- single class, single token, single head, single anchor, single cluster,
+# minimum sequence length -- so the advisory describes the test's own input, not
+# a defect. Suppressed HERE rather than in `pyproject.toml` so an ACCIDENTAL
+# size-1 softmax anywhere else still fails under `error::UserWarning`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:You are using a softmax over axis:UserWarning"),
+]
+
 _MP_B, _MP_N, _MP_DIM, _MP_H = 2, 64, 64, 4
 _MP_KEEP = _MP_N // 2
 _MP_DEG_ROW = 5
@@ -1418,4 +1431,54 @@ class TestMultiHeadLatentAttentionMaskPolarity:
             f"{delta_masked:.6g} under policy {dtype_policy!r} — this must be "
             f"exact, so the mask polarity is INVERTED (the inverted-polarity "
             f"control measures {inverted:.6g})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# RoPE axis order (plan-2026-08-14T233721-d4f9beb2, step 39.1, D-083)
+# ---------------------------------------------------------------------------
+
+
+class TestRoPECarriesPosition:
+    """MLA's decoupled RoPE must actually carry position.
+
+    This layer was the worse of the two victims of the `(B, S, H, D)` frame:
+    `RotaryPositionEmbedding.call` reads its sequence length from
+    `ops.shape(inputs)[2]`, so `q_pe` -- shape `(B, S_q, H, rope_dim)` -- was
+    rotated by its HEAD INDEX, while `k_pe` carries an explicit singleton head
+    axis, `(B, S_kv, 1, rope_dim)`, and was read as sequence length 1 and so
+    rotated by position 0 alone: `cos = 1`, `sin = 0`, the IDENTITY. Q and K
+    were therefore rotated by completely unrelated angles and no
+    relative-position signal survived.
+    """
+
+    def test_permuting_two_tokens_changes_the_output(self):
+        """Pre-fix: 4.47e-08 (float32 noise). Post-fix: 4.52e-03.
+
+        The signal here is smaller than `GatedAttention`'s because MLA rotates
+        only the decoupled `qk_rope_head_dim` slice of the score, not the whole
+        head -- but the pre-fix value is five orders of magnitude below it and
+        is indistinguishable from exact permutation equivariance.
+        """
+        keras.utils.set_random_seed(1234)
+        dim, seq, batch = 32, 8, 2
+        layer = MultiHeadLatentAttention(
+            dim=dim, num_heads=8, kv_latent_dim=16, max_seq_len=64,
+        )
+
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(batch, seq, dim)).astype("float32")
+        perm = np.arange(seq)
+        perm[1], perm[2] = perm[2], perm[1]
+
+        inp = keras.Input(shape=(seq, dim))
+        model = keras.Model(inp, layer(inp))
+
+        y = keras.ops.convert_to_numpy(model(x))
+        y_perm_in = keras.ops.convert_to_numpy(model(x[:, perm, :]))
+        defect = float(np.max(np.abs(y[:, perm, :] - y_perm_in)))
+
+        assert defect > 1e-4, (
+            f"MLA is permutation-equivariant (defect {defect:.3e}); its "
+            f"decoupled RoPE is carrying no positional signal."
         )

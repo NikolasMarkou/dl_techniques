@@ -203,5 +203,66 @@ class TestBiasFreeBatchNormSerialization:
         )
 
 
+class TestBiasFreeBatchNormDtypePolicies:
+    """Regression: the layer must run under non-float32 global dtype policies.
+
+    Before the D-002 fix, ``call()`` hardcoded ``ops.cast(inputs, "float32")``
+    while the weights were created at the layer's variable dtype and read back
+    through Keras autocast. That mixed dtypes and made the layer raise under
+    BOTH ``float64`` (``AddV2`` float32-vs-float64 in the EMA update, and a
+    float32-vs-float64 divide at inference) and ``mixed_float16``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_policy(self):
+        original = keras.mixed_precision.global_policy()
+        try:
+            yield
+        finally:
+            keras.mixed_precision.set_global_policy(original)
+
+    @pytest.mark.parametrize("policy,input_dtype,expected_variable_dtype", [
+        ("float64", "float64", "float64"),
+        ("mixed_float16", "float16", "float32"),
+    ])
+    def test_trains_under_dtype_policy(
+        self, policy: str, input_dtype: str, expected_variable_dtype: str
+    ) -> None:
+        keras.mixed_precision.set_global_policy(policy)
+        layer = BiasFreeBatchNorm(momentum=0.9)
+        rng = np.random.default_rng(3)
+        x = (rng.standard_normal((4, 6, 6, 3)) * 2.0).astype(input_dtype)
+
+        # Training branch: EMA update must not mix dtypes.
+        before = np.asarray(keras.ops.convert_to_numpy(layer.running_var))
+        for _ in range(3):
+            layer(x, training=True)
+        after = np.asarray(keras.ops.convert_to_numpy(layer.running_var))
+
+        # Inference branch: fixed-statistic divide must not mix dtypes.
+        layer(x, training=False)
+
+        assert layer.running_var.dtype == expected_variable_dtype, (
+            "moving statistics must live in the VARIABLE dtype, not the compute "
+            f"dtype (policy={policy})"
+        )
+        assert layer.gamma.dtype == expected_variable_dtype
+        assert not np.array_equal(before, after), (
+            "running_var did not move - the EMA update did not run"
+        )
+
+    def test_float64_statistics_are_computed_in_float64(self) -> None:
+        """The float64 path must not silently round through float32."""
+        keras.mixed_precision.set_global_policy("float64")
+        layer = BiasFreeBatchNorm(momentum=0.9)
+        rng = np.random.default_rng(4)
+        x = (rng.standard_normal((4, 6, 6, 3)) * 2.0).astype("float64")
+        y = layer(x, training=False)
+        assert keras.backend.standardize_dtype(y.dtype) == "float64"
+        # A float32 round-trip would clamp the running_var update to ~1e-7
+        # relative precision; float64 keeps far more.
+        layer(x, training=True)
+        assert layer.running_var.dtype == "float64"
+
 if __name__ == "__main__":
     pytest.main([__file__])

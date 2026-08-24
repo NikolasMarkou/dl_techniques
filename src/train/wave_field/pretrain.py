@@ -22,26 +22,37 @@ Usage::
 import os
 import glob
 import argparse
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, List
+from dataclasses import dataclass
+from typing import Callable, Optional, Tuple
 
 import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import (
+    setup_gpu,
+    set_seeds,
+    save_config_json,
+    save_training_history_json,
+)
 from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
-    load_text_dataset,
-    preprocess_clm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
-    estimate_clm_steps_per_epoch,
     build_clm_metrics,
     prepare_dict_keyed_compile,
     augment_probe_results,
+)
+from train.common.clm_pretrain import (
+    ClmPretrainConfig,
+    extract_step_from_checkpoint,
+    create_clm_loss_fn,
+    load_train_val_datasets,
+    load_tfds_clm_datasets,
+    load_hf_clm_datasets,
+    make_clm_steps_per_epoch,
 )
 from dl_techniques.models.wave_field.model import (
     WaveFieldLLM,
@@ -54,8 +65,28 @@ from dl_techniques.initializers.identity_plus_noise import (
     IdentityPlusNoise,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
+
+# DECISION plan-2026-08-12T123743-e798a9e1/D-011
+# Backwards-compatible aliases for the private spellings these six functions had
+# while they lived in this module -- plain assignments, so they are the SAME
+# objects and not copies (the general rule is decisions.md D-010).
+# WHAT NOT TO DO: do NOT delete `_extract_step_from_checkpoint`. This file calls
+# it under that name (in `_resolve_resume` and in `train_wave_field_llm`), so it
+# is live code, and it is additionally this module's public import surface for
+# anything written against the pre-consolidation spelling (D-010).
+# HISTORY, so the next reader is not confused by an older comment: the alias was
+# originally justified by a cross-module importer -- `train.wave_field.train_memory`
+# did `from train.wave_field.pretrain import _extract_step_from_checkpoint`, was
+# later repointed at `train.common.clm_pretrain` directly, and was then DELETED
+# outright on user instruction (2026-08-13; last present at commit 9f3208319).
+# That importer is gone; the in-file call sites and the D-010 rule are not.
+# See decisions.md D-011 (and D-010 for the alias-block rule it specializes).
+_extract_step_from_checkpoint = extract_step_from_checkpoint
+create_loss_fn = create_clm_loss_fn
+_load_tfds_datasets = load_tfds_clm_datasets
+_load_hf_datasets = load_hf_clm_datasets
+_make_steps_per_epoch = make_clm_steps_per_epoch
 
 
 # ---------------------------------------------------------------------
@@ -63,93 +94,40 @@ from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-08-13T091555-230c101d/D-011
+# `field_size` used to be declared 6th, between `num_heads` and `dropout_rate`.
+# Dataclass inheritance appends subclass-only fields AFTER the inherited ones,
+# so it is now LAST. That is a positional-construction contract change and it
+# was accepted deliberately: measured 2026-08-13, this class is constructed by
+# KEYWORD at every site in the repo (`_config_from_args` here, and
+# `SOTrainingConfig(**vars(base), ...)` for the gpt2 sibling), so no caller is
+# sensitive to it.
+# WHAT NOT TO DO: do NOT "restore" the old position by re-declaring
+# `field_size` in the base class. It is WaveField-specific -- `train.gpt2`
+# has no such concept -- and putting it in the base would add a dead field to
+# every GPT-2 config, which is the exact defect class
+# `tests/test_train/test_config_fields_are_live.py` exists to catch.
+# See decisions.md D-011.
 @dataclass
-class TrainingConfig:
-    """Configuration for WaveFieldLLM CLM pre-training."""
+class TrainingConfig(ClmPretrainConfig):
+    """Configuration for WaveFieldLLM CLM pre-training.
 
-    # Model
-    model_variant: str = "small"
-    vocab_size: int = 50261
-    max_seq_length: int = 512
-    num_layers: Optional[int] = None
-    num_heads: Optional[int] = None
-    field_size: Optional[int] = None  # None -> 2 * max_seq_length per variant
-    dropout_rate: float = 0.0
-    attention_dropout_rate: float = 0.0
-    tie_word_embeddings: bool = True
-
-    # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
-    encoding_name: str = "gpt2"
-    cls_token_id: int = 50257
-    sep_token_id: int = 50258
-    pad_token_id: int = 50259
-    mask_token_id: int = 50260
-
-    # Training
-    batch_size: int = 8
-    num_epochs: int = 3
-    learning_rate: float = 3e-4
-    warmup_ratio: float = 0.1
-    weight_decay: float = 0.01
-
-    # Loss: "ce" (default) or "focal"
-    loss_type: str = "ce"
-    focal_gamma: float = 1.0
-    label_smoothing: float = 0.0
+    Inherits the 43 shared CLM fields from
+    :class:`train.common.clm_pretrain.ClmPretrainConfig` -- the single
+    definition also used by :mod:`train.gpt2.pretrain` -- and adds only what is
+    WaveField-specific.
+    """
 
     # Paths
     save_dir: str = "results/wave_field_llm_pretrain"
 
-    # Data source: "huggingface" or "tfds"
-    dataset_source: str = "huggingface"
-
-    # TFDS settings
-    dataset_name: str = "imdb_reviews"
-    max_samples: Optional[int] = 10000
-
-    # HuggingFace / Wikipedia settings
-    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
-    hf_wikipedia_config: str = "20231101.en"
-    min_article_length: int = 0
-    val_fraction: float = 0.02
-    max_val_samples: int = 5000
-    max_train_samples: Optional[int] = None
-    shuffle_shards: int = 4
-
-    # Checkpointing & analysis (step-based for large datasets)
-    checkpoint_every_steps: int = 25000
-    analyze_every_steps: int = 50000
-    max_checkpoints: int = 3
-    steps_per_epoch: Optional[int] = None
-
-    # Resume from checkpoint
-    resume_from: Optional[str] = None
-    seed: int = 42
-
-    # Generation probes (run before each checkpoint)
-    probe_prompts: List[str] = field(default_factory=lambda: [
-        "The United States of America is a",
-        "In mathematics, a prime number is",
-        "Albert Einstein was born in",
-    ])
-    probe_max_tokens: int = 100
-    probe_temperature: float = 0.85
-    probe_top_p: float = 0.92
-    probe_repetition_penalty: float = 1.3
+    # Model (WaveField-specific)
+    field_size: Optional[int] = None  # None -> 2 * max_seq_length per variant
 
 
 # ---------------------------------------------------------------------
 # Model creation & resume
 # ---------------------------------------------------------------------
-
-
-def _extract_step_from_checkpoint(path: str) -> int:
-    import re
-    basename = os.path.basename(path)
-    match = re.search(r"step_(\d+)", basename)
-    if match:
-        return int(match.group(1))
-    return 0
 
 
 def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
@@ -215,90 +193,6 @@ def create_wave_field_llm_model(config: TrainingConfig) -> WaveFieldLLM:
 
 
 # ---------------------------------------------------------------------
-# Loss construction
-# ---------------------------------------------------------------------
-
-
-def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
-    if config.loss_type == "focal":
-        loss_fn = FocalCausalLMLoss(
-            gamma=config.focal_gamma,
-            label_smoothing=config.label_smoothing,
-        )
-        logger.info(f"Loss: FocalCausalLMLoss(gamma={config.focal_gamma})")
-    else:
-        loss_fn = MaskedCausalLMLoss(label_smoothing=config.label_smoothing)
-        logger.info("Loss: MaskedCausalLMLoss")
-    return loss_fn
-
-
-# ---------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------
-
-
-def load_train_val_datasets(
-    config: TrainingConfig,
-    preprocessor,
-    data_seed: int,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
-    n_train_articles: Optional[int] = None
-    if config.dataset_source == "tfds":
-        train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
-    elif config.dataset_source == "huggingface":
-        train_ds, val_ds, n_train_articles = _load_hf_datasets(
-            config, preprocessor, data_seed,
-        )
-    else:
-        raise ValueError(
-            f"Unknown dataset_source: {config.dataset_source!r}. "
-            f"Use 'tfds' or 'huggingface'."
-        )
-
-    # Wrap labels for dict-output model: (x, y) -> (x, {"logits": y})
-    wrap = lambda ds: ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    return wrap(train_ds), wrap(val_ds), n_train_articles
-
-
-def _load_tfds_datasets(config, preprocessor):
-    train = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "train", config.max_samples),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    val = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "test", config.max_samples),
-        preprocessor, config.max_seq_length, config.batch_size,
-    )
-    return train, val
-
-
-def _load_hf_datasets(config, preprocessor, data_seed: int):
-    train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
-        cache_dir=config.hf_cache_dir,
-        config_name=config.hf_wikipedia_config,
-        min_article_length=config.min_article_length,
-        val_fraction=config.val_fraction,
-        max_train_samples=config.max_train_samples,
-        max_val_samples=config.max_val_samples,
-        seed=data_seed,
-        num_shards=config.shuffle_shards,
-        return_counts=True,
-    )
-    train = preprocess_clm_dataset(
-        train_raw, preprocessor,
-        config.max_seq_length, config.batch_size,
-    )
-    val = preprocess_clm_dataset(
-        val_raw, preprocessor,
-        config.max_seq_length, config.batch_size,
-    )
-    return train, val, n_train
-
-
-# ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
 
@@ -330,23 +224,6 @@ def compile_model(
     )
 
 
-def _make_steps_per_epoch(
-    config: TrainingConfig, n_train_articles: Optional[int],
-) -> int:
-    if (
-        config.dataset_source == "tfds"
-        and config.max_samples
-        and config.steps_per_epoch is None
-    ):
-        return max(1, config.max_samples // config.batch_size)
-    return estimate_clm_steps_per_epoch(
-        num_articles=n_train_articles or config.max_train_samples,
-        max_seq_length=config.max_seq_length,
-        batch_size=config.batch_size,
-        override=config.steps_per_epoch,
-    )
-
-
 def train_wave_field_llm(
     config: TrainingConfig,
     model_factory: Callable[[TrainingConfig], WaveFieldLLM] = create_wave_field_llm_model,
@@ -356,8 +233,7 @@ def train_wave_field_llm(
     logger.info("WaveFieldLLM Causal LM Pre-training")
     logger.info("=" * 60)
 
-    tf.random.set_seed(config.seed)
-    keras.utils.set_random_seed(config.seed)
+    set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(
@@ -393,6 +269,7 @@ def train_wave_field_llm(
         results_dir_prefix="wave_field_llm_pretrain",
         include_analyzer=False,
     )
+    save_config_json(config, results_dir)
     callbacks.append(StepCheckpointCallback(
         save_dir=results_dir,
         save_every_steps=config.checkpoint_every_steps,
@@ -439,6 +316,7 @@ def train_wave_field_llm(
         verbose=1,
     )
     logger.info("Training completed!")
+    save_training_history_json(history, results_dir)
 
     generate_training_curves(history, results_dir)
 

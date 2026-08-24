@@ -1,29 +1,76 @@
 """
-# Capsule Networks (CapsNet) Implementation
+Capsule networks with dynamic routing between vector-valued units.
 
-A comprehensive Keras-based implementation of Capsule Networks as proposed by
-Sabour et al. in "Dynamic Routing Between Capsules" (2017).
+This module embodies the principle of vector-valued neural representation, a
+design paradigm that replaces the scalar activation of a conventional neuron
+with a vector whose length and orientation carry separate meaning. The core idea
+addresses a structural limitation of pooling-based convolutional networks: max
+pooling discards precise spatial and pose information in order to gain
+invariance, so a network can recognize that a feature is present while losing
+where it is and how it is oriented. A capsule instead encodes the presence of an
+entity in the magnitude of its output vector and that entity's instantiation
+parameters (position, scale, orientation, deformation) in the vector's direction,
+achieving equivariance rather than invariance.
 
-## Core Components
+The magnitude must therefore behave like a probability, which is the role of the
+squash non-linearity:
 
-### 1. Primary Capsule Layer
-Transforms traditional CNN features into capsule vectors.
+`v = (||s||^2 / (1 + ||s||^2)) * (s / ||s||)`
 
-### 2. Routing Capsule Layer
-Implements dynamic routing mechanism between capsule layers.
+This shrinks short vectors toward zero and asymptotically caps long ones just
+below unit length, all while leaving the direction untouched. The separation of
+concerns is exact: squashing is the only place magnitude is bounded, and it never
+perturbs the pose encoded in the orientation.
 
-### 3. Capsule Block
-A complete block combining routing capsules with regularization.
+Three components compose the module:
 
-## Dynamic Routing Algorithm
+1.  **PrimaryCapsule** converts convolutional features into capsule form. A
+    single `Conv2D` with `num_capsules * dim_capsules` filters is reshaped so
+    that groups of channels become vectors, then squashed. Every spatial
+    location contributes `num_capsules` capsules, giving
+    `H * W * num_capsules` capsules of dimension `dim_capsules`.
+2.  **RoutingCapsule** implements dynamic routing, described below.
+3.  **CapsuleBlock** wraps a routing layer with optional dropout and
+    normalization into a stackable unit.
 
-The routing process iteratively refines the connection strengths between input
-and output capsules through an agreement mechanism.
+Dynamic routing replaces pooling with a parse-tree-like assignment computed at
+inference time. Each lower-level capsule `i` predicts the output of each
+higher-level capsule `j` through a learned transformation matrix,
+`u_hat_ji = W_ij u_i`, which encodes the part-whole geometric relationship. The
+assignment of parts to wholes is then resolved iteratively:
 
-## References
+`c_ij = softmax_j(b_ij)`
+`s_j  = sum_i c_ij u_hat_ji + bias`
+`v_j  = squash(s_j)`
+`b_ij = b_ij + u_hat_ji . v_j`
 
-Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between capsules.
-In Advances in Neural Information Processing Systems (pp. 3856-3866).
+The logits `b_ij` begin at zero, so the first iteration is a uniform average.
+The update term is the agreement between a part's prediction and the emerging
+whole: predictions that point the same way as the consensus have their coupling
+strengthened, and dissenting predictions are attenuated. Because the softmax is
+taken over output capsules, routing weights from any single input capsule form a
+distribution, making the mechanism a competition among possible parents rather
+than an unconstrained reweighting. A small number of iterations, typically three,
+suffices; more risks driving the couplings toward a degenerate one-hot
+assignment.
+
+A subtlety arises when normalizing capsule outputs. Applying `LayerNormalization`
+directly across the capsule dimension would rescale `||v||`, destroying the
+detection probability that the margin loss depends on. The block therefore uses a
+length-preserving wrapper: the vector is decomposed into magnitude and direction,
+normalization is applied to the direction alone, the result is re-projected to
+unit length, and the original magnitude is restored. This confines the training
+stability benefit to the pose subspace while leaving the probability semantics
+intact.
+
+References:
+    - Sabour et al., 2017. Dynamic Routing Between Capsules. NeurIPS 2017.
+      (https://arxiv.org/abs/1710.09829)
+    - Hinton et al., 2018. Matrix Capsules with EM Routing. ICLR 2018.
+    - Hinton et al., 2011. Transforming Auto-encoders. ICANN 2011.
+    - Ba et al., 2016. Layer Normalization.
+      (https://arxiv.org/abs/1607.06450)
+
 """
 
 import keras
@@ -445,7 +492,19 @@ class RoutingCapsule(keras.layers.Layer):
         u_hat = keras.ops.matmul(self.W, inputs_tiled)
 
         # Initialize routing logits (b) to zero
-        b = keras.ops.zeros([batch_size, self.num_input_capsules, self.num_capsules, 1, 1])
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+        # `dtype=self.compute_dtype` is load-bearing. `keras.ops.zeros`
+        # defaults to `backend.floatx()`; `softmax(b)` keeps that dtype and
+        # `c * u_hat` in the routing loop then raises
+        # `InvalidArgumentError: cannot compute Mul ... expected to be a float
+        # tensor but is a half tensor` under `mixed_float16` -- CapsNet was
+        # unrunnable under mixed precision (measured, step 5.8).
+        # Do NOT cast `u_hat` to float32 instead: that would silently run the
+        # whole routing loop off the compute policy.
+        b = keras.ops.zeros(
+            [batch_size, self.num_input_capsules, self.num_capsules, 1, 1],
+            dtype=self.compute_dtype,
+        )
 
         # Perform iterative dynamic routing
         for i in range(self.routing_iterations):

@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of **FastVLM**, a hybrid vision architecture that combines the strengths of efficient convolutions and Transformers. This implementation is inspired by recent research on models like FastViT and RepMixer, designed to achieve a state-of-the-art balance between accuracy, latency, and model size.
+An implementation of **FastVLM**, a hybrid vision architecture that combines the strengths of efficient convolutions and Transformers. This implementation is inspired by recent research on models like FastViT and RepMixer, whose authors report a strong balance between accuracy, latency, and model size. This port has not been trained or benchmarked, and no accuracy or latency claim is made for it.
 
 The architecture features a `ConvolutionalStem` using MobileOne blocks, `RepMixer` stages for efficient feature mixing, and `Attention` stages for capturing global context.
 

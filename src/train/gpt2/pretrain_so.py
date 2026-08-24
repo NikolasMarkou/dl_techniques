@@ -229,7 +229,7 @@ def main() -> None:
 
     config = _so_config_from_args(args)
     logger.info(
-        f"Config: variant={config.gpt2_variant}, "
+        f"Config: variant={config.model_variant}, "
         f"epochs={config.num_epochs}, batch={config.batch_size}, "
         f"lr={config.learning_rate}, loss={config.loss_type}, "
         f"SO(λ={config.so_lambda}, l2={config.so_l2})"

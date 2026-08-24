@@ -1,54 +1,75 @@
 """
-TiRex hybrid architecture for probabilistic time series forecasting,
-combining recurrent state modeling with attention-based global context.
+Query-token variant of the TiRex forecaster: the pooled decoder of `TiRexCore` is
+replaced by learnable horizon tokens that are appended to the encoded history and
+read out position-wise, giving one distinct latent state per forecast step.
 
-This class realizes a "Mixed Sequential" architecture designed to address the
-dichotomy between local temporal dynamics and long-range global dependencies
-in time series data. It synthesizes the inductive biases of Recurrent Neural
-Networks (LSTMs) and Transformers into a unified, configurable pipeline.
+`TiRexCore` collapses its entire encoded history to a single mean-pooled vector and
+projects that one vector to the whole `(H, Q)` grid. That is cheap and stable, but
+it forces every forecast step to be decoded from *identical* evidence: step 1 and
+step H differ only through the weights of one Dense layer, and the pooling has
+already erased which patch any pattern came from. For short horizons this rarely
+matters; as H grows, the single summary becomes the bottleneck.
 
-Architecture Overview:
-    The model processes data through four distinct stages:
-    1.  **Reversible Normalization**: Input data is normalized (z-score) per-instance
-        to handle non-stationary statistics (shifting mean/variance), a technique
-        crucial for robust forecasting across diverse regimes.
-    2.  **Patch Tokenization**: The time series is segmented into sub-sequences
-        (patches) and projected into an embedding space. This reduces the effective
-        sequence length, enabling the processing of long horizons with reduced
-        computational complexity relative to point-wise attention.
-    3.  **Mixed Sequential Encoding**: A stack of configurable blocks processes
-        the tokenized sequence. These blocks can be pure LSTMs, pure Transformers,
-        or "Mixed" blocks.
-        -   **LSTM Layers** enforce a sequential inductive bias, carrying a running
-            state $h_t$ that captures local evolution and short-term causality.
-        -   **Transformer Layers** utilize Self-Attention to model global
-            dependencies ($Attention(Q, K, V)$), allowing the model to attend to
-            distant patches (e.g., yearly seasonality) regardless of their
-            position in the sequence.
-    4.  **Probabilistic Head**: The decoder projects the encoded representation
-        into a distribution of quantiles, approximating the inverse cumulative
-        distribution function (quantile function) of the target.
+This variant keeps the entire front half of `TiRexCore` — NaN-aware reversible
+instance normalization, mask concatenation onto the feature axis, patch embedding,
+input projection, and the same mixed LSTM/attention block stack — and
+changes only how the horizon representation is formed. A weight of shape
+`(1, prediction_length, embed_dim)` holds one learnable token per forecast step.
+These are broadcast to the batch and concatenated onto the *end* of the embedded
+history along the time axis, so the blocks process a sequence of
+`num_patches + prediction_length` positions. Two mechanisms then populate the
+tokens: the LSTM sub-layer, which is strictly ordered, carries state forward from
+the history positions into the appended tokens; and the attention sub-layer, which
+lets a token read specific positions directly. After the final normalization the
+last `prediction_length` states are sliced out — no pooling anywhere — and a
+token-wise quantile head maps each state to its own `Q` quantiles.
 
-Mathematical Intuition:
-    Standard Transformers suffer from a lack of inherent sequential bias, often
-    requiring complex positional encodings. LSTMs suffer from the vanishing gradient
-    problem over long horizons. TiRex addresses this by applying recurrence *within*
-    or *before* attention.
+The result is that each horizon step now owns a latent vector rather than sharing
+one, which is what a decoder-style architecture buys, while remaining a single
+forward pass with no autoregressive loop and therefore no compounding of sampled
+errors.
 
-    Mathematically, the mixed block computes:
-    $$ H_{local} = \text{LSTM}(X_{patches}) $$
-    $$ H_{global} = \text{SelfAttention}(H_{local}) $$
+The interaction with the inherited `attention_type` is the non-obvious part and it
+is easy to misread, because the two settings give the query tokens entirely
+different reach. Under the default `'multi_head'` every query token attends over the
+whole augmented sequence, so each horizon token can read any history patch directly.
+Under `attention_type='window'` a query token sees only its own window of that
+sequence: tokens near the start of the appended block can reach the final history
+patches, while later tokens see mostly other query tokens, and long-range access to
+the history falls back onto the recurrent path and depth. Widening
+`attention_window_size` is the knob that changes this in the windowed setting; it is
+inert under the global default.
 
-    This structure ensures that the tokens fed into the attention mechanism
-    already contain rich, context-aware local state information, stabilizing
-    optimization and improving zero-shot generalization capabilities.
+Two implementation consequences follow from the changed topology and are the
+reason this class cannot simply inherit its parent's plumbing. `build` is
+reimplemented rather than delegated: the blocks and output normalization see a
+sequence longer than the parent's by exactly `prediction_length`, and the head is
+the token-wise `QuantileSequenceHead` over `(B, prediction_length, embed_dim)`
+instead of the parent's flattening `QuantileHead` over a pooled `(B, 1, embed_dim)`.
+It also skips `TiRexCore.build` entirely and calls `keras.Model.build`, since
+running the parent's version would build the sub-layers against the wrong shapes.
+The explicit per-sub-layer builds are required, not stylistic: a `.keras` load
+restores weights before the first call, and any sub-layer still unbuilt at that
+moment has its restored weights silently discarded and re-initialized on the first
+forward pass.
+
+Everything downstream is unchanged from the parent: quantiles are made
+non-crossing by cumulative softplus rather than by a penalty, de-normalization uses
+the last feature's statistics, and the output contract stays `(B, H, Q)`, so
+`predict_quantiles`, `_forecast` and the `Forecast` contract are inherited as-is.
 
 References:
-    -   **TiRex Architecture**: Auer, A., et al. (2025). "TiRex: Zero-Shot
-        Forecasting Across Long and Short Horizons with Enhanced In-Context Learning."
-        arXiv preprint arXiv:2505.23719.
-    -   **Patching**: Nie, Y., et al. (2023). "A Time Series is Worth 64 Words:
-        Long-term Forecasting with Transformers." ICLR.
+    - Auer et al., 2025. TiRex: Zero-Shot Forecasting Across Long and Short
+      Horizons with Enhanced In-Context Learning.
+      (https://arxiv.org/abs/2505.23719)
+    - Nie et al., 2023. A Time Series is Worth 64 Words: Long-term Forecasting
+      with Transformers. ICLR 2023. (https://arxiv.org/abs/2211.14730)
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
+      (https://arxiv.org/abs/2005.12872)
+    - Zhou et al., 2021. Informer: Beyond Efficient Transformer for Long Sequence
+      Time-Series Forecasting. AAAI 2021. (https://arxiv.org/abs/2012.07436)
+    - Wen et al., 2017. A Multi-Horizon Quantile Recurrent Forecaster.
+      (https://arxiv.org/abs/1711.11053)
 """
 
 import keras
@@ -138,13 +159,9 @@ class TiRexExtended(TiRexCore):
             **kwargs
         )
 
-        # Learnable query tokens for the prediction horizon
-        self.query_tokens = self.add_weight(
-            shape=(1, prediction_length, embed_dim),
-            initializer="glorot_uniform",
-            trainable=True,
-            name="query_tokens"
-        )
+        # NOTE: the learnable query tokens are created in `build()`, not here.
+        # See the D-037 anchor there.
+        self.query_tokens = None
 
         # Quantile prediction head
         self.quantile_head = QuantileSequenceHead(
@@ -182,6 +199,30 @@ class TiRexExtended(TiRexCore):
             )
 
         batch_size, seq_len, features = input_shape[0], input_shape[1], input_shape[2]
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-037
+        # Learnable query tokens for the prediction horizon. CREATED HERE, not
+        # in `__init__` -- do not move it back. `add_weight` in `__init__` was
+        # the only R-001 violation in `models/` and the guide grades it
+        # CRITICAL, because a weight created before `build()` is created
+        # outside whatever scope Keras has arranged for it.
+        # HONESTY NOTE, because it changes what this edit claims: the predicted
+        # CONSEQUENCES did NOT reproduce here. MEASURED before the move -- a
+        # `.keras` round trip with `query_tokens` perturbed to 0.375 restored
+        # 0.375 with a forward delta of exactly 0.000000e+00 against an output
+        # range of 2.604545e+00, and constructing the model inside a
+        # `StatelessScope` did NOT leave the tokens at zero. So this is
+        # compliance with a house rule whose failure mode is latent here, not
+        # the repair of a measured defect; the move is made because the rule
+        # exists and the move is free, and it is recorded as such.
+        # See decisions.md D-037.
+        if self.query_tokens is None:
+            self.query_tokens = self.add_weight(
+                shape=(1, self.prediction_length, self.embed_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+                name="query_tokens"
+            )
 
         # call() concatenates the NaN mask onto the feature axis -> 2 * features.
         masked_features = None if features is None else features * 2

@@ -3,9 +3,15 @@ Character-level tokenizer for arithmetic expressions.
 
 Fixed vocabulary of 21 tokens covering digits, operators, parentheses,
 decimal point, and special tokens.
+
+Note that tokenizing a character is not the same as supporting it: ``DOT_ID``
+round-trips through ``encode``/``decode`` and ``get_number_mask`` includes it,
+but ``cell.py``'s number assembly has no fractional branch and ``models/nam``
+is integer-only. ``"1.5 + 2"`` assembles the operand ``15``. Likewise ``(`` and
+``)`` round-trip but do not group anything. See the ``NAM`` module docstring.
 """
 
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 

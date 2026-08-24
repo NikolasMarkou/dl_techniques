@@ -61,6 +61,23 @@ Loss = MSE(masked_patches_original, masked_patches_reconstructed)
 
 ---
 
+## Encoder contract
+
+`MaskedAutoencoder` wraps an encoder you supply. Three rules, all enforced by the
+constructor:
+
+1.  **`encoder` is a `keras.Model`** — the first positional argument. There is no
+    `encoder_dims` and no `encoder_output_shape` parameter; a non-model raises
+    `TypeError`.
+2.  **The encoder must return a 4-D `(B, H', W', C')` feature map.** A
+    token-sequence ViT does not fit, and raises `ValueError`.
+3.  **The encoder's total downsampling must equal `2 ** len(decoder_dims)`** —
+    `2 ** decoder_depth`, i.e. **16x** at the defaults. `ConvDecoder` upsamples
+    exactly 2x per `decoder_dims` entry, so a /4 encoder under the default decoder
+    reconstructs at 4x the input resolution. The constructor raises, naming both
+    sizes. Before 2026-08-15 it did not, and the mismatch surfaced only as a
+    broadcast failure inside `compute_loss` on the first training step.
+
 ## Quick Start
 
 Here's a minimal example to get started:
@@ -68,13 +85,24 @@ Here's a minimal example to get started:
 ```python
 import keras
 import numpy as np
-from masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
-from convnext_v2 import ConvNeXtV2
+from dl_techniques.models.masked_autoencoder import (
+    MaskedAutoencoder,
+    visualize_reconstruction,
+)
+from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
 
-# 1. Create MAE model
+# 1. Create MAE model. MAE takes an ENCODER MODEL, not a dimension list.
+#    `strides=2` is required: ConvNeXtV2 applies `strides` at the stem AND at
+#    each of the 3 inter-stage downsamples, so `strides=2` gives 2**4 = 16x
+#    total -- exactly the default decoder's upsampling factor (see § Encoder
+#    contract below). The shipped default `strides=4` gives 256x and a 1x1
+#    feature map at 224, which the constructor rejects.
+encoder = ConvNeXtV2.from_variant(
+    "tiny", include_top=False, input_shape=(224, 224, 3), strides=2
+)  # -> (None, 14, 14, 768)
+
 mae = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],      # ConvNeXt-Tiny dimensions
-    encoder_output_shape=(7, 7, 768),       # Encoder output after 224x224 input
+    encoder=encoder,
     patch_size=16,                          # 16x16 patches
     mask_ratio=0.75,                        # Mask 75% of patches
     input_shape=(224, 224, 3)
@@ -131,34 +159,27 @@ print(f"Loaded {len(train_images)} images with shape {train_images.shape}")
 The key is specifying your encoder architecture dimensions:
 
 ```python
-from masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
 
-# For ConvNeXt V2 architectures, use these configurations:
-
-# ConvNeXt-Pico (smallest, fastest)
-mae_pico = MaskedAutoencoder(
-    encoder_dims=[64, 128, 256, 512],
-    encoder_output_shape=(7, 7, 512),
-    patch_size=16,
-    mask_ratio=0.75,
-    decoder_dims=[256, 128, 64, 32],
-    input_shape=(224, 224, 3)
-)
+def convnext_encoder(variant, input_shape=(224, 224, 3)):
+    """A /16 ConvNeXtV2 feature extractor -- see the Encoder contract above."""
+    return ConvNeXtV2.from_variant(
+        variant, include_top=False, input_shape=input_shape, strides=2
+    )
 
 # ConvNeXt-Tiny (balanced)
 mae_tiny = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=convnext_encoder("tiny"),      # 14x14x768
     patch_size=16,
     mask_ratio=0.75,
-    decoder_dims=[512, 256, 128, 64],
+    decoder_dims=[512, 256, 128, 64],      # 4 entries -> 16x upsampling
     input_shape=(224, 224, 3)
 )
 
 # ConvNeXt-Base (larger, better representations)
 mae_base = MaskedAutoencoder(
-    encoder_dims=[128, 256, 512, 1024],
-    encoder_output_shape=(7, 7, 1024),
+    encoder=convnext_encoder("base"),      # 14x14x1024
     patch_size=16,
     mask_ratio=0.75,
     decoder_dims=[512, 256, 128, 64],
@@ -168,9 +189,11 @@ mae_base = MaskedAutoencoder(
 
 ### Step 3: Understanding Key Parameters
 
-**Encoder Parameters:**
-- `encoder_dims`: Channel dimensions for each encoder stage
-- `encoder_output_shape`: Spatial output after encoding (H, W, C)
+**Encoder Parameter:**
+- `encoder`: a **built or buildable `keras.Model`** that maps `(B, H, W, C)` to a
+  4-D `(B, H', W', C')` feature map. There is no `encoder_dims` and no
+  `encoder_output_shape`; both are read off the encoder itself. `H'`/`W'` must
+  satisfy the scale contract below or the constructor raises.
 
 **Masking Parameters:**
 - `patch_size`: Size of square patches (16 is standard)
@@ -337,13 +360,14 @@ mae.compile(optimizer=keras.optimizers.AdamW(learning_rate=lr_schedule))
 ### Method 1: Training MAE with ConvNeXt Configuration
 
 ```python
-from masked_autoencoder import MaskedAutoencoder
-from convnext_v2 import ConvNeXtV2
+from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
 
-# Create MAE with ConvNeXt-Tiny configuration
+# Create MAE with a ConvNeXt-Tiny encoder
 mae = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=ConvNeXtV2.from_variant(
+        "tiny", include_top=False, input_shape=(224, 224, 3), strides=2
+    ),
     patch_size=16,
     mask_ratio=0.75,
     input_shape=(224, 224, 3)
@@ -362,28 +386,19 @@ mae.save('mae_convnext_tiny.keras')
 If you have a pretrained ConvNeXt V2 model, you can initialize the MAE encoder:
 
 ```python
-# Create pretrained ConvNeXt encoder
-pretrained_encoder = ConvNeXtV2.from_variant(
-    "tiny",
-    include_top=False,
-    input_shape=(224, 224, 3),
-    pretrained=True  # If you have pretrained weights
-)
+# An encoder you trained and saved earlier. NOTE: `pretrained=True` raises
+# `NotImplementedError` -- no ConvNeXt V2 checkpoint ships with dl_techniques.
+pretrained_encoder = keras.models.load_model("my_convnext_encoder.keras")
 
-# Create MAE
+# Pass it straight in -- there is no separate "MAE encoder" to transfer into.
 mae = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=pretrained_encoder,
     patch_size=16,
     mask_ratio=0.75,
     input_shape=(224, 224, 3)
 )
 
-# Transfer weights from pretrained encoder to MAE encoder
-# Note: This requires architecture alignment
-mae.encoder.set_weights(pretrained_encoder.get_weights())
-
-# Continue training or use directly
+# `mae.encoder` IS `pretrained_encoder`; MAE training continues from its weights.
 ```
 
 ### Method 3: Extracting Encoder After MAE Training
@@ -415,7 +430,7 @@ After MAE pretraining, use the encoder for supervised tasks:
 ### Classification Task
 
 ```python
-from masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
 import keras
 
 # Load trained MAE
@@ -505,7 +520,7 @@ segmentation_model = keras.Model(inputs, outputs)
 ### Visualizing Reconstructions
 
 ```python
-from masked_autoencoder import visualize_reconstruction
+from dl_techniques.models.masked_autoencoder import visualize_reconstruction
 import matplotlib.pyplot as plt
 
 # Single image visualization
@@ -612,30 +627,29 @@ print(f"Linear probe accuracy: {accuracy:.4f}")
 
 ### Custom Encoder Architecture
 
-You can modify the encoder by subclassing:
+No subclassing is needed, and there is no `_create_encoder_placeholder` hook to
+override: the encoder is a constructor argument. Pass any `keras.Model` whose
+total downsampling is `2 ** decoder_depth`.
 
 ```python
-@keras.saving.register_keras_serializable()
-class CustomMAE(MaskedAutoencoder):
-    """MAE with custom encoder architecture."""
-    
-    def _create_encoder_placeholder(self):
-        """Override to use custom encoder."""
-        # Your custom encoder architecture
-        layers_list = [
-            keras.layers.Conv2D(64, 7, strides=4, padding='same'),
-            keras.layers.LayerNormalization(),
-            keras.layers.Activation('gelu'),
-            # ... more layers
-        ]
-        return keras.Sequential(layers_list, name='custom_encoder')
+# A /16 encoder: four stride-2 stages, matching the default decoder_depth=4.
+# A /4 encoder (e.g. a single `Conv2D(64, 7, strides=4)`) is REJECTED by the
+# constructor -- its decoder would emit 4x the input resolution.
+inputs = keras.Input(shape=(224, 224, 3))
+x = keras.layers.Conv2D(64, 7, strides=2, padding='same')(inputs)
+x = keras.layers.LayerNormalization()(x)
+x = keras.layers.Activation('gelu')(x)
+for filters in (128, 256, 512):
+    x = keras.layers.Conv2D(filters, 3, strides=2, padding='same')(x)
+    x = keras.layers.LayerNormalization()(x)
+    x = keras.layers.Activation('gelu')(x)
+custom_encoder = keras.Model(inputs, x, name='custom_encoder')  # (None,14,14,512)
 
-# Use custom MAE
-custom_mae = CustomMAE(
-    encoder_dims=[64, 128, 256, 512],
-    encoder_output_shape=(7, 7, 512),
+custom_mae = MaskedAutoencoder(
+    encoder=custom_encoder,
     patch_size=16,
-    mask_ratio=0.75
+    mask_ratio=0.75,
+    input_shape=(224, 224, 3),
 )
 ```
 
@@ -646,26 +660,26 @@ Experiment with masking parameters:
 ```python
 # Lower mask ratio (easier task, faster convergence)
 mae_easy = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=convnext_encoder("tiny"),
     mask_ratio=0.5,  # Only 50% masked
-    patch_size=16
+    patch_size=16,
+    input_shape=(224, 224, 3),
 )
 
 # Learnable mask tokens
 mae_learnable = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=convnext_encoder("tiny"),
     mask_value="learnable",  # Learn what to put in masked patches
-    mask_ratio=0.75
+    mask_ratio=0.75,
+    input_shape=(224, 224, 3),
 )
 
 # Zero masking (harder task)
 mae_zero = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=convnext_encoder("tiny"),
     mask_value="zero",  # Replace with zeros
-    mask_ratio=0.75
+    mask_ratio=0.75,
+    input_shape=(224, 224, 3),
 )
 ```
 
@@ -684,10 +698,10 @@ print(f"Number of devices: {strategy.num_replicas_in_sync}")
 # Create model within strategy scope
 with strategy.scope():
     mae = MaskedAutoencoder(
-        encoder_dims=[96, 192, 384, 768],
-        encoder_output_shape=(7, 7, 768),
+        encoder=convnext_encoder("tiny"),
         patch_size=16,
-        mask_ratio=0.75
+        mask_ratio=0.75,
+        input_shape=(224, 224, 3),
     )
     
     mae.compile(
@@ -858,7 +872,11 @@ import keras
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
+from dl_techniques.models.masked_autoencoder import (
+    MaskedAutoencoder,
+    visualize_reconstruction,
+)
+from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
 
 # ============================================
 # 1. DATA PREPARATION
@@ -889,8 +907,9 @@ train_dataset = create_dataset(unlabeled_paths, batch_size=64)
 
 # Create MAE
 mae = MaskedAutoencoder(
-    encoder_dims=[96, 192, 384, 768],
-    encoder_output_shape=(7, 7, 768),
+    encoder=ConvNeXtV2.from_variant(
+        "tiny", include_top=False, input_shape=(224, 224, 3), strides=2
+    ),
     patch_size=16,
     mask_ratio=0.75,
     input_shape=(224, 224, 3)

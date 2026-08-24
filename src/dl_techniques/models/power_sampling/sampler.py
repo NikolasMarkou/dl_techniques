@@ -41,7 +41,9 @@ Usage::
     # NO GPT-2/CliffordNet IDs (cls/pad/special are None/empty, ctx_len=None).
     config = PowerSamplingConfig(
         cls_token_id=50257,               # optional; None => no CLS prepend
-        pad_token_id=50260,               # required only for fixed ctx_len
+        pad_token_id=50260,               # required for fixed ctx_len AND for
+                                          # mcmc_steps >= 2 (ragged proposal
+                                          # batches are right-padded)
         special_token_ids={50257, 50258, 50259, 50260},
         ctx_len=511,                      # None => variable-length forward
     )
@@ -85,8 +87,10 @@ class PowerSampler:
     """Power-distribution sampling for any causal LM/VLM + any tokenizer.
 
     Forward passes run on whatever device the injected model uses; post-logit
-    sampling uses NumPy on CPU. MCMC proposals within each block are generated
-    in parallel via batched forward passes for high GPU utilization.
+    sampling uses NumPy on CPU. MCMC proposals are generated in parallel via
+    batched forward passes for high GPU utilization, but only across a run of
+    rejections: an acceptance moves the chain state, so the proposals queued
+    behind it are discarded and re-generated from the new state.
 
     The sampler is fully decoupled from concrete model/tokenizer types: it is
     driven by a :data:`LogitsFn` closure (single-position) plus an optional
@@ -102,6 +106,10 @@ class PowerSampler:
         ``PowerSamplingConfig()`` if ``None``.
     :param logits_fn: Optional explicit single-position :data:`LogitsFn`
         override (the unambiguous path for injecting a closure).
+    :raises ValueError: If ``config.mcmc_steps >= 2`` while a wrapped model is
+        driven with ``pad_token_id=None`` and ``ctx_len=None`` — the proposal
+        batch is ragged and cannot be padded. See
+        :meth:`_require_pad_id_for_batched_proposals`.
     """
 
     def __init__(
@@ -134,6 +142,48 @@ class PowerSampler:
                 pad_id=cfg.pad_token_id,
                 logits_key="logits",
             )
+
+        self._require_pad_id_for_batched_proposals(cfg.mcmc_steps)
+
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-017: the pad-token
+    # precondition of the batched proposal path is checked HERE, eagerly, at
+    # construction and again when a per-call `mcmc_steps` override raises the
+    # proposal count. Do NOT rely on `make_batch_logits_fn`'s inner `fn` to
+    # report it: that raise fires mid-generation, names the closure's `pad_id`
+    # parameter rather than the `PowerSamplingConfig.pad_token_id` field the
+    # caller must set, and only fires on the batches that happen to be ragged —
+    # so a run can proceed for several blocks before dying. The four guarded
+    # conditions are each load-bearing; widening the check to "mcmc_steps >= 2"
+    # alone would reject the injected-`logits_fn` path, which never batches and
+    # needs no pad id (`test_logits_fn_injection` covers exactly that config).
+    # See decisions.md D-017.
+    def _require_pad_id_for_batched_proposals(self, steps: int) -> None:
+        """Refuse a config whose MCMC proposals cannot be batched.
+
+        :param steps: Number of MCMC proposals per block (config value or a
+            per-call override).
+        :raises ValueError: If ``steps >= 2`` while the sampler drives a
+            wrapped model through the batched closure with
+            ``pad_token_id=None`` and ``ctx_len=None``.
+        """
+        if steps < 2:
+            return  # one proposal per block: batch of 1, never ragged
+        if self._batch_logits_fn is None:
+            return  # injected logits_fn: the batched path loops the single fn
+        cfg = self.config
+        if cfg.ctx_len is not None:
+            return  # fixed-shape path; pad_id already validated by the closure
+        if cfg.pad_token_id is not None:
+            return
+        raise ValueError(
+            "PowerSamplingConfig.pad_token_id is required when mcmc_steps >= 2 "
+            f"(got mcmc_steps={steps}, pad_token_id=None, ctx_len=None). MCMC "
+            "proposals are re-generated from random cut points, so the batch "
+            "holds prefixes of unequal length and must be right-padded. Fix: "
+            "pass pad_token_id=<your model's pad id> (any id works if the "
+            "model ignores padded positions), or set mcmc_steps=1, or inject a "
+            "pre-built closure via logits_fn= (that path is never batched)."
+        )
 
     # -----------------------------------------------------------------
     # Low-level helpers
@@ -180,8 +230,10 @@ class PowerSampler:
         :param temperature: Sampling temperature.
         :param recent_tokens: Recent token IDs for repetition penalty.
         :return: ``(token_id, log_prob_norm, log_prob_unnorm)`` where
-            ``log_prob_norm`` is the log probability under the proposal
-            (temperature-scaled + nucleus) and ``log_prob_unnorm`` is
+            ``log_prob_norm`` is the log probability under the proposal —
+            special-token masking, repetition penalty, temperature scaling
+            **and** the renormalized top-p nucleus, i.e. the exact distribution
+            the token was drawn from — and ``log_prob_unnorm`` is
             ``(1/temperature) * log p(token)`` under the base model.
         """
         cfg = self.config
@@ -210,12 +262,13 @@ class PowerSampler:
         # Temperature scaling
         scaled_logits = working_logits / temperature
 
-        # Nucleus (top-p) sampling
-        token_id = _nucleus_sample(scaled_logits, cfg.top_p)
+        # Nucleus (top-p) sampling. The proposal log-probability comes back
+        # from the draw itself: it is the density over the truncated,
+        # renormalized nucleus, which _log_softmax(scaled_logits) is not.
+        token_id, log_prob_norm = _nucleus_sample(scaled_logits, cfg.top_p)
 
-        # Log probabilities for MCMC
-        scaled_log_probs = _log_softmax(scaled_logits)
-        log_prob_norm = scaled_log_probs[token_id]
+        # Target (power) log-probability: alpha * log p(token) under the BASE
+        # model, i.e. before masking, repetition penalty and truncation.
         log_prob_unnorm = base_log_probs[token_id] / temperature
 
         return int(token_id), float(log_prob_norm), float(log_prob_unnorm)
@@ -319,9 +372,84 @@ class PowerSampler:
 
         return seqs, log_probs_norm, log_probs_unnorm
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-018: proposals are batched
+    # ONLY across a run of rejections. Do NOT restore the previous shape --
+    # one pre-loop `_batched_generate` for all `steps` proposals, consumed by
+    # an acceptance loop that mutates `gen` -- it generated proposal i+1 from
+    # a prefix of the PRE-BLOCK state and then compared it against the
+    # POST-acceptance target log-probs, so an accepted improvement was silently
+    # overwritten by the next stale proposal. A rejection leaves the chain
+    # state unchanged, so the proposals still queued behind it remain valid
+    # draws from q(.|x) and stay batched; an acceptance moves the state, so
+    # everything queued behind it is discarded and re-drawn from the new state.
+    # The cut points themselves are pre-drawn per block on purpose: idx ~
+    # Uniform[c, t-1] does not depend on the state. See decisions.md D-018.
+    def _batch_proposals(
+        self,
+        gen: List[int],
+        indices: List[int],
+        t: int,
+        temperature: float,
+    ) -> Tuple[List[List[int]], List[List[float]], List[List[float]]]:
+        """Generate one batch of proposals, all cut from the CURRENT state.
+
+        :param gen: The current chain state (token ids).
+        :param indices: Cut points still owed in this block; every proposal
+            regenerates ``gen[idx:]`` from ``gen[:idx]``.
+        :param t: Block-invariant sequence length (a proposal replaces the
+            suffix, so ``len(gen)`` is unchanged by an acceptance).
+        :param temperature: Proposal temperature.
+        :return: ``(proposals, log_probs_norm, log_probs_unnorm)``, one entry
+            per index, in the order given.
+        """
+        prefixes = [list(gen[:idx]) for idx in indices]
+        num_tokens = [t - idx for idx in indices]
+        return self._batched_generate(prefixes, num_tokens, temperature)
+
     # -----------------------------------------------------------------
     # MCMC Power Sampling
     # -----------------------------------------------------------------
+
+    # DECISION plan-2026-08-18T140459-7991552f/D-037
+    # Both MCMC entry points size their blocks HERE, and neither may go back to
+    # the bare `jump_size = max_tok // blocks` they used until 2026-08-19. That
+    # expression dropped the remainder, so the shipped `block_num=16` turned a
+    # requested `max_tokens=50` into 48 generated tokens with no warning, and
+    # when `max_tokens < block_num` it produced `jump_size == 0`: every block
+    # appended nothing, `t == c`, and `random.randint(c, t - 1)` raised a bare
+    # `ValueError: empty range` from inside stdlib `random`, which is what a
+    # short smoke run got. Spreading the remainder over the leading blocks
+    # makes the returned length exactly `max_tokens`; clamping the block count
+    # keeps every block non-empty, which is the precondition the cut-point draw
+    # below actually needs. Do NOT "simplify" this back to a single division.
+    # See decisions.md.
+    @staticmethod
+    def _block_sizes(max_tokens: int, block_num: int) -> List[int]:
+        """Split ``max_tokens`` into per-block generation counts.
+
+        :param max_tokens: Total number of tokens to generate. Must be
+            positive.
+        :param block_num: Requested number of MCMC blocks. Must be positive;
+            clamped down to ``max_tokens`` (with a warning) so that no block is
+            empty.
+        :return: A list of per-block token counts, each ``>= 1``, summing
+            exactly to ``max_tokens``.
+        :raises ValueError: If either argument is not positive.
+        """
+        if max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+        if block_num <= 0:
+            raise ValueError(f"block_num must be positive, got {block_num}")
+
+        n_blocks = min(block_num, max_tokens)
+        if n_blocks != block_num:
+            logger.warning(
+                f"block_num={block_num} exceeds max_tokens={max_tokens}; "
+                f"using {n_blocks} block(s) of 1 token so that no MCMC block "
+                f"is empty."
+            )
+        base, remainder = divmod(max_tokens, n_blocks)
+        return [base + 1 if i < remainder else base for i in range(n_blocks)]
 
     def mcmc_power_sample(
         self,
@@ -335,8 +463,12 @@ class PowerSampler:
 
         Samples from *p^alpha* where ``alpha = 1 / temperature``.  The
         generation is split into ``block_num`` blocks; after each block,
-        ``mcmc_steps`` proposals are generated **in parallel** via batched
-        forward passes and evaluated with Metropolis-Hastings acceptance.
+        ``mcmc_steps`` proposals are evaluated with Metropolis-Hastings
+        acceptance.  Each proposal regenerates the suffix of the **current**
+        chain state from its own cut point; proposals are batched across a run
+        of rejections (which leave the state unchanged) and re-generated after
+        every acceptance, so the chain is a valid sequential MH chain rather
+        than a set of proposals scored against a state they never saw.
 
         :param prompt: Text prompt to continue.
         :param temperature: Override config temperature.
@@ -353,6 +485,8 @@ class PowerSampler:
         steps = mcmc_steps if mcmc_steps is not None else cfg.mcmc_steps
         max_tok = max_tokens if max_tokens is not None else cfg.max_tokens
         blocks = block_num if block_num is not None else cfg.block_num
+
+        self._require_pad_id_for_batched_proposals(steps)
 
         alpha = 1.0 / temp
         logger.info(
@@ -371,8 +505,9 @@ class PowerSampler:
             strip = 0
         c = len(prompt_ids)  # context boundary
 
-        # Adjust block size to divide evenly
-        jump_size = max_tok // blocks
+        # Per-block token counts: they sum to exactly `max_tok` and none is
+        # zero (see the D-032 anchor on `_block_sizes`).
+        block_sizes = self._block_sizes(max_tok, blocks)
 
         gen = list(prompt_ids)
         log_probs_norm: List[float] = []
@@ -382,7 +517,7 @@ class PowerSampler:
 
         t0 = time.time()
 
-        for block_idx in range(blocks):
+        for block_idx, jump_size in enumerate(block_sizes):
             # Generate one block of tokens with naive temperature sampling
             gen, lp_norm, lp_unnorm = self.naive_temp_generate(
                 gen, temp, num_tokens=jump_size,
@@ -390,38 +525,40 @@ class PowerSampler:
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            # Generate all MCMC proposals in parallel (batched)
+            # Cut points are drawn once per block: idx ~ Uniform[c, t-1] is
+            # independent of the chain state, so pre-drawing them changes
+            # nothing about the kernel. The CONTINUATIONS are not.
             t = len(gen)
             indices = [random.randint(c, t - 1) for _ in range(steps)]
-            prefixes = [list(gen[:idx]) for idx in indices]
-            num_tokens = [t - idx for idx in indices]
 
-            props, lp_props_list, target_lp_props_list = (
-                self._batched_generate(prefixes, num_tokens, temp)
-            )
-
-            # Evaluate acceptance for each proposal
-            for i in range(steps):
-                attempts += 1
-                idx = indices[i]
-                s = len(props[i])
-
-                lp_cur = log_probs_norm[idx - c: s - c]
-                target_lp_cur = log_probs_unnorm[idx - c: s - c]
-
-                # Metropolis-Hastings acceptance criterion
-                log_r = (
-                    sum(target_lp_props_list[i]) + sum(lp_cur)
-                    - sum(target_lp_cur) - sum(lp_props_list[i])
+            i = 0
+            while i < steps:
+                props, lp_props_list, target_lp_props_list = (
+                    self._batch_proposals(gen, indices[i:], t, temp)
                 )
 
-                if np.random.rand() < np.exp(min(log_r, 0.0)):
-                    acceptances += 1
-                    gen = list(props[i])
-                    log_probs_norm[idx - c:] = list(lp_props_list[i])
-                    log_probs_unnorm[idx - c:] = list(
-                        target_lp_props_list[i],
+                for k, idx in enumerate(indices[i:]):
+                    attempts += 1
+                    i += 1
+                    s = len(props[k])
+
+                    lp_cur = log_probs_norm[idx - c: s - c]
+                    target_lp_cur = log_probs_unnorm[idx - c: s - c]
+
+                    # Metropolis-Hastings acceptance criterion
+                    log_r = (
+                        sum(target_lp_props_list[k]) + sum(lp_cur)
+                        - sum(target_lp_cur) - sum(lp_props_list[k])
                     )
+
+                    if np.random.rand() < np.exp(min(log_r, 0.0)):
+                        acceptances += 1
+                        gen = list(props[k])
+                        log_probs_norm[idx - c:] = list(lp_props_list[k])
+                        log_probs_unnorm[idx - c:] = list(
+                            target_lp_props_list[k],
+                        )
+                        break  # the rest of this batch is stale; re-batch
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)
@@ -453,8 +590,9 @@ class PowerSampler:
 
         Like :meth:`mcmc_power_sample` but always accepts proposals that
         improve the trajectory probability (greedy at the trajectory
-        level).  Approximates sampling from *p^infinity*.  Proposals are
-        generated in parallel via batched forward passes.
+        level).  Approximates sampling from *p^infinity*.  Proposals follow the
+        same chain discipline: batched across rejections, re-generated from the
+        state left behind by every accepted swap.
 
         :param prompt: Text prompt to continue.
         :param temperature: Override config temperature.
@@ -469,6 +607,8 @@ class PowerSampler:
         steps = mcmc_steps if mcmc_steps is not None else cfg.mcmc_steps
         max_tok = max_tokens if max_tokens is not None else cfg.max_tokens
         blocks = block_num if block_num is not None else cfg.block_num
+
+        self._require_pad_id_for_batched_proposals(steps)
 
         logger.info(
             f"Max-swap power sampling: temp={temp}, "
@@ -485,7 +625,7 @@ class PowerSampler:
             strip = 0
         c = len(prompt_ids)
 
-        jump_size = max_tok // blocks
+        block_sizes = self._block_sizes(max_tok, blocks)
 
         gen = list(prompt_ids)
         log_probs_norm: List[float] = []
@@ -495,41 +635,42 @@ class PowerSampler:
 
         t0 = time.time()
 
-        for block_idx in range(blocks):
+        for block_idx, jump_size in enumerate(block_sizes):
             gen, lp_norm, lp_unnorm = self.naive_temp_generate(
                 gen, temp, num_tokens=jump_size,
             )
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            # Generate all proposals in parallel (batched)
+            # Same chain discipline as mcmc_power_sample: cut points once per
+            # block, continuations re-derived from the state after each swap.
             t = len(gen)
             indices = [random.randint(c, t - 1) for _ in range(steps)]
-            prefixes = [list(gen[:idx]) for idx in indices]
-            num_tokens = [t - idx for idx in indices]
 
-            props, lp_props_list, target_lp_props_list = (
-                self._batched_generate(prefixes, num_tokens, temp)
-            )
+            i = 0
+            while i < steps:
+                props, lp_props_list, target_lp_props_list = (
+                    self._batch_proposals(gen, indices[i:], t, temp)
+                )
 
-            # Evaluate acceptance for each proposal
-            for i in range(steps):
-                attempts += 1
-                idx = indices[i]
-                s = len(props[i])
+                for k, idx in enumerate(indices[i:]):
+                    attempts += 1
+                    i += 1
+                    s = len(props[k])
 
-                target_lp_cur = log_probs_unnorm[idx - c: s - c]
+                    target_lp_cur = log_probs_unnorm[idx - c: s - c]
 
-                # Deterministic: accept if trajectory probability improves
-                log_r = sum(target_lp_props_list[i]) - sum(target_lp_cur)
+                    # Deterministic: accept if trajectory probability improves
+                    log_r = sum(target_lp_props_list[k]) - sum(target_lp_cur)
 
-                if log_r > 0:
-                    acceptances += 1
-                    gen = list(props[i])
-                    log_probs_norm[idx - c:] = list(lp_props_list[i])
-                    log_probs_unnorm[idx - c:] = list(
-                        target_lp_props_list[i],
-                    )
+                    if log_r > 0:
+                        acceptances += 1
+                        gen = list(props[k])
+                        log_probs_norm[idx - c:] = list(lp_props_list[k])
+                        log_probs_unnorm[idx - c:] = list(
+                            target_lp_props_list[k],
+                        )
+                        break  # the rest of this batch is stale; re-batch
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)

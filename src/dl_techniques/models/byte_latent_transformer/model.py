@@ -1,35 +1,104 @@
 """
-Byte Latent Transformer (BLT): Patches Scale Better Than Tokens
+Byte Latent Transformer (BLT): a tokenizer-free byte-level language model built as a
+three-stage hierarchy -- a local byte encoder, a wide global transformer over pooled
+patch representations, and a local byte decoder that reads patch context back down to
+per-byte logits.
 
-This module implements the Byte Latent Transformer (BLT), a revolutionary byte-level
-large language model architecture that, for the first time, matches tokenization-based
-LLM performance at scale while achieving significant improvements in inference efficiency
-and robustness.
+The problem BLT addresses is the cost structure of operating on raw bytes. Dropping
+the tokenizer removes a whole class of failures -- vocabulary bias toward
+high-resource languages, brittleness under typos and adversarial spellings, the
+inability to spell or count characters -- but a byte sequence is roughly four times
+longer than its token sequence, and a transformer that pays full width on every byte
+is priced out. The resolution is to spend width where information is, not where
+symbols are: bytes are grouped into *patches*, the expensive stack runs once per
+patch rather than once per byte, and only thin local stacks touch individual bytes.
+The paper's grouping criterion is the entropy of a small next-byte model, so that
+predictable runs collapse into long patches and surprising regions get short ones,
+giving patches of roughly uniform information content rather than uniform length.
 
-Architecture Overview
-====================
+Architecturally the forward pass is a funnel and a fan-out. `LocalEncoder` embeds
+bytes, runs a few transformer layers over them, and pools each patch's byte states
+into one vector of `global_dim` width; with the default `patch_pooling_method
+='attention'` the pooling is a small set of learnable queries cross-attending to the
+patch's (masked) byte states, with `'mean'` and `'max'` as cheaper alternatives.
+`GlobalTransformer` then runs `num_global_layers` at `global_dim` over the patch
+sequence, and is where the bulk of the FLOPs live. `LocalDecoder` re-embeds the bytes
+and alternates its own self-attention with a cross-attention that injects patch
+context, projecting to `vocab_size` logits at every byte position. Cross-attention
+keys and values are built by a gather over `patch_ids`, so the key sequence is
+byte-length rather than patch-length.
 
-BLT introduces a paradigm shift from fixed-vocabulary tokenization to dynamic, learnable
-byte grouping through three core innovations:
+Causality is enforced in all five places it is needed, and each one is load-bearing
+under the next-byte objective `train_step` implements. The entropy model, the local
+encoder, the global transformer (causal over the *patch* axis) and the local
+decoder's self-attention all receive a lower-triangular attend-mask from
+`layers.blt_blocks.causal_attend_mask`. The fifth is the cross-attention, and it is
+the subtle one: gathering a byte's *own* patch representation leaks the future
+regardless of any mask, because that representation is pooled over every byte of the
+patch, the target byte included. The gather is therefore of the *preceding* patch
+(`patch_ids - 1`, with patch-0 bytes receiving a zeroed context vector rather than
+their own patch), and a causal mask is applied over the gathered key axis as well,
+since key `j > i` can otherwise carry a patch at or after the query's own. With all
+five in place, perturbing the byte at index 6 of a 12-byte sequence moves the logits
+at every index < 6 by exactly 0.0, against 5.64e-01 before, while indices >= 6 still
+move by 3.31e+00.
 
-1. **Dynamic Entropy-Based Patching**: Instead of static tokens, BLT segments bytes into
-   patches based on the entropy of next-byte predictions, allocating more compute where
-   data complexity demands it. This allows for contextual groupings with uniform
-   information density.
+This implementation still diverges from the paper in ways that matter, and they are
+stated here rather than left for a reader to discover:
 
-2. **Hierarchical Processing Architecture**:
-   - **Local Encoder**: Lightweight transformer that efficiently maps byte sequences
-     into expressive patch representations using cross-attention pooling
-   - **Global Latent Transformer**: Computationally intensive autoregressive model
-     operating on patch representations (consumes bulk of FLOPs)
-   - **Local Decoder**: Lightweight transformer decoding patch representations back
-     to raw bytes using cross-attention mechanisms
+- **Boundary selection is position-ordered, not paper-ranked.** Patching IS
+  entropy-based: `DynamicPatcher.call` opens a new patch at every byte whose entropy
+  exceeds `entropy_threshold`, and each row of the batch is segmented independently.
+  Where it departs from the paper is what happens once the `max_patches` budget is
+  spent: the FIRST `max_patches - 1` crossings are kept BY POSITION and everything
+  after them merges into the final patch. Keeping the most informative crossings
+  instead would let a late high-entropy byte displace an earlier boundary, i.e. make
+  an earlier byte's patch id depend on a later byte, which the next-byte objective
+  forbids. The cost is real: a sequence whose surprising regions are all late gets
+  one long final patch.
+- **The threshold is a fixed constant, not a trained or adaptive one.** The paper
+  also describes an approximate-monotonicity criterion; here a single scalar in nats
+  decides every boundary, and it must be chosen against the entropy scale of the
+  vocabulary in use (`ln(vocab_size)` is the uniform ceiling). A threshold below the
+  model's typical entropy makes every position a boundary — one byte per patch with
+  the tail collapsed into the last one — and a threshold above `ln(vocab_size)` makes
+  none. Construction logs a warning when the configured value is degenerately low.
+- **There are no hash n-gram byte embeddings.** The paper augments byte
+  representations with rolling-hash n-gram embeddings; this implementation uses a
+  plain learned byte embedding plus positional embeddings.
+- Efficiency and quality figures from the paper (inference-FLOP savings, parity with
+  token-based models at scale) describe the reference model. Nothing here has been
+  measured against them, and the divergences above would have to be closed before
+  such a comparison would mean anything.
 
-3. **Enhanced Byte Representations**: Incorporates hash n-gram embeddings (n=3-8) to
-   capture contextual byte patterns and improve representation quality.
+Behavioural choices worth knowing:
 
-Based on "Byte Latent Transformer: Patches Scale Better Than Tokens"
-by Pagnoni et al. (2024), arXiv:2412.09871v1 [cs.CL] 13 Dec 2024
+- `train_step` is overridden rather than relying on stock `fit`, because the loss
+  masks out padded positions (byte id 0) and normalizes by the count of unmasked
+  positions instead of by sequence length. A caller who compiles a plain
+  `sparse_categorical_crossentropy` gets the masked version regardless.
+- `call` accepts either a bare token tensor or a dict. Supplying `patch_ids` in the
+  dict skips the entropy model and the patcher entirely, which is the intended path
+  for training where patch boundaries can be precomputed once.
+- `generate`, `_top_k_filtering` and `_top_p_filtering` are eager-only. They use
+  Python loops over the batch and vocabulary with `slice_update`, and `generate` calls
+  `.numpy()` and compares a tensor to the EOS id in Python control flow; none of this
+  survives `tf.function` tracing.
+- The attention pooling path also loops in Python over `num_patches`, so `max_patches`
+  must be statically known and the pooling cost grows linearly in it.
+- `get_build_config` / `build_from_config` record and replay the input shape so a
+  `.keras` reload rebuilds every sub-layer before weights are restored; without this
+  the lazily built sub-layers would silently come back randomly initialized.
+
+References:
+    - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better Than
+      Tokens. (https://arxiv.org/abs/2412.09871)
+    - Yu et al., 2023. MEGABYTE: Predicting Million-byte Sequences with Multiscale
+      Transformers. (https://arxiv.org/abs/2305.07185)
+    - Xue et al., 2022. ByT5: Towards a Token-Free Future with Pre-trained
+      Byte-to-Byte Models. (https://arxiv.org/abs/2105.13626)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras
@@ -232,6 +301,21 @@ class ByteLatentTransformer(keras.Model):
         # Validate configuration before constructing sub-layers
         self._validate_config()
 
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # There is deliberately NO construction-time degeneracy warning here.
+        # The predecessor (D-015) compared entropy_threshold to
+        # `0.5 * ln(vocab_size)`, which is a function of the VOCABULARY and
+        # never of the entropy the model emits: at the shipped vocab_size=260
+        # the floor is 2.78 nats, so every default-constructed model (1.5) and
+        # every train_blt.py run (1.3) warned -- 100% of shipped configurations,
+        # including the one D-015's own reasoning argues is probably right. The
+        # check now lives where the entropy actually exists:
+        # `DynamicPatcher.warn_if_segmentation_is_degenerate(entropy)`, which
+        # reports the OBSERVED boundary rate and therefore fires only in the
+        # real degenerate regime. Do NOT reintroduce a constructor-side variant.
+        # The default (1.5) is still deliberately unchanged -- see decisions.md
+        # D-015 for why -- and D-018 for why the instrument moved.
+
         # Create all sub-layers in __init__ following modern Keras pattern
         self.tokenizer = ByteTokenizer(
             vocab_size=vocab_size,
@@ -409,7 +493,10 @@ class ByteLatentTransformer(keras.Model):
 
             # Create dynamic patches
             patch_lengths = self.patcher(entropy, training=training)
-            patch_ids = self.patcher.compute_patch_ids(patch_lengths)
+            # Pass the STATIC sequence length; see the D-034 anchor on
+            # `PatchingLayer.compute_patch_ids`.
+            patch_ids = self.patcher.compute_patch_ids(
+                patch_lengths, seq_len=ops.shape(byte_tokens)[1])
 
         # Encode bytes to patch representations
         patch_representations = self.local_encoder(
@@ -450,9 +537,27 @@ class ByteLatentTransformer(keras.Model):
 
             # Compute loss with proper masking
             loss = self._compute_masked_loss(y, logits, sample_weight)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
+            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
+            # the SCALED value is what `tape.gradient` differentiates while the
+            # UNSCALED value is what is reported. Do NOT "simplify" this back
+            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
+            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
+            # every gradient by `dynamic_scale` (2**15 initially)
+            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
+            # precision -- it divides the whole update by the loss scale, with
+            # no warning of any kind. In float32 it is a provable no-op: the
+            # base `Optimizer.scale_loss` returns `loss` unchanged unless
+            # `loss_scale_factor` is set. Keras' own default TF `train_step`
+            # does exactly this; overriding `train_step` silently opts out.
+            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
+            # float32 2.156337e+03 vs mixed_float16 1.294069e-01, ratio 1.666e+04
+            # See decisions.md D-036, and the same ruling at
+            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            scaled_loss = self.optimizer.scale_loss(loss)
 
         # Compute gradients
-        gradients = tape.gradient(loss, self.trainable_variables)
+        gradients = tape.gradient(scaled_loss, self.trainable_variables)
 
         # Apply gradients
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
@@ -707,7 +812,24 @@ class ByteLatentTransformer(keras.Model):
             'cross_attention_queries': self.cross_attention_queries,
             'dropout_rate': self.dropout_rate,
             'patch_pooling_method': self.patch_pooling_method,
-            'entropy_model': None if not self._custom_entropy_model else self.entropy_model,
+            # DECISION plan-2026-08-18T140459-7991552f/D-030
+            # A CUSTOM entropy model is serialized here, and re-materialized by
+            # `from_config` below. WHAT NOT TO DO: do NOT store the live
+            # `self.entropy_model` layer object. It LOOKS like it works --
+            # `model.save()` succeeds, because Keras' config encoder walks the
+            # dict and serializes the layer on the way out -- but on reload the
+            # value arrives as a plain config DICT, `__init__` takes its
+            # `else` branch and assigns that dict to `self.entropy_model`, and
+            # the first `build()` dies. MEASURED at HEAD ae2e2aa0a with a
+            # 1-layer custom `EntropyModel`: save OK, then
+            # `AttributeError: 'TrackedDict' object has no attribute 'built'`.
+            # The default path (`entropy_model=None`) is unaffected, which is
+            # why the shipped round-trip test never saw it -- no test built a
+            # custom entropy model. See decisions.md D-030.
+            'entropy_model': (
+                keras.saving.serialize_keras_object(self.entropy_model)
+                if self._custom_entropy_model else None
+            ),
         })
         return config
 
@@ -742,6 +864,15 @@ class ByteLatentTransformer(keras.Model):
         Returns:
             ByteLatentTransformer model instance.
         """
+        config = dict(config)
+        # DECISION plan-2026-08-18T140459-7991552f/D-030: the mirror of the
+        # `serialize_keras_object` in `get_config`. Without this the value
+        # arriving from a `.keras` file stays a plain dict and the first
+        # `build()` raises `'TrackedDict' object has no attribute 'built'`.
+        if config.get('entropy_model') is not None:
+            config['entropy_model'] = keras.saving.deserialize_keras_object(
+                config['entropy_model']
+            )
         return cls(**config)
 
     def summary(self, **kwargs: Any) -> None:

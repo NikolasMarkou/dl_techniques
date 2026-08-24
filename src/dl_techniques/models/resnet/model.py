@@ -1,49 +1,88 @@
 """
-ResNet Model Implementation with Pretrained Support and Deep Supervision
-=========================================================================
+Residual networks with configurable blocks and optional deep supervision.
 
-A complete implementation of the ResNet architecture with support for
-loading pretrained weights and deep supervision training. This implementation
-follows the original "Deep Residual Learning for Image Recognition" paper
-with added deep supervision capabilities.
+This model embodies the principle of residual learning, a design paradigm that
+reformulates what each layer is asked to learn rather than changing its capacity.
+The core idea addresses the degradation problem: beyond a certain depth, adding
+layers to a plain convolutional stack makes *training* error worse, not merely
+test error. Since a deeper network can always represent a shallower one by setting
+the extra layers to identity, the failure is one of optimization rather than
+expressiveness. Making the identity the default instead of something the layers
+must discover resolves it:
 
-Deep supervision provides several benefits:
-- Better gradient flow to deeper layers during training
-- Multi-scale feature learning and supervision
-- More stable training for very deep networks
-- Improved convergence and generalization
+`y = F(x) + x`
 
-The model outputs multiple predictions during training:
-- Output 0: Final inference output (after final stage, primary output)
-- Output 1-N: Intermediate supervision outputs from earlier stages
+A block now learns only the residual `F(x)`, and driving `F` toward zero is far
+easier for gradient descent than fitting an identity map through a stack of
+nonlinear convolutions. The additive shortcut also gives gradients an unobstructed
+path to earlier layers, so signal reaches the network's start without being
+attenuated by every intervening weight matrix.
 
-Based on: "Deep Residual Learning for Image Recognition" (He et al., 2015)
-https://arxiv.org/abs/1512.03385
+Two block designs trade depth against width. The basic block stacks two 3x3
+convolutions and is used for the shallower variants. The bottleneck block
+sandwiches a 3x3 convolution between 1x1 projections that reduce and then restore
+channel count, which cuts the cost of the spatial convolution by roughly a factor
+of the reduction ratio and is what makes 101 and 152 layer configurations
+tractable. Five preset variants span the standard family, from ResNet-18
+(`[2, 2, 2, 2]`, basic) through ResNet-152 (`[3, 8, 36, 3]`, bottleneck), all over
+the same `[64, 128, 256, 512]` filter progression.
 
-Model Variants:
---------------
-- ResNet-18: [2, 2, 2, 2] blocks, [64, 128, 256, 512] filters, BasicBlock
-- ResNet-34: [3, 4, 6, 3] blocks, [64, 128, 256, 512] filters, BasicBlock
-- ResNet-50: [3, 4, 6, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
-- ResNet-101: [3, 4, 23, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
-- ResNet-152: [3, 8, 36, 3] blocks, [64, 128, 256, 512] filters, BottleneckBlock
+Architecturally the model is a stem followed by four stages that each halve
+resolution and double width. The stem is selectable: `stem_type='imagenet'`
+(the default) is the published 7x7 stride-2 convolution plus a 3x3 stride-2 max
+pool, and `stem_type='cifar'` is He et al.'s own CIFAR configuration from
+section 4.2 -- a single 3x3 stride-1 convolution with no pooling. The
+difference is not cosmetic on small inputs: the ImageNet stem downsamples by 4x
+before stage 1, so a 32x32 input reaches the global average pool at 1x1 and the
+last two stages stride an already-collapsed map. Shortcut projections are
+inserted only where the identity cannot be taken verbatim: at the first block of
+every stage after the first, where the stride-2 shortcut changes spatial shape,
+and additionally at stage 0's first block under the bottleneck design, where the
+channel count must widen even though the stride is 1. Everywhere else the shortcut
+is parameter-free, which is what keeps the identity path exactly an identity.
 
-Usage Examples:
--------------
-```python
-# Load pretrained ImageNet weights
-model = ResNet.from_variant("resnet50", pretrained=True, num_classes=1000)
+Deep supervision is available as an optional training aid. Intermediate stages are
+given their own pooling and classification heads, so gradient enters the network
+at several depths rather than only at the output. This shortens the effective
+backpropagation distance for early layers and pressures intermediate
+representations to be linearly discriminative on their own. Every stage but the
+last gets a head: the final stage is already served by the main head, and stage 0
+— the shallowest — is exactly where the shortened path is worth having. For the
+four-stage default that is three supervision heads, on stages 1, 2 and 3 counting
+from one. When enabled the model returns `[final_output, stage3, stage2, stage1]`,
+reversed so the deepest supervision head comes first; inference typically consumes
+index 0 alone.
 
-# Create model with deep supervision for training
-model = ResNet.from_variant("resnet50", num_classes=1000, enable_deep_supervision=True)
+Normalization and activation are supplied through factories rather than
+hard-coded, and an optional `normalization_kwargs` dict is forwarded to every
+construction site in both the stem and each block. Its default of `None` resolves
+to an empty dict, except that for `normalization_type='batch_norm'` a
+`momentum=0.9` is injected unless the caller supplies one: Keras' bare default is
+`0.99`, while torchvision's `BatchNorm2d` — the canonical He et al.
+reimplementation — uses `momentum=0.1`, and the two frameworks define momentum
+oppositely (`keras_momentum = 1 - torch_momentum`), so `0.1` there is `0.9` here.
+This is a training-time tracking constant only: it changes neither weight shapes
+nor the `training=False` forward pass, so existing checkpoints remain bit-exact.
 
-# Load pretrained as feature extractor
-model = create_resnet("resnet34", pretrained=True, include_top=False)
+No pretrained weights are distributed with this package. `pretrained=True` raises
+`NotImplementedError` rather than warning and returning a randomly initialized
+model, which is a deliberate choice: the previous behaviour made an unavailable
+download silently indistinguishable from a successful one. Local checkpoints are
+loaded by path, with shape mismatches in the classifier or input-dependent layers
+skipped by name when the target task differs from the checkpoint's.
 
-# Fine-tune on CIFAR-10 with deep supervision
-model = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
-                      enable_deep_supervision=True)
-```
+References:
+    - He et al., 2015. Deep Residual Learning for Image Recognition.
+      (https://arxiv.org/abs/1512.03385)
+    - He et al., 2016. Identity Mappings in Deep Residual Networks.
+      (https://arxiv.org/abs/1603.05027)
+    - Lee et al., 2015. Deeply-Supervised Nets. AISTATS 2015.
+      (https://arxiv.org/abs/1409.5185)
+    - Veit et al., 2016. Residual Networks Behave Like Ensembles of Relatively
+      Shallow Networks. (https://arxiv.org/abs/1605.06431)
+    - torchvision `nn.BatchNorm2d` (`momentum=0.1`), the de facto reference
+      reimplementation this port's BatchNorm momentum is matched against.
+      (https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html)
 """
 
 import os
@@ -55,71 +94,185 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.standard_blocks import (
     BasicBlock,
     BottleneckBlock,
 )
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class ResNet(keras.Model):
-    """ResNet model implementation with pretrained support and deep supervision.
+    """
+    Deep residual network with configurable blocks and optional deep supervision.
 
-    A deep residual learning framework that enables training of very deep
-    networks by using shortcut connections that skip one or more layers.
-    This implementation supports all standard ResNet variants and can adapt
-    to different input sizes.
+    Implements the ResNet family, in which each block learns a residual
+    ``F(x)`` added to an identity shortcut (``y = F(x) + x``) so that depth does
+    not obstruct optimization. A stem -- 7x7 stride-2 plus max pool by default,
+    or a 3x3 stride-1 CIFAR stem via ``stem_type='cifar'`` -- feeds four stages
+    that each halve spatial resolution and double channel width, built from
+    either
+    ``BasicBlock`` (two 3x3 convolutions) or ``BottleneckBlock`` (1x1 reduce,
+    3x3, 1x1 expand). Shortcut projections are inserted only where the identity
+    cannot be taken verbatim: at the first block of every stage after the first
+    (stride-2 shape change), plus stage 0's first block under the bottleneck
+    design (channel widening at stride 1). With ``enable_deep_supervision=True``
+    every stage but the last receives its own GAP + Dense head (the last stage is
+    the main head's own), and the model returns
+    ``[final_output, stage3, stage2, stage1]``.
 
-    During training with deep supervision enabled, the model outputs multiple predictions:
-    - Output 0: Final inference output (after final stage, primary output)
-    - Output 1: Supervision output after stage 3
-    - Output 2: Supervision output after stage 2
-    - Output 3: Supervision output after stage 1
+    **Architecture Overview:**
 
-    During inference, only the final output (index 0) is typically used.
+    .. code-block:: text
 
-    Args:
-        num_classes: Integer, number of output classes for classification.
-            Only used if include_top=True.
-        blocks_per_stage: List of integers, number of residual blocks in each stage.
-            Default is [3, 4, 6, 3] for ResNet-50.
-        filters_per_stage: List of integers, number of base filters in each stage.
-            Default is [64, 128, 256, 512].
-        block_type: String, type of residual block. Either "basic" or "bottleneck".
-            Default is "bottleneck" for deeper networks.
-        kernel_regularizer: Regularizer function applied to kernels.
-        normalization_type: String, type of normalization. Default is "batch_norm".
-        activation_type: String, type of activation. Default is "relu".
-        include_top: Boolean, whether to include the classification head.
-        enable_deep_supervision: Boolean, whether to add deep supervision outputs.
-            Default is False.
-        input_shape: Tuple, input shape. If None and include_top=True,
-            uses (224, 224, 3) for ImageNet.
-        **kwargs: Additional keyword arguments for the Model base class.
+        ┌──────────────────────────────────────┐
+        │       Input [B, H, W, C_in]          │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stem: Conv 7×7 /2 → Norm → Act      │
+        │        → MaxPool 3×3 /2              │
+        │  (stem_type='cifar': Conv 3×3 /1,    │
+        │   no MaxPool)                        │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Stage 1: N₁ × Block(f₁, stride 1)   │──────┐
+        └───────────────┬──────────────────────┘      │
+                        ▼                             │
+        ┌──────────────────────────────────────┐      │
+        │  Stage 2: N₂ × Block(f₂, stride 2)   │───┐  │
+        └───────────────┬──────────────────────┘   │  │
+                        ▼                          │  │
+        ┌──────────────────────────────────────┐   │  │
+        │  Stage 3: N₃ × Block(f₃, stride 2)   │┐  │  │
+        └───────────────┬──────────────────────┘│  │  │
+                        ▼                       │  │  │
+        ┌──────────────────────────────────────┐│  │  │
+        │  Stage 4: N₄ × Block(f₄, stride 2)   ││  │  │
+        └───────────────┬──────────────────────┘│  │  │
+                        │                       │  │  │
+            ┌───────────┴──────────┐            │  │  │
+            │  Block (residual)    │            │  │  │
+            │  x ──► F(x) ──► (+)  │            │  │  │
+            │  └──── shortcut ──┘  │            │  │  │
+            └───────────┬──────────┘            │  │  │
+                        ▼                       ▼  ▼  ▼ (deep supervision)
+        ┌──────────────────────────────────────┐ ┌──────────────┐
+        │  GAP → Dense(num_classes)            │ │ GAP → Dense  │
+        │  (if include_top)                    │ │ per stage    │
+        └───────────────┬──────────────────────┘ └──────┬───────┘
+                        │                               │
+                        ▼                               ▼
+        ┌───────────────────────────────────────────────────────┐
+        │  Output: [B, num_classes]                             │
+        │   include_top=False        → [B, H', W', f₄·expansion]│
+        │   deep_supervision=True    → [final, s3, s2, s1]      │
+        └───────────────────────────────────────────────────────┘
 
-    Raises:
-        ValueError: If blocks_per_stage and filters_per_stage have different lengths.
-        ValueError: If block_type is not "basic" or "bottleneck".
+    **Variants:**
+
+    .. code-block:: text
+
+        resnet18   [2, 2, 2, 2]   [64, 128, 256, 512]   basic
+        resnet34   [3, 4, 6, 3]   [64, 128, 256, 512]   basic
+        resnet50   [3, 4, 6, 3]   [64, 128, 256, 512]   bottleneck
+        resnet101  [3, 4, 23, 3]  [64, 128, 256, 512]   bottleneck
+        resnet152  [3, 8, 36, 3]  [64, 128, 256, 512]   bottleneck
+
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``. A value of 0 returns pooled features from the head.
+    :type num_classes: int
+    :param blocks_per_stage: Number of residual blocks in each stage. Must have
+        the same length as ``filters_per_stage``. Defaults to ``[3, 4, 6, 3]``.
+    :type blocks_per_stage: Optional[List[int]]
+    :param filters_per_stage: Base filter count per stage. Defaults to
+        ``[64, 128, 256, 512]``.
+    :type filters_per_stage: Optional[List[int]]
+    :param block_type: Residual block design, ``'basic'`` or ``'bottleneck'``.
+        Defaults to ``'bottleneck'``.
+    :type block_type: Literal['basic', 'bottleneck']
+    :param kernel_regularizer: Optional regularizer applied to all convolution
+        and dense kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization layer identifier passed to
+        ``create_normalization_layer``. Defaults to ``'batch_norm'``.
+    :type normalization_type: str
+    :param normalization_kwargs: Optional kwargs forwarded to every
+        normalization factory call in the stem and in every block. ``None``
+        resolves to ``{}``. When ``normalization_type == 'batch_norm'`` and no
+        ``momentum`` is supplied, ``momentum=0.9`` is injected to match
+        torchvision's ``BatchNorm2d`` (see the class body); pass an explicit
+        ``momentum`` to override. Weight shapes and the inference forward pass
+        are unaffected, so existing checkpoints stay bit-exact.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param activation_type: Activation identifier passed to
+        ``create_activation_layer``. Defaults to ``'relu'``.
+    :type activation_type: str
+    :param include_top: Whether to include the classification head. When False
+        the final stage's feature maps are returned. Defaults to True.
+    :type include_top: bool
+    :param enable_deep_supervision: Whether to attach auxiliary classification
+        heads. Requires ``include_top=True``. One head per stage except the last,
+        whose features the main head already consumes; stage 0 is included.
+        Defaults to False.
+    :type enable_deep_supervision: bool
+    :param input_shape: Input shape ``(height, width, channels)`` excluding the
+        batch dimension. Defaults to ``(224, 224, 3)``.
+    :type input_shape: Tuple[int, ...]
+    :param stem_type: Which input stem to build. ``'imagenet'`` (default) is the
+        published 7x7 stride-2 convolution followed by a 3x3 stride-2 max pool,
+        downsampling by 4x before stage 1; it is bit-identical to the model
+        before this argument existed. ``'cifar'`` is He et al.'s own CIFAR
+        configuration -- a single 3x3 stride-1 convolution and **no** pooling --
+        which preserves the input resolution into stage 1. Use it for small
+        inputs: on ``(32, 32, 3)`` the ImageNet stem leaves ``resnet18`` with a
+        ``(1, 1, 1, 512)`` feature map before the global average pool, so the
+        last two stages stride an already-collapsed map. Both stems take their
+        width from ``filters_per_stage[0]``.
+    :type stem_type: Literal['imagenet', 'cifar']
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+
+    :raises ValueError: If ``blocks_per_stage`` and ``filters_per_stage`` differ
+        in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, if
+        ``stem_type`` is not ``'imagenet'`` or ``'cifar'``, or if
+        ``input_shape`` is not 3D.
+
+    Input shape:
+        4D tensor with shape ``(batch_size, height, width, channels)``.
+
+    Output shape:
+        - ``include_top=True``: 2D tensor ``(batch_size, num_classes)``.
+        - ``include_top=False``: 4D tensor ``(batch_size, H', W', channels)``.
+        - ``enable_deep_supervision=True``: list of 2D tensors, ordered
+          ``[final_output, stage3, stage2, stage1]`` (reversed, matching the
+          BFUNet output convention). Inference typically uses index 0 alone.
 
     Example:
-        >>> # Create ResNet-50 model for ImageNet
+        >>> # ResNet-50 for ImageNet
         >>> model = ResNet.from_variant("resnet50", num_classes=1000)
         >>>
-        >>> # Create with deep supervision for training
+        >>> # Deep supervision for training
         >>> model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
         >>>
-        >>> # Load pretrained ImageNet model
-        >>> model = ResNet.from_variant("resnet50", pretrained=True)
-        >>>
-        >>> # Load as feature extractor
-        >>> model = ResNet.from_variant("resnet34", pretrained=True, include_top=False)
+        >>> # Feature extractor from a local checkpoint
+        >>> model = ResNet.from_variant("resnet34", pretrained="/path/to.keras",
+        ...                             include_top=False)
+
+    Note:
+        No pretrained ResNet weights are distributed with ``dl_techniques``.
+        ``pretrained=True`` raises ``NotImplementedError`` rather than warning
+        and returning a randomly-initialized model; pass a local checkpoint via
+        ``pretrained='/path/to/weights.keras'`` instead.
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "resnet18": {
             "blocks_per_stage": [2, 2, 2, 2],
@@ -148,30 +301,11 @@ class ResNet(keras.Model):
         },
     }
 
-    # Pretrained weights URLs (placeholder - update with actual URLs)
-    PRETRAINED_WEIGHTS = {
-        "resnet18": {
-            "imagenet": "https://example.com/resnet18_imagenet.keras",
-        },
-        "resnet34": {
-            "imagenet": "https://example.com/resnet34_imagenet.keras",
-        },
-        "resnet50": {
-            "imagenet": "https://example.com/resnet50_imagenet.keras",
-        },
-        "resnet101": {
-            "imagenet": "https://example.com/resnet101_imagenet.keras",
-        },
-        "resnet152": {
-            "imagenet": "https://example.com/resnet152_imagenet.keras",
-        },
-    }
-
     def __init__(
             self,
             num_classes: int = 1000,
-            blocks_per_stage: List[int] = [3, 4, 6, 3],
-            filters_per_stage: List[int] = [64, 128, 256, 512],
+            blocks_per_stage: Optional[List[int]] = None,
+            filters_per_stage: Optional[List[int]] = None,
             block_type: Literal["basic", "bottleneck"] = "bottleneck",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: str = "batch_norm",
@@ -180,11 +314,14 @@ class ResNet(keras.Model):
             include_top: bool = True,
             enable_deep_supervision: bool = False,
             input_shape: Tuple[int, ...] = (224, 224, 3),
+            stem_type: Literal["imagenet", "cifar"] = "imagenet",
             **kwargs
     ):
         super().__init__(**kwargs)
 
-        # Validate configuration
+        blocks_per_stage = list(blocks_per_stage) if blocks_per_stage is not None else [3, 4, 6, 3]
+        filters_per_stage = list(filters_per_stage) if filters_per_stage is not None else [64, 128, 256, 512]
+
         if len(blocks_per_stage) != len(filters_per_stage):
             raise ValueError(
                 f"Length of blocks_per_stage ({len(blocks_per_stage)}) must equal "
@@ -196,11 +333,21 @@ class ResNet(keras.Model):
                 f"block_type must be 'basic' or 'bottleneck', got '{block_type}'"
             )
 
-        # Store configuration
+        if stem_type not in ["imagenet", "cifar"]:
+            raise ValueError(
+                f"stem_type must be 'imagenet' or 'cifar', got '{stem_type}'"
+            )
+
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        if len(input_shape) != 3:
+            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+
         self.num_classes = num_classes
         self.blocks_per_stage = blocks_per_stage
         self.filters_per_stage = filters_per_stage
         self.block_type = block_type
+        self.stem_type = stem_type
         self.kernel_regularizer = kernel_regularizer
         self.normalization_type = normalization_type
         # DECISION plan_2026-05-18_6776f8ba/D-003
@@ -214,52 +361,100 @@ class ResNet(keras.Model):
         # gamma-removal contrast in the headline E2 result becomes a
         # pure 1-vs-d parameter-count confound rather than a norm choice.
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-480
+        # Inject the reference BatchNorm momentum. Do NOT delete this and fall
+        # back to Keras' bare default: `keras.layers.BatchNormalization`
+        # defaults to `momentum=0.99`, while the canonical He-et-al.
+        # reimplementation -- torchvision's `nn.BatchNorm2d` -- defaults to
+        # `momentum=0.1`.
+        #
+        # THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY. Do not "correct" 0.9
+        # back to 0.1; that would be a 10x-too-slow tracking constant, not a
+        # port fix. Keras:  moving = momentum * moving + (1 - momentum) * batch
+        #                   (https://keras.io/api/layers/normalization_layers/batch_normalization/)
+        #             torch:  moving = (1 - momentum) * moving + momentum * batch
+        #                   (https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html)
+        # Hence `keras_momentum = 1 - torch_momentum`, and torch's 0.1 is
+        # Keras' 0.9.
+        #
+        # Conditional on 'batch_norm' because `momentum` is not an accepted
+        # kwarg of the other factory types (layer_norm, rms_norm, ...), which
+        # `validate_normalization_config` rejects. `setdefault` semantics: an
+        # explicit caller-supplied `momentum` always wins.
+        # See decisions.md D-480.
+        if self.normalization_type == "batch_norm":
+            self.normalization_kwargs.setdefault("momentum", 0.9)
+
         self.activation_type = activation_type
         self.include_top = include_top
         self.enable_deep_supervision = enable_deep_supervision
         self.input_shape_config = input_shape
-
-        # Validate input shape
-        if input_shape is None:
-            input_shape = (224, 224, 3)
-        if len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
-
         self.input_height, self.input_width, self.input_channels = input_shape
 
-        # --- Build layers ---
-
-        # 1. Initial convolution (stem)
         self._build_stem()
 
-        # 2. Residual stages
         self.stages = []
-        self.stage_outputs = []  # Store stage outputs for deep supervision
         for stage_idx in range(len(blocks_per_stage)):
             self._build_stage(stage_idx)
 
-        # 3. Classification head
         if self.include_top:
             self._build_head()
 
-        # 4. Deep supervision heads (if enabled)
         self.supervision_heads = []
         if self.enable_deep_supervision and self.include_top:
             self._build_supervision_heads()
 
-        total_blocks = sum(blocks_per_stage)
         logger.info(
-            f"Created ResNet model with {total_blocks} blocks "
-            f"for input {input_shape}"
+            f"Created ResNet with {sum(blocks_per_stage)} blocks for input "
+            f"{input_shape} (deep supervision: {enable_deep_supervision})"
         )
-        logger.info(f"Deep supervision enabled: {enable_deep_supervision}")
 
     def _build_stem(self) -> None:
-        """Build initial convolution stem."""
+        """Build initial convolution stem.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-041
+        The stem width FOLLOWS ``filters_per_stage[0]``; it is not the literal
+        64 it used to be. Do not put the constant back. A `basic` block's
+        stage-0 first block is given ``use_projection=False``
+        unconditionally -- correctly, because stage 0 does not stride -- so its
+        identity shortcut requires the stem to emit exactly
+        ``filters_per_stage[0]`` channels. With the stem pinned at 64,
+        ``ResNet(block_type='basic')`` could not run a forward pass for ANY
+        other stage-0 width: MEASURED 8, 16, 32 and 128 all raise while 64
+        works, `bottleneck` works at every width (its stage-0 block projects),
+        and `from_variant` works because every shipped variant uses 64. The
+        error surfaced two frames deep in `layers/standard_blocks.py` naming
+        neither `filters_per_stage` nor 64.
+        This is checkpoint-safe by construction: it changes the stem's weight
+        SHAPE only for configurations that previously RAISED.
+        See decisions.md D-041.
+
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-019
+        ``stem_type`` exists because the ImageNet stem below downsamples by 4x
+        before stage 1 even starts, which on a 32x32 input leaves stage 4 with
+        a 1x1 feature map: MEASURED, ``resnet18`` on ``(32, 32, 3)`` reaches
+        the global-average pool at ``(1, 1, 1, 512)``, i.e. the last two stages
+        stride a map that has already collapsed. The README's own flagship
+        CIFAR-10 example walked the reader straight into it. He et al. did not
+        use this stem on CIFAR either -- section 4.2 of the paper uses a single
+        3x3 stride-1 convolution and no pooling -- and there was previously no
+        way to express that configuration at all.
+        Do NOT implement the CIFAR stem by rescaling the input, by making the
+        stem stride depend on ``input_shape``, or by adding a second model
+        class. An input-shape-derived stride would silently change the weight
+        tree of every existing small-input checkpoint; this knob changes
+        nothing unless it is asked for. ``'imagenet'`` is the default and is
+        bit-identical to the pre-knob model.
+        The D-041 rule above applies to BOTH stems: each takes its width from
+        ``filters_per_stage[0]``, never a literal 64.
+        See decisions.md D-019 (plan-2026-08-23T203721-009b7ccf -- note
+        `_build_supervision_heads` carries a DIFFERENT plan's D-019).
+        """
         self.stem_conv = keras.layers.Conv2D(
-            filters=64,
-            kernel_size=7,
-            strides=2,
+            filters=self.filters_per_stage[0],
+            kernel_size=7 if self.stem_type == "imagenet" else 3,
+            strides=2 if self.stem_type == "imagenet" else 1,
             padding="same",
             use_bias=False,
             kernel_initializer="he_normal",
@@ -280,7 +475,7 @@ class ResNet(keras.Model):
             strides=2,
             padding="same",
             name="stem_pool"
-        )
+        ) if self.stem_type == "imagenet" else None
 
     def _build_stage(self, stage_idx: int) -> None:
         """Build a residual stage.
@@ -291,31 +486,20 @@ class ResNet(keras.Model):
         num_blocks = self.blocks_per_stage[stage_idx]
         base_filters = self.filters_per_stage[stage_idx]
 
-        # Select block class
-        if self.block_type == "basic":
-            BlockClass = BasicBlock
-            expansion = 1
-        else:  # bottleneck
-            BlockClass = BottleneckBlock
-            expansion = 4
+        BlockClass = BasicBlock if self.block_type == "basic" else BottleneckBlock
 
         stage_blocks = []
 
         for block_idx in range(num_blocks):
-            # First block in stage (except first stage) uses stride=2 for downsampling
             stride = 2 if stage_idx > 0 and block_idx == 0 else 1
 
-            # Use projection if:
-            # 1. First block of stage and stride=2 (downsampling)
-            # 2. First block of first stage (channel adjustment)
+            # Stage 0's first block projects only to widen channels (bottleneck);
+            # every later stage's first block projects to match the stride-2 shortcut.
             use_projection = False
             if block_idx == 0:
-                if stage_idx == 0:
-                    # First stage: need projection if using bottleneck
-                    use_projection = (self.block_type == "bottleneck")
-                else:
-                    # Other stages: need projection for downsampling
-                    use_projection = True
+                use_projection = (
+                    self.block_type == "bottleneck" if stage_idx == 0 else True
+                )
 
             block = BlockClass(
                 filters=base_filters,
@@ -348,16 +532,24 @@ class ResNet(keras.Model):
     def _build_supervision_heads(self) -> None:
         """Build deep supervision classification heads.
 
-        Creates supervision heads for intermediate stages (stages 1, 2, 3).
-        Each head consists of:
-        - Global Average Pooling
-        - Dense layer to num_classes
+        One GAP + Dense head per stage EXCEPT the last. The final stage is
+        already served by the main head — ``call`` appends one entry to
+        ``stage_features`` per stage, so a head at ``stage_idx ==
+        len(blocks_per_stage) - 1`` would read the very tensor ``self.gap`` /
+        ``self.classifier`` consume and inject no gradient the main head does
+        not already carry. Stage 0 IS supervised: it is the only stage for which
+        deep supervision actually shortens the backpropagation path, which is
+        the entire point of the technique.
         """
-        # Create supervision heads for stages 1, 2, 3 (not stage 0 or final stage 4)
-        num_stages = len(self.blocks_per_stage)
-
-        for stage_idx in range(1, num_stages):
-            # Each supervision head
+        # DECISION plan-2026-08-17T183311-79c63e38/D-019
+        # range(0, N-1), NOT range(1, N) and NOT range(1, N-1). The old bound
+        # supervised the FINAL stage (a duplicate of the main head) and skipped
+        # stage 0 (the only one that shortens backprop). Do NOT "restore" the
+        # `Stage 0 is skipped as too shallow` rule that the old prose asserted:
+        # skipping stage 0 while also excluding the final stage would leave a
+        # 4-stage ResNet with two supervision heads and no shallow supervision
+        # at all. See decisions.md D-019.
+        for stage_idx in range(0, len(self.blocks_per_stage) - 1):
             gap_layer = keras.layers.GlobalAveragePooling2D(
                 name=f"supervision_gap_stage{stage_idx+1}"
             )
@@ -378,7 +570,22 @@ class ResNet(keras.Model):
                 "stage_idx": stage_idx
             })
 
-            logger.info(f"Added deep supervision head for stage {stage_idx+1}")
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method ResNet inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
             self,
@@ -399,73 +606,60 @@ class ResNet(keras.Model):
             - If deep_supervision=True: List of output tensors
               [final_output, supervision_output_stage3, supervision_output_stage2, supervision_output_stage1]
         """
-        # Stem
         x = self.stem_conv(inputs)
         x = self.stem_bn(x, training=training)
         x = self.stem_act(x)
-        x = self.stem_pool(x)
+        if self.stem_pool is not None:
+            x = self.stem_pool(x)
 
-        # Storage for stage outputs (for deep supervision)
         stage_features = []
-
-        # Residual stages
-        for stage_idx, stage_blocks in enumerate(self.stages):
+        for stage_blocks in self.stages:
             for block in stage_blocks:
                 x = block(x, training=training)
-
-            # Store stage output for deep supervision
             if self.enable_deep_supervision and self.include_top:
                 stage_features.append(x)
 
-        # Final output
         if self.include_top:
             final_features = self.gap(x)
-            if self.classifier:
-                final_output = self.classifier(final_features)
-            else:
-                final_output = final_features
+            final_output = (
+                self.classifier(final_features) if self.classifier else final_features
+            )
         else:
             final_output = x
 
-        # Deep supervision outputs
         if self.enable_deep_supervision and self.include_top and self.supervision_heads:
+            # Reversed (stage 3, 2, 1) to match the BFUNet output convention.
             supervision_outputs = []
-
-            # Generate supervision outputs from stored stage features
-            # Process in reverse order (stage 3, 2, 1) to match BFUNet convention
             for sup_head in reversed(self.supervision_heads):
-                stage_idx = sup_head["stage_idx"]
-                stage_feat = stage_features[stage_idx]
-
-                # Apply supervision head
-                sup_features = sup_head["gap"](stage_feat)
-                if sup_head["classifier"]:
-                    sup_output = sup_head["classifier"](sup_features)
-                else:
-                    sup_output = sup_features
-
-                supervision_outputs.append(sup_output)
-
-            # Return [final_output, stage3_output, stage2_output, stage1_output]
-            all_outputs = [final_output] + supervision_outputs
-
-            logger.info(f"Returning {len(all_outputs)} outputs (deep supervision)")
-            return all_outputs
+                feat = sup_head["gap"](stage_features[sup_head["stage_idx"]])
+                supervision_outputs.append(
+                    sup_head["classifier"](feat) if sup_head["classifier"] else feat
+                )
+            return [final_output] + supervision_outputs
 
         return final_output
 
     def load_pretrained_weights(
             self,
             weights_path: str,
-            skip_mismatch: bool = True,
-            by_name: bool = True
+            skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained weights into the model from a local checkpoint.
+
+        Transfer is layer-by-layer via
+        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+        not ``self.load_weights(..., by_name=True)``. Keras 3 removed ``by_name``
+        from ``Model.load_weights`` — its signature is
+        ``(filepath, skip_mismatch=False, **kwargs)`` and it rejects the unknown
+        keyword — so the old call raised ``ValueError: Invalid keyword arguments:
+        {'by_name': True}`` for every caller. Nothing noticed, because the only
+        route to it was ``pretrained=<path>`` and the surrounding ``except``
+        turned the failure into a warning that continued with random weights.
 
         Args:
             weights_path: String, path to the weights file (.keras format).
             skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-            by_name: Boolean, whether to load weights by layer name.
+                Maps to the inverse of the transfer helper's ``strict``.
 
         Raises:
             FileNotFoundError: If weights_path doesn't exist.
@@ -475,75 +669,57 @@ class ResNet(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
             if not self.built:
                 dummy_input = keras.random.normal((1,) + tuple(self.input_shape_config))
                 self(dummy_input, training=False)
 
             logger.info(f"Loading pretrained weights from {weights_path}")
-
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
-
-            if skip_mismatch:
-                logger.info(
-                    "Weights loaded with skip_mismatch=True. "
-                    "Layers with shape mismatches were skipped."
-                )
-            else:
-                logger.info("All weights loaded successfully.")
+            logger.info(f"Weight transfer complete: {report}")
 
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs
+    # pointing at a non-existent host; `from_variant` caught the download failure,
+    # logged a warning and returned a randomly-initialized model, so
+    # `pretrained=True` silently produced untrained weights. Do NOT reinstate a
+    # warn-and-return branch here or in `from_variant`. No public ResNet weights
+    # are distributed with dl_techniques; pass a local path via
+    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
             variant: str,
             dataset: str = "imagenet",
             cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Resolve a download path for pretrained weights of ``variant``.
+
+        Not implemented: no public ResNet weights ship with ``dl_techniques``.
+        Always raises. Kept to mirror the BERT / GPT-2 / WaveFieldLLM factory
+        recipe and to give an explicit failure mode instead of a silent
+        random-init fallback.
 
         Args:
-            variant: String, model variant name.
-            dataset: String, dataset the weights were trained on.
-            cache_dir: Optional string, directory to cache downloaded weights.
-
-        Returns:
-            String, path to the downloaded weights file.
+            variant: Variant name (unused).
+            dataset: Dataset name (unused).
+            cache_dir: Cache directory (unused).
 
         Raises:
-            ValueError: If variant or dataset is not available.
+            NotImplementedError: Always.
         """
-        if variant not in ResNet.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(ResNet.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in ResNet.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(ResNet.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = ResNet.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading {variant} weights from {dataset}...")
-
-        weights_path = keras.utils.get_file(
-            fname=f"{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/resnet"
+        raise NotImplementedError(
+            f"No pretrained ResNet weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: ResNet.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -564,8 +740,10 @@ class ResNet(keras.Model):
                 "resnet101", "resnet152".
             num_classes: Integer, number of output classes.
             input_shape: Tuple, input shape. If None, uses (224, 224, 3).
-            pretrained: Boolean or string. If True, loads pretrained weights.
-                If string, treats it as a path to local weights file.
+            pretrained: If a string, a path to a local weights file to load.
+                If True, raises NotImplementedError — no public ResNet weights
+                ship with dl_techniques. If False (default), returns a
+                randomly-initialized model.
             weights_dataset: String, dataset for pretrained weights.
             weights_input_shape: Tuple, input shape used during weight pretraining.
             cache_dir: Optional string, directory to cache downloaded weights.
@@ -576,11 +754,9 @@ class ResNet(keras.Model):
 
         Raises:
             ValueError: If variant is not recognized.
+            NotImplementedError: If pretrained is True.
 
         Example:
-            >>> # Load pretrained ImageNet model
-            >>> model = ResNet.from_variant("resnet50", pretrained=True)
-            >>>
             >>> # Create with deep supervision for training
             >>> model = ResNet.from_variant("resnet50", enable_deep_supervision=True)
             >>>
@@ -594,14 +770,25 @@ class ResNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        config = cls.MODEL_VARIANTS[variant]
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
+        # House style (`wave_field/model.py`): copy the preset, drop the
+        # metadata key, then `config.update(kwargs)`. Do NOT go back to
+        # splatting named preset fields alongside `**kwargs` -- every
+        # documented override of one of those fields raised
+        # `TypeError: got multiple values for keyword argument`
+        # (MEASURED at all six sites). The `.copy()` is NOT optional and
+        # NOT cosmetic: `config.update(kwargs)` on the shared
+        # `MODEL_VARIANTS[variant]` dict would permanently poison the
+        # class-level table for every later caller. See decisions.md D-127.
+        config = cls.MODEL_VARIANTS[variant].copy()
+        config.pop("description", None)
+        config.update(kwargs)
 
         if input_shape is None:
             input_shape = (224, 224, 3)
 
         logger.info(f"Creating {variant.upper()} model")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
@@ -610,29 +797,21 @@ class ResNet(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant,
-                        dataset=weights_dataset,
-                        cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
 
-            # Check if we need to skip mismatches
-            include_top = kwargs.get("include_top", True)
-            if include_top:
-                pretrained_classes = 1000  # ImageNet classes
-                if num_classes != pretrained_classes:
-                    skip_mismatch = True
-                    logger.info(
-                        f"num_classes ({num_classes}) differs from pretrained "
-                        f"({pretrained_classes}). Will skip classifier weights."
-                    )
+            # The ImageNet head is 1000-wide; a different num_classes or a
+            # different input shape than the checkpoint was trained at means the
+            # affected layers must be skipped rather than refused.
+            if kwargs.get("include_top", True) and num_classes != 1000:
+                skip_mismatch = True
+                logger.info(
+                    f"num_classes ({num_classes}) differs from the pretrained 1000; "
+                    f"classifier weights will be skipped."
+                )
 
             if weights_input_shape and input_shape and weights_input_shape != input_shape:
                 logger.info(
@@ -641,23 +820,17 @@ class ResNet(keras.Model):
                 )
                 skip_mismatch = True
 
-        # Create model
         model = cls(
             num_classes=num_classes,
-            blocks_per_stage=config["blocks_per_stage"],
-            filters_per_stage=config["filters_per_stage"],
-            block_type=config["block_type"],
             input_shape=input_shape,
-            **kwargs
+            **config
         )
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch,
-                    by_name=True
+                    skip_mismatch=skip_mismatch
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")
@@ -672,6 +845,7 @@ class ResNet(keras.Model):
             "blocks_per_stage": self.blocks_per_stage,
             "filters_per_stage": self.filters_per_stage,
             "block_type": self.block_type,
+            "stem_type": self.stem_type,
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
             "normalization_type": self.normalization_type,
@@ -705,7 +879,12 @@ class ResNet(keras.Model):
 # Utility Functions for Deep Supervision
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.deep_supervision import (
+# Re-exported so callers of `models.resnet` get the deep-supervision helpers
+# from the same module as the model itself — `src/train/resnet/train_resnet.py`
+# imports `create_resnet` and `get_model_output_info` in one statement. The
+# import sits here rather than at the top because it is an API re-export, not a
+# dependency of the class above.
+from dl_techniques.utils.deep_supervision import (  # noqa: E402,F401
     get_model_output_info,
     create_inference_model_from_training_model,
 )
@@ -731,8 +910,9 @@ def create_resnet(
             "resnet101", "resnet152").
         num_classes: Integer, number of output classes.
         input_shape: Tuple, input shape.
-        pretrained: Boolean or string. If True, loads pretrained weights.
-            If string, treats it as a path to local weights file.
+        pretrained: If a string, a path to a local weights file. If True, raises
+            NotImplementedError — no public ResNet weights ship with
+            dl_techniques. If False (default), random initialization.
         weights_dataset: String, dataset for pretrained weights.
         weights_input_shape: Tuple, input shape used during weight pretraining.
         cache_dir: Optional string, directory to cache downloaded weights.
@@ -741,19 +921,19 @@ def create_resnet(
     Returns:
         ResNet model instance.
 
+    Raises:
+        NotImplementedError: If pretrained is True.
+
     Example:
-        >>> # Create ResNet-50 with pretrained ImageNet weights
-        >>> model = create_resnet("resnet50", pretrained=True)
-        >>>
-        >>> # Create ResNet-34 as feature extractor
-        >>> model = create_resnet("resnet34", pretrained=True, include_top=False)
+        >>> # Create ResNet-34 as a feature extractor
+        >>> model = create_resnet("resnet34", include_top=False)
         >>>
         >>> # Fine-tune on CIFAR-10 with deep supervision
         >>> model = create_resnet("resnet18", num_classes=10,
         ...                       input_shape=(32, 32, 3),
         ...                       enable_deep_supervision=True)
     """
-    model = ResNet.from_variant(
+    return ResNet.from_variant(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
@@ -763,8 +943,6 @@ def create_resnet(
         cache_dir=cache_dir,
         **kwargs
     )
-
-    return model
 
 
 # ---------------------------------------------------------------------

@@ -1,17 +1,121 @@
 """
-Progressive Focused Transformer for Single Image Super-Resolution (PFT-SR).
+Single-image super-resolution with a chain of windowed transformer blocks whose
+attention maps are inherited layer to layer, then pixel-shuffle upsampling.
 
-This module implements the complete PFT-SR architecture for image super-resolution,
-combining shallow feature extraction, deep feature extraction with PFT blocks,
-and high-quality image reconstruction.
+Super-resolution is an inverse problem in which the missing high-frequency
+content has to be inferred from context, and the useful context is often far from
+the pixel being reconstructed: a repeated texture, an edge continuing across the
+image, a self-similar patch elsewhere in the scene. That argues for attention.
+But attention over a full-resolution feature map is quadratic in pixel count, and
+super-resolution runs at full resolution throughout — there is no downsampling
+pyramid to hide behind — so the standard remedy is Swin's window partition, which
+restricts attention to non-overlapping `ws x ws` tiles and recovers cross-window
+reach by cyclically shifting the tiling in alternate layers. That reduces cost
+from `O((HW)^2 C)` to `O(HW * ws^2 * C)` and is the substrate this model is
+built on.
+
+What "PFT" adds on top of that substrate is the observation that a deep stack of
+such blocks recomputes its attention from scratch at every layer, throwing away
+what the layer below already established about which token pairs matter. The
+progressive focusing step reuses it: the previous block's attention map is
+multiplied elementwise into the current block's raw scores before normalization.
+
+`S_foc = (Q K^T / sqrt(d_h) + M_swmsa) (*) A_prev`, then `A = softmax(S_foc)`
+
+The domain of that product is the detail worth being precise about, because it is
+easy to assume the wrong one. The Hadamard product lands on the **logits**, not on
+the probabilities. Where `A_prev[i, j]` is near zero the focused logit is pulled
+toward *zero*, which is the uniform point of the softmax, not toward `-inf`; a
+pair suppressed by an earlier layer is attenuated but recoverable if this layer's
+own score is large. It also means that because `A_prev >= 0` while `S` is signed,
+the product reverses the ordering among negative logits. Both are properties of
+the mechanism as specified and the layers are trained jointly under them, so
+neither is a defect to be "corrected".
+
+One half of the published method is deliberately absent. The paper pairs
+progressive focusing with sparse matrix multiplication that *skips* computing
+similarities for pairs the inherited map has already ruled out — that is where its
+efficiency claim comes from. In this implementation the sparse path is a stub, and
+`ProgressiveFocusedAttention` raises `NotImplementedError` at construction for any
+`sparsity_mode` other than `'none'` rather than silently running dense attention
+while advertising sparse. Everything here therefore computes dense windowed
+attention: the focusing behaviour reproduces, the speedup does not.
+
+The block itself is pre-norm with two residual branches, `x' = x + DropPath(PFA(Norm1(x), A_prev))`
+followed by `y = x' + DropPath(FFN(Norm2(x')))`, and it returns a *pair* —
+`(features, attn_map)` — because the attention map is a second output that the
+next block consumes. That is why `call` here threads two values through the loop
+rather than one, and why the first block is invoked with a bare tensor while every
+subsequent block receives a two-element **list**: a tuple would be misread by
+Keras' shape machinery as a single shape, and a structured input containing `None`
+raises before `call` is ever reached.
+
+`num_blocks` looks like it describes a multi-resolution hierarchy and does not.
+Every stage runs at the same spatial resolution and the same `embed_dim`; there is
+no patch merging, no downsampling and no channel progression anywhere in the deep
+feature extractor. The stage boundaries affect exactly two things: layer naming,
+and the shift schedule, which restarts at `shift_size = 0` on each stage's first
+block and alternates from there. The attention chain does *not* restart — a single
+`prev_attn_map` is threaded across all stages unbroken from the first block to the
+last. Uniform resolution is precisely what makes that possible, since the map's
+shape `(B*nW, heads, ws^2, ws^2)` is constant throughout.
+
+Around the block chain sits the standard SR skeleton: one 3x3 convolution produces
+shallow features, the block chain refines them, `conv_after_body` projects the
+result and a long skip adds the shallow features back, and only then does
+resolution change. Deferring all upsampling to the very end is the design decision
+that makes the model affordable — every attention operation runs at low-resolution
+input size, and the `scale**2` factor is paid once, by rearranging channels into
+space rather than by convolving at the output size. `'pixelshuffle'` composes 4x
+as two 2x stages, which is cheaper and better-conditioned than a single 16x
+channel expansion; `'pixelshuffledirect'` does the single-step version for
+lightweight models. Note that `'nearest+conv'` derives its stage count as
+`int(log2(scale))` and so silently under-upsamples for non-power-of-two scales,
+and that `'pixelshuffle'` accepts only scales 2, 3 and 4.
+
+Two constraints follow from the windowing and bind the caller. Input height and
+width must be divisible by `window_size`, since the partition does not pad. More
+restrictively, shifted-window blocks need **statically known** spatial dimensions:
+the SW-MSA mask encodes which regions became non-adjacent under the cyclic shift
+and is materialized at build time, so it cannot be constructed from dynamic
+`None` dims. This model is not resolution-agnostic at call time the way a purely
+convolutional SR network is.
+
+Two implementation choices are deliberate and load-bearing. The stochastic-depth
+schedule comes from `linear_drop_path_rates`, which returns plain Python floats;
+an earlier `keras.ops.linspace` plus `.item()` formulation raised `AttributeError`
+on TF eager tensors and left the entire `drop_path_rate > 0` branch dead, so no
+backend-tensor linspace belongs here. And `build` ends with a concrete dummy
+forward pass through `self.call`. The sub-layers are created in `build` but would
+otherwise construct their weights lazily on first call; `build_from_config` during
+a `.keras` reload recreates them unbuilt, and weight restoration then fails on
+layers that "were never built". Forcing materialization here is what makes the
+round-trip work — and it matters more than usual because the blocks are held in a
+nested `List[List[Layer]]`, a structure that can otherwise restore fresh weights
+while every layer count and path still matches.
 
 References:
-    Long, Wei, et al. "Progressive Focused Transformer for Single Image Super-Resolution."
-    CVPR 2025. https://arxiv.org/abs/2503.20337
+    - Long et al., 2025. Progressive Focused Transformer for Single Image
+      Super-Resolution. CVPR. (https://arxiv.org/abs/2503.20337)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
+      Shifted Windows. ICCV. (https://arxiv.org/abs/2103.14030)
+      The window partition, cyclic shift and SW-MSA mask reused wholesale.
+    - Liang et al., 2021. SwinIR: Image Restoration Using Swin Transformer.
+      (https://arxiv.org/abs/2108.10257)
+      The shallow-feature / deep-feature / long-skip / upsample skeleton.
+    - Shi et al., 2016. Real-Time Single Image and Video Super-Resolution Using an
+      Efficient Sub-Pixel Convolutional Neural Network.
+      (https://arxiv.org/abs/1609.05158)
+      The pixel-shuffle upsampler.
+    - Dong et al., 2022. CSWin Transformer: A General Vision Transformer Backbone
+      with Cross-Shaped Windows. (https://arxiv.org/abs/2107.00652)
+      Origin of LePE, the depthwise positional encoding applied to values.
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      (https://arxiv.org/abs/1603.09382)
 """
 
 import keras
-from typing import Optional, List, Literal
+from typing import Any, Dict, Optional, List, Literal
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -22,8 +126,10 @@ class PFTSR(keras.Model):
     """
     Progressive Focused Transformer for Single Image Super-Resolution.
 
-    A state-of-the-art transformer-based super-resolution model that achieves
-    excellent performance through progressive focused attention mechanism.
+    The PFT-SR architecture of Long et al. (CVPR 2025), which the authors report
+    as state-of-the-art on single image super-resolution benchmarks through its
+    progressive focused attention mechanism. This Keras port has not been trained
+    or benchmarked here; no performance claim is made for it.
 
     The architecture consists of:
     1. Shallow feature extraction (single conv layer)
@@ -42,11 +148,13 @@ class PFTSR(keras.Model):
         num_blocks: List of integers, number of PFT blocks in each stage.
             Default: [4, 4, 4, 6, 6, 6].
         num_heads: Integer, number of attention heads. Default: 6.
-        window_size: Integer, size of the attention window. Default: 8.
+        window_size: Integer, size of the attention window. Default: 8. Note the
+            two paper-sourced variants override this to 32 (see MODEL_VARIANTS);
+            8 is only this constructor's own fallback.
         mlp_ratio: Float, expansion ratio for MLP. Default: 2.0.
         qkv_bias: Boolean, whether to use bias in QKV projections. Default: True.
-        attention_dropout: Float, dropout rate for attention. Default: 0.0.
-        projection_dropout: Float, dropout rate for projections. Default: 0.0.
+        attention_dropout_rate: Float, dropout rate for attention. Default: 0.0.
+        projection_dropout_rate: Float, dropout rate for projections. Default: 0.0.
         drop_path_rate: Float, stochastic depth rate. Default: 0.0.
         norm_type: String, normalization type ('layer_norm' or 'rms_norm'). Default: 'layer_norm'.
         use_lepe: Boolean, whether to use LePE. Default: True.
@@ -74,10 +182,67 @@ class PFTSR(keras.Model):
         >>> print(sr_image.shape)
         (1, 192, 192, 3)
         >>>
-        >>> # Create lightweight variant
-        >>> model_light = PFTSR(scale=4, embed_dim=48, num_blocks=[4, 4, 4, 4])
+        >>> # The paper's PFT_light config, spelled out explicitly
+        >>> model_light = PFTSR(scale=4, embed_dim=52, num_blocks=[2, 4, 6, 6, 6],
+        ...                     num_heads=4, mlp_ratio=1.0, window_size=32)
         >>> sr_image_light = model_light(lr_image)
     """
+
+    #: Public-name registry of the three named PFT-SR sizes (models/CLAUDE.md
+    #: Axis 2). Hoisted verbatim out of ``create_pft_sr``'s body on 2026-08-19,
+    #: where it was a local ``configs`` dict that nothing outside the function
+    #: could enumerate. The remaining ``PFTSR(...)`` arguments the factory passes
+    #: (``window_size``, ``upsampler``, the dropout rates, ...) are IDENTICAL
+    #: across all three variants and stay in the factory rather than being
+    #: restated three times here.
+    #: DECISION plan-2026-08-23T091307-9a110062/D-463
+    #: ``light`` and ``base`` are the paper's own two released configs, quoted field
+    #: for field from the official training YAMLs so this package's "based on the
+    #: CVPR 2025 paper" claim is true of its numbers and not just its mechanism:
+    #:   base  <- options/train/001_PFT_SRx2_scratch.yml       (network_g)
+    #:   light <- options/train/101_PFT_light_SRx2_scratch.yml (network_g)
+    #:   https://github.com/CVL-UESTC/PFT-SR
+    #: ``window_size`` is listed HERE, not left to the constructor default of 8,
+    #: because 32 is part of what those two rows quote -- the published models are
+    #: 32x32-window models and an 8x8 window is a different architecture wearing
+    #: their name. Note the consequence before "fixing" it back: at window_size 32
+    #: every shifted block materializes a (1, 1024, 1024) non-trainable
+    #: ``attention_mask`` buffer, so ``count_params()`` reports ~13.2M for ``light``
+    #: and ~34.4M for ``base`` while the TRAINABLE counts are 636,691 and 18,656,163
+    #: (MEASURED). The inflated total is a mask-buffer artifact, not model size.
+    #: ``repo_medium`` is this repo's own tier and has NO upstream counterpart --
+    #: the official repo publishes exactly two configs, PFT and PFT_light, with no
+    #: third size. It was called ``large`` while ``base`` was (wrongly) 60-wide; at
+    #: the published 240 that name became false in this table's own terms, since 80
+    #: now sits BETWEEN the two published sizes rather than above them.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        # PFT_light, 101_PFT_light_SRx2_scratch.yml network_g
+        'light': {
+            'embed_dim': 52,
+            'num_blocks': [2, 4, 6, 6, 6],
+            'num_heads': 4,
+            'mlp_ratio': 1.0,
+            'window_size': 32,
+        },
+        # PFT, 001_PFT_SRx2_scratch.yml network_g
+        'base': {
+            'embed_dim': 240,
+            'num_blocks': [4, 4, 4, 6, 6, 6],
+            'num_heads': 6,
+            'mlp_ratio': 2.0,
+            'window_size': 32,
+        },
+        # Repo-original. Not in the paper, not in the official repo, not a rung
+        # above ``base``. Kept because it is a cheap mid-size model, not because
+        # anything published looks like it.
+        'repo_medium': {
+            'embed_dim': 80,
+            'num_blocks': [6, 6, 6, 8, 8, 8],
+            'num_heads': 8,
+            'mlp_ratio': 2.0,
+            'window_size': 8,
+        }
+    }
 
     def __init__(
             self,
@@ -89,8 +254,8 @@ class PFTSR(keras.Model):
             window_size: int = 8,
             mlp_ratio: float = 2.0,
             qkv_bias: bool = True,
-            attention_dropout: float = 0.0,
-            projection_dropout: float = 0.0,
+            attention_dropout_rate: float = 0.0,
+            projection_dropout_rate: float = 0.0,
             drop_path_rate: float = 0.0,
             norm_type: Literal['layer_norm', 'rms_norm'] = 'layer_norm',
             use_lepe: bool = True,
@@ -110,8 +275,8 @@ class PFTSR(keras.Model):
         self.window_size = window_size
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
-        self.attention_dropout = attention_dropout
-        self.projection_dropout = projection_dropout
+        self.attention_dropout_rate = attention_dropout_rate
+        self.projection_dropout_rate = projection_dropout_rate
         self.drop_path_rate = drop_path_rate
         self.norm_type = norm_type
         self.use_lepe = use_lepe
@@ -166,8 +331,8 @@ class PFTSR(keras.Model):
                     shift_size=shift_size,
                     mlp_ratio=self.mlp_ratio,
                     qkv_bias=self.qkv_bias,
-                    attention_dropout=self.attention_dropout,
-                    projection_dropout=self.projection_dropout,
+                    attention_dropout_rate=self.attention_dropout_rate,
+                    projection_dropout_rate=self.projection_dropout_rate,
                     drop_path_rate=self.dpr[block_idx],
                     norm_type=self.norm_type,
                     use_lepe=self.use_lepe,
@@ -300,9 +465,37 @@ class PFTSR(keras.Model):
         """
         Build nearest neighbor + conv upsampler.
 
+        Only power-of-two scales are reachable here: the stage count is
+        ``int(log2(scale))`` doubling stages, so any other scale would silently emit
+        the wrong resolution (``scale=3`` gives one stage, i.e. a 2x output for a 3x
+        request).
+
         Returns:
             Sequential model for upsampling.
+
+        Raises:
+            ValueError: If ``scale`` is not a power of two.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-078
+        # This upsampler can only realize powers of two, and it used to accept anything.
+        # `_build_pixelshuffle_upsampler` has always raised for unsupported scales; this
+        # branch did not, so `PFTSR(scale=3, upsampler='nearest+conv')` built happily and
+        # returned a 2x image for a 3x request. The module docstring named the defect and
+        # shipped it anyway. `create_pft_sr` hardcodes `upsampler='pixelshuffle'`, so only
+        # direct `PFTSR(...)` construction reaches here — which is exactly why it went
+        # unnoticed, not a reason to leave it. Do NOT "fix" this by rounding the stage
+        # count up: three doubling stages give 8x, not 3x. See decisions.md D-078.
+        if self.scale < 1 or (self.scale & (self.scale - 1)) != 0:
+            raise ValueError(
+                f"Unsupported scale for upsampler='nearest+conv': {self.scale}. "
+                f"This upsampler stacks int(log2(scale)) doubling stages, so it can "
+                f"only realize powers of two (1, 2, 4, 8, ...); scale={self.scale} "
+                f"would silently emit a "
+                f"{2 ** max(self.scale.bit_length() - 1, 0) if self.scale > 0 else 0}x "
+                f"image. "
+                f"Use upsampler='pixelshuffle' (supports 2, 3 and 4) instead."
+            )
+
         layers = []
 
         for i in range(int(keras.ops.log2(self.scale))):
@@ -384,8 +577,8 @@ class PFTSR(keras.Model):
             "window_size": self.window_size,
             "mlp_ratio": self.mlp_ratio,
             "qkv_bias": self.qkv_bias,
-            "attention_dropout": self.attention_dropout,
-            "projection_dropout": self.projection_dropout,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "projection_dropout_rate": self.projection_dropout_rate,
             "drop_path_rate": self.drop_path_rate,
             "norm_type": self.norm_type,
             "use_lepe": self.use_lepe,
@@ -396,7 +589,8 @@ class PFTSR(keras.Model):
 
 def create_pft_sr(
         scale: int = 4,
-        variant: Literal['base', 'light', 'large'] = 'base'
+        variant: Literal['base', 'light', 'repo_medium'] = 'base',
+        **kwargs: Any,
 ) -> PFTSR:
     """
     Factory function to create PFT-SR models with predefined configurations.
@@ -404,9 +598,16 @@ def create_pft_sr(
     Args:
         scale: Integer, upsampling scale factor (2, 3, or 4).
         variant: String, model variant:
-            - 'light': Lightweight model (48 channels, [4, 4, 4, 4] blocks)
-            - 'base': Base model (60 channels, [4, 4, 4, 6, 6, 6] blocks)
-            - 'large': Large model (80 channels, [6, 6, 6, 8, 8, 8] blocks)
+            - 'light': the paper's PFT_light (52 channels, [2, 4, 6, 6, 6] blocks,
+              4 heads, mlp_ratio 1.0, window 32)
+            - 'base': the paper's PFT (240 channels, [4, 4, 4, 6, 6, 6] blocks,
+              6 heads, mlp_ratio 2.0, window 32)
+            - 'repo_medium': repo-original mid-size tier (80 channels,
+              [6, 6, 6, 8, 8, 8] blocks, window 8). No published counterpart --
+              the official repo ships only the two configs above.
+        **kwargs: Any :class:`PFTSR` constructor argument, overriding the variant
+            table. This is the only route to ``window_size``, ``drop_path_rate``,
+            ``upsampler``, ``norm_type``, ``use_lepe`` and the dropout knobs.
 
     Returns:
         PFTSR model instance.
@@ -418,51 +619,31 @@ def create_pft_sr(
         >>> # Create lightweight model for 2x SR
         >>> model_light = create_pft_sr(scale=2, variant='light')
         >>>
-        >>> # Create large model for 4x SR
-        >>> model_large = create_pft_sr(scale=4, variant='large')
+        >>> # Create the repo-original mid-size model for 4x SR
+        >>> model_medium = create_pft_sr(scale=4, variant='repo_medium')
     """
-    configs = {
-        'light': {
-            'embed_dim': 48,
-            'num_blocks': [4, 4, 4, 4],
-            'num_heads': 6,
-            'mlp_ratio': 2.0,
-        },
-        'base': {
-            'embed_dim': 60,
-            'num_blocks': [4, 4, 4, 6, 6, 6],
-            'num_heads': 6,
-            'mlp_ratio': 2.0,
-        },
-        'large': {
-            'embed_dim': 80,
-            'num_blocks': [6, 6, 6, 8, 8, 8],
-            'num_heads': 8,
-            'mlp_ratio': 2.0,
-        }
-    }
-
-    if variant not in configs:
+    if variant not in PFTSR.MODEL_VARIANTS:
         raise ValueError(
             f"Unknown variant: {variant}. "
-            f"Available variants: {list(configs.keys())}"
+            f"Available variants: {list(PFTSR.MODEL_VARIANTS.keys())}"
         )
 
-    config = configs[variant]
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-118: `config.update(kwargs)` is the
+    # house `from_variant` shape. The `.copy()` + `list(...)` beneath it protect the
+    # LOCAL dict that `config.update(kwargs)` then mutates -- without them a caller's
+    # override would be written straight into `PFTSR.MODEL_VARIANTS[variant]`. They do
+    # NOT repair a model-side alias, and it is worth saying why the obvious probe
+    # misleads here: `m.num_blocks is PFTSR.MODEL_VARIANTS[variant]['num_blocks']` reads
+    # False even on the pre-fix code, because Keras 3 auto-tracking rewraps any list
+    # assigned to a Layer/Model attribute as a NEW `TrackedList`. MEASURED against the
+    # unfixed source: `m.num_blocks.append(99)` left the class table at [4,4,4,6,6,6].
+    # The nine arguments this call used to spell out (`in_channels=3`,
+    # `window_size=8`, `qkv_bias=True`, the three dropouts, `norm_type`, `use_lepe`,
+    # `upsampler`) were each byte-identical to `PFTSR.__init__`'s own default, and
+    # hard-coding them is exactly what made every one of them unreachable through
+    # this factory. Do NOT re-inline them.
+    config = PFTSR.MODEL_VARIANTS[variant].copy()
+    config['num_blocks'] = list(config['num_blocks'])
+    config.update(kwargs)
 
-    return PFTSR(
-        scale=scale,
-        in_channels=3,
-        embed_dim=config['embed_dim'],
-        num_blocks=config['num_blocks'],
-        num_heads=config['num_heads'],
-        window_size=8,
-        mlp_ratio=config['mlp_ratio'],
-        qkv_bias=True,
-        attention_dropout=0.0,
-        projection_dropout=0.0,
-        drop_path_rate=0.0,
-        norm_type='layer_norm',
-        use_lepe=True,
-        upsampler='pixelshuffle',
-    )
+    return PFTSR(scale=scale, **config)

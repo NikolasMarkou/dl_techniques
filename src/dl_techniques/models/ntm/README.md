@@ -80,8 +80,14 @@ NeuralTuringMachine              -> (batch, seq, output_dim)
 | Variant | memory | controller | heads (read / write) |
 |---------|--------|------------|----------------------|
 | `tiny` | 32 x 16 | LSTM, 64 | 1 / 1 |
-| `base` | 128 x 32 | LSTM, 256 | 1 / 1 |
+| `base` | 128 x 20 | LSTM, 256 | 1 / 1 |
 | `large` | 256 x 64 | LSTM, 512 | 2 / 2 |
+
+`base`'s memory shape is the paper's: Graves et al. 2014
+([arXiv:1410.5401](https://arxiv.org/abs/1410.5401)) Tables 1 and 2 use `128 x 20`
+in every one of their ten experiment rows. Its controller width (256) is not from
+those tables, and `tiny` / `large` are this repo's own tiers with no published
+counterpart.
 
 Any `NTMConfig` field passed as a keyword to `create_ntm_variant` /
 `NTMModel.from_variant` overrides the preset (`shift_range`, `controller_type`,

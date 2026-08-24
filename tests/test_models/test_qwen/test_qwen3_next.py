@@ -28,6 +28,8 @@ from dl_techniques.models.qwen.qwen3_next import (
 )
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 class TestQwen3NextModelBasic:
     """Test basic Qwen3 Next model functionality with hybrid block structure."""
 
@@ -281,7 +283,14 @@ class TestQwen3NextModelConfigurations:
             pytest.skip("80b variant too large even with overrides")
 
     def test_different_head_configurations(self):
-        """Test different attention head configurations."""
+        """The head layout must reach the attention projections.
+
+        The logits shape is ``(1, 16, vocab_size)`` under every layout, and
+        ``model.head_dim == hidden_size // num_attention_heads`` is a knob ECHO
+        of a value the constructor computed and stored. The head layout is
+        structural -- ``num_key_value_heads`` sets the K/V projection width --
+        so the weight-shape signature is the discriminating fact.
+        """
         configs = [
             # Standard configuration
             {'num_attention_heads': 8, 'num_key_value_heads': 8, 'hidden_size': 128},
@@ -290,6 +299,34 @@ class TestQwen3NextModelConfigurations:
             # Extreme GQA
             {'num_attention_heads': 6, 'num_key_value_heads': 1, 'hidden_size': 120},
         ]
+
+        def _build(config):
+            model_config = {
+                'vocab_size': 500,
+                'hidden_size': config['hidden_size'],
+                'num_layers': 2,
+                'num_attention_heads': config['num_attention_heads'],
+                'num_key_value_heads': config['num_key_value_heads'],
+                'max_seq_len': 256,
+                
+                'num_experts': 1,
+                'num_experts_per_tok': 1,
+            }
+            model = Qwen3Next(**model_config)
+            model(keras.ops.zeros((1, 16), dtype='int32'))
+            return model
+
+        builders = {i: (lambda c=c: _build(c)) for i, c in enumerate(configs)}
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="head configuration")
+        # Stronger than "different": GQA (config 1) shares K/V across query
+        # heads, so at the SAME hidden_size it must hold strictly FEWER
+        # parameters than full multi-head attention (config 0).
+        params = [sum(int(np.prod(w)) for w in sigs[i]) for i in (0, 1)]
+        assert params[1] < params[0], (
+            "num_key_value_heads=2 did not shrink the K/V projections relative "
+            f"to num_key_value_heads=8: {params[1]} vs {params[0]} parameters"
+        )
 
         for config in configs:
             model_config = {
@@ -317,7 +354,12 @@ class TestQwen3NextModelConfigurations:
             assert model.head_dim == expected_head_dim
 
     def test_different_moe_configurations(self):
-        """Test different MoE configurations."""
+        """The MoE layout must reach the parameterisation.
+
+        ``model.num_experts == ...`` and its sibling are knob ECHOES of stored
+        kwargs. The expert count is structural: each expert is its own set of
+        FFN weights, so the signature and the parameter count carry the claim.
+        """
         base_config = {
             'vocab_size': 600,
             'hidden_size': 96,
@@ -335,6 +377,21 @@ class TestQwen3NextModelConfigurations:
             # Larger MoE
             {'num_experts': 8, 'num_experts_per_tok': 2, 'moe_intermediate_size': 96},
         ]
+
+        def _build(moe_config):
+            model = Qwen3Next(**{**base_config, **moe_config})
+            model(keras.ops.zeros((1, 16), dtype='int32'), training=False)
+            return model
+
+        builders = {i: (lambda m=m: _build(m)) for i, m in enumerate(moe_configs)}
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="MoE configuration")
+        # Stronger than "different": more experts means strictly more
+        # parameters. A dropped MoE config would leave all three identical.
+        params = [sum(int(np.prod(w)) for w in sigs[i]) for i in range(len(moe_configs))]
+        assert params == sorted(params) and params[0] < params[-1], (
+            f"num_experts did not grow the parameter count: {params}"
+        )
 
         for moe_config in moe_configs:
             config = {**base_config, **moe_config}
@@ -584,7 +641,7 @@ class TestQwen3NextModelFactories:
             "tiny",
             task_type="classification",
             num_labels=num_labels,
-            classifier_dropout=0.5
+            classifier_dropout_rate=0.5
         )
         # Check that the dropout layer was created with the correct rate
         classifier_dropout_layer = dropout_model.get_layer("classifier_dropout")
@@ -731,7 +788,7 @@ class TestQwen3NextModelErrorHandling:
             create_qwen3_next("tiny", task_type="classification", num_labels=-1)
 
         # Invalid pooling strategy
-        with pytest.raises(ValueError, match="pooling_strategy must be 'cls' or 'mean'"):
+        with pytest.raises(ValueError, match="pooling_strategy must be 'last', 'cls' or 'mean'"):
             create_qwen3_next("tiny", task_type="classification", num_labels=3, pooling_strategy="max")
 
 
@@ -995,6 +1052,111 @@ class TestQwen3NextIntegration:
         # Outputs should be different
         output_diff = keras.ops.mean(keras.ops.abs(output_with_mask - output_without_mask))
         assert float(output_diff) > 1e-6, "Attention mask should affect outputs"
+
+
+class TestQwen3NextCausalMasking:
+    """Qwen3Next is a decoder-only causal LM and must not attend to the future.
+
+    Ported from ``test_qwen3.py::TestQwen3CausalMasking``, which this file had no
+    counterpart to. MEASURED 2026-08-21: **the string ``causal`` did not occur
+    ANYWHERE in this module** -- ``grep -c -i causal`` returned 0 -- while
+    ``Qwen3Next.call`` builds a ``build_causal_attention_mask`` under a comment
+    saying "without this every token attended to every future token."
+
+    The one causal-looking fixture in this directory does not close the gap.
+    ``test_components.py:148`` builds a ``tf.linalg.band_part`` lower-triangular
+    mask, but its only consumer, ``test_forward_pass_with_attention_mask``
+    (:328), asserts a SHAPE and non-NaN-ness -- **satisfied identically by that
+    mask's own inverse**, i.e. by an anti-causal model.
+
+    ``test_attention_mask_effect`` in this file is the same shape one level up:
+    "masked output != unmasked output" is true of ANY mask, an inverted one
+    included.
+
+    This is a MISSING GUARD OVER A CORRECT PATH. The leak is exactly 0.0 at HEAD;
+    what was absent was anything that would notice if it stopped being.
+
+    Three arms, per the house causal contract:
+
+    1. changing the LAST token must not move ANY earlier logit (exact 0.0);
+    2. it must move its OWN logits (else arm 1 is a model ignoring its input);
+    3. **negative control** -- the same two sequences pushed through the SAME
+       BUILT blocks with an all-ones ATTEND mask must let the perturbation reach
+       the prefix. Without arm 3, arm 1's zero could be explained by anything.
+
+    MEASURED (GPU, ``CUDA_VISIBLE_DEVICES=1``): leak ``0.000000e+00``, signal
+    ``1.744376e-01``, all-attend control leak ``2.677717e-01``. ``dropout_rate``
+    is pinned to 0.0 and ``training=False`` is explicit; a single stochastic draw
+    between the two forward passes would make arm 1 nonzero for a reason that has
+    nothing to do with masking.
+    """
+
+    CFG = {
+        'vocab_size': 512,
+        'hidden_size': 128,
+        'num_layers': 2,
+        'num_attention_heads': 8,
+        'num_key_value_heads': 2,
+        'max_seq_len': 64,
+        'num_experts': 1,
+        'num_experts_per_tok': 1,
+        'dropout_rate': 0.0,
+    }
+    LAST = 7
+
+    @staticmethod
+    def _pair():
+        """Two sequences differing ONLY in the final position."""
+        a = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int32)
+        b = np.array([[1, 2, 3, 4, 5, 6, 7, 99]], dtype=np.int32)
+        return a, b
+
+    def _logits(self):
+        keras.utils.set_random_seed(1234)
+        model = Qwen3Next(**self.CFG)
+        a, b = self._pair()
+        la = keras.ops.convert_to_numpy(model(a, training=False))
+        lb = keras.ops.convert_to_numpy(model(b, training=False))
+        return model, la, lb
+
+    def test_future_does_not_affect_past(self):
+        _, la, lb = self._logits()
+        for pos in range(self.LAST):
+            leak = float(np.abs(la[0, pos] - lb[0, pos]).max())
+            assert leak == 0.0, (
+                f"position {pos} moved by {leak:.6e} when only position "
+                f"{self.LAST} changed -- the future is leaking into the past"
+            )
+
+    def test_the_probe_is_not_vacuous(self):
+        """The perturbation must actually change SOMETHING."""
+        _, la, lb = self._logits()
+        delta = float(np.abs(la[0, self.LAST] - lb[0, self.LAST]).max())
+        assert delta > 1e-3, (
+            f"changing position {self.LAST} moved its own logits by only "
+            f"{delta:.6e}; the causality assertion above would be vacuous"
+        )
+
+    def test_without_the_mask_the_same_tokens_do_leak(self):
+        """Negative control: the isolation is due to the MASK, same weights."""
+        model, _, _ = self._logits()
+        a, b = self._pair()
+
+        def _forward_unmasked(ids):
+            h = model.embeddings(ids)
+            batch, seq = keras.ops.shape(h)[0], keras.ops.shape(h)[1]
+            allow = keras.ops.ones((batch, seq, seq), dtype="bool")
+            for block in model.blocks:
+                h = block(h, attention_mask=allow, training=False)
+            return keras.ops.convert_to_numpy(model.lm_head(model.final_norm(h)))
+
+        ua, ub = _forward_unmasked(a), _forward_unmasked(b)
+        leak = float(np.abs(ua[0, :self.LAST] - ub[0, :self.LAST]).max())
+        assert leak > 1e-3, (
+            f"even with an all-attend mask the prefix did not move (max |delta| "
+            f"= {leak:.6e}); the masked run's agreement would then not be "
+            f"attributable to the causal mask"
+        )
 
 
 if __name__ == "__main__":

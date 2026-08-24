@@ -1,18 +1,11 @@
 """
 SAM 3 Training Wrapper: one packed supervision tensor for one joint loss.
-=========================================================================
 
 :class:`Sam3TrainingModel` wraps :class:`Sam3Image` and emits ONE packed
 supervision tensor. That is all it does, and the reason is that the SAM 3
 detection loss is JOINT: one Hungarian assignment is shared across the
 classification, box, presence and mask terms, so all four must be seen by ONE
 :class:`~dl_techniques.losses.sam3_detection_loss.Sam3DetectionLoss` object.
-
-Based on:
----------
-- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-- Carion, N. et al. (2020). DETR -- the Hungarian set-prediction loss this
-  packing serves.
 
 Key Features:
 ------------
@@ -76,6 +69,11 @@ Measured caveats:
   four times in this repository). The packing below is pure ``keras.ops``. The
   loss module's own dependency is sanctioned as training-only and never traced
   in a forward path; this file inherits no such exemption and takes none.
+
+References:
+    Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
+    Carion, N. et al. (2020). DETR -- the Hungarian set-prediction loss this
+    packing serves.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple

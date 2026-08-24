@@ -1,110 +1,99 @@
 """
-Mamba State Space Model Implementation
-============================================
+Mamba (v1) selective state-space encoder producing contextual hidden states, plus a
+factory that joins it to any NLP task head.
 
-Mamba provides an alternative to the popular Transformer architecture for
-modeling long sequences. It is built upon the structured state space
-model (SSM) paradigm, but introduces a critical "selection" mechanism that
-allows it to operate with linear-time complexity in sequence length,
-a significant improvement over the quadratic complexity of attention.
+Attention buys unrestricted token-to-token routing at a price that is quadratic in
+sequence length; a recurrent state buys `O(L)` at the price of squeezing the entire
+past through a fixed-size vector. Classical structured state-space models take the
+recurrent side of that trade and make it work by being linear and time-*invariant*:
 
-Architecturally, the model consists of a stack of Mamba blocks. Each block
-applies a selective SSM to its input, allowing it to modulate how much
-information is propagated or forgotten at each step based on the content
-of the input sequence itself.
+`h'(t) = A h(t) + B x(t)`,  `y(t) = C h(t) + D x(t)`
 
-The foundational mathematical concept is the linear time-invariant (LTI)
-state space model, a cornerstone of control theory. A continuous-time SSM
-is defined by the differential equations:
-    1. h'(t) = Ah(t) + Bx(t)  (State equation)
-    2. y(t) = Ch(t) + Dx(t)  (Output equation)
-Here, x(t) is the input, h(t) is a latent state vector, and y(t) is the
-output. The matrices (A, B, C, D) are the model parameters that govern
-the system's dynamics.
+discretized with a step `Δ` into `h_k = Ā h_{k-1} + B̄ x_k`, `y_k = C h_k + D x_k`.
+Time-invariance is exactly what makes such a model fast — with fixed `Ā, B̄` the
+whole recurrence is a convolution and can be evaluated by FFT — and it is also
+exactly what makes it weak on language. A system whose dynamics do not depend on
+what it is reading cannot decide to remember one token and discard the next; it
+applies the same decay to everything.
 
-To be used in a deep learning model, this continuous system is discretized
-into a recurrent formulation using a step size Δ:
-    h_k = Āh_{k-1} + B̄x_k
-    y_k = Ch_k + Dx_k
+Mamba's selection mechanism gives up time-invariance to buy that decision. `Δ`, `B`
+and `C` are projected from the input at every position, so the dynamics are
+re-chosen per token: a large `Δ` drives `exp(ΔA)` toward zero and wipes the state
+(reset on a delimiter), a small `Δ` drives it toward one and holds the state across
+irrelevant filler. `A` and `D` remain input-independent, which is what keeps the
+recurrence a *linear* system for any fixed input and therefore keeps it cheap and
+stable; the content-dependence enters only through the coefficients.
 
-where Ā and B̄ are derived from A, B, and Δ. This recurrent form can
-model sequences, but its time-invariant nature (fixed Ā, B̄) limits its
-expressiveness for complex data like language.
+Discretization here follows the reference implementation's asymmetric choice:
+`Ā = exp(ΔA)` is the exact zero-order-hold solution, while `B̄x` is formed as the
+first-order `Δ · B · x` rather than the exact `(ΔA)^-1 (exp(ΔA) - I) ΔB`. The
+approximation is harmless because `B` is itself a learned function of the input and
+can absorb the difference. `A` is stored as `A_log` and used as `-exp(A_log)`, so
+every eigenvalue is negative by construction and `exp(ΔA)` lies in `(0, 1)` for any
+positive `Δ` — the recurrence cannot diverge no matter what the selection network
+emits. The S4D-real initialization fills row `d` of `A` with `[1, 2, ..., d_state]`,
+giving each state channel a distinct decay rate; `dt_proj`'s bias is initialized to
+the inverse-softplus of a log-uniform draw in `[dt_min, dt_max]`, so channels also
+start with a spread of timescales rather than all forgetting at the same rate.
 
-Mamba's key innovation is to make the SSM parameters input-dependent,
-thereby breaking the time-invariance and enabling selectivity. The crucial
-parameters (step size Δ, and projections B and C) are no longer fixed but
-are instead computed dynamically from the input tokens x_k at each time
-step. This allows the model to selectively remember relevant information
-and forget irrelevant details by changing the system dynamics on the fly.
-For instance, a large Δ allows the state to be forgotten quickly, while a
-small Δ preserves it. This content-aware reasoning is what allows Mamba
-to effectively manage long-range dependencies.
+**The scan in this implementation is sequential, not parallel.** `_selective_scan`
+runs a `keras.ops.while_loop` over the time axis, one `scatter_update` per step.
+That is `O(L)` in arithmetic, as the paper promises, but it has no parallelism
+across time and no fused kernel, so wall-clock training throughput is far below
+attention at the sequence lengths where Mamba's asymptotics ought to win. The
+hardware-aware parallel scan the paper relies on is not implemented here; earlier
+revisions of this docstring claimed a "hardware-optimized selective scan" and were
+wrong. Treat this package as an architecturally faithful reference, not a
+performance one.
 
-While this selection mechanism makes the model powerful, it prevents the
-use of a fast parallel convolutional computation method available to LTI
-SSMs. To maintain efficiency, Mamba employs a hardware-aware parallel
-scan algorithm. This algorithm allows the recurrent computation to be
-executed efficiently on modern accelerators like GPUs, achieving linear-time
-complexity while preserving the model's selective capabilities.
+A block projects to `expand * d_model`, splits into a signal path `x` and a gate
+path `z`, runs `x` through a depthwise `Conv1D` with `padding='causal'` and SiLU,
+computes `Δ, B, C` from the convolved signal, scans, adds the `D * x` skip, and
+gates by `silu(z)` before projecting back. Causality is structural rather than
+enforced: the convolution is causal and the recurrence only ever reads `h_{k-1}`,
+so there is no attention mask to get wrong and no way for a future token to leak
+backwards. For the same reason there are no positional embeddings — order is
+carried by the recurrence itself.
 
-The Mamba architecture uses a selective state space mechanism that allows
-the model to efficiently capture long-range dependencies in sequences while
-maintaining linear-time complexity. Unlike attention-based models, Mamba
-uses a data-dependent state space model with learned selective parameters.
+Residual addition is deferred rather than performed inside the block. Each
+`MambaResidualBlock` returns `(mamba_output, running_residual)` and adds the
+*previous* residual before normalizing, with the final addition done once in the
+model's tail. This mirrors the reference implementation's fused add-norm and keeps
+the residual stream unnormalized end to end. The consequence for anyone composing
+blocks by hand is sharp: calling `block(x)` and discarding the second return value
+produces a network with no skip connections at all, and it will still run.
 
-Usage Examples:
---------------
+The embedding is created with `mask_zero=False` deliberately. Nothing in the
+encoder consumes a padding mask — the recurrence has no notion of an ignorable
+position — so `create_mamba_with_head` builds the mask from `input_ids !=
+pad_token_id` at the boundary and hands it to the task head, which is the only
+component that can act on it (masked pooling). Padded positions still update the
+state, so a batch's results depend on its padding; right-padding a causal model
+leaves the valid prefix intact, left-padding does not.
 
-.. code-block:: python
-
-    import keras
-    from dl_techniques.models.mamba import Mamba
-
-    # 1. Create Mamba model with predefined variant
-    mamba_model = Mamba.from_variant("base", vocab_size=50257)
-
-    # 2. Load from local weights file
-    mamba_model = Mamba.from_variant("large", vocab_size=50257,
-                                      pretrained="path/to/weights.keras")
-
-    # 3. Create Mamba with custom configuration
-    mamba_model = Mamba(
-        vocab_size=50257,
-        d_model=768,
-        num_layers=24,
-        d_state=16,
-        d_conv=4,
-        expand=2
-    )
-
-    # 4. Use the model
-    inputs = {
-        "input_ids": keras.random.randint((2, 512), 0, 50257, dtype="int32")
-    }
-    outputs = mamba_model(inputs)
-    print(outputs["last_hidden_state"].shape)  # (2, 512, 768)
-
-Key Features:
-- Linear-time complexity O(L) vs O(L²) for attention
-- Selective state space mechanism with data-dependent parameters
-- Efficient long-range dependency modeling
-- Hardware-optimized selective scan implementation
-- Modular architecture separating encoding from task-specific heads
-
-Architecture:
-    Input (tokens) → Embedding → [MambaLayer × N] → Output (hidden states)
-
-    Each MambaLayer contains:
-    - Input projection (splits into x and z paths)
-    - Causal 1D convolution
-    - Selective SSM with data-dependent Δ, B, C parameters
-    - Output gating and projection
+Two things were wrong here until 2026-08-14 and are worth stating as fixed rather
+than leaving a reader to re-derive. `pretrained=True` used to log a warning and
+return a randomly initialized model; it now raises `NotImplementedError`, because no
+public Mamba checkpoints ship with `dl_techniques` and a caller who asks for trained
+weights must not silently receive untrained ones. Pass a local `.keras` path to
+`pretrained` instead. And `MODEL_VARIANTS` did not reproduce the paper's size table:
+370M carried 24 layers instead of 48, 790M carried `d_model` 1024 instead of 1536 and
+1.4B carried 1536 instead of 2048, so three of the six rows built a model
+substantially smaller than the parameter count in its own name. The table now matches
+Gu and Dao 2023: 130M 768x24, 370M 1024x48, 790M 1536x48, 1.4B 2048x48, 2.8B
+2560x64.
 
 References:
-    - Gu, A., & Dao, T. (2023). Mamba: Linear-Time Sequence Modeling with
-      Selective State Spaces. arXiv preprint arXiv:2312.00752.
-      https://arxiv.org/abs/2312.00752
+    - Gu and Dao, 2023. Mamba: Linear-Time Sequence Modeling with Selective State
+      Spaces. (https://arxiv.org/abs/2312.00752)
+    - Gu et al., 2021. Efficiently Modeling Long Sequences with Structured State
+      Spaces. (https://arxiv.org/abs/2111.00396)
+    - Gu et al., 2022. On the Parameterization and Initialization of Diagonal State
+      Space Models. (https://arxiv.org/abs/2206.11893)
+    - Fu et al., 2023. Hungry Hungry Hippos: Towards Language Modeling with State
+      Space Models. (https://arxiv.org/abs/2212.14052)
+    - Smith et al., 2023. Simplified State Space Layers for Sequence Modeling.
+      (https://arxiv.org/abs/2208.04933)
 """
 
 import keras
@@ -116,6 +105,7 @@ from typing import Optional, Union, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
+from dl_techniques.utils.model_build import materialize_sublayers
 from .components import MambaResidualBlock
 
 
@@ -247,7 +237,12 @@ class Mamba(keras.Model):
         the causal convolutions and recurrent state space mechanism.
     """
 
-    # Model variants following the original Mamba paper specifications
+    # Model variants following the original Mamba paper's size table (Gu and Dao
+    # 2023, Table 9). Corrected 2026-08-14: 370m carried 24 layers, 790m carried
+    # d_model 1024 and 1.4b carried d_model 1536, so three of the six rows were
+    # smaller than the parameter count in their own name. The layer counts are
+    # double the GPT-3 equivalents by design — one Mamba block replaces an
+    # attention+MLP pair, so 130M is 24 blocks where GPT-3 small is 12 layers.
     MODEL_VARIANTS = {
         "2.8b": {
             "d_model": 2560,
@@ -255,18 +250,18 @@ class Mamba(keras.Model):
             "description": "Mamba-2.8B: Largest variant with 2.8B parameters"
         },
         "1.4b": {
-            "d_model": 1536,
+            "d_model": 2048,
             "num_layers": 48,
             "description": "Mamba-1.4B: Large variant with ~1.4B parameters"
         },
         "790m": {
-            "d_model": 1024,
+            "d_model": 1536,
             "num_layers": 48,
             "description": "Mamba-790M: Medium variant with ~790M parameters"
         },
         "370m": {
             "d_model": 1024,
-            "num_layers": 24,
+            "num_layers": 48,
             "description": "Mamba-370M: Small variant with ~370M parameters"
         },
         "130m": {
@@ -350,6 +345,22 @@ class Mamba(keras.Model):
             f"vocab_size={self.vocab_size}"
         )
 
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method Mamba inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
@@ -416,14 +427,15 @@ class Mamba(keras.Model):
         :type variant: str
         :param vocab_size: Size of the vocabulary. Must be specified.
         :type vocab_size: int
-        :param pretrained: If True, attempts to load pretrained weights (not yet
-            implemented). If string, loads weights from the specified path.
-            Defaults to False.
+        :param pretrained: If a string, loads weights from that local path. If
+            True, raises `NotImplementedError` — no public checkpoints ship with
+            this package. Defaults to False.
         :type pretrained: Union[bool, str]
         :param kwargs: Additional arguments to override variant defaults.
         :return: A Mamba model instance configured for the specified variant.
         :rtype: Mamba
         :raises ValueError: If unknown variant or invalid parameters.
+        :raises NotImplementedError: If ``pretrained is True``.
 
         Example:
             .. code-block:: python
@@ -476,10 +488,17 @@ class Mamba(keras.Model):
                     logger.error(f"Failed to load weights: {e}")
                     raise
             elif pretrained is True:
-                # Future: load from hub or default location
-                logger.warning(
-                    "Pretrained weights not yet available. "
-                    "Model initialized with random weights."
+                # Do NOT reinstate a warn-and-return branch here. It made
+                # `pretrained=True` hand back a randomly initialized model that
+                # a caller had every reason to believe was trained; the house
+                # rule (models/CLAUDE.md, Axis 3) is that an unavailable
+                # checkpoint fails loudly.
+                raise NotImplementedError(
+                    f"No pretrained weights are distributed with dl_techniques "
+                    f"for Mamba variant '{variant}'. Pass a local checkpoint "
+                    f"instead: Mamba.from_variant('{variant}', "
+                    f"vocab_size=..., pretrained='/path/to/weights.keras'), "
+                    f"or use pretrained=False (default) for random init."
                 )
 
         return model
@@ -587,9 +606,9 @@ def create_mamba_with_head(
             # Define a task for sequence classification
             seq_cls_task = NLPTaskConfig(
                 name="sentiment_analysis",
-                task_type=NLPTaskType.SEQUENCE_CLASSIFICATION,
+                task_type=NLPTaskType.TEXT_CLASSIFICATION,
                 num_classes=3,
-                vocab_size=50257  # Mamba needs vocab_size at creation
+                vocabulary_size=50257  # Mamba needs the vocabulary at creation
             )
 
             # Create the full model with a Mamba-130m encoder
@@ -608,25 +627,47 @@ def create_mamba_with_head(
         f"Creating Mamba-{mamba_variant} with a '{task_config.name}' head."
     )
 
-    if not hasattr(task_config, 'vocab_size') or not task_config.vocab_size:
+    # The field is `vocabulary_size`. `NLPTaskConfig` is a dataclass and has
+    # never had a `vocab_size` field, so the previous `hasattr(task_config,
+    # 'vocab_size')` guard could not be satisfied by ANY config object and this
+    # function raised on every call; the docstring and README examples passed
+    # `vocab_size=...` to `NLPTaskConfig`, which is a `TypeError` before this
+    # line is ever reached. Both examples are corrected above / in README § 9.
+    if not getattr(task_config, 'vocabulary_size', None):
         raise ValueError(
-            "The `task_config` must have a 'vocab_size' attribute "
+            "The `task_config` must set 'vocabulary_size' "
             "to create a Mamba model."
         )
 
     # 1. Create the foundational Mamba model
     mamba_encoder = Mamba.from_variant(
         mamba_variant,
-        vocab_size=task_config.vocab_size,
+        vocab_size=task_config.vocabulary_size,
         pretrained=pretrained,
         **mamba_config_overrides,
     )
 
     # 2. Create the task head
+    # DECISION plan-2026-08-17T183311-79c63e38/D-023: pool the LAST token, not
+    # the first. `BaseNLPHead` defaults to `pooling_type='cls'`, which is right
+    # for the bidirectional encoders that make up most of its consumers and
+    # WRONG here: `Mamba` is a strictly causal selective SSM, so the hidden state
+    # at position 0 is a function of token 0 alone and a 'cls'-pooled classifier
+    # is a function of the first token id and nothing else. Measured on CPU with
+    # an 8-token input before this line existed: perturbing token 5 moved the
+    # logits by exactly 0.000e+00, while perturbing token 0 moved them by
+    # 6.205e-02. The failure is SILENT -- the loss falls and accuracy plateaus at
+    # the first-token prior. Same defect and same remedy as qwen3's D-029.
+    # `head_config_overrides` still wins, so a caller can opt back out.
+    # Do NOT "simplify" 'last' to `inputs[:, -1, :]`: SequencePooling's 'last'
+    # resolves the last position KEPT BY THE MASK, which is why the
+    # `attention_mask` built below is load-bearing rather than decorative.
+    head_kwargs = {'pooling_type': 'last'}
+    head_kwargs.update(head_config_overrides)
     task_head = create_nlp_head(
         task_config=task_config,
         input_dim=mamba_encoder.d_model,  # Pass Mamba's hidden size
-        **head_config_overrides,
+        **head_kwargs,
     )
 
     # 3. Define inputs and build the end-to-end model

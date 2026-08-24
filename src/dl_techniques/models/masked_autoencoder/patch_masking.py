@@ -3,7 +3,7 @@ A patch-based random masking strategy for self-supervised learning.
 """
 
 import keras
-from keras import ops, layers, random
+from keras import ops, random
 from typing import Optional, Tuple, Union, Any, Dict
 
 # ---------------------------------------------------------------------

@@ -20,7 +20,6 @@ from typing import Optional, List, Union, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

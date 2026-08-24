@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **FNet** architecture in **Keras 3**, based on the paper ["FNet: Mixing Tokens with Fourier Transforms"](https://arxiv.org/abs/2105.03824) by Lee-Thorp et al. (2021).
+An implementation of the **FNet** architecture in **Keras 3**, based on the paper ["FNet: Mixing Tokens with Fourier Transforms"](https://arxiv.org/abs/2105.03824) by Lee-Thorp et al. (2021).
 
 This architecture is designed as a **pure encoder**, separating core mixing logic from task-specific heads. This modular design makes it ideal for pre-training, fine-tuning, and complex multi-task learning workflows.
 
@@ -419,7 +419,7 @@ modern_fnet = FNet.from_variant(
     "base",
     # Pass kwargs down to FNetEncoderBlock
     normalization_type="rms_norm",
-    normalization_position="pre", # Pre-Norm is generally more stable
+    normalization_position="pre", # x = input + branch(Norm(input)), plus a stack-final norm
     ffn_type="swiglu"
 )
 ```

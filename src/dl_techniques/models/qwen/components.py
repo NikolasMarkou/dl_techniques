@@ -1,13 +1,50 @@
 """
-Qwen3 Next Model Implementation
-============================================
+Shared building blocks for the Qwen decoders: the causal mask constructor used by
+both `qwen3.py` and `qwen3_next.py`, and the hybrid `Qwen3NextBlock`.
 
-A complete implementation of the Qwen3 Next architecture following the correct block structure:
-- Each block contains 3x Gated DeltaNet layers + 1x Gated Attention layer
-- Each layer has its own Zero-Centered RMSNorm and MoE
-- Proper residual connections throughout
+`build_causal_attention_mask` exists because nothing further down the stack
+manufactures causality on its own. `TransformerLayer` defaults its `attention_mask`
+to `None`, and `GroupQueryAttention` and `GatedAttention` mask only with what they
+are handed, so a decoder that forwards just the caller's padding mask — which is
+what both Qwen models did before this helper — lets every token attend to its own
+future. The helper works entirely in *block* semantics (`True` = suppress),
+OR-combining the lower-triangular causal mask with the padding mask derived from
+`attention_mask == 0`, and inverts once at the very end to the *attend* semantics
+(`True` = may attend) the attention layers expect. Doing the inversion once on the
+combined mask rather than per component is what keeps the polarity tractable; the
+GPT-2 path in `layers/transformers/text_decoder.py` follows the same discipline, and
+its causality is pinned in both directions by a positive and a negative test.
 
-Based on the architectural diagram showing the precise layer arrangement and connections.
+`Qwen3NextBlock` is four residual updates, not one: three gated linear-attention
+sublayers followed by one gated softmax-attention sublayer, each with its own
+pre-normalization, its own optional mixture-of-experts FFN, and its own optional
+stochastic-depth gate. The asymmetry is deliberate — the linear sublayers summarize
+the past into a fixed-size recurrent state at `O(L)` cost, and the single attention
+sublayer supplies the exact global lookup a bounded summary cannot. Only that
+sublayer holds a KV cache, so the 3:1 ratio is what caps cache memory at roughly a
+quarter of a uniformly attentive stack.
+
+The mask reaches only the attention sublayer. The three linear-attention sublayers
+are called without it, and that is not an omission to be repaired: a gated linear
+scan is a strictly left-to-right recurrence over causal depthwise convolutions and
+cannot read forward, so causality holds there structurally. What does *not* hold is
+padding exclusion — padded positions still enter the recurrent state — so with
+left-padded batches the summary a token sees is contaminated, while right-padding
+leaves every valid prefix's state correct.
+
+Normalization defaults to `zero_centered_rms_norm`. Plain RMS normalization divides
+by the root-mean-square without removing a mean, so a persistent additive offset in
+the residual stream survives every layer and consumes dynamic range the scale
+weights are calibrated against; the zero-centered variant subtracts it.
+
+References:
+    - Qwen Team, 2025. Qwen3 Technical Report.
+    - Yang et al., 2024. Gated Linear Attention Transformers with Hardware-Efficient
+      Training. (https://arxiv.org/abs/2312.06635)
+    - Katharopoulos et al., 2020. Transformers are RNNs: Fast Autoregressive
+      Transformers with Linear Attention. (https://arxiv.org/abs/2006.16236)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
 """
 
 import keras
@@ -23,6 +60,62 @@ from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.attention.gated_attention import GatedAttention
+from dl_techniques.utils.masking import create_mask, combine_masks, MaskConfig
+
+
+# ---------------------------------------------------------------------
+
+
+def build_causal_attention_mask(
+        hidden_states: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+) -> keras.KerasTensor:
+    """Build the causal (+ optional padding) attention mask for a Qwen stack.
+
+    Qwen3 and Qwen3Next are decoder-only causal LMs, but neither built a causal
+    mask: ``call`` forwarded only the *padding* mask (``None`` unless a caller
+    supplied one), ``TransformerLayer`` defaults ``attention_mask=None``, and
+    ``GroupQueryAttention``/``GatedAttention`` mask only when one is given. Every
+    token therefore attended to every future token, so ``task_type="generation"``
+    trained next-token prediction on a model that had already seen the answer.
+
+    This mirrors the GPT-2 path in
+    ``layers/transformers/text_decoder.py:505-538``, whose causality is pinned
+    in both directions by ``tests/test_models/test_gpt2/test_gpt2.py:186``
+    (future does not affect past) and ``:639`` (the negative control: without
+    the mask it *does* leak).
+
+    :param hidden_states: Embedded sequence, shape ``(batch, seq_len, dim)``.
+    :type hidden_states: keras.KerasTensor
+    :param attention_mask: Optional padding mask, shape ``(batch, seq_len)``,
+        ``1`` for real tokens and ``0`` for padding.
+    :type attention_mask: keras.KerasTensor or None
+    :return: Boolean mask of shape ``(batch, seq_len, seq_len)`` in ATTEND
+        semantics — ``True`` means "may attend" — which is the convention the
+        attention layers expect.
+    :rtype: keras.KerasTensor
+    """
+    batch_size = keras.ops.shape(hidden_states)[0]
+    seq_len = keras.ops.shape(hidden_states)[1]
+
+    # Block semantics throughout (True = block), inverted once at the end.
+    causal_mask = create_mask('causal', seq_len=seq_len, dtype='bool')
+    causal_mask = keras.ops.expand_dims(causal_mask, axis=0)
+    causal_mask = keras.ops.broadcast_to(
+        causal_mask, (batch_size, seq_len, seq_len))
+
+    if attention_mask is not None:
+        padding_mask_1d = keras.ops.equal(attention_mask, 0)
+        padding_mask_3d = create_mask(config=MaskConfig(
+            mask_type='padding',
+            dtype='bool',
+            extra_params={'padding_mask': padding_mask_1d},
+        ))
+        combined = combine_masks(causal_mask, padding_mask_3d, combination='or')
+    else:
+        combined = causal_mask
+
+    return keras.ops.logical_not(combined)
 
 
 # ---------------------------------------------------------------------
@@ -72,6 +165,10 @@ class Qwen3NextBlock(keras.layers.Layer):
             divisible by num_heads for efficient attention computation.
         num_heads: Integer, number of attention heads. Must be positive and
             should divide evenly into dim for optimal head dimension.
+        num_kv_heads: Optional integer, number of key/value heads for
+            grouped-query attention in the block's `GatedAttention` sublayer.
+            None (the default) means one K/V head per query head, i.e. plain
+            multi-head attention. Must divide num_heads.
         head_dim: Optional integer, dimension per attention head. If None,
             defaults to dim // num_heads. Must be positive if specified.
         max_seq_len: Integer, maximum sequence length for RoPE embeddings
@@ -157,6 +254,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             self,
             dim: int,
             num_heads: int,
+            num_kv_heads: Optional[int] = None,
             head_dim: Optional[int] = None,
             max_seq_len: int = 4096,
             moe_config: Optional[Any] = None,  # MoEConfig or dict
@@ -188,6 +286,12 @@ class Qwen3NextBlock(keras.layers.Layer):
         # Store configuration
         self.dim = dim
         self.num_heads = num_heads
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: forwarded to
+        # `GatedAttention`. `None` keeps one K/V head per query head (plain MHA),
+        # which is what this block did unconditionally until 2026-08-15 while
+        # `Qwen3Next` validated, stored and serialized a `num_key_value_heads`
+        # that reached nothing. See decisions.md D-071.
+        self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.max_seq_len = max_seq_len
         self.normalization_type = normalization_type
@@ -251,6 +355,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         self.attention_layer = GatedAttention(
             dim=self.dim,
             num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
             head_dim=self.head_dim,
             max_seq_len=self.max_seq_len,
             dropout_rate=self.dropout_rate,
@@ -386,6 +491,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         config.update({
             "dim": self.dim,
             "num_heads": self.num_heads,
+            "num_kv_heads": self.num_kv_heads,
             "head_dim": self.head_dim,
             "max_seq_len": self.max_seq_len,
             "moe_config": self.moe_config.to_dict() if self.moe_config else None,

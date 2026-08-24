@@ -52,12 +52,13 @@ Notes:
 
 import keras
 from keras import ops
-from typing import Optional, Tuple, Dict, Any, List, Union
+from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 
 # ---------------------------------------------------------------------
 # Local imports - assumed to exist as per instructions
 # ---------------------------------------------------------------------
 from ..utils.logger import logger
+from ..initializers import clone_initializer
 from .yolo12_blocks import ConvBlock
 from .squeeze_excitation import SqueezeExcitation
 
@@ -201,25 +202,40 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 
             logger.info(f"Scale {i}: input_channels={in_channels}, bbox_channels={bbox_c}, cls_channels={cls_c}")
 
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-071
+            # Every one of the eight consumers below takes a CLONE, not
+            # `self.kernel_initializer`. One shared instance is handed to the
+            # bbox branch and the cls branch of all three scales, and MEASURED
+            # on `create_yolov12_multitask(scale='n', input_shape=(64,64,3))`
+            # that produced 161 bit-identical same-size weight pairs of 140
+            # non-constant tensors. 155 of those are SAME-role
+            # (`conv/kernel` against `conv/kernel`), which D-057 does not
+            # convict -- but SIX are DIFFERENT-role, all here:
+            # `bbox_N_pred/kernel` against `cls_0_pw{1,2}/conv/kernel`, i.e.
+            # the box-regression head and the classification head starting as
+            # the same function. The clone is applied to all eight rather than
+            # to seven, because the loop runs three times and cloning "all but
+            # the first" would still tie scale 0's first layer to scale 1's.
+            # See decisions.md D-071.
             # Populate bbox branch layers
             self.bbox_branches[i].add(ConvBlock(
                 filters=bbox_c,
                 kernel_size=3,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_conv1"
             ))
             self.bbox_branches[i].add(ConvBlock(
                 filters=bbox_c,
                 kernel_size=3,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_conv2"
             ))
             self.bbox_branches[i].add(keras.layers.Conv2D(
                 filters=4 * self.reg_max,
                 kernel_size=1,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_pred"
             ))
@@ -229,14 +245,14 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 filters=in_channels,
                 kernel_size=3,
                 groups=in_channels,  # Depthwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_dw1"
             ))
             self.cls_branches[i].add(ConvBlock(
                 filters=cls_c,
                 kernel_size=1,  # Pointwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pw1"
             ))
@@ -244,21 +260,21 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 filters=cls_c,
                 kernel_size=3,
                 groups=cls_c,  # Depthwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_dw2"
             ))
             self.cls_branches[i].add(ConvBlock(
                 filters=cls_c,
                 kernel_size=1,  # Pointwise
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pw2"
             ))
             self.cls_branches[i].add(keras.layers.Conv2D(
                 filters=self.num_classes,
                 kernel_size=1,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pred"
             ))
@@ -415,7 +431,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     def __init__(
         self,
         num_classes: int = 1,
-        intermediate_filters: List[int] = [128, 64, 32, 16],
+        intermediate_filters: Sequence[int] = (128, 64, 32, 16),
         target_size: Optional[Tuple[int, int]] = None,
         use_attention: bool = True,
         dropout_rate: float = 0.1,
@@ -440,7 +456,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
-        self.intermediate_filters = intermediate_filters
+        self.intermediate_filters = list(intermediate_filters)
         self.target_size = target_size
         self.use_attention = use_attention
         self.dropout_rate = dropout_rate
@@ -847,8 +863,8 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     def __init__(
         self,
         num_classes: int = 1,
-        hidden_dims: List[int] = [512, 256],
-        pooling_types: List[str] = ["avg", "max"],
+        hidden_dims: Sequence[int] = (512, 256),
+        pooling_types: Sequence[str] = ("avg", "max"),
         use_attention: bool = True,
         dropout_rate: float = 0.3,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
@@ -877,8 +893,13 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
 
         # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
-        self.hidden_dims = hidden_dims
-        self.pooling_types = pooling_types
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.hidden_dims = list(hidden_dims)
+        self.pooling_types = list(pooling_types)
         self.use_attention = use_attention
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)

@@ -26,12 +26,25 @@ API of the reused AutoEncoder (verified against ``ideogram4/vae.py``):
 For the SD3 tiny preset (``ch=32, ch_mult=(1, 2)``) the VAE downsamples by
 ``2 ** (len(ch_mult) - 1) = 2``: a ``(B, 32, 32, 3)`` image encodes to a
 ``(B, 16, 16, 16)`` latent.
+
+References:
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis (SD3). ICML 2024.
+      (https://arxiv.org/abs/2403.03206) -- the 16-channel latent space and the
+      SCALAR shift/scale convention this module supplies.
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. CVPR 2022. (https://arxiv.org/abs/2112.10752) -- the
+      KL-regularized first-stage autoencoder being reused.
+
+    The encoder/decoder ARCHITECTURE is not defined here. It is
+    ``dl_techniques.models.ideogram4.vae.AutoEncoder``, which carries the full
+    References section for it.
 """
 
 from __future__ import annotations
 
 import keras
-from typing import Any, Optional, Tuple
+from typing import Optional
 
 # ---------------------------------------------------------------------
 # local imports
@@ -55,12 +68,23 @@ from dl_techniques.models.sd3_mmdit.config import get_sd3_config
 # LATENT_SHIFT / LATENT_SCALE vectors. Do NOT import or reuse ideogram4's
 # latent_norm.py here: those vectors were derived for z_channels=32 *patchified*
 # latents (128 = 32 * 2**2) and are dimensionally and semantically wrong for
-# SD3's z_channels=16 spatial latent. SD3/SDXL use a single scalar (0.13025)
-# that diffusers applies as `(latents - shift) * scale` on encode and
-# `latents / scale + shift` on decode. We reuse the AutoEncoder *architecture*
-# and replace the latent-norm *convention*. See decisions.md D-008.
-SD3_SCALING_FACTOR: float = 0.13025
-SD3_SHIFT_FACTOR: float = 0.0
+# SD3's z_channels=16 spatial latent. diffusers applies the scalars as
+# `(latents - shift) * scale` on encode and `latents / scale + shift` on decode.
+# We reuse the AutoEncoder *architecture* and replace the latent-norm
+# *convention*. See decisions.md D-008.
+#
+# DECISION plan-2026-08-18T140459-7991552f/D-058: these are SD3's OWN constants,
+# not SDXL's. Do NOT "restore" scale=0.13025 / shift=0.0 -- that pair is the
+# SDXL VAE's, and SDXL has no shift, which is why the shift-bearing diffusers
+# formula above read as consistent with it. It shipped here until 2026-08-19 and
+# left latents ~12x under-scaled and uncentred. Verified against the SD3/SD3.5
+# `vae/config.json` (`scaling_factor: 1.5305`, `shift_factor: 0.0609`), read
+# from two independent un-gated mirrors of the stabilityai repos, which are
+# themselves access-restricted. The package's own round-trip test cannot catch a
+# wrong value here -- normalize/denormalize are inverses for ANY scalar pair --
+# so `test_normalize_applies_sd3_scalar` pins the literals instead.
+SD3_SCALING_FACTOR: float = 1.5305
+SD3_SHIFT_FACTOR: float = 0.0609
 
 
 def normalize_latent(z: keras.KerasTensor) -> keras.KerasTensor:

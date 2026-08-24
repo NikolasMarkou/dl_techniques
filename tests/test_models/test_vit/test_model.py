@@ -19,6 +19,11 @@ from dl_techniques.models.vit.model import (
     create_vit,
 )
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
 
 class TestViTInitialization:
     """Test suite for ViT model initialization with modern patterns."""
@@ -551,20 +556,38 @@ class TestViTFactoryFunctions:
         assert model.scale == "base"
         assert model.num_classes == 1000
 
-    def test_factory_function_validation(self):
-        """Test validation in factory functions."""
-        # Invalid parameters should raise errors
-        with pytest.raises(ValueError, match="num_classes must be positive"):
-            create_vit(variant="vit_base", num_classes=-1)
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            (dict(num_classes=-1), "num_classes must be positive"),
+            (dict(input_shape=(224, 224)), "input_shape must be a 3-tuple"),
+            (dict(input_shape=(-224, 224, 3)), "dimensions must be positive"),
+            (dict(patch_size=-16), "patch_size must be positive"),
+            (dict(patch_size=(16, 16, 16)), "patch_size must be int or tuple"),
+            (dict(patch_size=(-16, 16)), "patch_size dimensions must be positive"),
+            (
+                dict(input_shape=(225, 224, 3), patch_size=16),
+                "Image height .* must be divisible",
+            ),
+            (
+                dict(input_shape=(224, 225, 3), patch_size=16),
+                "Image width .* must be divisible",
+            ),
+        ],
+    )
+    def test_factory_function_validation(self, overrides, message):
+        """Every one of these guards lives in ``ViT.__init__``, not in ``create_vit``.
 
-        with pytest.raises(ValueError, match="input_shape must be a 3-element"):
-            create_vit(variant="vit_base", input_shape=(224, 224))
-
-        with pytest.raises(ValueError, match="patch_size must be positive"):
-            create_vit(variant="vit_base", patch_size=-16)
-
-        with pytest.raises(ValueError, match="Image height .* must be divisible"):
-            create_vit(variant="vit_base", input_shape=(225, 224, 3), patch_size=16)
+        ``create_vit`` used to carry its own copy of all eight (audit rule
+        R-051, routed to step 19 as SEVERE). Each copy was measured redundant --
+        the constructor raises ``ValueError`` with a near-identical message for
+        every case below -- so the copies were deleted and this test now pins
+        the SURVIVING guard. If a guard is ever removed from ``ViT.__init__``,
+        this goes red; that is the point of asserting through the factory rather
+        than around it.
+        """
+        with pytest.raises(ValueError, match=message):
+            create_vit(variant="vit_base", **overrides)
 
     def test_factory_function_with_advanced_options(self):
         """Test factory functions with advanced configuration options."""
@@ -750,13 +773,54 @@ class TestViTEdgeCases:
         assert not np.any(np.isnan(output.numpy()))
 
     def test_different_normalization_configurations(self):
-        """Test different normalization configurations using factories."""
+        """Both normalization axes must reach the graph.
+
+        The logits shape is ``(2, 5)`` under all four combinations, so the old
+        assertion was true whether or not either kwarg was honoured -- and the
+        two axes fail differently, so they need different instruments.
+        """
         configs = [
             {"normalization_type": "layer_norm", "normalization_position": "post"},
             {"normalization_type": "layer_norm", "normalization_position": "pre"},
             {"normalization_type": "rms_norm", "normalization_position": "post"},
             {"normalization_type": "rms_norm", "normalization_position": "pre"}
         ]
+
+        input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
+
+        def _build(**kwargs):
+            model = ViT(
+                input_shape=(64, 64, 3),
+                scale="tiny",
+                num_classes=5,
+                **kwargs
+            )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # Axis 1 -- `normalization_type` is STRUCTURAL: RMSNorm has no centering
+        # shift, so it holds strictly fewer weights than LayerNorm. (Measured on
+        # the `tiny` scale: 127 tensors / 5,486,021 params vs 152 / 5,490,821.)
+        type_sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(normalization_type=t))
+             for t in ("layer_norm", "rms_norm")},
+            knob="normalization_type",
+        )
+        assert len(type_sigs["rms_norm"]) < len(type_sigs["layer_norm"])
+
+        # Axis 2 -- `normalization_position` is a VALUE knob: pre-norm and
+        # post-norm hold the SAME weights, so under one seed they are
+        # bit-identical and the whole output difference is the ordering. This is
+        # the axis a shape assertion is completely blind to.
+        for norm_type in ("layer_norm", "rms_norm"):
+            deltas = assert_value_knob_changes_output(
+                {pos: (lambda pos=pos: _build(
+                    normalization_type=norm_type, normalization_position=pos))
+                 for pos in ("post", "pre")},
+                input_tensor,
+                knob=f"normalization_position ({norm_type})",
+            )
+            assert min(deltas.values()) > 1e-5
 
         for config in configs:
             model = ViT(
@@ -766,23 +830,43 @@ class TestViTEdgeCases:
                 **config
             )
 
-            input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
 
             assert output.shape == (2, 5)
             assert not np.any(np.isnan(output.numpy()))
 
     def test_different_ffn_types(self):
-        """Test different FFN types using factory integration."""
+        """``ffn_type`` must build the requested FFN.
+
+        The logits shape is ``(1, 3)`` for every FFN, so the old assertion held
+        whether or not the factory ever saw the argument. The three FFNs have
+        genuinely different parameterisations -- SwiGLU fuses gate and up
+        projections, GEGLU adds a third matrix -- so the weight-shape signature
+        pins which one was built.
+        """
         ffn_types = ["mlp", "swiglu", "geglu"]  # Available types
 
-        for ffn_type in ffn_types:
+        def _build(ffn_type):
             model = ViT(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=3,
                 ffn_type=ffn_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(t)) for t in ffn_types}, knob="ffn_type")
+        params = {
+            t: sum(int(np.prod(w)) for w in sigs[t]) for t in ffn_types
+        }
+        # All three parameter counts must be distinct -- two matching counts
+        # would mean two of the three names resolved to the same layer.
+        assert len(set(params.values())) == 3, f"ffn_type parameter counts: {params}"
+
+        for ffn_type in ffn_types:
+            model = _build(ffn_type)
 
             input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
             output = model(input_tensor)
@@ -1034,5 +1118,181 @@ class TestViTNormalizationKwargs:
         assert model_a.norm.get_config().get("name") == "norm"
 
 
+class TestViTPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `ViT.build` used to call `create_embedding_layer('positional_learned',
+    ..., dropout=...)`, but the registry and `PositionalEmbedding.__init__`
+    both declare `dropout_rate`. `create_embedding_layer` silently filtered
+    unknown keys out AT THE TIME, so positional dropout was unconditionally
+    0.0 for every caller.
+
+    Asserting `model.pos_dropout_rate` here would be VACUOUS — the model's
+    own stored attribute was always correct and was never the bug. This
+    reads the real `keras.layers.Dropout` instance's `.rate`.
+
+    RE-RUNNING THE ORIGINAL RED-PROOF: the factory no longer drops silently
+    (`plan-2026-08-14T042537-ff96c6c6/D-002`, same iteration as this guard) —
+    it RAISES on an unregistered kwarg. So re-injecting the historical bug at
+    the KEYWORD level (`dropout=` for `dropout_rate=`) now fails with the
+    factory's `ValueError: ... unsupported parameter(s) ['dropout']` at
+    construction, NOT with the `.rate == 0.5` assertion below. To exercise
+    THIS assertion, inject at the VALUE level instead (pass a different
+    `dropout_rate=`).
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer(self):
+        model = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            pos_dropout_rate=0.5,
+        )
+        # Build via a real forward pass so every sub-layer exists.
+        _ = model(np.zeros((1, 32, 32, 3), dtype=np.float32), training=False)
+
+        pos_dropout = model.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(historically: create_embedding_layer SILENTLY DROPPED an "
+            "unknown kwarg name; it now raises instead, so this assertion "
+            "firing today means a VALUE, not a keyword, went astray)"
+        )
+
+
+class TestViTPositionalDropoutHasAnEffect:
+    """The EFFECT-level companion to the guard above, which is configuration-level.
+
+    `pos_dropout.rate == 0.5` says the right `Dropout` was BUILT. It does not say
+    it is ever CALLED. A refactor that constructs the layer correctly and then
+    drops it out of `call`, or invokes it with a hard-wired `training=False`,
+    passes that assertion and every other test in this file while positional
+    dropout is dead again -- which is exactly the shape of the original D-2 bug,
+    one level down.
+
+    So this pins the observable consequence instead: at a non-zero
+    `pos_dropout_rate`, two training-mode forward passes on the SAME input must
+    DIFFER, while two inference-mode passes must not; and at rate 0.0 the
+    training passes must agree. `dropout_rate` and `attention_dropout_rate` are
+    pinned to 0.0 so positional dropout is the only stochastic element in the
+    graph -- otherwise a green result here would be evidence about block
+    dropout, not about the positional path.
+
+    Seeded with `keras.utils.set_random_seed`, per repo convention: an unseeded
+    statistic reads the process-global RNG and couples its value to test
+    collection order.
+    """
+
+    @staticmethod
+    def _build(rate: float):
+        keras.utils.set_random_seed(1234)
+        model = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            dropout_rate=0.0,
+            attention_dropout_rate=0.0,
+            pos_dropout_rate=rate,
+        )
+        x = np.asarray(
+            np.random.default_rng(0).normal(size=(2, 32, 32, 3)), dtype=np.float32)
+        _ = model(x, training=False)  # materialize every sub-layer
+        return model, x
+
+    def test_training_passes_differ_and_inference_passes_do_not(self):
+        model, x = self._build(0.5)
+
+        train_a = np.asarray(model(x, training=True))
+        train_b = np.asarray(model(x, training=True))
+        infer_a = np.asarray(model(x, training=False))
+        infer_b = np.asarray(model(x, training=False))
+
+        train_delta = float(np.max(np.abs(train_a - train_b)))
+        infer_delta = float(np.max(np.abs(infer_a - infer_b)))
+
+        assert train_delta > 1e-6, (
+            "positional dropout is CONFIGURED at rate 0.5 but has NO EFFECT: two "
+            f"training-mode passes on identical input agree to {train_delta}. The "
+            "Dropout layer is built and never called (or is called with a "
+            "hard-wired training=False). Every .rate assertion in this file "
+            "passes in that state.")
+        assert infer_delta == 0.0, (
+            "two inference-mode passes disagree "
+            f"({infer_delta}): dropout is active outside training, or some other "
+            "stochastic element leaked into this model despite dropout_rate and "
+            "attention_dropout_rate both being 0.0 -- in which case the "
+            "training-mode assertion above is not evidence about the positional "
+            "path.")
+
+    def test_at_rate_zero_the_training_passes_agree(self):
+        """The other arm: without this, the test above could pass on any noise."""
+        model, x = self._build(0.0)
+
+        train_a = np.asarray(model(x, training=True))
+        train_b = np.asarray(model(x, training=True))
+        train_delta = float(np.max(np.abs(train_a - train_b)))
+
+        assert train_delta == 0.0, (
+            f"at pos_dropout_rate=0.0 two training passes differ by {train_delta}: "
+            "some stochastic element other than positional dropout is live, so the "
+            "non-zero-rate test above does not isolate the positional path.")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at scale="tiny", 64x64x3, patch 16 (a 4x4 = 16-patch grid
+# plus CLS): 152 trainable weights, 0 dead, 0 non-finite. No waiver needed and
+# none given. The geometry is the smallest one this file's own configs cover --
+# a gradient claim is per-weight, so it does not need 196 patches to be true,
+# and the suite already pins the 224/384 shapes elsewhere.
+#
+# A ViT is a plausible home for a silently-dead weight: the CLS token and
+# the positional embedding are bare `add_weight` tensors rather than
+# sub-layers, so a slicing or broadcast mistake can leave either off the
+# backward graph while every shape and round-trip test still passes.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestViTGradientFlow:
+    """Every trainable weight is on the backward graph."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = ViT(input_shape=(64, 64, 3), num_classes=10, scale="tiny", patch_size=16)
+        x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)  # subclassed model: unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == 152, (
+            "the tiny variant's weight set changed shape; re-measure before "
+            "editing this number"
+        )
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_gradients_reach_every_trainable_weight_without_top(self):
+        """``include_top=False`` removes the head, not the trunk's gradient path.
+
+        The pooled/no-head arm is the one a downstream user fine-tunes, and it
+        is a different forward path (no classifier Dense, a pooling reduction
+        instead). A trunk weight that only trains through the classification
+        head would be invisible to the arm above.
+        """
+        model = ViT(input_shape=(64, 64, 3), scale="tiny", patch_size=16, include_top=False, pooling="mean")
+        x = np.random.default_rng(1).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0

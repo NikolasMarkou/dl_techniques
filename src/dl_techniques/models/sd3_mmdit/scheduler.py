@@ -40,7 +40,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-import keras
 import numpy as np
 from scipy.special import ndtri, expit
 

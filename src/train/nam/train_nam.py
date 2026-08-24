@@ -109,6 +109,13 @@ def parse_args() -> argparse.Namespace:
         "High weight is critical — reduction must converge first for all "
         "downstream sub-skills (number extraction, operator) to work.",
     )
+    parser.add_argument(
+        "--w-halt", type=float, default=0.5,
+        help="Weight for the ACT halting BCE loss (S6). The q_halt head is "
+        "trained to predict whether the current step's result is already "
+        "within 1%% relative error; set 0.0 to reproduce the pre-D-034 "
+        "behaviour in which the head received no gradient at all.",
+    )
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--save-interval", type=int, default=2000)
     parser.add_argument("--eval-interval", type=int, default=1000,
@@ -280,6 +287,7 @@ def _make_compiled_train_fn(
     w_number: float = 5.0,
     w_operator: float = 3.0,
     w_reduction: float = 1.0,
+    w_halt: float = 0.5,
     number_loss_type: str = "log_mse",
     number_loss_delta: float = 0.1,
     log_grad_norms: bool = False,
@@ -292,6 +300,7 @@ def _make_compiled_train_fn(
     - S2: Operator classification (CE on op_logits vs true operator)
     - S3: Reduction target (CE on reduction_weights vs true operator position)
     - S5: Final result (Huber on result vs true result, log-space)
+    - S6: Halting (BCE on q_halt vs per-step correctness -- see D-034)
     - Validity (BCE) and ponder cost (step penalty)
 
     All computed in ONE forward pass. ONE backward pass. ONE optimizer step.
@@ -369,6 +378,7 @@ def _make_compiled_train_fn(
             L_valid = tf.constant(0.0)
             L_operator = tf.constant(0.0)
             L_reduction = tf.constant(0.0)
+            L_halt = tf.constant(0.0)
 
             # Log-compress for result loss
             def _log_c(x):
@@ -417,12 +427,53 @@ def _make_compiled_train_fn(
                 )
                 L_reduction += tf.reduce_mean(per_sample_red_loss * step_valid)
 
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-034: S6, the ACT
+                # halting loss. `all_q_halt` / `all_q_cont` used to be collected
+                # here and consumed by NOTHING -- there was no `L_halt` in this
+                # file at all -- so the halting head was neither trained nor
+                # (before D-033) read, and `halt_exploration_prob` /
+                # `halt_max_steps` had no measurable effect on anything.
+                #
+                # The target is "is THIS step's answer already right", the same
+                # per-step-correctness signal `HRMLoss` uses for its q_halt arm
+                # (`losses/hrm_loss.py`, `q_halt_targets = seq_correct`), with
+                # NAM's regression analogue of correctness: relative error below
+                # 1%. That threshold is not invented here -- it is the same
+                # `per_sample_rel_error < 0.01` the eval path already reports as
+                # `exact_acc`, so the head is trained against the metric it is
+                # judged by. The target is `stop_gradient`-ed: it is a LABEL
+                # derived from the prediction, and without the barrier the loss
+                # is trivially minimised by moving `result` rather than `q_halt`.
+                #
+                # Only the q_halt arm exists. NAM halts on `q_halt > 0` in BOTH
+                # branches of `model.call` (D-033), so `q_continue` is not on the
+                # decision path; a Bellman arm for it would train a head nothing
+                # reads and would need a lookahead pass the model does not
+                # currently emit. Do NOT add one without first putting
+                # `q_continue` back on the halting predicate.
+                # See decisions.md D-034.
+                step_abs_true = tf.abs(targets) + 1e-8
+                step_rel_error = tf.abs(all_results[i] - targets) / step_abs_true
+                # (B, 1) throughout: `all_q_halt[i]` is (B,), and a rank-1
+                # `binary_crossentropy` reduces the BATCH axis instead of a
+                # per-sample one. Keeping both at (B, 1) makes the reduction
+                # per sample and the following `reduce_mean` the batch mean.
+                step_correct = tf.cast(tf.less(step_rel_error, 0.01), tf.float32)
+                L_halt += tf.reduce_mean(
+                    keras.losses.binary_crossentropy(
+                        tf.stop_gradient(step_correct),
+                        tf.expand_dims(all_q_halt[i], axis=-1),
+                        from_logits=True,
+                    )
+                )
+
             # Normalize by number of steps
             n_steps = tf.cast(max_act_steps, tf.float32)
             L_result = L_result / n_steps
             L_valid = L_valid / n_steps
             L_operator = L_operator / n_steps
             L_reduction = L_reduction / n_steps
+            L_halt = L_halt / n_steps
 
             # Ponder cost
             avg_steps = tf.reduce_mean(tf.cast(carry["steps"], tf.float32))
@@ -434,6 +485,7 @@ def _make_compiled_train_fn(
                 + w_reduction * L_reduction
                 + result_loss_weight * L_result
                 + valid_loss_weight * L_valid
+                + w_halt * L_halt
                 + L_ponder
             )
 
@@ -483,6 +535,7 @@ def _make_compiled_train_fn(
             "L_reduction": L_reduction,
             "L_result": L_result,
             "L_valid": L_valid,
+            "L_halt": L_halt,
             "last_result": last_result,
             "last_step_result": last_step_result,
             "last_valid": last_valid,
@@ -844,6 +897,7 @@ def main():
         w_number=args.w_number,
         w_operator=args.w_operator,
         w_reduction=args.w_reduction,
+        w_halt=args.w_halt,
         number_loss_type=args.number_loss_type,
         number_loss_delta=args.number_loss_delta,
         log_grad_norms=args.log_grad_norms,
@@ -1115,6 +1169,7 @@ def main():
                 "w_number": args.w_number,
                 "w_operator": args.w_operator,
                 "w_reduction": args.w_reduction,
+                "w_halt": args.w_halt,
                 "number_loss_type": args.number_loss_type,
                 "number_loss_delta": args.number_loss_delta,
                 "curriculum": args.curriculum,

@@ -19,8 +19,22 @@ failed in the full `tests/test_layers/` run. Four collisions existed:
     Custom>ByteTokenizer   layers.blt_blocks             vs models.modern_bert.components
     Custom>CoverageMetric  metrics.probabilistic_...     vs models.cliffordnet...
 
-Two of those right-hand modules have since been DELETED and no longer exist anywhere in
-the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_denoiser`
+The `ConvUNextStem` row is NOT a registry-key collision and never was -- read it as a
+PYTHON NAME collision only. Measured on 2026-08-14 (Keras 3.8.0,
+plan-2026-08-14-0e3d792d step 1): the two classes held two DISTINCT keys,
+``dl_techniques.bias_free_denoisers>ConvUNextStem`` and
+``dl_techniques.convunext>ConvUNextStem``, and both resolved simultaneously -- neither
+ever shadowed the other. What actually collided was the bare identifier `ConvUNextStem`
+in two modules, which is confusing to read but harmless to load. That is also why the
+row lists a `package=`-qualified pair while its three neighbours list bare `Custom>`
+keys. It is moot now regardless: the two classes were MERGED into one on 2026-08-14,
+the `models.convunext.model` twin was deleted, and the survivor lives in
+`models/convunext/model.py` while deliberately keeping
+``package="dl_techniques.bias_free_denoisers"`` so its key stays byte-stable. Do not
+"fix" that package/module mismatch.
+
+Two of the OTHER right-hand modules have since been DELETED and no longer exist anywhere
+in the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_denoiser`
 (plan-2026-08-10-3649c19e). The table is kept verbatim as the historical record of why
 the `package=` arguments below exist -- do not go looking for those two modules, and do
 not drop a `package=` just because its collision partner is gone: the checker below is

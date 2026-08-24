@@ -28,8 +28,51 @@ from typing import Optional, Union, Tuple, List, Dict, Any, Callable
 # ---------------------------------------------------------------------
 
 from ..ffn import create_ffn_layer
+from ...initializers import clone_initializer
 from ..transformers import TransformerLayer
 from ..norms import create_normalization_layer
+
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-14T183218-f4c612aa/D-017
+# Scale applied to the block summary before it is broadcast onto every output
+# token (see `RELGTTransformerBlock.call`). It is NOT a free constant: both the
+# summary and the local tokens leave a LayerNorm, so BOTH have per-feature RMS
+# exactly 1.0 by construction, while the token-VARYING part of the sequence is
+# far smaller. MEASURED unscaled on the shipped model path (embedding_dim=32,
+# 3 blocks, untrained, real RELGTTokenEncoder):
+# summary per-feature RMS 1.0 against an across-token per-feature std of 0.3843
+# at block 0 and 0.2535 at block 1 -- a token-INVARIANT component 2.60x then
+# 3.94x the token-specific signal, compounding with depth. At 0.1 those ratios
+# are 0.26 and 0.36, i.e. the summary perturbs the sequence instead of
+# dominating it.
+#
+# DEPTH LIMIT -- this constant is a BOUNDED fix, not an unconditional one. The
+# numerator is pinned at exactly this value (a LayerNorm output has per-feature
+# RMS 1.0), while the across-token std of the sequence DECAYS block over block,
+# so the ratio grows monotonically with depth. MEASURED on the shipped path
+# (real RELGTTokenEncoder, embedding_dim=32, untrained, 20 unseeded draws at
+# num_transformer_blocks=4), per-block ratio min/max:
+#   block 0: 0.230/0.493   block 1: 0.278/0.569
+#   block 2: 0.297/0.712   block 3: 0.317/1.023
+# `create_relgt_model("large")` ships 4 blocks, and at that depth the worst
+# draw of 20 already TOUCHED 1.0 at the last block; at 8 blocks the ratio
+# exceeded 1.0 at blocks 4-7 on 2-3 of 5 draws. So: 0.1 is safe for the shipped
+# presets (1/2/4 blocks) and the margin at 4 is thin. Do NOT raise
+# `num_transformer_blocks` past 4 without re-measuring the ratio at the DEEPEST
+# block, and do not invent a depth-dependent scaling formula here -- no such
+# formula has been measured. Guard: the ratio assertion runs at 4 blocks and
+# covers every block.
+#
+# Do NOT raise this to 1.0 "for symmetry": at 1.0 every query in
+# the next block's self-attention sees the same query-independent per-key bias
+# and the local attention degenerates toward pooling at initialization. Do NOT
+# make it a learnable per-feature scale either -- MEASURED, that reintroduces
+# exactly the defect D-014 closed (the LAST block's tokens are discarded by
+# `RELGT.call`, so its scale weight gets a `None` gradient: 1 of 110). Guard:
+# `test_the_broadcast_summary_does_not_swamp_the_token_signal`.
+# See decisions.md D-017.
+SUMMARY_BROADCAST_SCALE: float = 0.1
 
 # ---------------------------------------------------------------------
 
@@ -347,10 +390,19 @@ class RELGTTokenEncoder(keras.layers.Layer):
             name="HopEncoder",
         )
 
-        # 4. Time Encoder
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
+        # `TimeEncoder` and `PEProjection` get CLONES; `FeatureEncoder` keeps
+        # the stored instance so `get_config` still reports what the caller
+        # passed. All three project INTO `embedding_dim` from different sources
+        # -- raw node features, relative time, and the GNN positional encoding
+        # -- so whenever two of those source dims coincide the shared seedless
+        # instance made them the same function. MEASURED at the audit's
+        # construction (`embedding_dim=32, ffn_dim=32, gnn_pe_dim=8`, feature
+        # dim 8): `FeatureEncoder/kernel == PEProjection/kernel` at (8, 32).
+        # See decisions.md D-070.
         self.time_encoder = keras.layers.Dense(
             embedding_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="TimeEncoder",
         )
 
@@ -361,7 +413,7 @@ class RELGTTokenEncoder(keras.layers.Layer):
         ]
         self.pe_projection = keras.layers.Dense(
             embedding_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="PEProjection",
         )
 
@@ -571,6 +623,15 @@ class RELGTTransformerBlock(keras.layers.Layer):
     :param kernel_initializer: Initializer for Dense layers.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param return_tokens: When ``True``, ``call`` returns the tuple
+        ``(combined_representation, local_processed_tokens)`` instead of the
+        combined representation alone, exposing the ``(B, K, E)`` token sequence
+        that the local transformer produced before it was mean-pooled. This is
+        what lets a caller STACK blocks: chaining the ``(B, E)`` summary instead
+        would hand the next block a single-token sequence. Defaults to ``False``,
+        which keeps the historical single-tensor return. See
+        ``models/relgt/model.py``. Defaults to ``False``.
+    :type return_tokens: bool
     :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
@@ -584,6 +645,7 @@ class RELGTTransformerBlock(keras.layers.Layer):
         ffn_type: str = "mlp",
         normalization_type: str = "layer_norm",
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        return_tokens: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -613,6 +675,18 @@ class RELGTTransformerBlock(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-009
+        # The token sequence is exposed behind an opt-in flag, NOT by making the
+        # tuple the unconditional return. A bare tuple return would be a silent
+        # breaking change for every caller that treats the block as a one-tensor
+        # layer -- including a functional `keras.Model` built over it, which is
+        # how the layer suite exercises serialization. Do not "simplify" this by
+        # always returning the tuple and deleting the flag; and do not read the
+        # tokens off `self` as a side-channel attribute instead (that is not
+        # graph-safe under `@tf.function` and would not survive a saved model).
+        # See decisions.md D-009.
+        self.return_tokens = return_tokens
 
         # CREATE all sub-layers in __init__
 
@@ -708,15 +782,32 @@ class RELGTTransformerBlock(keras.layers.Layer):
         self,
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """Forward pass for hybrid local-global processing.
 
         :param inputs: List of ``[local_tokens, seed_node_features]``.
         :type inputs: List[keras.KerasTensor]
         :param training: Whether in training mode.
         :type training: Optional[bool]
-        :return: Combined representation ``(batch_size, embedding_dim)``.
-        :rtype: keras.KerasTensor
+        :return: Combined representation ``(batch_size, embedding_dim)``; or,
+            when ``return_tokens`` is set, the tuple
+            ``(combined_representation, output_tokens)`` whose second element has
+            shape ``(batch_size, num_tokens, embedding_dim)``. ``output_tokens``
+            is the locally processed token sequence with the combined
+            representation broadcast-added onto every token at
+            ``SUMMARY_BROADCAST_SCALE``, so the block's global/centroid half is
+            carried forward rather than discarded by a downstream consumer that
+            reads only the token sequence. The scale matters: added at unit
+            weight the summary is a token-INVARIANT component 2.60x (block 0)
+            and 3.94x (block 1) larger than the across-token per-feature std it
+            is added to, since both tensors leave a LayerNorm; at 0.1 those
+            ratios are 0.26 and 0.36 (measured, ``embedding_dim=32``,
+            untrained). Note that this ratio GROWS with depth (the numerator is
+            pinned by the LayerNorm, the denominator decays): it is 0.23-0.49 at
+            block 0 but 0.32-1.02 at block 3 over 20 untrained draws, so the
+            scale bounds the summary only up to ~4 chained blocks. See the
+            DEPTH LIMIT note on ``SUMMARY_BROADCAST_SCALE``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         local_tokens, seed_node_features = inputs
         batch_size = keras.ops.shape(seed_node_features)[0]
@@ -758,22 +849,61 @@ class RELGTTransformerBlock(keras.layers.Layer):
         residual = self.residual_projection(combined_representation)
         output = self.combination_norm(output + residual)
 
+        if self.return_tokens:
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-014
+            # The returned token sequence carries the block's COMBINED
+            # representation, broadcast onto every token -- it is not the raw
+            # `local_processed_tokens`. Returning the raw local tokens is the
+            # obvious spelling and it makes the block's whole global half dead
+            # weight in every non-final block: only the last block's `output` is
+            # read by the model, so `global_centroids`, `GlobalAttention`,
+            # `ResidualProjection`, `CombinationNorm` and `CombinationFFN` were
+            # MEASURED to receive no gradient at all (34 of 107 trainable
+            # variables, 32%, in a 3-block RELGT). Do NOT "simplify" this back to
+            # `return output, local_processed_tokens`; the guard is
+            # `test_no_trainable_variable_is_gradient_less`. Rejected
+            # alternatives: appending the summary as an extra token (grows K by
+            # one per block and lets the summary be re-pooled as if it were a
+            # neighbour) and a learned gate (new parameters, and a multiplicative
+            # gate can annihilate the token signal). See decisions.md D-014.
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-017
+            # The summary is added at `SUMMARY_BROADCAST_SCALE`, not at unit
+            # weight. Unscaled it is a token-INVARIANT component 2.6x-3.9x
+            # LARGER than the token-varying signal (both sides leave a
+            # LayerNorm), which drives the next block's self-attention toward a
+            # query-independent distribution. The rationale and the measured
+            # ratios live on the constant at the top of this module.
+            output_tokens = local_processed_tokens + (
+                SUMMARY_BROADCAST_SCALE * keras.ops.expand_dims(output, axis=1)
+            )
+            return output, output_tokens
+
         return output
 
     def compute_output_shape(
         self,
         input_shape: List[Tuple[Optional[int], ...]],
-    ) -> Tuple[Optional[int], ...]:
+    ) -> Union[
+        Tuple[Optional[int], ...],
+        Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]],
+    ]:
         """Compute output shape.
 
         :param input_shape: List of ``[local_tokens_shape, seed_features_shape]``.
         :type input_shape: List[Tuple[Optional[int], ...]]
-        :return: Output shape tuple.
-        :rtype: Tuple[Optional[int], ...]
+        :return: Output shape tuple, or a pair of them when ``return_tokens``
+            is set — mirroring exactly what ``call`` returns.
+        :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]
         """
         local_tokens_shape, _ = input_shape
         batch_size = local_tokens_shape[0]
-        return (batch_size, self.embedding_dim)
+        representation_shape = (batch_size, self.embedding_dim)
+
+        if self.return_tokens:
+            num_tokens = local_tokens_shape[1]
+            return representation_shape, (batch_size, num_tokens, self.embedding_dim)
+
+        return representation_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -787,6 +917,7 @@ class RELGTTransformerBlock(keras.layers.Layer):
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "return_tokens": self.return_tokens,
         })
         return config
 

@@ -185,13 +185,26 @@ class ShearletTransform(keras.layers.Layer):
         filters_real = np.real(filters_shifted).astype(np.float32)
         filters_imag = np.imag(filters_shifted).astype(np.float32)
 
-        # Register as non-trainable weights
+        # Register as non-trainable weights.
+        #
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
+        # ``autocast=False`` is load-bearing, not decoration. ``dtype="float32"``
+        # alone fixes only the STORAGE dtype; Keras 3 casts a float variable to
+        # ``compute_dtype`` on every READ, so under ``mixed_float16`` these two
+        # banks arrived as float16 at :367 and the complex multiply raised
+        # ``InvalidArgumentError: cannot compute Mul as input #1 ... is a half
+        # tensor``. Do NOT drop ``autocast=False`` and do NOT "fix" it by casting
+        # ``fft_r``/``fft_i`` down to half instead: ``keras.ops.fft2`` has no
+        # float16 kernel in TensorFlow at all, so the whole spectral island must
+        # be float32 and only its RESULT may return to ``compute_dtype``.
+        # See decisions.md D-054.
         self.filter_bank_real = self.add_weight(
             name="filter_bank_real",
             shape=filters_real.shape,
             initializer=initializers.Constant(filters_real),
             trainable=False,
-            dtype="float32"
+            dtype="float32",
+            autocast=False,
         )
 
         self.filter_bank_imag = self.add_weight(
@@ -199,7 +212,8 @@ class ShearletTransform(keras.layers.Layer):
             shape=filters_imag.shape,
             initializer=initializers.Constant(filters_imag),
             trainable=False,
-            dtype="float32"
+            dtype="float32",
+            autocast=False,
         )
 
         super().build(input_shape)
@@ -405,7 +419,11 @@ class ShearletTransform(keras.layers.Layer):
             out_ch = channels_dim * num_base_filters
             final_shape = (-1, self.height, self.width, out_ch)
 
-        return ops.reshape(coeffs, final_shape)
+        # The spectral island above is float32 by construction (see the
+        # ``autocast=False`` DECISION in ``build``); hand the caller the layer's
+        # own ``compute_dtype`` so a ``mixed_float16`` consumer is not silently
+        # promoted. Under the default float32 policy this cast is a no-op.
+        return ops.cast(ops.reshape(coeffs, final_shape), self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""

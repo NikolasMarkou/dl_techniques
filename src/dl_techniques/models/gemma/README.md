@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of **Gemma 3**, Google's next-generation open-source language model. This architecture introduces a sophisticated **dual normalization** pattern and a strategic **mixed attention** mechanism to deliver a state-of-the-art balance of performance and computational efficiency.
+A Keras 3 implementation of **Gemma 3**, Google's next-generation open-source language model. This architecture introduces a sophisticated **dual normalization** pattern and a strategic **mixed attention** mechanism to deliver a state-of-the-art balance of performance and computational efficiency.
 
 ---
 
@@ -268,6 +268,9 @@ model = create_gemma3(
     num_labels=3,
     pooling_strategy="mean" # Use mean pooling over the sequence
 )
+# The default is "last" (the last position kept by `attention_mask`). Gemma 3's
+# blocks are causally masked, so `"cls"` would pool a position that attended only
+# to itself; it is accepted only for bidirectional-era checkpoints.
 
 # Compile with appropriate loss for classification
 model.compile(

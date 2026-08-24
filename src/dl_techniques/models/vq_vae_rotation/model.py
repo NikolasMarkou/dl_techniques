@@ -64,12 +64,15 @@ References:
       Representation Learning. NeurIPS 2017.
 """
 
+import itertools
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
+import numpy as np
 import tensorflow as tf
 from keras import initializers, ops
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.factory import (
     NormalizationType,
     create_normalization_layer,
@@ -77,6 +80,7 @@ from dl_techniques.layers.norms.factory import (
 from dl_techniques.layers.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
+from dl_techniques.utils.model_build import materialize_sublayers
 
 
 # ---------------------------------------------------------------------
@@ -194,7 +198,12 @@ class VQVAERotationTrick(keras.Model):
     :param use_ema: EMA codebook updates.
     :param ema_decay: EMA decay.
     :param num_heads: Multi-head codebook count.
-    :param kmeans_init: Run one-shot k-means warm start.
+    :param kmeans_init: Enable the one-shot k-means codebook warm start. It is
+        performed by :meth:`warm_start_codebook`, which :meth:`fit` invokes
+        automatically before the first epoch. It does NOT happen inside the
+        quantizer's ``call``: that ran ``np.asarray`` on a graph tensor, which
+        raises under ``fit()``, and accumulated batches in a Python list mutated
+        inside a traced function.
     :param kmeans_init_steps: Number of batches accumulated before k-means.
     :param kmeans_seed: Deterministic numpy seed for k-means.
     :param dead_code_threshold: Consecutive unused-call count for re-init.
@@ -331,6 +340,22 @@ class VQVAERotationTrick(keras.Model):
         self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
         self.vq_loss_tracker = keras.metrics.Mean(name="vq_loss")
 
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method VQVAERotationTrick inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -340,16 +365,135 @@ class VQVAERotationTrick(keras.Model):
         z_q = self.quantizer(z_e, training=training)
         return self.decoder(z_q, training=training)
 
+    # ---- k-means warm start ----
+
+    def warm_start_codebook(
+            self,
+            data: Any,
+            steps: Optional[int] = None,
+    ) -> None:
+        """Seed the quantizer's codebook from `steps` batches of encoder output.
+
+        Runs eagerly and does the whole warm start in one call: it encodes
+        `steps` batches with `training=False`, flattens them to
+        `(N, embedding_dim)` and hands them to
+        :meth:`VectorQuantizerRotationTrick.warm_start_codebook`.
+
+        :param data: A ``tf.data.Dataset`` / iterable of batches, or a single
+            array of shape ``(B, H, W, C)`` which is treated as one batch. When
+            an iterable yields ``(x, y)`` tuples, ``x`` is used.
+        :type data: Any
+        :param steps: Number of batches to accumulate. Defaults to
+            ``kmeans_init_steps``.
+        :type steps: int or None
+        :raises ValueError: If ``kmeans_init`` is ``False``, or if the data
+            yields no batches.
+        """
+        if not self.kmeans_init:
+            raise ValueError(
+                "warm_start_codebook requires kmeans_init=True."
+            )
+
+        num_steps = self.kmeans_init_steps if steps is None else steps
+
+        if isinstance(data, np.ndarray) or tf.is_tensor(data):
+            # A single array. Split it into `num_steps` chunks so that
+            # `kmeans_init_steps` still means what it says. Checked FIRST:
+            # `np.ndarray` also has a `.take`, with entirely different
+            # semantics (flat element selection), so a dataset-style
+            # `hasattr(data, "take")` probe silently mangles arrays.
+            batches = np.array_split(np.asarray(data), num_steps)
+        elif hasattr(data, "take") and not isinstance(data, (list, tuple)):
+            batches = data.take(num_steps)  # tf.data.Dataset
+        else:
+            batches = itertools.islice(iter(data), num_steps)
+
+        collected = []
+        for batch in batches:
+            x = batch[0] if isinstance(batch, (tuple, list)) else batch
+            z_e = self.encoder(x, training=False)
+            z_e = ops.reshape(z_e, (-1, self.embedding_dim))
+            collected.append(keras.ops.convert_to_numpy(z_e))
+
+        if not collected:
+            raise ValueError(
+                "warm_start_codebook received no batches from `data`."
+            )
+
+        # The quantizer's codebook variable must exist before it can be
+        # assigned. Encoding above builds the encoder but never reaches the
+        # quantizer, so on a model that has not yet been called it is unbuilt.
+        if not self.quantizer.built:
+            self.quantizer.build((None, self.embedding_dim))
+        if len(collected) < num_steps:
+            logger.warning(
+                f"warm_start_codebook: asked for {num_steps} batches, the data "
+                f"yielded {len(collected)}."
+            )
+
+        self.quantizer.warm_start_codebook(collected)
+
+    def fit(self, x=None, *args: Any, **kwargs: Any):
+        """`keras.Model.fit`, preceded by the k-means warm start when enabled.
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-040
+        The warm start used to run inside the quantizer's `call()`, where it
+        raised under `fit()` (a graph tensor cannot be converted to numpy) and
+        where its Python-list accumulator collected one TRACE, not
+        `kmeans_init_steps` batches. It is hoisted here because `fit` is the
+        one place that has both the data and an eager context, so
+        `kmeans_init=True` cannot silently do nothing the way a callback the
+        caller forgets to pass would. Do NOT move it back into `call`.
+        """
+        if self.kmeans_init and not self.quantizer.is_codebook_warm_started:
+            self.warm_start_codebook(x)
+        return super().fit(x, *args, **kwargs)
+
     def train_step(self, data: Union[keras.KerasTensor, Tuple]) -> Dict[str, Any]:
         x = data[0] if isinstance(data, tuple) else data
         with tf.GradientTape() as tape:
             x_recon = self(x, training=True)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
+            # Reduce in float32; see the sibling `models/vq_vae`. `x` is
+            # float32 dataset data, `x_recon` is `compute_dtype`, and the
+            # subtraction raised under `mixed_float16`.
+            x_recon = ops.cast(x_recon, "float32")
             recon_loss = ops.mean(ops.square(x - x_recon))
             recon_loss = self.reconstruction_loss_weight * recon_loss
-            vq_losses = self.quantizer.losses
-            vq_loss = ops.sum(ops.stack(vq_losses)) if vq_losses else 0.0
+            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
+            # `self.quantizer.losses`. Do NOT narrow this back to the quantizer.
+            # `self.losses` already CONTAINS the quantizer's codebook/commitment/
+            # diversity terms and additionally carries every regularizer on the
+            # caller-supplied encoder and decoder. With the narrow form a BYO encoder
+            # built with `kernel_regularizer=l2(...)` contributed EXACTLY NOTHING to
+            # the gradient (measured on the sibling `models/vq_vae`: identical
+            # reported loss with and without the regularizer). The module's own
+            # architecture diagram at the top of this file already said
+            # `total_loss = recon(x, x_rec) + sum(layer.losses)`; only the code
+            # disagreed. See decisions.md D-026.
+            aux_losses = self.losses
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `models/vq_vae`).
+            vq_loss = (
+                ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
+                if aux_losses else 0.0
+            )
             total = recon_loss + vq_loss
-        grads = tape.gradient(total, self.trainable_variables)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 9.799837e-01 vs fp16 2.713639e-05, ratio 3.611e+04.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_total = self.optimizer.scale_loss(total)
+        grads = tape.gradient(scaled_total, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         self.total_loss_tracker.update_state(total)
         self.reconstruction_loss_tracker.update_state(recon_loss)
@@ -365,8 +509,12 @@ class VQVAERotationTrick(keras.Model):
         x_recon = self(x, training=False)
         recon_loss = ops.mean(ops.square(x - x_recon))
         recon_loss = self.reconstruction_loss_weight * recon_loss
-        vq_losses = self.quantizer.losses
-        vq_loss = ops.sum(ops.stack(vq_losses)) if vq_losses else 0.0
+        # DECISION plan-2026-08-18T140459-7991552f/D-026: `self.losses`, not
+        # `self.quantizer.losses` -- same reason as the anchor in `train_step`
+        # above. `test_step` must report the SAME objective `train_step`
+        # optimizes. See decisions.md D-026.
+        aux_losses = self.losses
+        vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
         total = recon_loss + vq_loss
         self.total_loss_tracker.update_state(total)
         self.reconstruction_loss_tracker.update_state(recon_loss)
@@ -444,3 +592,80 @@ class VQVAERotationTrick(keras.Model):
         decoder = keras.saving.deserialize_keras_object(decoder_cfg)
         config["input_shape"] = config.pop("input_shape_config", None)
         return cls(encoder=encoder, decoder=decoder, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_vq_vae_rotation(
+        input_shape: Optional[Tuple[int, int, int]] = None,
+        num_embeddings: int = 512,
+        embedding_dim: int = 64,
+        encoder: Optional[keras.Model] = None,
+        decoder: Optional[keras.Model] = None,
+        gradient_mode: str = "rotation",
+        distance_mode: str = "euclidean",
+        commitment_cost: float = 0.25,
+        hidden_channels: int = 128,
+        downsample_factor: int = 4,
+        num_res_blocks: int = 2,
+        norm_type: NormalizationType = "layer_norm",
+        **kwargs: Any
+) -> VQVAERotationTrick:
+    """Create a rotation-trick VQ-VAE.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: Fifty et al.
+    publish a quantizer, not a backbone family, and this package's convolutional
+    encoder/decoder is parameterized continuously by ``hidden_channels``,
+    ``downsample_factor`` and ``num_res_blocks`` with no named scales to
+    enumerate. The factory therefore constructs the class directly.
+
+    Leave ``encoder``/``decoder`` as ``None`` and pass ``input_shape`` to use the
+    auto-built convolutional pair; pass both to bring your own.
+
+    :param input_shape: ``(H, W, C)`` of the input images. Required when
+        ``encoder``/``decoder`` are not supplied.
+    :param num_embeddings: Codebook size K.
+    :param embedding_dim: Codebook vector dimension D.
+    :param encoder: Optional caller-supplied encoder model.
+    :param decoder: Optional caller-supplied decoder model.
+    :param gradient_mode: One of ``rotation``, ``reflection``, ``no_grad_scale``,
+        ``ste``.
+    :param distance_mode: ``euclidean`` or ``cosine``.
+    :param commitment_cost: Weight beta of the commitment term.
+    :param hidden_channels: Channel width of the auto-built encoder/decoder.
+    :param downsample_factor: Spatial reduction of the auto-built encoder; must
+        be a power of 2.
+    :param num_res_blocks: Residual blocks per auto-built stack.
+    :param norm_type: Normalization type passed to
+        ``create_normalization_layer``.
+    :param kwargs: Additional arguments forwarded to the model constructor.
+    :returns: A configured ``VQVAERotationTrick`` instance.
+    :raises ValueError: If an argument is out of range, or if neither an
+        encoder/decoder pair nor an ``input_shape`` is given.
+
+    Example::
+
+        model = create_vq_vae_rotation(input_shape=(32, 32, 3),
+                                       num_embeddings=64, embedding_dim=16)
+        recon = model(keras.random.normal((2, 32, 32, 3)))
+    """
+    return VQVAERotationTrick(
+        num_embeddings=num_embeddings,
+        embedding_dim=embedding_dim,
+        encoder=encoder,
+        decoder=decoder,
+        commitment_cost=commitment_cost,
+        gradient_mode=gradient_mode,
+        distance_mode=distance_mode,
+        input_shape=input_shape,
+        hidden_channels=hidden_channels,
+        downsample_factor=downsample_factor,
+        num_res_blocks=num_res_blocks,
+        norm_type=norm_type,
+        **kwargs
+    )
+
+# ---------------------------------------------------------------------

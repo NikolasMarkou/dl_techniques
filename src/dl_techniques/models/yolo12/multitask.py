@@ -76,6 +76,23 @@ Tasks can be specified in multiple flexible ways:
 - TaskConfiguration objects for advanced configuration
 - Predefined CommonTaskConfigurations for common combinations
 
+References:
+    - Tian et al., 2025. YOLOv12: Attention-Centric Real-Time Object Detectors.
+      (https://arxiv.org/abs/2502.12524) -- the detector this multi-task model
+      shares a backbone with.
+    - Bolya et al., 2019. YOLACT: Real-time Instance Segmentation. ICCV 2019.
+      (https://arxiv.org/abs/1904.02689) -- the prototype-mask + per-instance
+      coefficient formulation the segmentation head follows.
+    - Caruana, 1997. Multitask Learning. Machine Learning 28(1) -- the shared-
+      trunk argument this model is an instance of.
+    - Kendall et al., 2018. Multi-Task Learning Using Uncertainty to Weigh
+      Losses for Scene Geometry and Semantics. CVPR 2018.
+      (https://arxiv.org/abs/1705.07115) -- the task-weighting problem the
+      per-task loss weights here expose.
+    - Lin et al., 2017. Focal Loss for Dense Object Detection. ICCV 2017.
+      (https://arxiv.org/abs/1708.02002) and Milletari et al., 2016. V-Net
+      (Dice loss). (https://arxiv.org/abs/1606.04797) -- the two terms of
+      ``DiceFocalSegmentationLoss``.
 """
 
 import keras
@@ -121,9 +138,9 @@ class YOLOv12MultiTask(keras.Model):
         reg_max: Maximum value for DFL regression in detection.
         task_config: TaskConfiguration instance or list of VisionTaskType enums.
         segmentation_filters: Filter sizes for segmentation decoder.
-        segmentation_dropout: Dropout rate for segmentation head.
+        segmentation_dropout_rate: Dropout rate for segmentation head.
         classification_hidden_dims: Hidden dimensions for classification head.
-        classification_dropout: Dropout rate for classification head.
+        classification_dropout_rate: Dropout rate for classification head.
         kernel_initializer: Weight initializer for all layers.
         name: Model name.
 
@@ -164,10 +181,10 @@ class YOLOv12MultiTask(keras.Model):
         ] = VisionTaskType.DETECTION,
         # Segmentation head configuration
         segmentation_filters: Optional[List[int]] = None,
-        segmentation_dropout: float = 0.1,
+        segmentation_dropout_rate: float = 0.1,
         # Classification head configuration
         classification_hidden_dims: Optional[List[int]] = None,
-        classification_dropout: float = 0.3,
+        classification_dropout_rate: float = 0.3,
         # Common configuration
         kernel_initializer: str = "he_normal",
         name: Optional[str] = None,
@@ -187,9 +204,9 @@ class YOLOv12MultiTask(keras.Model):
             task_config: Task configuration - can be TaskConfiguration, list of VisionTaskType enums,
                         list of strings, single VisionTaskType, or single string.
             segmentation_filters: Filter sizes for segmentation decoder.
-            segmentation_dropout: Dropout rate for segmentation.
+            segmentation_dropout_rate: Dropout rate for segmentation.
             classification_hidden_dims: Hidden dims for classification MLP.
-            classification_dropout: Dropout rate for classification.
+            classification_dropout_rate: Dropout rate for classification.
             kernel_initializer: Weight initializer.
             name: Model name.
             **kwargs: Additional keyword arguments.
@@ -232,9 +249,9 @@ class YOLOv12MultiTask(keras.Model):
         self.scale = scale
         self.reg_max = reg_max
         self.segmentation_filters = segmentation_filters
-        self.segmentation_dropout = segmentation_dropout
+        self.segmentation_dropout_rate = segmentation_dropout_rate
         self.classification_hidden_dims = classification_hidden_dims
-        self.classification_dropout = classification_dropout
+        self.classification_dropout_rate = classification_dropout_rate
         self.kernel_initializer = kernel_initializer
 
         if name is None:
@@ -295,7 +312,7 @@ class YOLOv12MultiTask(keras.Model):
             segmentation_head = YOLOv12SegmentationHead(
                 num_classes=self.num_segmentation_classes,  # Use segmentation-specific class count
                 intermediate_filters=self.segmentation_filters,
-                dropout_rate=self.segmentation_dropout,
+                dropout_rate=self.segmentation_dropout_rate,
                 kernel_initializer=self.kernel_initializer,
                 name="segmentation_head"
             )
@@ -306,14 +323,27 @@ class YOLOv12MultiTask(keras.Model):
             classification_head = YOLOv12ClassificationHead(
                 num_classes=self.num_classification_classes,  # Use classification-specific class count
                 hidden_dims=self.classification_hidden_dims,
-                dropout_rate=self.classification_dropout,
+                dropout_rate=self.classification_dropout_rate,
                 kernel_initializer=self.kernel_initializer,
                 name="classification_head"
             )
             classification_output = classification_head(feature_maps)
             task_outputs[VisionTaskType.CLASSIFICATION.value] = classification_output
 
-        outputs = task_outputs
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-048: with exactly ONE task
+        # configured the model emits that task's TENSOR, not a one-entry dict.
+        # This line used to be an unconditional `outputs = task_outputs`, which
+        # made the module docstring's "or single tensor for single tasks" and
+        # README.md:264's "The output will be a single tensor, not a
+        # dictionary" both false, and made README Example 1's
+        # `model.predict(images).shape` raise `AttributeError: 'dict' object
+        # has no attribute 'shape'`. Do NOT normalize this the other way (always
+        # a dict): a single-task model compiled with a bare loss/metric list is
+        # the common case, and Keras keys losses by output name for a dict.
+        if len(task_outputs) == 1:
+            outputs = next(iter(task_outputs.values()))
+        else:
+            outputs = task_outputs
 
         return inputs, outputs
 
@@ -334,9 +364,9 @@ class YOLOv12MultiTask(keras.Model):
             # Serialize task config as task names list for simplicity
             "task_config": self.task_config.get_task_names(),
             "segmentation_filters": self.segmentation_filters,
-            "segmentation_dropout": self.segmentation_dropout,
+            "segmentation_dropout_rate": self.segmentation_dropout_rate,
             "classification_hidden_dims": self.classification_hidden_dims,
-            "classification_dropout": self.classification_dropout,
+            "classification_dropout_rate": self.classification_dropout_rate,
             "kernel_initializer": self.kernel_initializer,
         })
         return config

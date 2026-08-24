@@ -188,8 +188,17 @@ def test_training_loop():
     x = tf.random.normal((32, 16, 16, 32))
     y = tf.random.normal((32, 16, 16, 32))
 
-    # Train for one epoch
-    history = model.fit(x, y, epochs=1, verbose=0)
+    # Train for one epoch.
+    #
+    # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. `StochasticDepth`
+    # owns NO weights, so this one-layer model has none either and Keras says so
+    # (`backend/tensorflow/trainer.py:82`). That is exactly the property under
+    # test -- the layer must survive a real `fit()` without contributing a
+    # parameter -- so the advisory is ASSERTED here rather than suppressed: if
+    # `StochasticDepth` ever grows a weight, this goes red instead of silently
+    # passing.
+    with pytest.warns(UserWarning, match="does not have any trainable weights"):
+        history = model.fit(x, y, epochs=1, verbose=0)
     assert 'loss' in history.history
 
 
@@ -229,10 +238,10 @@ def test_different_input_shapes(input_shape):
     assert output.shape == input_shape
 
 
-@pytest.mark.parametrize("drop_rate", [0.0, 0.3, 0.7, 0.999])
-def test_different_drop_rates(drop_rate, sample_input):
+@pytest.mark.parametrize("drop_path_rate", [0.0, 0.3, 0.7, 0.999])
+def test_different_drop_rates(drop_path_rate, sample_input):
     """Test layer with different drop rates."""
-    layer = StochasticDepth(drop_path_rate=drop_rate)
+    layer = StochasticDepth(drop_path_rate=drop_path_rate)
     output = layer(sample_input, training=True)
     assert output.shape == sample_input.shape
 

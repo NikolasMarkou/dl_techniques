@@ -25,6 +25,21 @@ autoregressive rollout. See method docstring for shape details.
 See `/tmp/lewm_source/jepa.py` for the PyTorch reference; see decisions.md
 entries D-001 (live target encoder, no EMA) and D-002 (MLPProjector uses
 LayerNorm, matching upstream default).
+
+References:
+    - Sobal et al., 2024. Learning the World with Minimal Supervision (LeWM) --
+      the upstream PyTorch reference this module ports; see this package's
+      README section 14 for the citation as recorded with the port.
+    - Assran et al., 2023. Self-Supervised Learning from Images with a Joint-
+      Embedding Predictive Architecture (I-JEPA). CVPR 2023.
+      (https://arxiv.org/abs/2301.08243) -- the predict-in-EMBEDDING-space
+      principle that makes a pixel decoder unnecessary.
+    - LeCun, 2022. A Path Towards Autonomous Machine Intelligence.
+      (OpenReview: BZ5a1r-kVsf) -- the JEPA world-model framing.
+    - Skean et al., 2025. SIGReg / hyperspherical-energy anti-collapse
+      regularization, as implemented in
+      ``dl_techniques.layers.sigreg`` -- the collapse control this port keeps
+      instead of an EMA target encoder (D-001).
 """
 
 import keras
@@ -37,7 +52,6 @@ from dl_techniques.models.lewm.embedder import ActionEmbedder
 from dl_techniques.models.lewm.projector import MLPProjector
 from dl_techniques.models.lewm.predictor import ARPredictor
 from dl_techniques.regularizers.sigreg import SIGRegLayer
-from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
@@ -96,8 +110,8 @@ class LeWM(keras.Model):
             input_dim=cfg.embed_dim,
             hidden_dim=cfg.embed_dim,
             output_dim=cfg.embed_dim,
-            dropout=cfg.dropout,
-            emb_dropout=cfg.emb_dropout,
+            dropout_rate=cfg.dropout_rate,
+            emb_dropout_rate=cfg.emb_dropout_rate,
             name="predictor",
         )
 
@@ -170,6 +184,85 @@ class LeWM(keras.Model):
     # Training forward
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _require_pixels_and_action(mapping: Any) -> Any:
+        """Return ``(mapping["pixels"], mapping["action"])``, or raise.
+
+        Interface contract (call sites: :meth:`build` and :meth:`call`). Shared
+        because both take the SAME dict-shaped argument -- one a nest of shapes,
+        one a nest of tensors -- and both must fail with the same named
+        ``ValueError``. ``build`` runs FIRST for an explicit ``model.build(...)``
+        and for ``.keras`` deserialization, so a ``build`` that indexed the dict
+        directly would turn this ``ValueError`` into a bare ``TypeError``.
+
+        :param mapping: The dict passed to ``build`` or ``call``.
+        :return: The values under ``"pixels"`` and ``"action"``.
+        :raises ValueError: If ``mapping`` is not a dict.
+        """
+        # DECISION plan-2026-08-23T091307-9a110062/D-426
+        # Do NOT inline this back into `call` and index the dict directly in
+        # `build`. `build` runs FIRST on `model(...)`, so a direct index turns
+        # this named `ValueError` into a bare `TypeError`. The identical
+        # regression was MEASURED on `video_jepa` on 2026-08-23. One validator,
+        # two callers -- not two copies of the message. See decisions.md D-426.
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                f"LeWM expects `inputs` to be a dict with 'pixels' and 'action' "
+                f"keys. Got type={type(mapping)}."
+            )
+        return mapping["pixels"], mapping["action"]
+
+    def build(self, input_shape: Dict[str, Any]) -> None:
+        """Materialize every weight-bearing sub-layer.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-424
+        This repeats `call`'s forward shape math instead of tracing `call`,
+        because `call` cannot be traced: `self.add_loss(pred_loss)` below
+        raises ``ValueError: add_loss() can only be called from inside build()
+        or call(), on a tensor input`` when `call` is invoked directly on
+        `KerasTensor` placeholders. `materialize_sublayers` invokes `.call`
+        deliberately (`.__call__` would recurse into `build` forever), so it
+        can never enter the tracking context `add_loss` demands.
+
+        The duplication is kept as small as it can be: every line below goes
+        through the SAME `encode_pixels` / `encode_actions` / `predict_next`
+        helpers `call` uses, so only the four lines of action zero-padding are
+        a second encoding of the topology, and the SIGReg transpose is copied
+        verbatim from `call`. What is skipped is exactly the loss tail --
+        `add_loss` and the two trackers -- which owns no weights.
+
+        A hand walk of a forward graph drifts silently; that is why
+        `materialize_sublayers` prefers a trace. The mitigation is a shipped
+        assertion, not a comment: `test_the_explicit_build_materializes_the_
+        model.py` pins that this build materializes exactly the population a
+        real call does (MEASURED: 188 both ways), so a sub-layer added to
+        `call` and not here fails loudly.
+
+        The batch axis is made concrete (`1`): `encode_pixels` multiplies
+        `B * T`, which is a `TypeError` on `None`, and no weight shape depends
+        on the batch.
+
+        :param input_shape: dict with keys ``pixels`` (B, T, H, W, C) and
+            ``action`` (B, T-1, A).
+        """
+        if self.built:
+            return
+        cfg = self.config
+        pixels_shape, action_shape = self._require_pixels_and_action(input_shape)
+        pixels = keras.KerasTensor((1,) + tuple(pixels_shape[1:]))
+        action = keras.KerasTensor((1,) + tuple(action_shape[1:]))
+
+        emb = self.encode_pixels(pixels)
+
+        zero_pad = ops.zeros((1, 1, cfg.action_dim), dtype=action.dtype)
+        action_padded = ops.concatenate([action, zero_pad], axis=1)
+        act_emb = self.encode_actions(action_padded)
+
+        self.predict_next(emb, act_emb)
+        self.sigreg(ops.transpose(emb, (1, 0, 2)))
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Dict[str, keras.KerasTensor],
@@ -182,13 +275,7 @@ class LeWM(keras.Model):
         :param training: passed to submodules.
         :return: ``pred_emb`` of shape (B, T, D).
         """
-        if not isinstance(inputs, dict):
-            raise ValueError(
-                f"LeWM expects `inputs` to be a dict with 'pixels' and 'action' "
-                f"keys. Got type={type(inputs)}."
-            )
-        pixels = inputs["pixels"]
-        action = inputs["action"]
+        pixels, action = self._require_pixels_and_action(inputs)
 
         # Target encoder is live (no EMA, no stop_gradient).
         # Upstream LeWM uses the same encoder for both context and target.
@@ -356,3 +443,53 @@ class LeWM(keras.Model):
         cfg_dict = config.pop("config", None)
         cfg = LeWMConfig.from_dict(cfg_dict) if cfg_dict is not None else LeWMConfig()
         return cls(config=cfg, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_lewm(
+    config: Optional[LeWMConfig] = None,
+    **overrides: Any,
+) -> LeWM:
+    """Create a LeWM action-conditioned world model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: LeWM ships one
+    configuration (``LeWMConfig``, mirroring the upstream YAML defaults) and is
+    retuned field by field rather than by picking a named scale, so there is no
+    published scale family to enumerate. Encoder size is the one scale knob and
+    it lives in ``LeWMConfig.encoder_scale``, forwarded to ``ViT``.
+
+    :param config: A ``LeWMConfig``; ``None`` uses the upstream defaults.
+    :param overrides: Individual ``LeWMConfig`` field overrides applied on top
+        of ``config``. Any key that is not a config field is forwarded to
+        ``keras.Model`` instead (e.g. ``name``).
+    :returns: A configured ``LeWM`` instance.
+    :raises ValueError: If the resulting config is inconsistent (e.g.
+        ``num_frames`` too small to cover ``history_size + num_preds``).
+
+    Example::
+
+        model = create_lewm(img_size=64, patch_size=16, depth=1, history_size=2)
+        out = model({"pixels": pixels, "action": actions})
+    """
+    base = config if config is not None else LeWMConfig()
+    fields = set(LeWMConfig.__dataclass_fields__)
+    cfg_overrides = {k: v for k, v in overrides.items() if k in fields}
+    model_kwargs = {k: v for k, v in overrides.items() if k not in fields}
+
+    if cfg_overrides:
+        merged = base.to_dict()
+        merged.update(cfg_overrides)
+        # num_frames is a serialized field with a 0 sentinel: if the caller
+        # resized the horizon without restating it, re-derive it rather than
+        # carrying the old value forward into a ValueError.
+        if "num_frames" not in cfg_overrides:
+            merged["num_frames"] = 0
+        base = LeWMConfig.from_dict(merged)
+
+    return LeWM(config=base, **model_kwargs)
+
+# ---------------------------------------------------------------------

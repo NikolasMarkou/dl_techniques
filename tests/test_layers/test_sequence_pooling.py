@@ -531,7 +531,7 @@ class TestSequencePooling:
         layer = SequencePooling(
             strategy='attention',
             attention_hidden_dim=64,
-            attention_dropout=0.1
+            attention_dropout_rate=0.1
         )
         output = layer(sample_input)
 
@@ -785,7 +785,7 @@ class TestSequencePooling:
         layer_output = SequencePooling(
             strategy='attention',
             attention_hidden_dim=64,
-            attention_dropout=0.0  # No dropout for deterministic test
+            attention_dropout_rate=0.0  # No dropout for deterministic test
         )(inputs)
         model = keras.Model(inputs, layer_output)
 
@@ -852,7 +852,7 @@ class TestSequencePooling:
             aggregation_method='concat',
             attention_hidden_dim=128,
             attention_num_heads=4,
-            attention_dropout=0.2,
+            attention_dropout_rate=0.2,
             weighted_max_seq_len=256,
             top_k=20,
             temperature=0.5,
@@ -867,7 +867,7 @@ class TestSequencePooling:
         assert config['aggregation_method'] == 'concat'
         assert config['attention_hidden_dim'] == 128
         assert config['attention_num_heads'] == 4
-        assert config['attention_dropout'] == 0.2
+        assert config['attention_dropout_rate'] == 0.2
         assert config['weighted_max_seq_len'] == 256
         assert config['top_k'] == 20
         assert config['temperature'] == 0.5

@@ -20,7 +20,7 @@ class TestMobileClipModel:
                 "backbone_name": "MobileNetV2",
                 "backbone_weights": None,
                 "backbone_trainable": True,
-                "projection_dropout": 0.0,
+                "projection_dropout_rate": 0.0,
             },
             "text_config": {
                 "vocab_size": 1000,

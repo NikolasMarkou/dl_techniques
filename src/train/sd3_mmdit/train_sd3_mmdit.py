@@ -103,7 +103,7 @@ class TrainingConfig:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.train.sd3_mmdit")
+@keras.saving.register_keras_serializable()
 class SD3FlowTrainer(keras.Model):
     """Thin trainer wrapping :class:`SD3MMDiT` with a custom flow-matching step.
 

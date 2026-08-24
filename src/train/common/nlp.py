@@ -5,16 +5,25 @@ and NLP-specific callback wrappers. Used by BERT, FNet, and other NLP pretrain/f
 scripts that share the Tiktoken + TFDS pipeline.
 """
 
+import os
+import pickle
+
 import keras
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import tiktoken
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from train.common import create_callbacks as create_common_callbacks
+from train.common.callbacks import best_checkpoint_path
 from train.common.generation_probe import GenerationProbeCallback
 
+from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
+from dl_techniques.models.masked_language_model import (
+    MaskedLanguageModel,
+    visualize_mlm_predictions,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 # `create_warmup_lr_schedule` now lives in dl_techniques.optimization.schedule
@@ -433,6 +442,14 @@ def create_nlp_callbacks(
 
     Wraps common create_callbacks() with NLP defaults: TensorBoard enabled,
     LR schedule managed externally (no ReduceLROnPlateau).
+
+    .. note::
+       There is **no ``monitor_mode=`` passthrough**, so none of this helper's
+       callers can pass an explicit direction; the mode is always inferred from
+       ``monitor`` by ``callbacks.resolve_monitor_mode``. That inference is
+       correct for every monitor string in use today, and for an unrecognized
+       name it falls back to ``'min'`` with a WARNING. If you need an explicit
+       mode, call :func:`create_callbacks` directly rather than this wrapper.
     """
     callbacks, results_dir = create_common_callbacks(
         model_name=model_name,
@@ -575,6 +592,205 @@ def prepare_dict_keyed_compile(
         model.output_names = keys
 
 
+# ---------------------------------------------------------------------
+# MLM pre-training: qualitative evaluation
+# ---------------------------------------------------------------------
+
+# The four sentences the MLM pre-training scripts probe with. Module-level and
+# shared: a caller that wants different ones passes `test_texts`, rather than
+# forking the function -- forking is how bert's and fnet's copies of this block
+# came to exist in the first place.
+DEFAULT_MLM_PROBE_TEXTS = [
+    "The movie was really good and entertaining.",
+    "I loved the acting and the storyline was amazing.",
+    "This film was terrible and boring.",
+    "The plot was confusing but the effects were great.",
+]
+
+
+def evaluate_mlm_model(
+    mlm_model: MaskedLanguageModel,
+    preprocessor: TiktokenPreprocessor,
+    test_texts: Optional[List[str]] = None,
+) -> None:
+    """Evaluate the trained model with MLM prediction visualization.
+
+    One shared implementation of the block `src/train/bert/pretrain.py` and
+    `src/train/fnet/pretrain.py` carried byte-identically.
+
+    Args:
+        mlm_model: A built `MaskedLanguageModel`.
+        preprocessor: The tokenizer the model was trained with; must expose
+            `batch_encode(texts, return_tensors='np')`.
+        test_texts: Sentences to probe. `None` (default) uses
+            `DEFAULT_MLM_PROBE_TEXTS`, which is what both scripts passed
+            implicitly -- so the default is the behaviour, not a convenience.
+
+    Returns nothing: `visualize_mlm_predictions` prints/plots. `num_samples=4`
+    is passed to match the four default sentences; a caller supplying more
+    texts still visualises only the first four, exactly as before.
+    """
+    texts = DEFAULT_MLM_PROBE_TEXTS if test_texts is None else test_texts
+    test_inputs = preprocessor.batch_encode(texts, return_tensors='np')
+    test_batch = {k: tf.constant(v, dtype=tf.int32) for k, v in test_inputs.items()}
+    visualize_mlm_predictions(mlm_model=mlm_model, inputs=test_batch, tokenizer=preprocessor, num_samples=4)
+
+
+# ---------------------------------------------------------------------
+# Sentiment fine-tuning: post-training analysis
+# ---------------------------------------------------------------------
+
+
+def sentiment_final_model_filename(model_name: str) -> str:
+    """Filename the sentiment fine-tuning scripts save their final model under.
+
+    Args:
+        model_name: Lower-case script/model name, ``"bert"`` or ``"fnet"``.
+
+    Returns:
+        e.g. ``"bert_sentiment_final_best.keras"``.
+
+    Used at BOTH ends of the same contract -- the save site inside each
+    script's ``finetune_sentiment_model``, and the read site inside
+    :func:`run_finetune_post_training_analysis` -- so the two cannot drift into
+    a "saved here, looked for there" mismatch. That failure mode is not
+    hypothetical in this file pair: see the ``best_path`` note below.
+    """
+    return f"{model_name}_sentiment_final_best.keras"
+
+
+def prepare_data_for_analyzer(val_dataset: tf.data.Dataset, num_samples: int) -> DataInput:
+    """Extract samples from validation dataset for ModelAnalyzer.
+
+    Args:
+        val_dataset: A BATCHED ``(x_dict, y)`` classification dataset; it is
+            unbatched here before taking ``num_samples`` examples.
+        num_samples: How many individual examples to take.
+
+    Returns:
+        A ``DataInput`` whose ``x_data`` is a dict of stacked numpy arrays
+        keyed exactly as the dataset's feature dict.
+
+    Failure mode: an empty ``val_dataset`` raises ``IndexError`` on
+    ``x_batches[0]`` -- deliberately loud, since analysing zero samples is
+    never the intent.
+    """
+    logger.info(f"Preparing {num_samples} samples for analysis...")
+    val_subset = val_dataset.unbatch().take(num_samples)
+    x_batches, y_list = [], []
+    for x, y in val_subset:
+        x_batches.append(x)
+        y_list.append(y.numpy())
+    x_data = {key: np.array([d[key].numpy() for d in x_batches]) for key in x_batches[0].keys()}
+    return DataInput(x_data=x_data, y_data=np.array(y_list))
+
+
+# DECISION plan-2026-08-12T123743-e798a9e1/D-021  (SUPERSEDES D-017)
+# `results_dir` is a REQUIRED parameter, and the best-checkpoint path is
+# resolved through `best_checkpoint_path` -- the same producer
+# `create_callbacks` configures `ModelCheckpoint` with -- so the reader here
+# and the writer there cannot disagree.
+# DO NOT reintroduce `os.path.join(config.save_dir, "best_sentiment_model.keras")`,
+# and DO NOT give `results_dir` a `config.save_dir` default "for convenience".
+# That was F-23: `best_sentiment_model.keras` had zero write sites anywhere in
+# `src/` while `ModelCheckpoint` wrote `<results_dir>/best_model.keras` -- a
+# different DIRECTORY *and* a different FILENAME -- so both
+# `train.bert.finetune` and `train.fnet.finetune` raised
+# `ValueError: File not found` here at the end of EVERY default run
+# (`run_post_training_analysis` defaults to True), after training had finished
+# and the final model had already been saved. A `save_dir` default would make
+# that silent failure reachable again from a caller that simply forgets to
+# thread the run directory through.
+# Guarded by
+# `tests/test_train/test_bert_fnet/test_analysis_reads_what_training_writes.py`,
+# which compares the two PRODUCERS rather than a hard-coded string.
+# See decisions.md D-021 (supersedes D-017).
+def run_finetune_post_training_analysis(
+    config: Any,
+    model_name: str,
+    create_initial_model: Callable[[], keras.Model],
+    results_dir: str,
+) -> None:
+    """Run comprehensive post-training analysis comparing model snapshots.
+
+    One shared implementation of the ~58-line block that
+    ``src/train/bert/finetune.py`` and ``src/train/fnet/finetune.py`` carried
+    in near-identical copies.
+
+    Args:
+        config: The script's ``FinetuneConfig``. Must carry
+            ``full_analysis_dir``, ``save_dir``, ``dataset_name``,
+            ``max_samples``, ``max_seq_length``, ``batch_size``,
+            ``encoding_name``, the four special-token ids, and
+            ``analysis_n_samples``.
+        model_name: ``"bert"`` or ``"fnet"`` -- selects the final-model
+            filename via :func:`sentiment_final_model_filename`.
+        create_initial_model: Zero-argument factory returning a FRESH
+            (untrained-head) sentiment model, i.e. each script's own
+            ``create_sentiment_model``. Called here rather than passed
+            pre-built so construction still happens after the analysis
+            directory exists, exactly as it did in the per-script copies.
+        results_dir: The RUN directory `create_nlp_callbacks` returned to the
+            training function -- the directory `ModelCheckpoint` wrote the
+            best-validation snapshot into. Required, and deliberately without a
+            default: see the D-021 note above.
+
+    Failure mode: raises whatever ``keras.models.load_model`` raises when a
+    snapshot is missing. That is a real possibility for the best-checkpoint
+    arm: `ModelCheckpoint` never fires if `fit()` ran without a validation
+    split, so the file can legitimately be absent after a (mis-sized) run.
+
+    ``custom_objects=`` is deliberately NOT passed: ``BERT``, ``FNet`` and
+    ``TreeTransformer`` are all ``@keras.saving.register_keras_serializable()``
+    so the registry already resolves them. The two scripts disagreed about this
+    (bert omitted it, fnet passed it); verified by execution that both models
+    round-trip bit-identically without it.
+    """
+    logger.info("Running Post-Training Analysis")
+    os.makedirs(config.full_analysis_dir, exist_ok=True)
+
+    initial_model = create_initial_model()
+    best_path = best_checkpoint_path(results_dir)
+    final_path = os.path.join(
+        config.save_dir, sentiment_final_model_filename(model_name)
+    )
+
+    models_to_analyze = {
+        "Initial_Model": initial_model,
+        "Best_Model(ValAcc)": keras.models.load_model(best_path),
+        "Final_Model": keras.models.load_model(final_path),
+    }
+
+    history_path = os.path.join(config.save_dir, "training_history.pkl")
+    with open(history_path, 'rb') as f:
+        history_dict = pickle.load(f)
+    training_histories = {name: history_dict for name in models_to_analyze}
+
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    val_dataset = preprocess_classification_dataset(
+        load_text_dataset(config.dataset_name, "test", config.max_samples, as_supervised=True),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
+    analysis_data = prepare_data_for_analyzer(val_dataset, config.analysis_n_samples)
+
+    analyzer = ModelAnalyzer(
+        models=models_to_analyze,
+        training_history=training_histories,
+        config=AnalysisConfig(
+            analyze_weights=True, analyze_spectral=True,
+            analyze_calibration=True, analyze_training_dynamics=True,
+            analyze_information_flow=False, verbose=True,
+        ),
+        output_dir=config.full_analysis_dir,
+    )
+    analyzer.analyze(data=analysis_data)
+    logger.info(f"Analysis complete. Results: {config.full_analysis_dir}")
+
+
 __all__ = [
     "create_tokenizer",
     "decode_text",
@@ -588,6 +804,11 @@ __all__ = [
     "create_nlp_callbacks",
     "build_clm_metrics",
     "prepare_dict_keyed_compile",
+    "DEFAULT_MLM_PROBE_TEXTS",
+    "evaluate_mlm_model",
+    "sentiment_final_model_filename",
+    "prepare_data_for_analyzer",
+    "run_finetune_post_training_analysis",
     "augment_probe_results",
     "GenerationProbeCallback",
 ]

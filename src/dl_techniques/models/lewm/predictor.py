@@ -31,8 +31,8 @@ class ARPredictor(keras.layers.Layer):
     :param input_dim: dim of the input embeddings (= model D).
     :param hidden_dim: internal working dim of the stack.
     :param output_dim: output embedding dim (defaults to input_dim).
-    :param dropout: dropout rate inside blocks.
-    :param emb_dropout: dropout applied after pos-embedding addition.
+    :param dropout_rate: dropout rate inside blocks.
+    :param emb_dropout_rate: dropout applied after pos-embedding addition.
     :param kwargs: passthrough to `keras.layers.Layer`.
     """
 
@@ -46,8 +46,8 @@ class ARPredictor(keras.layers.Layer):
         input_dim: int,
         hidden_dim: int,
         output_dim: Optional[int] = None,
-        dropout: float = 0.0,
-        emb_dropout: float = 0.0,
+        dropout_rate: float = 0.0,
+        emb_dropout_rate: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -64,8 +64,8 @@ class ARPredictor(keras.layers.Layer):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim if output_dim is not None else input_dim
-        self.dropout_rate = dropout
-        self.emb_dropout_rate = emb_dropout
+        self.dropout_rate = dropout_rate
+        self.emb_dropout_rate = emb_dropout_rate
 
         # Projections — identity (via None) when dims match.
         self.input_proj = (
@@ -81,7 +81,7 @@ class ARPredictor(keras.layers.Layer):
             if hidden_dim != self.output_dim else None
         )
 
-        self.emb_dropout = keras.layers.Dropout(emb_dropout, name="emb_dropout")
+        self.emb_dropout = keras.layers.Dropout(emb_dropout_rate, name="emb_dropout")
 
         self.blocks = [
             AdaLNZeroConditionalBlock(
@@ -89,7 +89,7 @@ class ARPredictor(keras.layers.Layer):
                 num_heads=num_heads,
                 dim_head=dim_head,
                 mlp_dim=mlp_dim,
-                dropout_rate=dropout,
+                dropout_rate=dropout_rate,
                 name=f"block_{i}",
             )
             for i in range(depth)
@@ -185,7 +185,7 @@ class ARPredictor(keras.layers.Layer):
             "input_dim": self.input_dim,
             "hidden_dim": self.hidden_dim,
             "output_dim": self.output_dim,
-            "dropout": self.dropout_rate,
-            "emb_dropout": self.emb_dropout_rate,
+            "dropout_rate": self.dropout_rate,
+            "emb_dropout_rate": self.emb_dropout_rate,
         })
         return config

@@ -13,8 +13,14 @@ Key Features
   skip connections.
 - Strided Conv2D downsampling / Conv2DTranspose upsampling (factor 2 per stage → total
   factor 64 = 2^6).
-- Reflection padding so arbitrary input resolutions divisible-by-64 constraint is met,
-  cropped back to the original size on output.
+- Reflection padding so arbitrary input resolutions meet the divisible-by-64
+  constraint, cropped back to the original size on output. The pad is computed with
+  `keras.ops`, so a dynamic build — `SCUNet()(keras.Input((None, None, 3)))` — works
+  and one built model serves every concrete size. Two limits survive on that path:
+  a reflect pad must be strictly smaller than the extent it pads, so heights or
+  widths below 33 still fail inside `MirrorPad` (statically-shaped calls get a named
+  `ValueError` instead), and `window_size` divisibility is checked at construction
+  against `input_resolution`, not against the tensor.
 - Linearly-scheduled stochastic depth across all blocks.
 
 Architecture
@@ -50,7 +56,6 @@ Reference
 """
 
 import keras
-import numpy as np
 from keras import ops
 from typing import List, Optional, Dict, Any
 
@@ -60,6 +65,7 @@ from typing import List, Optional, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
 
 # ---------------------------------------------------------------------
@@ -124,10 +130,8 @@ class SCUNet(keras.Model):
         logger.info(f"Initializing SCUNet with config: {config}, dim: {dim}, "
                     f"window_size: {window_size}, input_resolution: {input_resolution}")
 
-        # Calculate drop path rates for each layer
         dpr = linear_drop_path_rates(sum(config), stochastic_depth_rate)
 
-        # Build network components
         self._build_network(dpr)
 
     def _validate_config(
@@ -421,6 +425,45 @@ class SCUNet(keras.Model):
             )
         return blocks
 
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from an explicit `build` call.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-422
+        The spatial axes are coerced to `self.input_resolution` before the
+        trace, and only when they arrive as `None`. `materialize_sublayers`
+        invokes `self.call` DIRECTLY on `KerasTensor` placeholders; on that
+        path `ops.shape(x)[1]` is the Python value `None`, not the scalar
+        tensor the D-004 block below correctly describes for a real graph
+        trace, so `(-h) % 64` dies with `TypeError: bad operand type for unary
+        -: 'NoneType'`.
+
+        This is a BUILD-TIME probe and nothing else. The model stays fully
+        convolutional at call time: `Layer.__call__` -> `compute_output_spec`
+        traces `call` with genuine graph placeholders where the same
+        expressions are dynamic. MEASURED: build at `(None, 64, 64, 3)` ->
+        148 weights, then call at `(1, 96, 96, 3)` -> succeeds, output
+        `(1, 96, 96, 3)`, still 148 weights. `test_dynamic_spatial_dims.py`
+        remains the contract for the call-time behaviour.
+
+        `self.input_resolution` rather than an arbitrary constant: it is
+        already the number every stage's `input_res` is derived from
+        (`__init__` above), so the window/shift geometry the probe exercises
+        is the geometry the sub-layers were configured for.
+
+        Args:
+            input_shape: Shape of `call`'s `x`, `(B, H, W, C)`.
+        """
+        if self.built:
+            return
+        materialize_sublayers(
+            self,
+            concretize_axes(
+                input_shape,
+                {1: self.input_resolution, 2: self.input_resolution},
+            ),
+        )
+        super().build(input_shape)
+
     def call(self,
              x: keras.KerasTensor,
              training: Optional[bool] = None
@@ -485,13 +528,23 @@ class SCUNet(keras.Model):
 
         h, w = ops.shape(x)[1], ops.shape(x)[2]
 
-        # Padding to ensure divisibility by 64 (2^6 for 6 downsampling steps)
-        padding_bottom = int(np.ceil(h / 64) * 64 - h)
-        padding_right = int(np.ceil(w / 64) * 64 - w)
+        # Padding to ensure divisibility by 64 (2^6 for 6 downsampling steps).
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-045: computed with `%`,
+        # UNCONDITIONALLY, and never through numpy. `ops.shape` yields a scalar
+        # TENSOR for any extent that is `None`, so the previous
+        # `int(np.ceil(h / 64) * 64 - h)` raised inside numpy — with no
+        # model-level message — for the natural fully-convolutional build
+        # `SCUNet()(keras.Input((None, None, 3)))`, which the module docstring
+        # advertises as supported. Do NOT reintroduce the `if padding > 0`
+        # guard around the pad or the crop either: it is a Python branch on a
+        # possibly-symbolic value, and a zero-width pad/full-extent crop is
+        # already a no-op. On a fully static input `h`/`w` are plain ints and
+        # `(-h) % 64` is the same number `ceil` produced.
+        padding_bottom = (-h) % 64
+        padding_right = (-w) % 64
 
-        if padding_bottom > 0 or padding_right > 0:
-            paddings = [[0, 0], [0, padding_bottom], [0, padding_right], [0, 0]]
-            x = ops.pad(x, paddings, mode="REFLECT")
+        paddings = [[0, 0], [0, padding_bottom], [0, padding_right], [0, 0]]
+        x = ops.pad(x, paddings, mode="REFLECT")
 
         # Encoder path with skip connections
         x1 = self.m_head(x)
@@ -508,9 +561,8 @@ class SCUNet(keras.Model):
         x = self.m_up1(x + x2, training=training)
         x = self.m_tail(x + x1)
 
-        # Remove padding
-        if padding_bottom > 0 or padding_right > 0:
-            x = x[:, :h, :w, :]
+        # Remove padding (a no-op when nothing was padded; see D-045)
+        x = x[:, :h, :w, :]
 
         return x
 
@@ -531,5 +583,60 @@ class SCUNet(keras.Model):
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
+
+# ---------------------------------------------------------------------
+
+
+def create_scunet(
+        in_nc: int = 3,
+        config: Optional[List[int]] = None,
+        dim: int = 64,
+        head_dim: int = 32,
+        window_size: int = 8,
+        stochastic_depth_rate: float = 0.0,
+        input_resolution: int = 256,
+        **kwargs: Any
+) -> SCUNet:
+    """Create an SCUNet image-restoration model.
+
+    SCUNet has no ``MODEL_VARIANTS`` table and none was invented: Zhang et al.
+    publish a single network (``config=[4]*7``, ``dim=64``) and scale it only by
+    editing those two arguments, so there are no named scales to enumerate.
+    This factory therefore constructs the class with the paper's defaults.
+
+    Args:
+        in_nc: Number of input (and output) channels. Defaults to 3.
+        config: Per-stage block counts; exactly 7 entries (3 down + bottleneck
+            + 3 up). ``None`` resolves to the paper's ``[4, 4, 4, 4, 4, 4, 4]``.
+        dim: Base feature dimension. Must be positive and even.
+        head_dim: Attention head dimension.
+        window_size: Swin attention window size.
+        stochastic_depth_rate: Maximum stochastic-depth drop rate, scheduled
+            linearly across all blocks.
+        input_resolution: Advisory resolution hint forwarded to every
+            ``SwinConvBlock``; it changes no attention geometry.
+        **kwargs: Additional arguments forwarded to the model constructor.
+
+    Returns:
+        A configured SCUNet instance.
+
+    Raises:
+        ValueError: If any argument is outside its valid range.
+
+    Examples:
+        >>> model = create_scunet(dim=32, head_dim=16, config=[1] * 7)
+        >>> model(keras.random.normal((1, 64, 64, 3))).shape
+        (1, 64, 64, 3)
+    """
+    return SCUNet(
+        in_nc=in_nc,
+        config=config,
+        dim=dim,
+        head_dim=head_dim,
+        window_size=window_size,
+        stochastic_depth_rate=stochastic_depth_rate,
+        input_resolution=input_resolution,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------

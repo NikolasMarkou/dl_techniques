@@ -1,58 +1,95 @@
 """
-extended Long Short-Term Memory (xLSTM) architecture.
+xLSTM language model: a token-embedding to vocabulary-logits stack of mLSTM
+(matrix-memory) and sLSTM (scalar-memory) residual blocks, with the split between
+the two block types set by a single ratio.
 
-This model realizes the xLSTM architecture, a significant evolution of the
-traditional LSTM network designed to rival the performance and scalability of
-Transformers in sequence modeling tasks. It achieves this by introducing novel
-gating structures and memory mechanisms, resulting in two specialized recurrent
-blocks: sLSTM and mLSTM. This class constructs a deep sequence model by
-stacking these blocks.
+Despite living under `models/time_series/`, this class is a language model — its
+input is integer token ids `(B, T)` and its output is `(B, T, vocab_size)` logits.
+The continuous-input forecasting sibling that reuses the same block stack is
+`forecaster.xLSTMForecaster`.
 
-The core motivation behind xLSTM is to enhance the memory capabilities and
-parallelism of LSTMs. It deconstructs the LSTM's memory into two complementary
-forms: a scalar, recurrent memory (sLSTM) and a matrix, parallelizable
-memory (mLSTM).
+The classic LSTM has two structural limits that block it from competing at scale.
+It cannot *revise* a stored decision: the sigmoid input and forget gates are
+bounded in `(0, 1)`, so once memory is committed, later evidence can only decay it
+gradually, never overwrite it decisively. And its memory per unit is a single
+scalar, so the number of distinguishable things it can hold grows only with width.
+xLSTM attacks each limit with one change.
 
-Architectural Overview:
-The model is a deep residual stack of xLSTM blocks. The composition of this
-stack is controlled by the `mlstm_ratio`, which determines the proportion of
-mLSTM blocks to sLSTM blocks. This allows the architecture to be tuned along
-a spectrum from fully recurrent (like a traditional LSTM) to highly
-parallelizable (closer in spirit to a Transformer). Typically, mLSTM blocks
-are placed in the lower layers to process sequences in parallel, followed by
-sLSTM blocks in the upper layers to refine the representation with stateful,
-recurrent processing.
+The first change is exponential gating. The input gate becomes `i_t = exp(i_proj)`,
+which is unbounded above, so a single strongly-activated step can dominate
+everything accumulated before it — the "revision" the sigmoid gate cannot express.
+A raw exponential of course overflows immediately, and the fix is what makes the
+cell work. A running maximum is carried in the log domain as a fourth state,
 
-Foundational Concepts:
-The architecture is built upon two key innovations extending the classic LSTM:
+    `m_t = max(m_{t-1} + log f_t, log i_t)`
+    `i_t = exp(log i_t - m_t)`,  `f_t = exp(m_{t-1} + log f_t - m_t)`
 
-1.  **sLSTM (Scalar LSTM):** This block enhances the traditional LSTM cell
-    to improve long-range dependencies. It retains a scalar hidden state and
-    cell state but modifies the gating mechanism. A key change is the
-    introduction of an exponential forget gate, which normalizes the memory
-    state and allows for more flexible memory updates than the standard
-    sigmoid gate. This enables the model to multiplicatively update its memory,
-    offering a more powerful mechanism for retaining or discarding information
-    over long sequences.
+which bounds both gates in `(0, 1]`. The subtraction is exactly cancelling rather
+than approximate: the cell keeps a normalizer state alongside the memory,
+`c_t = f_t*c_{t-1} + i_t*z_t` and `n_t = f_t*n_{t-1} + i_t`, and reads out the
+ratio `h_t = o_t * c_t / n_t`. Both numerator and denominator carry the same
+`exp(-m_t)` factor, so it divides out and the stabilized recurrence computes the
+same function as the unstabilized one, in a representable range. This is why the
+sLSTM cell carries four states, `[h, c, n, m]`, where a standard LSTM carries two.
+The forget gate is selectable: `slstm_forget_gate='sigmoid'` (the default) takes
+its log for the stabilizer, `'exp'` treats the pre-activation as already
+logarithmic.
 
-2.  **mLSTM (Matrix LSTM):** This block introduces a matrix memory, `C_t`,
-    and a matrix hidden state, `H_t`. This fundamentally changes the memory
-    from a scalar value to a structured matrix, allowing for parallel updates
-    and storage of multiple pieces of information simultaneously. The mLSTM
-    employs covariance-based gating, enabling parallel memory mixing that is
-    reminiscent of the query-key-value interactions in Transformer attention
-    heads. This design makes mLSTM highly parallelizable and efficient on
-    modern hardware, addressing a key limitation of traditional RNNs.
+The second change is the matrix memory. An mLSTM cell replaces the vector cell
+state with a matrix `C_t` of shape `(key_dim, value_dim)` per head and updates it
+by an outer product, `C_t = f_t*C_{t-1} + i_t*(v_t k_t^T)`, retrieving with a query,
+`h_t = o_t * (C_t q_t) / max(|n_t^T q_t|, exp(-m_t))`. This is associative-memory
+storage: each step writes a key/value pair into a distinct outer-product direction
+instead of overwriting a shared scalar, so capacity scales with `key_dim *
+value_dim` rather than with width, and retrieval is the same query-key-value
+operation attention performs — but with a fixed-size state instead of a growing KV
+cache. The same log-domain stabilizer guards it; without it the matrix memory
+overflows fp32 after a few dozen steps.
 
-By combining these two block types, the xLSTM model creates a hybrid
-architecture. It leverages the parallel processing power of mLSTM for efficient
-representation learning and the robust, stateful recurrence of sLSTM for
-capturing complex temporal dependencies, aiming to achieve a superior balance
-of performance, efficiency, and scalability.
+A caveat about what "parallelizable" means here. The mLSTM recurrence is
+*formulated* so that it admits a parallel, attention-like evaluation over a whole
+sequence. This implementation does not exploit that: both cells are wrapped in
+`keras.layers.RNN` and stepped sequentially, so mLSTM's advantage over sLSTM in
+this codebase is representational capacity, not wall-clock throughput. Treat any
+speed claim as belonging to the paper, not to this code.
+
+Architecturally the model is a plain residual stack. `mlstm_ratio` sets the split
+by index: the first `int(num_layers * mlstm_ratio)` blocks are mLSTM and the rest
+are sLSTM, putting the high-capacity associative memory in the lower layers and the
+stateful scalar refinement above it. The two block types are shaped differently,
+following the paper's two figures. An mLSTM block is pre-up-projection: it widens
+by `mlstm_expansion_factor`, applies a depthwise *causal* convolution with swish,
+runs the mLSTM in the widened space, normalizes and projects back down, with the
+residual spanning the whole thing. An sLSTM block is post-normalization: sLSTM,
+then normalization, then a configurable gated feed-forward network (SwiGLU by
+default), with one skip around the block. Normalization type and FFN type are
+resolved through the shared factories rather than hard-coded, so a stack can be run
+with LayerNorm or RMSNorm without touching this file.
+
+Because every path through the model is recurrent or causally convolved, causality
+is a property of the architecture rather than of a mask. There is no attention and
+no positional encoding, and consequently no way to accidentally leak future tokens
+by omitting a mask — the failure mode that haunts transformer language models
+simply cannot occur here.
+
+Two deliberate behavioural choices. `normalization_kwargs` is stored exactly as
+passed, including a `None` sentinel, and `or {}` is applied only at the factory
+call site; storing the resolved `{}` instead would make `get_config()` emit
+something the constructor never received and break lossless round-tripping.
+`from_variant(..., pretrained=True)` raises `NotImplementedError` rather than
+warning and returning a randomly initialized model — no checkpoints ship with this
+package, and silently handing back random weights to a caller who asked for trained
+ones is indistinguishable from success.
 
 References:
-    - Beck, M., et al. (2024). xLSTM: Extended Long Short-Term Memory.
-      arXiv:2405.04517v2
+    - Beck et al., 2024. xLSTM: Extended Long Short-Term Memory.
+      (https://arxiv.org/abs/2405.04517)
+    - Hochreiter and Schmidhuber, 1997. Long Short-Term Memory. Neural Computation
+      9(8), 1735-1780.
+    - Katharopoulos et al., 2020. Transformers are RNNs: Fast Autoregressive
+      Transformers with Linear Attention. (https://arxiv.org/abs/2006.16236)
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
 """
 
 import keras

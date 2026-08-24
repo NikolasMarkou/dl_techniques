@@ -65,6 +65,7 @@ import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
 from ..activations import resolve_activation_layer
+from ...initializers import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -228,10 +229,22 @@ class ChannelAttention(keras.layers.Layer):
             **(self.intermediate_activation_args or {}),
         )
 
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
+        # `dense2` gets a CLONE, not `self.kernel_initializer`. Passing the one
+        # shared instance to both `Dense` layers made the SQUEEZE kernel and the
+        # EXCITE kernel the same flat draw: MEASURED on
+        # `CBAMNet.from_variant('tiny')`, `channel_attention_dense_1/kernel`
+        # (64, 8) and `channel_attention_dense_2/kernel` (8, 64) were
+        # element-for-element equal in EVERY block (2 of 2). Those two weights
+        # are the bottleneck's two OPPOSITE directions, so this is the
+        # different-role collision D-057 convicts. Do NOT "simplify" this back
+        # to `self.kernel_initializer`, and do NOT resolve the initializer twice
+        # in `__init__` instead -- `get_config` must keep reporting the instance
+        # the caller passed. See decisions.md D-070.
         self.dense2 = keras.layers.Dense(
             units=channels,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='channel_attention_dense_2'
         )

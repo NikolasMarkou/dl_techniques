@@ -639,9 +639,12 @@ class TestCreateVAEFactory:
         samples = vae.sample(num_samples=3)
         assert samples.shape == (3, 32, 32, 1)
 
-    def test_create_vae_validation_passes(self):
-        """Test that create_vae's internal validation works."""
-        # This should not raise any errors
+    def test_create_vae_returns_a_compiled_model(self):
+        """``create_vae``'s remaining contract: it compiles. It no longer self-tests.
+
+        The self-test it used to run lives at
+        ``TestVAESamplingTypes::test_create_vae_output_shapes``.
+        """
         vae = create_vae(
             input_shape=(64, 64, 3),
             latent_dim=128,
@@ -1021,8 +1024,20 @@ class TestVAESamplingTypes:
         assert samples.shape == (3,) + self.INPUT_SHAPE
 
     @pytest.mark.parametrize("mode", SAMPLING_MODES)
-    def test_create_vae_factory_assertion_branch(self, mode):
-        """create_vae's internal validation passes for every mode."""
+    def test_create_vae_output_shapes(self, mode):
+        """The shape contract ``create_vae`` used to ``assert`` on, as a real test.
+
+        Until step 19 the factory ran a random forward pass and ``assert``-ed on
+        these three shapes ITSELF (audit rule R-051, routed SEVERE). That was
+        void under ``python -O``, and the ``keras.random.uniform`` draw shifted
+        the global seed stream for every later caller. The check moved here, and
+        it got stronger on the way: it now runs for all three sampling types
+        rather than for whichever one the caller happened to request.
+
+        ``hypersphere`` emits a single scalar radius log-variance ``[B, 1]`` and
+        ``vmf`` a single scalar concentration kappa ``[B, 1]``; ``gaussian``
+        keeps the full ``[B, latent_dim]`` log-variance.
+        """
         vae = create_vae(
             input_shape=self.INPUT_SHAPE,
             latent_dim=self.LATENT_DIM,
@@ -1030,6 +1045,49 @@ class TestVAESamplingTypes:
             sampling_type=mode,
         )
         assert vae.sampling_type == mode
+
+        batch = keras.random.uniform((2,) + self.INPUT_SHAPE)
+        out = vae(batch, training=False)
+        assert tuple(out["reconstruction"].shape) == (2,) + self.INPUT_SHAPE
+        assert tuple(out["z_mean"].shape) == (2, self.LATENT_DIM)
+        expected_log_var_dim = 1 if mode in ("hypersphere", "vmf") else self.LATENT_DIM
+        assert tuple(out["z_log_var"].shape) == (2, expected_log_var_dim)
+
+    def test_create_vae_runs_no_forward_pass(self):
+        """The factory must BUILD a model, never RUN one.
+
+        This is the RED proof for the removal: restore the self-test forward
+        pass in ``create_vae`` and the counter below reads 1 instead of 0.
+
+        A first draft of this test tried to prove the point via the global seed
+        stream -- seed, build, draw, and compare against the same sequence
+        without the factory's ``keras.random.uniform`` call. It FAILED, and the
+        instrument was the reason: weight initialization draws from that same
+        global stream, so BOTH arms shift it and the comparison could never
+        isolate the factory's own draw. Counting invocations is unconfounded.
+        """
+        calls = []
+        original_call = VAE.call
+
+        def counting_call(self, *args, **kwargs):
+            calls.append(1)
+            return original_call(self, *args, **kwargs)
+
+        VAE.call = counting_call
+        try:
+            create_vae(
+                input_shape=self.INPUT_SHAPE,
+                latent_dim=self.LATENT_DIM,
+                variant="micro",
+            )
+        finally:
+            VAE.call = original_call
+
+        assert calls == [], (
+            f"create_vae invoked the model {len(calls)} time(s). The factory "
+            "builds and compiles; it does not run. Its old self-test forward "
+            "pass moved to test_create_vae_output_shapes."
+        )
 
     def test_legacy_hypersphere_faithful_alias_maps_to_hypersphere(self):
         """Back-compat: the deprecated 'hypersphere_faithful' value constructs
@@ -1141,6 +1199,83 @@ class TestKLWarmupCallback:
 
         with pytest.raises(ValueError):
             KLWarmupCallback(target=0.01, warmup_epochs=0)
+
+
+class TestVAEEffectiveBeta:
+    """F-53: `kl_loss_weight` is `beta / prod(input_shape)`, and that is PINNED.
+
+    The reconstruction term is a MEAN over pixels while the gaussian KL is a SUM
+    over latents, so the `beta` of the standard sum-over-pixels ELBO is
+    `kl_loss_weight * prod(input_shape)`. This was undocumented, which made a
+    nominal `kl_loss_weight` mean different things at different resolutions:
+    MEASURED over the shipped `MODEL_VARIANTS`, `micro`/`small` optimize
+    beta 7.84 at (28, 28, 1) and 30.72 at (32, 32, 3) -- a 3.92x swing in
+    regularization strength from the input resolution alone.
+
+    The arithmetic is deliberately UNCHANGED (see the D-028 anchor in
+    `_compute_reconstruction_loss`); what these tests pin is that the convention
+    is what the docs now say it is, so a later "cleanup" of either reduction is
+    caught here rather than silently re-scaling every shipped preset.
+    """
+
+    def test_reconstruction_is_a_mean_over_pixels_not_a_sum(self):
+        vae = VAE(latent_dim=4, input_shape=(8, 8, 1), kl_loss_weight=0.01)
+        rng = np.random.default_rng(0)
+        y_true = rng.uniform(size=(4, 8, 8, 1)).astype("float32")
+        y_pred = np.clip(y_true + 0.1, 1e-3, 1 - 1e-3).astype("float32")
+
+        got = float(keras.ops.convert_to_numpy(
+            vae._compute_reconstruction_loss(y_true, y_pred)))
+        per_pixel_mean = float(np.mean(keras.ops.convert_to_numpy(
+            keras.losses.binary_crossentropy(
+                y_true.reshape(4, -1),
+                np.clip(y_pred.reshape(4, -1), 1e-7, 1 - 1e-7)))))
+
+        assert got == pytest.approx(per_pixel_mean, rel=1e-5)
+        # And it is emphatically NOT the sum over the 64 pixels, which is the
+        # reduction the standard ELBO uses and the one `effective_kl_beta`
+        # converts to. `rel=0.5` is deliberately loose: this arm only has to
+        # separate a mean from a 64x-larger sum, not measure either.
+        assert got != pytest.approx(64.0 * per_pixel_mean, rel=0.5)
+
+    def test_kl_is_a_sum_over_the_latent_axis_for_gaussian(self):
+        vae = VAE(latent_dim=6, input_shape=(8, 8, 1), sampling_type="gaussian")
+        z_mean = np.zeros((4, 6), dtype="float32")
+        z_log_var = np.zeros((4, 6), dtype="float32")
+        z_mean[:, :] = 1.0
+        got = float(keras.ops.convert_to_numpy(
+            vae._compute_kl_loss(z_mean, z_log_var)))
+        # -0.5 * sum_j (1 + 0 - 1 - 1) = 0.5 * latent_dim
+        assert got == pytest.approx(0.5 * 6, rel=1e-5)
+
+    @pytest.mark.parametrize("shape", [(28, 28, 1), (32, 32, 3)])
+    def test_effective_beta_is_the_weight_times_the_pixel_count(self, shape):
+        vae = VAE(latent_dim=8, input_shape=shape, kl_loss_weight=0.01)
+        assert vae.effective_kl_beta == pytest.approx(
+            0.01 * int(np.prod(shape)))
+
+    def test_the_same_nominal_weight_is_a_different_beta_per_resolution(self):
+        """The finding itself, as an assertion."""
+        mnist = VAE(latent_dim=8, input_shape=(28, 28, 1), kl_loss_weight=0.01)
+        cifar = VAE(latent_dim=8, input_shape=(32, 32, 3), kl_loss_weight=0.01)
+        assert mnist.kl_loss_weight == cifar.kl_loss_weight
+        assert cifar.effective_kl_beta / mnist.effective_kl_beta == (
+            pytest.approx(3072.0 / 784.0))
+
+    def test_shipped_variant_effective_betas_are_the_measured_ones(self):
+        """Any re-tune of `MODEL_VARIANTS` must update these numbers on purpose."""
+        expected_at_mnist = {
+            "micro": 7.84, "small": 7.84,
+            "medium": 3.92, "large": 3.92,
+            "xlarge": 0.784,
+        }
+        assert set(expected_at_mnist) == set(VAE.MODEL_VARIANTS)
+        for variant, beta in expected_at_mnist.items():
+            weight = VAE.MODEL_VARIANTS[variant]["kl_loss_weight"]
+            assert weight * 784 == pytest.approx(beta, rel=1e-6), (
+                f"variant {variant!r} now optimizes an effective beta of "
+                f"{weight * 784:.4g} at (28, 28, 1), not {beta}"
+            )
 
 
 if __name__ == "__main__":

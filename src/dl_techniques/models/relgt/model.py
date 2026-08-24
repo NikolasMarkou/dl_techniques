@@ -1,11 +1,75 @@
 """
-Modern Relational Graph Transformer (RELGT) Implementation
+Relational Graph Transformer: multi-element node tokenization over sampled subgraphs,
+with local self-attention combined with cross-attention to learnable global centroids.
 
-This module provides a modernized implementation of the Relational Graph Transformer,
+A relational database is a graph, but not one a standard graph transformer handles
+well. Its nodes come from different tables and so carry different feature schemas and
+different meanings; edges encode foreign keys rather than a single relation; rows
+carry timestamps, so an edge's usefulness depends on when it was created relative to
+the prediction time. Flattening all of that into one node-feature vector throws away
+exactly the structure that makes the data relational, and running full attention over
+a real database is impossible anyway — the graph does not fit.
 
-The RELGT model introduces a novel multi-element tokenization strategy for relational
-graph data and combines local attention over subgraphs with global attention to
-learnable centroids for powerful relational deep learning.
+RELGT's answer to the first problem is to stop treating a node as one vector.
+Each node in a sampled subgraph is decomposed into five elements, each embedded
+separately and summed:
+
+`T = Norm(Dropout(E_feat(x) + E_type(t) + E_hop(h) + E_time(tau) + E_pe(A)))`
+
+carrying, in order, its own features, which table it came from, how many hops it sits
+from the seed node, its timestamp relative to the seed's, and its structural position.
+Because the components are summed after independent embedding, attention can weigh
+"same table as the seed", "two hops away" and "recent" as separable signals rather
+than having to disentangle them from a concatenated blob. The positional element is
+computed by a small GNN run over random features propagated through the subgraph's
+adjacency — a learned structural fingerprint, since a relational graph has no
+canonical node ordering to index a positional table with.
+
+The second problem, scale, is handled by attending locally and summarizing globally.
+Local attention runs only over the sampled subgraph around the seed node, so cost is
+governed by the sample size rather than by the database. That alone would confine
+every prediction to its own neighbourhood, so each block also cross-attends from the
+seed node to a bank of learnable global centroids — `K = V = centroids`, `Q = seed` —
+which act as a small learned codebook of database-wide structure. The two are then
+combined, `output = Norm(FFN([h_local; h_global]) + ResidualProj([h_local; h_global]))`,
+where `h_local` is the mean-pooled output of local self-attention and `h_global` the
+single vector produced by the centroid cross-attention. The centroids are parameters,
+not statistics: they are shaped by the task, and their count is the knob that trades
+global expressiveness against parameters.
+
+Two structural facts about this implementation are worth stating plainly. The first
+is how the blocks stack. A block's headline output is a single `(B, E)` vector, so
+chaining *that* across blocks would hand every block after the first a one-token
+sequence to self-attend over — depth in name only. What is chained instead is a
+`(B, K, E)` token sequence: the block's local transformer output with the block's
+own combined `(B, E)` summary broadcast-added onto every token, which the block
+returns alongside that summary when constructed with `return_tokens=True`. Block
+`i+1` therefore attends over block `i`'s full, processed token set, `K` is preserved
+at every level, and `num_transformer_blocks` buys real depth rather than only
+parameters. The summary is folded in rather than dropped so that a non-final block's
+global/centroid half is not computed and discarded — chaining the local tokens alone
+left 32% of a 3-block model's parameters without any gradient at all, which is what
+`test_no_trainable_variable_is_gradient_less` now pins. The seed embedding is deliberately *not* chained:
+it is only ever the cross-attention query, no block emits an updated seed, and it is
+the fixed anchor identifying the node being predicted about. Second, the seed node is
+taken to be index 0 of `node_features` — the subgraph sampler's contract, not
+something the model verifies.
+
+The prediction head's final activation follows `problem_type`, and when there are no
+transformer blocks at all the model falls back to mean-pooling the tokens, so the
+degenerate configuration still produces a well-shaped output rather than failing.
+
+References:
+    - Dwivedi et al., 2025. Relational Graph Transformer.
+      (https://arxiv.org/abs/2505.10960)
+    - Fey et al., 2023. Relational Deep Learning: Graph Representation Learning on
+      Relational Databases. (https://arxiv.org/abs/2312.04615)
+    - Dwivedi & Bresson, 2020. A Generalization of Transformer Networks to Graphs.
+      (https://arxiv.org/abs/2012.09699)
+    - Rampasek et al., 2022. Recipe for a General, Powerful, Scalable Graph
+      Transformer. (https://arxiv.org/abs/2205.12454)
+    - Jaegle et al., 2021. Perceiver: General Perception with Iterative Attention.
+      (https://arxiv.org/abs/2103.03206)
 """
 
 import keras
@@ -20,6 +84,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.graphs.relational_graph_transformer_blocks import (
     RELGTTransformerBlock, RELGTTokenEncoder)
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -34,7 +99,7 @@ class RELGT(keras.Model):
     long-range dependencies in relational databases. It establishes Graph Transformers
     as a powerful architecture for Relational Deep Learning.
 
-    **Intent**: Provide state-of-the-art predictive modeling on relational data by
+    **Intent**: Provide predictive modeling on relational data by
     combining the expressiveness of graph transformers with relational-specific
     innovations in tokenization and attention mechanisms.
 
@@ -61,7 +126,17 @@ class RELGT(keras.Model):
         gnn_pe_dim: Integer, dimension for GNN positional encoding. Defaults to 32.
         gnn_pe_layers: Integer, number of GNN PE layers. Defaults to 2.
         num_transformer_blocks: Integer, number of transformer blocks to stack.
-            Defaults to 2.
+            Defaults to 2. **Bounded above by measurement at ~4** (the depth
+            `create_relgt_model("repo_medium")` ships): each block broadcast-adds its
+            summary onto every token at `SUMMARY_BROADCAST_SCALE`, and that
+            token-invariant component grows relative to the token-varying signal
+            with every block (measured untrained at `embedding_dim=32`: ratio
+            0.23-0.49 at block 0, 0.32-1.02 at block 3 over 20 draws, and past
+            1.0 at blocks 4-7 of an 8-block model). Deeper models are not
+            rejected — only `> 0` is validated — but re-measure the ratio at the
+            deepest block before going past 4. See the DEPTH LIMIT note on
+            `SUMMARY_BROADCAST_SCALE` in
+            `layers/graphs/relational_graph_transformer_blocks.py`.
         num_heads: Integer, number of attention heads. Defaults to 4.
         num_global_centroids: Integer, number of learnable global tokens. Defaults to 64.
         ffn_dim: Integer, hidden dimension for FFNs. Defaults to 256.
@@ -96,6 +171,59 @@ class RELGT(keras.Model):
         )
         ```
     """
+
+    #: DECISION plan-2026-08-23T091307-9a110062/D-464
+    #: ``base`` is the official default configuration of snap-stanford/relgt, the
+    #: paper authors' own release, quoted from its argparse defaults:
+    #:   --channels 512  --num_heads 4  --num_centroids 4096  --num_layers 1
+    #:   https://raw.githubusercontent.com/snap-stanford/relgt/main/main_node_ddp.py
+    #: This file's References block heads with Dwivedi et al. 2025 and carries no
+    #: "inspired by" disclaimer, so these numbers are a citation and must stay one.
+    #: What is quoted and what is NOT:
+    #:   quoted     embedding_dim (channels), num_heads, num_global_centroids
+    #:              (num_centroids), num_transformer_blocks (num_layers -- 1 is the
+    #:              argparse DEFAULT; the official expts/ scripts sweep it over
+    #:              {1, 4, 8}, so it is a default rather than a single canonical depth)
+    #:   NOT quoted ffn_dim: the official argparse defines no FFN width, so 1024
+    #:              preserves this table's own 2x-embedding_dim ratio and is a repo
+    #:              choice. Also unresolved: the constructor's gnn_pe_dim=32 sits
+    #:              opposite an official `--pos_enc_dim 128`, but that mapping was
+    #:              never verified against the upstream code, so it is flagged here
+    #:              rather than silently "corrected".
+    #: ``small`` and ``repo_medium`` have NO upstream counterpart: the official repo
+    #: publishes no model-size ladder at all (its own "small"/"large" scripts name
+    #: RelBench DATASET-size categories, not model sizes). ``repo_medium`` was called
+    #: ``large`` until 2026-08-23; at the published 512-wide ``base`` a 256-wide row
+    #: could no longer be called large in this table's own terms.
+    #: Pinned by tests/test_variant_tables_match_upstream_references.py.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        # Repo-original. Smallest tier; used by the package's own smoke tests.
+        "small": {
+            "embedding_dim": 64,
+            "num_heads": 2,
+            "num_global_centroids": 16,
+            "ffn_dim": 128,
+            "num_transformer_blocks": 1,
+        },
+        # snap-stanford/relgt main_node_ddp.py argparse defaults.
+        "base": {
+            "embedding_dim": 512,
+            "num_heads": 4,
+            "num_global_centroids": 4096,
+            "ffn_dim": 1024,
+            "num_transformer_blocks": 1,
+        },
+        # Repo-original. Deeper (4 blocks) but narrower than `base`; the 4-block
+        # depth is the ceiling documented at SUMMARY_BROADCAST_SCALE, do not raise
+        # it without re-measuring.
+        "repo_medium": {
+            "embedding_dim": 256,
+            "num_heads": 8,
+            "num_global_centroids": 64,
+            "ffn_dim": 512,
+            "num_transformer_blocks": 4,
+        },
+    }
 
     def __init__(
             self,
@@ -168,6 +296,7 @@ class RELGT(keras.Model):
                 dropout_rate=dropout_rate,
                 ffn_type=ffn_type,
                 normalization_type=normalization_type,
+                return_tokens=True,
                 name=f"TransformerBlock_{i}",
             )
             self.transformer_blocks.append(block)
@@ -191,6 +320,23 @@ class RELGT(keras.Model):
             layers.Dense(output_dim, activation=final_activation, name="FinalOutput")
         ], name="PredictionHead")
 
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method RELGT inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        Args:
+            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
     def call(
             self,
             inputs: Dict[str, keras.KerasTensor],
@@ -202,27 +348,25 @@ class RELGT(keras.Model):
         seed_node_features = inputs["node_features"][:, 0:1, :]  # (batch, 1, feature_dim)
         seed_node_embedding = self.seed_encoder(seed_node_features)  # (batch, 1, embed_dim)
 
-        # 1. Encode input graph data into tokens
         local_tokens = self.token_encoder(inputs, training=training)
 
-        # 2. Process through transformer blocks
-        # In a complete implementation, you might want to update local_tokens
-        # between blocks, but for simplicity we process once and then use
-        # the representation for all blocks
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-009
+        # What is chained is the (B, K, E) TOKEN SEQUENCE, not the block's (B, E)
+        # summary. Chaining the summary (via expand_dims) is type-correct and
+        # defeats the purpose: every block after the first would self-attend over
+        # a single token. Do NOT chain `seed_node_embedding` either -- it is only
+        # ever the cross-attention query and no block emits an updated seed, so a
+        # "chained seed" would have to be invented rather than read. See
+        # decisions.md D-009.
         current_representation = None
+        current_tokens = local_tokens
 
         for block in self.transformer_blocks:
-            # Each block outputs a single vector representation
-            current_representation = block(
-                [local_tokens, seed_node_embedding],
+            current_representation, current_tokens = block(
+                [current_tokens, seed_node_embedding],
                 training=training
             )
 
-            # For multi-block architectures, you might want to update tokens
-            # or maintain running representations. This implementation uses
-            # the final block output directly.
-
-        # 3. Generate final prediction
         if current_representation is None:
             # Handle case with no transformer blocks
             current_representation = ops.mean(local_tokens, axis=1)
@@ -233,7 +377,8 @@ class RELGT(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        return {
+        config = super().get_config()
+        config.update({
             "output_dim": self.output_dim,
             "problem_type": self.problem_type,
             "embedding_dim": self.embedding_dim,
@@ -248,7 +393,8 @@ class RELGT(keras.Model):
             "dropout_rate": self.dropout_rate,
             "ffn_type": self.ffn_type,
             "normalization_type": self.normalization_type,
-        }
+        })
+        return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'RELGT':
@@ -269,36 +415,14 @@ def create_relgt_model(
     Args:
         output_dim: Dimension of final output.
         problem_type: 'classification' or 'regression'.
-        model_size: 'small', 'base', or 'large' for predefined configurations.
+        model_size: 'small', 'base', or 'repo_medium'. Only 'base' has an
+            upstream counterpart; see RELGT.MODEL_VARIANTS.
         **kwargs: Additional arguments to override defaults.
 
     Returns:
         Configured RELGT model.
     """
-    # Predefined configurations
-    size_configs = {
-        "small": {
-            "embedding_dim": 64,
-            "num_heads": 2,
-            "num_global_centroids": 16,
-            "ffn_dim": 128,
-            "num_transformer_blocks": 1,
-        },
-        "base": {
-            "embedding_dim": 128,
-            "num_heads": 4,
-            "num_global_centroids": 32,
-            "ffn_dim": 256,
-            "num_transformer_blocks": 2,
-        },
-        "large": {
-            "embedding_dim": 256,
-            "num_heads": 8,
-            "num_global_centroids": 64,
-            "ffn_dim": 512,
-            "num_transformer_blocks": 4,
-        }
-    }
+    size_configs = RELGT.MODEL_VARIANTS
 
     if model_size not in size_configs:
         raise ValueError(f"model_size must be one of {list(size_configs.keys())}, got {model_size}")

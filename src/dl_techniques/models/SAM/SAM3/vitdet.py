@@ -79,6 +79,10 @@ from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # module-private helpers
@@ -525,7 +529,7 @@ class Sam3ViTDetBlock(keras.layers.Layer):
         self.drop_path_rate = float(drop_path_rate)
         self.dropout_rate = float(dropout_rate)
         self.norm_epsilon = float(norm_epsilon)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.init_values = init_values
         self.use_rope = bool(use_rope)
         self.rope_theta = float(rope_theta)
@@ -687,7 +691,7 @@ class Sam3ViTDetBlock(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
             "dropout_rate": self.dropout_rate,
             "norm_epsilon": self.norm_epsilon,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "init_values": self.init_values,
             "use_rope": self.use_rope,
             "rope_theta": self.rope_theta,
@@ -744,7 +748,10 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
     :param window_size: Attention window side for the non-global blocks.
     :type window_size: int
     :param global_att_blocks: Block indices that attend globally. The LAST of
-        them is the block whose output the trunk returns.
+        them is the block whose output the trunk returns, so it is REQUIRED to
+        be ``depth - 1`` -- anything earlier leaves the remaining blocks built,
+        parameter-counted and optimizer-tracked but never executed. Enforced in
+        ``__init__``.
     :type global_att_blocks: Sequence[int]
     :param qkv_bias: Whether the fused ``qkv`` projections carry biases.
     :type qkv_bias: bool
@@ -788,9 +795,11 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``img_size`` is not divisible by ``patch_size``, if
-        ``depth`` is not positive, if ``global_att_blocks`` is empty or holds an
-        out-of-range index, or if ``pretrain_img_size`` is not divisible by
-        ``patch_size``.
+        ``depth`` is not positive, if ``global_att_blocks`` is empty, holds an
+        out-of-range index or does not name the LAST block
+        (``max(global_att_blocks) != depth - 1``, which would leave the blocks
+        past it built and trained but never executed), or if
+        ``pretrain_img_size`` is not divisible by ``patch_size``.
 
     Example:
         >>> import numpy as np
@@ -855,6 +864,35 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
                 f"global_att_blocks {global_att_blocks} must all be in "
                 f"[0, depth={depth})"
             )
+        # DECISION plan-2026-08-18T140459-7991552f/D-046
+        # The LAST block must be global. `call` returns at
+        # `index == max(global_att_blocks)`, so every block after that index is
+        # BUILT, parameter-counted and handed to the optimizer while
+        # contributing nothing: no gradient reaches it, and AdamW still carries
+        # two moment buffers per weight for it. MEASURED at
+        # `depth=6, global_att_blocks=(1, 3)`: the trunk constructs silently,
+        # and zeroing every weight of blocks 4 and 5 (1,744 parameters) moves
+        # the output by max|delta| == 0.0 exactly. No shape error, no warning,
+        # and invisible to a parameter-count assertion -- which is why this
+        # needs a constructor guard rather than a test.
+        # WHAT NOT TO DO: do not "repair" a violating config by silently
+        # truncating `self.blocks` to `max(global_att_blocks) + 1`, and do not
+        # downgrade this to a `logger.warning`. Either would let `depth` mean
+        # something different from the block count it names, and `get_config`
+        # round-trips `depth` -- a truncating trunk would reload as a shorter
+        # one. The class docstring at `:747-748` already states the invariant;
+        # this makes it enforceable. Every shipped variant satisfies it
+        # (`sam3` 31/32, `small` 5/6, `tiny` 1/2), and
+        # `tests/test_models/test_sam3/test_model.py:990` already asserts it
+        # over the variant table. See decisions.md D-046.
+        if max(global_att_blocks) != depth - 1:
+            raise ValueError(
+                f"global_att_blocks {global_att_blocks} must name the LAST "
+                f"block (depth - 1 = {depth - 1}) -- the trunk returns at the "
+                f"last global block, so blocks "
+                f"{tuple(range(max(global_att_blocks) + 1, depth))} would be "
+                f"built and trained but never executed"
+            )
 
         # Store ALL configuration parameters.
         self.img_size = int(img_size)
@@ -870,7 +908,7 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
         self.drop_path_rate = float(drop_path_rate)
         self.dropout_rate = float(dropout_rate)
         self.norm_epsilon = float(norm_epsilon)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.init_values = init_values
         self.pretrain_img_size = int(pretrain_img_size)
         self.pretrain_use_cls_token = bool(pretrain_use_cls_token)
@@ -1113,7 +1151,7 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
             "dropout_rate": self.dropout_rate,
             "norm_epsilon": self.norm_epsilon,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "init_values": self.init_values,
             "pretrain_img_size": self.pretrain_img_size,
             "pretrain_use_cls_token": self.pretrain_use_cls_token,

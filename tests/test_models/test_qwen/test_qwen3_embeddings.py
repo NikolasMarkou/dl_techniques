@@ -77,5 +77,88 @@ class TestQwen3RerankerModel:
                                    err_msg="Qwen3RerankerModel differs after round-trip")
 
 
+class _Tap:
+    """Plain callable (not a Layer) so it can replace an attribute on an
+    already-built layer, which Keras 3 refuses for tracked sub-layers."""
+
+    def __init__(self, inner, sink):
+        self.inner = inner
+        self.sink = sink
+
+    def __call__(self, x, *args, **kwargs):
+        self.sink.append(keras.ops.convert_to_numpy(x))
+        return self.inner(x, *args, **kwargs)
+
+
+def _hidden_states_pair(layer, attr, seq=12, perturb_at=6):
+    """Run ``layer`` twice on ids differing only at ``perturb_at`` and return
+    the two per-position sequences that reached ``attr``."""
+    rng = np.random.default_rng(0)
+    ids = rng.integers(1, VOCAB, (2, seq)).astype("int32")
+    mask = np.ones((2, seq), dtype="int32")
+    layer({"input_ids": ids, "attention_mask": mask})  # build
+
+    sink = []
+    object.__setattr__(layer, attr, _Tap(getattr(layer, attr), sink))
+
+    other = ids.copy()
+    other[:, perturb_at] = (other[:, perturb_at] + 7) % (VOCAB - 1) + 1
+    layer({"input_ids": ids, "attention_mask": mask}, training=False)
+    layer({"input_ids": other, "attention_mask": mask}, training=False)
+    return np.asarray(sink[0]), np.asarray(sink[1])
+
+
+class TestQwen3Causality:
+    """The reranker is causal; the embedding tower deliberately is not.
+
+    The reranker reads its own LM head at the last real position, which makes
+    it a next-token prediction: without a causal mask that position has
+    already attended to the tokens it is scoring. Measured on the unmasked
+    implementation, perturbing index 6 of a 12-token sequence moved the
+    hidden states at indices < 6 by ``3.421534e-01``; it is now exactly 0.0.
+
+    The embedding tower predicts nothing, so there is no target to leak and
+    bidirectional attention is strictly more informative. That is a decision,
+    not an oversight, and the test below pins it so a future "consistency"
+    edit has to argue with a test rather than with a comment.
+    """
+
+    PERTURB_AT = 6
+
+    def _reranker(self):
+        from dl_techniques.models.qwen.qwen3_embeddings import Qwen3RerankerLayer
+        return Qwen3RerankerLayer(
+            vocab_size=VOCAB, hidden_size=32, num_layers=2, num_heads=4,
+            intermediate_size=64, max_seq_len=12, yes_token_id=5,
+            no_token_id=6,
+        )
+
+    def _embedder(self):
+        from dl_techniques.models.qwen.qwen3_embeddings import Qwen3EmbeddingLayer
+        return Qwen3EmbeddingLayer(
+            vocab_size=VOCAB, hidden_size=32, num_layers=2, num_heads=4,
+            intermediate_size=64, max_seq_len=12, normalize=False,
+        )
+
+    def test_reranker_does_not_leak_the_future(self):
+        a, b = _hidden_states_pair(self._reranker(), "lm_head")
+        past = np.abs(a[:, :self.PERTURB_AT] - b[:, :self.PERTURB_AT]).max()
+        assert past == 0.0, f"reranker future leak: {past:.6e} (must be 0.0)"
+
+    def test_reranker_still_responds(self):
+        a, b = _hidden_states_pair(self._reranker(), "lm_head")
+        future = np.abs(a[:, self.PERTURB_AT:] - b[:, self.PERTURB_AT:]).max()
+        assert future > 1e-3, f"reranker is inert: {future:.6e}"
+
+    def test_embedding_tower_is_bidirectional_on_purpose(self):
+        a, b = _hidden_states_pair(self._embedder(), "final_norm")
+        past = np.abs(a[:, :self.PERTURB_AT] - b[:, :self.PERTURB_AT]).max()
+        assert past > 1e-3, (
+            "the embedding tower is expected to be BIDIRECTIONAL: an encoder "
+            "predicts nothing, so there is no target to leak. If a causal mask "
+            "was added here deliberately, change this test and say why."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

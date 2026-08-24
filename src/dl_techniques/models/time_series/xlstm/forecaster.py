@@ -1,49 +1,106 @@
 """
-xLSTM-based forecaster for continuous time-series probabilistic forecasting.
+Continuous-input forecaster over the xLSTM block stack: reversible per-instance
+normalization, a Dense projection in place of the language model's token
+embedding, mLSTM/sLSTM residual blocks, and a pooled head that emits either
+non-crossing quantiles or a point forecast.
 
-This module provides :class:`xLSTMForecaster`, a forecasting sibling of the
-language-model :class:`dl_techniques.models.time_series.xlstm.model.xLSTM`. It
-reuses the same mLSTM/sLSTM residual block stack but replaces the LM-specific
-token ``Embedding`` + ``vocab`` head with a continuous-input projection and a
-forecasting head (quantile or point), and adds the unified ``Forecast``
-contract via :class:`ForecastMixin`.
+This is the forecasting sibling of the language model `model.xLSTM`. The two share
+their entire middle: the same `mLSTMBlock` / `sLSTMBlock` classes, the same
+`mlstm_ratio` index split (first `int(num_layers * mlstm_ratio)` blocks are mLSTM,
+the rest sLSTM), the same normalization factory. What changes is only the two ends.
+An LM's input is a discrete symbol, so it is looked up in an embedding table; a
+forecaster's input is a real-valued vector, so it is projected by a Dense layer,
+and the arithmetic relationships between neighbouring values — which a lookup table
+throws away by construction — are preserved. At the other end, a vocabulary
+softmax is replaced by a head over a fixed horizon. Wrapping rather than
+subclassing the LM is what keeps that substitution honest: nothing in this class
+carries a vocabulary, a token axis or a language-model head that would have to be
+disabled.
 
-Architecture Overview:
-    ```
-    Context [B, input_length, F]
-        |
-    (optional) reversible instance-norm (per-instance z-score over time)
-        |
-    Dense input projection -> [B, T, embed_dim]
-        |
-    [mLSTM / sLSTM blocks] x num_layers   (mlstm_ratio picks the split)
-        |
-    final normalization
-        |
-    global mean-pool over time -> [B, 1, embed_dim]
-        |
-    head:  QuantileHead  -> [B, H, Q]      (quantile mode)
-           Dense+reshape -> [B, H, F]      (point mode)
-        |
-    (optional) reversible denormalization (undo the instance-norm)
-    ```
+Why xLSTM blocks suit forecasting at all: their recurrence keeps a *fixed-size*
+state regardless of context length, so lengthening the lookback costs linear time
+and constant memory rather than the quadratic attention cost — and their gating is
+exponential, stabilized by a running log-domain maximum, so a regime change part
+way through a window can overwrite what the memory holds instead of merely decaying
+it. The mLSTM half stores associations in a matrix memory by outer-product updates,
+giving capacity that scales with `key_dim * value_dim` rather than with width. The
+full derivation lives in this package's `model.py`; note the same caveat applies
+here, that both cells run sequentially through `keras.layers.RNN`, so mLSTM buys
+capacity, not throughput.
 
-The global mean-pool collapses the sequence axis to a static length of 1, which
-satisfies the ``QuantileHead(flatten_input=True)`` requirement for a defined
-(non-``None``) sequence length. This mirrors the proven TiRex pooled-head
-pattern.
+Scale handling is the same reversible instance normalization the TiRex models use,
+and it matters more here than in an LM because a forecaster is expected to
+generalize across series whose levels differ by orders of magnitude. Statistics are
+taken over the time axis (`axis=1`), per series and per feature, never across the
+batch, and the prediction is mapped back by `y = out * std + mean`. NaNs are made
+harmless first: they are located, replaced by zeros, and the mean/variance sums are
+divided by the count of *valid* steps rather than the window length, so a gap
+neither skews the statistics nor propagates forward. Note one difference from
+TiRex: the validity mask is used only for those NaN-safe statistics and is **not**
+concatenated onto the features, so the network cannot distinguish an imputed zero
+from an observed one. The NaN replacement runs even when `use_normalization=False`,
+which is deliberate — a NaN reaching the block stack is unrecoverable, whereas a
+zero is merely a bad sample. Which statistics the de-normalization uses depends on
+what the head emits, and is spelled out below.
+
+The head is fed a single pooled vector: after the final normalization the time axis
+is collapsed by a mean with `keepdims=True`, giving `(B, 1, embed_dim)`. Keeping
+the dimension is load-bearing rather than tidy — `QuantileHead(flatten_input=True)`
+must know its input length statically, and a length of exactly 1 is the one value
+that is always known. The trade is the same as in TiRex: one forward pass with no
+autoregressive loop and therefore no compounding error, at the cost of a decoder
+that cannot see *where* in the window a pattern occurred, and cannot condition step
+`h` on step `h-1`. Note that this pooling makes the encoder's own summary the only
+channel between history and horizon, which is precisely the bottleneck the LSTM's
+final state would otherwise have carried.
+
+Both head modes are honest about what they can express. In quantile mode the head
+emits `r` and forms `Q_0 = r_0`, `Q_i = Q_{i-1} + softplus(r_i)`, so quantiles are
+non-decreasing by construction rather than by a penalty that can be traded away
+against the fit. In point mode a Dense layer produces `H * F` values reshaped to
+`(B, H, F)`, and the `Forecast` returned by the mixin carries `quantiles=None`: a
+point model must not fabricate intervals it never estimated. `predict_quantiles`
+maps requested levels onto the levels actually trained, falling back to the nearest
+and logging a warning instead of interpolating, since an interpolated 0.95 from a
+model that only learned 0.9 would look calibrated while being nothing of the kind;
+the median is taken as the point forecast because it minimizes absolute error under
+the quantile loss.
+
+The reversible instance-norm is inverted differently for the two heads, and it has
+to be. Normalization is per-channel, so `mean` and `std` are `(B, 1, F)`. The
+quantile head's `(B, H, Q)` output is Q quantiles of ONE series — by convention the
+last feature — so it is inverted with that feature's `(B, 1, 1)` stats. The point
+head's `(B, H, F)` output is one value per feature and is inverted with the full
+`(B, 1, F)` stats. Until 2026-08-15 both paths used the last feature's stats, a
+convention inherited verbatim from TiRex, where there is only ever one target. Under
+`num_features > 1` in point mode that rescaled channels `0..F-2` by another series'
+standard deviation and shifted them by its mean, which produces finite, plausible
+numbers in the wrong units and is invisible at `num_features=1`.
+
+Two further deliberate choices. `normalization_kwargs` is stored exactly as passed,
+including the `None` sentinel, with `or {}` applied only at the factory call site,
+so `get_config()` emits what the constructor received and round-trips losslessly.
+`from_variant(..., pretrained=True)` raises `NotImplementedError` rather than
+warning and returning random weights — no checkpoints ship with this package, and a
+silent fallback makes an unavailable download indistinguishable from a successful
+one.
 
 References:
-    - Beck, M., et al. (2024). xLSTM: Extended Long Short-Term Memory.
-      arXiv:2405.04517v2
-    - Kim, T., et al. (2022). Reversible Instance Normalization for Accurate
-      Time-Series Forecasting against Distribution Shift. ICLR.
+    - Beck et al., 2024. xLSTM: Extended Long Short-Term Memory.
+      (https://arxiv.org/abs/2405.04517)
+    - Kim et al., 2022. Reversible Instance Normalization for Accurate Time-Series
+      Forecasting against Distribution Shift. ICLR 2022.
+    - Wen et al., 2017. A Multi-Horizon Quantile Recurrent Forecaster.
+      (https://arxiv.org/abs/1711.11053)
+    - Salinas et al., 2020. DeepAR: Probabilistic forecasting with autoregressive
+      recurrent networks. International Journal of Forecasting 36(3).
+      (https://arxiv.org/abs/1704.04110)
 """
 
 import keras
 import numpy as np
 from keras import ops, initializers
-from typing import Optional, Union, List, Any, Dict, Tuple, Literal
+from typing import Optional, Union, List, Any, Dict, Sequence, Tuple, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -63,7 +120,16 @@ from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 # Module-level alias retained for the constructor / factory signature defaults
 # (and any external importers); the canonical home is
 # ``xLSTMForecaster.DEFAULT_QUANTILES`` (assigned on the class below).
-DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: this is a TUPLE, and it must
+# stay one. It was a `List[float]`, aliased by the class attribute below, so the
+# module constant and `xLSTMForecaster.DEFAULT_QUANTILES` were ONE object under two
+# names -- and a caller who took the parameter default and mutated it in place
+# silently changed the default for every later caller in the process. Do NOT
+# "fix" that by copying in `__init__`: a copy in the constructor leaves the two
+# ALIASES pointing at the same mutable object and repairs nothing. A tuple kills
+# the parameter default (R-009 S1), the `ast.Name` default (S2) and the class
+# alias (S3) together, which is why the remedy is the type and not the copy.
+DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 # ---------------------------------------------------------------------
 
@@ -165,7 +231,7 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
 
     # Canonical default quantile levels (class attribute; the module-level
     # ``DEFAULT_QUANTILES`` is a backward-compatible alias of this value).
-    DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES
+    DEFAULT_QUANTILES: Tuple[float, ...] = DEFAULT_QUANTILES
 
     # Model variant configurations (small / tiny for quick experiments).
     MODEL_VARIANTS = {
@@ -202,7 +268,7 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         dropout_rate: float = 0.0,
         use_quantile_head: bool = True,
-        quantile_levels: List[float] = DEFAULT_QUANTILES,
+        quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         enforce_monotonicity: bool = True,
         use_normalization: bool = True,
         kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
@@ -449,7 +515,19 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
 
         # 8. DENORMALIZE OUTPUT (undo the reversible instance-norm).
         if self.use_normalization:
-            norm_mean, norm_std = self._get_target_stats(mean, std)
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-036
+            # The de-normalization statistics are head-dependent and must stay
+            # so. The quantile head emits Q quantiles of ONE series (the last
+            # feature), so it takes that feature's (B,1,1) stats. The point head
+            # emits one value per FEATURE, so every channel must be inverted
+            # with its OWN (B,1,F) stats. Do NOT unify these onto
+            # `_get_target_stats`: broadcasting the last feature's mean/std
+            # across F channels rescales channels 0..F-2 by another series'
+            # units — finite, plausible, and silently wrong. See D-036.
+            if self.use_quantile_head:
+                norm_mean, norm_std = self._get_target_stats(mean, std)
+            else:
+                norm_mean, norm_std = mean, std
             outputs = (outputs * norm_std) + norm_mean
 
         return outputs
@@ -462,9 +540,13 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         """
         Extract normalization stats for the target (last) feature.
 
-        For multivariate inputs the target is assumed to be the last feature.
-        Returns stats shaped ``(Batch, 1, 1)`` so they broadcast against both
-        quantile predictions ``(B, H, Q)`` and point predictions ``(B, H, F)``.
+        Used by the **quantile** head only, whose ``(B, H, Q)`` output is Q
+        quantiles of a single series. For multivariate inputs that series is
+        assumed to be the last feature. Returns stats shaped ``(Batch, 1, 1)``.
+
+        The point head does **not** use this: it emits ``(B, H, F)``, one value
+        per feature, and is inverted with the full ``(B, 1, F)`` stats in
+        :meth:`call`.
 
         Args:
             mean: Mean tensor of shape ``(Batch, 1, Features)``.
@@ -701,7 +783,7 @@ def create_xlstm_forecaster(
     mlstm_ratio: float = 0.5,
     mlstm_num_heads: int = 4,
     use_quantile_head: bool = True,
-    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     **kwargs: Any
 ) -> xLSTMForecaster:
     """

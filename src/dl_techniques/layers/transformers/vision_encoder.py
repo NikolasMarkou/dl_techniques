@@ -75,6 +75,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, get_arg
 # local imports
 # ---------------------------------------------------------------------
 
+from ...initializers import clone_initializer
 from ..embedding import create_embedding_layer
 from ..norms import create_normalization_layer
 from .transformer import (
@@ -310,6 +311,21 @@ class VisionEncoder(keras.layers.Layer):
             raise ValueError(
                 f"img_size ({img_size}) must be divisible by patch_size ({patch_size})"
             )
+        # The multi-stage stems reach `patch_size` as a PRODUCT of strides, and
+        # integer division silently rounds: 'siglip' is 2*(patch//2) and 'conv' is
+        # 2*2*(patch//4), which equal `patch` only for the divisibilities below.
+        # Without this the encoder constructs, then dies in an opaque reshape at
+        # the first forward because the token count is not `num_patches`.
+        # (Same defect as vit_siglip/model.py, C-15.)
+        _stem_stride_divisor = {'siglip': 2, 'conv': 4}.get(patch_embed_type)
+        if _stem_stride_divisor and patch_size % _stem_stride_divisor != 0:
+            raise ValueError(
+                f"patch_embed_type='{patch_embed_type}' needs a patch_size "
+                f"divisible by {_stem_stride_divisor}, got {patch_size}: its "
+                f"multi-stage stem's total stride would be "
+                f"{_stem_stride_divisor * (patch_size // _stem_stride_divisor)} "
+                f"instead of {patch_size}."
+            )
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if depth <= 0:
@@ -388,7 +404,7 @@ class VisionEncoder(keras.layers.Layer):
             'positional_learned',
             max_seq_len=self.seq_len,
             dim=self.embed_dim,
-            dropout=self.pos_dropout_rate,
+            dropout_rate=self.pos_dropout_rate,
             name="pos_embed"
         )
 
@@ -416,8 +432,20 @@ class VisionEncoder(keras.layers.Layer):
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. MEASURED at HEAD before this change,
+                # on a seeded depth-4 encoder: 12 of 24 same-shape kernel pairs at
+                # `max|delta| = 0.0` (all 4 `.../cross_attention/qkv/kernel`
+                # pairwise identical, likewise all 4 `.../proj/kernel`). This is a
+                # SHARED layer: `nano_vlm`, `nano_vlm_world_model` and `clip` all
+                # build their vision tower from it, so the defect was theirs too.
+                # `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
@@ -460,8 +488,10 @@ class VisionEncoder(keras.layers.Layer):
         :rtype: keras.layers.Layer
         """
         base_args = {
-            'kernel_initializer': self.kernel_initializer,
-            'bias_initializer': self.bias_initializer,
+            # D-560: a clone per patch-embed stack -- 'hybrid'/'overlapping'
+            # build SEVERAL convs from this one dict.
+            'kernel_initializer': clone_initializer(self.kernel_initializer),
+            'bias_initializer': clone_initializer(self.bias_initializer),
             'kernel_regularizer': self.kernel_regularizer,
             'bias_regularizer': self.bias_regularizer,
             'use_bias': self.use_bias
@@ -480,7 +510,9 @@ class VisionEncoder(keras.layers.Layer):
             )
 
         elif self.patch_embed_type == 'siglip':
-            # SigLIP-style two-stage patch embedding
+            # Two-stage patch embedding. NOT a SigLIP feature -- SigLIP is a sigmoid
+            # contrastive LOSS and its tower uses a single-conv stem; see
+            # models/vit_siglip/model.py's module docstring.
             return keras.Sequential([
                 # Stage 1: Coarse-grained patching
                 layers.Conv2D(
@@ -938,7 +970,7 @@ def create_vision_encoder(
         ffn_type: FFNType = 'mlp',
         use_cls_token: bool = True,
         output_mode: PoolingStrategy = 'cls',
-        dropout: float = 0.0,
+        dropout_rate: float = 0.0,
         **kwargs: Any
 ) -> VisionEncoder:
     """
@@ -974,8 +1006,8 @@ def create_vision_encoder(
     :type use_cls_token: bool
     :param output_mode: Output pooling mode.
     :type output_mode: str
-    :param dropout: General dropout rate.
-    :type dropout: float
+    :param dropout_rate: General dropout rate.
+    :type dropout_rate: float
     :param kwargs: Additional arguments for VisionEncoder constructor.
     :return: Configured VisionEncoder instance.
     :rtype: VisionEncoder
@@ -1008,7 +1040,7 @@ def create_vision_encoder(
         ffn_type=ffn_type,
         use_cls_token=use_cls_token,
         output_mode=output_mode,
-        dropout_rate=dropout,
+        dropout_rate=dropout_rate,
         **kwargs
     )
 

@@ -9,27 +9,50 @@ Phase boundaries (steps, defaults)::
 
 Behavior at each boundary:
 
-- **Phase 1 -> 2**: freeze backbone (token_embeddings + decoder blocks +
-  final_norm), unfreeze memory + gate, enable all aux losses, call
+- **Phase 1 -> 2**: freeze the backbone, enable memory injection and all
+  aux losses, call
   ``model.warmup_memory_keys(warmup_dataset, num_batches=64)``.
-- **Phase 2 -> 3**: unfreeze backbone (everything trainable), keep aux
-  losses on.
+- **Phase 2 -> 3**: unfreeze the backbone; memory and aux losses stay on.
 - **Phase 3 -> 4**: identical trainable surface to phase 3 (no-op).
 
-The scheduler reads the global step from ``model._global_step`` (a
-non-trainable ``add_weight`` int64 counter) and writes the new phase to
-``model.current_phase`` (a non-trainable ``add_weight`` int32 counter).
-Both are managed by :class:`WaveFieldMemoryLLM` so that the values
-survive ``model.save`` / ``load_model`` round-trips.
+The scheduler reads the global step from ``model._global_step`` and
+writes the new phase to ``model.current_phase``. Both are non-trainable
+``add_weight`` float32 counters managed by :class:`WaveFieldMemoryLLM`,
+so their values survive ``model.save`` / ``load_model`` round-trips.
 
-The ``--init-from`` flag in ``train_memory.py`` sets ``phase1_steps=0``
-to skip Phase 1 entirely.
+**This callback flips exactly one Python attribute, and pays for it.**
+``read_controller.top_k`` is a Python int consumed at trace time by
+``ops.top_k``, which cannot take a ``Variable`` for ``k``, so the optional
+``top_k_schedule`` assigns the attribute and then forces a retrace
+(``PhaseScheduler._force_retrace``); without that second half the schedule was
+a log line only, which is F-21. Everything else here is a ``Variable``.
+Assigning ``current_phase`` *is* the whole state change: the model derives memory
+injection, aux-loss scaling and the backbone gradient mask from that one
+``Variable`` inside its traced ``call``/``train_step``. The scheduler
+previously set ``layer.trainable = False`` and
+``read_controller.enable_gate_entropy = True`` (and friends) instead, and
+neither could work: ``fit()`` traces ``train_function`` **before**
+``on_train_begin`` (``keras/src/backend/tensorflow/trainer.py:360-361``)
+and rebuilds it only from ``compile()``
+(``keras/src/trainers/trainer.py:187``), so every later flip landed on
+Python objects the already-traced graph no longer consults. Under the
+documented 50k-step curriculum the log printed "entered phase 2" while
+the backbone kept training and not one anti-collapse loss ever
+contributed a gradient. The single eager action left here is zeroing the
+backbone optimizer's learning-rate ``Variable``
+(``model.set_backbone_optimizer_active``) — also a ``Variable``, also
+read inside the traced step.
+
+Skipping Phase 1 entirely is done by setting ``phase1_steps=0``. The trainer
+that did this behind an ``--init-from`` flag, ``src/train/wave_field/train_memory.py``,
+was DELETED on user instruction on 2026-08-13 (last present at commit ``9f3208319``);
+no trainer ships for this package now, so ``phase1_steps=0`` is something a caller
+sets directly.
 """
 
 from typing import Any, Dict, Optional
 
 import keras
-import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
 
@@ -49,7 +72,7 @@ PHASE_EXTEND = 4            # P4 — same trainable surface as P3
 
 
 class PhaseScheduler(keras.callbacks.Callback):
-    """Curriculum callback flipping phase + trainable flags + aux flags.
+    """Curriculum callback publishing the current phase to the model.
 
     :param phase1_steps: Length of Phase 1 in train batches.
     :param phase2_steps: Length of Phase 2.
@@ -60,8 +83,9 @@ class PhaseScheduler(keras.callbacks.Callback):
         boundary.
     :param warmup_num_batches: Number of batches consumed by the warmup.
 
-    The scheduler is intentionally minimal — all heavy lifting (KMeans,
-    trainable-flag flipping for the entire backbone) lives on the model.
+    The scheduler is intentionally minimal — all heavy lifting (KMeans
+    warmup, and every gate the phase implies) lives on the model, behind
+    the ``current_phase`` ``Variable`` this callback assigns.
     """
 
     def __init__(
@@ -117,17 +141,24 @@ class PhaseScheduler(keras.callbacks.Callback):
     # Phase application
     # ------------------------------------------------------------------
 
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — the ONLY state
+    # `_apply_phase` changes is the `current_phase` Variable plus the
+    # backbone optimizer's learning-rate Variable. Do not add a
+    # `layer.trainable = ...` or `read_controller.enable_* = ...` line
+    # back: both are Python state that an already-traced `train_function`
+    # never re-reads, which is how the entire curriculum came to be inert.
+    # See decisions.md D-016.
     def _apply_phase(self, phase: int) -> None:
-        """Apply trainable flags + aux-loss flags + warmup for `phase`."""
-        if phase == PHASE_WARMUP:
-            self._set_backbone_trainable(True)
-            self._set_memory_trainable(True)
-            self._set_aux_losses(False)
-        elif phase == PHASE_FREEZE_BACKBONE:
-            # Freeze backbone, unfreeze memory, enable aux losses.
-            self._set_backbone_trainable(False)
-            self._set_memory_trainable(True)
-            self._set_aux_losses(True)
+        """Publish `phase` to the model and run the P1->P2 warmup once."""
+        # Assigned first: the model's in-graph gates (memory injection,
+        # aux-loss scale, backbone gradient mask) all read this Variable,
+        # so it must be current before the next batch executes.
+        if hasattr(self.model, "current_phase"):
+            self.model.current_phase.assign(phase)
+
+        self._set_backbone_frozen(phase == PHASE_FREEZE_BACKBONE)
+
+        if phase == PHASE_FREEZE_BACKBONE:
             # Warmup K_lt via offline KMeans (once).
             if not self._warmup_done and self._warmup_dataset is not None:
                 if hasattr(self.model, "warmup_memory_keys"):
@@ -140,93 +171,27 @@ class PhaseScheduler(keras.callbacks.Callback):
                     logger.warning(
                         "PhaseScheduler: model has no warmup_memory_keys"
                     )
-        elif phase == PHASE_FULL:
-            # Unfreeze backbone; aux losses stay on.
-            self._set_backbone_trainable(True)
-            self._set_memory_trainable(True)
-            self._set_aux_losses(True)
-        else:  # PHASE_EXTEND: same trainable surface as PHASE_FULL.
-            self._set_backbone_trainable(True)
-            self._set_memory_trainable(True)
-            self._set_aux_losses(True)
-
-        # Persist the phase value on the model.
-        if hasattr(self.model, "current_phase"):
-            self.model.current_phase.assign(phase)
 
         logger.info(f"PhaseScheduler: entered phase {phase}")
 
-    # R2: a single set-driven walk replaces the parallel attr lists in
-    # `_set_backbone_trainable` / `_set_memory_trainable`. The set
-    # `_MEMORY_LAYER_NAMES` is the source of truth for which attrs are
-    # memory; everything else listed in `_ALL_LAYER_NAMES` is backbone.
-    # `embed_dropout` is included (was missing — R2 audit smell).
-    _MEMORY_LAYER_NAMES = (
-        "lt_memory",
-        "wm_memory",
-        "read_controller",
-        "write_controller",
-    )
-    _ALL_LAYER_NAMES = (
-        "token_embeddings",
-        "position_embeddings",
-        "embed_norm",
-        "embed_dropout",
-        "final_norm",
-        "lm_head",
-        "lt_memory",
-        "wm_memory",
-        "read_controller",
-        "write_controller",
-    )
+    def _set_backbone_frozen(self, frozen: bool) -> None:
+        """Zero (or restore) the backbone optimizer's learning rate.
 
-    def _apply_trainable(self, mem_flag: bool, bb_flag: bool) -> None:
-        """Single-pass trainable walk over all known top-level attrs.
-        Memory layers get `mem_flag`; everything else gets `bb_flag`.
-        Also walks the decoder block list (variable count → not in the
-        named tuple)."""
-        m = self.model
-        memory_set = set(self._MEMORY_LAYER_NAMES)
-        for attr in self._ALL_LAYER_NAMES:
-            obj = getattr(m, attr, None)
-            if obj is None:
-                continue
-            obj.trainable = mem_flag if attr in memory_set else bb_flag
-        blocks = getattr(m, "blocks", None) or []
-        for blk in blocks:
-            blk.trainable = bb_flag
+        The in-graph gradient mask in ``WaveFieldMemoryLLM.train_step``
+        already stops new gradient from reaching backbone weights in
+        phase 2. This closes the other half: with Adam/AdamW a gradient of
+        exactly zero still moves a weight, from the phase-1 moment
+        estimates and from decoupled weight decay. Both terms are scaled
+        by the learning rate, so zeroing it makes the freeze exact.
 
-    def _set_backbone_trainable(self, flag: bool) -> None:
-        # Preserved for API compatibility — internally delegates to
-        # `_apply_trainable`. Memory flag preserved by reading current
-        # `read_controller.trainable`. _apply_phase always calls the
-        # two helpers in pairs so this state preservation is correct.
-        m = self.model
-        rc = getattr(m, "read_controller", None)
-        mem_flag = bool(getattr(rc, "trainable", True)) if rc else True
-        self._apply_trainable(mem_flag=mem_flag, bb_flag=flag)
-
-    def _set_memory_trainable(self, flag: bool) -> None:
-        m = self.model
-        # Recover current backbone flag from token_embeddings (a
-        # canonical backbone layer).
-        bb_layer = getattr(m, "token_embeddings", None)
-        bb_flag = bool(getattr(bb_layer, "trainable", True)) if bb_layer else True
-        self._apply_trainable(mem_flag=flag, bb_flag=bb_flag)
-
-    def _set_aux_losses(self, flag: bool) -> None:
-        rc = getattr(self.model, "read_controller", None)
-        if rc is None:
+        A model without a ``set_backbone_optimizer_active`` method (a
+        stand-in in tests, or a caller reusing this callback on another
+        architecture) is left alone.
+        """
+        setter = getattr(self.model, "set_backbone_optimizer_active", None)
+        if setter is None:
             return
-        rc.enable_gate_entropy = flag
-        rc.enable_load_balance = flag
-        rc.enable_z_loss = flag
-        rc.enable_diversity = flag
-        rc.enable_infonce = flag
-        # O6: V_lt diversity loss (defaults False on the controller; only
-        # flipped here when this method is called by the curriculum).
-        if hasattr(rc, "enable_v_diversity"):
-            rc.enable_v_diversity = flag
+        setter(not frozen)
 
     # ------------------------------------------------------------------
     # Callback hooks
@@ -251,9 +216,11 @@ class PhaseScheduler(keras.callbacks.Callback):
 
     def _apply_top_k_schedule(self, step: int) -> None:
         """O7: if `model.top_k_schedule` is set, evaluate it at the
-        current step and assign the result to
-        `model.read_controller.top_k`. Done only on phase transitions
-        (cheap; phase-1 -> phase-2 is the only frequent case)."""
+        current step, assign the result to `model.read_controller.top_k`
+        AND force the step functions to be re-traced, because that
+        attribute is a Python int the traced graph reads once. Done only
+        on phase transitions (cheap; phase-1 -> phase-2 is the only
+        frequent case)."""
         m = self.model
         sched = getattr(m, "top_k_schedule", None)
         if sched is None:
@@ -280,6 +247,45 @@ class PhaseScheduler(keras.callbacks.Callback):
                 f"PhaseScheduler: top_k {rc.top_k} -> {new_top_k} (step={step})"
             )
             rc.top_k = new_top_k
+            self._force_retrace()
+
+    # DECISION plan-2026-08-18T140459-7991552f/D-032
+    # `_apply_top_k_schedule` is the ONE place in this callback that flips a
+    # Python attribute, and it is legal ONLY because of the call below. Do not
+    # delete `_force_retrace`, and do not add a second attribute flip that does
+    # not pair with it: `read_controller.top_k` is consumed as a Python int at
+    # TRACE time (`ops.top_k(sim_clipped, k=self.top_k)` needs a static k, so a
+    # Variable is not expressible there), and `fit()` traces `train_function`
+    # once before the epoch loop and rebuilds it only from `compile()`. Until
+    # 2026-08-19 the assignment stood alone, so the log printed `top_k 32 -> 8`
+    # while the traced graph retrieved 32 keys for the rest of the run -- the
+    # very defect D-016 removed from every other line of this file. Proven RED
+    # by `test_top_k_schedule_reaches_the_traced_graph.py`, which the
+    # pre-existing mock-driven `TestTopKSchedule` could not see.
+    def _force_retrace(self) -> None:
+        """Rebuild the traced step functions so the new ``top_k`` takes effect.
+
+        ``fit()`` re-reads ``self.train_function`` every step, so replacing it
+        here lands before the next batch; the retrace itself is deferred to
+        that batch's first call. ``test_function`` / ``predict_function`` are
+        merely cleared, because ``evaluate()`` / ``predict()`` re-make theirs on
+        entry when they are ``None``.
+
+        This is the "(cheap retrace boundary)" the caller's comment always
+        claimed: it runs only on a phase transition that actually changes k, at
+        most three times in a full curriculum.
+
+        A model without ``make_train_function`` (a stand-in in tests, or a
+        caller reusing this callback outside a Keras trainer) is left alone.
+        """
+        model = self.model
+        make_train_function = getattr(model, "make_train_function", None)
+        if make_train_function is None:
+            return
+        make_train_function(force=True)
+        for attr in ("test_function", "predict_function"):
+            if getattr(model, attr, None) is not None:
+                setattr(model, attr, None)
 
     # ------------------------------------------------------------------
     # Config (for callback save/restore via training logs)

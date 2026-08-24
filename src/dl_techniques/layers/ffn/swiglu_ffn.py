@@ -73,6 +73,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -232,11 +233,20 @@ class SwiGLUFFN(keras.layers.Layer):
                 name='gate_proj'
             )
 
-            # Up projection: linear transformation
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-070
+            # `up_proj` and `down_proj` get CLONES. With one shared initializer
+            # instance the GATE branch and the UP branch are bit-identical --
+            # MEASURED inside `CLIP`, `vision_transformer_0/ffn/gate_proj/kernel
+            # == up_proj/kernel` at (32, 256) in BOTH towers. SwiGLU is
+            # `silu(gate(x)) * up(x)`; if the two branches start as the same
+            # function the layer starts as `silu(u) * u`, i.e. the gating that
+            # the architecture IS does not exist at initialization. This is the
+            # `power_mlp` shape D-057 already convicted. Do NOT restore the
+            # shared attribute here. See decisions.md D-070.
             self.up_proj = keras.layers.Dense(
                 self.hidden_dim,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
@@ -247,7 +257,7 @@ class SwiGLUFFN(keras.layers.Layer):
             self.down_proj = keras.layers.Dense(
                 self.output_dim,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,

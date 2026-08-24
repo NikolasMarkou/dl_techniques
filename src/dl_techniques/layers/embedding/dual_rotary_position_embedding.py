@@ -219,47 +219,55 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         # Calculate frequency dimension (half of head_dim for complex pairs)
         freq_dim = self.head_dim // 2
 
-        # Create frequency tensor: 1 / (theta_base ^ (2i / head_dim))
-        inv_freq = 1.0 / (
-            theta_base ** (
-                keras.ops.arange(0, freq_dim, dtype='float32') * 2.0 / self.head_dim
-            )
-        )
+        # Both tables come from an INITIALIZER that computes the table INSIDE
+        # itself, never from `add_weight(initializer='zeros')` + `.assign()`.
+        #
+        # WHAT NOT TO DO: do NOT compute `cos_table`/`sin_table` here and
+        # `.assign()` them. Keras 3 runs a symbolic build pass inside a
+        # `StatelessScope` whenever this layer is first reached from a PARENT's
+        # `call()` -- i.e. in every real model -- and that scope RECORDS the
+        # `.assign()` and then DISCARDS it, leaving both caches at their 'zeros'
+        # initializer. Measured on CPU 2026-08-15: a direct `.build(...)` gives
+        # `cos_global_cached[0, 0] == 1.0`, while the same layer reached through a
+        # parent layer's `call()` gave `0.0` with the entire table all-zero -- so
+        # `call()` multiplied q and k by cos=0/sin=0 and returned exactly zeros.
+        # Equally, do NOT close over a table computed out here: that tensor belongs
+        # to the symbolic pass's scratch `FuncGraph` and raises "cannot be accessed
+        # from here ... out of scope" on the eager pass. Same defect and same fix as
+        # `rotary_position_embedding.py` (D-021). See decisions.md D-027.
+        def _table_initializer(trig):
+            def initializer(shape, dtype=None):
+                table_dtype = dtype or 'float32'
+                # 1 / (theta_base ^ (2i / head_dim)) for i in [0, freq_dim)
+                inv_freq = 1.0 / (
+                    theta_base ** (
+                        keras.ops.arange(0, shape[1] // 2, dtype=table_dtype)
+                        * 2.0 / self.head_dim
+                    )
+                )
+                positions = keras.ops.arange(shape[0], dtype=table_dtype)
+                freqs = keras.ops.outer(positions, inv_freq)
+                # Duplicate frequencies to match full head_dim (Gemma3 approach)
+                freqs_full = keras.ops.concatenate([freqs, freqs], axis=1)
+                return trig(freqs_full)
 
-        # Position indices: [0, 1, 2, ..., max_seq_len-1]
-        positions = keras.ops.arange(self.max_seq_len, dtype='float32')
+            return initializer
 
-        # Outer product to get all position-frequency combinations
-        # Shape: (max_seq_len, freq_dim)
-        freqs = keras.ops.outer(positions, inv_freq)
-
-        # Duplicate frequencies to match full head_dim (Gemma3 approach)
-        # Shape: (max_seq_len, head_dim)
-        freqs_full = keras.ops.concatenate([freqs, freqs], axis=1)
-
-        # Compute cos and sin tables
-        cos_table = keras.ops.cos(freqs_full)
-        sin_table = keras.ops.sin(freqs_full)
-
-        # Create layer weights using add_weight for proper serialization
+        table_shape = (self.max_seq_len, freq_dim * 2)
         cos_cache = self.add_weight(
             name=f'cos_{cache_prefix}_cached',
-            shape=cos_table.shape,
-            initializer='zeros',
+            shape=table_shape,
+            initializer=_table_initializer(keras.ops.cos),
             trainable=False,
             dtype='float32'
         )
         sin_cache = self.add_weight(
             name=f'sin_{cache_prefix}_cached',
-            shape=sin_table.shape,
-            initializer='zeros',
+            shape=table_shape,
+            initializer=_table_initializer(keras.ops.sin),
             trainable=False,
             dtype='float32'
         )
-
-        # Assign the computed values
-        cos_cache.assign(cos_table)
-        sin_cache.assign(sin_table)
 
         return cos_cache, sin_cache
 

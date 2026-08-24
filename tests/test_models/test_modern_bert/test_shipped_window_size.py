@@ -1,0 +1,345 @@
+"""ModernBERT's local layers at the window size it actually ships.
+
+Every other test in this package runs at ``TEST_WINDOW_SIZE = 16`` with
+sequence lengths of 16/24/32 (``test_modern_bert.py:29``). All of those
+lengths are ``<= 16**2 = 256``, so ~25 pre-existing tests exercise the local
+layers as *full* attention over a padded 256-slot window without asserting
+that they do — the shipped configuration is untested and the degeneracy is
+invisible.
+
+This module pins the degeneracy at the shipped size, and pins it as a COST
+claim, because the cost claim in the surrounding prose used to be inverted
+rather than merely approximate.
+
+The mechanism, from ``WindowAttention._call_grid``:
+
+* ``H = W = ceil(sqrt(N))``; the sequence is padded up to ``H * W``.
+* ``pad_h = (ws - H % ws) % ws``, and likewise ``pad_w``. When ``H < ws`` this
+  is ``ws - H``, so the padded grid is exactly one ``ws x ws`` tile.
+* ``_window_partition`` therefore yields a SINGLE window holding ``ws**2``
+  slots, of which ``ws**2 - N`` are padding, and attention inside it is dense.
+
+Threshold: ``N <= M`` with ``M = window_size**2``. ``MODEL_VARIANTS`` ships
+``window_size=128`` for ``base``/``large`` (``M = 16384``) and ``64`` for
+``tiny`` (``M = 4096``), against ``DEFAULT_MAX_POSITION_EMBEDDINGS = 8192``.
+
+**How these tests observe the partition without paying for it.** A real
+forward at ``window_size=128`` would materialize a ``16384 x 16384`` score
+matrix per head — ~2.7e8 entries, which is the point being made and also far
+too expensive to run. So the per-window attention sublayer is replaced with an
+identity recorder that captures the shape of the window tensor handed to it.
+Everything up to and including the partition is the layer's own code; only the
+attention math inside the window is stubbed out. The recorded shape is
+``(B * num_windows, window_slots, dim)``.
+
+``test_windowing_does_engage_for_tiny_above_its_threshold`` is the CONTROL: it
+uses the same instrument on a configuration that genuinely windows, so a
+"one window" result elsewhere cannot be an artefact of the recorder.
+
+DECISION plan-2026-08-19T163559-499b6f0e/D-139, amended by
+plan-2026-08-22T035419-a11304c8/D-073. Since D-135 set
+``global_attention_interval = 1`` for ``base`` and ``large`` (at the inherited
+``3`` both variants raised ``ResourceExhaustedError`` on their first forward),
+those two variants build NO local attention layer at all -- not merely "the
+window never engages", but "there is no windowed layer". D-139 kept
+``test_base_and_large_can_never_window`` as a pure threshold pin and named the
+vacuity here; **that was not enough**, because the threshold arithmetic passes
+whatever the interval is, so the test would have stayed GREEN through the very
+edit (interval back to 3) that makes the threshold load-bearing -- MEASURED
+2026-08-22. The test now asserts the OPERATIVE fact first, against a real
+constructed model: at each variant's own interval, ZERO layers are
+``WindowAttention``. ``test_the_restored_hybrid_does_build_windowed_layers`` is
+its control, and the threshold assertion is kept behind it exactly as D-139
+intended. Do NOT "fix" the vacuity by shrinking ``local_attention_window_size``:
+D-019 forbids it, because a smaller window buys a different wrong adjacency, not
+the paper's.
+"""
+
+import os
+
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+import numpy as np
+import pytest
+
+from dl_techniques.layers.attention.window_attention import WindowAttention
+from dl_techniques.models.modern_bert.model import ModernBERT
+
+DIM = 4
+HEADS = 2
+
+
+class _RecordingWindowAttention:
+    """Identity stand-in for ``SingleWindowAttention`` that records shapes."""
+
+    def __init__(self) -> None:
+        self.window_shapes: list = []
+
+    @property
+    def built(self) -> bool:
+        return True
+
+    def build(self, input_shape) -> None:  # noqa: D401 - stub
+        return None
+
+    def __call__(self, windows, attention_mask=None, training=None):
+        self.window_shapes.append(tuple(int(d) for d in windows.shape))
+        return windows
+
+
+def _partition_of(window_size: int, seq_len: int):
+    """Return ``(num_windows, slots_per_window)`` for one forward pass.
+
+    Runs ``WindowAttention``'s real grid-formation, padding and partitioning
+    code; only the per-window attention is stubbed.
+    """
+    layer = WindowAttention(
+        dim=DIM,
+        window_size=window_size,
+        num_heads=HEADS,
+        use_relative_position_bias=False,
+    )
+    recorder = _RecordingWindowAttention()
+    layer.attention = recorder
+
+    out = layer(np.zeros((1, seq_len, DIM), dtype="float32"))
+    assert tuple(int(d) for d in out.shape) == (1, seq_len, DIM), (
+        "the layer must stay shape-preserving; if it does not, the recorded "
+        "partition below is not describing the pass this test thinks it is"
+    )
+
+    assert len(recorder.window_shapes) == 1, "expected exactly one attention call"
+    num_windows, slots, _ = recorder.window_shapes[0]
+    return num_windows, slots
+
+
+class TestShippedWindowSizeIsDenseAttention:
+    """The shipped ``window_size=128`` never windows an admissible sequence."""
+
+    @pytest.mark.parametrize(
+        "seq_len", [8, 128, 512, 4096, 4097, 6000, 8191, 8192]
+    )
+    def test_one_padded_window_at_every_admissible_length(self, seq_len):
+        """One window of 16384 slots, whatever the sequence length is.
+
+        This is the whole claim in one assertion: the partition is INDEPENDENT
+        of ``seq_len``. Windowed attention that does not depend on ``N`` is not
+        windowed attention.
+        """
+        window_size = 128
+        slots_per_window = window_size ** 2
+
+        num_windows, slots = _partition_of(window_size, seq_len)
+
+        assert num_windows == 1, (
+            f"L={seq_len} at window_size={window_size} produced {num_windows} "
+            f"windows. If a 1-D sliding-window attention layer has been added "
+            f"and wired in, DELETE this module rather than relaxing it."
+        )
+        assert slots == slots_per_window, (
+            f"the single window holds {slots} slots, not window_size**2 = "
+            f"{slots_per_window}"
+        )
+        assert slots >= seq_len, "padding, not truncation, is what fills a window"
+
+    def test_the_cost_is_inverted_not_approximate(self):
+        """A local layer costs MORE than the global attention it replaces.
+
+        Score-matrix entries are ``slots**2`` per head per sample regardless of
+        ``L``, against ``L**2`` for dense global attention over the real
+        tokens. The ratio is ``(M / L)**2`` and is > 1 for every ``L <= M``.
+        """
+        window_size = 128
+        _, slots = _partition_of(window_size, 128)
+
+        windowed_entries = slots ** 2
+        assert windowed_entries == 16384 ** 2
+
+        for seq_len in (128, 8192):
+            dense_entries = seq_len ** 2
+            ratio = windowed_entries / dense_entries
+            assert ratio > 1.0, (
+                f"at L={seq_len} the windowed path would be cheaper than dense "
+                f"attention, which contradicts the padding mechanism"
+            )
+
+        assert windowed_entries // (128 ** 2) == 16384, "≈16,384x dense at L=128"
+        assert windowed_entries // (8192 ** 2) == 4, "≈4x dense at L=8192"
+
+    def test_windowing_does_engage_for_tiny_above_its_threshold(self):
+        """CONTROL, and the pin on ``tiny``'s exact engagement band.
+
+        ``tiny`` ships ``window_size=64`` (``M = 4096``), so ``L > M`` is above
+        its threshold and the grid really is partitioned. Without this arm,
+        every "1 window" assertion above could be an artefact of the recorder
+        rather than a property of the configuration.
+
+        This also pins the BOUNDARY, which is the fact that killed a proposal
+        to delete ``local_attention_window_size`` outright (see the
+        ``plan-2026-08-18T140459-7991552f/D-019`` anchor in
+        ``models/modern_bert/model.py``): windowing here is not degenerate
+        everywhere, it is degenerate up to 4096 and real from 4097 to 8192, so
+        deleting the knob would remove a capability rather than a no-op.
+        """
+        for seq_len in (8, 64, 1024, 4096):
+            num_windows, slots = _partition_of(window_size=64, seq_len=seq_len)
+            assert num_windows == 1, (
+                f"tiny at L={seq_len} (<= 4096) must be one padded window, "
+                f"got {num_windows}"
+            )
+            assert slots == 64 ** 2
+
+        for seq_len in (4097, 6000, 8191, 8192):
+            num_windows, slots = _partition_of(window_size=64, seq_len=seq_len)
+            assert num_windows == 4, (
+                f"tiny at L={seq_len} (> 4096) must be a 2x2 partition, "
+                f"got {num_windows}"
+            )
+            assert slots == 64 ** 2
+
+
+class TestVariantTableAgainstTheThreshold:
+    """Arithmetic over the shipped constants, not over hand-copied numbers."""
+
+    def test_base_and_large_can_never_window(self):
+        """The OPERATIVE reason, then the dormant threshold behind it.
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-073
+        # WHAT NOT TO DO: do not go back to asserting ONLY
+        # ``window_size ** 2 >= DEFAULT_MAX_POSITION_EMBEDDINGS``. That
+        # arithmetic is true, but it is not WHY ``base``/``large`` never window:
+        # since D-135 set ``global_attention_interval = 1``,
+        # ``(i + 1) % 1 == 0`` holds for every layer in
+        # ``model.py:_build_architecture``, so those variants build ZERO
+        # ``WindowAttention`` sublayers and the threshold has no consumer. A
+        # test that pins only the dormant knob passes for a reason it does not
+        # check, and would keep passing if the interval were changed back to 3
+        # -- the exact edit that makes the threshold load-bearing again. It is
+        # ALSO not fixable by shrinking ``local_attention_window_size``:
+        # D-019/D-139 forbid that, because a smaller window buys a different
+        # wrong adjacency, not the paper's. So the operative claim is asserted
+        # FIRST, against a real constructed model, and the threshold is kept
+        # after it as the pin on the restored-hybrid path.
+        # See decisions.md D-073.
+        """
+        max_pos = ModernBERT.DEFAULT_MAX_POSITION_EMBEDDINGS
+        for variant in ("base", "large"):
+            spec = ModernBERT.MODEL_VARIANTS[variant]
+            interval = spec["global_attention_interval"]
+
+            # (1) The operative claim, on a REAL model at the variant's own
+            # interval. Sizes are shrunk (base is 22 layers of 768) because the
+            # attention TYPE per layer depends on the interval and the layer
+            # index only -- never on the widths.
+            model = ModernBERT(
+                vocab_size=32,
+                hidden_size=16,
+                num_layers=4,
+                num_heads=2,
+                intermediate_size=24,
+                global_attention_interval=interval,
+                local_attention_window_size=spec["local_attention_window_size"],
+                hidden_dropout_rate=0.0,
+                attention_probs_dropout_rate=0.0,
+            )
+            windowed = [
+                i
+                for i, layer in enumerate(model.encoder_layers)
+                if isinstance(layer.attention, WindowAttention)
+            ]
+            assert windowed == [], (
+                f"variant '{variant}' builds windowed layers at indices "
+                f"{windowed}: global_attention_interval = {interval}. The "
+                f"claim that these variants never window rests on the interval "
+                f"being 1 (every layer global), NOT on the window size. If the "
+                f"interval was changed deliberately, the threshold assertion "
+                f"below stops being dormant and this package needs a real "
+                f"windowed-path test at the shipped window size."
+            )
+            assert interval == 1, (
+                f"variant '{variant}': global_attention_interval = {interval}, "
+                f"not 1 -- see D-135 for why it was set to 1"
+            )
+
+            # (2) The dormant threshold, kept per D-139: it becomes
+            # load-bearing the moment a caller passes
+            # ``from_variant(variant, global_attention_interval=3)``.
+            window_size = spec["local_attention_window_size"]
+            threshold = window_size ** 2
+            assert threshold >= max_pos, (
+                f"variant '{variant}': window_size**2 = {threshold} vs "
+                f"max_position_embeddings = {max_pos}. The docstring claim "
+                f"that no admissible length is ever windowed depends on this."
+            )
+
+    def test_the_restored_hybrid_does_build_windowed_layers(self):
+        """CONTROL for the test above: the instrument can see a windowed layer.
+
+        Without this arm, ``windowed == []`` could be an artefact of reading the
+        wrong attribute or of ``WindowAttention`` never being the class used --
+        and it would then pass for every interval, which is precisely the
+        vacuity being repaired.
+        """
+        model = ModernBERT(
+            vocab_size=32,
+            hidden_size=16,
+            num_layers=4,
+            num_heads=2,
+            intermediate_size=24,
+            global_attention_interval=3,  # the inherited hybrid
+            local_attention_window_size=128,
+            hidden_dropout_rate=0.0,
+            attention_probs_dropout_rate=0.0,
+        )
+        windowed = [
+            i
+            for i, layer in enumerate(model.encoder_layers)
+            if isinstance(layer.attention, WindowAttention)
+        ]
+        assert windowed == [0, 1, 3], (
+            f"at interval 3 every layer except every 3rd is windowed; got "
+            f"{windowed}"
+        )
+
+    def test_tiny_is_the_only_variant_where_windowing_can_engage(self):
+        max_pos = ModernBERT.DEFAULT_MAX_POSITION_EMBEDDINGS
+        threshold = (
+            ModernBERT.MODEL_VARIANTS["tiny"]["local_attention_window_size"] ** 2
+        )
+        assert threshold < max_pos, "tiny's threshold must sit below max position"
+        assert threshold == 4096
+
+    def test_the_rest_of_the_suite_runs_in_the_degenerate_regime_too(self):
+        """``TEST_WINDOW_SIZE = 16`` with L in 16/24/32 is one padded window.
+
+        Recorded so a reader does not mistake ~25 green local-attention tests
+        for evidence that windowing works.
+        """
+        for seq_len in (16, 24, 32):
+            num_windows, slots = _partition_of(window_size=16, seq_len=seq_len)
+            assert num_windows == 1
+            assert slots == 256
+
+
+class TestModelWiresTheShippedWindowSize:
+    """The model hands ``local_attention_window_size`` straight to the layer."""
+
+    def test_local_layer_receives_the_window_size_unmodified(self):
+        model = ModernBERT(
+            vocab_size=32,
+            hidden_size=16,
+            num_layers=1,
+            num_heads=2,
+            intermediate_size=24,
+            global_attention_interval=999,  # no layer is global
+            local_attention_window_size=128,
+            hidden_dropout_rate=0.0,
+            attention_probs_dropout_rate=0.0,
+        )
+        layer = model.encoder_layers[0]
+        assert layer.attention_type == "window"
+        assert isinstance(layer.attention, WindowAttention)
+        assert layer.attention.window_size == 128, (
+            "the degeneracy proven above only applies to the model if the "
+            "model's own window size reaches the layer unchanged"
+        )

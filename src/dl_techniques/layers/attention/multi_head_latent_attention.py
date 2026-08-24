@@ -446,9 +446,10 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # Build KV path (RoPE - Shared Key)
         self.k_rope_proj.build(kv_shape)
 
-        # Build RoPE embedding
+        # Build RoPE embedding in the frame `call()` hands it: (B, H, S, D).
+        # See the D-083 anchor in `call()` -- axis 2 must be the SEQUENCE axis.
         rope_input_shape = (
-            q_shape[0], q_shape[1], self.num_heads, self.qk_rope_head_dim
+            q_shape[0], self.num_heads, q_shape[1], self.qk_rope_head_dim
         )
         self.rope.build(rope_input_shape)
 
@@ -559,18 +560,35 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # ═══════════════════════════════════════════════════════════════════
         # STEP 3: ROPE APPLICATION
         # ═══════════════════════════════════════════════════════════════════
-        q_pe = self.rope(q_pe)
-        k_pe = self.rope(k_pe)
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-083: RoPE is applied in the
+        # (B, H, S, D) frame. Here that means transposing FIRST and leaving the
+        # tensors transposed -- STEP 4 below wants (B, H, S, D) anyway, so the
+        # fix removes a later transpose rather than adding one.
+        #
+        # WHAT NOT TO DO: do NOT call `self.rope(q_pe)` on the (B, S, H, D)
+        # tensor. `RotaryPositionEmbedding.call` takes its sequence length from
+        # `ops.shape(inputs)[2]` against a POSITION-indexed table, and axis 2 in
+        # that frame is HEADS. This layer was the worse of the two victims:
+        # `q_pe` was rotated by its HEAD INDEX, while `k_pe` -- which carries an
+        # explicit singleton head axis, `(B, S_kv, 1, rope_dim)` -- was read as
+        # sequence length 1 and so rotated by position 0 alone, i.e. `cos = 1`,
+        # `sin = 0`, the IDENTITY. Q and K therefore disagreed completely and no
+        # relative-position signal existed. Measured 2026-08-17, CPU: permuting
+        # two input tokens moved the layer output by 4.47e-08, float32 noise.
+        # See decisions.md D-083.
+        q_pe = self.rope(ops.transpose(q_pe, (0, 2, 1, 3)))
+        k_pe = self.rope(ops.transpose(k_pe, (0, 2, 1, 3)))
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 4: ATTENTION SCORE CALCULATION
         # ═══════════════════════════════════════════════════════════════════
 
-        # Transpose for matmul: (B, H, S, D)
+        # Transpose for matmul: (B, H, S, D).
+        # `q_pe` / `k_pe` are ALREADY in this frame -- they were transposed
+        # before RoPE in STEP 3 (see the D-083 anchor there), so transposing
+        # them again here would undo it.
         q_nope = ops.transpose(q_nope, (0, 2, 1, 3))
-        q_pe = ops.transpose(q_pe, (0, 2, 1, 3))
-        k_nope = ops.transpose(k_nope, (0, 2, 1, 3))
-        k_pe = ops.transpose(k_pe, (0, 2, 1, 3))  # (B, 1, S_kv, rope_dim)
+        k_nope = ops.transpose(k_nope, (0, 2, 1, 3))  # k_pe is (B, 1, S_kv, rope_dim)
 
         # Content Score: (B, H, S_q, S_kv)
         score_content = ops.matmul(q_nope, ops.transpose(k_nope, (0, 1, 3, 2)))

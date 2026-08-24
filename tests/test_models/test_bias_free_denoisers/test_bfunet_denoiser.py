@@ -19,6 +19,26 @@ from dl_techniques.models.bias_free_denoisers.bfunet import (
     BFUNET_CONFIGS
 )
 
+from .conftest import (
+    HOMOGENEITY_RTOL,
+    HOMOGENEITY_SCALES,
+    fit_one_step,
+    homogeneity_error,
+    homogeneity_error_raw,
+    tf32_disabled,
+)
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
+
+def _first_norm(layer):
+    """The normalization sublayer of a ``BiasFreeConv2D`` or ``BiasFreeResidualBlock``."""
+    if hasattr(layer, 'batch_norm'):
+        return layer.batch_norm
+    return layer.conv1.batch_norm  # BiasFreeResidualBlock wraps two BiasFreeConv2D
+
 
 class TestBiasFreeUNet:
     """Test suite for Bias-Free U-Net implementation."""
@@ -107,9 +127,26 @@ class TestBiasFreeUNet:
         assert large_output.shape == (1, 128, 128, 1)
 
     def test_different_depths(self, grayscale_input_shape):
-        """Test U-Net with different depth configurations."""
-        depths = [3, 4, 5]  # Updated minimum depth to 3
+        """``depth`` must add levels, not just be accepted.
 
+        The output shape is the input's shape at every depth, so it is not
+        evidence. `depth` is structural: each extra level adds encoder, decoder
+        and skip weights, so the weight-shape signature carries the claim and
+        the parameter count must grow strictly.
+        """
+        depths = [3, 4, 5]  # Updated minimum depth to 3
+        builders = {
+            d: (lambda d=d: create_bfunet_denoiser(
+                input_shape=grayscale_input_shape, depth=d, initial_filters=8))
+            for d in depths
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="depth")
+        counts = [sum(int(np.prod(w)) for w in sigs[d]) for d in depths]
+        assert counts[0] < counts[1] < counts[2], (
+            f"depth did not grow the parameter count: {dict(zip(depths, counts))}"
+        )
+
+        # Forward pass still works at every depth, and preserves the shape.
         for depth in depths:
             model = create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
@@ -117,7 +154,6 @@ class TestBiasFreeUNet:
                 initial_filters=8
             )
 
-            # Test forward pass
             test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
             output = model(test_input)
 
@@ -463,32 +499,130 @@ class TestBiasFreeUNet:
         assert not np.any(np.isnan(output.numpy()))
         assert not np.any(np.isinf(output.numpy()))
 
-    def test_scaling_invariance_property(self, test_image_grayscale):
-        """Test the scaling invariance property of the bias-free U-Net."""
+    def test_scaling_invariance_property(self, test_image_grayscale, homogeneity_probe):
+        """A TRAINED, factory-built bias-free U-Net is degree-1 homogeneous.
+
+        Reaches the model through ``create_bfunet_denoiser`` at its defaults -- NOT through
+        ``src/train/bfunet/``, which is where the ``'batchnorm'`` -> ``BiasFreeBatchNorm``
+        remap used to live and which therefore masked this defect from every trainer-side
+        test.
+
+        The ``fit_one_step`` call is the entire point: on an untrained model stock
+        ``BatchNormalization`` has ``moving_mean == 0`` and is exactly homogeneous, so the
+        pre-2026-08-15 version of this test passed against a model that did not have the
+        property. See ``conftest.py`` for the tolerance derivation and the measured
+        pre-fix / post-fix numbers.
+        """
         model = create_bfunet_denoiser(
             input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=32,
-            final_activation='linear'  # Important for scaling invariance
+            depth=2,
+            initial_filters=8,
+            blocks_per_level=1,
+            final_activation='linear',  # required: any other activation is not homogeneous
+        )
+        fit_one_step(model)
+
+        for c in HOMOGENEITY_SCALES:
+            err = homogeneity_probe(model, test_image_grayscale, c)
+            assert err < HOMOGENEITY_RTOL, (
+                f"homogeneity violated at c={c}: relative error {err:.3e} exceeds "
+                f"{HOMOGENEITY_RTOL:.0e}. A trained bias-free denoiser must satisfy "
+                "f(c*x) = c*f(x) to float32 round-off"
+            )
+
+    def test_homogeneity_error_is_round_off_not_bias(self, test_image_grayscale):
+        """Pins the DIAGNOSIS behind `test_scaling_invariance_property`, not its symptom.
+
+        # DECISION plan-2026-08-18T123346-c3c4a681/D-003
+        The residual homogeneity error of a bias-free U-Net is arithmetic ROUND-OFF, so it must
+        shrink when the arithmetic gets more precise. An additive-bias leak -- the defect this
+        family of tests exists to catch -- would not: it is a property of the weights, not of
+        the mantissa. Measured 2026-08-18 on GPU 1 over c in (0.5, 2, 3, 10, 100, 1e4):
+        TF32 ~6.5e-04, true float32 ~1.2e-06, float64 ~1.4e-07 (the float64 floor is the
+        decoder's bilinear ``UpSampling2D``, which ``tf.image.resize`` executes in float32 at
+        any dtype policy -- see conftest for the full table and the per-layer walk, where the
+        encoder reads 4.01e-16).
+
+        Do NOT tighten this to an absolute bar on the TF32 reading: it is genuinely unstable
+        run to run (2.86e-04 / 5.06e-04 / 1.08e-03 observed), which is why the assertion is on
+        the RATIO, where the separation is ~100x-1000x and the bar is 10x. Do NOT delete the
+        skips: on CPU, and on any GPU that does not actually take the TF32 path, both readings
+        are the same number and the experiment has no discriminating power.
+        """
+        if not tf.config.list_physical_devices('GPU'):
+            pytest.skip("TF32 is a GPU (Ampere+) execution mode; the flag is inert on CPU")
+
+        model = create_bfunet_denoiser(
+            input_shape=(64, 64, 1),
+            depth=2,
+            initial_filters=8,
+            blocks_per_level=1,
+            final_activation='linear',
+        )
+        fit_one_step(model)
+
+        previous = tf.config.experimental.tensor_float_32_execution_enabled()
+        tf.config.experimental.enable_tensor_float_32_execution(True)
+        try:
+            err_tf32 = homogeneity_error_raw(model, test_image_grayscale, 3.0)
+        finally:
+            tf.config.experimental.enable_tensor_float_32_execution(previous)
+            assert (
+                tf.config.experimental.tensor_float_32_execution_enabled() == previous
+            ), "TF32 setting leaked out of the diagnosis test"
+
+        err_true_f32 = homogeneity_error(model, test_image_grayscale, 3.0)
+
+        if err_tf32 < 1e-5:
+            pytest.skip(
+                f"this GPU did not take the TF32 path (error {err_tf32:.3e}); "
+                "the on/off comparison has nothing to discriminate"
+            )
+
+        assert err_true_f32 < HOMOGENEITY_RTOL, (
+            f"true-float32 homogeneity error {err_true_f32:.3e} exceeds "
+            f"{HOMOGENEITY_RTOL:.0e} -- this is NOT reduced precision and is a real defect"
+        )
+        assert err_true_f32 * 10 < err_tf32, (
+            f"homogeneity error did not track arithmetic precision: TF32 {err_tf32:.3e} vs "
+            f"true float32 {err_true_f32:.3e}. Round-off shrinks with the mantissa; an "
+            "additive-bias leak would stay put, so this looks like a real bias leak"
         )
 
-        # Test scaling invariance: if input is scaled by α, output is scaled by α
-        alpha = 2.0
-        scaled_input = alpha * test_image_grayscale
-
-        original_output = model(test_image_grayscale)
-        scaled_output = model(scaled_input)
-
-        # The outputs should be related by the same scaling factor
-        expected_scaled_output = alpha * original_output
-
-        # Use relaxed tolerance for practical implementations
-        np.testing.assert_allclose(
-            scaled_output.numpy(),
-            expected_scaled_output.numpy(),
-            rtol=1e-1,  # Relaxed tolerance for U-Net complexity
-            atol=1e-1
+        moving_means = [w for w in model.weights if 'moving_mean' in w.path]
+        assert not moving_means, (
+            "the factory-built bias-free U-Net still contains "
+            f"{len(moving_means)} moving_mean variable(s) -- it is using stock "
+            "BatchNormalization, whose moving_mean subtraction is an additive constant "
+            "that breaks f(c*x) = c*f(x)"
         )
+
+    def test_deep_supervision_head_uses_the_block_normalization(self):
+        """The deep-supervision heads get the same normalization as the blocks.
+
+        The heads feed gradient straight into the decoder, so a head left on a different
+        normalization than the blocks makes that gradient scale-dependent. Asserted on the
+        BUILT layer TYPE, not on the ``normalization_type`` string, so it stays true however
+        the name is resolved.
+        """
+        model = create_bfunet_denoiser(
+            input_shape=(32, 32, 1),
+            depth=2,
+            initial_filters=8,
+            blocks_per_level=1,
+            enable_deep_supervision=True,
+        )
+        heads = [l for l in model.layers if l.name.startswith('supervision_intermediate_')]
+        assert heads, "no deep-supervision head was built"
+
+        block = next(l for l in model.layers if l.name.startswith('encoder_level_0_'))
+        block_norm_type = type(_first_norm(block))
+        for head in heads:
+            assert type(head.batch_norm) is block_norm_type, (
+                f"deep-supervision head {head.name!r} normalizes with "
+                f"{type(head.batch_norm).__name__} while the encoder blocks use "
+                f"{block_norm_type.__name__} -- the head ignores block_normalization"
+            )
 
     def test_different_batch_sizes(self, grayscale_input_shape):
         """Test model with different batch sizes."""
@@ -730,7 +864,12 @@ class TestBiasFreeUNetParameterized:
         ((96, 96, 3), 3, 32),  # Non-power-of-2 dimensions
     ])
     def test_various_configurations(self, input_shape, depth, initial_filters):
-        """Test model creation with various valid configurations."""
+        """Each configuration builds and forwards without NaN.
+
+        A build smoke only. The shape assertion below is true at every depth and
+        width by construction; `test_different_depths` and
+        `test_different_initial_filters` carry the knob claims.
+        """
         model = create_bfunet_denoiser(
             input_shape=input_shape,
             depth=depth,
@@ -745,71 +884,91 @@ class TestBiasFreeUNetParameterized:
         assert output.shape == (batch_size,) + input_shape
         assert not np.any(np.isnan(output.numpy()))
 
-    @pytest.mark.parametrize("activation", [
-        'relu', 'leaky_relu', 'elu', 'swish', 'gelu'
-    ])
-    def test_different_activations(self, activation):
-        """Test model with different activation functions."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            activation=activation
+    def test_different_activations(self):
+        """The activation must reach the forward pass.
+
+        A value knob: the parameterisation is identical across activations, so
+        under one seed the models hold bit-identical weights and the whole
+        output difference is the activation.
+        """
+        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
+        builders = {
+            a: (lambda a=a: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                activation=a))
+            for a in ('relu', 'leaky_relu', 'elu', 'swish', 'gelu')
+        }
+        deltas = assert_value_knob_changes_output(
+            builders, test_input, knob="activation",
+        )
+        assert min(deltas.values()) > 1e-5
+
+    def test_different_kernel_sizes(self):
+        """``kernel_size`` must reach the convolution kernels.
+
+        bfunet.py fixes the stem at ``initial_kernel_size=5`` (line 362) and the
+        output projection at 1x1, so those extents are present at every setting;
+        `kernel_size` governs every other conv.
+        """
+        builders = {
+            k: (lambda k=k: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                kernel_size=k))
+            for k in (1, 3, 5, 7)
+        }
+        sigs = assert_structural_knob_changes_weights(builders, knob="kernel_size")
+        for k, sig in sigs.items():
+            spatial = {w[:2] for w in sig if len(w) == 4}
+            assert (k, k) in spatial, (
+                f"kernel_size={k} produced no {k}x{k} kernel; extents were "
+                f"{sorted(spatial)}"
+            )
+            assert spatial <= {(5, 5), (k, k), (1, 1)}, (
+                f"kernel_size={k} produced unexpected extents {sorted(spatial)}"
+            )
+
+    def test_different_filter_multipliers(self):
+        """``filter_multiplier`` must widen each successive level.
+
+        Structural. bfunet.py:339 computes
+        ``initial_filters * multiplier ** level``; at multiplier 1 the levels
+        are flat, so the parameter count must grow strictly with the multiplier.
+        """
+        multipliers = (1, 2, 3, 4)
+        builders = {
+            m: (lambda m=m: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                filter_multiplier=m))
+            for m in multipliers
+        }
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="filter_multiplier")
+        counts = [sum(int(np.prod(w)) for w in sigs[m]) for m in multipliers]
+        assert counts == sorted(counts) and counts[0] < counts[-1], (
+            f"filter_multiplier did not widen the model: "
+            f"{dict(zip(multipliers, counts))}"
         )
 
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
+    def test_different_blocks_per_level(self):
+        """``blocks_per_level`` must add blocks, not just be accepted.
 
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("kernel_size", [1, 3, 5, 7])
-    def test_different_kernel_sizes(self, kernel_size):
-        """Test model with different kernel sizes."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            kernel_size=kernel_size
+        Structural: more blocks per level means strictly more weight tensors,
+        which a differing-shapes check alone would not pin down.
+        """
+        counts_swept = (1, 2, 3, 4)
+        builders = {
+            b: (lambda b=b: create_bfunet_denoiser(
+                input_shape=(64, 64, 1), depth=3, initial_filters=16,
+                blocks_per_level=b))
+            for b in counts_swept
+        }
+        sigs = assert_structural_knob_changes_weights(
+            builders, knob="blocks_per_level")
+        n_weights = [len(sigs[b]) for b in counts_swept]
+        assert n_weights == sorted(n_weights) and n_weights[0] < n_weights[-1], (
+            f"blocks_per_level did not add weight tensors: "
+            f"{dict(zip(counts_swept, n_weights))}"
         )
-
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("filter_multiplier", [1, 2, 3, 4])
-    def test_different_filter_multipliers(self, filter_multiplier):
-        """Test model with different filter multipliers."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            filter_multiplier=filter_multiplier
-        )
-
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
-
-    @pytest.mark.parametrize("blocks_per_level", [1, 2, 3, 4])
-    def test_different_blocks_per_level(self, blocks_per_level):
-        """Test model with different numbers of blocks per level."""
-        model = create_bfunet_denoiser(
-            input_shape=(64, 64, 1),
-            depth=3,  # Updated minimum depth
-            initial_filters=16,
-            blocks_per_level=blocks_per_level
-        )
-
-        test_input = np.random.rand(1, 64, 64, 1).astype(np.float32)
-        output = model(test_input)
-
-        assert output.shape == test_input.shape
-        assert not np.any(np.isnan(output.numpy()))
 
     @pytest.mark.parametrize("variant", ['tiny', 'small', 'base', 'large', 'xlarge'])
     def test_all_variants_parameterized(self, variant):
@@ -823,6 +982,41 @@ class TestBiasFreeUNetParameterized:
         assert output.shape == test_input.shape
         assert not np.any(np.isnan(output.numpy()))
         assert not np.any(np.isinf(output.numpy()))
+
+
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `BFUNET_PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `create_bfunet_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_create_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained BFUNet weights"):
+            create_bfunet_variant("tiny", (32, 32, 1), pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = create_bfunet_variant("tiny", (32, 32, 1), pretrained=False)
+        assert isinstance(model, keras.Model)
+
+    def test_local_path_still_works(self, tmp_path):
+        src = create_bfunet_variant("tiny", (32, 32, 1))
+        path = str(tmp_path / "bfunet.keras")
+        src.save(path)
+        loaded = create_bfunet_variant("tiny", (32, 32, 1), pretrained=path)
+        x = np.random.rand(1, 32, 32, 1).astype("float32")
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(src(x)),
+            keras.ops.convert_to_numpy(loaded(x)),
+            atol=1e-6,
+        )
+
+    def test_no_placeholder_weight_table(self):
+        import dl_techniques.models.bias_free_denoisers.bfunet as mod
+        assert not hasattr(mod, "BFUNET_PRETRAINED_WEIGHTS")
 
 
 if __name__ == "__main__":

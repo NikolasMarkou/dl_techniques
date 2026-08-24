@@ -229,8 +229,8 @@ class TestConstructionAndConfig:
         assert not np.any(kernel) and not np.any(bias)
 
     @pytest.mark.parametrize("bad", [
-        {"dim": 0}, {"dim": -1}, {"num_heads": 0}, {"dropout": 1.0},
-        {"dropout": -0.1},
+        {"dim": 0}, {"dim": -1}, {"num_heads": 0}, {"dropout_rate": 1.0},
+        {"dropout_rate": -0.1},
     ])
     def test_ctor_raises_on_invalid_args(self, bad):
         kwargs = dict(dim=DIM, num_heads=HEADS, dim_head=DIM_HEAD,

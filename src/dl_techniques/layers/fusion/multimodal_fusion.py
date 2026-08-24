@@ -13,13 +13,27 @@ Architecture Overview:
 
     1. Early Fusion (Concatenation): Y = W[X₁; X₂; ...; Xₙ] + b
     2. Element-wise Fusion: Addition/Multiplication with alignment
-    3. Interaction-based: Bilinear pooling and tensor fusion
+    3. Interaction-based: Bilinear pooling (an explicit outer product)
     4. Attention-based: Cross-modal attention mechanisms
+    5. Wide early fusion (``'tensor_fusion'``): a one-hidden-layer MLP over the
+       concatenation -- see the note below.
+
+    Note on ``'tensor_fusion'``:
+        Despite the name, this strategy computes **no outer product and no
+        tensor decomposition**. It is early fusion (case 1) with a wider,
+        non-linear hidden layer: concatenate on the feature axis, apply
+        ``num_tensor_projections`` parallel ``Dense(dim, activation)`` layers to
+        that same concatenation, concatenate their outputs, and project back to
+        ``dim``. Only ``'bilinear'`` in this file forms a genuine cross-modal
+        product. See ``_call_tensor_fusion`` for the measured cost comparison.
 
 References:
     - Baltrusaitis et al. (2018): Multimodal Machine Learning: A Survey
     - Vaswani et al. (2017): Attention Is All You Need
-    - Zadeh et al. (2017): Tensor Fusion Network
+    - Zadeh et al. (2017): Tensor Fusion Network -- the source of the
+      ``'tensor_fusion'`` NAME only. That paper's mechanism (the outer product
+      of the modality vectors, optionally low-rank-factorized) is **not**
+      implemented here; ``'bilinear'`` is the closest thing in this file.
     - Lu et al. (2019): ViLBERT
 """
 
@@ -46,7 +60,7 @@ FusionStrategy = Literal[
     'gated',              # Learned gating mechanism
     'attention_pooling',  # Attention-based pooling and fusion
     'bilinear',           # Bilinear pooling
-    'tensor_fusion'       # Multi-dimensional tensor fusion
+    'tensor_fusion'       # Concatenate, then a wide parallel-Dense hidden layer
 ]
 
 # ---------------------------------------------------------------------
@@ -106,7 +120,10 @@ class MultiModalFusion(keras.layers.Layer):
     :type norm_type: NormalizationType
     :param norm_config: Configuration dict for normalization layers.
     :type norm_config: Optional[Dict[str, Any]]
-    :param num_tensor_projections: Number of projections for tensor fusion.
+    :param num_tensor_projections: Width multiplier for ``'tensor_fusion'``:
+        the number of parallel ``Dense(dim)`` units applied to the concatenated
+        modalities, i.e. a hidden layer of width ``num_tensor_projections * dim``.
+        Ignored by every other strategy.
     :type num_tensor_projections: int
     :param dropout_rate: Dropout probability for regularization.
     :type dropout_rate: float
@@ -584,9 +601,13 @@ class MultiModalFusion(keras.layers.Layer):
         self.norm_layers.append(norm)
 
     def _build_tensor_fusion(self, input_shape: List[Tuple]) -> None:
-        """Build layers for tensor fusion strategy.
+        """Build layers for the ``'tensor_fusion'`` strategy.
 
-        Creates multiple projections to model higher-order interactions.
+        Creates ``num_tensor_projections`` parallel ``Dense(dim, activation)``
+        layers over the feature-axis concatenation of all modalities, plus one
+        linear ``Dense(dim)`` over their concatenated outputs. This is the
+        hidden and output layer of an MLP -- there is no outer product and no
+        decomposition; see ``_call_tensor_fusion``.
 
         :param input_shape: List of input shapes for each modality.
         :type input_shape: List[Tuple]
@@ -597,7 +618,9 @@ class MultiModalFusion(keras.layers.Layer):
         concat_shape = list(input_shape[0])
         concat_shape[-1] = self.dim * num_modalities
 
-        # Create multiple projection layers for tensor decomposition
+        # Parallel hidden units: each sees the SAME concatenated input, so this
+        # is one wide Dense(dim * num_tensor_projections) written as a list, not
+        # a decomposition of anything.
         for i in range(self.num_tensor_projections):
             proj = keras.layers.Dense(
                 units=self.dim,
@@ -669,7 +692,50 @@ class MultiModalFusion(keras.layers.Layer):
         if handler is None:
             raise ValueError(f"Unknown fusion strategy: {self.fusion_strategy}")
 
+        if self.fusion_strategy not in self.LENGTH_AGNOSTIC_STRATEGIES:
+            self._require_equal_sequence_lengths(inputs)
+
         return handler(inputs, training)
+
+    #: The two strategies that can fuse modalities of DIFFERENT sequence
+    #: length. Every other strategy either concatenates on the feature axis or
+    #: broadcasts element-wise on axis 1, and so requires equal lengths.
+    LENGTH_AGNOSTIC_STRATEGIES = frozenset({'cross_attention', 'attention_pooling'})
+
+    def _require_equal_sequence_lengths(
+        self,
+        inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+    ) -> None:
+        """Refuse statically-unequal sequence lengths, naming the strategy.
+
+        Interface contract (1 call site, :meth:`call`, guarding the six
+        strategies outside :attr:`LENGTH_AGNOSTIC_STRATEGIES`): raises
+        ``ValueError`` when every input has a statically-known sequence length
+        and they are not all equal; returns ``None`` otherwise. A symbolic build
+        with a ``None`` sequence axis is legal and is NEVER refused here — the
+        check is deliberately blind to it rather than guessing.
+
+        :param inputs: The modality tensors, as passed to :meth:`call`.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+
+        :raises ValueError: If the statically-known sequence lengths differ.
+        """
+        lengths = [
+            t.shape[1] for t in inputs
+            if len(t.shape) > 2 and t.shape[1] is not None
+        ]
+        if len(lengths) != len(inputs) or len(set(lengths)) <= 1:
+            return
+
+        raise ValueError(
+            f"fusion_strategy='{self.fusion_strategy}' requires all modality "
+            "inputs to share the same sequence length, because it combines them "
+            "on the feature axis (concatenation) or element-wise on the sequence "
+            f"axis; got sequence lengths {lengths} for inputs of shapes "
+            f"{[tuple(t.shape) for t in inputs]}. Use "
+            "fusion_strategy='cross_attention' or 'attention_pooling' for "
+            "modalities of different sequence length."
+        )
 
     def _call_cross_attention(
         self,
@@ -942,9 +1008,48 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply tensor fusion with multiple projections.
+        """Apply the ``'tensor_fusion'`` strategy.
 
-        Models higher-order interactions through tensor decomposition.
+        **What this actually computes.** Despite the name, there is no outer
+        product and no tensor decomposition anywhere in this method. It is a
+        one-hidden-layer MLP over the feature-axis concatenation::
+
+            h        = concat([x_1, ..., x_N], axis=-1)     # (B, T, N*dim)
+            u_i      = activation(h @ W_i + b_i)            # i = 1..P
+            output   = concat([u_1, ..., u_P], -1) @ W_out + b_out
+
+        where ``P = num_tensor_projections``. Because every ``u_i`` sees the
+        same ``h``, the parallel list is just one wide hidden layer of width
+        ``P * dim`` written as ``P`` separate ``Dense`` layers.
+
+        **Relation to ``'concatenation'``.** Up to that hidden layer, this is
+        the same model: ``'concatenation'`` is ``activation(h @ W) -> norm ->
+        dropout``, i.e. the same concatenation with a width-``dim`` hidden layer
+        and no output projection. So ``'tensor_fusion'`` buys extra hidden width
+        and one more linear map, not a different class of interaction. It also
+        applies **no** normalization and **no** dropout, unlike
+        ``'concatenation'``. If you want genuine multiplicative cross-modal
+        interaction, use ``'bilinear'`` (a real outer product) or
+        ``'multiplication'``/``'gated'``.
+
+        **Cost.** MEASURED trainable parameters, 2 modalities, ``dim=64``,
+        default ``num_tensor_projections=8``: ``concatenation`` 8,384;
+        ``tensor_fusion`` 98,880; ``bilinear`` 262,336. The ``tensor_fusion``
+        count is EXACT, not asymptotic::
+
+            P * (N*dim*dim + dim)   # the P hidden projections
+          + (P*dim*dim + dim)       # the output projection
+          = P * (N + 1) * dim^2 + (P + 1) * dim
+
+        i.e. ``24 * dim^2 + 9 * dim`` at ``P=8, N=2``. Verified against
+        constructed layers at four settings: ``(dim,N,P) = (64,2,8) -> 98,880``,
+        ``(96,2,8) -> 222,048``, ``(48,3,4) -> 37,104``, ``(64,3,8) -> 131,648``,
+        all exact. So the growth is quadratic in ``dim`` and LINEAR in both ``N``
+        and ``P`` -- like every other strategy here except ``'bilinear'``, which
+        is ``dim^3 + 3*dim``. ``tensor_fusion`` is therefore roughly ``12x``
+        concatenation but *cheaper* than ``'bilinear'`` for any ``dim > 24``
+        (at ``dim=24``: 14,040 vs 13,896; at ``dim=25``: 15,225 vs 15,700); it is
+        not the most expensive strategy in this layer.
 
         :param inputs: List of modality tensors.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
@@ -953,11 +1058,34 @@ class MultiModalFusion(keras.layers.Layer):
 
         :return: Fused tensor after tensor fusion.
         :rtype: keras.KerasTensor
+
+        :raises ValueError: If the modalities have statically-known but unequal
+            sequence lengths, which this strategy cannot fuse.
         """
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-007
+        # Do NOT drop this in favour of "the concat already fails": it fails as a
+        # backend-level InvalidArgumentError ("ConcatOp : Dimension 1 in both shapes
+        # must be equal"), which is not a ValueError, names neither the strategy nor
+        # the requirement, and points at no alternative. Do NOT "fix" it by padding
+        # or slicing to a common length either — that would silently change the
+        # semantics of the fusion. See decisions.md D-007.
+        #
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-024
+        # The check itself MOVED, verbatim in effect, to
+        # `_require_equal_sequence_lengths`, called once from `call()` for every
+        # strategy outside `LENGTH_AGNOSTIC_STRATEGIES`. It is not re-run here.
+        # WHAT NOT TO DO: do not re-inline it into this method. `tensor_fusion`
+        # was never the only strategy with this requirement — `concatenation`
+        # concatenates on the same axis with the same precondition, and
+        # `addition`/`multiplication`/`gated`/`bilinear` broadcast on axis 1 — so
+        # a per-method copy is how five of the six ended up unguarded while this
+        # one was fixed. See decisions.md D-024.
+
         # Concatenate all modalities
         concatenated = keras.ops.concatenate(inputs, axis=-1)
 
-        # Apply multiple projections (tensor decomposition)
+        # One wide hidden layer, expressed as P parallel Dense layers over the
+        # SAME concatenation (not a decomposition, not an outer product).
         projections = []
         for i in range(self.num_tensor_projections):
             proj_layer = self.projection_layers[i]

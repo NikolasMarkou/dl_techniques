@@ -142,7 +142,8 @@ class TestBrierScoreLoss:
 
         # Create a simple model
         model = keras.Sequential([
-            keras.layers.Dense(16, activation="relu", input_shape=(1,)),
+            keras.Input(shape=(1,)),
+            keras.layers.Dense(16, activation="relu"),
             keras.layers.Dense(1, activation="sigmoid")
         ])
 
@@ -557,7 +558,8 @@ class TestModelSaveLoad:
         """Test saving and loading a model with calibration losses."""
         # Create a simple model
         model = keras.Sequential([
-            keras.layers.Dense(16, activation="relu", input_shape=(10,)),
+            keras.Input(shape=(10,)),
+            keras.layers.Dense(16, activation="relu"),
             keras.layers.Dense(8, activation="relu"),
             keras.layers.Dense(1, activation="sigmoid")
         ])

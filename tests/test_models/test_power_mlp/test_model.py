@@ -44,6 +44,9 @@ from dl_techniques.models.power_mlp.model import (
 )
 from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 
+from ..knob_sensitivity_oracle import as_array, build_seeded
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
 # ---------------------------------------------------------------------
 
 
@@ -348,8 +351,14 @@ class TestPowerMLPSerialization:
             )
 
     def test_save_model_method(self, model_config: Dict[str, Any]) -> None:
-        """Test the save_model convenience method."""
+        """The archive must contain the WEIGHTS, not just exist.
+
+        Before D-053 this test asserted only ``os.path.exists`` plus the class
+        of the reloaded object, and passed against a 9,997-byte archive holding
+        zero weights.
+        """
         model = PowerMLP(**model_config)
+        model.build((None, 16))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'model_via_method.keras')
@@ -357,13 +366,41 @@ class TestPowerMLPSerialization:
 
             assert os.path.exists(filepath)
 
-            # Verify it can be loaded
+            # Verify it can be loaded WITH its weights
             loaded_model = keras.models.load_model(filepath)
             assert isinstance(loaded_model, PowerMLP)
+            original = model.get_weights()
+            restored = loaded_model.get_weights()
+            assert len(original) > 0, "the source model held no weights"
+            assert len(restored) == len(original), (
+                f"round trip restored {len(restored)} weight arrays, "
+                f"saved {len(original)}"
+            )
+            for index, (before, after) in enumerate(zip(original, restored)):
+                np.testing.assert_allclose(
+                    before, after, rtol=0, atol=0,
+                    err_msg=f"weight array {index} changed across the round trip"
+                )
+
+    def test_saving_an_unbuilt_power_mlp_is_refused(
+        self, model_config: Dict[str, Any]
+    ) -> None:
+        """`PowerMLP.__init__` takes no input shape, so it cannot self-build."""
+        model = PowerMLP(**model_config)
+        assert not model.built
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'empty.keras')
+            with pytest.raises(ValueError, match="unbuilt PowerMLP"):
+                model.save_model(filepath)
+            assert not os.path.exists(filepath), (
+                "an empty archive was written before the refusal"
+            )
 
     def test_load_model_method(self, model_config: Dict[str, Any]) -> None:
         """Test the load_model class method."""
         model = PowerMLP(**model_config)
+        model.build((None, 16))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'model_for_loading.keras')
@@ -372,6 +409,7 @@ class TestPowerMLPSerialization:
             loaded_model = PowerMLP.load_model(filepath)
             assert isinstance(loaded_model, PowerMLP)
             assert loaded_model.hidden_units == model.hidden_units
+            assert len(loaded_model.get_weights()) == len(model.get_weights())
 
 
 class TestPowerMLPConfiguration:
@@ -462,20 +500,22 @@ class TestPowerMLPGradients:
         model: PowerMLP,
         sample_input: keras.KerasTensor
     ) -> None:
-        """Test that gradients flow through the model."""
-        with tf.GradientTape() as tape:
-            output = model(sample_input, training=True)
-            loss = ops.mean(ops.square(output))
+        """Test that gradients flow through the model.
 
-        gradients = tape.gradient(loss, model.trainable_variables)
+        The body used to be ``all(g is not None)`` plus a
+        ``grad.shape == var.shape`` loop. Neither can fail for a model whose
+        weights are on the graph but receive an identically-zero gradient --
+        the dead-component case -- and the shape equality is a property of
+        ``tape.gradient`` itself rather than of PowerMLP. Both checks are now
+        inside ``tests/test_models/gradient_flow_oracle.py`` (the shape check
+        is retained there and raises), alongside the nonzero and finiteness
+        floors this test never made.
+        """
+        model(sample_input)  # a subclassed model is unbuilt until first call
+        report = assert_gradients_reach_every_trainable_weight(model, sample_input)
 
-        # Check all gradients exist
-        assert all(g is not None for g in gradients)
-        assert len(gradients) > 0
-
-        # Check gradients have proper shapes
-        for var, grad in zip(model.trainable_variables, gradients):
-            assert grad.shape == var.shape
+        assert len(report) == len(model.trainable_variables)
+        assert len(report) > 0
 
     def test_gradients_with_regularization(self) -> None:
         """Test gradients with kernel regularization."""
@@ -530,19 +570,53 @@ class TestPowerMLPTrainingModes:
         """Create sample input."""
         return keras.random.normal(shape=(8, 10))
 
-    @pytest.mark.parametrize("training", [True, False, None])
     def test_different_training_modes(
         self,
-        model: PowerMLP,
         sample_input: keras.KerasTensor,
-        training: bool
     ) -> None:
-        """Test model behavior in different training modes."""
-        output = model(sample_input, training=training)
+        """The `training` flag must change what the model computes.
 
-        assert output.shape == (8, 5)
-        assert not ops.any(ops.isnan(output))
-        assert not ops.any(ops.isinf(output))
+        Restructured out of ``@parametrize``: one call per invocation could only
+        assert ``(8, 5)`` plus finiteness, which is true in every mode -- and
+        train-vs-eval is the whole point of the fixture, whose model carries
+        ``dropout_rate=0.5`` AND ``batch_normalization=True``. Both of those
+        behave differently in the two modes and nothing checked it.
+
+        Measured on one seeded model, batch (8, 10):
+
+        * ``training=True`` vs ``training=False``: 12.226
+        * two ``training=True`` calls: 5.169 (dropout is stochastic)
+        * ``training=None`` vs ``training=False``: exactly 0.0 -- ``None`` means
+          "use the enclosing context", and a direct call has none, so it must be
+          bit-identical to inference. That exactness is the assertion; a
+          tolerance here would hide the mode leaking the other way.
+        """
+        model = build_seeded(lambda: PowerMLP(
+            hidden_units=[10, 16, 5],
+            dropout_rate=0.5,
+            batch_normalization=True,
+        ))
+
+        train_out = as_array(model(sample_input, training=True))
+        eval_out = as_array(model(sample_input, training=False))
+        none_out = as_array(model(sample_input, training=None))
+        train_again = as_array(model(sample_input, training=True))
+
+        for output in (train_out, eval_out, none_out):
+            assert output.shape == (8, 5)
+            assert np.all(np.isfinite(output))
+
+        assert np.max(np.abs(train_out - eval_out)) > 1e-5, (
+            "training=True and training=False produced the same output; "
+            "dropout and batch normalization are not mode-aware"
+        )
+        assert np.max(np.abs(train_out - train_again)) > 1e-5, (
+            "two training-mode calls were identical; dropout is not sampling"
+        )
+        np.testing.assert_array_equal(
+            none_out, eval_out,
+            err_msg="training=None must fall back to inference on a direct call",
+        )
 
     def test_dropout_affects_training(self) -> None:
         """Test that dropout behaves differently in training vs inference."""

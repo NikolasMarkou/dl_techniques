@@ -1,16 +1,11 @@
 """
 ``SAM2TrainingModel``: the trainable, traceable multi-frame wrapper.
-====================================================================
 
 :meth:`SAM2.stream_step` is the video path and is deliberately NOT traceable:
 it mutates a Python object (the memory bank), branches on whether that object
 is empty, and reads Python integers out of its selection policy. It therefore
 cannot be the inner operation of a ``fit()`` step, and a custom ``train_step``
 is forbidden by standing instruction. This wrapper takes the other route.
-
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 
 Key Features:
 ------------
@@ -89,6 +84,9 @@ Measured caveats:
 - This module makes **no accuracy claim**. It proves the multi-frame training
   path runs with live gradients; no Meta SAM 2 checkpoint has ever been loaded
   in this repository.
+
+References:
+    Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
 """
 
 from typing import Any, Dict, List, Optional, Tuple

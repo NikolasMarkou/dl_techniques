@@ -202,14 +202,14 @@ class TestSerialization:
 
     def test_get_config(self, minimal_config):
         layer = ProgressiveFocusedAttention(
-            **minimal_config, use_lepe=False, attention_dropout=0.1
+            **minimal_config, use_lepe=False, attention_dropout_rate=0.1
         )
         config = layer.get_config()
         assert config["dim"] == 16
         assert config["num_heads"] == 2
         assert config["window_size"] == 4
         assert config["use_lepe"] is False
-        assert config["attention_dropout"] == 0.1
+        assert config["attention_dropout_rate"] == 0.1
 
     def test_from_config(self, minimal_config):
         original = ProgressiveFocusedAttention(**minimal_config)

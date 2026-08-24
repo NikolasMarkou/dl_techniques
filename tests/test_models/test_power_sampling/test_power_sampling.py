@@ -122,17 +122,20 @@ class TestOps:
     def test_nucleus_sample_in_range(self):
         np.random.seed(0)
         logits = np.random.randn(VOCAB).astype("float32")
-        tok = _nucleus_sample(logits, top_p=0.92)
+        tok, log_prob = _nucleus_sample(logits, top_p=0.92)
         assert isinstance(tok, int)
         assert 0 <= tok < VOCAB
+        assert log_prob <= 0.0  # it is a log probability of a kept token
 
     def test_nucleus_sample_argmax_dominant(self):
         """One-hot-dominant logits + low top_p -> returns the argmax."""
         np.random.seed(0)
         logits = np.full(VOCAB, -50.0, dtype="float32")
         logits[7] = 50.0
-        tok = _nucleus_sample(logits, top_p=0.1)
+        tok, log_prob = _nucleus_sample(logits, top_p=0.1)
         assert tok == 7
+        # Sole member of the nucleus -> renormalized probability exactly 1.
+        assert abs(log_prob) <= 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +215,32 @@ class TestForward:
 # ---------------------------------------------------------------------------
 # Sampler
 # ---------------------------------------------------------------------------
+
+def _assert_mcmc_actually_ran(info, *, what: str) -> None:
+    """`0 <= acceptance_ratio <= 1` is true by construction and cannot fail.
+
+    ``sampler.py`` computes ``acceptances / max(attempts, 1)`` from two
+    counters, so the bound holds for every possible execution -- including one
+    where the MCMC loop never proposed anything at all (``attempts == 0`` gives
+    ``0.0``, which is inside [0, 1]). What the tests meant to claim is that the
+    chain RAN and that the reported ratio is the two counters' quotient.
+
+    MEASURED 2026-08-18 on the seeded fixtures in this file: ``mcmc_power_sample``
+    reports 2/6 = 0.333 and ``max_swap`` 4/6 = 0.667 with ``mcmc_steps=3``,
+    ``block_num=2``.
+    """
+    attempts = info["total_steps"]
+    acceptances = info["acceptances"]
+    assert attempts > 0, f"{what}: the chain made ZERO proposals"
+    assert 0 <= acceptances <= attempts, (
+        f"{what}: {acceptances} acceptances out of {attempts} attempts"
+    )
+    assert info["acceptance_ratio"] == pytest.approx(acceptances / attempts), (
+        f"{what}: acceptance_ratio {info['acceptance_ratio']} is not "
+        f"{acceptances}/{attempts}"
+    )
+
+
 def _std_config(**overrides):
     base = dict(pad_token_id=0, ctx_len=16, max_tokens=8)
     base.update(overrides)
@@ -237,7 +266,10 @@ class TestSampler:
         )
         s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)
         ids, info = s.mcmc_power_sample("abc")
-        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info, what="mcmc_power_sample")
+        assert info["acceptance_ratio"] == pytest.approx(2 / 6), (
+            "seeded reference value measured 2026-08-18"
+        )
         assert "alpha" in info
         assert len(ids) >= 3
 
@@ -250,7 +282,10 @@ class TestSampler:
         )
         s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)
         ids, info = s.max_swap("abc")
-        assert 0.0 <= info["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info, what="max_swap")
+        assert info["acceptance_ratio"] == pytest.approx(4 / 6), (
+            "seeded reference value measured 2026-08-18"
+        )
 
     def test_generate_text_dispatch(self):
         """SC4: generate_text dispatch + ValueError on a bad method."""
@@ -391,4 +426,360 @@ class TestSampler:
 
         # exercise the single-fn batched fallback in _batched_generate via mcmc
         ids2, info2 = s.mcmc_power_sample("a")
-        assert 0.0 <= info2["acceptance_ratio"] <= 1.0
+        _assert_mcmc_actually_ran(info2, what="single-fn batched fallback")
+
+
+# ---------------------------------------------------------------------------
+# C-30(c): the acceptance ratio must use the density it actually drew from
+# ---------------------------------------------------------------------------
+def _nucleus_reference_log_prob(logits, top_p, token_id):
+    """Oracle for ``q(token | logits)`` under nucleus sampling.
+
+    Written from the DEFINITION of top-p sampling, not from ``ops.py``: take
+    the smallest set of highest-probability tokens whose cumulative probability
+    reaches ``top_p``, renormalize over that set, and read off the token's
+    probability. Tokens outside the set have probability 0.
+
+    :return: ``log q(token)``, or ``-inf`` if the token was truncated away.
+    """
+    p = np.exp(logits - logits.max())
+    p = p / p.sum()
+    order = np.argsort(p)[::-1]
+    cum = np.cumsum(p[order])
+    keep = int(np.searchsorted(cum, top_p)) + 1  # smallest set reaching top_p
+    kept = order[:keep]
+    if token_id not in kept:
+        return float("-inf")
+    return float(np.log(p[token_id] / p[kept].sum()))
+
+
+class TestProposalDensityIsTheTruncatedOne:
+    """C-30(c): ``log_prob_norm`` must be the density the token was drawn from.
+
+    ``_nucleus_sample`` draws from the top-p truncated distribution
+    RENORMALIZED over the surviving tokens. ``_sample_token``'s docstring
+    already promises ``log_prob_norm`` is "the log probability under the
+    proposal (temperature-scaled + nucleus)", but it was read off
+    ``_log_softmax(scaled_logits)`` — the FULL vocabulary — so the
+    ``q(x|x')/q(x'|x)`` term of the MH ratio was built from a distribution
+    nothing ever sampled from.
+
+    The two assertions below are twins on purpose. At ``top_p = 1.0`` nothing is
+    truncated and the two densities coincide exactly, which is why a guard
+    written only at that point is blind; the low-``top_p`` arm carries the
+    ``> 1e-6`` separation that makes the first arm non-vacuous. Do not collapse
+    them onto one case. CPU, ``np.random`` seeded.
+    """
+
+    def _sample(self, top_p, seed=0):
+        np.random.seed(seed)
+        logits = np.linspace(2.0, -2.0, VOCAB).astype("float32")
+        cfg = PowerSamplingConfig(top_p=top_p, mcmc_steps=1)
+        s = PowerSampler(
+            None, CharTokenizer(), cfg,
+            logits_fn=lambda ids: logits,
+        )
+        token_id, log_prob_norm, _ = s._sample_token(logits, temperature=1.0)
+        return logits, token_id, log_prob_norm
+
+    def test_truncating_top_p_uses_the_renormalized_density(self):
+        """top_p=0.5 excludes real mass: the two densities must disagree."""
+        logits, token_id, log_prob_norm = self._sample(top_p=0.5)
+
+        expected = _nucleus_reference_log_prob(logits, 0.5, token_id)
+        full = float(_log_softmax(logits)[token_id])
+
+        assert np.isfinite(expected)  # the drawn token survived truncation
+        assert abs(log_prob_norm - expected) <= 1e-6
+        # Anti-vacuity control: truncation really did remove mass here, so the
+        # full-vocabulary value is a DIFFERENT number.
+        assert abs(log_prob_norm - full) > 1e-6
+
+    def test_top_p_one_is_the_degenerate_twin(self):
+        """top_p=1.0 truncates nothing: the two densities must coincide."""
+        logits, token_id, log_prob_norm = self._sample(top_p=1.0)
+
+        expected = _nucleus_reference_log_prob(logits, 1.0, token_id)
+        full = float(_log_softmax(logits)[token_id])
+
+        assert abs(log_prob_norm - expected) <= 1e-6
+        assert abs(log_prob_norm - full) <= 1e-6  # coincide, hence blind here
+
+    def test_nucleus_sample_returns_the_log_prob_of_what_it_drew(self):
+        """The primitive itself reports the density it sampled from."""
+        np.random.seed(1)
+        logits = np.linspace(3.0, -3.0, VOCAB).astype("float32")
+        token_id, log_prob = _nucleus_sample(logits, top_p=0.6)
+
+        assert isinstance(token_id, int)
+        assert 0 <= token_id < VOCAB
+        assert abs(
+            log_prob - _nucleus_reference_log_prob(logits, 0.6, token_id)
+        ) <= 1e-6
+
+
+# ---------------------------------------------------------------------------
+# C-30(b): the chain must propose from the state it just accepted
+# ---------------------------------------------------------------------------
+class CounterLM:
+    """Deterministic stub whose every emitted token is its own call counter.
+
+    Two properties make the chain readable, and both are properties of the
+    STUB, not of the sampler:
+
+    1. **No token is ever emitted twice.** The winning logit is placed at
+       ``counter % vocab`` and the counter advances once per batch row, so a
+       token's value says exactly *when* it was generated. Position ``p`` of the
+       final sequence therefore identifies which generation produced it.
+    2. **Later calls are strictly more confident** (the losing logits sink by
+       ``0.5`` per call), so a later proposal always has a higher trajectory
+       log-probability than an earlier one. This is what lets ``max_swap``'s
+       ``log_r > 0`` rule accept every proposal in a correct chain.
+    """
+
+    def __init__(self, vocab: int = VOCAB):
+        self.vocab = vocab
+        self.counter = 0
+
+    def __call__(self, arr, training=False):
+        a = np.asarray(arr)
+        B, T = a.shape
+        out = np.empty((B, T, self.vocab), dtype="float32")
+        for b in range(B):
+            k = self.counter
+            self.counter += 1
+            out[b] = -5.0 - 0.5 * k
+            out[b, :, k % self.vocab] = 5.0
+        return {"logits": out}
+
+
+class TestChainProposesFromTheAcceptedState:
+    """C-30(b): proposal i+1 must be cut from the state acceptance i produced.
+
+    **Oracle, derived from the Metropolis-Hastings definition — not from the
+    sampler.** An MH step draws ``y ~ q(.|x)`` where ``x`` is the CURRENT state
+    and accepts or rejects it; the next step draws from ``q(.|x')`` with ``x'``
+    the state that step left behind. Here ``q(.|x)`` regenerates ``x[idx:]``
+    from ``x[:idx]``, so proposal 2 (cut at 5) must share its first 5 tokens
+    with the state proposal 1 left behind — not with the pre-block state.
+
+    **Scenario** (fully scripted; nothing is read off the implementation):
+    prompt ``"ab"`` -> ``c = 2``; one block of 4 tokens -> ``t = 6``; cut points
+    forced to ``[4, 5]`` by patching ``random.randint``; acceptance forced by
+    patching ``np.random.rand`` to ``0.0`` (``0.0 < exp(min(log_r, 0))`` for any
+    finite ``log_r``). The stub emits token ``k`` on its ``k``-th call, so the
+    naive block lays down tokens ``0,1,2,3`` at positions ``2,3,4,5``.
+
+    A correct chain then: accepts proposal 1, which rewrites positions 4-5 with
+    freshly generated tokens (values ``>= 4``); cuts proposal 2 at position 5 of
+    THAT state, so position 4 keeps its post-acceptance value.
+    A stale chain instead replays ``pre_block[:5]``, restoring the naive block's
+    token at position 4 and discarding acceptance 1 entirely.
+
+    **Measured against the pre-fix sampler** (restored from a ``cp`` backup):
+    ``mcmc_power_sample`` returned ``[31, 31, 0, 1, 2, 5]`` -- position 4 back to
+    the naive block's token ``2`` -- and ``max_swap`` accepted only ``1`` of 2
+    proposals, because the stale proposal was scored against the already-updated
+    bookkeeping. Post-fix both return ``[31, 31, 0, 1, 4, 7]`` with 2
+    acceptances.
+    """
+
+    PRE_BLOCK_TOKEN_AT_4 = 2  # the naive block's 3rd token (stub call #2)
+
+    def _run(self, monkeypatch, method, force_accept):
+        m = CounterLM()
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, max_tokens=4, block_num=1, mcmc_steps=2,
+            temperature=0.25,
+        )
+        s = PowerSampler(m, CharTokenizer(), cfg)
+
+        cut_points = iter([4, 5] * 8)
+        monkeypatch.setattr(random, "randint", lambda a, b: next(cut_points))
+        if force_accept:
+            monkeypatch.setattr(np.random, "rand", lambda *a: 0.0)
+
+        return getattr(s, method)("ab")
+
+    def test_mcmc_second_proposal_is_cut_from_the_accepted_state(
+        self, monkeypatch,
+    ):
+        """Position 4 must carry a post-acceptance token, not the block's."""
+        ids, info = self._run(monkeypatch, "mcmc_power_sample", True)
+
+        assert info["acceptances"] == 2  # both forced through
+        assert ids[:4] == [31, 31, 0, 1]  # untouched by either cut point
+        # Every token generated after the naive block has value >= 4 (the stub
+        # emitted 0..3 there), so this is the MH property, spelled numerically.
+        assert ids[4] != self.PRE_BLOCK_TOKEN_AT_4
+        assert ids[4] >= 4
+
+    def test_max_swap_second_proposal_is_scored_against_its_own_state(
+        self, monkeypatch,
+    ):
+        """A greedy chain of strictly-improving proposals accepts all of them.
+
+        ``max_swap`` has no ``rand`` draw to patch: acceptance is ``log_r > 0``,
+        and the stub guarantees a later proposal is strictly more probable than
+        an earlier one, so a chain that proposes from its own state accepts
+        both. Against the stale chain the second proposal was generated before
+        the first was accepted, so it was scored against the updated
+        bookkeeping and lost -- 1 acceptance, not 2.
+        """
+        ids, info = self._run(monkeypatch, "max_swap", False)
+
+        assert info["acceptances"] == 2
+        assert ids[:4] == [31, 31, 0, 1]
+        assert ids[4] >= 4
+        assert ids[5] >= 4
+
+    def test_a_rejection_leaves_the_queued_proposals_valid(self, monkeypatch):
+        """Anti-vacuity: rejections must NOT trigger a re-batch.
+
+        A rejected proposal leaves the chain state unchanged, so the proposals
+        already generated behind it are still valid draws from ``q(.|x)`` and
+        must be consumed as-is. With every proposal rejected the final sequence
+        must be exactly the naive block, and all ``mcmc_steps`` attempts must
+        still be counted -- a fix that re-batched on rejection too would burn
+        extra forward passes for the same answer.
+        """
+        m = CounterLM()
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, max_tokens=4, block_num=1, mcmc_steps=4,
+            temperature=0.25,
+        )
+        s = PowerSampler(m, CharTokenizer(), cfg)
+        cut_points = iter([4, 5, 4, 5] * 8)
+        monkeypatch.setattr(random, "randint", lambda a, b: next(cut_points))
+        monkeypatch.setattr(np.random, "rand", lambda *a: 1.0)  # reject all
+
+        ids, info = s.mcmc_power_sample("ab")
+
+        assert info["acceptances"] == 0
+        assert info["total_steps"] == 4
+        assert ids == [31, 31, 0, 1, 2, 3]  # the untouched naive block
+        # 4 naive calls + one batch of 4 proposals (2 rows need a 2nd token).
+        assert m.counter == 10
+
+
+# ---------------------------------------------------------------------------
+# C-30(a): the documented default configuration must not die mid-generation
+# ---------------------------------------------------------------------------
+class TestPadTokenIsRequiredEagerly:
+    """The pad-token precondition of batched MCMC proposals is checked eagerly.
+
+    Regime this needs, and why: the config under test is exactly the one the
+    package's own module docstring blesses — "supply only the IDs your model
+    needs", i.e. ``pad_token_id=None``/``ctx_len=None`` — with the shipped
+    ``mcmc_steps`` default (10) left alone. Before the fix, construction
+    SUCCEEDED and the run died several forward passes later inside
+    ``make_batch_logits_fn``'s closure with ``ValueError: pad_id is required
+    for a variable-length batch with unequal prefix lengths (lengths=[4, 4,
+    3])`` — a message naming the closure parameter ``pad_id``, not the
+    ``PowerSamplingConfig.pad_token_id`` field the caller has to set. "It
+    raised either way" is therefore NOT the property under test: the assertions
+    below pin WHERE it raises (construction) and WHICH field it names.
+
+    Every other MCMC test in this file passes ``pad_token_id=0, ctx_len=16``,
+    which is why the suite never saw this.
+    """
+
+    def test_documented_default_config_raises_at_construction(self):
+        """Construction refuses pad_token_id=None with mcmc_steps >= 2."""
+        cfg = PowerSamplingConfig(max_tokens=4, block_num=2)  # docstring shape
+        assert cfg.pad_token_id is None and cfg.ctx_len is None
+        assert cfg.mcmc_steps >= 2  # shipped default, not overridden here
+
+        with pytest.raises(ValueError) as exc:
+            PowerSampler(DictMockLM(), CharTokenizer(), cfg)
+
+        msg = str(exc.value)
+        assert "pad_token_id" in msg  # the FIELD, not the closure's `pad_id`
+        assert "mcmc_steps" in msg
+
+    def test_per_call_mcmc_steps_override_is_also_refused(self):
+        """A config that passes at construction is re-checked per call.
+
+        ``mcmc_steps=1`` batches nothing, so it is admissible; raising it to 3
+        at the call site reintroduces the ragged batch and must raise there.
+        """
+        cfg = PowerSamplingConfig(max_tokens=4, block_num=2, mcmc_steps=1)
+        s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)  # must not raise
+
+        for method in (s.mcmc_power_sample, s.max_swap):
+            with pytest.raises(ValueError, match="pad_token_id"):
+                method("abc", mcmc_steps=3)
+
+    def test_injected_logits_fn_needs_no_pad_id(self):
+        """Anti-vacuity: the guard must not reject the never-batched path.
+
+        With an explicit ``logits_fn=``, ``_batched_generate`` loops the
+        single-position closure and no padding is ever performed, so
+        ``pad_token_id=None`` is correct there. A guard keyed on
+        ``mcmc_steps >= 2`` alone would fail this test.
+        """
+        fn = lambda ids: np.zeros(VOCAB, dtype="float32")
+        cfg = PowerSamplingConfig(max_tokens=4, block_num=2, mcmc_steps=3)
+        s = PowerSampler(None, CharTokenizer(), cfg, logits_fn=fn)
+
+        random.seed(0)
+        np.random.seed(0)
+        _, info = s.mcmc_power_sample("abc")
+        _assert_mcmc_actually_ran(info, what="mcmc_power_sample")
+
+    def test_pad_token_id_supplied_still_runs(self):
+        """Anti-vacuity: supplying the field makes the same config run."""
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, max_tokens=4, block_num=2, mcmc_steps=3,
+        )
+        s = PowerSampler(DictMockLM(), CharTokenizer(), cfg)
+
+        random.seed(0)
+        np.random.seed(0)
+        _, info = s.mcmc_power_sample("abc")
+        _assert_mcmc_actually_ran(info, what="mcmc_power_sample")
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11) -- NOT ADOPTABLE, on purpose
+# ---------------------------------------------------------------------
+#
+# This suite is one of the 29 under `tests/test_models/` that had no
+# gradient-flow test, and it is one of only TWO that cannot get one: there is no
+# model here to assert about. `dl_techniques.models.power_sampling` is an
+# INFERENCE-TIME sampler -- config + numpy ops + forward closures + the MCMC
+# dispatch -- and its own package docstring says so ("... subclasses
+# `keras.Model`, so there is nothing for a model factory to build"). A
+# `keras.Model` appears nowhere in the package, so there are no trainable
+# weights and a gradient-flow assertion would be vacuous rather than merely
+# absent.
+#
+# The claim is recorded as a TEST rather than a comment so the census cannot rot
+# into "someone forgot". If a trainable component is ever added here, this test
+# fails and the gradient-flow adoption becomes required.
+
+
+def test_this_package_ships_no_trainable_model():
+    """Why this suite has no gradient-flow test: there is nothing to train."""
+    import inspect
+    import pkgutil
+    import importlib
+
+    import dl_techniques.models.power_sampling as pkg
+
+    offenders = []
+    for module_info in pkgutil.iter_modules(pkg.__path__):
+        module = importlib.import_module(f"{pkg.__name__}.{module_info.name}")
+        for name, obj in vars(module).items():
+            if not inspect.isclass(obj) or obj.__module__ != module.__name__:
+                continue
+            bases = {base.__name__ for base in inspect.getmro(obj)}
+            if bases & {"Model", "Layer"}:
+                offenders.append(f"{module.__name__}.{name}")
+
+    assert not offenders, (
+        "power_sampling now ships a Keras component: "
+        f"{offenders}. It therefore has trainable weights, and this suite needs "
+        "the shared gradient-flow oracle "
+        "(tests/test_models/gradient_flow_oracle.py) like the other 27."
+    )

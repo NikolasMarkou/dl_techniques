@@ -480,3 +480,5 @@ class EomtMask(keras.layers.Layer):
             'bias_constraint': constraints.serialize(self.bias_constraint),
         })
         return config
+
+# ---------------------------------------------------------------------

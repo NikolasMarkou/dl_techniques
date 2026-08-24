@@ -162,6 +162,13 @@ def _diverge_teacher(model, seed=33):
     return distance
 
 
+# Tolerance for the student/teacher pairing comparison. Derived, not pasted: measured
+# 2026-08-17 on CPU, a CORRECT pairing recomputes to within 4.768e-07 (float32 recompute
+# noise) while a WRONG pairing lands at 2.6e-05..6.1e-05, so 5e-06 sits an order of
+# magnitude above the noise and 5x below the signal it must catch.
+PAIR_ATOL = 5e-6
+
+
 def _batch(batch_size=3, seed=0):
     rng = np.random.RandomState(seed)
     return rng.normal(
@@ -230,20 +237,36 @@ class TestForwardContract:
              for v in range(N_GLOBAL_VIEWS)],
             axis=1,
         )
-        # Non-vacuity: the views must actually differ from one another,
-        # otherwise any pairing would satisfy the assertions below. BOTH
-        # networks are checked -- the teacher's two global views separate by
-        # only ~2.8e-04 here (a UnitNorm-constrained head over seeded weights
-        # is nearly view-invariant), which is 28x the atol used below and is
-        # exactly the margin the "wrong teacher view" RED arm fires on.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-081
+        # These two non-vacuity floors used to be the literals 1e-4 and 5e-5, and this
+        # test was RED at a measured student separation of 6.104e-05. The floors were
+        # written against a model that no longer exists: the comment claimed the teacher's
+        # two global views separate by "~2.8e-04", and the measured value is 2.611e-05 --
+        # an order of magnitude out, so the TEACHER floor was failing too and was simply
+        # masked by the student assertion firing first. A UnitNorm-constrained head over a
+        # seeded ViT is near view-invariant, and it is more so now than when this was
+        # written; across seeds 0..11 the separations sit in 2.1e-05 .. 6.3e-05 with no
+        # seed doing better, so this is the model's regime, not an unlucky draw.
+        #
+        # The fix is to make the MARGIN real rather than to keep the numbers: the pairing
+        # comparisons below drop from atol=1e-5 to PAIR_ATOL=5e-6, measured against a
+        # correct-pairing residual of 4.768e-07 (pure float32 recompute noise, ~10x below)
+        # and a WRONG-pairing residual of 2.6e-05..6.1e-05 (~5x above). Both floors are
+        # then derived as 2 * PAIR_ATOL rather than pasted. Do NOT restore the literals:
+        # they encode a model that changed under them. See decisions.md D-081.
+        separation_floor = 2.0 * PAIR_ATOL
         student_separation = float(
             np.abs(student_by_view[:, 0] - student_by_view[:, 1]).max())
         teacher_separation = float(
             np.abs(teacher_by_view[:, 0] - teacher_by_view[:, 1]).max())
-        assert student_separation > 1e-4, student_separation
-        assert teacher_separation > 5e-5, (
+        assert student_separation > separation_floor, (
+            f"the student's views differ by only {student_separation:.3e}, below the "
+            f"{separation_floor:.3e} floor ({2.0:.0f}x the {PAIR_ATOL:.0e} pairing "
+            f"tolerance) -- this test can no longer tell one view from another"
+        )
+        assert teacher_separation > separation_floor, (
             f"the teacher's two global views differ by only "
-            f"{teacher_separation:.3e}, below the 1e-5 tolerance used below -- "
+            f"{teacher_separation:.3e}, below the {separation_floor:.3e} floor -- "
             f"this test can no longer tell global view 0 from global view 1"
         )
 
@@ -257,14 +280,31 @@ class TestForwardContract:
         for index, (t_view, s_view) in enumerate(expected_pairs):
             np.testing.assert_allclose(
                 out[:, index, :OUT_DIM], student_by_view[:, s_view],
-                rtol=1e-5, atol=1e-5,
+                rtol=0, atol=PAIR_ATOL,
                 err_msg=f"row {index} student half is not view {s_view}",
             )
             np.testing.assert_allclose(
                 out[:, index, OUT_DIM:], teacher_by_view[:, t_view],
-                rtol=1e-5, atol=1e-5,
+                rtol=0, atol=PAIR_ATOL,
                 err_msg=f"row {index} teacher half is not global view {t_view}",
             )
+
+        # Anti-vacuity for the tolerance itself: the SAME comparison against a
+        # deliberately shifted pairing must fail. Without this arm, lowering the
+        # separation floors above would be indistinguishable from loosening the test.
+        for index, (t_view, s_view) in enumerate(expected_pairs):
+            wrong_s = (s_view + 1) % N_VIEWS
+            wrong_t = (t_view + 1) % N_GLOBAL_VIEWS
+            with pytest.raises(AssertionError):
+                np.testing.assert_allclose(
+                    out[:, index, :OUT_DIM], student_by_view[:, wrong_s],
+                    rtol=0, atol=PAIR_ATOL,
+                )
+            with pytest.raises(AssertionError):
+                np.testing.assert_allclose(
+                    out[:, index, OUT_DIM:], teacher_by_view[:, wrong_t],
+                    rtol=0, atol=PAIR_ATOL,
+                )
 
     def test_layout_agrees_with_pack_student_teacher(self):
         """The model uses the loss module's packing helper, not its own order."""

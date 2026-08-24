@@ -1,4 +1,5 @@
-"""Teacher EMA decay schedules + Keras callback for DepthAnything.
+"""
+Teacher EMA decay schedules + Keras callback for DepthAnything.
 
 This module provides on-step EMA decay schedules (cosine and linear, with
 warmup → asymptote) and a small ``keras.callbacks.Callback`` that drives

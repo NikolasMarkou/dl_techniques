@@ -8,6 +8,8 @@ from typing import Dict, Any, Optional
 
 from dl_techniques.models.fastvlm.model import FastVLM
 
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
 class TestFastVLM:
     """Comprehensive test suite for FastVLM model."""
 
@@ -439,7 +441,12 @@ class TestFastVLM:
         assert model.dropout_rate == 0.0
         assert model.drop_path_rate == 0.1
         assert model.use_se is False
-        assert model.attention_type == 'multi_head'
+        # D-044: flipped from 'multi_head' on 2026-08-19. 'multi_head' has no
+        # RoPE and no relative bias, and nothing else in the model adds a
+        # positional embedding, so stage 3 was exactly permutation-equivariant
+        # over the spatial grid. This is a WEIGHT-PATH change.
+        assert model.attention_type == 'group_query'
+        assert model.attention_max_seq_len == 2048
         assert model.use_layer_scale is True
         assert model.activation == 'gelu'
         assert model.include_top is True
@@ -518,27 +525,48 @@ class TestFastVLM:
         except Exception as e:
             pytest.fail(f"Model summary failed: {e}")
 
-    @pytest.mark.parametrize("attention_type", [
-        'multi_head',
-        'group_query'
-        # Note: window_attention requires specific spatial dimensions that are complex to set up
-    ])
     def test_different_attention_types(
         self,
         base_config: Dict[str, Any],
         sample_input: keras.KerasTensor,
-        attention_type: str
     ) -> None:
-        """Test model with different attention mechanisms."""
-        config = base_config.copy()
-        config['attention_type'] = attention_type
+        """``attention_type`` must build the requested attention.
 
-        model = FastVLM(**config)
-        output = model(sample_input)
+        Restructured out of ``@parametrize``: one model per invocation gave the
+        sweep nowhere to compare, so it asserted the logits shape (identical at
+        every attention type) plus ``model.attention_type == attention_type``,
+        a knob ECHO of the stored kwarg. The two attentions have different
+        parameterisations -- measured 139 tensors / 418,058 params for
+        `multi_head` and 151 / 549,130 for `group_query` -- so the weight-shape
+        signature says which one was actually built.
+        """
+        # Note: window_attention requires specific spatial dimensions that are
+        # complex to set up.
+        attention_types = ['multi_head', 'group_query']
 
-        assert output.shape == (sample_input.shape[0], config['num_classes'])
-        assert keras.ops.all(keras.ops.isfinite(output))
-        assert model.attention_type == attention_type
+        def _build(attention_type):
+            config = base_config.copy()
+            config['attention_type'] = attention_type
+            model = FastVLM(**config)
+            model(keras.ops.zeros_like(sample_input[:1]))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {a: (lambda a=a: _build(a)) for a in attention_types},
+            knob="attention_type",
+        )
+        assert len(sigs['multi_head']) != len(sigs['group_query'])
+
+        for attention_type in attention_types:
+            config = base_config.copy()
+            config['attention_type'] = attention_type
+
+            model = FastVLM(**config)
+            output = model(sample_input)
+
+            assert output.shape == (sample_input.shape[0], config['num_classes'])
+            assert keras.ops.all(keras.ops.isfinite(output))
+            assert model.attention_type == attention_type
 
 
 # Additional integration tests
@@ -817,3 +845,60 @@ class TestFastVLMStochasticDepthWiring:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestAttentionBlockVLMSignalPath:
+    """LayerScale must sit inside the residual, not on the block's whole output."""
+
+    def test_layer_scale_does_not_annihilate_the_signal(self) -> None:
+        """A stack of blocks must not collapse the activation magnitude.
+
+        RED-proof: LayerScale used to be a standalone LearnableMultiplier
+        applied to the block's output in call(), AFTER TransformerLayer had
+        already closed its own residuals -- i.e. ``x = gamma * f(x)`` with no
+        skip path. At the default ``layer_scale_init=1e-4`` that attenuates by
+        1e-4 per block, so the 6 blocks of the `base` variant's stage 3 give
+        ~1e-24 and the classifier sees zeros.
+
+        Asserting output shape, finiteness, or that gradients merely EXIST would
+        all be VACUOUS -- every one of those held at 1e-24, which is why the
+        three existing drop-path tests sit beside this defect without seeing it.
+        """
+        from dl_techniques.models.fastvlm.components import AttentionBlockVLM
+
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(2, 4, 4, 32)).astype("float32")
+
+        depth = 6
+        h = x
+        for i in range(depth):
+            block = AttentionBlockVLM(
+                dim=32, num_heads=4,
+                use_layer_scale=True, layer_scale_init=1e-4,
+                name=f"blk{i}",
+            )
+            h = block(h, training=False)
+
+        ratio = float(np.std(keras.ops.convert_to_numpy(h)) / np.std(x))
+        assert ratio > 0.1, (
+            f"signal magnitude collapsed to {ratio:.3e} of the input over "
+            f"{depth} blocks; LayerScale is being applied outside the residual")
+
+    def test_layer_scale_init_is_near_identity_at_small_gamma(self) -> None:
+        """With gamma ~ 0 the block must approach the IDENTITY, not zero.
+
+        This is the sign check that distinguishes the two placements: inside a
+        residual, gamma -> 0 means ``out -> x``; applied to the output, it means
+        ``out -> 0``.
+        """
+        from dl_techniques.models.fastvlm.components import AttentionBlockVLM
+
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=(2, 4, 4, 32)).astype("float32")
+
+        block = AttentionBlockVLM(
+            dim=32, num_heads=4, use_layer_scale=True, layer_scale_init=1e-8)
+        out = keras.ops.convert_to_numpy(block(x, training=False))
+
+        np.testing.assert_allclose(
+            out, x, atol=1e-3,
+            err_msg="at gamma~0 the block must reduce to the identity")

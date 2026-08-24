@@ -18,6 +18,7 @@ Refined to match the actual integrated CLIPModel implementation that uses:
 """
 
 import pytest
+from dl_techniques.utils.masking import create_mask
 import numpy as np
 import keras
 from keras import ops
@@ -755,6 +756,95 @@ class TestCLIPIntegration:
         grad_norm_values = [keras.ops.convert_to_numpy(norm) for norm in grad_norms]
         assert all(norm > 1e-12 for norm in grad_norm_values)  # Not vanishingly small
         assert all(norm < 1000.0 for norm in grad_norm_values)  # Not exploding
+
+
+class TestCLIPTextTowerCausality:
+    """The text tower is causal (OpenAI CLIP's convention) and the vision
+    tower is not.
+
+    The instrument is a future-leak probe on the per-position hidden states,
+    read by appending a pass-through tap to the text block list. Reading the
+    pooled output instead would prove nothing: it is taken at the LAST real
+    position, which legitimately sees everything.
+
+    Measured on the unmasked implementation: perturbing the token at index 6
+    of a 12-token sequence moved the hidden states at indices < 6 by
+    ``7.270164e-01``.
+    """
+
+    SEQ_LEN = 12
+    PERTURB_AT = 6
+
+    def _hidden_states(self, text_ids, model):
+        """Run the text stack by hand and return the final hidden states.
+
+        Reads per-position hidden states rather than the pooled output, because
+        the pooled feature is taken at the LAST real position, which legitimately
+        sees everything and so can never show a leak.
+
+        This mirrors `CLIP.encode_text`'s prefix and loop exactly rather than
+        appending a tap layer to `text_transformer_layers`. Tapping does not work
+        here: Keras locks a layer's state once built, so an append either raises
+        or is silently dropped, and the probe then measures an empty sink and
+        fails with IndexError instead of reporting a leak.
+        """
+        x = model.token_embedding(text_ids, training=False)
+        seq_len = keras.ops.shape(text_ids)[1]
+        batch = keras.ops.shape(text_ids)[0]
+        block = create_mask('causal', seq_len=seq_len, dtype='bool')
+        block = keras.ops.broadcast_to(
+            keras.ops.expand_dims(block, axis=0), (batch, seq_len, seq_len)
+        )
+        attend = keras.ops.logical_not(block)
+        for layer in model.text_transformer_layers:
+            x = layer(x, attention_mask=attend, training=False)
+        return keras.ops.convert_to_numpy(x)
+
+    def _probe(self):
+        model = CLIP(
+            embed_dim=32, image_size=32, patch_size=16,
+            vision_layers=1, vision_width=32, vision_heads=4,
+            vision_kv_heads=4, context_length=self.SEQ_LEN,
+            text_layers=2, text_width=32, text_heads=4, text_kv_heads=4,
+            vocab_size=32, dropout_rate=0.0, attention_dropout_rate=0.0,
+        )
+        rng = np.random.default_rng(0)
+        x = rng.integers(1, 32, size=(2, self.SEQ_LEN)).astype("int32")
+        x2 = x.copy()
+        x2[:, self.PERTURB_AT] = (x2[:, self.PERTURB_AT] + 7) % 31 + 1
+        return self._hidden_states(x, model), self._hidden_states(x2, model)
+
+    def test_future_token_does_not_change_the_past(self):
+        a, b = self._probe()
+        past = np.abs(a[:, :self.PERTURB_AT] - b[:, :self.PERTURB_AT]).max()
+        assert past == 0.0, (
+            f"future leak in the CLIP text tower: {past:.6e} (must be 0.0)"
+        )
+
+    def test_the_text_tower_still_responds(self):
+        """Negative control against a mask that blocks everything."""
+        a, b = self._probe()
+        future = np.abs(a[:, self.PERTURB_AT:] - b[:, self.PERTURB_AT:]).max()
+        assert future > 1e-3, f"text tower is inert: {future:.6e}"
+
+    def test_vision_tower_stays_bidirectional(self):
+        """Image patches have no ordering; masking them would be wrong."""
+        model = CLIP(
+            embed_dim=32, image_size=32, patch_size=16,
+            vision_layers=1, vision_width=32, vision_heads=4,
+            vision_kv_heads=4, context_length=self.SEQ_LEN,
+            text_layers=1, text_width=32, text_heads=4, text_kv_heads=4,
+            vocab_size=32, dropout_rate=0.0, attention_dropout_rate=0.0,
+        )
+        rng = np.random.default_rng(1)
+        images = rng.normal(size=(2, 32, 32, 3)).astype("float32")
+        perturbed = images.copy()
+        perturbed[:, 16:, 16:, :] += 5.0  # last patch only
+
+        a = keras.ops.convert_to_numpy(model.encode_image(images, training=False))
+        b = keras.ops.convert_to_numpy(model.encode_image(perturbed, training=False))
+        # The CLS read at index 0 must see the last patch.
+        assert np.abs(a - b).max() > 1e-4
 
 
 if __name__ == "__main__":

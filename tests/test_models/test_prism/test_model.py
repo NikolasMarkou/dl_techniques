@@ -7,12 +7,20 @@ shape inference, and integration with training pipeline.
 
 import os
 import keras
+import logging
 import pytest
 import tempfile
 import numpy as np
 from typing import Dict, Any, Tuple
 
 from dl_techniques.models.time_series.prism.model import PRISMModel, create_prism_model
+from dl_techniques.layers.time_series.prism_blocks import PRISMTimeTree
+
+from ..knob_sensitivity_oracle import (
+    as_array,
+    assert_structural_knob_changes_weights,
+    build_seeded,
+)
 
 
 class TestPRISMModelInstantiation:
@@ -92,6 +100,349 @@ class TestPRISMModelInstantiation:
                 forecast_len=24,
                 num_features=-5,
             )
+
+    def test_out_of_range_overlap_ratio_raises_rather_than_hangs(self) -> None:
+        """A negative ``overlap_ratio`` must RAISE -- it used to HANG.
+
+        RED-proof (measured before the fix, plan-2026-08-18T073231-52a93f8c
+        completion fix A): this exact call did not return within 60s and was
+        killed by ``timeout`` (exit 124). The remedy search inside the
+        ``min_band_len`` refusal was an unbounded ``while True`` over
+        ``context_len``, and a negative ``overlap_ratio`` makes the segment
+        length negative at EVERY ``context_len`` (-18 at 96, -18750 at
+        100000), so the loop could never break. The contract ``[0, 0.5)`` is
+        ``PRISMTimeTree.__init__``'s, which is constructed only AFTER this
+        arithmetic runs -- hence the duplicate guard.
+        """
+        with pytest.raises(ValueError, match=r"overlap_ratio must be in \[0, 0.5\)"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                overlap_ratio=-20.0,
+            )
+
+    @pytest.mark.parametrize("bad_overlap", [-0.1, 0.5, 0.9, 1.0])
+    def test_overlap_ratio_outside_half_open_interval_raises(
+        self, bad_overlap: float
+    ) -> None:
+        """The interval is half-open: 0.5 itself is refused, 0.0 is not."""
+        with pytest.raises(ValueError, match="overlap_ratio"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                overlap_ratio=bad_overlap,
+            )
+
+    def test_zero_overlap_ratio_is_accepted(self) -> None:
+        """The closed end of ``[0, 0.5)`` must still construct."""
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            overlap_ratio=0.0,
+        )
+        assert model.overlap_ratio == 0.0
+
+    def test_negative_tree_depth_raises(self) -> None:
+        """Negative ``tree_depth`` must RAISE, not silently skip validation.
+
+        The band-validation block used to sit behind
+        ``if tree_depth >= 0 and num_wavelet_levels >= 0:``, so a negative
+        value bypassed the whole ``min_band_len`` check instead of being
+        rejected.
+        """
+        with pytest.raises(ValueError, match="tree_depth must be >= 0"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=-1,
+            )
+
+    def test_negative_num_wavelet_levels_raises(self) -> None:
+        """Negative ``num_wavelet_levels`` must RAISE (same skipped-gate bug)."""
+        with pytest.raises(ValueError, match="num_wavelet_levels must be >= 0"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                num_wavelet_levels=-3,
+            )
+
+    def test_unsupportable_band_config_raises_value_error(self) -> None:
+        """A configuration whose deepest frequency band has length 0 is REFUSED.
+
+        The governing quantity is ``min_band_len``, not ``tree_depth``::
+
+            deepest_leaf_seg = PRISMTimeTree._segment_len(
+                context_len, overlap_ratio, 2 ** tree_depth)[2]
+            min_band_len     = deepest_leaf_seg // 2 ** num_wavelet_levels
+
+        Measured (plan-2026-08-18T073231-52a93f8c step 1, 36-cell grid): at
+        ``context_len=96`` the deepest-leaf segment is 54 / 25 / 12 / 6 for
+        ``tree_depth`` 1-4, so ``96/4/3`` gives ``6 >> 3 == 0``. Without this
+        raise the model builds happily and, since the degenerate-band guard
+        landed, returns finite ALL-ZERO band statistics -- silent garbage.
+        """
+        with pytest.raises(ValueError, match="min_band_len"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=4,
+                num_wavelet_levels=3,
+            )
+
+    def test_unsupportable_band_message_names_all_four_knobs(self) -> None:
+        """The refusal must name every knob the caller can turn to fix it."""
+        with pytest.raises(ValueError) as excinfo:
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=3,
+                num_wavelet_levels=4,
+            )
+        message = str(excinfo.value)
+        for knob in (
+            "context_len",
+            "tree_depth",
+            "num_wavelet_levels",
+            "overlap_ratio",
+        ):
+            assert knob in message, f"{knob!r} missing from: {message}"
+        assert "min_band_len=0" in message
+        assert "deepest_leaf_seg=12" in message
+
+    def test_min_band_len_one_config_is_still_supported(self) -> None:
+        """The neighbour of the refused config must NOT be refused.
+
+        ``context_len=96, tree_depth=3, num_wavelet_levels=3`` gives
+        ``12 >> 3 == 1``. Threshold = 1 was CONFIRMED by measurement (all six
+        ``min_band_len == 1`` grid cells forward finite once the degenerate-band
+        guard landed), so this must construct AND forward finite. This is the
+        discriminating half of the pair: over-broad validation fails here.
+        """
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            tree_depth=3,
+            num_wavelet_levels=3,
+        )
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+        output = as_array(model(inputs, training=False))
+        assert output.shape == (4, 24, 7)
+        assert np.all(np.isfinite(output))
+
+    @pytest.mark.parametrize(
+        "variant,expected_min_band_len",
+        [("tiny", 13), ("small", 3), ("base", 3), ("large", 1)],
+    )
+    def test_shipped_variants_survive_band_validation(
+        self, variant: str, expected_min_band_len: int
+    ) -> None:
+        """Every shipped preset constructs AND forwards finitely at ctx 96.
+
+        The old version of this test asserted only ``model.context_len == 96``,
+        which is a property of the argument it just passed -- it could not have
+        caught the defect this plan fixed. It now pins the quantity that
+        actually governs the preset.
+
+        MEASURED at ``context_len=96, overlap_ratio=0.25``
+        (``deepest_leaf_seg // 2 ** num_wavelet_levels``)::
+
+            tiny  (depth 1, nwl 2): seg 54 -> min_band_len 13
+            small (depth 2, nwl 3): seg 25 -> min_band_len  3
+            base  (depth 2, nwl 3): seg 25 -> min_band_len  3
+            large (depth 2, nwl 4): seg 25 -> min_band_len  1   <- boundary
+
+        ``large`` sits EXACTLY on the degenerate boundary, and the plan's
+        assumption A-8 / invariant I-2 ("no shipped variant affected",
+        "observationally inert for every shipped variant") is FALSE for it:
+        measured old-vs-new, ``large`` @ ctx 96 was 85.4% NaN before this
+        plan's ``FrequencyBandStatistics`` guard and is 0% NaN after. See
+        decisions.md D-010. If a shipped preset starts raising, the validation
+        rule is wrong -- do not loosen the rule without re-measuring.
+        """
+        model = PRISMModel.from_variant(
+            variant,
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+        )
+        assert model.context_len == 96
+
+        num_leaves = 2 ** model.tree_depth
+        if num_leaves == 1:
+            deepest_leaf_seg = model.context_len
+        else:
+            _, _, deepest_leaf_seg = PRISMTimeTree._segment_len(
+                model.context_len, model.overlap_ratio, num_leaves
+            )
+        min_band_len = deepest_leaf_seg // (2 ** model.num_wavelet_levels)
+        assert min_band_len == expected_min_band_len, (
+            f"{variant}: min_band_len is {min_band_len}, expected "
+            f"{expected_min_band_len} (deepest_leaf_seg={deepest_leaf_seg}, "
+            f"num_wavelet_levels={model.num_wavelet_levels})"
+        )
+
+        inputs = np.random.randn(2, 96, 7).astype(np.float32)
+        output = as_array(model(inputs, training=False))
+        assert output.shape == (2, 24, 7)
+        assert np.all(np.isfinite(output)), (
+            f"{variant} @ context_len=96 is non-finite "
+            f"(nan_frac={float(np.mean(np.isnan(output)))}); this preset was "
+            f"85.4% NaN before plan-2026-08-18T073231-52a93f8c"
+        )
+
+    def test_large_variant_is_refused_below_its_supportable_context_len(
+        self,
+    ) -> None:
+        """MEASURED boundary for the one preset that has a tight one.
+
+        Searching ``context_len`` upward by construction: ``large`` (depth 2,
+        nwl 4) first becomes supportable at ``context_len=61``
+        (``deepest_leaf_seg=16``, ``16 >> 4 == 1``). Below that
+        ``min_band_len == 0`` and ``__init__`` refuses it -- a behaviour change
+        this plan introduced for that preset, recorded in decisions.md D-010.
+        The other three presets bottom out at 8 (``tiny``) and 31 (``small``,
+        ``base``).
+        """
+        with pytest.raises(ValueError, match="min_band_len=0"):
+            PRISMModel.from_variant(
+                "large", context_len=60, forecast_len=4, num_features=1
+            )
+        model = PRISMModel.from_variant(
+            "large", context_len=61, forecast_len=4, num_features=1
+        )
+        assert model.context_len == 61
+
+
+class TestPRISMDegenerateBandWarning:
+    """``min_band_len == 1`` is supported, but it must not be silent."""
+
+    def test_warning_fires_at_min_band_len_one(self, caplog) -> None:
+        """``context_len=96, tree_depth=3, num_wavelet_levels=3`` -> band 1.
+
+        Measured (36-cell grid, D-002): deepest_leaf_seg 12, ``12 >> 3 == 1``.
+        Threshold = 1 ALLOWS this, so nothing raises -- but the deepest bands
+        carry a single timestep, where ``mean == min == max`` and both
+        first-difference features are a fabricated exact ``0.0``. The only
+        record of that used to be README prose a ``from_variant`` caller never
+        sees.
+        """
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=3,
+                num_wavelet_levels=3,
+                num_layers=1,
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        degenerate = [m for m in messages if "min_band_len=1" in m]
+        assert degenerate, f"no degenerate-boundary warning in: {messages}"
+        message = degenerate[0]
+        for knob in (
+            "context_len",
+            "tree_depth",
+            "num_wavelet_levels",
+            "overlap_ratio",
+        ):
+            assert knob in message, f"{knob!r} missing from: {message}"
+        assert "SINGLE timestep" in message
+
+    def test_warning_does_not_fire_at_min_band_len_two_or_more(
+        self, caplog
+    ) -> None:
+        """The default config (``min_band_len == 3``) must stay quiet.
+
+        ``context_len=96, tree_depth=2, num_wavelet_levels=3``: deepest_leaf_seg
+        25, ``25 >> 3 == 3``.
+        """
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=2,
+                num_wavelet_levels=3,
+                num_layers=1,
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        assert not [m for m in messages if "min_band_len=1" in m], (
+            f"warning fired at min_band_len=3: {messages}"
+        )
+
+
+class TestPRISMModelTimeAxisContract:
+    """The time axis is pinned statically, and the dynamic axis is finite anyway."""
+
+    def test_wrong_static_context_len_is_refused(self) -> None:
+        """A static time axis other than ``context_len`` raises at ``__call__``.
+
+        ``context_len`` is a required constructor argument and the whole tree
+        geometry is derived from it, so any other static length is a caller
+        error rather than a supported mode.
+        """
+        model = PRISMModel(
+            context_len=96, forecast_len=24, num_features=7, num_layers=1
+        )
+        x = np.random.randn(2, 128, 7).astype("float32")
+        with pytest.raises(ValueError, match="axis 1"):
+            model(x, training=False)
+
+    def test_dynamic_time_axis_is_finite(self) -> None:
+        """The dynamic-time-axis hole is CLOSED; this pins it shut.
+
+        This test previously asserted the BROKEN behaviour on purpose
+        (``nan_frac == 1.0`` under a trace with an unknown time axis, where the
+        same model gives ``0.0`` eager), with instructions to flip the assertion
+        rather than delete the test once the hole was closed. That is what
+        happened: the degenerate-band guard in ``FrequencyBandStatistics.call``
+        now carries a dynamic fallback that replaces non-finite statistics with
+        ``0.0`` when the static band length is ``None``
+        (decisions.md D-001 of plan-2026-08-18T111512-29569f8b, which closes
+        D-012 of plan-2026-08-18T073231-52a93f8c).
+
+        ``PRISMModel.input_spec`` is NOT what closes it and never could: Keras'
+        ``assert_input_compatibility`` tests ``shape[axis] not in {value,
+        None}`` (``keras/src/layers/input_spec.py:223-226``), so an unknown
+        dimension is explicitly accepted by an ``axes`` constraint. Measured
+        both before and after adding the pin: ``nan_frac == 1.0`` either way.
+        """
+        import tensorflow as tf
+
+        model = PRISMModel(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            tree_depth=3,
+            num_layers=1,
+        )
+        x = np.random.randn(2, 96, 7).astype("float32")
+
+        eager = np.asarray(model(x, training=False))
+        assert float(np.mean(np.isnan(eager))) == 0.0, (
+            "control: the static-shape path must be finite"
+        )
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None, 7], tf.float32)])
+        def traced(t):
+            return model(t, training=False)
+
+        dynamic = np.asarray(traced(tf.constant(x)))
+        nan_frac = float(np.mean(~np.isfinite(dynamic)))
+        assert nan_frac == 0.0, (
+            f"the dynamic-time-axis hole has REOPENED: nan_frac={nan_frac}. The "
+            "fallback in FrequencyBandStatistics.call (D-001) is what keeps this "
+            "finite -- do not remove it, and do not try to close it with "
+            "input_spec, which is measured not to work"
+        )
 
 
 class TestPRISMModelForwardPass:
@@ -759,52 +1110,166 @@ class TestPRISMModelDifferentConfigurations:
 
         assert output.shape == (4, 24, num_features)
 
-    @pytest.mark.parametrize("num_layers", [1, 2, 3, 4])
-    def test_different_num_layers(self, num_layers: int) -> None:
-        """Test model with different numbers of PRISM layers."""
-        model = PRISMModel(
+    def test_different_num_layers(self) -> None:
+        """``num_layers`` must build the requested stack.
+
+        Restructured out of ``@parametrize``: one model per invocation gave the
+        sweep nowhere to compare, so it asserted ``(4, 24, 7)`` -- true at every
+        depth -- plus ``len(model.prism_layers) == num_layers``, a STRUCTURAL
+        ECHO of the list Python just built. `num_layers` is a parameterisation
+        knob, so the weight-shape signature is the discriminating fact.
+        """
+        layer_counts = [1, 2, 3, 4]
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+
+        def _build(num_layers):
+            model = PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                num_layers=num_layers,
+            )
+            model(inputs[:1])
+            return model
+
+        builders = {n: (lambda n=n: _build(n)) for n in layer_counts}
+        sigs = assert_structural_knob_changes_weights(builders, knob="num_layers")
+        n_weights = [len(sigs[n]) for n in layer_counts]
+        assert n_weights == sorted(n_weights) and n_weights[0] < n_weights[-1], (
+            f"num_layers did not add weight tensors: {dict(zip(layer_counts, n_weights))}"
+        )
+
+        for num_layers in layer_counts:
+            model = _build(num_layers)
+            assert len(model.prism_layers) == num_layers
+            assert model(inputs).shape == (4, 24, 7)
+
+    def test_different_tree_depths(self) -> None:
+        """``tree_depth`` must build the requested frequency tree.
+
+        Swept over 1, 2 and 3. Depth 3 was previously EXCLUDED because the
+        depth-3 forward was all-NaN; that defect is fixed (see
+        :meth:`test_tree_depth_3_forward_is_finite`), so the sweep is whole
+        again. Depth 4 is NOT swept here, and not because it is broken:
+        at ``context_len=96`` it drives ``min_band_len`` to 0 and is REFUSED by
+        ``__init__`` with a ``ValueError`` at the default
+        ``num_wavelet_levels=3`` -- that path is covered by
+        :meth:`TestPRISMModelInstantiation.test_unsupportable_band_config_raises_value_error`.
+
+        Weight counts below are MEASURED (seed 42, this sweep's own builder),
+        not extrapolated: 48 weights / 5,989 params at depth 1, 96 / 10,189 at
+        depth 2, 192 / 18,589 at depth 3. The tensor count doubles per level
+        (one extra band tree level doubles the node count); the PARAMETER count
+        does not -- its increments do (4,200 then 8,400), because the shared
+        head is paid once.
+        """
+        depths = [1, 2, 3]
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+
+        def _build(tree_depth):
+            model = PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                tree_depth=tree_depth,
+            )
+            model(inputs[:1])
+            return model
+
+        builders = {d: (lambda d=d: _build(d)) for d in depths}
+        sigs = assert_structural_knob_changes_weights(builders, knob="tree_depth")
+        # Each extra level doubles the number of tree nodes, hence the tensor
+        # count: measured 48 / 96 / 192 weight tensors at depths 1 / 2 / 3.
+        for shallow, deep in zip(depths, depths[1:]):
+            assert len(sigs[deep]) == 2 * len(sigs[shallow]), (
+                f"tree_depth={deep} held {len(sigs[deep])} weight tensors, not "
+                f"twice depth {shallow}'s {len(sigs[shallow])}"
+            )
+
+        for tree_depth in depths:
+            model = _build(tree_depth)
+            output = model(inputs)
+            assert output.shape == (4, 24, 7)
+            assert np.all(np.isfinite(as_array(output)))
+
+    # DECISION plan-2026-08-17T183311-79c63e38/D-037
+    # HISTORY (do not delete): D-037 added this test under a strict xfail. The
+    # defect it pinned was real and MEASURED: PRISMModel(tree_depth=3) at
+    # context_len=96 returned nan_frac 1.0 on seeds 1234 and 7, because at
+    # num_wavelet_levels=3 the deepest leaf segment (12) decimates to a band of
+    # length 1, whose first-difference tensor is EMPTY -- ops.mean/ops.var over
+    # an empty axis return NaN silently, and the router's joint softmax then
+    # spread that NaN across every band. The old parametrized sweep asserted
+    # only the output SHAPE, so it stayed green throughout.
+    # FIXED by plan-2026-08-18T073231-52a93f8c: D-004 (static-length guard in
+    # FrequencyBandStatistics.call emitting exact-zero diff features at length
+    # 1 and all-zero statistics at length 0) and D-005 (PRISMModel.__init__
+    # refuses min_band_len == 0 with a ValueError). The strict xfail did its
+    # job -- it turned XPASS the moment D-004 landed -- and was removed in the
+    # same commit that restored depth 3 to the sweep above.
+    # WHAT THIS TEST GUARDS NOW: that the depth-3 forward stays FINITE. Do NOT
+    # relax it to a shape check or a nan-tolerant check, and do not delete it
+    # as redundant with the sweep above -- the sweep's oracle is the weight
+    # signature, this one's is finiteness of the actual output. Note the
+    # governing quantity is min_band_len, NOT tree_depth: a depth-2 config
+    # (96/2/4) was equally broken and a depth-4 one (256/4/3) was always fine.
+    @pytest.mark.parametrize("seed", [1234, 7])
+    def test_tree_depth_3_forward_is_finite(self, seed: int) -> None:
+        """The depth-3 forward must be finite, on two seeds.
+
+        The plan's success criterion 1 says "on at least two seeds"; until this
+        parametrization the claim lived only in this docstring while the test
+        built ONE model at the default seed. Measured ``nan_frac == 0.0`` at
+        both 1234 and 7.
+        """
+        model = build_seeded(lambda: PRISMModel(
             context_len=96,
             forecast_len=24,
             num_features=7,
-            num_layers=num_layers,
+            tree_depth=3,
+        ), seed=seed)
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+        output = as_array(model(inputs, training=False))
+        assert np.all(np.isfinite(output)), (
+            f"{float(np.mean(~np.isfinite(output))) * 100:.0f}% of the depth-3 "
+            "forward output is non-finite"
         )
 
-        assert len(model.prism_layers) == num_layers
+    def test_different_dropout_rates(self) -> None:
+        """``dropout_rate`` must reach the training-mode forward.
 
+        An output-difference sweep is the WRONG instrument here: dropout is
+        inactive at inference, so two rates give identical inference outputs
+        whether or not the kwarg was honoured. The discriminating form is
+        training-mode NON-DETERMINISM -- two training-mode calls on one model
+        must be bit-identical at rate 0.0 and must differ at rate > 0.
+
+        Measured with identical seeds: rate 0.0 gives exactly 0.0 between two
+        training calls, rate 0.3 gives 1.924. The bar is set from that signal.
+        """
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
-        output = model(inputs)
 
-        assert output.shape == (4, 24, 7)
+        def _train_mode_spread(dropout_rate):
+            model = build_seeded(lambda: PRISMModel(
+                context_len=96,
+                forecast_len=24,
+                num_features=7,
+                dropout_rate=dropout_rate,
+            ))
+            first = as_array(model(inputs, training=True))
+            second = as_array(model(inputs, training=True))
+            assert first.shape == (4, 24, 7)
+            return float(np.max(np.abs(first - second)))
 
-    @pytest.mark.parametrize("tree_depth", [1, 2, 3])
-    def test_different_tree_depths(self, tree_depth: int) -> None:
-        """Test model with different tree depths."""
-        model = PRISMModel(
-            context_len=96,
-            forecast_len=24,
-            num_features=7,
-            tree_depth=tree_depth,
+        assert _train_mode_spread(0.0) == 0.0, (
+            "dropout_rate=0.0 must make the training-mode forward deterministic"
         )
-
-        inputs = np.random.randn(4, 96, 7).astype(np.float32)
-        output = model(inputs)
-
-        assert output.shape == (4, 24, 7)
-
-    @pytest.mark.parametrize("dropout_rate", [0.0, 0.1, 0.3, 0.5])
-    def test_different_dropout_rates(self, dropout_rate: float) -> None:
-        """Test model with different dropout rates."""
-        model = PRISMModel(
-            context_len=96,
-            forecast_len=24,
-            num_features=7,
-            dropout_rate=dropout_rate,
-        )
-
-        inputs = np.random.randn(4, 96, 7).astype(np.float32)
-        output = model(inputs)
-
-        assert output.shape == (4, 24, 7)
+        for dropout_rate in (0.1, 0.3, 0.5):
+            spread = _train_mode_spread(dropout_rate)
+            assert spread > 1e-5, (
+                f"dropout_rate={dropout_rate} is a no-op: two training-mode "
+                f"forwards agreed to {spread:.3e}"
+            )
 
 # ---------------------------------------------------------------------
 # Run tests
@@ -813,3 +1278,169 @@ class TestPRISMModelDifferentConfigurations:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at this file's own default config (context_len 96,
+# forecast_len 24, 7 features, hidden 64, 2 layers, tree_depth 2): 96 trainable
+# weights. 82 of them receive an ordinary live gradient. The other 14 -- every
+# `*_router_router_mlp/fc2/bias` -- are MATHEMATICALLY INERT.
+#
+# PRODUCT FINDING GF-07. `FrequencyBandRouter.call`
+# (`layers/time_series/prism_blocks.py`) applies the SAME `router_mlp` to every
+# band, concatenates the resulting scalar scores along the band axis, and takes
+# `softmax(scores / temperature, axis=-1)`. `fc2` has `output_dim=1`, so its
+# bias is ONE scalar added identically to every band's score -- and softmax is
+# shift-invariant along the axis it normalizes. The bias cannot change the
+# output at all.
+#
+# Measured, same instance:
+#
+#   +1000.0 added to ALL 14 router biases -> max|delta| in the model output
+#   is 3.81e-05, i.e. float32 rounding. A functional parameter moved by 1000
+#   would move the output by O(1000).
+#
+#   gradient magnitudes, 12 seeds x 14 biases = 168 samples:
+#     router fc2 biases : 1.164e-10 .. 5.588e-09, and EXACTLY 0.0 in 13 of 168
+#     every other bias  : 1.282e-03 .. 2.873e-01
+#
+# Five to nine orders of magnitude apart: the router-bias "gradient" is the
+# rounding residue of a sum that cancels analytically, and ~8% of the time it
+# cancels to exactly 0.0. That non-determinism is why this is NOT expressed the
+# usual two ways. `expect_zero` is two-sided (D-010) and would FAIL on the ~92%
+# of draws where the residue is nonzero; `xfail(strict=True)` would fail on
+# exactly those same draws, because the oracle passes then. A flaky pin is worse
+# than none. So the claim is split into the two DETERMINISTIC halves below: the
+# oracle's per-weight liveness over the 82 real parameters, and a direct
+# value-space proof that the other 14 are inert.
+#
+# See GF-07 in
+# plans/plan-2026-08-19T070627-a616f581/findings/gradient-flow-adoption-findings.md
+
+from ..gradient_flow_oracle import (
+    assert_gradients_reach_every_trainable_weight,
+    gradient_report,
+)
+
+#: Weights whose gradient is a rounding residue, not a signal (GF-07).
+GF07_INERT_SUFFIX = "router_mlp/fc2/bias"
+
+GF_N_WEIGHTS = 96
+GF_N_INERT = 14
+
+
+def _gf_model():
+    return PRISMModel(
+        context_len=96, forecast_len=24, num_features=7, hidden_dim=64,
+        num_layers=2, tree_depth=2, overlap_ratio=0.25,
+        num_wavelet_levels=3, router_hidden_dim=64, router_temperature=1.0,
+        dropout_rate=0.1, ffn_expansion=4,
+    )
+
+
+def _gf_batch():
+    return np.random.default_rng(0).standard_normal((4, 96, 7)).astype("float32")
+
+
+class TestPRISMGradientFlow:
+    """Gradient flow through PRISM, minus the 14 softmax-annihilated biases."""
+
+    def test_gradients_reach_every_real_trainable_weight(self):
+        """Per-weight liveness over the 82 parameters that can actually matter.
+
+        PRISM is a soft-routed tree: a router that saturated, or a tree level
+        whose nodes were built and never visited, would leave whole subtrees off
+        the backward graph while every shape, finiteness and round-trip test in
+        this file still passed.
+        """
+        # DECISION plan-2026-08-19T070627-a616f581/D-014
+        # The 14 inert biases are EXCLUDED from the per-weight floor rather than
+        # waived with `expect_zero` or pinned with `xfail(strict=True)`. Both of
+        # those express "this weight is zero", and the measurement says it is
+        # zero only ~8% of the time -- the rest of the time it carries a ~1e-10
+        # rounding residue. Either form would therefore be FLAKY, which is the
+        # one failure mode that destroys an oracle's credibility faster than a
+        # false green. The inertness itself is not dropped: it is proven in
+        # value space, deterministically, by the test below.
+        # Do NOT "simplify" this to `assert_gradients_reach_every_trainable_weight(
+        # model, x)` -- it fails on roughly one run in twelve.
+        # See D-014 in plans/plan-2026-08-19T070627-a616f581/decisions.md
+        model = _gf_model()
+        x = _gf_batch()
+        model(x, training=False)  # subclassed model: unbuilt until first call
+
+        report = gradient_report(model, x)
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == GF_N_WEIGHTS, (
+            "PRISM's weight set changed shape; re-measure GF_N_INERT below"
+        )
+
+        real = {p: v for p, v in report.items() if not p.endswith(GF07_INERT_SUFFIX)}
+        assert len(report) - len(real) == GF_N_INERT, (
+            f"expected {GF_N_INERT} router biases, found {len(report) - len(real)}"
+        )
+
+        dead = sorted(p for p, v in real.items() if v is None or v == 0.0)
+        assert not dead, (
+            f"gradient flow is incomplete in PRISMModel: {len(dead)} of "
+            f"{len(real)} non-inert weights receive no live gradient:\n  "
+            + "\n  ".join(dead)
+        )
+        nonfinite = sorted(p for p, v in real.items() if v is not None and v != v)
+        assert not nonfinite, nonfinite
+
+        # Anti-vacuity: every tree level must be represented, including the
+        # deepest. A tree that stopped descending would still be "0 dead".
+        routers = [p for p in real if "router" in p]
+        assert routers, "no router weight in the report -- has the tree changed?"
+        assert any("level2" in p for p in routers), (
+            f"no depth-2 router weight found; router paths seen: {sorted(routers)[:5]}"
+        )
+
+    def test_the_router_output_bias_is_annihilated_by_the_band_softmax(self):
+        """GF-07, proven in VALUE space so it does not depend on a gradient draw.
+
+        This is the honest form of the exclusion above. It perturbs all 14
+        biases by +1000 -- six orders of magnitude larger than anything training
+        would produce -- and requires the model output not to move; and it
+        perturbs a CONTROL weight by the same amount and requires the output to
+        move a lot, so the test cannot pass by comparing a model against itself.
+        """
+        model = _gf_model()
+        x = _gf_batch()
+        before = keras.ops.convert_to_numpy(model(x, training=False))
+
+        inert = [w for w in model.trainable_weights
+                 if w.path.endswith(GF07_INERT_SUFFIX)]
+        assert len(inert) == GF_N_INERT, len(inert)
+        for w in inert:
+            w.assign(keras.ops.add(w.value, 1000.0))
+        after = keras.ops.convert_to_numpy(model(x, training=False))
+        delta_inert = float(np.max(np.abs(before - after)))
+        assert delta_inert < 1e-3, (
+            f"+1000 on all {GF_N_INERT} router output biases moved the forecast "
+            f"by {delta_inert:.3e} -- they are NOT inert any more, so the "
+            f"exclusion in the test above is no longer justified and GF-07 may "
+            f"have been fixed"
+        )
+
+        # The control: the same perturbation on a weight that IS on the forward
+        # path must move the output by orders of magnitude more. Without this,
+        # a model that ignored its input entirely would pass the assertion above.
+        control_model = _gf_model()
+        control_before = keras.ops.convert_to_numpy(control_model(x, training=False))
+        control = next(
+            w for w in control_model.trainable_weights
+            if w.path.endswith("/bias") and not w.path.endswith(GF07_INERT_SUFFIX)
+        )
+        control.assign(keras.ops.add(control.value, 1000.0))
+        control_after = keras.ops.convert_to_numpy(
+            control_model(x, training=False))
+        delta_control = float(np.max(np.abs(control_before - control_after)))
+        assert delta_control > 1.0, (
+            f"the control weight {control.path} moved the forecast by only "
+            f"{delta_control:.3e} under +1000 -- this model appears inert "
+            f"everywhere, so the inertness assertion above proves nothing"
+        )

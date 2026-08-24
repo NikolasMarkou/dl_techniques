@@ -17,6 +17,23 @@ from typing import Dict, Any
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 
 
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# This module drives `OrthogonalHypersphereInitializer` (the DEFAULT
+# `kernel_initializer` of `OrthoBlock` / `OrthoGLUFFN` / `NeuroGrid`) at shapes
+# where more orthogonal vectors are requested than the space has dimensions --
+# which is the ORDINARY case for a dimension-reducing projection. The advisory
+# at `initializers/hypersphere_orthogonal_initializer.py:190` is ours, it is
+# correct, and it reports a fallback that is the designed behaviour. Suppressed
+# HERE rather than in `pyproject.toml` so that a module which starts tripping
+# the fallback UNEXPECTEDLY still fails under `error::UserWarning`. The advisory
+# is pinned live (message text included) by
+# `tests/test_the_deliberate_advisories_still_fire.py`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Orthogonality constraint violation:UserWarning"),
+]
+
+
 # Test fixtures
 @pytest.fixture
 def sample_inputs() -> tf.Tensor:

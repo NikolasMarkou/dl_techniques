@@ -44,11 +44,11 @@ def sample_conv_weights() -> tf.Tensor:
 def test_model(default_regularizer) -> tf.keras.Model:
     """Create test model with SRIP regularizer."""
     return keras.Sequential([
+        keras.Input(shape=(32, 32, 3)),
         keras.layers.Conv2D(
             32, 3,
             kernel_regularizer=default_regularizer,
             padding='same',
-            input_shape=(32, 32, 3)
         ),
         keras.layers.BatchNormalization(),
         keras.layers.ReLU(),

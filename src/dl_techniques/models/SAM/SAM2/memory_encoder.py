@@ -68,6 +68,10 @@ from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -177,7 +181,7 @@ class SAM2MaskDownSampler(keras.layers.Layer):
         self.padding = int(padding)
         self.total_stride = int(total_stride)
         self.mask_in_chans = int(mask_in_chans)
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.norm_epsilon = float(norm_epsilon)
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-016
@@ -360,7 +364,7 @@ class SAM2MaskDownSampler(keras.layers.Layer):
             "padding": self.padding,
             "total_stride": self.total_stride,
             "mask_in_chans": self.mask_in_chans,
-            "activation": self.activation,
+            "activation": serialize_activation(self.activation),
             "norm_epsilon": self.norm_epsilon,
         })
         return config

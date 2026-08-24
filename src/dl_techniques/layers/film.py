@@ -79,9 +79,9 @@ class FiLMLayer(keras.layers.Layer):
     :param scale_factor: Base scaling factor applied before gamma modulation.
         Defaults to 1.0.
     :type scale_factor: float
-    :param projection_dropout: Dropout rate applied to style vector before
+    :param projection_dropout_rate: Dropout rate applied to style vector before
         projection. Defaults to 0.0.
-    :type projection_dropout: float
+    :type projection_dropout_rate: float
     :param use_layer_norm: Whether to apply LayerNormalization to style vector.
         Defaults to False.
     :type use_layer_norm: bool
@@ -119,7 +119,7 @@ class FiLMLayer(keras.layers.Layer):
             beta_activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'linear',
             use_bias: bool = True,
             scale_factor: float = 1.0,
-            projection_dropout: float = 0.0,
+            projection_dropout_rate: float = 0.0,
             use_layer_norm: bool = False,
             gamma_kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             beta_kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
@@ -144,7 +144,7 @@ class FiLMLayer(keras.layers.Layer):
         self.beta_activation = beta_activation
         self.use_bias = use_bias
         self.scale_factor = scale_factor
-        self.projection_dropout = projection_dropout
+        self.projection_dropout_rate = projection_dropout_rate
         self.use_layer_norm = use_layer_norm
         self.gamma_kernel_initializer = keras.initializers.get(gamma_kernel_initializer)
         self.beta_kernel_initializer = keras.initializers.get(beta_kernel_initializer)
@@ -159,8 +159,8 @@ class FiLMLayer(keras.layers.Layer):
         self.epsilon = epsilon
 
         # Validate inputs
-        if projection_dropout < 0.0 or projection_dropout >= 1.0:
-            raise ValueError(f"projection_dropout must be in [0, 1), got {projection_dropout}")
+        if projection_dropout_rate < 0.0 or projection_dropout_rate >= 1.0:
+            raise ValueError(f"projection_dropout_rate must be in [0, 1), got {projection_dropout_rate}")
 
         if modulation_mode not in ['multiplicative', 'additive', 'both']:
             raise ValueError(f"modulation_mode must be one of ['multiplicative', 'additive', 'both'], "
@@ -190,9 +190,9 @@ class FiLMLayer(keras.layers.Layer):
                 name=f"{self.name}_style_norm"
             )
 
-        if self.projection_dropout > 0.0:
+        if self.projection_dropout_rate > 0.0:
             self.dropout = keras.layers.Dropout(
-                self.projection_dropout,
+                self.projection_dropout_rate,
                 name=f"{self.name}_style_dropout"
             )
 
@@ -382,7 +382,7 @@ class FiLMLayer(keras.layers.Layer):
             'beta_activation': keras.activations.serialize(keras.activations.get(self.beta_activation)),
             'use_bias': self.use_bias,
             'scale_factor': self.scale_factor,
-            'projection_dropout': self.projection_dropout,
+            'projection_dropout_rate': self.projection_dropout_rate,
             'use_layer_norm': self.use_layer_norm,
             'gamma_kernel_initializer': keras.initializers.serialize(self.gamma_kernel_initializer),
             'beta_kernel_initializer': keras.initializers.serialize(self.beta_kernel_initializer),

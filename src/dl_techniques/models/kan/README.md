@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Kolmogorov-Arnold Network (KAN)** architecture in **Keras 3**. This implementation is based on the recent paper by Liu et al. and provides a powerful alternative to traditional Multi-Layer Perceptrons (MLPs).
+An implementation of the **Kolmogorov-Arnold Network (KAN)** architecture in **Keras 3**. This implementation is based on the recent paper by Liu et al. and provides a powerful alternative to traditional Multi-Layer Perceptrons (MLPs).
 
 The architecture's key feature is its use of **learnable activation functions** on the edges of the network, parameterized by B-splines. This allows KANs to learn complex, non-linear relationships with potentially greater accuracy and parameter efficiency than MLPs.
 

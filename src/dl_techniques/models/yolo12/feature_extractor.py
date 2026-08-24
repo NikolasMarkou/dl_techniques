@@ -7,6 +7,19 @@ models for object detection, segmentation, classification, etc.
 
 The feature extractor outputs multiscale feature maps that can be consumed by
 various task-specific heads.
+
+References:
+    - Tian et al., 2025. YOLOv12: Attention-Centric Real-Time Object Detectors.
+      (https://arxiv.org/abs/2502.12524) -- the backbone/neck this extracts.
+    - Lin et al., 2017. Feature Pyramid Networks for Object Detection. CVPR
+      2017. (https://arxiv.org/abs/1612.03144) -- the multi-scale P3/P4/P5
+      pyramid the neck produces.
+    - Liu et al., 2018. Path Aggregation Network for Instance Segmentation.
+      CVPR 2018. (https://arxiv.org/abs/1803.01534) -- the bottom-up path the
+      neck adds on top of FPN.
+    - Wang et al., 2020. CSPNet: A New Backbone that can Enhance Learning
+      Capability of CNN. (https://arxiv.org/abs/1911.11929) -- the cross-stage
+      partial blocks the backbone stacks.
 """
 
 import keras
@@ -49,6 +62,43 @@ class YOLOv12FeatureExtractor(keras.Model):
         "l": [1.00, 1.00],  # large
         "x": [1.00, 1.50],  # extra-large
     }
+
+    # `MODEL_VARIANTS` is the canonical name across `models/` (see
+    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
+    # definition because `multitask.py` and the tests already read it by that
+    # name; this is an alias to the same dict, not a copy.
+    MODEL_VARIANTS = SCALE_CONFIGS
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            input_shape: Tuple[int, int, int] = (640, 640, 3),
+            **kwargs: Any
+    ) -> "YOLOv12FeatureExtractor":
+        """
+        Create a YOLOv12 feature extractor from a predefined scale variant.
+
+        Args:
+            variant: Scale key, one of 'n', 's', 'm', 'l', 'x'.
+            input_shape: Input image shape (height, width, channels).
+            **kwargs: Additional arguments passed to the constructor.
+
+        Returns:
+            YOLOv12FeatureExtractor instance.
+
+        Raises:
+            ValueError: If the variant is not recognized.
+
+        Example:
+            >>> backbone = YOLOv12FeatureExtractor.from_variant("s")
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+        return cls(input_shape=input_shape, scale=variant, **kwargs)
 
     def __init__(
             self,

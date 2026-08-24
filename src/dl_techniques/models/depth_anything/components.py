@@ -9,8 +9,9 @@ as a depth map or a segmentation mask.
 
 This decoder is not a Transformer-based decoder. Instead, it is a lightweight and
 effective convolutional head. It progressively refines the feature maps from the
-encoder, gradually reducing the channel dimensionality while maintaining the spatial
-resolution to produce the final dense output.
+encoder, gradually reducing the channel dimensionality while raising the spatial
+resolution by `upsample_factor` (1, i.e. unchanged, by default) to produce the
+final dense output.
 
 Architectural Design:
 
@@ -22,20 +23,27 @@ Architectural Design:
         the `dims` parameter. For example, `dims=[256, 128, 64]` would create three
         such blocks, reducing the channel dimension from the input's size down to 64.
 
-2.  **No Upsampling:**
-    -   A key characteristic of this specific decoder design is that it **does not
-        perform any spatial upsampling**. It assumes that the input features from the
-        encoder already have the desired output spatial resolution.
-    -   This is common in DPT variants where the encoder is designed to preserve
-        spatial detail or where features from multiple scales are fused *before*
-        being passed to this final decoder head.
+2.  **Optional Bilinear Upsampling:**
+    -   `upsample_factor` controls how much spatial resolution the decoder
+        recovers. It must be a power of two no greater than `2 ** len(dims)`, and
+        `log2(upsample_factor)` `2x` `UpSampling2D` blocks are placed after the
+        leading non-final conv stages; the remaining stages keep the resolution.
+    -   `upsample_factor=1`, the default, is the no-upsampling case: the input
+        features are assumed to already carry the output resolution, as in DPT
+        variants whose encoder preserves spatial detail or whose multi-scale
+        features are fused *before* this head. `models/depth_anything/model.py`
+        does not use that default — it passes the encoder stride (16), so a
+        `H/16 x W/16` feature map returns to full resolution.
 
 3.  **Final Output Projection:**
     -   After the sequence of refining blocks, a final `3x3 Conv2D` layer is used to
         project the features into the desired number of `output_channels`.
-    -   This final layer also applies an `output_activation` (e.g., `sigmoid` for
-        depth estimation between 0 and 1, or `softmax` for multi-class segmentation)
-        to format the output for the specific prediction task.
+    -   This final layer applies `output_activation`, which defaults to `linear`
+        — deliberately, and `DepthAnything` depends on it: affine-invariant and
+        scale-shift depth losses need the output unconstrained so the network can
+        choose its own scale (see `model.py`'s module docstring). Bounded
+        activations such as `sigmoid` belong only to a pipeline whose target
+        genuinely lives in `[0, 1]`; `softmax` suits multi-class segmentation.
 
 In summary, the `DPTDecoder` acts as a simple but effective "prediction head" that
 takes a high-dimensional feature map from a powerful encoder and translates it into a
@@ -44,6 +52,29 @@ low-dimensional, interpretable, pixel-wise output map.
 
 import keras
 from typing import Dict, Tuple, Optional, Any, List, Union
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
+
+# ---------------------------------------------------------------------
+
+#: Variance epsilon for every ``BatchNormalization`` in this package.
+#:
+#: The DPT dense-prediction head below follows the Depth Anything V1 recipe (see
+#: ``model.py``'s module docstring, which enumerates the three places this
+#: package deliberately departs from the paper — normalization is not one of
+#: them). That reference is PyTorch, whose ``nn.BatchNorm2d`` defaults to 1e-5;
+#: Keras' ``BatchNormalization`` defaults to 1e-3, 100x larger. The same fact is
+#: stated for the other torch port in this repo at
+#: ``layers/fastvit/reference.py``, where getting it wrong once silently
+#: mis-normalized 86 of 114 layers with every test green.
+#:
+#: ``model.py``'s placeholder encoder imports this constant too. Its
+#: justification is different and weaker: that encoder is an in-repo stand-in
+#: for DINOv2 with no reference implementation at all, so the value there is
+#: chosen for consistency with the head it feeds, not for fidelity.
+REFERENCE_BN_EPSILON: float = 1e-5
 
 # ---------------------------------------------------------------------
 
@@ -84,7 +115,9 @@ class DPTDecoder(keras.layers.Layer):
         4D tensor with shape: `(batch_size, height, width, channels)`
 
     Output shape:
-        4D tensor with shape: `(batch_size, height, width, output_channels)`
+        4D tensor with shape:
+        `(batch_size, height * upsample_factor, width * upsample_factor,
+        output_channels)`
 
     Returns:
         A 4D tensor representing the decoded dense predictions.
@@ -117,8 +150,8 @@ class DPTDecoder(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
-        self.activation = activation
-        self.output_activation = output_activation
+        self.activation = deserialize_activation(activation)
+        self.output_activation = deserialize_activation(output_activation)
         self.upsample_factor = int(upsample_factor)
 
         # Validate upsample_factor: must be a power of 2 and <= 2**len(dims).
@@ -161,7 +194,13 @@ class DPTDecoder(keras.layers.Layer):
             self.conv_layers.append(conv)
 
             # Batch normalization layer
-            bn = keras.layers.BatchNormalization(name=f'bn_{i}')
+            # DECISION plan-2026-08-17T183311-79c63e38/D-028
+            # `epsilon` is EXPLICIT: Keras' 1e-3 default is 100x the torch
+            # reference this head follows. Do NOT drop the argument, and do NOT
+            # restate the literal — the constant has one definition above.
+            bn = keras.layers.BatchNormalization(
+                epsilon=REFERENCE_BN_EPSILON, name=f'bn_{i}'
+            )
             self.batch_norm_layers.append(bn)
 
             # Activation layer
@@ -195,17 +234,39 @@ class DPTDecoder(keras.layers.Layer):
         self._build_input_shape: Optional[Tuple[int, ...]] = None
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Build decoder layers based on input shape.
-
-        Sublayers are created in __init__ (their dims are shape-independent);
-        build only records the input shape for serialization. Sublayer weights
-        are constructed lazily on the first call.
+        """Build every sublayer `call` runs, in `call`'s own shape order.
 
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        # Store input shape for serialization
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-124
+        # Do NOT go back to "sublayers are built lazily on the first call". That
+        # is true of `__call__` and FALSE of `keras.models.load_model`, which
+        # builds from the SAVED input_shape and restores immediately -- so the
+        # restore found a zero-weight decoder. MEASURED 2026-08-21, standalone,
+        # CPU: pre-forward weight count after `build` was 0 (post-forward 12),
+        # and a perturb-save-reload moved the output by max|dOut| = 70.98 with
+        # 12 of 12 weights back at class defaults. The save side was BLIND --
+        # the archive held 12 of 12 HDF5 datasets both before and after the fix
+        # -- so an archive-content check alone cannot see this, and neither can
+        # a post-forward count. Inside `DepthAnything` it was masked by that
+        # model's `load_own_variables` force-build; `DPTDecoder` is public API.
+        # See decisions.md D-124.
         self._build_input_shape = input_shape
+        shape = tuple(input_shape)
+        for conv, bn, act, up in zip(
+                self.conv_layers,
+                self.batch_norm_layers,
+                self.activation_layers,
+                self.upsample_layers,
+        ):
+            conv.build(shape)
+            shape = conv.compute_output_shape(shape)
+            bn.build(shape)
+            act.build(shape)
+            if up is not None:
+                shape = up.compute_output_shape(shape)
+        self.output_conv.build(shape)
 
         super().build(input_shape)
 
@@ -281,8 +342,8 @@ class DPTDecoder(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
+            "activation": serialize_activation(self.activation),
+            "output_activation": serialize_activation(self.output_activation),
             "upsample_factor": self.upsample_factor,
         })
         return config

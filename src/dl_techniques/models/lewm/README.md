@@ -198,7 +198,7 @@ In Keras (channels-last) the upstream `permute(0,2,1)` pair is a no-op; input/ou
 A stack of `AdaLNZeroConditionalBlock` layers — DiT-style adaptive layer-norm Transformer blocks where the conditioning vector (here, the per-step action embedding `c`) produces shift, scale, and **zero-initialized residual gates** for the attention and MLP sublayers. Components:
 
 1.  **Learned positional embedding**: shape `(1, num_frames, input_dim)`, `RandomNormal(stddev=0.02)`; sliced to current `T` at call time.
-2.  **`emb_dropout`** on the positionally-encoded sequence.
+2.  **`emb_dropout`** layer on the positionally-encoded sequence.
 3.  **Input / cond projections**: `Dense(input_dim -> hidden_dim)` for `x` and `c`, instantiated only when dims differ (Identity otherwise).
 4.  **`depth` AdaLN-zero blocks**: each consumes `[x, c]` and returns updated `x`. Zero-init gates mean the predictor starts as an identity, which stabilizes early training on top of the live target encoder.
 5.  **Final LayerNorm + output projection** back to `output_dim`.
@@ -299,7 +299,7 @@ Dataclass with `to_dict()` / `from_dict()` round-trip. Fields:
 | `num_preds` | 1 | predicted frames per sample |
 | `num_frames` | 0 (auto) | predictor positional-embedding length; `0` means `history_size + num_preds`; explicit values must satisfy `num_frames >= history_size + num_preds` |
 | `depth`, `heads`, `dim_head`, `mlp_dim` | 6, 16, 64, 2048 | predictor Transformer |
-| `dropout`, `emb_dropout` | 0.1, 0.0 | predictor dropouts |
+| `dropout_rate`, `emb_dropout_rate` | 0.1, 0.0 | predictor dropouts |
 | `projector_hidden_dim` | 192 | hidden dim of `projector` and `pred_proj` |
 | `action_dim`, `smoothed_dim`, `mlp_scale` | 2, 10, 4 | action embedder |
 | `sigreg_weight`, `sigreg_knots`, `sigreg_num_proj` | 0.09, 17, 1024 | SIGReg |

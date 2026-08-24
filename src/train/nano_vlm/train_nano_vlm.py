@@ -3,6 +3,7 @@
 import os
 import argparse
 import keras
+import tensorflow as tf
 from keras import ops
 from datetime import datetime
 from typing import Dict, List, Tuple, Any
@@ -130,7 +131,7 @@ class NanoVLMTrainer:
     def train_step(self, batch_data: Tuple[Any, Any]) -> Dict[str, keras.Variable]:
         inputs, labels = batch_data
 
-        with keras.GradientTape() as tape:
+        with tf.GradientTape() as tape:
             predictions = self.model(inputs, training=True)
             loss = self.loss_fn(labels, predictions)
 
@@ -154,8 +155,8 @@ class NanoVLMTrainer:
         return {'loss': self.train_loss.result(), 'accuracy': self.train_accuracy.result()}
 
     def reset_metrics(self) -> None:
-        self.train_loss.reset_states()
-        self.train_accuracy.reset_states()
+        self.train_loss.reset_state()
+        self.train_accuracy.reset_state()
 
 
 # ---------------------------------------------------------------------
@@ -182,17 +183,55 @@ def train_nanovlm(
     setup_gpu(gpu_id=gpu_index)
     configure_mixed_precision()
 
-    model = create_nanovlm()
-    logger.info(f"Created nanoVLM-222M: {model.count_params():,} parameters")
-
-    training_setup = create_training_setup()
-    trainer = NanoVLMTrainer(model, training_setup['loss_fn'], use_multi_optimizer=use_multi_optimizer)
-    logger.info(f"Using {'multi-optimizer' if use_multi_optimizer else 'single optimizer'} training")
-
     data_processor = VQADataProcessor(image_size=224, max_text_length=512, vocab_size=32000)
     sample_data = load_cauldron_sample()
     train_dataset = create_vqa_dataset(sample_data, data_processor, batch_size=batch_size, shuffle=True)
     steps_per_epoch = len(train_dataset)
+
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-134
+    # REFUSE `steps_per_epoch == 0`. `VQADataSequence.__len__` is
+    # `len(samples) // batch_size`, and `load_cauldron_sample()` returns exactly
+    # 3 placeholder samples, so at the shipped default `batch_size=8` this is
+    # `3 // 8 == 0`. `for step in range(0)` then runs ZERO steps, every epoch
+    # logs `Loss=0.0000` from an untouched `Mean` metric, and the run "completes"
+    # and saves an UNTRAINED model with no error anywhere. Do NOT "fix" this by
+    # rounding `__len__` up (the last partial batch is not what is missing here)
+    # and do NOT lower the default `batch_size` silently -- the sample loader is
+    # a 3-row placeholder, and the caller must be told. See decisions.md D-134.
+    if steps_per_epoch == 0:
+        raise ValueError(
+            f"steps_per_epoch == 0: len(samples)={len(sample_data)} // batch_size={batch_size} == 0. "
+            f"Every epoch would run zero training steps and an untrained model would be saved. "
+            f"Use batch_size <= {len(sample_data)}, or supply more samples."
+        )
+
+    model = create_nanovlm()
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-134
+    # BUILD EAGERLY, HERE, BEFORE the `count_params` log AND before
+    # `NanoVLMTrainer` partitions the variables. Same defect as the D-031 anchor
+    # in `src/train/hrm/train_hrm.py`: `count_params()` on an unbuilt subclassed
+    # model raises `ValueError: ... the layer isn't built`, so `train_nanovlm`
+    # died on its own second statement and never reached the data at all.
+    # Building here also makes `setup_different_learning_rates(model)` see real
+    # variables -- on an unbuilt model it partitions three EMPTY lists.
+    model.build({'images': (None, data_processor.image_size, data_processor.image_size, 3),
+                 'text_tokens': (None, data_processor.max_text_length)})
+    # DECISION plan-2026-08-22T035419-a11304c8/D-008
+    # The label is DERIVED, never written down. This line read
+    # "Created nanoVLM-222M" while printing the real count beside it: the model
+    # `create_nanovlm()` actually builds measures 305,435,904 parameters at the
+    # default `variant="base"` and this trainer's own build shapes -- 1.38x the
+    # "222M" design target carried over from `research/nanoVLM_research.md`,
+    # which proposes a `create_nanovlm_222m()` that exists nowhere in `src/`.
+    # Do not replace this with a hardcoded "305M": a second literal is the same
+    # defect one refactor later, and the count moves with `variant` and with the
+    # image/text shapes built above.
+    n_params = model.count_params()
+    logger.info(f"Created nanoVLM-{n_params / 1e6:.0f}M: {n_params:,} parameters")
+
+    training_setup = create_training_setup()
+    trainer = NanoVLMTrainer(model, training_setup['loss_fn'], use_multi_optimizer=use_multi_optimizer)
+    logger.info(f"Using {'multi-optimizer' if use_multi_optimizer else 'single optimizer'} training")
 
     logger.info(f"Epochs: {epochs}, Batch: {batch_size}, Steps/epoch: {steps_per_epoch}")
 
@@ -204,7 +243,20 @@ def train_nanovlm(
         for epoch in range(epochs):
             trainer.reset_metrics()
 
-            for step, batch in enumerate(train_dataset):
+            # DECISION plan-2026-08-18T140459-7991552f/D-009
+            # Index by `range(steps_per_epoch)`. Do NOT write
+            # `for step, batch in enumerate(train_dataset)`. `create_vqa_dataset`
+            # returns a `VQADataSequence(keras.utils.Sequence)`, and in Keras 3
+            # `keras.utils.Sequence` IS `PyDataset`, which defines
+            # `__getitem__`/`__len__` and no `__iter__`. `enumerate` therefore
+            # fell back to Python's legacy `__getitem__` protocol, which walks
+            # 0, 1, 2, ... until `IndexError` and IGNORES `__len__` entirely.
+            # `VQADataSequence.__getitem__` serves any index and never raises
+            # `IndexError`, so epoch 0 never ended: a hang with no failure text.
+            # Same mechanism, same repair as the D-034 anchor in
+            # `src/train/hrm/train_hrm.py`'s `train_epoch`.
+            for step in range(steps_per_epoch):
+                batch = train_dataset[step]
                 try:
                     metrics = trainer.train_step(batch)
                     if step % log_frequency == 0:
@@ -212,7 +264,16 @@ def train_nanovlm(
                             f"Epoch {epoch + 1}/{epochs}, Step {step}/{steps_per_epoch}: "
                             f"Loss={float(metrics['loss']):.4f}, Acc={float(metrics['accuracy']):.4f}"
                         )
-                except Exception as e:
+                # DECISION plan-2026-08-18T140459-7991552f/D-010
+                # Do NOT widen this back to `except Exception`. This handler
+                # exists to survive one bad SAMPLE, not a broken training
+                # mechanism. As `except Exception: continue` it swallowed an
+                # `AttributeError` on EVERY step of EVERY epoch (there was no
+                # `keras.GradientTape`), so the run "completed" all ten epochs
+                # and saved an untrained model, reporting only a per-step
+                # `logger.error` line. An `AttributeError`/`TypeError` is a
+                # programming defect and must propagate.
+                except (tf.errors.InvalidArgumentError, ValueError) as e:
                     logger.error(f"Error in step {step}: {e}")
                     continue
 

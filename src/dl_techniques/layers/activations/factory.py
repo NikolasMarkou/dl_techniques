@@ -476,6 +476,30 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
                     raise ValueError(f"Invalid {param}: {e}")
 
 
+STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
+"""Substring every strict-drop rejection message carries.
+
+DUPLICATION, deliberate and gated: the identical literal is defined in
+`layers/attention/factory.py`, `layers/ffn/factory.py`,
+`layers/embedding/factory.py` and `layers/sampling.py`. It is not centralised
+because every candidate home is either a peer package (importing one factory from
+another drags that package's whole layer tree into this module's import graph) or
+a new shared module (this plan's abstraction budget is 0). The lockstep is NOT
+hand-maintained: `tests/test_layers/test_activations/test_activation_factory.py::
+TestStrictDroppedKeys::test_marker_is_identical_across_all_five_factories` fails
+if any copy drifts.
+"""
+
+# Base `keras.layers.Layer` kwargs. Every registered activation class takes
+# `**kwargs` and forwards them to `Layer.__init__`, so these genuinely build and
+# are NOT rejected by the strict check below. Mirrors `_KERAS_BASE_PARAMS` in
+# `layers/norms/factory.py`; kept local for the same import-graph reason as the
+# marker above, and pinned identical by the same test class.
+_KERAS_BASE_PARAMS = frozenset(
+    {'name', 'dtype', 'trainable', 'activity_regularizer', 'autocast'}
+)
+
+
 def create_activation_layer(
     activation_type: ActivationType,
     name: Optional[str] = None,
@@ -494,9 +518,55 @@ def create_activation_layer(
     :param kwargs: Parameters specific to the activation type.
     :return: A configured activation layer instance.
     :rtype: keras.layers.Layer
-    :raises ValueError: If activation_type is invalid or parameters are incorrect.
+    :raises ValueError: If activation_type is invalid, parameters are incorrect, or
+        an undeclared parameter is passed (the message then carries
+        :data:`STRICT_DROPPED_KEY_MARKER`).
     :raises TypeError: If parameter types are incorrect.
     """
+    # DECISION plan-2026-08-18T140459-7991552f/D-017
+    # The INVERSE direction -- an undeclared kwarg -- was hardened in
+    # `attention`/`ffn`/`embedding` by an earlier plan's D-011/D-023
+    # (STRICT_DROPPED_KEY_MARKER). This factory was left open: its filter below
+    # read `if k in valid_param_names or k in kwargs`, and the `or k in kwargs`
+    # clause makes the registry side of that test unreachable -- every caller kwarg
+    # survives it by construction.
+    #
+    # WHAT THAT DOES *NOT* MEAN, and what a plan premise got wrong here: the
+    # unreachable filter is NOT a silent-drop. MEASURED at HEAD, before this
+    # change, Keras 3's own `Layer.__init__` already rejected the undeclared key,
+    # e.g. `create_activation_layer('mish', bogus_param=1)` raised
+    # "Unrecognized keyword arguments passed to Mish". So this change buys a
+    # NAMED, factory-level diagnostic (which activation type, which keys, what the
+    # accepted set is) and closes the registry-drift door -- it does not repair a
+    # silently-wrong layer. Do not re-file this as a silent-drop defect.
+    #
+    # `_KERAS_BASE_PARAMS` is exempted ON PURPOSE: `trainable=` and `dtype=` build
+    # today (measured), and rejecting them would be a regression introduced by a
+    # hardening step. DO NOT tighten this to registry keys only.
+    #
+    # Pre-flight cost, measured before this edit (decisions.md D-016): 28 call
+    # sites repo-wide, ZERO of which pass an undeclared kwarg, under both a static
+    # AST sweep and a runtime recorder over the 11,031 tests of
+    # tests/test_layers/. The check runs BEFORE the try so the
+    # `except (TypeError, ValueError)` re-wrapper below cannot bury the marker.
+    _info = ACTIVATION_REGISTRY.get(activation_type)
+    if _info is not None:
+        _valid_param_names = (
+            set(_info['required_params'])
+            | set(_info['optional_params'].keys())
+            | _KERAS_BASE_PARAMS
+        )
+        dropped = sorted(set(kwargs) - _valid_param_names)
+        if dropped:
+            raise ValueError(
+                f"create_activation_layer('{activation_type}'): "
+                f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
+                f"'{activation_type}' ({_info['class'].__name__}) accepts only "
+                f"{sorted(_valid_param_names)}. Either you mistyped one of "
+                f"those names, or you chose the wrong activation_type for the "
+                f"parameters you are passing."
+            )
+
     try:
         # Validate configuration first
         validate_activation_config(activation_type, **kwargs)
@@ -524,14 +594,16 @@ def create_activation_layer(
             set(act_info['optional_params'].keys())
         )
 
-        # Only strict filtering if we want to prevent passing extra kwargs to
-        # layers that might not handle them well, but most Keras layers use **kwargs.
-        # We'll trust the validation logic above and pass what we have,
-        # but prioritizing explicit registry params + name.
+        # The `or k in kwargs` clause that used to be here made this filter
+        # unreachable on its registry side. It is gone: the strict check at the
+        # top of this function has already rejected anything outside
+        # `valid_param_names | _KERAS_BASE_PARAMS`, so the only kwargs that reach
+        # here are ones the registry or `keras.layers.Layer` declares.
+        valid_param_names |= _KERAS_BASE_PARAMS
 
         final_params = {
             k: v for k, v in params.items()
-            if k in valid_param_names or k in kwargs
+            if k in valid_param_names
         }
 
         if name is not None:

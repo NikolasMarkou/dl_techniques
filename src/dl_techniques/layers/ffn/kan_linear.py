@@ -246,16 +246,55 @@ class KANLinear(keras.layers.Layer):
         # weight so it persists during saving/loading but isn't updated by gradient descent.
         # Size: grid_size + 1 (intervals) + 2 * spline_order (padding)
         grid_length = self.grid_size + 2 * self.spline_order + 1
+
+        # The INITIAL knot sequence comes from an `initializer` callable; it is NOT
+        # written by `_set_grid_from_range` here.
+        #
+        # WHAT NOT TO DO: do NOT restore
+        #     self.grid = self.add_weight(..., initializer="zeros")
+        #     self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
+        # `_set_grid_from_range` ends in `self.grid.assign(...)`, and Keras 3 runs a
+        # symbolic build pass inside a `StatelessScope` whenever this layer is first
+        # reached from a PARENT's `call()` -- i.e. in every real model, and on every
+        # `create_ffn_layer(ffn_type='kan')` path, where the layer is never touched
+        # directly at all. That scope RECORDS the assign and then DISCARDS it, so the
+        # knot vector stayed all zeros: every knot collapses onto one point and the
+        # Cox-de Boor recursion in `_compute_bspline_basis` runs over a degenerate
+        # knot vector. Measured on CPU 2026-08-15: `grid[0]` is -4.3999996 on a direct
+        # `.build(...)` and 0.0 through a parent layer's `call()`.
+        #
+        # This is why the two writers are deliberately SEPARATED:
+        #   * initial value      -> this `initializer`, honoured at variable-CREATION
+        #                           time, which is what survives the stateless scope;
+        #   * runtime adaptation -> `_set_grid_from_range` / `update_grid_from_samples`,
+        #                           a real `.assign()` issued from user code in a real
+        #                           scope, long after `build()`. That path is unchanged
+        #                           and must keep working.
+        # See the DECISION anchor in `layers/time_series/nbeats_blocks.py`
+        # (`TrendBlock._create_polynomial_basis`) and decisions.md D-028.
         self.grid = self.add_weight(
             name="grid",
             shape=(grid_length,),
-            initializer="zeros",  # Initialized properly immediately below
+            initializer=lambda shape, dtype=None: keras.ops.cast(
+                self._compute_grid_values(self.grid_range[0], self.grid_range[1]),
+                dtype or self.dtype,
+            ),
             trainable=False,
             dtype=self.dtype,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-043
+            # The knot sequence is a COORDINATE TABLE, not an activation. Keras 3
+            # autocasts float variables on read, so under `mixed_float16` the grid
+            # would arrive as float16 inside `_compute_bspline_basis` and the whole
+            # Cox-de Boor recursion — including the `+ self.epsilon` guard, whose
+            # 1e-7 default is SUBNORMAL in float16 (1.192093e-07, below
+            # `finfo('float16').tiny`, ~19% relative error) — would run at half
+            # precision.
+            # Do NOT drop `autocast=False` on the grounds that the grid "is just a
+            # weight": the recursion divides by knot differences, and it is the one
+            # place in this layer where float16 rounding is not tolerable.
+            # See decisions.md D-043.
+            autocast=False,
         )
-
-        # Initialize the grid based on the configured range
-        self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
 
         super().build(input_shape)
 
@@ -276,21 +315,32 @@ class KANLinear(keras.layers.Layer):
         grid_points = keras.ops.linspace(
             start, stop, self.grid_size + 1, dtype=self.dtype
         )
+        return self._extend_knots(grid_points)
 
-        # Calculate grid spacing step size
-        h = (grid_points[1] - grid_points[0])
+    def _extend_knots(
+        self, grid_points: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Pad an interior knot sequence with ``spline_order`` knots at each end.
 
-        # Generate index ranges for extensions
+        The interior sequence need not be uniformly spaced — the left and right
+        extensions are generated from the *boundary* spacing (``t_1 - t_0`` and
+        ``t_n - t_{n-1}``) so that a non-uniform, quantile-matched interior is
+        extended consistently at both ends.
+
+        :param grid_points: Monotone interior knots of shape ``(grid_size + 1,)``.
+        :type grid_points: keras.KerasTensor
+        :return: Full knot sequence of shape ``(grid_size + 2 * spline_order + 1,)``.
+        :rtype: keras.KerasTensor
+        """
+        h_left = grid_points[1] - grid_points[0]
+        h_right = grid_points[-1] - grid_points[-2]
+
         start_indices = keras.ops.arange(-self.spline_order, 0, dtype=self.dtype)
         end_indices = keras.ops.arange(1, self.spline_order + 1, dtype=self.dtype)
 
-        # Extend grid on the left
-        extended_knots_start = start_indices * h + grid_points[0]
+        extended_knots_start = start_indices * h_left + grid_points[0]
+        extended_knots_end = end_indices * h_right + grid_points[-1]
 
-        # Extend grid on the right
-        extended_knots_end = end_indices * h + grid_points[-1]
-
-        # Concatenate to form complete knot sequence
         return keras.ops.concatenate(
             [extended_knots_start, grid_points, extended_knots_end], axis=0
         )
@@ -299,6 +349,13 @@ class KANLinear(keras.layers.Layer):
         self, start: Union[float, keras.KerasTensor], stop: Union[float, keras.KerasTensor]
     ) -> None:
         """Calculate and assign grid values to the state variable.
+
+        This is the RUNTIME grid-adaptation writer only (``update_grid_from_samples``).
+        It must not be used to supply the grid's initial value from ``build()``: an
+        ``.assign()`` issued during Keras 3's symbolic build pass is recorded by the
+        surrounding ``StatelessScope`` and discarded, leaving the knots all zero. The
+        initial knot sequence comes from the ``grid`` weight's ``initializer`` instead
+        (see the anchor in ``build``).
 
         :param start: Range minimum (Python float or scalar tensor).
         :type start: Union[float, keras.KerasTensor]
@@ -316,6 +373,13 @@ class KANLinear(keras.layers.Layer):
         :return: Basis function values of shape ``(..., input_features, num_basis_fns)``.
         :rtype: keras.KerasTensor
         """
+        # The Cox-de Boor recursion runs in the VARIABLE dtype (float32 under
+        # `mixed_float16`), never in the compute dtype: `self.grid` is held
+        # `autocast=False` and the input is lifted to match it. The basis is
+        # returned at the layer boundary in `compute_dtype`.
+        compute_dtype = self.compute_dtype
+        x = keras.ops.cast(x, self.dtype)
+
         # Add dimension for broadcasting with grid: (..., input_features, 1)
         x = keras.ops.expand_dims(x, axis=-1)
 
@@ -356,7 +420,7 @@ class KANLinear(keras.layers.Layer):
             # Combine terms
             basis = term1 + term2
 
-        return basis
+        return keras.ops.cast(basis, compute_dtype)
 
     def call(
             self, inputs: keras.KerasTensor, training: Optional[bool] = None
@@ -407,8 +471,10 @@ class KANLinear(keras.layers.Layer):
     def update_grid_from_samples(self, x: Union[keras.KerasTensor, Any]) -> None:
         """Adapt the B-spline knot grid to the empirical distribution of ``x``.
 
-        Estimates per-feature quantile boundaries from a data batch and writes the
-        new knot sequence into the ``grid`` weight via ``assign``. Fully
+        Estimates per-feature quantile boundaries from a data batch, averages them
+        across features, and writes the resulting (generally non-uniform) knot
+        sequence into the ``grid`` weight via ``assign``. The interior quantiles are
+        kept — this is a genuine quantile match, not a min/max range update. Fully
         tensor-based, so it runs in both eager and ``@tf.function``/graph contexts.
         ``grid_range`` is the configured *initial* range and is intentionally not
         mutated here — the ``grid`` weight is the adapted source of truth and
@@ -439,13 +505,23 @@ class KANLinear(keras.layers.Layer):
         # Shape: (grid_size + 1, input_features)
         grid_points_per_feature = keras.ops.take(x_sorted, indices, axis=0)
 
-        # Average across features to find a unified range for the layer
+        # Average across features to find a unified knot sequence for the layer.
+        # Averaging a monotone-per-column matrix is monotone, so the result is a
+        # valid (generally NON-uniform) knot sequence.
         # Shape: (grid_size + 1,)
         new_grid_points = keras.ops.mean(grid_points_per_feature, axis=1)
 
-        # Re-calculate and assign the grid weight values. Endpoints stay tensors
-        # (no host-side materialization), keeping this graph-compatible.
-        self._set_grid_from_range(new_grid_points[0], new_grid_points[-1])
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-074
+        # This used to be `self._set_grid_from_range(new_grid_points[0],
+        # new_grid_points[-1])`, which threw away every interior quantile and rebuilt a
+        # UNIFORM knot sequence between the min and the max — a range update wearing the
+        # name "quantile matching". The interior knots are now kept, which is the whole
+        # point of adapting the grid to the empirical distribution. Do NOT revert to the
+        # min/max spelling on the grounds that it is "simpler": on skewed data a uniform
+        # grid leaves most knots in a region holding almost no samples, and the two
+        # spellings are indistinguishable on uniformly distributed x, so a test written on
+        # uniform data will not notice. See decisions.md D-074.
+        self.grid.assign(self._extend_knots(new_grid_points))
 
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]

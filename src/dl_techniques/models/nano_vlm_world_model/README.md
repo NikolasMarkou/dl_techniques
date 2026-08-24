@@ -80,7 +80,7 @@ from dl_techniques.models.nano_vlm_world_model.scheduler import DiffusionSchedul
 scheduler = DiffusionScheduler(
     num_timesteps=1000,
     beta_schedule='cosine',
-    prediction_type='epsilon'  # Model predicts noise
+    prediction_type='sample'  # Model predicts the clean x_0 (the class default)
 )
 
 # Forward diffusion: add noise
@@ -172,7 +172,7 @@ model = ScoreBasedNanoVLM(
     diffusion_config={
         'num_timesteps': 1000,
         'beta_schedule': 'cosine',
-        'prediction_type': 'epsilon'
+        'prediction_type': 'sample'
     },
     generation_mode='joint',
     use_classifier_free_guidance=True
@@ -217,6 +217,27 @@ for images, text in dataset:
 - Exponential Moving Average (EMA) for stable inference
 - Gradient accumulation for large effective batch sizes
 - Mixed precision support
+
+**Trainer contract**: `ScoreVLMTrainer.train_step` is a thin Python wrapper around a
+`@tf.function`. Everything that owns a variable — the model's own build, the optimizer's
+slot variables, the EMA clone and the gradient accumulators — is created eagerly on the
+first call, by `_ensure_state`, and never inside the traced step. That ordering is
+load-bearing three times over, and each half was broken before 2026-08-15:
+
+- The EMA clone must be made from a **built** model. `keras.models.clone_model` of an
+  unbuilt subclassed `keras.Model` yields an unbuilt clone, and `set_weights(
+  model.get_weights())` between two unbuilt models is `set_weights([])` — the clone stayed
+  empty, `_update_ema` zipped two empty lists, and `train_score_vlm` saved that inert clone
+  as every epoch checkpoint.
+- The accumulation counter must be a `tf.Variable` released by `tf.cond`. A Python `int`
+  compared with a Python `if` inside the traced step is evaluated **once**, at trace time,
+  against 0 — at the shipped `gradient_accumulation_steps=4` `apply_gradients` was never
+  emitted into the graph, and because no Python state changed there was never a retrace.
+  The loss metric kept moving throughout.
+- Variables created by the first trace also break the *second* trace outright
+  (`tf.function only supports singleton tf.Variables created on the first call`).
+
+Pinned by `tests/test_models/test_nano_vlm_world_model/test_train.py`.
 
 ---
 
@@ -485,7 +506,7 @@ where the score ∇_x log p_t(x) is provided by the denoiser. This enables gener
 - Vision: 24 layers, 1024 dim
 - Text: 24 layers, 1024 dim
 - Denoisers: 16 layers
-- Use case: State-of-the-art results
+- Use case: the largest configuration provided here (untrained, unbenchmarked)
 
 ---
 
@@ -524,7 +545,7 @@ where the score ∇_x log p_t(x) is provided by the denoiser. This enables gener
 This implementation represents a fundamental re-imagination of Vision-Language Models through the lens of score-based generative modeling. By treating VLMs as learners of score fields rather than deterministic predictors, we gain:
 
 1. **Theoretical Elegance**: Unified framework grounded in probability theory
-2. **Practical Power**: State-of-the-art generation quality
+2. **Practical Power**: a generative formulation rather than a deterministic one (this implementation is untrained and unbenchmarked, so no quality claim is made)
 3. **Interpretability**: Explicit semantic landscapes
 4. **Flexibility**: Natural extension to new tasks and modalities
 

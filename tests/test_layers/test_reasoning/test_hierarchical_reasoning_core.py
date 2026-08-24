@@ -123,15 +123,29 @@ class TestHierarchicalReasoningCore:
 
         assert layer.pos_encodings == 'learned'
         assert layer.position_embedding is not None
-        assert layer.rope is None
+        # 'learned' adds its positional term at the embedding stage, so
+        # attention stays position-blind and must NOT also apply RoPE.
+        assert layer.h_reasoning.attention_type == 'multi_head'
+        assert layer.l_reasoning.attention_type == 'multi_head'
 
     def test_initialization_rope_pos(self, layer_config):
-        """Test initialization with RoPE positional embeddings."""
+        """Test initialization with RoPE positional embeddings.
+
+        RoPE is a per-Q/K rotation and lives INSIDE attention. The core owns no
+        rotary layer of its own (plan-2026-08-17T183311-79c63e38/D-012): it used
+        to, and that instance was never handed a Q or K tensor by any code path,
+        which is precisely how a model advertising RoPE shipped exactly
+        permutation-equivariant.
+        """
         layer = HierarchicalReasoningCore(**layer_config)
 
         assert layer.pos_encodings == 'rope'
-        assert layer.rope is not None
         assert layer.position_embedding is None
+        assert not hasattr(layer, 'rope')
+        for module in (layer.h_reasoning, layer.l_reasoning):
+            assert module.attention_type == 'group_query'
+            assert module.max_seq_len == layer.total_seq_len
+            assert module.rope_theta == layer.rope_theta
 
     def test_empty_carry(self, layer_config):
         """Test empty carry generation."""

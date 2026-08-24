@@ -1,53 +1,88 @@
 """
-Masked Language Model (MLM) Pre-training Framework
-====================================================
+Masked language model pre-trainer that wraps an arbitrary encoder and corrupts its
+input on the fly, with a configurable mask/random/unchanged corruption split.
 
-A flexible and model-agnostic framework for pre-training NLP foundation models
-using the Masked Language Modeling (MLM) objective, as introduced in BERT.
-This module is designed to work with any Keras-based transformer encoder.
+Autoregressive factorization conditions each token only on its left context, which
+forces every representation in the network to be one-sided. Masked language modelling
+removes that constraint by changing the objective rather than the architecture: delete
+a random subset `S` of positions and maximize `sum_{i in S} log p(x_i | x_notS)`. Because
+the target is held out of the input, attention can be fully bidirectional without the
+prediction becoming trivial, and each position's representation is free to use both
+sides of the sentence. The price is supervision density: only the selected positions
+produce any signal, so a sequence yields roughly `mask_ratio * T` training targets
+instead of `T`. That is why the ratio is a tuned quantity, and why the corruption is
+drawn fresh inside `train_step`/`test_step` rather than baked into the dataset - the
+same example is masked differently on every epoch, which multiplies the effective
+number of distinct training examples at no storage cost.
 
-Based on: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"
-(Devlin et al., 2018) https://arxiv.org/abs/1810.04805
+The corruption itself is not a plain deletion, and the reason is a train/deploy
+mismatch: the `[MASK]` id is an artifact of pre-training and never appears in the
+downstream inputs the encoder will eventually see. Conditioning entirely on it would
+let the encoder learn a representation that is only correct in the presence of a token
+it will never meet again. So of the selected positions a fraction
+`1 - random_token_ratio - unchanged_ratio` (0.8 by default) becomes `[MASK]`,
+`random_token_ratio` (0.1) becomes a uniformly drawn vocabulary id, and
+`unchanged_ratio` (0.1) is left verbatim. All three groups are scored. The unchanged
+group is the important one: since the model cannot tell a scored-but-unchanged position
+from an ordinary one, it must keep a predictive representation at *every* position
+rather than only where a mask token flags one. The random-token group additionally
+stops the model from assuming the observed id is always correct.
 
-Usage Examples:
---------------
+Selection and corruption are independent per-token uniform draws
+(`dl_techniques.utils.masking.strategies.apply_mlm_masking`), not quotas: 15/80/10/10
+are expectations, and the number of masked positions varies from batch to batch.
+Positions whose id appears in `special_token_ids` are excluded by value equality.
+Padding is excluded only when an `attention_mask` is supplied; call this without one
+and pad positions are eligible for masking and are scored like any other token.
 
-.. code-block:: python
+Labels are the full uncorrupted id tensor, so the per-position cross entropy is dense
+and the restriction to masked positions happens in the reduction: the boolean selection
+mask is passed as `sample_weight`, and the loss is
+`sum(CE * mask) / max(sum(mask), 1)`. Unselected positions are multiplied by exactly
+zero, so they contribute neither loss nor gradient, and normalizing by the number of
+selected tokens rather than by the sequence length makes the loss scale independent of
+how many tokens the Bernoulli draw happened to select. The `max(..., 1)` floor keeps a
+batch in which nothing was selected finite instead of producing `0/0`.
 
-    import keras
-    import tensorflow as tf
-    from bert import BERT
-    from transformers import BertTokenizer
+The prediction head is `Dense(hidden_size, gelu) -> Dropout -> LayerNorm ->
+Dense(vocab_size)`. Two things about it diverge from BERT's and are deliberate. First,
+the output projection is an independent `hidden_size x vocab_size` matrix and is *not*
+tied to the encoder's input embedding table. The wrapper accepts any encoder and cannot
+assume that an embedding matrix is exposed, or under what attribute, so tying would make
+the model-agnostic contract conditional on encoder internals; the cost is an extra
+`hidden_size * vocab_size` parameters and the loss of the regularization that tying
+provides. Second, BERT places LayerNorm directly after the activation and uses no
+dropout in the head, whereas here dropout sits between them.
 
-    # 1. Create a foundation model to be pretrained
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    encoder = BERT.from_variant("base", vocab_size=tokenizer.vocab_size)
+"Model-agnostic" is a contract, not an absence of one. The encoder must expose a
+`hidden_size` attribute (a missing one raises `ValueError` at construction) and its
+`call` must return a mapping containing `last_hidden_state`.
 
-    # 2. Create the MLM pre-training model
-    mlm_pretrainer = MaskedLanguageModel(
-        encoder=encoder,
-        vocab_size=tokenizer.vocab_size,
-        mask_ratio=0.15,
-        mask_token_id=tokenizer.mask_token_id,
-        special_token_ids=tokenizer.all_special_ids,
-    )
+`train_step` and `test_step` are hand-written over `tf.GradientTape`, so this model is
+TensorFlow-backend only. The `metrics` property is overridden to return the two internal
+trackers PLUS whatever was passed to `compile(metrics=...)`, and `train_step` feeds the
+compiled ones explicitly; a compiled metric whose NAME collides with `loss` or
+`accuracy` is still dropped, because the step's return dict is keyed by name, but it now
+logs a warning instead of vanishing. Validation masking is dynamic as well, so `val_loss` carries the
+noise of a fresh corruption draw and an epoch-to-epoch comparison mixes model change
+with sampling noise. `call()` deliberately does no masking at all: it runs the encoder
+on the inputs as given and returns logits for every position, which is what makes
+`predict()` usable for scoring an already-masked sequence prepared by the caller.
 
-    # 3. Compile the model
-    mlm_pretrainer.compile(
-        optimizer=keras.optimizers.AdamW(learning_rate=5e-5)
-    )
-
-    # 4. Start pre-training
-    mlm_pretrainer.fit(train_dataset, epochs=5)
-
-    # 5. Extract the pretrained encoder for downstream tasks
-    pretrained_encoder = mlm_pretrainer.encoder
-    pretrained_encoder.save("pretrained_bert_encoder.keras")
-
+References:
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional Transformers for
+      Language Understanding. (https://arxiv.org/abs/1810.04805)
+    - Liu et al., 2019. RoBERTa: A Robustly Optimized BERT Pretraining Approach.
+      (https://arxiv.org/abs/1907.11692)
+    - Taylor, 1953. "Cloze Procedure": A New Tool for Measuring Readability.
+      Journalism Quarterly.
+    - Press and Wolf, 2017. Using the Output Embedding to Improve Language Models.
+      (https://arxiv.org/abs/1608.05859)
 """
 
 import keras
 import tensorflow as tf
+from keras import ops
 from typing import Dict, Any, Optional, Union, List, Tuple
 
 # ---------------------------------------------------------------------
@@ -56,6 +91,11 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking.strategies import apply_mlm_masking
+from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 
 # ---------------------------------------------------------------------
@@ -125,8 +165,8 @@ class MaskedLanguageModel(keras.Model):
     :param initializer_range: The standard deviation for weight initialization
         in the MLM head. Defaults to 0.02.
     :type initializer_range: float
-    :param mlm_head_dropout: Dropout rate for the MLM head. Defaults to 0.1.
-    :type mlm_head_dropout: float
+    :param mlm_head_dropout_rate: Dropout rate for the MLM head. Defaults to 0.1.
+    :type mlm_head_dropout_rate: float
     :param layer_norm_eps: Epsilon for LayerNormalization in MLM head.
         Defaults to 1e-12.
     :type layer_norm_eps: float
@@ -144,7 +184,7 @@ class MaskedLanguageModel(keras.Model):
             special_token_ids: Optional[List[int]] = None,
             mlm_head_activation: str = "gelu",
             initializer_range: float = 0.02,
-            mlm_head_dropout: float = 0.1,
+            mlm_head_dropout_rate: float = 0.1,
             layer_norm_eps: float = 1e-12,
             **kwargs: Any,
     ) -> None:
@@ -154,7 +194,7 @@ class MaskedLanguageModel(keras.Model):
         # Validate configuration
         self._validate_config(
             vocab_size, mask_ratio, mask_token_id, random_token_ratio,
-            unchanged_ratio, initializer_range, mlm_head_dropout
+            unchanged_ratio, initializer_range, mlm_head_dropout_rate
         )
 
         # Store all configuration parameters
@@ -165,9 +205,9 @@ class MaskedLanguageModel(keras.Model):
         self.random_token_ratio = random_token_ratio
         self.unchanged_ratio = unchanged_ratio
         self.special_token_ids = special_token_ids or []
-        self.mlm_head_activation = mlm_head_activation
+        self.mlm_head_activation = deserialize_activation(mlm_head_activation)
         self.initializer_range = initializer_range
-        self.mlm_head_dropout = mlm_head_dropout
+        self.mlm_head_dropout_rate = mlm_head_dropout_rate
         self.layer_norm_eps = layer_norm_eps
 
         # Validate encoder has required attributes
@@ -187,7 +227,7 @@ class MaskedLanguageModel(keras.Model):
             name="mlm_dense",
         )
         self.mlm_dropout = keras.layers.Dropout(
-            rate=self.mlm_head_dropout,
+            rate=self.mlm_head_dropout_rate,
             name="mlm_dropout"
         )
         self.mlm_norm = keras.layers.LayerNormalization(
@@ -213,8 +253,58 @@ class MaskedLanguageModel(keras.Model):
 
     @property
     def metrics(self):
-        """List of metrics for Keras to track."""
-        return [self.loss_tracker, self.acc_metric]
+        """Metrics Keras tracks: the two internal trackers PLUS any compiled ones.
+
+        This property previously returned ONLY `[loss_tracker, acc_metric]`.
+        Because `train_step`/`test_step` build their return dict by iterating
+        this same property, anything passed to `compile(metrics=[...])` was
+        built by Keras and then never updated and never reported — it vanished
+        silently, with no error and no warning.
+
+        The compiled metrics are appended rather than substituted, so the two
+        tracker names `loss` and `accuracy` keep their existing meaning; a large
+        body of tests asserts on them.
+        """
+        tracked = [self.loss_tracker, self.acc_metric]
+        compiled = getattr(self, "_compile_metrics", None)
+        if compiled is not None:
+            names = {m.name for m in tracked}
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-131
+            # The name dedup must stay NAME-based: train_step returns
+            # ``{m.name: m.result() for m in self.metrics}``, so admitting a
+            # second metric called "accuracy" would not add a row, it would
+            # overwrite the tracker's under the same key. Do NOT "fix" this by
+            # comparing identity. Warn instead -- the dropped metric IS updated
+            # (measured 0.015625 against the tracker's 0.055556 on one epoch),
+            # so silence made a live, diverging number invisible. See D-131.
+            dropped = sorted(m.name for m in compiled.metrics if m.name in names)
+            if dropped and not getattr(self, "_warned_metric_name_clash", False):
+                self._warned_metric_name_clash = True
+                logger.warning(
+                    f"compile(metrics=...) supplied {dropped}, which collide with this "
+                    f"model's own trackers {sorted(names)} and will NOT be reported. "
+                    f"Rename them to see their values."
+                )
+            tracked += [m for m in compiled.metrics if m.name not in names]
+        return tracked
+
+    def _update_compiled_metrics(
+            self,
+            labels: keras.KerasTensor,
+            logits: keras.KerasTensor,
+            sample_weight: Optional[keras.KerasTensor] = None
+    ) -> None:
+        """Feed the compiled metrics, which nothing updated before this.
+
+        Kept separate from the two internal trackers because those are updated
+        with an explicit `masked_positions` weight and must keep that exact
+        semantics; this only forwards the same signals to whatever the caller
+        compiled.
+        """
+        compiled = getattr(self, "_compile_metrics", None)
+        if compiled is None:
+            return
+        compiled.update_state(labels, logits, sample_weight=sample_weight)
 
     def _validate_config(
             self,
@@ -224,7 +314,7 @@ class MaskedLanguageModel(keras.Model):
             random_token_ratio: float,
             unchanged_ratio: float,
             initializer_range: float,
-            mlm_head_dropout: float,
+            mlm_head_dropout_rate: float,
     ) -> None:
         """Validate model configuration parameters."""
         if vocab_size <= 0:
@@ -256,11 +346,27 @@ class MaskedLanguageModel(keras.Model):
             raise ValueError(
                 f"initializer_range must be positive, got {initializer_range}"
             )
-        if not (0.0 <= mlm_head_dropout < 1.0):
+        if not (0.0 <= mlm_head_dropout_rate < 1.0):
             raise ValueError(
-                f"mlm_head_dropout must be between 0 and 1, "
-                f"got {mlm_head_dropout}"
+                f"mlm_head_dropout_rate must be between 0 and 1, "
+                f"got {mlm_head_dropout_rate}"
             )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method MaskedLanguageModel inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
             self,
@@ -326,9 +432,27 @@ class MaskedLanguageModel(keras.Model):
                 y_pred=logits,
                 sample_weight=masked_positions,
             )
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
+            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
+            # the SCALED value is what `tape.gradient` differentiates while the
+            # UNSCALED value is what is reported. Do NOT "simplify" this back
+            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
+            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
+            # every gradient by `dynamic_scale` (2**15 initially)
+            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
+            # precision -- it divides the whole update by the loss scale, with
+            # no warning of any kind. In float32 it is a provable no-op: the
+            # base `Optimizer.scale_loss` returns `loss` unchanged unless
+            # `loss_scale_factor` is set. Keras' own default TF `train_step`
+            # does exactly this; overriding `train_step` silently opts out.
+            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
+            # float32 3.561846e+01 vs mixed_float16 1.617076e-03, ratio 2.203e+04, on a REAL BERT encoder
+            # See decisions.md D-036, and the same ruling at
+            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            scaled_loss = self.optimizer.scale_loss(loss)
 
         trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
+        gradients = tape.gradient(scaled_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         # Manually update the state of the metrics
@@ -338,6 +462,7 @@ class MaskedLanguageModel(keras.Model):
             y_pred=logits,
             sample_weight=masked_positions
         )
+        self._update_compiled_metrics(labels, logits, masked_positions)
 
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
@@ -373,6 +498,7 @@ class MaskedLanguageModel(keras.Model):
             y_pred=logits,
             sample_weight=masked_positions
         )
+        self._update_compiled_metrics(labels, logits, masked_positions)
 
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
@@ -392,12 +518,15 @@ class MaskedLanguageModel(keras.Model):
         loss = loss_fn(y, y_pred)
 
         if sample_weight is not None:
-            sample_weight = tf.cast(sample_weight, dtype=loss.dtype)
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `keras.ops` on the
+            # traced path. Only the `GradientTape` in `train_step` stays raw --
+            # it is the documented exception (module docstring line 61).
+            sample_weight = ops.cast(sample_weight, dtype=loss.dtype)
             loss = loss * sample_weight
-            num_masked = tf.maximum(tf.reduce_sum(sample_weight), 1.0)
-            return tf.reduce_sum(loss) / num_masked
+            num_masked = ops.maximum(ops.sum(sample_weight), 1.0)
+            return ops.sum(loss) / num_masked
         else:
-            return tf.reduce_mean(loss)
+            return ops.mean(loss)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the configuration of the model for serialization."""
@@ -411,9 +540,9 @@ class MaskedLanguageModel(keras.Model):
                 "random_token_ratio": self.random_token_ratio,
                 "unchanged_ratio": self.unchanged_ratio,
                 "special_token_ids": self.special_token_ids,
-                "mlm_head_activation": self.mlm_head_activation,
+                "mlm_head_activation": serialize_activation(self.mlm_head_activation),
                 "initializer_range": self.initializer_range,
-                "mlm_head_dropout": self.mlm_head_dropout,
+                "mlm_head_dropout_rate": self.mlm_head_dropout_rate,
                 "layer_norm_eps": self.layer_norm_eps,
             }
         )

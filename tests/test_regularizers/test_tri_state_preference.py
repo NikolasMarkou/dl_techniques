@@ -8,7 +8,7 @@ The regularizer should encourage weights to converge to -1, 0, or 1.
 
 import pytest
 import tensorflow as tf
-from keras.api.layers import Dense
+from keras.api.layers import Dense, Input
 from keras.api.models import Sequential
 from dl_techniques.regularizers.tri_state_preference import TriStatePreferenceRegularizer
 
@@ -125,7 +125,8 @@ def test_keras_integration():
 
     # Create simple model with regularizer
     model = Sequential([
-        Dense(4, input_shape=(2,), kernel_regularizer=regularizer)
+        Input(shape=(2,)),
+        Dense(4, kernel_regularizer=regularizer)
     ])
 
     # Compile model

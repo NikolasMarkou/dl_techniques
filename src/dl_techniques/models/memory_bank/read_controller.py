@@ -1,8 +1,8 @@
 """Memory read controller — top-K STE retrieval + gated injection.
 
-This module implements the read-tap of the dual-tap memory architecture.
-Step 3 (this commit) implements the retrieval and gating; Step 4 will add
-the four anti-collapse aux losses on top.
+This module implements the read-tap of the dual-tap memory architecture:
+top-K retrieval, the gated injection, and the anti-collapse aux losses
+that keep the long-term bank from collapsing onto a few slots.
 
 Algorithm (per F-004 §3-§4)::
 
@@ -27,6 +27,7 @@ Algorithm (per F-004 §3-§4)::
 import math
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import keras
 from keras import ops
 
@@ -34,6 +35,15 @@ from dl_techniques.utils.logger import logger
 
 
 _NEG_INF = -1.0e9
+
+#: Config key removed on 2026-08-19: an
+#: ``infonce_temperature`` constructor argument that was stored, forwarded from
+#: :class:`~dl_techniques.models.memory_bank.wave_field_memory_llm.WaveFieldMemoryLLM`
+#: and serialized by both ``get_config()`` methods while no code read it. Both
+#: ``from_config`` implementations drop it so pre-removal artifacts still load;
+#: the name lives here, once, because both of them need it. See decisions.md
+#: plan-2026-08-18T140459-7991552f/D-033.
+_DEAD_INFONCE_TEMPERATURE_KEY = "infonce_temperature"
 
 
 # ---------------------------------------------------------------------
@@ -77,16 +87,34 @@ class MemoryReadController(keras.layers.Layer):
     :param layer_norm_eps: LayerNorm epsilon for ``V_proj`` norm.
     :param kwargs: Forwarded to :class:`keras.layers.Layer`.
 
-    Aux-loss enable flags (default ``False`` — Step 4 will turn them on):
+    Aux-loss enable flags (default ``False``):
         - ``enable_gate_entropy``
         - ``enable_load_balance``
         - ``enable_z_loss``
         - ``enable_diversity``
         - ``enable_infonce``
 
-    Variable-name prefixes are ``memory_`` for keys/values/projections and
-    ``gate_`` for the gate (so the custom ``train_step`` routes their
-    gradients to the memory optimizer).
+    These flags are **static graph shape**, not a runtime switch. They are
+    read as ordinary Python booleans inside :meth:`call`, so their value at
+    the moment the enclosing ``train_function`` is traced decides, once and
+    for all, whether the corresponding ``add_loss`` term exists in the
+    graph. Flipping one from a ``keras.callbacks.Callback`` during
+    ``fit()`` changes nothing: Keras traces ``train_function`` *before*
+    ``on_train_begin`` and rebuilds it only from ``compile()``. Set them at
+    construction. The **runtime** curriculum switch is the ``aux_scale``
+    tensor argument of :meth:`call` — a value derived from the model's
+    ``current_phase`` ``Variable`` and multiplied into every term, so it is
+    read fresh on every traced step.
+
+    Sublayer names carry ``memory_`` for keys/values/projections and
+    ``gate_`` for the gate. Routing to the memory optimizer does **not**
+    depend on those names: the custom ``train_step`` matches the leading
+    component of ``Variable.path``, which for every weight in this
+    controller is the controller's own layer name
+    (``memory_read_controller``). Under Keras 3 a sublayer's weights are
+    named ``kernel``/``bias``/``gamma`` — the parent layer's name appears
+    only in ``.path`` — so a ``.name``-based match would route every one
+    of them, ``gate_W_g`` included, to the backbone optimizer.
     """
 
     def __init__(
@@ -101,7 +129,8 @@ class MemoryReadController(keras.layers.Layer):
         initializer_range: float = 0.02,
         gate_init_bias: float = -3.0,
         layer_norm_eps: float = 1e-5,
-        # Aux loss enable flags (Step 4 wires them in).
+        # Aux loss enable flags. STATIC graph shape — see the class
+        # docstring; the runtime switch is `call`'s `aux_scale`.
         enable_gate_entropy: bool = False,
         enable_load_balance: bool = False,
         enable_z_loss: bool = False,
@@ -123,7 +152,6 @@ class MemoryReadController(keras.layers.Layer):
         # Sub-sample sizes for cheap aux losses on large S_lt.
         diversity_subsample: int = 1024,
         infonce_negatives: int = 256,
-        infonce_temperature: float = 0.1,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -178,7 +206,6 @@ class MemoryReadController(keras.layers.Layer):
 
         self.diversity_subsample = diversity_subsample
         self.infonce_negatives = infonce_negatives
-        self.infonce_temperature = infonce_temperature
 
         # M_static is the static last-axis cardinality of the routing
         # tensor — required by ops.one_hot under XLA.
@@ -238,6 +265,16 @@ class MemoryReadController(keras.layers.Layer):
             initializer=self._log_temp_initializer,
             trainable=True,
         )
+        # DECISION plan-2026-08-18T140459-7991552f/D-033
+        # This weight is the ONLY InfoNCE temperature. Do NOT re-add an
+        # `infonce_temperature` constructor argument: one existed until
+        # 2026-08-19, was forwarded model -> controller and emitted by both
+        # `get_config()`s, and was read by nothing, so a caller asking for
+        # `infonce_temperature=0.05` trained at softplus(0.0)+1e-3 == 0.694 and
+        # then saw 0.05 echoed back in the reloaded config. Seeding this
+        # initializer from such an argument is NOT a free fix either -- it
+        # would move the shipped default init from 0.694 to 0.1 and change
+        # every future training run. See decisions.md.
         # B2: learnable InfoNCE temperature. tau = softplus(log_temp_nce)
         # + 1e-3 to keep tau strictly positive.
         # DECISION plan_2026-05-09_0f39a086/D-001 — added a separate
@@ -259,6 +296,7 @@ class MemoryReadController(keras.layers.Layer):
         k_wm: Any,
         v_wm: Any,
         wm_padding_mask: Any,
+        aux_scale: Optional[Any] = None,
         training: Optional[bool] = None,
     ) -> Any:
         """Run retrieval and return ``g * V_proj`` (gated injection).
@@ -267,7 +305,7 @@ class MemoryReadController(keras.layers.Layer):
 
            **Positional-7 signature (D3).** This ``call`` takes seven
            positional tensor inputs (``x_r``, ``k_lt``, ``v_lt``, ``k_wm``,
-           ``v_wm``, ``wm_padding_mask``, ``training``). It is **not**
+           ``v_wm``, ``wm_padding_mask``, ``aux_scale``). It is **not**
            compatible with the Keras Functional API — Functional models
            expect ``call(inputs, ...)`` with at most one tensor input. The
            parent :class:`WaveFieldMemoryLLM` is a subclassed
@@ -281,6 +319,11 @@ class MemoryReadController(keras.layers.Layer):
         :param v_wm: Working-memory values, shape ``(B, max_seq_len, d_v)``.
         :param wm_padding_mask: Padding mask for WM positions, shape
             ``(B, max_seq_len)``. 1.0 on real positions, 0.0 on padded.
+        :param aux_scale: Scalar multiplied into every aux loss before
+            ``add_loss``. Pass a **tensor read from a ``Variable``** (the
+            parent model passes ``current_phase != PHASE_WARMUP``) to switch
+            the anti-collapse losses on and off inside an already-traced
+            graph. ``None`` means ``1.0`` — the standalone / eager default.
         :param training: Forwarded for parity (no dropout here).
         :returns: Gated injection ``g * V_proj`` of shape ``(B, T, D)``.
             Caller is responsible for the residual add.
@@ -346,14 +389,21 @@ class MemoryReadController(keras.layers.Layer):
         # ops.top_k returns (values, indices). We take the indices.
         top_vals, top_idx = ops.top_k(sim_clipped, k=self.top_k)
         # top_idx shape: (B, T, H, top_k).
+        # `ops.one_hot` with no `dtype=` returns float32 regardless of the active
+        # mixed-precision policy; the float32 mask then met the float16 `soft_w`
+        # one statement below. See decisions.md D-045.
         hard_one_hot = ops.one_hot(
-            top_idx, num_classes=self.M_static,
+            top_idx, num_classes=self.M_static, dtype=self.compute_dtype,
         )  # (B, T, H, top_k, M_static)
         hard_mask = ops.sum(hard_one_hot, axis=-2)  # (B, T, H, M_static)
         # Re-normalize the soft weights restricted to the top-K positions.
+        # The `1e-9` floor is VOID in float16 — `np.float16(1e-9)` is exactly
+        # 0.0 — so it is raised to the dtype's smallest normal when the compute
+        # dtype cannot represent it. See decisions.md D-045.
+        renorm_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
         masked_soft = soft_w * hard_mask
         hard_w = masked_soft / (
-            ops.sum(masked_soft, axis=-1, keepdims=True) + 1e-9
+            ops.sum(masked_soft, axis=-1, keepdims=True) + renorm_eps
         )
 
         # STE: forward = hard_w, backward = soft_w.
@@ -382,12 +432,18 @@ class MemoryReadController(keras.layers.Layer):
         g = ops.sigmoid(self.W_g(x_r))  # (B, T, D)
         injection = g * v_proj
 
-        # 10. Anti-collapse aux losses (Step 4).
-        # All gated by enable flags so phase-1 disables them all. Each loss
-        # is computed only when training=True to avoid double-accumulation
-        # at eval time (LESSONS — `add_loss` semantics).
-        # D4: also short-circuit when no aux loss is enabled — saves a few
-        # bool checks + the function call in Phase 1 / unscheduled use.
+        # 10. Anti-collapse aux losses.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — the enable flags
+        # below decide which terms EXIST in the graph; the curriculum's
+        # on/off switch is the `aux_scale` TENSOR, multiplied into every
+        # term further down in `_maybe_add_aux_losses`. Do NOT move the
+        # phase test back into this Python `if`: a callback flipping
+        # `self.enable_*` mid-`fit()` cannot reach an already-traced
+        # `train_function` (Keras rebuilds it only from `compile()`), so the
+        # 4-phase curriculum silently never enabled a single aux loss. See
+        # decisions.md D-016.
+        # Each loss is still computed only when training=True to avoid
+        # double-accumulation at eval time (LESSONS — `add_loss` semantics).
         any_aux_enabled = (
             self.enable_gate_entropy
             or self.enable_load_balance
@@ -405,6 +461,7 @@ class MemoryReadController(keras.layers.Layer):
                 k_lt=k_lt,
                 v_lt=v_lt,
                 v_proj=v_proj,
+                aux_scale=aux_scale,
             )
 
         return injection
@@ -425,7 +482,7 @@ class MemoryReadController(keras.layers.Layer):
         return (input_shape[0], input_shape[1], self.embed_dim)
 
     # ------------------------------------------------------------------
-    # Aux losses (Step 4)
+    # Aux losses
     # ------------------------------------------------------------------
 
     def _maybe_add_aux_losses(
@@ -437,11 +494,27 @@ class MemoryReadController(keras.layers.Layer):
         k_lt: Any,
         v_lt: Any,
         v_proj: Any,
+        aux_scale: Optional[Any] = None,
     ) -> None:
         """Compute and add the four (+ optional z-loss) anti-collapse aux
-        losses via :meth:`self.add_loss`. Each is gated by an enable flag
-        so phase-1 (or eager testing) can short-circuit all of them.
+        losses via :meth:`self.add_loss`.
+
+        Two independent gates apply to every term. The ``enable_*`` flags
+        are Python booleans and decide whether a term is emitted into the
+        graph at all (static, decided at trace time). ``aux_scale`` is a
+        scalar multiplied into whatever is emitted, and is the gate the
+        4-phase curriculum drives at runtime — pass the model's
+        ``current_phase``-derived tensor, or ``None`` for ``1.0``.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-016 — every term goes
+        # through `_add`, so the runtime phase gate cannot be forgotten at
+        # one of the six sites. Do NOT call `self.add_loss` directly here.
+        def _add(term: Any) -> None:
+            if aux_scale is None:
+                self.add_loss(term)
+            else:
+                self.add_loss(term * ops.cast(aux_scale, term.dtype))
+
         # 1. Gate entropy: maximize H(g) by adding `lambda * (-H_mean)`.
         if self.enable_gate_entropy:
             eps = 1e-7
@@ -449,7 +522,7 @@ class MemoryReadController(keras.layers.Layer):
             ent = -(g_clip * ops.log(g_clip)
                      + (1.0 - g_clip) * ops.log(1.0 - g_clip))  # (B, T, D)
             ent_mean = ops.mean(ent)
-            self.add_loss(self.lambda_gate_entropy * (-ent_mean))
+            _add(self.lambda_gate_entropy * (-ent_mean))
 
         # 2. Load balance: only over the M_LT slice (first S_lt columns).
         # routing_lt: (B, T, H, S_lt). soft_lt: (B, T, H, S_lt).
@@ -463,14 +536,14 @@ class MemoryReadController(keras.layers.Layer):
                 * float(self.s_lt)
                 * ops.sum(ops.stop_gradient(f_i) * p_i)
             )
-            self.add_loss(lb)
+            _add(lb)
 
         # 3. Z-loss on the M_LT slice (logsumexp(sim_lt))^2.
         if self.enable_z_loss:
             sim_lt = sim_clipped[..., :self.s_lt]  # (B, T, H, S_lt)
             lse = ops.logsumexp(sim_lt, axis=-1)
             zl = self.lambda_z_loss * ops.mean(lse * lse)
-            self.add_loss(zl)
+            _add(zl)
 
         # 4. Key diversity: subsample `diversity_subsample` keys from K_lt
         # and add lambda * mean(off-diagonal cos-sim ** 2).
@@ -496,7 +569,7 @@ class MemoryReadController(keras.layers.Layer):
             eye = ops.eye(n_sub, dtype=cos.dtype)
             cos_off = cos * (1.0 - eye)
             div = self.lambda_diversity * ops.mean(cos_off * cos_off)
-            self.add_loss(div)
+            _add(div)
 
         # 4b. O6 — V_lt diversity. Mirrors the K_lt diversity loss but
         # over the value bank to keep retrieved values from collapsing
@@ -517,7 +590,7 @@ class MemoryReadController(keras.layers.Layer):
             eye_v = ops.eye(n_sub_v, dtype=cos_v.dtype)
             cos_v_off = cos_v * (1.0 - eye_v)
             div_v = self.lambda_v_diversity * ops.mean(cos_v_off * cos_v_off)
-            self.add_loss(div_v)
+            _add(div_v)
 
         # 5. B2 — proper InfoNCE contrastive loss.
         # DECISION plan_2026-05-09_0f39a086/D-001 — the previous
@@ -587,7 +660,7 @@ class MemoryReadController(keras.layers.Layer):
             )  # (B, T, 1 + n_neg)
             log_probs = ops.log_softmax(all_logits / tau, axis=-1)
             nce = -ops.mean(log_probs[..., 0])  # -log P(positive)
-            self.add_loss(self.lambda_infonce * nce)
+            _add(self.lambda_infonce * nce)
 
     def _build_wm_mask(
         self, t: Any, wm_padding_mask: Any,
@@ -596,7 +669,25 @@ class MemoryReadController(keras.layers.Layer):
 
         Output shape ``(B, T, max_seq_len)``: ``0`` on allowed positions,
         ``-inf`` on disallowed (causal-violating OR padded).
+
+        The mask is materialised in the layer's ``compute_dtype`` with a
+        sentinel clamped to that dtype's representable range — see the
+        ``DECISION`` anchor below.
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-045
+        # The additive mask is built in `compute_dtype`, and its sentinel is
+        # `max(_NEG_INF, finfo(dtype).min / 2)`. Two separate defects are closed
+        # here and BOTH must stay closed:
+        #   1. the mask was hard-coded `dtype="float32"` and was added to a
+        #      float16 `sim` under `mixed_float16`, which RAISED;
+        #   2. `-1.0e9` is NOT representable in float16 — it overflows to `-inf`,
+        #      and an `-inf` entering `softmax` is the fully-masked-row NaN shape.
+        # Do NOT "simplify" this back to a single literal: in float32 the clamp is
+        # inert by construction (`max(-1e9, -1.7e38) == -1e9` exactly), so the
+        # dtype-aware spelling costs float32 nothing.
+        # See decisions.md D-045.
+        mask_dtype = self.compute_dtype
+        neg_inf = max(_NEG_INF, float(np.finfo(mask_dtype).min) / 2.0)
         # Causal portion: position `i` (in WM, 0..max_seq_len-1) is
         # allowed for query at time t' iff i <= t'. We want a tensor
         # M_caus[b, t', i] = -inf if i > t' else 0.
@@ -606,8 +697,8 @@ class MemoryReadController(keras.layers.Layer):
         causal_bool = ops.expand_dims(wm_idx, axis=0) <= ops.expand_dims(q_idx, axis=1)
         causal_add = ops.where(
             causal_bool,
-            ops.zeros_like(causal_bool, dtype="float32"),
-            ops.full(ops.shape(causal_bool), _NEG_INF, dtype="float32"),
+            ops.zeros_like(causal_bool, dtype=mask_dtype),
+            ops.full(ops.shape(causal_bool), neg_inf, dtype=mask_dtype),
         )
         # Expand to (1, T, max_seq_len) -> broadcast against batch.
         causal_add = ops.expand_dims(causal_add, axis=0)
@@ -615,8 +706,8 @@ class MemoryReadController(keras.layers.Layer):
         # Padding mask: 1.0 -> 0.0 add, 0.0 -> -inf add.
         pad_add = ops.where(
             wm_padding_mask > 0.5,
-            ops.zeros_like(wm_padding_mask),
-            ops.full(ops.shape(wm_padding_mask), _NEG_INF, dtype="float32"),
+            ops.zeros_like(wm_padding_mask, dtype=mask_dtype),
+            ops.full(ops.shape(wm_padding_mask), neg_inf, dtype=mask_dtype),
         )  # (B, max_seq_len)
         pad_add = ops.expand_dims(pad_add, axis=1)  # (B, 1, max_seq_len)
 
@@ -650,6 +741,23 @@ class MemoryReadController(keras.layers.Layer):
             "lambda_v_diversity": self.lambda_v_diversity,
             "diversity_subsample": self.diversity_subsample,
             "infonce_negatives": self.infonce_negatives,
-            "infonce_temperature": self.infonce_temperature,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MemoryReadController":
+        """Rebuild from a ``get_config()`` dict, tolerating pre-2026-08-19 ones.
+
+        Configs saved before ``infonce_temperature`` was removed carry it. The
+        key is dropped rather than rejected: it never reached the InfoNCE term,
+        so a restored controller computes exactly what the saved one computed.
+        """
+        if _DEAD_INFONCE_TEMPERATURE_KEY in config:
+            config = {k: v for k, v in config.items()
+                      if k != _DEAD_INFONCE_TEMPERATURE_KEY}
+            logger.warning(
+                f"MemoryReadController: ignoring legacy config key "
+                f"'{_DEAD_INFONCE_TEMPERATURE_KEY}'; the InfoNCE temperature "
+                f"is the learned `log_temp_nce` weight and always was."
+            )
+        return cls(**config)

@@ -57,23 +57,37 @@ legitimately writes a trainer path as `train/vit/` rather than `src/train/vit/`.
 
 ## src/dl_techniques/ — the 13 subpackages
 
-Weighting matters more than completeness here: layers and models together are 560 of the
-library's Python files, i.e. 55% of everything under `src/`. The other eleven subpackages
+Weighting matters more than completeness here: layers and models together are 566 of the
+library's Python files, i.e. 56% of everything under `src/`. The other eleven subpackages
 combined are smaller than either one.
 
-> **Re-derived 2026-08-11, after the `models/beit/` + `src/train/beit/` package landed;
-> previously re-derived 2026-08-10, after the multi-package deletion pass**
-> (`convnext_patch_vae`, `cliffordnet` submodules, `bfcliffordunet`, `anomaly_detection`,
-> `qwen3_som`, two `modern_bert` modules). Every `.py` FILE-COUNT digit in this section and
-> in the corresponding Numbers-table rows moved in one edit together with the `560` / `55%`
-> prose above — that is the row-group rule for this section: never half-correct it. The
-> directory-COUNT rows (model packages, trainer dirs, test dirs, applications) were
-> re-derived in the same pass and are current.
+> **`layers`/`models` re-derived 2026-08-14 (second pass), after `models/mobile_clip_v2/`
+> was SPLIT into `models/fastvit/` (the assembled MCi tower) + `models/mobile_clip/mobile_clip_v2.py`
+> (the CLIP model), leaving `layers/fastvit/` untouched. That pass also corrected an
+> off-by-one in each of the two rows below — the pair total `561` had been right while its
+> `294`/`267` split was not; at that HEAD the true split was `295`/`266`. Re-derive with
+> `find src/dl_techniques/<pkg> -name '*.py' | wc -l`.
+>
+> **Whole-table re-derivation 2026-08-14 (first pass), after the `layers/fastvit/` +
+> `models/mobile_clip_v2/` packages
+> landed (every one of the ~68 Numbers-table rows was
+> re-executed, not only the rows this change moved). Previously re-derived 2026-08-11,
+> after the `models/beit/` + `src/train/beit/` package landed, and 2026-08-10, after the
+> multi-package deletion pass** (`convnext_patch_vae`, `cliffordnet` submodules,
+> `bfcliffordunet`, `anomaly_detection`, `qwen3_som`, two `modern_bert` modules). Every
+> `.py` FILE-COUNT digit in this section and in the corresponding Numbers-table rows moved
+> in one edit together with the `561` / `55%` prose above — that is the row-group rule for
+> this section: never half-correct it. (`561` and `55%` moved on 2026-08-14: `layers` gained 8
+> files and `models` lost 8 in the whole-table pass, leaving the pair at `560`/55%, and a
+> later same-day completion fix added `layers/fastvit/reference.py`, taking `layers` to 294
+> and the pair to `561`; 561/1006 is still 55%.) The directory-COUNT rows (model
+> packages, trainer dirs, test dirs, applications) were re-derived in the same pass and are
+> current. The 2026-08-14 pass also absorbed 17 rows that had already been stale at HEAD.
 
 | Subpackage | `.py` | Role |
 |---|---|---|
-| **`src/dl_techniques/layers/`** | 285 | **The largest package.** 20 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …) plus 74 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
-| **`src/dl_techniques/models/`** | 275 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. About a third (25 of 73) bind a `create_*` factory in their package init — do not assume one exists; see Part C. |
+| **`src/dl_techniques/layers/`** | 296 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
+| **`src/dl_techniques/models/`** | 267 | **The second largest.** 73 *top-level* model packages — not 73 architectures: `src/dl_techniques/models/time_series/` nests a further 7 model packages and `src/dl_techniques/models/bias_free_denoisers/` holds several denoiser architectures as sibling modules. As of 2026-08-19 **69 of 73** bind a `create_*` factory in their package init and **72 of 73** export a curated `__all__`; the 4 without a factory are `power_sampling`, `mamba`, `fnet` and the nested family `SAM/`, and `SAM/` is also the one without an `__all__` — a documented, deliberate exception, because re-exporting the class `SAM2` there would shadow the `SAM2/` subpackage (its own init docstring carries the reasoning). (This sentence said "70 of 73 ... the 3 without a factory (`power_sampling`, `SAM/`, `time_series/`)" until 2026-08-17: the count was one high and the list was wrong in both directions — `time_series/` DOES bind one, while `mamba` and `fnet` do not. Re-derive from the Numbers table row, never by memory.) See Part C. |
 | `src/dl_techniques/losses/` | 42 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 39 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
@@ -95,7 +109,7 @@ Every one of the 13 has its own `CLAUDE.md` — start there, not here.
 | Directory | Present here | Ships in a clone | Consequence |
 |---|---|---|---|
 | `src/`, `tests/`, `research/`, `imgs/`, `scripts/` | yes | yes | The whole repo a newcomer gets. |
-| `results/` | yes — 55 run dirs, 6.3 G | **no** (gitignored) | Zero checkpoints in a clone. |
+| `results/` | yes — 8 run dirs, 4.5 M | **no** (gitignored) | Zero checkpoints in a clone. These two digits are the most volatile in this file: they describe one machine's untracked scratch, and they fell from 55 dirs / 6.3 G to 6 / 3.4 M between 2026-08-11 and 2026-08-14, then rose to 8 / 4.5 M when `plan-2026-08-14T042537-ff96c6c6` proved a repo-root-write guard RED (the 2 added dirs are that injection's artifacts, deliberately left in place because nothing under `results/` may be deleted; the figure returns to 6 if the user removes them). Do not read them as a repo property, and never act on them — `results/` is gitignored and untracked, so a deletion there is unrecoverable. |
 | `plans/` | yes | **no** (gitignored) | Planner state is machine-local. |
 | `data/` | yes — 2.6 G | **no** (untracked) | Local datasets only. |
 
@@ -172,15 +186,23 @@ transformer block's constructor arguments. For the options behind `attention_typ
 
 ## The model / trainer / test triangle
 
+<!-- allow-dead-path: src/train/convunext/ - drift-note subject: deleted 2026-08-14 in the ConvUNext/bfconvunext merge; naming it is the point of the addendum below -->
+
 Three trees are meant to line up by directory name: 73 model packages under
-`src/dl_techniques/models/`, 48 trainer directories under `src/train/`, and 81 test
+`src/dl_techniques/models/`, 46 trainer directories under `src/train/`, and 81 test
 directories under `tests/test_models/`. (All three digits were re-measured on
-2026-08-10 after the `convnext_patch_vae` and `anomaly_detection` deletions. A
-further deletion pass is in flight in the same session, so re-run the Numbers-table
+2026-08-14 in the whole-table re-derivation; the trainer count had drifted 48 -> 47
+since 2026-08-10 without any row moving to record it. **ADDENDUM, 2026-08-14 (later
+the same day): 47 -> 46.** `src/train/convunext/` was deleted when
+`models/convunext` and `models/bias_free_denoisers/bfconvunext` were merged onto one
+`create_convunext(..., use_bias=...)` builder; its two scripts reached into the
+deleted `ConvUNextModel`'s subclass-only internals and had zero importers, zero
+tests and no row here. Both derivations move together: 48 -> 47 including
+`src/train/common/`, 47 -> 46 excluding it. Re-run the Numbers-table
 commands before quoting these; they are correct as of that measurement, not
-permanently.) **48 counts `src/train/` entries EXCLUDING
+permanently.) **46 counts `src/train/` entries EXCLUDING
 `src/train/common/`, which is a shared library, not a trainer** — the Numbers table
-carries both derivations (49 including it, 48 excluding it), because the two rows were
+carries both derivations (47 including it, 46 excluding it), because the two rows were
 once read as contradicting each other. Comparing those name lists directly is the
 obvious move and it produces a badly wrong picture. Four things break the correspondence:
 
@@ -297,48 +319,52 @@ Every command is in the Numbers table at the foot of this file.
 
 | Convention | Files following it (of the library's `.py`) |
 |---|---|
-| `@keras.saving.register_keras_serializable()` on custom classes | 468 |
-| A `get_config()` for round-trip serialization | 470 |
-| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 357 |
+| `@keras.saving.register_keras_serializable()` on custom classes | 479 |
+| A `get_config()` for round-trip serialization | 479 |
+| Logging through `src/dl_techniques/utils/logger.py`, never `print` | 340 |
 
 Three honest exceptions. None of them is a defect to go fix on sight; each is a
 thing you will meet and should not be surprised by.
 
-- **Raw TensorFlow has not been fully migrated.** 67 files under
+- **Raw TensorFlow has not been fully migrated.** 61 files under
   `src/dl_techniques/` still import `tensorflow` directly despite `keras.ops`
   being the stated backend-agnostic surface. The standing repo preference is to
   *migrate* such a site rather than document it as an accepted exception, unless
   it is genuinely unmigratable (FFT, SVD).
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
-  `src/dl_techniques/layers/attention/` — 324 modules carry Sphinx/reST
-  `:param:` and 251 carry a Google-style `Args:` block, and the two sets are not
+  `src/dl_techniques/layers/attention/` — 339 modules carry Sphinx/reST
+  `:param:` and 246 carry a Google-style `Args:` block, and the two sets are not
   disjoint: 13 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
-  *within itself* — 33 of its 34 modules. The split reaches the shared test
+  *within itself* — 34 of its 35 modules. The split reaches the shared test
   fixtures too: both `tests/conftest.py` and `tests/test_layers/conftest.py`
   document themselves in reST. Read the root `CLAUDE.md`'s "Google-style
   docstrings" line as a preference for new code, not a description of the tree.
-- **The factory convention is not universal, and the two ways of measuring it
-  disagree sharply.** 15 of the 73 model packages define no `create_*` function
-  *anywhere* in the package. But defining one and exporting one are different
-  things: only 25 of the 73 actually *bind* a `create_*` in their own
-  `<pkg>/__init__.py` — an import, a def or an assignment, not a mention
-  (concretely `src/dl_techniques/models/vit/__init__.py`) — and that is the
-  figure a caller actually experiences; the rest bury the factory in a submodule
-  you must know to import. Read the package init before assuming importability.
-  A plain mention-`grep create_` currently agrees at 25, but it is still the
-  wrong instrument and the two figures are not pinned together: until
-  2026-08-10 the grep gave 24, because
+- **The factory convention is now near-universal, but this entry is kept because
+  the measurement trap that produced it is not.** As of 2026-08-19 **69 of 73**
+  model packages bind a `create_*` in their own `<pkg>/__init__.py` and **72 of 73**
+  declare a curated `__all__` (`SAM/` is the deliberate exception), so the old
+  "read the init before assuming
+  importability" caveat is largely retired. Before the `1bfe89d08` curated-export
+  pass the binding figure was 27 of 73 while 14 packages defined no `create_*`
+  *anywhere* — two different numbers answering two different questions, which is
+  the point. Both have since moved: the same commands now give 69 and **1**
+  (`power_sampling` alone), and this bullet was left quoting the pre-pass pair for
+  three days. That is the entry's own lesson landing on the entry.
+  **Defining a factory and exporting one are different things**, and a plain
+  mention-`grep create_` answers neither: until 2026-08-10 it gave 24 against a
+  binding count of 25 because
   `src/dl_techniques/models/convnext_patch_vae/__init__.py` was a pure docstring
-  that only cross-referenced its factories without binding them. That package
-  has been deleted and no surviving init has that shape, so the gap is zero **by
-  accident, not by rule** — one docstring mention re-opens it. Use the binding
-  command in the Numbers table, never the mention-grep.
+  cross-referencing factories it never bound. Use an AST scan for the definition
+  question and the binding command in the Numbers table for the export question;
+  never the mention-grep. A grep-based census run on 2026-08-14 got this column
+  wrong for `convnext`, `squeezenet`, `mobilenet`, `qwen`, `gemma` and `gpt2`,
+  each time reporting a factory as missing when it existed.
 
 **Before writing a new layer or model, read
-`research/2026_keras_custom_models_instructions.md`.** The root `CLAUDE.md` names
+`research/2026_keras_custom_models_instructions_v2.md`.** The root `CLAUDE.md` names
 it as mandatory and at 3105 lines it is among the longest documents in the repo.
 Four of its rules are load-bearing. **Nothing enforces them.** None fails at
 layer-definition time: you find out at `.keras` save/load, at shape inference,
@@ -367,25 +393,21 @@ anchors rot. Everything else stays there: restating it here is how a map goes st
 
 `tests/` mirrors `src/dl_techniques/`: package `x` is tested by `tests/test_<x>/`,
 for example `tests/test_layers/`.
-Three named places break that rule, and each has cost someone a search:
+Two named places break that rule, and each has cost someone a search:
 
 - **`src/dl_techniques/visualization/` has no test directory at all.** It has a
   `CLAUDE.md`; it has no tests, and no test module anywhere imports it. The trap
   is that `tests/test_utils/test_visualization.py` exists and is a zero-byte
   file, so a name-based search finds something and learns nothing.
-- **`tests/test_analysis/` is a vestigial empty directory** — it holds nothing but an
-  empty init module and 0 test files, and its name shadows the real, populated
-  `tests/test_analyzer/` (2 files). Searching for "analysis tests" lands you in
-  the wrong one.
 - **`tests/test_models/test_lewm.py` is a loose file**, where every other model
   gets a `tests/test_models/test_<name>/` directory — e.g.
-  `tests/test_models/test_ccnets/`. Any directory-to-directory comparison
+  `tests/test_models/test_vit/`. Any directory-to-directory comparison
   reports `lewm` as untested. It is not.
 
 And one place that only *looks* broken: `src/dl_techniques/layers/sequence_pooling/`
 has no test *directory*, but it is tested — by the loose
 `tests/test_layers/test_sequence_pooling.py`. A loose module is the dominant
-layout there, 78 of them against 20 subdirectories, so under `tests/test_layers/`
+layout there, 78 of them against 21 subdirectories, so under `tests/test_layers/`
 a missing directory means nothing at all. Under `tests/test_models/`, where the
 directory is the norm, it usually does — which is why `lewm` is worth naming.
 
@@ -419,7 +441,7 @@ the map's job is to route you to the right one, not to paraphrase it.
 
 | Your question | Read |
 |---|---|
-| How do I write a new layer or model? | `research/2026_keras_custom_models_instructions.md` (mandatory) |
+| How do I write a new layer or model? | `research/2026_keras_custom_models_instructions_v2.md` (mandatory) |
 | What are the library-wide conventions? | `src/dl_techniques/CLAUDE.md` |
 | What attention variants exist, and which do I pick? | `src/dl_techniques/layers/attention/README.md`, then `src/dl_techniques/layers/attention/GUIDE.md` |
 | What activations / sequence-pooling options exist? | `src/dl_techniques/layers/activations/GUIDE.md`, `src/dl_techniques/layers/sequence_pooling/GUIDE.md` |
@@ -450,7 +472,7 @@ table are named precisely *because* they do not resolve.
 <!-- allow-dead-path: docs/ - ledger subject: generated on demand by `make docs`, never committed -->
 <!-- allow-dead-path: ww-img/ - ledger subject: named by the root CLAUDE.md, absent from disk -->
 <!-- allow-dead-path: .github/ - asserted absent on purpose: this repo has no CI -->
-<!-- allow-dead-path: src/dl_techniques/models/jepa/ - ledger subject: named by models/CLAUDE.md, never existed under that name -->
+<!-- allow-dead-path: src/dl_techniques/models/jepa/ - ledger subject: was named by models/CLAUDE.md until ba3ec3122; never existed under that name -->
 <!-- allow-dead-path: tests/test_models/test_mobilenet_v1.py - ledger subject: cited as the mirroring exemplar; the real path is a directory -->
 
 | The claim | Where it is made | Reality, and the proof |
@@ -461,9 +483,10 @@ table are named precisely *because* they do not resolve.
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
 | "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 49 files under `src/` name `keras.callbacks.Callback`; only 10 are in `src/dl_techniques/callbacks/` and 32 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
-| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Holds for the layer families, not for models: only 25 of the 73 model packages bind a `create_*` in their package init, and 15 define none anywhere. Both commands are in the Numbers table |
+| "Config-driven construction via factory functions" | root `CLAUDE.md` Core Conventions | Now holds for models too, though it did not when this row was written: 69 of the 73 model packages bind a `create_*` in their package init and only 1 (`power_sampling`) defines none anywhere. The row is kept because the pre-`1bfe89d08` figures — 27 and 14 — are what the root `CLAUDE.md` claim was measured against, and they moved without the map moving. Both commands are in the Numbers table |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
-| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — a sample of two already rot | `src/dl_techniques/models/CLAUDE.md` lists a package `src/dl_techniques/models/jepa/`; `src/dl_techniques/CLAUDE.md` cites `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar | Neither resolves. The real names are `src/dl_techniques/models/video_jepa/` and the *directory* `tests/test_models/test_mobilenet/`. `ls -d src/dl_techniques/models/*jepa*`; `ls -d tests/test_models/*mobilenet*`. This map verified only that its routing targets **exist** — it did not check what they say, and this row is the found-by-sampling floor, not a count |
+| **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split is 255 of 294. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
+| `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired by shipping `global_attention_interval = 1` for those two variants (all-global attention); they now run and measure **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
 are gitignored and will not be in your clone. The root `CLAUDE.md` is tracked, and the
@@ -479,6 +502,25 @@ against `~=2.0.2`), i.e. redundancy, not conflict. The divergence is coverage:
 `src/dl_techniques/datasets/nlp.py` and `src/dl_techniques/utils/tokenizer.py` import
 them. `pyproject.toml` is authoritative for the library API; a bare `pip install -e .`
 will not run the dataset loaders or the tokenizer, nor put you on a GPU wheel.
+
+
+### Checkpoint-affecting changes
+
+Recorded here because they change a weight tree, not just behaviour, and this file is
+the tracked place a future reader will look.
+
+* **2026-08-21 — `ModernBERT` `base` / `large` moved to `global_attention_interval = 1`.**
+  Every layer is now a `group_query` global layer, so the local layers' fused-QKV subtree
+  and its `relative_position_bias_table` are gone and the global layers' RoPE caches take
+  their place: **every parameter path under a swapped layer changes**, and any pre-existing
+  `base`/`large` checkpoint is unloadable. Impact check, run read-only BEFORE the edit:
+  `find results -iname "*modern*bert*"` returned **nothing**, and `find results -name '*.keras'`
+  returned **8 files, all `sam3_tiny_*/final_model.keras`** — so the local impact is **zero**.
+  A clone contains no checkpoints at all (see the `results/` row above). The hybrid schedule
+  remains reachable as `ModernBERT.from_variant("base", global_attention_interval=3)`, which
+  is the configuration that cannot complete a forward pass on this hardware.
+  Rationale and the rejected alternatives: the `D-019` / `D-027` / `D-135` anchors in
+  `models/modern_bert/model.py`.
 
 ---
 
@@ -517,6 +559,31 @@ count, run `find src -name '*.py' -exec cat {} + | wc -l` yourself and treat the
 valid for that instant only. The FILE-count rows below are kept: they move only when a
 file is added or deleted, which is a reviewable event rather than a side effect of typing.
 
+> **The `tests/` file-count row was re-derived on 2026-08-23** (1026 -> 1036: ten guard
+> modules added by `plan-2026-08-22-a11304c8`). At that same re-derivation ALL 66
+> enforceable rows in this table were re-run with their OWN commands and every other row
+> reproduced unchanged — notably `Python files under src/` held at 1007, which is the
+> mechanical statement that that plan added ZERO files under `src/`.
+>
+> **Superseded 2026-08-23** by `plan-2026-08-23-9a110062`, which re-derived ALL 67 enforceable
+> rows with their own commands; 10 moved. `Python files under src/` is now **1011** (+4: the
+> shared activation-serialization, model-build, Caffe-reference and DINO-reference helpers), and
+> `tests/` is **1042** (+8 guards). The +4 is the mechanical statement that THIS plan did add
+> files under `src/` — deliberately, each one collapsing a rule that previously had many homes.
+>
+> **Superseded 2026-08-24** by `plan-2026-08-23-009b7ccf` (BERT + ResNet doc/API repair). ALL 66
+> enforceable rows were re-run with their OWN commands; exactly ONE moved. `tests/` is now
+> **1055** (+13), and every other row — including `Python files under src/` at **1011** — held
+> unchanged, which is the mechanical statement that this plan added ZERO files under `src/`; it
+> edited four existing ones. The +13 reconciles exactly to the guard modules the plan landed:
+> five under `test_models/test_bert/`, five under `test_models/test_resnet/`, and three
+> (including `__init__.py`) in the new `tests/test_train/test_resnet/` package.
+>
+> The row was GREEN at that plan's base commit `1a3a6e7e3` — `git ls-tree -r --name-only
+> 1a3a6e7e3 tests | grep '\.py$' | wc -l` gives exactly 1042 — so all thirteen are that plan's
+> own, and no earlier work was owed. (A carried claim that the row was already stale at 1048 was
+> checked against the base tree and did not survive.)
+>
 > **The `.py` FILE-COUNT rows were re-derived on 2026-08-11**, after the `models/beit/` +
 > `src/train/beit/` package landed (and on 2026-08-10, after the multi-package deletion pass) — see the boxed note in Part A § "src/dl_techniques/ — the 13
 > subpackages". They are one row-group with that section's prose and its per-subpackage
@@ -525,38 +592,47 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1010 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 737 | `find tests -name '*.py' \| wc -l` |
-| In-tree `CLAUDE.md` files (excl. `plans/`) | 20 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
+| Python files under `src/` | 1011 | `find src -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1055 | `find tests -name '*.py' \| wc -l` |
+| In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| `.py` in `src/dl_techniques/layers/` | 285 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/models/` | 275 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/layers/` | 297 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/models/` | 269 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 42 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/utils/` | 39 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/utils/` | 41 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/datasets/` | 37 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/analyzer/` | 24 | `find src/dl_techniques/analyzer -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/metrics/` | 15 | `find src/dl_techniques/metrics -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/optimization/` | 14 | `find src/dl_techniques/optimization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/callbacks/` | 11 | `find src/dl_techniques/callbacks -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/initializers/` | 10 | `find src/dl_techniques/initializers -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/initializers/` | 11 | `find src/dl_techniques/initializers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/regularizers/` | 8 | `find src/dl_techniques/regularizers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
-| `.py` in layers + models | 560 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in layers + models | 566 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
 | layers+models share of `src/` (%) | 55 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
-| Subpackages under `src/dl_techniques/layers/` | 20 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Loose modules directly under `src/dl_techniques/layers/` | 74 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
+| Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Loose modules directly under `src/dl_techniques/layers/` | 75 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model packages under `src/dl_techniques/models/` | 73 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Entries under `src/train/` | 49 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Entries under `src/train/` | 47 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/applications/` | 1 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Top-level dirs under `tests/` | 17 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Run dirs under `results/` (local) | 55 | `find results -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Size of `results/` (local) | 6.3G | `LC_ALL=C du -sh results \| cut -f1` |
+| Top-level dirs under `tests/` | 15 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
+| Size of `results/` (local) | 4.5M | `LC_ALL=C du -sh results \| cut -f1` |
+
+> **A `Run dirs under \`results/\` (local)` row stood here and was DELETED on 2026-08-17.**
+> `results/` is gitignored and untracked, so that number described one machine at one
+> moment and moved every time anybody started a training run — it went 8 -> 9 while this
+> plan was executing, without a single tracked file changing. A row that cannot hold
+> still is not a fact the map can enforce; it is a permanent RED that teaches readers to
+> ignore the sweep. The two remaining `(local)` rows survive only because their Values
+> are prose (`4.5M`, `2.6G`) and are therefore not enforced by
+> `tests/test_repo_map_numbers.py` in the first place. Prefer deleting such a row over
+> re-deriving it forever.
 | Size of `data/` (local) | 2.6G | `LC_ALL=C du -sh data \| cut -f1` |
 | Files under `data/` tracked by git | 0 | `git ls-files data \| wc -l` |
-| Notes in `research/` | 122 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
+| Notes in `research/` | 126 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Lines in `README.md` | 485 | `wc -l < README.md` |
+| Lines in `README.md` | 544 | `wc -l < README.md` |
 | Dicts named `*_REGISTRY` under `src/dl_techniques/` | 9 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
 | Keys in `ATTENTION_REGISTRY` | 32 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `ACTIVATION_REGISTRY` | 22 | `awk 'index($0,"ACTIVATION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/activations/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
@@ -568,28 +644,29 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Keys in `MIXTURE_REGISTRY` | 3 | `awk 'index($0,"MIXTURE_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/mixtures/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `SEQUENCE_POOLING_REGISTRY` | 3 | `awk 'index($0,"SEQUENCE_POOLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sequence_pooling/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `_TYPE_TO_CLASS` (norms factory) | 18 | `awk 'index($0,"_TYPE_TO_CLASS")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/norms/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
-| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 48 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
+| Trainer dirs under `src/train/` (excl. `src/train/common/`) | 46 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
 | Test dirs under `tests/test_models/` | 81 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Files under `src/` naming `keras.callbacks.Callback` | 49 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 10 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
-| …of those, under `src/train/` | 32 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
-| Files using `@keras.saving.register_keras_serializable` | 470 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
-| Files defining `get_config` | 472 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
-| Files using the central logger | 359 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
-| Files importing raw `tensorflow` | 68 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
+| …of those, under `src/train/` | 31 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
+| Files using `@keras.saving.register_keras_serializable` | 479 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files defining `get_config` | 479 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
+| Files using the central logger | 340 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
+| Files importing raw `tensorflow` | 60 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
-| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 324 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 253 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules carrying BOTH styles (the two sets overlap) | 13 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
+| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 257 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 342 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 247 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules carrying BOTH styles (the two sets overlap) | 18 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 9 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
-| Loose `test_*.py` directly under `tests/test_layers/` | 78 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
+| Loose `test_*.py` directly under `tests/test_layers/` | 84 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
 | Subdirectories under `tests/test_layers/` | 20 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| Model packages with no `create_` function ANYWHERE in the package | 15 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
-| Model packages BINDING a `create_` in their own package init (what a caller sees) | 25 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
-| …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 25 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
-| Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 24 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
-| Lines in the mandatory authoring guide | 3105 | `wc -l < research/2026_keras_custom_models_instructions.md` |
-| Test files under `tests/test_analysis/` | 0 | `find tests/test_analysis -name 'test_*.py' \| wc -l` |
+| Model packages with no `create_` function ANYWHERE in the package | 1 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do if ! grep -rq "^def create_" "$d" --include=*.py; then echo "$d"; fi; done \| wc -l` |
+| Model packages BINDING a `create_` in their own package init (what a caller sees) | 71 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -qE "^(from\|import) .*create_\|^ +create_\|^def create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| …the same thing counted by a bare mention-grep, which overcounted by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10) and can do so again | 73 | `for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__); do grep -q "create_" "$d/__init__.py" && echo "$d"; done \| wc -l` |
+| Model packages with no same-named `src/train/` dir AND no `models.` import under `src/train/` | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); for d in $(find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ -printf "%f\n"); do echo "$t" \| grep -qx "$d" \|\| grep -rq "models\.$d" src/train --include=*.py \|\| echo "$d"; done \| wc -l` |
+| Lines in the mandatory authoring guide | 2698 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
 | Test files under `tests/test_analyzer/` | 2 | `find tests/test_analyzer -name 'test_*.py' \| wc -l` |
+| Test directories holding an init module and **no** `test_*.py` (orphans of a deleted subject) | 0 | `for d in $(find tests -mindepth 1 -type d ! -name __pycache__); do [ -z "$(find $d -maxdepth 1 -name 'test_*.py')" ] && [ -z "$(find $d -mindepth 1 -maxdepth 1 -type d ! -name __pycache__)" ] && echo $d; done \| wc -l` |

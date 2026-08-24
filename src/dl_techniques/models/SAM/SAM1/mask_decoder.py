@@ -74,6 +74,10 @@ from typing import Optional, Tuple, Any, Dict, Literal
 
 from .transformer import TwoWayTransformer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -271,8 +275,8 @@ class MaskDecoder(keras.layers.Layer):
         # hardcode `F.relu` inside `MLP`. One shared knob cannot be correct for
         # both halves; routing a single value to both is what made this package
         # trade a wrong-MLP deviation for a wrong-upscaler one. See D-024.
-        self.activation = activation
-        self.mlp_activation = mlp_activation
+        self.activation = deserialize_activation(activation)
+        self.mlp_activation = deserialize_activation(mlp_activation)
 
         # Calculate number of mask tokens (multi-mask outputs + 1 single output)
         self.num_mask_tokens = num_multimask_outputs + 1
@@ -612,8 +616,8 @@ class MaskDecoder(keras.layers.Layer):
             "iou_head_depth": self.iou_head_depth,
             "iou_head_hidden_dim": self.iou_head_hidden_dim,
             "normalization_type": self.normalization_type,
-            "activation": self.activation,
-            "mlp_activation": self.mlp_activation,
+            "activation": serialize_activation(self.activation),
+            "mlp_activation": serialize_activation(self.mlp_activation),
             "transformer": keras.layers.serialize(self.transformer),
         })
         # Note: self.transformer is passed in __init__ as a layer,

@@ -4,7 +4,7 @@
 
 A Keras 3 implementation of **PRISM (Partitioned Representations for Iterative Sequence Modeling)**, a hierarchical time-series forecaster that replaces standard attention with a learnable **binary time tree** combined with **Haar Wavelet** frequency decomposition. PRISM supports both **point forecasting** (single tensor) and **probabilistic forecasting** via an optional quantile head with monotonicity enforcement.
 
-> **Identity, up front.** PRISM is a forecasting model. The architecture is a "Split / Transform / Weight / Merge" pipeline over time: time gets recursively bisected into overlapping segments, each segment is wavelet-decomposed into frequency bands, a small MLP router assigns soft importance weights to those bands, and the bands are recombined and stitched back together with linear cross-fading. The output is `(B, F_out, num_features)` in point mode or `(B, F_out, num_features, num_quantiles)` in quantile mode.
+> **Identity, up front.** PRISM is a forecasting model. The architecture is a "Split / Transform / Weight / Merge" pipeline over time: time gets split into `2^i` overlapping segments at each level `i` (a loop over levels, not a recursion over children), each segment is wavelet-decomposed into frequency bands, a small MLP router assigns soft importance weights to those bands, and the bands are recombined and stitched back together with linear cross-fading. The output is `(B, F_out, num_features)` in point mode or `(B, F_out, num_features, num_quantiles)` in quantile mode.
 
 ---
 
@@ -76,13 +76,13 @@ PRISM is positioned in between. It is both **hierarchical** (a binary tree over 
 
 ## 3. How PRISM Works: Core Concepts
 
-**Time tree.** At each PRISM layer, the time axis is recursively bisected into `2^tree_depth` overlapping segments (overlap controlled by `overlap_ratio`). Each segment is processed independently by a `PRISMNode` and the outputs are stitched back together with linear cross-fading at the segment boundaries.
+**Time tree.** At each PRISM layer, the time axis is split into `2^tree_depth` overlapping segments (overlap controlled by `overlap_ratio`). Each segment is processed independently by a `PRISMNode` and the outputs are stitched back together with linear cross-fading at the segment boundaries. This is a **loop, not a recursion**: level `i` re-splits the full, re-stitched sequence into `2^i` segments rather than bisecting level `i-1`'s children, so the deepest leaf's length comes from one application of the split formula at `num_segments = 2^tree_depth` — not from `tree_depth` successive halvings.
 
 **Node mechanism.** Each `PRISMNode` runs four steps on its segment:
 
-1. **Haar DWT** decomposes the segment into `num_wavelet_levels` frequency bands (low-pass + high-pass at each level).
-2. **Statistics extraction** computes per-band summary stats (mean, std, max amplitude, first/second derivatives).
-3. **Importance router** is a small MLP from stats to per-band weights, normalized via `softmax(stats / router_temperature)`.
+1. **Haar DWT** decomposes the segment into `num_wavelet_levels + 1` frequency bands: one detail (high-pass) band per level plus the final approximation (low-pass) band. Each level floor-halves the length, so the deepest band is `segment_len // 2 ** num_wavelet_levels` long (see L-5).
+2. **Statistics extraction** computes exactly six per-band summary stats: `mean`, `std`, `min`, `max`, and the `mean` and `std` of the band's FIRST difference. There is no second derivative. On a band of length 1 the first difference does not exist and both diff stats are defined to be `0.0`; on a band of length 0 all six are `0.0` (that configuration is refused at construction anyway — see L-5).
+3. **Importance router** is a small MLP from the concatenated per-band stats to one score per band, normalized by a SINGLE joint `softmax(scores / router_temperature)` across all bands of the node. Because it is joint, a non-finite statistic in any one band propagates to every band's weight.
 4. **Weighted reconstruction** sums the bands with the router weights.
 
 **Stacking.** `num_layers` PRISM layers are stacked, each with residual connection + LayerNorm + dropout. Each layer keeps the hidden dimension fixed at `hidden_dim`.
@@ -198,7 +198,7 @@ Output shape summary:
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISMModel
 
 # Synthetic data: 1000 windows of length 96 -> forecast next 24 steps, 1 channel.
 x = np.linspace(0, 100, 1000 + 96 + 24)
@@ -232,16 +232,16 @@ print(forecast.shape)  # (1, 24, 1)
 | `num_features` | `int` | required | Number of input/output channels. Must be `> 0`. |
 | `hidden_dim` | `Optional[int]` | `None` | Hidden dim for projection and PRISM layers. If `None`, falls back to `num_features`. |
 | `num_layers` | `int` | `2` | Number of stacked PRISM layers (each = TimeTree + residual + LN + dropout). |
-| `tree_depth` | `int` | `2` | Depth of the time binary tree inside each layer. `2^tree_depth` segments per layer. `0` disables splitting. |
-| `overlap_ratio` | `float` | `0.25` | Overlap fraction between adjacent time segments. Range `[0.0, 0.5]`. Larger values smooth segment boundaries. |
-| `num_wavelet_levels` | `int` | `3` | Number of Haar DWT levels per node. Produces `num_wavelet_levels + 1` frequency bands. |
+| `tree_depth` | `int` | `2` | Depth of the time binary tree inside each layer. `2^tree_depth` segments per layer. `0` disables splitting. **No standalone valid range** — it is constrained jointly with `context_len`, `overlap_ratio` and `num_wavelet_levels` via `min_band_len` (see L-5); `__init__` raises `ValueError` when `min_band_len` reaches 0. |
+| `overlap_ratio` | `float` | `0.25` | Overlap fraction between adjacent time segments. Range `[0, 0.5)` — half-open, and validated in `__init__`: a value outside it raises `ValueError`. Larger values smooth segment boundaries — and lengthen each segment, so this knob also shifts `min_band_len` (see L-5). |
+| `num_wavelet_levels` | `int` | `3` | Number of Haar DWT levels per node. Produces `num_wavelet_levels + 1` frequency bands. Each level floor-halves the band length, so raising it on a short context is what drives the deepest band to length 0 (see L-5). |
 | `router_hidden_dim` | `int` | `64` | Hidden dim of the per-node importance-router MLP. |
 | `router_temperature` | `float` | `1.0` | Temperature for the router softmax. Lower (`< 1.0`) sharpens band selection; higher (`> 1.0`) smooths it. |
 | `dropout_rate` | `float` | `0.1` | Dropout applied inside each PRISM layer and before the forecast head. |
 | `ffn_expansion` | `int` | `4` | Expansion factor for the point-mode MLP forecast head (`hidden_dim * ffn_expansion`). Ignored when `use_quantile_head=True`. |
 | `use_quantile_head` | `bool` | `False` | If `True`, swap the point MLP head for a `QuantileHead`. Output rank becomes 4. |
 | `num_quantiles` | `int` | `3` | Number of quantiles emitted when `use_quantile_head=True`. Ignored in point mode (still stored / serialized — see L-7). |
-| `quantile_levels` | `Optional[List[float]]` | `None` | Optional explicit quantile levels (e.g. `[0.1, 0.5, 0.9]`). Length must equal `num_quantiles`. If `None` and `use_quantile_head=True`, auto-generates a linear space. |
+| `quantile_levels` | `Optional[List[float]]` | `None` | Optional explicit quantile levels (e.g. `[0.1, 0.5, 0.9]`). Length must equal `num_quantiles`. If `None` and `use_quantile_head=True`: at `num_quantiles == 3` (the default) it is `PRISMModel.DEFAULT_QUANTILES = [0.1, 0.5, 0.9]`; at any OTHER length it falls back to evenly spaced interior levels, `np.linspace(0, 1, num_quantiles + 2)[1:-1]`. |
 | `enforce_monotonicity` | `bool` | `True` | When `use_quantile_head=True`, forces `Q_i <= Q_{i+1}` via a cumulative softplus reparameterization. Eliminates quantile crossing. |
 | `kernel_initializer` | `Union[str, Initializer]` | `"glorot_uniform"` | Kernel initializer for all `Dense` layers. Round-tripped via `get_config`. |
 | `kernel_regularizer` | `Optional[Regularizer]` | `None` | Kernel regularizer for all `Dense` layers. Round-tripped via `get_config`. |
@@ -258,7 +258,7 @@ print(forecast.shape)  # (1, 24, 1)
 | Parameter | Description |
 |-----------|-------------|
 | `tree_depth` | Depth of the per-layer time tree. `2^tree_depth` overlapping segments. |
-| `overlap_ratio` | Overlap fraction between segments. `[0.0, 0.5]`. |
+| `overlap_ratio` | Overlap fraction between segments. `[0, 0.5)` (half-open; validated in `__init__`). |
 | `num_wavelet_levels` | Number of Haar DWT levels per node. |
 | `router_hidden_dim` | Router MLP hidden dim. |
 | `router_temperature` | Softmax temperature for the router. |
@@ -288,6 +288,30 @@ PRISMModel.MODEL_VARIANTS = {
 - **`base`** — wider for multivariate (e.g. ETT, Weather). 3 layers, depth 2.
 - **`large`** — long context / large-scale pre-training. 4 layers, depth 2, deeper wavelets.
 
+### Band budget per preset (MEASURED, not hand-computed)
+
+Every preset multiplies `tree_depth` and `num_wavelet_levels` into one number,
+`min_band_len = deepest_leaf_seg // 2 ** num_wavelet_levels` (see L-5). It depends on
+`context_len`, which is a caller argument, so a preset alone does not determine it. At
+`context_len=96, overlap_ratio=0.25` (produced by running each preset and its forward pass, not by
+arithmetic on paper):
+
+| variant | `tree_depth` | `num_wavelet_levels` | `deepest_leaf_seg` | `min_band_len` @ `context_len=96` | forward finite | smallest supportable `context_len` |
+|---|---|---|---|---|---|---|
+| `tiny`  | 1 | 2 | 54 | 13 | yes | 8 |
+| `small` | 2 | 3 | 25 | 3  | yes | 31 |
+| `base`  | 2 | 3 | 25 | 3  | yes | 31 |
+| `large` | 2 | 4 | 25 | **1** | yes | 61 |
+
+`large` sits **exactly on the degenerate boundary** at `context_len=96`: its deepest bands carry a
+single timestep, so `mean == min == max` and both first-difference features are exactly `0.0` by
+definition. `__init__` emits a `logger.warning` saying so. This is supported, not an error — but it
+is the reason `large` is documented as the *long context* preset. Below `context_len=61` the same
+preset is REFUSED with a `ValueError` (`min_band_len == 0`).
+
+Historical note: before plan `plan-2026-08-18T073231-52a93f8c`, `large` @ `context_len=96` was
+**85.4% NaN** on a forward pass. It is 0% NaN now. See L-5.
+
 `from_variant` accepts any variant key plus the three required positional fields (`context_len`, `forecast_len`, `num_features`) plus any override kwargs (e.g. `use_quantile_head=True`, `num_quantiles=9`). Preset fields are merged with user kwargs (user kwargs win).
 
 ---
@@ -297,7 +321,7 @@ PRISMModel.MODEL_VARIANTS = {
 ### Example 1 — Point forecast, preset
 
 ```python
-from dl_techniques.models.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISMModel
 
 model = PRISMModel.from_variant(
     "small",
@@ -379,7 +403,7 @@ A standalone CPU-only ONNX exporter lives at [`src/train/time_series/prism/expor
 - **Normalize inputs.** PRISM has internal LayerNorm but does not include instance-level (ReVIN) normalization. Per-instance Z-score normalization is implemented in the bundled trainer (`--no-normalize` to disable) and recommended for benchmark datasets.
 - **Single-feature default.** `num_features=1` is the bundled trainer default and the only path exercised in CI. Multivariate (`num_features>1`) is supported by the architecture but lightly tested — start by validating point mode with a small `forecast_len`.
 - **Context length.** PRISM benefits from longer context windows due to hierarchical splitting. `168` -> `336` -> `512` are good progression points.
-- **Tree depth.** Depth `2` (4 segments per layer) is the standard sweet spot. Depths `> 3` rarely help and inflate node count exponentially.
+- **Tree depth.** Depth `2` (4 segments per layer) is the standard sweet spot, and node count grows as `2^tree_depth`. There is no depth range that is safe on its own: depth is bounded by `min_band_len` jointly with `context_len` and `num_wavelet_levels` (see L-5). Deepen the tree and the context window together.
 - **Overlap ratio.** Default `0.25` is robust. Increase to `0.3`-`0.4` if you see "jumpy" predictions at segment boundaries.
 - **Quantile losses.** Use `dl_techniques.losses.QuantileLoss(quantiles=quantile_levels)`. Set `enforce_monotonicity=True` (default) to eliminate quantile crossing at the head level.
 - **Single GPU only.** Pass `--gpu 0` or `--gpu 1` to the trainer. Do not run two trainers in parallel.
@@ -444,7 +468,26 @@ Higher weight on low-pass (approximation) bands indicates the node is focused on
 - **L-2. `predict_quantiles` self-mutates `self.quantile_levels` on first call** if `quantile_levels` was empty or `None` at construction. Pass `quantile_levels` explicitly at construction time (or via `from_variant`) to avoid this footgun. Surfaced from issue I-8.
 - **L-3. `num_quantiles` and `enforce_monotonicity` are stored even in point mode.** When `use_quantile_head=False` these values are kept in `get_config()` for round-trip fidelity but never used at inference. Not a bug, just noisy config. Surfaced from issue I-9.
 - **L-4. `num_features=1` is the well-tested default.** The architecture supports multivariate `num_features>1`, but the bundled trainer and the existing test suite focus on `num_features=1`. Validate point mode first when going multivariate, then enable quantile.
-- **L-5. Tree depth is exponential in node count.** Each layer has `2^tree_depth - 1` internal segments plus leaves. Setting `tree_depth > 3` rarely helps and inflates parameter count and graph build time significantly.
+- **L-5. `tree_depth`, `context_len`, `overlap_ratio` and `num_wavelet_levels` are jointly constrained — no `tree_depth` range is valid on its own.** The binding quantity is the length of the deepest frequency band:
+
+  ```
+  overlap_size    = int(context_len * overlap_ratio / 2 ** tree_depth)
+  non_overlap_len = (context_len - overlap_size * (2 ** tree_depth - 1)) // 2 ** tree_depth
+  deepest_leaf_seg = non_overlap_len + overlap_size          # == context_len when tree_depth == 0
+  min_band_len     = deepest_leaf_seg // 2 ** num_wavelet_levels
+  ```
+
+  `min_band_len` must be `>= 1`. `PRISMModel.__init__` raises `ValueError` when it is 0, naming all four knobs, the computed `deepest_leaf_seg` and `min_band_len`, and a `context_len` that does work. Measured over a 36-cell grid: **depth alone does not separate the working configurations from the broken ones** — `context_len=96, tree_depth=2, num_wavelet_levels=4` is refused, while `context_len=256, tree_depth=4, num_wavelet_levels=3` is fine. Do not read a "`tree_depth > 3` is bad" rule out of this; compute `min_band_len`.
+
+  At `min_band_len == 1` the configuration is SUPPORTED but statistically degenerate: that band is a single timestep, so the router sees `mean == min == max`, and its two first-difference statistics are defined to be exactly `0.0` (there is no first difference of one sample). Prefer `min_band_len >= 2` if the deepest band is meant to carry information. `__init__` emits a `logger.warning` when `min_band_len == 1`, because README prose is not reachable from a `from_variant(...)` call site.
+
+  **The shipped `large` preset sits exactly on that boundary** at `context_len=96` (`min_band_len == 1`) — see the per-preset table in §8. It was **85.4% NaN** on a forward pass before the band guard landed and is 0% NaN now, and below `context_len=61` it is now REFUSED where it previously constructed. That is a real behaviour change to a shipped preset, not an inert repair.
+
+  **Loading a legacy checkpoint saved from a refused configuration.** `from_config` routes through `__init__`, so a `.keras` file saved before this validation whose config has `min_band_len == 0` now raises `ValueError` at `load_model` instead of loading. This is DELIBERATE: such a model was producing `inf`/NaN band statistics on every forward pass, so its weights were trained against (or produce) garbage. Re-train at a supported configuration; there is no migration path that makes those weights meaningful.
+
+  **Known limitation — a dynamic time axis defeats all of this.** The degenerate-band guard branches on the STATIC band length and deliberately falls through when it is unknown. MEASURED: the fixed `tree_depth=3` model traced as `tf.function(input_signature=[tf.TensorSpec([None,None,7])])` returns `nan_frac == 1.0`, where the same model returns `0.0` eager. `PRISMModel.input_spec` pins `axes={1: context_len}` and refuses a WRONG static length, but it cannot close this: Keras' `assert_input_compatibility` explicitly accepts an unknown dimension against an `axes` constraint. Pin the time axis statically in any `tf.function`, `saved_model` signature or `padded_batch` pipeline (the shipped ONNX exporter already does).
+
+  Cost is separately exponential in depth: each layer instantiates `2^tree_depth` leaf segments plus the shallower levels, which inflates parameter count and graph build time.
 - **L-6. `PRISMNode.call()` uses `keras.ops.cond` for the interpolation branch.** Under the TF backend, `ops.cond` traces both branches, so the conditional is purely a control-flow nicety, not a perf optimization. Acceptable for forward pass, but a latent inefficiency if you are benchmarking on very large trees. Surfaced from issue I-12.
 - **L-7. ONNX export is not exercised in CI.** The exporter at `train/time_series/prism/export.py` is a near-verbatim copy of `train/time_series/tirex/export.py` (which is exercised), but the PRISM-specific path has not been smoke-tested end-to-end. ONNX export is opt-in only (off by default in the trainer).
 - **L-8. No instance normalization.** PRISM does not include ReVIN-style per-instance normalization. The bundled trainer does per-instance Z-score normalization in the data pipeline; if you build a custom pipeline, normalize inputs yourself.
@@ -477,13 +520,13 @@ Higher weight on low-pass (approximation) bands indicates the node is focused on
 
 **Related code:**
 
-- Model: `dl_techniques/models/prism/model.py`
+- Model: `dl_techniques/models/time_series/prism/model.py`
 - Blocks: `dl_techniques/layers/time_series/prism_blocks.py` (`PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter`, `FrequencyBandStatistics`)
 - Quantile head: `dl_techniques/layers/time_series/quantile_head_fixed_io.py`
 - Loss: `dl_techniques/losses/quantile_loss.py`
-- Trainer: `train/prism/train_prism.py`
-- ONNX export: `train/prism/export.py`
-- Peer time-series models: `dl_techniques/models/{tirex, adaptive_ema, nbeats, mdn, deepar}`
+- Trainer: `train/time_series/prism/train_prism.py`
+- ONNX export: `train/time_series/prism/export.py`
+- Peer time-series models: `dl_techniques/models/time_series/{tirex, adaptive_ema, nbeats, mdn, deepar, xlstm}`
 - Tests: `tests/test_models/test_prism/test_model.py`
 
 ```bibtex

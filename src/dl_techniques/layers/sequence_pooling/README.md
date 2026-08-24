@@ -174,7 +174,7 @@ A scalar weight is allocated per position up to `max_seq_len`; only the first
 **Required:** None
 **Optional:** `strategy` (default: `'mean'`), `exclude_positions` (default: None),
 `aggregation_method` (default: `'concat'`), `attention_hidden_dim` (default: 256),
-`attention_num_heads` (default: 1), `attention_dropout` (default: 0.0),
+`attention_num_heads` (default: 1), `attention_dropout_rate` (default: 0.0),
 `weighted_max_seq_len` (default: 512), `top_k` (default: 10),
 `temperature` (default: 1.0), `use_bias` (default: True),
 `kernel_initializer` (default: `'glorot_uniform'`),

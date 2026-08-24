@@ -23,6 +23,7 @@ from keras import layers
 from keras import initializers
 from typing import Any, Literal
 
+from dl_techniques.initializers import clone_initializer
 from .ntm_interface import (
     AddressingMode,
     BaseMemory,
@@ -83,6 +84,7 @@ class NTMMemory(BaseMemory):
         memory_size: int,
         memory_dim: int,
         epsilon: float = 1e-6,
+        memory_init_seed: int = 42,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -91,6 +93,7 @@ class NTMMemory(BaseMemory):
             epsilon=epsilon,
             **kwargs,
         )
+        self.memory_init_seed = memory_init_seed
 
     def initialize_state(self, batch_size: int) -> MemoryState:
         """
@@ -106,10 +109,13 @@ class NTMMemory(BaseMemory):
         :return: Initial memory state with small random values.
         :rtype: MemoryState
         """
+        # See the D-058 anchor on `NTMCell.get_initial_state` for why this seed
+        # is fixed rather than absent.
         memory = keras.random.normal(
             (batch_size, self.memory_size, self.memory_dim),
             mean=0.0,
             stddev=1e-3,
+            seed=self.memory_init_seed,
         )
         usage = ops.zeros((batch_size, self.memory_size))
         return MemoryState(memory=memory, usage=usage)
@@ -196,11 +202,16 @@ class NTMReadHead(BaseHead):
     """
     Standard NTM Read Head.
 
-    Projects controller output to addressing parameters (key, beta, gate,
-    shift, gamma) and computes attention weights for reading from memory
-    using the full NTM hybrid addressing mechanism.
+    Projects controller output to addressing parameters and computes attention
+    weights for reading from memory. **Which parameters exist depends on
+    ``addressing_mode``** — the chain below is the ``HYBRID`` one; under
+    ``CONTENT`` the gate / shift / gamma projections are not created at all and
+    the content weights ARE the addressing (D-073). This paragraph and the
+    diagram described the hybrid chain as unconditional until 2026-08-18, four
+    months after the branch landed; ``shift_range`` in particular is read only
+    on the ``HYBRID`` path, and a CONTENT head silently ignores it.
 
-    **Architecture Overview:**
+    **Architecture Overview (HYBRID):**
 
     .. code-block:: text
 
@@ -210,14 +221,16 @@ class NTMReadHead(BaseHead):
                    ▼
         ┌───────────────────────────┐
         │  Dense projections:       │
-        │  key, beta, gate,         │
-        │  shift, gamma             │
+        │  key, beta                │
+        │  (+ gate, shift, gamma    │
+        │   only under HYBRID)      │
         └──────────┬────────────────┘
                    ▼
         ┌───────────────────────────┐
-        │  Hybrid Addressing:       │
-        │  content ─► gate ─►       │
-        │  shift ─► sharpen         │
+        │  HYBRID:  content ─► gate │
+        │           ─► shift ─►     │
+        │           sharpen         │
+        │  CONTENT: content         │
         └──────────┬────────────────┘
                    ▼
         ┌───────────────────────────┐
@@ -228,9 +241,15 @@ class NTMReadHead(BaseHead):
     :type memory_size: int
     :param memory_dim: Dimension of each memory slot.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism.
+    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
+        (the default) runs the full NTM chain: content -> interpolation -> circular
+        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
+        directly and does not create the gate / shift / gamma projections at all, so a
+        CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
-    :param shift_range: Range of allowed shifts for location addressing.
+    :param shift_range: Range of allowed shifts for location addressing. Read
+        ONLY under ``AddressingMode.HYBRID``; a ``CONTENT`` head creates no
+        shift projection, so this value is silently ignored there.
     :type shift_range: int
     :param kernel_initializer: Initializer for dense layers.
     :type kernel_initializer: str | keras.initializers.Initializer
@@ -269,42 +288,67 @@ class NTMReadHead(BaseHead):
         # Create sub-layers in __init__ (Golden Rule)
         self.key_dense = layers.Dense(
             memory_dim,
-            kernel_initializer=self.kernel_initializer,
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-068
+            # EVERY consumer clones. Handing the SAME initializer instance to
+            # all of a head's projections made them bit-identical: MEASURED
+            # before this change, `read_head_0/key == write_head_0/key ==
+            # write_head_0/erase == write_head_0/add` and all six of
+            # `{read,write}_head_0/{beta,gate,gamma}` -- 22 identical pairs of
+            # 17 non-constant tensors. `erase` and `add` are OPPOSITE
+            # operations on memory and the two heads address it independently,
+            # so this is the D-057 defect case. `self.kernel_initializer` is
+            # untouched, so `get_config` still reports the caller's argument.
+            # See decisions.md D-068.
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
         self.beta_dense = layers.Dense(
             1,
             activation="softplus",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
         )
-        self.gate_dense = layers.Dense(
-            1,
-            activation="sigmoid",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gate",
-        )
-        self.shift_dense = layers.Dense(
-            shift_range,
-            activation="softmax",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="shift",
-        )
-        self.gamma_dense = layers.Dense(
-            1,
-            activation="softplus",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gamma",
-        )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # `addressing_mode` used to be threaded in, stored and serialized while
+        # `compute_addressing` ran content -> gate -> shift -> sharpen unconditionally, so
+        # `AddressingMode.CONTENT` round-tripped with NO effect. Under CONTENT the three
+        # location-addressing projections are NOT created at all. Do NOT "simplify" this by
+        # always creating them and only skipping their use in `call` — that reinstates the
+        # very defect (parameters that exist, train and serialize while nothing reads them)
+        # this branch closes, and it makes the CONTENT checkpoint carry HYBRID-shaped
+        # weights. See decisions.md D-073.
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense = layers.Dense(
+                1,
+                activation="sigmoid",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gate",
+            )
+            self.shift_dense = layers.Dense(
+                shift_range,
+                activation="softmax",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="shift",
+            )
+            self.gamma_dense = layers.Dense(
+                1,
+                activation="softplus",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gamma",
+            )
+        else:
+            self.gate_dense = None
+            self.shift_dense = None
+            self.gamma_dense = None
 
     def build(self, input_shape: tuple) -> None:
         """
@@ -315,9 +359,10 @@ class NTMReadHead(BaseHead):
         """
         self.key_dense.build(input_shape)
         self.beta_dense.build(input_shape)
-        self.gate_dense.build(input_shape)
-        self.shift_dense.build(input_shape)
-        self.gamma_dense.build(input_shape)
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense.build(input_shape)
+            self.shift_dense.build(input_shape)
+            self.gamma_dense.build(input_shape)
         super().build(input_shape)
 
     def content_addressing(
@@ -362,15 +407,28 @@ class NTMReadHead(BaseHead):
         # 1. Project controller output to head parameters
         key = self.key_dense(controller_output)
         beta = self.beta_dense(controller_output)
-        gate = self.gate_dense(controller_output)
-        shift = self.shift_dense(controller_output)
-        gamma = self.gamma_dense(controller_output) + 1.0
 
         # 2. Content Addressing
         key_expanded = ops.expand_dims(key, axis=1)
         content_weights = self.content_addressing(
             key_expanded, beta, memory_state.memory
         )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # Under CONTENT the content weights ARE the addressing: no interpolation with the
+        # previous weights, no circular shift, no sharpening. `prev_weights` is therefore
+        # unused in this mode by construction, which is exactly what "content-only
+        # addressing" means. See decisions.md D-073.
+        if self.addressing_mode is not AddressingMode.HYBRID:
+            return content_weights, HeadState(
+                weights=content_weights,
+                key=key,
+                beta=beta,
+            )
+
+        gate = self.gate_dense(controller_output)
+        shift = self.shift_dense(controller_output)
+        gamma = self.gamma_dense(controller_output) + 1.0
 
         # 3. Interpolation (Gating)
         gated_weights = gate * content_weights + (1.0 - gate) * prev_weights
@@ -458,9 +516,15 @@ class NTMWriteHead(BaseHead):
     :type memory_size: int
     :param memory_dim: Dimension of each memory slot.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism.
+    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
+        (the default) runs the full NTM chain: content -> interpolation -> circular
+        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
+        directly and does not create the gate / shift / gamma projections at all, so a
+        CONTENT head has strictly fewer parameters than a HYBRID one.
     :type addressing_mode: AddressingMode
-    :param shift_range: Range of allowed shifts for location addressing.
+    :param shift_range: Range of allowed shifts for location addressing. Read
+        ONLY under ``AddressingMode.HYBRID``; a ``CONTENT`` head creates no
+        shift projection, so this value is silently ignored there.
     :type shift_range: int
     :param kernel_initializer: Initializer for dense layers.
     :type kernel_initializer: str | keras.initializers.Initializer
@@ -499,48 +563,56 @@ class NTMWriteHead(BaseHead):
         # Addressing parameters
         self.key_dense = layers.Dense(
             memory_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
         self.beta_dense = layers.Dense(
             1,
             activation="softplus",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
         )
-        self.gate_dense = layers.Dense(
-            1,
-            activation="sigmoid",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gate",
-        )
-        self.shift_dense = layers.Dense(
-            shift_range,
-            activation="softmax",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="shift",
-        )
-        self.gamma_dense = layers.Dense(
-            1,
-            activation="softplus",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="gamma",
-        )
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # Same branch as NTMReadHead: under CONTENT the location-addressing projections do
+        # not exist. See decisions.md D-073.
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense = layers.Dense(
+                1,
+                activation="sigmoid",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gate",
+            )
+            self.shift_dense = layers.Dense(
+                shift_range,
+                activation="softmax",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="shift",
+            )
+            self.gamma_dense = layers.Dense(
+                1,
+                activation="softplus",
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="gamma",
+            )
+        else:
+            self.gate_dense = None
+            self.shift_dense = None
+            self.gamma_dense = None
 
         # Write-specific parameters
         self.erase_dense = layers.Dense(
             memory_dim,
             activation="sigmoid",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="erase",
@@ -548,7 +620,7 @@ class NTMWriteHead(BaseHead):
         self.add_dense = layers.Dense(
             memory_dim,
             activation="tanh",
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="add",
@@ -563,9 +635,10 @@ class NTMWriteHead(BaseHead):
         """
         self.key_dense.build(input_shape)
         self.beta_dense.build(input_shape)
-        self.gate_dense.build(input_shape)
-        self.shift_dense.build(input_shape)
-        self.gamma_dense.build(input_shape)
+        if self.addressing_mode is AddressingMode.HYBRID:
+            self.gate_dense.build(input_shape)
+            self.shift_dense.build(input_shape)
+            self.gamma_dense.build(input_shape)
         self.erase_dense.build(input_shape)
         self.add_dense.build(input_shape)
         super().build(input_shape)
@@ -612,9 +685,6 @@ class NTMWriteHead(BaseHead):
         # 1. Project parameters
         key = self.key_dense(controller_output)
         beta = self.beta_dense(controller_output)
-        gate = self.gate_dense(controller_output)
-        shift = self.shift_dense(controller_output)
-        gamma = self.gamma_dense(controller_output) + 1.0
         erase = self.erase_dense(controller_output)
         add = self.add_dense(controller_output)
 
@@ -623,6 +693,21 @@ class NTMWriteHead(BaseHead):
         content_weights = self.content_addressing(
             key_expanded, beta, memory_state.memory
         )
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
+        # Content-only addressing: the content weights are the final weights.
+        if self.addressing_mode is not AddressingMode.HYBRID:
+            return content_weights, HeadState(
+                weights=content_weights,
+                key=key,
+                beta=beta,
+                erase_vector=erase,
+                add_vector=add,
+            )
+
+        gate = self.gate_dense(controller_output)
+        shift = self.shift_dense(controller_output)
+        gamma = self.gamma_dense(controller_output) + 1.0
 
         # 3. Interpolation
         gated_weights = gate * content_weights + (1.0 - gate) * prev_weights
@@ -729,7 +814,7 @@ class NTMController(BaseController):
         if self.controller_type == "lstm":
             self.core = layers.LSTMCell(
                 self.controller_dim,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_cell",
@@ -737,7 +822,7 @@ class NTMController(BaseController):
         elif self.controller_type == "gru":
             self.core = layers.GRUCell(
                 self.controller_dim,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_cell",
@@ -746,7 +831,7 @@ class NTMController(BaseController):
             self.core = layers.Dense(
                 self.controller_dim,
                 activation="relu",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_dense",
@@ -921,7 +1006,7 @@ class NTMCell(keras.layers.Layer):
         self.controller = NTMController(
             self.config.controller_dim,
             self.config.controller_type,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="controller",
@@ -933,7 +1018,7 @@ class NTMCell(keras.layers.Layer):
                 self.config.memory_dim,
                 self.config.addressing_mode,
                 self.config.shift_range,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 epsilon=self.config.epsilon,
@@ -948,7 +1033,7 @@ class NTMCell(keras.layers.Layer):
                 self.config.memory_dim,
                 self.config.addressing_mode,
                 self.config.shift_range,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 epsilon=self.config.epsilon,
@@ -1187,10 +1272,21 @@ class NTMCell(keras.layers.Layer):
                 (batch_size, self.config.memory_size, self.config.memory_dim),
             )
         else:
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-058
+            # A FIXED seed, so this draw is stateless and identical on every
+            # call. DO NOT drop it: without a seed `keras.random.normal` draws
+            # from the global stateful stream, so with `use_memory_init=False`
+            # the initial memory differed on every invocation and
+            # `model.predict(x)` twice returned DIFFERENT values (stddev 1e-3 --
+            # small, and exactly the size that makes a numeric test flaky rather
+            # than red). The draw still breaks symmetry across memory slots,
+            # which is its whole purpose; nothing here wanted per-call variation.
+            # See decisions.md D-058.
             memory = keras.random.normal(
                 (batch_size, self.config.memory_size, self.config.memory_dim),
                 mean=0.0,
                 stddev=1e-3,
+                seed=self.config.memory_init_seed,
             )
         states.append(memory)
 
@@ -1310,7 +1406,7 @@ class NeuralTuringMachine(BaseNTM):
 
         self.ntm_cell = NTMCell(
             self.config,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="ntm_cell",
@@ -1325,7 +1421,7 @@ class NeuralTuringMachine(BaseNTM):
 
         self.output_projection = layers.Dense(
             output_dim,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="output_projection",

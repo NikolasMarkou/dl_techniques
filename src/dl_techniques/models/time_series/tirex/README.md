@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of a **TiRex-inspired** time series forecasting model in **Keras 3**. This implementation is based on recent advancements in time series modeling that leverage hybrid architectures to capture both local and global dependencies.
+An implementation of a **TiRex-inspired** time series forecasting model in **Keras 3**. This implementation is based on recent advancements in time series modeling that leverage hybrid architectures to capture both local and global dependencies.
 
 The architecture's key feature is its use of **Mixed Sequential Blocks**, allowing for a flexible combination of LSTM and Transformer layers. It is designed for **probabilistic forecasting**, outputting a range of quantiles to provide a comprehensive view of prediction uncertainty.
 

@@ -152,6 +152,43 @@ def create_normalization_layer(
     layers, supporting both standard Keras layers and specialized layers from the
     dl_techniques framework.
 
+    .. warning::
+
+       **THIS IS NOT A DROP-IN REPLACEMENT FOR CONSTRUCTING THE LAYER DIRECTLY.**
+       The factory imposes its own ``epsilon=1e-6`` on every type that accepts one
+       (via ``setdefault``), which for **11 of the 16 bare-constructible registry
+       types** is NOT the value that class would have chosen for itself.
+       MEASURED 2026-08-23 on keras 3.8.0, factory default vs class own default:
+
+       ============================================  =========  =========  =========
+       ``normalization_type``                        factory    class own  ratio
+       ============================================  =========  =========  =========
+       ``batch_norm``, ``layer_norm``                ``1e-6``   ``1e-3``   **1000x**
+       ``energy_layer_norm``                         ``1e-6``   ``1e-5``   10x
+       ``band_rms``, ``adaptive_band_rms``,          ``1e-6``   ``1e-7``   0.1x
+       ``band_logit_norm``, ``logit_norm``,
+       ``max_logit_norm``, ``decoupled_max_logit``,
+       ``zero_centered_band_rms_norm``,
+       ``zero_centered_adaptive_band_rms_norm``
+       ``rms_norm``, ``zero_centered_rms_norm``,     ``1e-6``   ``1e-6``   1x
+       ``bias_free_batch_norm``,
+       ``global_response_norm``
+       ``dynamic_tanh``                              (popped)   n/a        n/a
+       ``dml_plus_focal``, ``dml_plus_center``       ``1e-6``   n/a        not bare
+       ============================================  =========  =========  =========
+
+       So **rewriting ``keras.layers.BatchNormalization()`` as
+       ``create_normalization_layer('batch_norm')`` silently divides epsilon by
+       1000** and changes inference on every affected layer. This is not
+       hypothetical: it was proposed for ``mobilenet`` and ``cbam`` (189 layers)
+       and rejected on this measurement. See ``decisions.md`` D-202 and the guard
+       ``tests/test_layers/test_norms/test_the_norm_factory_family_is_pinned.py::
+       TestTheFactoryEpsilonIsNotTheLayerDefault``.
+
+       If you want a layer's own default, **instantiate the class directly**.
+       There is deliberately no ``epsilon=None`` sentinel meaning "use the class
+       default" — see D-202 for why that was rejected.
+
     :param normalization_type: Type of normalization layer to create. Supported types
         include 'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
         'zero_centered_rms_norm', 'zero_centered_band_rms_norm',
@@ -183,6 +220,42 @@ def create_normalization_layer(
         are provided for the specific normalization type.
     :raises TypeError: If kwargs contain invalid parameter types for the chosen layer.
     """
+    # DECISION plan-2026-08-18T140459-7991552f/D-017
+    # `validate_normalization_config` has existed in this module for two plans and
+    # was NEVER CALLED by the builder. The INVERSE direction -- an undeclared kwarg
+    # -- was hardened in `attention`/`ffn`/`embedding` by an earlier plan's
+    # D-011/D-023 (STRICT_DROPPED_KEY_MARKER); this factory was left open, so the
+    # only thing standing between a caller and a wrong layer was whatever the
+    # target class happened to do with the key.
+    #
+    # For most keys Keras 3's `Layer.__init__` already raises "Unrecognized keyword
+    # arguments", so the gap is NOT a silent drop for those. The gap that is real
+    # and MEASURED at HEAD is the class of keys the target class accepts and this
+    # factory then throws away:
+    #   create_normalization_layer('dml_plus_focal', model_type='center')
+    #     -> builds, and layer.model_type == 'focal'   (silently clobbered)
+    # `_FACTORY_OWNED_PARAMS` / `_FACTORY_DROPPED_PARAMS` enumerate that class, and
+    # `_accepted_params` already subtracts them -- the validator knew, the builder
+    # did not ask.
+    #
+    # DO NOT "simplify" this to a hand-written whitelist. `_accepted_params` derives
+    # from the target class's real `inspect.signature`; a hand-kept list drifted
+    # twice and produced 19 live validator/builder disagreements (see that
+    # function's docstring). DO NOT move the call inside the if/elif chain either:
+    # it must run for every arm.
+    #
+    # Unknown types deliberately fall through UNVALIDATED to the `else` arm below,
+    # whose error names the supported types; the validator's own unknown-type
+    # message does not, and tests pin the richer one.
+    #
+    # Pre-flight cost, measured before this edit (decisions.md D-016): 200 call
+    # sites repo-wide, ZERO of which pass a kwarg outside `_accepted_params`, under
+    # both a static AST sweep and a runtime recorder over the 11,031 tests of
+    # tests/test_layers/. The single runtime hit was a test deliberately passing
+    # `definitely_not_a_layer_norm_argument` and asserting a raise.
+    if normalization_type in _TYPE_TO_CLASS:
+        validate_normalization_config(normalization_type, **kwargs)
+
     # Prepare base parameters
     layer_kwargs = kwargs.copy()
     if name is not None:

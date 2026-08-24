@@ -6,7 +6,7 @@ Verifies that the ideogram4 ``AutoEncoder`` reused with ``z_channels=16``:
 2. encodes a ``(B, 32, 32, 3)`` image to ``(z_mean, z_log_var)`` with 16 latent
    channels and a 2x spatial downsample (-> ``(B, 16, 16, 16)``);
 3. samples + decodes back to the input spatial dims ``(B, 32, 32, 3)``;
-4. has inverse SD3 scalar latent-norm helpers applying ``(z - 0.0) * 0.13025``;
+4. has inverse SD3 scalar latent-norm helpers applying ``(z - 0.0609) * 1.5305``;
 5. produces a DETERMINISTIC ``z_mean`` that survives a ``.keras`` save/load of
    the AutoEncoder (mu is compared because ``sample`` is stochastic).
 """
@@ -114,8 +114,12 @@ def test_normalize_denormalize_are_inverses():
 
 
 def test_normalize_applies_sd3_scalar():
-    assert SD3_SHIFT_FACTOR == 0.0
-    assert SD3_SCALING_FACTOR == pytest.approx(0.13025)
+    # SD3's OWN constants, from the SD3/SD3.5 `vae/config.json`. 0.13025 / 0.0
+    # is the SDXL pair and shipped here until 2026-08-19; the round-trip test
+    # above cannot discriminate them, because normalize/denormalize are
+    # inverses for any scalar pair. See the D-058 anchor in vae.py.
+    assert SD3_SHIFT_FACTOR == pytest.approx(0.0609)
+    assert SD3_SCALING_FACTOR == pytest.approx(1.5305)
 
     rng = np.random.default_rng(2)
     z = rng.standard_normal((1, 4, 4, _Z_CHANNELS)).astype(np.float32)

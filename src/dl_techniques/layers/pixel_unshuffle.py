@@ -23,12 +23,15 @@ References:
       the inverse transform).
 """
 
-from typing import Any, Dict, Optional
-
 import keras
+from typing import Any, Dict, Optional
 from keras import initializers, layers, ops, regularizers
 
-from ..utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -42,6 +45,40 @@ class PixelUnshuffle2D(keras.layers.Layer):
     scale**2 * C)``. The rearrangement carries no parameters and preserves
     every input value. When ``out_channels`` is provided, a learnable 1x1
     ``Conv2D`` projects the rearranged tensor to ``out_channels``.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────────────────┐
+        │  Input [B, H, W, C]                   │
+        └──────────────────┬────────────────────┘
+                           ▼
+                ┌───────────────────────────┐
+                │  Reshape to blocks        │
+                │  [B, H/s, s, W/s, s, C]   │
+                └────────────┬──────────────┘
+                             ▼
+                ┌───────────────────────────┐
+                │  Transpose                │
+                │  (0, 1, 3, 2, 4, 5)       │
+                │  [B, H/s, W/s, s, s, C]   │
+                └────────────┬──────────────┘
+                             ▼
+                ┌───────────────────────────┐
+                │  Flatten blocks to depth  │
+                │  [B, H/s, W/s, s²*C]      │
+                └────────────┬──────────────┘
+                             ▼
+                ┌───────────────────────────┐
+                │  Optional 1x1 Conv2D      │
+                │  s²*C -> out_channels     │
+                └────────────┬──────────────┘
+                             ▼
+        ┌───────────────────────────────────────┐
+        │  Output [B, H/s, W/s, out_channels]   │
+        │  (or s²*C if no projection)           │
+        └───────────────────────────────────────┘
 
     :param scale: Downsampling factor for both spatial axes. Must divide
         the input height and width evenly. Default ``2``.
@@ -61,16 +98,6 @@ class PixelUnshuffle2D(keras.layers.Layer):
     :param bias_regularizer: Optional projection-bias regulariser.
     :type bias_regularizer: Optional[regularizers.Regularizer]
     :param kwargs: Additional keyword arguments for the Layer base class.
-
-    Example:
-
-    .. code-block:: python
-
-        x = keras.layers.Input(shape=(32, 32, 96))
-        # Lossless: -> (None, 16, 16, 384)
-        y = PixelUnshuffle2D(scale=2)(x)
-        # With projection: -> (None, 16, 16, 96)
-        z = PixelUnshuffle2D(scale=2, out_channels=96)(x)
     """
 
     def __init__(

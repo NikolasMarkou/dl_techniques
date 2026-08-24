@@ -1,72 +1,117 @@
 """
-Ideogram4 flow-matching DiT transformer model (Keras 3 port).
+Ideogram4 flow-matching diffusion transformer: a single packed self-attention
+stream that interleaves text-conditioning tokens with image latent tokens and
+regresses a velocity field, with 3D multi-axis rotary positions and a tanh-gated
+4-stream AdaLN block.
 
-This module assembles the Ideogram4 ``Ideogram4Transformer`` from the
-already-built, separately-tested layers (mRoPE, scalar/time embed, the
-4-stream tanh-gated AdaLN block, RMSNorm) into a single ``keras.Model``. It is
-a faithful port of the PyTorch ``Ideogram4Transformer.__init__`` / ``forward``,
-with the single deliberate structural change locked by decision D1: conditioning
-arrives as a precomputed ``llm_features`` tensor (no Qwen3-VL in Keras).
+The generative principle is flow matching. Training pairs a clean latent with a
+noise sample, interpolates them along a straight line, and asks the network to
+predict the path's velocity -- a target that is constant along the path, which is
+why a handful of Euler steps can integrate it. What the transformer itself pins is
+narrow: `t` is a scalar in `[0, 1]` (`ScalarSinusoidalEmbedding(input_range=(0.0,
+1.0))`), it may be per-sample `(B,)` or per-token `(B, L)`, and the output is a
+velocity in the latent's own channel space. Everything about *which* endpoint `t = 0`
+denotes lives outside this module; the convention the package settles on is stated in
+the note below.
 
-Packed-stream forward (the structurally-novel bit, ported exactly)
-------------------------------------------------------------------
-The transformer consumes a SINGLE packed self-attention stream that interleaves
-text tokens (carrying projected ``llm_features``) and image tokens (carrying
-projected noise ``x``). There is NO cross-attention. Per-token roles are marked
-by an integer ``indicator``:
+The structurally distinctive choice is that there is no cross-attention anywhere.
+Rather than keeping conditioning in a separate tower and injecting it through
+cross-attention layers, Ideogram4 packs text and image tokens into ONE sequence and
+lets ordinary self-attention do the mixing. Roles are carried as data, not as
+structure: an integer `indicator` marks each position as text or image, and two
+float masks derived from it gate each stream's contribution before a plain addition
+merges them into the single hidden state `h`. The masking is applied twice on each
+branch, before *and* after its projection, and the second application is the
+load-bearing one: `input_proj` and `llm_cond_proj` both carry a bias, so without the
+post-projection mask every text position would pick up the image projection's bias
+vector (and vice versa) and the merge would no longer be role-pure. A learned 2-entry
+`embed_image_indicator` is then added on top, so the stack can distinguish the two
+roles by more than the content that happens to be there. The payoff of packing is
+uniformity: one block stack, one rotary table and one mask mechanism serve any
+text/image split without reshaping, and the split may vary per batch.
 
-- ``LLM_TOKEN_INDICATOR`` (text)   -> contributes ``llm_features``.
-- ``OUTPUT_IMAGE_INDICATOR`` (img) -> contributes the projected noise ``x``.
+Attention structure comes from `segment_ids`, not from a triangular mask. Positions
+sharing a segment attend to each other and nothing else, which makes attention
+block-diagonal over independently packed rows. This is deliberately NOT causal, and
+should not be: a diffusion transformer denoises the whole latent at once, so an
+image token must see the entire caption and the entire latent. The block-diagonal
+keep-mask is realized as an ADDITIVE finite mask, `where(same_segment, 0.0, -1e9)`
+added to the scaled scores (D-004), rather than a boolean mask that could produce an
+all-`-inf` row and hence a NaN softmax; the finite form is also XLA-safe.
 
-Two float masks gate the two contributions so each role only sees its own
-content:
+Positional information is 3D. `position_ids` carries `(t, h, w)` coordinates per
+token, and mRoPE splits the head's rotary frequency budget into three bands sized by
+`mrope_section`, interleaving them across `head_dim / 2` so each axis rotates its own
+subset of feature pairs. The cos/sin tables are computed once per forward and shared
+by every block. The PyTorch reference builds the band interleave with a dynamic
+in-place scatter; this port precomputes a static per-slot one-hot selector at
+`build()` and applies it with an einsum (D-003), which is XLA-safe and was verified
+element-wise against a NumPy reproduction of the reference forward.
 
-    llm_token_mask    = (indicator == LLM_TOKEN_INDICATOR)[..., None]   # float
-    output_image_mask = (indicator == OUTPUT_IMAGE_INDICATOR)[..., None]
+Conditioning enters only through modulation. The scalar time is sinusoidally
+embedded, projected to `adanln_dim` and passed through SiLU -- note the activation
+comes *after* the projection -- yielding `adaln_input`, which every block and the
+output head consume. When `t` arrives per-sample the resulting `(B, adaln)` vector is
+expanded to `(B, 1, adaln)` so it broadcasts over the sequence; the branch is a
+Python `if` on static rank, not a tensor-valued condition, so it is trace-safe. The
+per-block modulation itself lives in `Ideogram4TransformerBlock` and departs from
+this repo's usual AdaLN-zero block in three ways worth knowing before comparing them:
+it emits 4 streams rather than 6 (scale and gate per sublayer, NO shift), the gates
+are `tanh` rather than raw, and each sublayer sits in a 4-RMSNorm sandwich with a
+post-norm applied INSIDE the residual branch, i.e.
+`x = x + tanh(gate) * norm2(sublayer(norm1(x) * (1 + scale)))`. That post-norm
+placement is unusual but is replicated exactly rather than normalized away.
 
-    llm_features = llm_features * llm_token_mask
-    x            = x * output_image_mask
-    x            = input_proj(x) * output_image_mask
-    llm_features = llm_cond_proj(llm_cond_norm(llm_features)) * llm_token_mask
-    h            = x + llm_features                              # masked add
-    h            = h + embed_image_indicator(indicator == OUTPUT_IMAGE_INDICATOR)
+Deliberate choices and divergences:
 
-Conditioning (time) goes through the scalar sinusoidal embed + a SiLU AdaLN
-projection to ``adaln_dim``; the per-block 4-stream modulation lives inside the
-``Ideogram4TransformerBlock``. The final velocity is cast to float32 even under
-mixed precision (PyTorch returns ``.float()``).
+- **The time convention, settled: `t = 0` is clean data, `t = 1` is pure noise, and
+  the velocity points data -> noise.** `src/train/ideogram4/train_ideogram4.py` trains
+  with `x_t = (1 - tau) * x0 + tau * x1` for `x1 ~ N(0, I)` and target `v = x1 - x0`,
+  which fixes that assignment; `pipeline.py`'s sampler follows it, seeding pure noise
+  at the top of the time grid and integrating DOWN, so its `z += v * (s - t)` runs with
+  `s < t` (a negative step) and the `t` it evaluates the transformer at descends
+  monotonically toward the data end. Because `LogitNormalSchedule` is strictly
+  DECREASING in its uniform argument, the loop reads its step grid in reverse to obtain
+  that descent -- see the D-002 derivation at the loop itself. This is the same
+  convention as `models/sd3_mmdit/`, which implements the identical rectified flow, so
+  the two packages' schedulers and samplers can be read against each other. The module's
+  `[0, 1]` range alone still implies nothing; the endpoints are fixed by the trainer.
+- Conditioning is a PRECOMPUTED `llm_features` call input (D1). The reference
+  conditions on 13 stacked hidden-state taps of Qwen3-VL-8B; that model has no Keras
+  equivalent, so the text tower is out of scope and this is not an end-to-end
+  text-to-image model as it stands.
+- The architecture is faithful in math but NOT weight-compatible with the released
+  `ideogram-4-nf4` checkpoint: there is no nf4 dequantization path and no parameter
+  name map. Models built here are randomly initialized.
+- The velocity head casts to float32 unconditionally, even under a mixed-precision
+  policy, mirroring the reference's `.float()` return.
+- `Ideogram4Config` is a plain frozen dataclass rather than a Keras-serializable
+  object, so `from_config` rebuilds it via `Ideogram4Config.from_dict`.
 
-PyTorch reference (faithfully ported)::
+References:
+    - Lipman et al., 2023. Flow Matching for Generative Modeling.
+      (https://arxiv.org/abs/2210.02747)
+    - Liu et al., 2022. Flow Straight and Fast: Learning to Generate and Transfer
+      Data with Rectified Flow. (https://arxiv.org/abs/2209.03003)
+    - Peebles & Xie, 2023. Scalable Diffusion Models with Transformers.
+      (https://arxiv.org/abs/2212.09748)
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for High-Resolution
+      Image Synthesis. (https://arxiv.org/abs/2403.03206)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
+    - Wang et al., 2024. Qwen2-VL: Enhancing Vision-Language Model's Perception of
+      the World at Any Resolution. (introduces the multi-axis / M-RoPE scheme)
+    - Zhang & Sennrich, 2019. Root Mean Square Layer Normalization.
+      (https://arxiv.org/abs/1910.07467)
+    - Ho & Salimans, 2022. Classifier-Free Diffusion Guidance.
+      (https://arxiv.org/abs/2207.12598)
 
-    head_dim = emb_dim // num_heads
-    self.input_proj    = nn.Linear(in_channels, emb_dim, bias=True)
-    self.llm_cond_norm = Ideogram4RMSNorm(llm_features_dim, eps=1e-6)
-    self.llm_cond_proj = nn.Linear(llm_features_dim, emb_dim, bias=True)
-    self.t_embedding   = Ideogram4EmbedScalar(emb_dim, input_range=(0, 1))
-    self.adaln_proj    = nn.Linear(emb_dim, adanln_dim, bias=True)
-    self.embed_image_indicator = nn.Embedding(2, emb_dim)
-    self.rotary_emb    = Ideogram4MRoPE(head_dim, base=rope_theta, mrope_section=...)
-    self.layers        = [Ideogram4TransformerBlock(...) for _ in range(num_layers)]
-    self.final_layer   = Ideogram4FinalLayer(emb_dim, in_channels, adanln_dim)
-
-    def forward(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
-        llm_token_mask    = (indicator == LLM_TOKEN_INDICATOR)[..., None]
-        output_image_mask = (indicator == OUTPUT_IMAGE_INDICATOR)[..., None]
-        llm_features = llm_features * llm_token_mask
-        x = self.input_proj(x * output_image_mask) * output_image_mask
-        t_cond = self.t_embedding(t)
-        if t.ndim == 1: t_cond = t_cond[:, None, :]
-        adaln_input = silu(self.adaln_proj(t_cond))
-        llm_features = self.llm_cond_proj(self.llm_cond_norm(llm_features)) * llm_token_mask
-        h = x + llm_features
-        h = h + self.embed_image_indicator((indicator == OUTPUT_IMAGE_INDICATOR).long())
-        cos, sin = self.rotary_emb(position_ids)
-        for layer in self.layers: h = layer(h, segment_ids, cos, sin, adaln_input)
-        return self.final_layer(h, c=adaln_input).float()
+    Ideogram 4 has no published architecture paper; this port follows the released
+    reference implementation.
 """
 
 import keras
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -90,6 +135,7 @@ from dl_techniques.models.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -205,6 +251,22 @@ class Ideogram4Transformer(keras.Model):
             f"in_channels={config.in_channels}, "
             f"llm_features_dim={config.llm_features_dim})"
         )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method Ideogram4Transformer inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,

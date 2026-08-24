@@ -397,3 +397,324 @@ class TestGPT2Iter1Refactor:
         import dl_techniques.models.gpt2 as pkg
 
         assert sorted(pkg.__all__) == ["GPT2", "create_gpt2"]
+
+
+# ---------------------------------------------------------------------
+# Untied LM Head Tests (plan-2026-08-13-230c101d / F-05)
+# ---------------------------------------------------------------------
+
+
+class TestGPT2UntiedLMHead:
+    """Cover ``tie_word_embeddings=False`` — the only hand-rolled layer in the
+    package (``keras.layers.Dense(vocab_size, use_bias=False, name='lm_head')``,
+    ``gpt2.py`` ``GPT2._build_architecture``), which had ZERO tests.
+
+    Every bar below is a measured number, not a hope. Measured on GPU:1 and
+    reproduced across ``keras.utils.set_random_seed`` in {7, 11, 23} with the
+    SHIPPED initializers, ``tiny_config`` and ``ids`` of shape ``(2, 8)``:
+
+    - ``|untied logits - tied recomputation|`` max: 0.8657 / 0.8186 / 0.8936
+      (logits themselves are O(0.5)), so the ``> 1e-2`` bar has ~80x margin.
+    - L2 norm of ``d(mean(logits^2))/d(lm_head.kernel)``: 0.04633 / 0.04539 /
+      0.05494, so the ``> 1e-6`` bar has ~4.5e4x margin.
+    """
+
+    @staticmethod
+    def _untied_model(tiny_config, seed=1234):
+        keras.utils.set_random_seed(seed)
+        return GPT2(**tiny_config, tie_word_embeddings=False)
+
+    def test_untied_head_is_a_distinct_variable(self, tiny_config):
+        """The untied ``lm_head`` kernel must be its OWN variable, not an alias
+        of (or a view onto) the token-embedding table."""
+        model = self._untied_model(tiny_config)
+        model(_random_ids((2, 8), tiny_config["vocab_size"]), training=False)
+
+        assert model.lm_head is not None
+        embeddings = model.decoder.word_embeddings.embeddings
+        kernel = model.lm_head.kernel
+
+        # Shapes are transposes of each other, so a shape check alone would
+        # not distinguish them; pin the orientation too. (The `is not` identity
+        # check lives in the square-config test below: at this config the two
+        # shapes differ, so aliasing is structurally impossible and an identity
+        # assertion here would be a tautology that no injection can turn RED.)
+        assert tuple(kernel.shape) == (
+            tiny_config["embed_dim"], tiny_config["vocab_size"],
+        )
+        assert tuple(embeddings.shape) == (
+            tiny_config["vocab_size"], tiny_config["embed_dim"],
+        )
+        # ``use_bias=False`` — the head is a bare linear projection.
+        assert model.lm_head.bias is None
+
+    # DECISION plan-2026-08-13T091555-230c101d/D-009
+    # Do NOT move this identity assertion back into the rectangular-config
+    # test above and do NOT "simplify" this square config away. At
+    # vocab_size != embed_dim the kernel (D, V) and the embedding table (V, D)
+    # have transposed shapes, so no injection can make them the same object
+    # while the head stays live: three separate attempts were defeated by an
+    # EARLIER guard (Keras' post-build state lock, a BatchMatMul shape error,
+    # and "You must build the layer before accessing `kernel`") rather than by
+    # the assertion. An assertion no injection can turn RED is a tautology, not
+    # a guard. See decisions.md D-009.
+    def test_untied_head_kernel_is_not_the_embedding_variable(self):
+        """The untied head's kernel must be its OWN variable, not an alias of
+        the token-embedding table.
+
+        Deliberately run at ``vocab_size == embed_dim`` (64/64). At the normal
+        rectangular config the two variables have transposed shapes, so an
+        alias is structurally impossible and this assertion could not be made
+        to fail by ANY injection — a tautology, not a guard. At a square config
+        the alias IS shape-legal (it is the classic transposed-tie defect), so
+        the assertion becomes falsifiable and was RED-proven by injecting
+        exactly that alias.
+        """
+        square_config = {
+            "vocab_size": 64, "embed_dim": 64, "depth": 2, "num_heads": 4,
+            "max_seq_len": 32, "dropout_rate": 0.0,
+            "attention_dropout_rate": 0.0,
+        }
+        model = self._untied_model(square_config)
+        model(_random_ids((2, 8), 64), training=False)
+
+        embeddings = model.decoder.word_embeddings.embeddings
+        assert model.lm_head.kernel is not embeddings
+        assert all(w is not embeddings for w in model.lm_head.weights)
+
+    def test_untied_logits_are_not_the_tied_computation(self, tiny_config):
+        """BEHAVIORAL untiedness: the logits must NOT equal
+        ``hidden @ embeddings.T``. An identity-only check would pass even if
+        ``call`` silently took the tied branch with a fresh copy of the table.
+
+        Measured max |delta| across seeds {7, 11, 23}: 0.8657 / 0.8186 / 0.8936
+        against logits of magnitude ~0.5. Bar: > 1e-2.
+        """
+        model = self._untied_model(tiny_config)
+        outputs = model(
+            _random_ids((2, 8), tiny_config["vocab_size"]), training=False,
+        )
+
+        tied_logits = keras.ops.matmul(
+            outputs["last_hidden_state"],
+            keras.ops.transpose(model.decoder.word_embeddings.embeddings),
+        )
+        delta = np.abs(
+            keras.ops.convert_to_numpy(outputs["logits"])
+            - keras.ops.convert_to_numpy(tied_logits)
+        ).max()
+        assert delta > 1e-2, (
+            f"untied logits are indistinguishable from the tied computation "
+            f"(max |delta| = {delta:.4e}); the lm_head is not in the path"
+        )
+
+    def test_gradients_reach_the_untied_lm_head_kernel(self, tiny_config):
+        """Gradients must actually reach the hand-rolled head. A dead head
+        (``stop_gradient`` around the ``lm_head`` call) yields ``None`` here.
+
+        Measured grad L2 norm across seeds {7, 11, 23}: 0.04633 / 0.04539 /
+        0.05494. Bar: > 1e-6.
+        """
+        model = self._untied_model(tiny_config)
+        input_ids = _random_ids((2, 8), tiny_config["vocab_size"])
+        model(input_ids, training=False)
+
+        kernel = model.lm_head.kernel
+        embeddings = model.decoder.word_embeddings.embeddings
+        with tf.GradientTape() as tape:
+            outputs = model(input_ids, training=True)
+            loss = keras.ops.mean(keras.ops.square(outputs["logits"]))
+        grad, emb_grad = tape.gradient(loss, [kernel, embeddings])
+
+        assert grad is not None, "no gradient reaches lm_head.kernel"
+        grad_norm = float(
+            keras.ops.sqrt(keras.ops.sum(keras.ops.square(grad)))
+        )
+        assert grad_norm > 1e-6, (
+            f"lm_head.kernel gradient is dead (L2 = {grad_norm:.4e})"
+        )
+        # The untied head must not starve the embedding table either: with an
+        # untied head the table is still reached through the input embedding.
+        assert emb_grad is not None
+
+    def test_tied_model_has_no_lm_head(self, tiny_config):
+        """Control for the three tests above: the default (tied) path builds
+        NO ``lm_head`` at all, so the untied assertions are exercising a
+        genuinely different branch."""
+        keras.utils.set_random_seed(1234)
+        model = GPT2(**tiny_config, tie_word_embeddings=True)
+        model(_random_ids((2, 8), tiny_config["vocab_size"]), training=False)
+        assert model.lm_head is None
+
+
+# ---------------------------------------------------------------------
+# attention_mask Tests (plan-2026-08-13-230c101d / F-05)
+# ---------------------------------------------------------------------
+
+
+class TestGPT2AttentionMask:
+    """``attention_mask`` must actually mask, not merely be accepted.
+
+    ``test_forward_pass_dict_input`` passes an all-ones mask and checks only the
+    output SHAPE, so nothing pinned padding behaviour. GPT-2 is causal, so a
+    RIGHT-padded probe is vacuous (causality alone hides the future). These
+    tests use LEFT padding — positions ``0..P-1`` masked, ``P..N-1`` real — and
+    perturb the token IDs sitting at the masked positions.
+
+    Measured (``vocab_size=256, embed_dim=64, depth=2, num_heads=4``, B=2, N=12,
+    P=5, seed pinned), on BOTH the RTX 4070 (``CUDA_VISIBLE_DEVICES=1``) and CPU
+    (``CUDA_VISIBLE_DEVICES=""``), i.e. in both the TF32 and non-TF32 regimes:
+
+    - max |delta| at UNMASKED positions: **exactly 0.0** in both regimes.
+    - max |delta| at MASKED positions:   1.0547 (the perturbation is real).
+    - same perturbation with NO mask:    3.944e-03 at the unmasked positions
+      (i.e. the isolation is due to the mask, not to causality).
+
+    Logits are O(0.96), so the ``< 1e-6`` bar is a two-sided margin, not a
+    bit-identity claim.
+
+    **Re-measured 2026-08-18** (plan-2026-08-18T140459-7991552f, step 8, F-70).
+    The previous numbers were 0.8897 / 0.1973 against logits of O(0.75). They
+    moved because ``TextDecoder`` now initialises its transformer blocks from
+    ``initializer_range`` (0.02 truncated normal) instead of falling through to
+    ``TransformerLayer``'s ``glorot_uniform`` (~0.036 for these widths) -- the
+    blocks' weights are ~1.8x smaller, so the *cross-position* signal that has to
+    traverse two attention blocks fell ~50x while the *same-position* signal,
+    dominated by the untouched embedding path, rose. The no-mask control's bar
+    moved 1e-2 -> 1e-3 for that reason and only that reason: it is still 3.9x
+    above the new measurement and 3900x above the ``1e-6`` isolation bar it
+    exists to make non-vacuous, and the isolation measurement itself is still
+    exactly 0.0.
+    """
+
+    P = 5  # number of left-padded positions
+
+    @staticmethod
+    def _probe_inputs(vocab_size, batch=2, seq_len=12, pad=5):
+        rng = np.random.default_rng(0)
+        ids = rng.integers(0, vocab_size, (batch, seq_len)).astype(np.int32)
+        mask = np.ones((batch, seq_len), dtype=np.int32)
+        mask[:, :pad] = 0
+        perturbed = ids.copy()
+        perturbed[:, :pad] = rng.integers(
+            0, vocab_size, (batch, pad),
+        ).astype(np.int32)
+        assert not np.array_equal(ids[:, :pad], perturbed[:, :pad])
+        return ids, perturbed, mask
+
+    def test_masked_positions_do_not_reach_unmasked_outputs(self, tiny_config):
+        """Perturbing the tokens at LEFT-padded (masked) positions must leave
+        every unmasked position's logits unchanged. Measured: 0.0 (GPU and
+        CPU). Bar: < 1e-6."""
+        keras.utils.set_random_seed(1234)
+        model = GPT2(**tiny_config)
+        ids, perturbed, mask = self._probe_inputs(tiny_config["vocab_size"])
+
+        base = keras.ops.convert_to_numpy(
+            model({"input_ids": ids, "attention_mask": mask},
+                  training=False)["logits"]
+        )
+        moved = keras.ops.convert_to_numpy(
+            model({"input_ids": perturbed, "attention_mask": mask},
+                  training=False)["logits"]
+        )
+
+        leak = np.abs(base[:, self.P:] - moved[:, self.P:]).max()
+        assert leak < 1e-6, (
+            f"masked (padded) tokens leaked into unmasked positions: "
+            f"max |delta| = {leak:.4e} (measured 0.0 on GPU and CPU)"
+        )
+
+    def test_the_perturbation_is_real(self, tiny_config):
+        """Non-vacuity guard for the test above: the perturbed tokens DO change
+        the model's output somewhere — at the masked positions themselves.
+        Measured 1.0547 against logits of magnitude ~0.96. Bar: > 1e-2."""
+        keras.utils.set_random_seed(1234)
+        model = GPT2(**tiny_config)
+        ids, perturbed, mask = self._probe_inputs(tiny_config["vocab_size"])
+
+        base = keras.ops.convert_to_numpy(
+            model({"input_ids": ids, "attention_mask": mask},
+                  training=False)["logits"]
+        )
+        moved = keras.ops.convert_to_numpy(
+            model({"input_ids": perturbed, "attention_mask": mask},
+                  training=False)["logits"]
+        )
+
+        moved_delta = np.abs(base[:, :self.P] - moved[:, :self.P]).max()
+        assert moved_delta > 1e-2, (
+            f"the probe perturbation changed nothing anywhere "
+            f"(max |delta| at masked positions = {moved_delta:.4e}); the "
+            f"isolation assertion would be vacuous"
+        )
+
+    def test_without_the_mask_the_same_tokens_do_leak(self, tiny_config):
+        """The isolation is attributable to the MASK, not to causality: drop
+        the mask and the identical perturbation reaches the same positions.
+        Measured 3.944e-03 (GPU and CPU). Bar: > 1e-3 -- see the class docstring
+        for why this bar moved from 1e-2 on 2026-08-18."""
+        keras.utils.set_random_seed(1234)
+        model = GPT2(**tiny_config)
+        ids, perturbed, _mask = self._probe_inputs(tiny_config["vocab_size"])
+
+        base = keras.ops.convert_to_numpy(
+            model(ids, training=False)["logits"]
+        )
+        moved = keras.ops.convert_to_numpy(
+            model(perturbed, training=False)["logits"]
+        )
+
+        leak = np.abs(base[:, self.P:] - moved[:, self.P:]).max()
+        assert leak > 1e-3, (
+            f"unmasked run shows no influence from the prefix tokens "
+            f"(max |delta| = {leak:.4e}); the masked run's 0.0 would then be "
+            f"explained by causality alone and prove nothing about masking"
+        )
+
+
+# ---------------------------------------------------------------------
+# pretrained="<path>" -- the local-path door (C-4b, D-070)
+# ---------------------------------------------------------------------
+
+
+class TestPretrainedLocalPathIsVerified:
+    """The route the `pretrained=True` error message points callers at.
+
+    ``from_variant`` loads a local path with an unconditional
+    ``skip_mismatch=True``. A checkpoint whose variables do not line up restores
+    NOTHING, ``load_weights`` returns normally, and before D-070 the next line
+    logged "Loaded weights from ..." -- the same "silently untrained model" the
+    `pretrained=True` contract exists to prevent, one door over.
+    """
+
+    def test_mismatched_checkpoint_raises_naming_the_cause(self, tmp_path):
+        other = keras.Sequential(
+            [keras.layers.Input(shape=(4,)), keras.layers.Dense(3, name="d")]
+        )
+        ckpt = str(tmp_path / "not_a_gpt2.keras")
+        other.save(ckpt)
+
+        # R-038 / D-054: the mismatched load Keras is asked to perform here
+        # emits `A total of N objects could not be loaded` -- that warning IS the
+        # instrument working, so it is asserted rather than suppressed. Without
+        # this context the test aborts under `-W error::UserWarning`.
+        with pytest.warns(UserWarning, match="could not be loaded"):
+            with pytest.raises(ValueError, match="changed none of this model"):
+                GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+
+    def test_matching_checkpoint_still_loads(self, tmp_path):
+        """Anti-vacuity: the real warm-start path must still work."""
+        src = GPT2.from_variant("tiny", vocab_size=64)
+        src(_random_ids((1, 8), 64), training=False)
+        ckpt = str(tmp_path / "gpt2_tiny.keras")
+        src.save(ckpt)
+
+        loaded = GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        x = _random_ids((1, 8), 64)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(src(x, training=False)["logits"]),
+            keras.ops.convert_to_numpy(loaded(x, training=False)["logits"]),
+            rtol=1e-6,
+            atol=1e-6,
+        )

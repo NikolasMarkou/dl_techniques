@@ -124,6 +124,67 @@ def sample_images() -> keras.KerasTensor:
         dtype='float32'
     )
 
+
+# ---------------------------------------------------------------------------
+# Reconstruction bars, derived from the trivial baseline
+# ---------------------------------------------------------------------------
+# The reconstruction assertions in this file used to read `error < 0.5`,
+# `error < 1.0` and `final <= initial * 1.1`. On `sample_images`
+# (uniform(0, 1)) the CONSTANT predictor 0.5 has MSE = Var(U(0,1)) = 1/12 =
+# 0.0833, so `< 0.5` is ~6x looser than predicting a constant, and a test named
+# "reconstruction_quality_improves" passed a model that got 10% WORSE.
+#
+# MEASURED 2026-08-18, this exact config on `sample_images`: initial 0.08339,
+# final after 10 epochs 0.08329 -- the model sits EXACTLY on the variance floor,
+# because i.i.d. uniform noise is incompressible and nothing better than the
+# mean can be learned from it. A derived bar is therefore untestable on that
+# fixture: the data, not the assertion, is what made the claim unfalsifiable.
+#
+# `_structured_images` supplies learnable data (smooth sinusoidal texture,
+# variance 0.0625) on which the claim is real. MEASURED at 60 epochs, 3 runs
+# each: MSE/variance = 0.102 / 0.124 / 0.103 (gradient codebook) and
+# 0.306 / 0.172 / 0.241 (EMA codebook). The bar below is 0.6, ~2x above the
+# worst measurement; a model that only predicts the mean scores exactly 1.0 and
+# fails.
+RECON_TRAIN_EPOCHS = 60
+RECON_MSE_OVER_VARIANCE = 0.6
+
+
+def _structured_images(n: int = 8, size: int = 32, seed: int = 0) -> np.ndarray:
+    """Learnable images: smooth sinusoidal texture in [0, 1], seeded."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.meshgrid(
+        np.linspace(0, 1, size), np.linspace(0, 1, size), indexing="ij"
+    )
+    images = []
+    for _ in range(n):
+        freq = rng.integers(1, 3)
+        phase = rng.random()
+        base = 0.5 + 0.5 * np.sin(2 * np.pi * freq * (xx + phase)) * np.cos(
+            2 * np.pi * freq * (yy + phase)
+        )
+        images.append(np.stack([base, np.roll(base, 4, axis=0), 1.0 - base], -1))
+    return np.clip(np.asarray(images, dtype="float32"), 0.0, 1.0)
+
+
+def _assert_beats_the_constant_predictor(images, reconstruction, *, what: str) -> float:
+    """MSE must be a fraction of the data variance (= the constant predictor's MSE)."""
+    images = np.asarray(ops.convert_to_numpy(images))
+    error = float(
+        ops.convert_to_numpy(ops.mean(ops.square(images - reconstruction)))
+    )
+    baseline = float(images.var())
+    assert np.isfinite(error)
+    assert error < RECON_MSE_OVER_VARIANCE * baseline, (
+        f"{what}: reconstruction MSE {error:.5f} is {error / baseline:.2f}x the "
+        f"data variance {baseline:.5f}. A model that outputs the constant mean "
+        f"scores exactly 1.00x; the bar is {RECON_MSE_OVER_VARIANCE:.2f}x "
+        f"(measured 0.10-0.31x for a working model at "
+        f"{RECON_TRAIN_EPOCHS} epochs)."
+    )
+    return error
+
+
 # ============================================================================
 # VQVAEModel Tests
 # ============================================================================
@@ -461,27 +522,33 @@ class TestVQVAEModel:
         # Output shape should be correct regardless of training mode
         assert output.shape == sample_images.shape
 
-    def test_reconstruction_quality_improves(self, vqvae_config, sample_images):
-        """Test that reconstruction quality improves with training."""
+    def test_reconstruction_quality_improves(self, vqvae_config):
+        """Reconstruction must beat the constant predictor after training.
+
+        The old bar, `final <= initial * 1.1`, passed a model that got 10%
+        WORSE -- on a test named "improves" -- and was evaluated on
+        incompressible uniform noise where no model can improve at all. See the
+        measurements above `_structured_images`.
+        """
+        images = _structured_images()
         model = VQVAEModel(**vqvae_config)
         model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
 
-        # Initial reconstruction loss
-        initial_recon = model(sample_images, training=False)
-        initial_loss = ops.mean(ops.square(sample_images - initial_recon))
-        initial_loss_value = ops.convert_to_numpy(initial_loss)
+        initial_loss_value = float(
+            ops.convert_to_numpy(
+                ops.mean(ops.square(images - model(images, training=False)))
+            )
+        )
 
-        # Train for several epochs
-        model.fit(sample_images, epochs=10, batch_size=4, verbose=0)
+        model.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
 
-        # Final reconstruction loss
-        final_recon = model(sample_images, training=False)
-        final_loss = ops.mean(ops.square(sample_images - final_recon))
-        final_loss_value = ops.convert_to_numpy(final_loss)
-
-        # Loss should decrease (or at least not increase significantly)
-        assert final_loss_value <= initial_loss_value * 1.1, \
-            "Reconstruction loss did not improve with training"
+        final_loss_value = _assert_beats_the_constant_predictor(
+            images, model(images, training=False), what="after training"
+        )
+        assert final_loss_value < initial_loss_value, (
+            f"training did not reduce the reconstruction loss at all: "
+            f"{initial_loss_value:.5f} -> {final_loss_value:.5f}"
+        )
 
 
 # ============================================================================
@@ -519,11 +586,20 @@ class TestVQVAEIntegration:
         generated = model.decode_from_indices(indices)
         assert generated.shape == sample_images.shape
 
-        # 7. Verify reconstruction is reasonable
-        reconstruction_error = ops.mean(ops.square(sample_images - reconstructed))
-        reconstruction_error_value = ops.convert_to_numpy(reconstruction_error)
-        assert reconstruction_error_value < 0.5, \
-            "Reconstruction error is too high"
+        # 7. Verify reconstruction is reasonable. `< 0.5` on uniform(0, 1)
+        # inputs was ~6x LOOSER than predicting the constant 0.5, so it could
+        # not distinguish this pipeline from a model that ignores its input.
+        # The bar is now derived from that constant predictor, on data where
+        # beating it is possible at all.
+        images = _structured_images(seed=1)
+        trained = VQVAEModel(**vqvae_config)
+        trained.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        trained.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
+        _assert_beats_the_constant_predictor(
+            images,
+            trained.decode_from_indices(trained.encode_to_indices(images)),
+            what="end-to-end encode -> indices -> decode",
+        )
 
     def test_codebook_usage(self, vqvae_config, sample_images):
         """Test that codebook is being used (not all codes map to same embedding)."""
@@ -548,6 +624,136 @@ class TestVQVAEIntegration:
         # This is a soft requirement - might not be met with small training
         if usage_ratio < 0.1:
             print(f"Warning: Low codebook usage ({usage_ratio:.2%})")
+
+    def test_ema_codebook_does_not_blow_up(self, simple_encoder, simple_decoder):
+        """The EMA codebook must stay bounded and use more than one code.
+
+        RED PROOF (F-65). Before the `ema_step` bias correction and the Laplace
+        smoothing in `VectorQuantizer._update_ema`, `ema_cluster_size` started at
+        zeros while `ema_embeddings` started at the codebook initializer, so a
+        code that received no assignments on step 1 normalized to
+        `0.99 * init[k] / 1e-5` ~= 99000 * init[k]. That is a step-1 blow-up,
+        not a slow drift -- extra epochs never recover.
+
+        MEASURED on this exact configuration, 5 epochs, seed 1234:
+
+        =========================================  =============  ==============
+        variant                                    unique codes   max|codebook|
+        =========================================  =============  ==============
+        HEAD (no correction)                       1              4521
+        bias correction only, init kept            1              47283
+        bias correction + zero-init accumulator    18             0.264
+        =========================================  =============  ==============
+
+        The middle row is why this test asserts BOTH quantities: adding the
+        debias alone made the magnitude an order of magnitude WORSE while the
+        collapse indicator stayed at 1.
+
+        The bars are 4 orders of magnitude away from both the failing and the
+        passing measurement, so this guard is insensitive to TF32 (no
+        `tf32_disabled` fixture is reachable from `tests/test_models/` and I5
+        forbids adding a process-global toggle).
+        """
+        keras.utils.set_random_seed(1234)
+        model = VQVAEModel(
+            encoder=simple_encoder,
+            decoder=simple_decoder,
+            num_embeddings=128,
+            embedding_dim=32,
+            use_ema=True,
+        )
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        images = _structured_images(seed=0)
+        model.fit(images, epochs=5, batch_size=4, verbose=0)
+
+        codebook = np.asarray(
+            ops.convert_to_numpy(model.quantizer.embeddings)
+        )
+        max_abs = float(np.abs(codebook).max())
+        assert np.isfinite(max_abs)
+        assert max_abs < 50.0, (
+            f"EMA codebook blew up: max|codebook| = {max_abs:.4g} after 5 "
+            f"epochs. MEASURED 4519 (this test) / 4521 (standalone probe) "
+            f"before the bias correction + Laplace smoothing, and 0.264 "
+            f"after; the bar is 50.0."
+        )
+
+        indices = np.asarray(
+            ops.convert_to_numpy(model.encode_to_indices(images))
+        )
+        unique_codes = len(np.unique(indices))
+        assert unique_codes > 1, (
+            f"EMA codebook collapsed to {unique_codes} code(s) after 5 epochs. "
+            f"MEASURED 1 before the fix and 18 after."
+        )
+
+    def test_ema_weight_set_is_four_and_only_under_ema(
+            self, simple_encoder, simple_decoder, sample_images
+    ):
+        """`ema_step` exists at `use_ema=True` and NOWHERE else.
+
+        The counter is a weight-SET change (3 -> 4 at `use_ema=True`). It must
+        not appear on the gradient path, where it would change every existing
+        `use_ema=False` checkpoint's weight list for nothing.
+        """
+        model_ema = VQVAEModel(
+            encoder=simple_encoder,
+            decoder=simple_decoder,
+            num_embeddings=32,
+            embedding_dim=32,
+            use_ema=True,
+        )
+        model_ema(sample_images, training=False)
+        ema_names = [w.name for w in model_ema.quantizer.weights]
+        assert ema_names == [
+            "embeddings", "ema_cluster_size", "ema_embeddings", "ema_step"
+        ], ema_names
+
+        model_grad = VQVAEModel(
+            encoder=keras.models.clone_model(simple_encoder),
+            decoder=keras.models.clone_model(simple_decoder),
+            num_embeddings=32,
+            embedding_dim=32,
+            use_ema=False,
+        )
+        model_grad(sample_images, training=False)
+        grad_names = [w.name for w in model_grad.quantizer.weights]
+        assert grad_names == ["embeddings"], grad_names
+
+    def test_ema_model_round_trips_by_value(
+            self, simple_encoder, simple_decoder, tmp_path
+    ):
+        """A trained `use_ema=True` model reloads with the SAME codebook VALUES.
+
+        Weight COUNTS and PATHS match under the failure mode this repo has
+        measured repeatedly (a nested sublayer list restores fresh kernels with
+        an identical weight tree), so this asserts values, never structure.
+        """
+        keras.utils.set_random_seed(7)
+        model = VQVAEModel(
+            encoder=simple_encoder,
+            decoder=simple_decoder,
+            num_embeddings=32,
+            embedding_dim=32,
+            use_ema=True,
+        )
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
+        images = _structured_images(seed=3)
+        model.fit(images, epochs=2, batch_size=4, verbose=0)
+
+        before = np.asarray(ops.convert_to_numpy(model.quantizer.embeddings))
+        step_before = float(
+            ops.convert_to_numpy(model.quantizer.ema_step)
+        )
+        assert step_before > 0, "ema_step never advanced during fit()"
+
+        path = str(tmp_path / "vqvae_ema.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+
+        after = np.asarray(ops.convert_to_numpy(reloaded.quantizer.embeddings))
+        np.testing.assert_allclose(before, after, atol=1e-6, rtol=1e-6)
+        assert float(ops.convert_to_numpy(reloaded.quantizer.ema_step)) == step_before
 
     def test_ema_vs_gradient_consistency(self, simple_encoder, simple_decoder, sample_images):
         """Test that EMA and gradient-based training produce similar results."""
@@ -576,27 +782,32 @@ class TestVQVAEIntegration:
         model_grad.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
         model_ema.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
 
-        # Train both (small number of epochs)
-        model_grad.fit(sample_images, epochs=3, batch_size=4, verbose=0)
-        model_ema.fit(sample_images, epochs=3, batch_size=4, verbose=0)
+        # `error < 1.0` on uniform(0, 1) images was nearly unfalsifiable: the
+        # constant-mean predictor scores 0.083. Both codebook update rules must
+        # instead BEAT that constant predictor by the derived margin, so this
+        # test trains for RECON_TRAIN_EPOCHS rather than 3.
+        #
+        # SUPERSEDED 2026-08-18 (F-65). The epoch budget used to be justified by
+        # "the EMA path needs materially longer than the gradient path -- at 30
+        # epochs it was still collapsed to a single code (MSE/variance = 1.000),
+        # escaping to 5 codes and 0.17-0.31 by 60". That collapse was not a
+        # convergence rate, it was the missing EMA bias correction: the codebook
+        # was blown up by ~1e5 on step 1 and never recovered. With the fix in
+        # `VectorQuantizer._update_ema` the EMA path reaches 18 codes and
+        # max|codebook| 0.264 in FIVE epochs -- see
+        # `test_ema_codebook_does_not_blow_up` above. RECON_TRAIN_EPOCHS is kept
+        # because the gradient arm and the measured 0.6 bar were both calibrated
+        # at 60 epochs, not because EMA needs them.
+        images = _structured_images(seed=2)
+        model_grad.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
+        model_ema.fit(images, epochs=RECON_TRAIN_EPOCHS, batch_size=4, verbose=0)
 
-        # Get reconstructions
-        recon_grad = model_grad(sample_images, training=False)
-        recon_ema = model_ema(sample_images, training=False)
-
-        # Both should produce reasonable reconstructions
-        # (They won't be identical but should have similar quality)
-        error_grad = ops.mean(ops.square(sample_images - recon_grad))
-        error_ema = ops.mean(ops.square(sample_images - recon_ema))
-
-        error_grad_value = ops.convert_to_numpy(error_grad)
-        error_ema_value = ops.convert_to_numpy(error_ema)
-
-        # Both should be finite and reasonable
-        assert np.isfinite(error_grad_value)
-        assert np.isfinite(error_ema_value)
-        assert error_grad_value < 1.0
-        assert error_ema_value < 1.0
+        _assert_beats_the_constant_predictor(
+            images, model_grad(images, training=False), what="gradient codebook"
+        )
+        _assert_beats_the_constant_predictor(
+            images, model_ema(images, training=False), what="EMA codebook"
+        )
 
 
 # ============================================================================
@@ -648,6 +859,91 @@ class TestVQVAEPerformance:
 
         # If we got here without OOM, test passes
         assert True
+
+
+class TestVQVAEAuxiliaryLossesReachTheObjective:
+    """F-66: `train_step`/`test_step` must sum `self.losses`, not just the quantizer's.
+
+    Before 2026-08-18 both steps summed `self.quantizer.losses`, so every
+    `add_loss` on the caller-supplied encoder or decoder -- the kernel
+    regularizers a BYO encoder is normally built with -- was absent from the
+    optimized objective AND from the reported `loss`, while the module's own
+    architecture diagram said `total_loss = recon + sum(layer.losses)`.
+
+    MEASURED at HEAD, encoder built with `kernel_regularizer=l2(1e-1)`:
+    `train_step` reported the identical 0.326447 with and without the
+    regularizer; `sum(self.losses)` was 0.912722 against
+    `sum(self.quantizer.losses)` 0.236841; the encoder-kernel gradient differed
+    by max 5.30e-02 between the two objectives.
+    """
+
+    @staticmethod
+    def _build(regularizer):
+        keras.utils.set_random_seed(0)
+        encoder = keras.Sequential([
+            keras.layers.Conv2D(8, 3, strides=2, padding='same',
+                                activation='relu',
+                                kernel_regularizer=regularizer),
+            keras.layers.Conv2D(4, 1, padding='same',
+                                kernel_regularizer=regularizer),
+        ])
+        decoder = keras.Sequential([
+            keras.layers.Conv2DTranspose(8, 3, strides=2, padding='same',
+                                         activation='relu'),
+            keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid'),
+        ])
+        model = VQVAEModel(encoder=encoder, decoder=decoder,
+                           num_embeddings=8, embedding_dim=4)
+        model.compile(optimizer=keras.optimizers.SGD(0.0))
+        return model
+
+    @pytest.fixture
+    def images(self):
+        return np.random.default_rng(0).uniform(
+            size=(4, 8, 8, 1)).astype('float32')
+
+    def test_an_encoder_regularizer_changes_the_reported_loss(self, images):
+        """RED at HEAD: both arms reported exactly 0.326447."""
+        plain = self._build(None)
+        regularized = self._build(keras.regularizers.l2(1e-1))
+        loss_plain = float(ops.convert_to_numpy(
+            plain.train_step(ops.convert_to_tensor(images))['loss']))
+        loss_reg = float(ops.convert_to_numpy(
+            regularized.train_step(ops.convert_to_tensor(images))['loss']))
+        assert loss_reg > loss_plain + 1e-4, (
+            f"an l2(1e-1) encoder regularizer moved the objective by "
+            f"{loss_reg - loss_plain:.3e} -- it is not in the objective"
+        )
+
+    def test_test_step_reports_the_same_objective_as_train_step(self, images):
+        """`val_loss` and `loss` must be the same quantity."""
+        model = self._build(keras.regularizers.l2(1e-1))
+        train_loss = float(ops.convert_to_numpy(
+            model.train_step(ops.convert_to_tensor(images))['loss']))
+        model.total_loss_tracker.reset_state()
+        model.reconstruction_loss_tracker.reset_state()
+        model.vq_loss_tracker.reset_state()
+        test_loss = float(ops.convert_to_numpy(
+            model.test_step(ops.convert_to_tensor(images))['loss']))
+        # SGD(0.0) leaves the weights untouched, so the only difference between
+        # the two is the training flag, which this model does not branch on.
+        assert abs(train_loss - test_loss) < 1e-4, (
+            f"train_step reported {train_loss:.6f} but test_step "
+            f"{test_loss:.6f} on identical weights and data"
+        )
+
+    def test_the_quantizer_losses_are_still_included(self, images):
+        """Control: widening to `self.losses` must not LOSE the VQ terms."""
+        model = self._build(None)
+        _ = model(images, training=True)
+        assert len(model.quantizer.losses) > 0
+        quantizer_sum = float(ops.convert_to_numpy(
+            ops.sum(ops.stack(model.quantizer.losses))))
+        model_sum = float(ops.convert_to_numpy(
+            ops.sum(ops.stack(model.losses))))
+        assert model_sum == pytest.approx(quantizer_sum, abs=1e-6), (
+            "with no encoder/decoder regularizer the two sums must coincide"
+        )
 
 
 if __name__ == "__main__":

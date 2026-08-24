@@ -82,7 +82,6 @@ References:
       Network Language Model". AISTATS.
 """
 
-import math
 import functools
 import keras
 import numpy as np

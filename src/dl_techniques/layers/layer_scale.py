@@ -1,43 +1,66 @@
 """
-The primary purpose of this layer is to introduce a simple, data-driven scaling
-factor into a model's computation graph. Instead of using a fixed scalar or a
-complex transformation (like a `Dense` layer), this layer learns a parameter `gamma`
-that multiplies the entire input tensor. This can be used to dynamically adjust the
-magnitude of activations, effectively allowing the network to learn the importance of
-certain features or pathways. It is conceptually similar to the learnable `gamma`
-parameter in `BatchNormalization` or `LayerNormalization`, but offered as a
-standalone layer.
+Learnable element-wise scaling for adaptive feature and pathway weighting.
 
-Key Features and Mechanisms:
+This layer embodies the principle of minimal parameterized gating, a design
+paradigm that inserts the smallest possible learnable transformation into a
+computation graph in order to let the network modulate signal magnitude without
+altering its content. The core idea is that many architectural decisions
+normally hard-coded as fixed constants, how much of a residual branch to admit,
+how strongly to weight a feature map, are better left to gradient descent, and
+that a single multiplicative parameter is sufficient to express them. Unlike a
+`Dense` layer, no mixing occurs across positions or channels; the operation is
+purely a rescaling, so the layer can only attenuate or amplify what is already
+present.
 
-1.  **Learnable Scaling Parameter (`gamma`):** The core of the layer is a trainable
-    weight `gamma` that performs the element-wise multiplication.
+Architecturally, the layer applies a trainable parameter `gamma` element-wise:
 
-2.  **Two Operational Modes (`multiplier_type`):**
-    -   **`GLOBAL`:** A single scalar `gamma` is learned and broadcasted across the
-        entire input tensor. This uniformly scales all features, learning a global
-        importance score for the entire tensor.
-    -   **`CHANNEL`:** A vector `gamma` is learned with a size equal to the number of
-        input channels (the last dimension). Each channel is multiplied by its own
-        unique `gamma` value, allowing the network to independently re-weight each
-        feature map.
+`output = gamma * input`
 
-3.  **Sensible Defaults for Stability:**
-    -   **Initializer:** Defaults to `ones`, meaning the layer initially acts as an
-        identity function (`output = 1 * input`). This is crucial for stable
-        training, as it ensures that inserting the layer into a network does not
-        drastically change the signal propagation at the beginning of training.
-    -   **Constraint:** Defaults to `non_neg`, ensuring the learned multipliers are
-        always zero or positive. This is useful for preventing the layer from
-        flipping the sign of features and allows it to function as a "soft gate" that
-        can only attenuate or amplify signals.
+Two modes determine the shape of `gamma` and therefore the granularity of
+control:
 
-Common Use Cases:
--   **Gating Residual Connections:** Used in residual blocks to learn how much of the
-    residual to add: `output = x + LearnableMultiplier(type='GLOBAL')(residual_block(x))`.
--   **Feature Re-weighting:** Dynamically adjusting the importance of different channels
-    before they are fused or combined with other features.
--   **Simple Attention:** Acting as a very simple channel-wise attention mechanism.
+1.  **GLOBAL.** A single scalar broadcast across the entire tensor. All features
+    are scaled uniformly, so the parameter expresses one importance score for
+    the whole pathway. This is the form used to gate a residual branch, where
+    the quantity being learned is how much of the branch to contribute.
+2.  **CHANNEL.** A vector of length equal to the last dimension, with each
+    channel scaled independently. This lets the network re-weight feature maps
+    relative to one another, which amounts to a static, input-independent form
+    of channel attention.
+
+Two defaults are chosen specifically for training stability rather than
+generality. Initializing `gamma` to ones makes the layer an exact identity at
+step zero, so inserting it into an existing network leaves forward signal
+propagation and gradient magnitudes unchanged; any deviation from identity is
+something the network chose rather than something imposed at initialization.
+Constraining `gamma` to be non-negative prevents the layer from inverting the
+sign of a feature, which restricts it to the semantics of a soft gate: the
+parameter answers how much, never in which direction. Both defaults are
+overridable when a signed or non-identity scale is genuinely wanted.
+
+One implementation detail is load-bearing under mixed precision. Keras stores
+`gamma` in float32 even when the compute policy is `mixed_float16`, so the
+multiplication is cast to the input's compute dtype before it is applied.
+Without the cast, the float32-weight against float16-activation pairing is
+rejected by XLA during gradient computation as disallowed mixed precision. The
+cast is a no-op on the pure float32 path.
+
+Conceptually this is the standalone form of the learnable `gamma` found inside
+`BatchNormalization` and `LayerNormalization`, separated from any normalization
+statistics so that the scaling can be placed independently of where activations
+are normalized.
+
+References:
+    - Ioffe and Szegedy, 2015. Batch Normalization: Accelerating Deep Network
+      Training by Reducing Internal Covariate Shift.
+      (https://arxiv.org/abs/1502.03167)
+    - Bachlechner et al., 2020. ReZero is All You Need: Fast Convergence at
+      Large Depth. (https://arxiv.org/abs/2003.04887)
+    - Touvron et al., 2021. Going Deeper with Image Transformers (LayerScale).
+      (https://arxiv.org/abs/2103.17239)
+    - Hu et al., 2018. Squeeze-and-Excitation Networks.
+      (https://arxiv.org/abs/1709.01507)
+
 """
 
 import keras

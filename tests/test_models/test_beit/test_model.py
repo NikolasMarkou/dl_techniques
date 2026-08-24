@@ -2,8 +2,11 @@
 
 The assertions here read the ACTUAL sub-layer objects and weights, never the kwargs
 dict that was passed in: a kwarg that never arrived and a kwarg that arrived and was
-honoured are indistinguishable from the caller's side, and
-``create_attention_layer`` drops undeclared kwargs SILENTLY.
+honoured are indistinguishable from the caller's side. ``create_attention_layer``
+used to drop undeclared kwargs SILENTLY; since 2026-08-17
+(plan-2026-08-17T183311-79c63e38/D-011) it raises on them, but the reason to read the
+objects stands — a kwarg the registry DECLARES and the constructor never wires is
+still invisible to the raise.
 
 Two costs are traded deliberately:
 
@@ -140,8 +143,8 @@ class TestBeitModelInitialization:
         assert model.patch_size == 16
         assert model.layer_norm_eps == 1e-12
         assert model.drop_path_rate == 0.1
-        assert model.hidden_dropout_prob == 0.0
-        assert model.attention_probs_dropout_prob == 0.0
+        assert model.hidden_dropout_rate == 0.0
+        assert model.attention_probs_dropout_rate == 0.0
         assert model.use_absolute_position_embeddings is False
         assert model.use_relative_position_bias is True
         assert model.use_shared_relative_position_bias is False
@@ -180,8 +183,8 @@ class TestBeitModelInitialization:
             (dict(intermediate_size=0), "intermediate_size must be positive"),
             (dict(hidden_size=192, num_heads=5), "divisible by num_heads"),
             (dict(drop_path_rate=1.5), r"drop_path_rate must be in \[0, 1\]"),
-            (dict(hidden_dropout_prob=-0.1), r"must be in \[0, 1\]"),
-            (dict(attention_probs_dropout_prob=2.0), r"must be in \[0, 1\]"),
+            (dict(hidden_dropout_rate=-0.1), r"must be in \[0, 1\]"),
+            (dict(attention_probs_dropout_rate=2.0), r"must be in \[0, 1\]"),
             (dict(layer_norm_eps=0.0), "layer_norm_eps must be positive"),
             (dict(initializer_range=0.0), "initializer_range must be positive"),
             (dict(scale='enormous'), "Unknown variant"),
@@ -406,8 +409,8 @@ class TestBeitModelSerialization:
     def test_get_config_round_trips_every_constructor_param(self):
         model = _tiny(
             drop_path_rate=0.2,
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.05,
+            hidden_dropout_rate=0.1,
+            attention_probs_dropout_rate=0.05,
             use_absolute_position_embeddings=True,
             use_mean_pooling=False,
             layer_norm_eps=1e-10,

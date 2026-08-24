@@ -65,6 +65,10 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -84,6 +88,22 @@ from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
 # reason given for it was wrong, and a wrong reason is what licenses a later
 # "simplification" to 1.0.
 _INPUT_POS_ENC_SCALE = 0.1
+
+# DECISION plan-2026-08-22T035419-a11304c8/D-090
+#: The SHIPPED memory-attention dropout rate, and the single home of the
+#: number. Every class below takes it as its constructor default and
+#: ``SAM2.MODEL_VARIANTS`` reads it from here rather than restating ``0.1``.
+#: Do NOT write a bare ``0.1`` into the variant table or into any of the three
+#: signatures below: a rate restated in two homes drifts silently, and this
+#: file already had one hard-wired copy per class with no way to reach it. The
+#: model-level knob (``SAM2.from_variant(dropout_rate=...)``, D-090) overrides
+#: this per construction; the default stays 0.1 so shipped behaviour is
+#: bit-identical. The constructor PARAMETER on all three classes below is now
+#: ``dropout_rate`` too (D-130, the `*_dropout_rate` convention wave), so the
+#: constant, the parameter, the attribute and the ``get_config`` key all carry
+#: one spelling. The old ``dropout`` spelling is gone with no alias: the user
+#: ruled that no checkpoint depends on it.
+DEFAULT_DROPOUT_RATE: float = 0.1
 
 # ---------------------------------------------------------------------
 
@@ -140,8 +160,8 @@ class _SAM2RoPEAttention(keras.layers.Layer):
     :type num_heads: int
     :param downsample_rate: ``internal_dim = embedding_dim // downsample_rate``.
     :type downsample_rate: int
-    :param dropout: Dropout rate applied to the attention weights.
-    :type dropout: float
+    :param dropout_rate: Dropout rate applied to the attention weights.
+    :type dropout_rate: float
     :param kv_in_dim: Width of the key/value tensors. ``None`` means
         ``embedding_dim``.
     :type kv_in_dim: Optional[int]
@@ -165,7 +185,7 @@ class _SAM2RoPEAttention(keras.layers.Layer):
             embedding_dim: int = 256,
             num_heads: int = 1,
             downsample_rate: int = 1,
-            dropout: float = 0.1,
+            dropout_rate: float = DEFAULT_DROPOUT_RATE,
             kv_in_dim: Optional[int] = None,
             rope_theta: float = 10000.0,
             feat_sizes: Sequence[int] = (64, 64),
@@ -196,7 +216,7 @@ class _SAM2RoPEAttention(keras.layers.Layer):
         self.embedding_dim = int(embedding_dim)
         self.num_heads = int(num_heads)
         self.downsample_rate = int(downsample_rate)
-        self.dropout = float(dropout)
+        self.dropout_rate = float(dropout_rate)
         self.kv_in_dim = int(kv_in_dim) if kv_in_dim is not None else None
         self.rope_theta = float(rope_theta)
         self.feat_sizes = (int(feat_sizes[0]), int(feat_sizes[1]))
@@ -213,7 +233,7 @@ class _SAM2RoPEAttention(keras.layers.Layer):
         self.k_proj = keras.layers.Dense(self.internal_dim, name="k_proj")
         self.v_proj = keras.layers.Dense(self.internal_dim, name="v_proj")
         self.out_proj = keras.layers.Dense(self.embedding_dim, name="out_proj")
-        self.attn_dropout = keras.layers.Dropout(self.dropout, name="attn_dropout")
+        self.attn_dropout = keras.layers.Dropout(self.dropout_rate, name="attn_dropout")
         self.rope = AxialRoPE2D(
             head_dim=self.head_dim,
             feat_shape=self.feat_sizes,
@@ -384,7 +404,7 @@ class _SAM2RoPEAttention(keras.layers.Layer):
             "embedding_dim": self.embedding_dim,
             "num_heads": self.num_heads,
             "downsample_rate": self.downsample_rate,
-            "dropout": self.dropout,
+            "dropout_rate": self.dropout_rate,
             "kv_in_dim": self.kv_in_dim,
             "rope_theta": self.rope_theta,
             "feat_sizes": self.feat_sizes,
@@ -428,9 +448,9 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
     :type d_model: int
     :param dim_feedforward: FFN hidden width. Defaults to ``2048``.
     :type dim_feedforward: int
-    :param dropout: Dropout rate used by the FFN, the three residual dropouts,
+    :param dropout_rate: Dropout rate used by the FFN, the three residual dropouts,
         and both attention sub-blocks. Defaults to ``0.1``.
-    :type dropout: float
+    :type dropout_rate: float
     :param activation: FFN hidden activation. SAM 2.1 ships ``'relu'``, not the
         transformer-default ``'gelu'``. Defaults to ``'relu'``.
     :type activation: str
@@ -476,7 +496,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             self,
             d_model: int = 256,
             dim_feedforward: int = 2048,
-            dropout: float = 0.1,
+            dropout_rate: float = DEFAULT_DROPOUT_RATE,
             activation: str = "relu",
             pos_enc_at_attn: bool = False,
             pos_enc_at_cross_attn_queries: bool = False,
@@ -499,8 +519,8 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
         # Store ALL configuration parameters.
         self.d_model = int(d_model)
         self.dim_feedforward = int(dim_feedforward)
-        self.dropout = float(dropout)
-        self.activation = activation
+        self.dropout_rate = float(dropout_rate)
+        self.activation = deserialize_activation(activation)
         self.pos_enc_at_attn = bool(pos_enc_at_attn)
         self.pos_enc_at_cross_attn_queries = bool(pos_enc_at_cross_attn_queries)
         self.pos_enc_at_cross_attn_keys = bool(pos_enc_at_cross_attn_keys)
@@ -520,7 +540,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             embedding_dim=self.d_model,
             num_heads=self.num_heads,
             downsample_rate=self.downsample_rate,
-            dropout=self.dropout,
+            dropout_rate=self.dropout_rate,
             kv_in_dim=None,
             rope_theta=self.rope_theta,
             feat_sizes=self.feat_sizes,
@@ -531,7 +551,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             embedding_dim=self.d_model,
             num_heads=self.num_heads,
             downsample_rate=self.downsample_rate,
-            dropout=self.dropout,
+            dropout_rate=self.dropout_rate,
             kv_in_dim=self.kv_in_dim,
             rope_theta=self.rope_theta,
             feat_sizes=self.feat_sizes,
@@ -550,10 +570,10 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             epsilon=self.layer_norm_epsilon, name="norm3")
         self.linear1 = keras.layers.Dense(self.dim_feedforward, name="linear1")
         self.linear2 = keras.layers.Dense(self.d_model, name="linear2")
-        self.ffn_dropout = keras.layers.Dropout(self.dropout, name="ffn_dropout")
-        self.dropout1 = keras.layers.Dropout(self.dropout, name="dropout1")
-        self.dropout2 = keras.layers.Dropout(self.dropout, name="dropout2")
-        self.dropout3 = keras.layers.Dropout(self.dropout, name="dropout3")
+        self.ffn_dropout = keras.layers.Dropout(self.dropout_rate, name="ffn_dropout")
+        self.dropout1 = keras.layers.Dropout(self.dropout_rate, name="dropout1")
+        self.dropout2 = keras.layers.Dropout(self.dropout_rate, name="dropout2")
+        self.dropout3 = keras.layers.Dropout(self.dropout_rate, name="dropout3")
 
     def build(
             self,
@@ -704,8 +724,8 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
         config.update({
             "d_model": self.d_model,
             "dim_feedforward": self.dim_feedforward,
-            "dropout": self.dropout,
-            "activation": self.activation,
+            "dropout_rate": self.dropout_rate,
+            "activation": serialize_activation(self.activation),
             "pos_enc_at_attn": self.pos_enc_at_attn,
             "pos_enc_at_cross_attn_queries": self.pos_enc_at_cross_attn_queries,
             "pos_enc_at_cross_attn_keys": self.pos_enc_at_cross_attn_keys,
@@ -752,8 +772,8 @@ class SAM2MemoryAttention(keras.layers.Layer):
     :type pos_enc_at_input: bool
     :param dim_feedforward: Per-block FFN hidden width. Defaults to ``2048``.
     :type dim_feedforward: int
-    :param dropout: Per-block dropout rate. Defaults to ``0.1``.
-    :type dropout: float
+    :param dropout_rate: Per-block dropout rate. Defaults to ``0.1``.
+    :type dropout_rate: float
     :param activation: Per-block FFN activation. Defaults to ``'relu'``.
     :type activation: str
     :param pos_enc_at_attn: Per-block self-attention positional injection.
@@ -800,7 +820,7 @@ class SAM2MemoryAttention(keras.layers.Layer):
             num_layers: int = 4,
             pos_enc_at_input: bool = True,
             dim_feedforward: int = 2048,
-            dropout: float = 0.1,
+            dropout_rate: float = DEFAULT_DROPOUT_RATE,
             activation: str = "relu",
             pos_enc_at_attn: bool = False,
             pos_enc_at_cross_attn_queries: bool = False,
@@ -823,8 +843,8 @@ class SAM2MemoryAttention(keras.layers.Layer):
         self.num_layers = int(num_layers)
         self.pos_enc_at_input = bool(pos_enc_at_input)
         self.dim_feedforward = int(dim_feedforward)
-        self.dropout = float(dropout)
-        self.activation = activation
+        self.dropout_rate = float(dropout_rate)
+        self.activation = deserialize_activation(activation)
         self.pos_enc_at_attn = bool(pos_enc_at_attn)
         self.pos_enc_at_cross_attn_queries = bool(pos_enc_at_cross_attn_queries)
         self.pos_enc_at_cross_attn_keys = bool(pos_enc_at_cross_attn_keys)
@@ -840,7 +860,7 @@ class SAM2MemoryAttention(keras.layers.Layer):
             SAM2MemoryAttentionLayer(
                 d_model=self.d_model,
                 dim_feedforward=self.dim_feedforward,
-                dropout=self.dropout,
+                dropout_rate=self.dropout_rate,
                 activation=self.activation,
                 pos_enc_at_attn=self.pos_enc_at_attn,
                 pos_enc_at_cross_attn_queries=self.pos_enc_at_cross_attn_queries,
@@ -959,8 +979,8 @@ class SAM2MemoryAttention(keras.layers.Layer):
             "num_layers": self.num_layers,
             "pos_enc_at_input": self.pos_enc_at_input,
             "dim_feedforward": self.dim_feedforward,
-            "dropout": self.dropout,
-            "activation": self.activation,
+            "dropout_rate": self.dropout_rate,
+            "activation": serialize_activation(self.activation),
             "pos_enc_at_attn": self.pos_enc_at_attn,
             "pos_enc_at_cross_attn_queries": self.pos_enc_at_cross_attn_queries,
             "pos_enc_at_cross_attn_keys": self.pos_enc_at_cross_attn_keys,

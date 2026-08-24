@@ -145,6 +145,11 @@ class MultiHeadAttention(keras.layers.Layer):
     :param dropout_rate: Float, dropout rate for attention weights. Must be between
         0.0 and 1.0. Defaults to 0.0.
     :type dropout_rate: float
+    :param output_kernel_initializer: Optional initializer for the output
+        projection (``cross_attention/proj``) alone; ``None`` (the default)
+        leaves it on ``kernel_initializer``. See
+        :class:`MultiHeadCrossAttention`.
+    :type output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param kernel_initializer: String or Initializer for weight matrices.
         Defaults to "he_normal".
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -188,6 +193,7 @@ class MultiHeadAttention(keras.layers.Layer):
         num_heads: int = 8,
         dropout_rate: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+        output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         use_bias: bool = False,
         probability_type: str = "softmax",
@@ -218,6 +224,10 @@ class MultiHeadAttention(keras.layers.Layer):
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.output_kernel_initializer = (
+            keras.initializers.get(output_kernel_initializer)
+            if output_kernel_initializer is not None else None
+        )
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
         self.probability_type = probability_type
@@ -234,6 +244,7 @@ class MultiHeadAttention(keras.layers.Layer):
             shared_qk_projections=True,  # Efficient self-attention mode
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
+            output_kernel_initializer=self.output_kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_initializer="zeros",  # Use default bias initializer
             probability_type=self.probability_type,
@@ -335,6 +346,10 @@ class MultiHeadAttention(keras.layers.Layer):
             "num_heads": self.num_heads,
             "dropout_rate": self.dropout_rate,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "output_kernel_initializer": (
+                keras.initializers.serialize(self.output_kernel_initializer)
+                if self.output_kernel_initializer is not None else None
+            ),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
             "probability_type": self.probability_type,

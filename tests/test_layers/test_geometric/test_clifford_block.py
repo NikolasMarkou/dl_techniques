@@ -2909,9 +2909,29 @@ class TestSequencePaddingHazard:
             f"zero padding no longer reaches the last real position "
             f"(per-position {per_pos}); note 8 quotes 1.183 here"
         )
-        assert float(per_pos[:-1].max()) == 0.0, (
+        # DECISION plan-2026-08-22T035419-a11304c8/D-037
+        # The positions BEHIND the boundary margin are bounded in ULP, not
+        # pinned at `== 0.0`. The exact-zero form was RED at baseline
+        # (`assert 3.5762786865234375e-07 == 0.0`, per-position
+        # `[0, 0, 2.384e-07, 3.576e-07, 2.980e-08, 1.183]`) and is
+        # unsatisfiable: padding changes the TENSOR LENGTH, so the same
+        # depthwise convolutions take a different fused/vectorized kernel path
+        # and the untouched positions differ by fp32 reassociation, not by a
+        # leak. Measured over 20 freshly initialized blocks: the pre-boundary
+        # residual is 1.192093e-07 .. 5.960464e-07 = **0.50 .. 5.00 ulp** of the
+        # output amplitude, and it was never 0.0. Over the same 20 blocks the
+        # REAL boundary effect at the last position is 0.0813 .. 1.1828, at
+        # least 1.4e5 ulp -- so the 16-ulp budget (3.2x over the worst residual)
+        # is ~5000x below the smallest genuine leak this assertion must see, and
+        # note 8's claim that the margin is exactly (2K-2) is unweakened.
+        early = float(per_pos[:-1].max())
+        amplitude = float(np.abs(y_bare).max())
+        ulp = float(np.spacing(np.float32(amplitude)))
+        assert early <= 16 * ulp, (
             f"padding reached FURTHER back than the (2K-2) boundary margin "
-            f"note 8 documents: per-position {per_pos}"
+            f"note 8 documents: per-position {per_pos}; the worst pre-boundary "
+            f"position moved {early:.6e} = {early / ulp:.2f} ulp of the output "
+            f"amplitude {amplitude:.4f}"
         )
 
 

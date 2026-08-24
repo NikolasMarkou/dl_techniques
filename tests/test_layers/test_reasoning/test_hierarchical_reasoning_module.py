@@ -68,7 +68,11 @@ class TestHierarchicalReasoningModule:
         """Test default HRM-optimized configuration."""
         layer = HierarchicalReasoningModule(num_layers=1, embed_dim=16, num_heads=2)
 
-        assert layer.attention_type == 'multi_head'
+        # 'group_query' with num_kv_heads == num_heads, not 'multi_head':
+        # arithmetically the same attention, but the only registry type that
+        # also carries RoPE (plan-2026-08-17T183311-79c63e38/D-012). Reverting
+        # this default is what made every HRM permutation-equivariant.
+        assert layer.attention_type == 'group_query'
         assert layer.normalization_type == 'rms_norm'
         assert layer.normalization_position == 'post'
         assert layer.ffn_type == 'swiglu'

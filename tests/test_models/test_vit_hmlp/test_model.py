@@ -20,6 +20,79 @@ from dl_techniques.models.vit_hmlp.model import (
     apply_mask_after_stem
 )
 
+from ..knob_sensitivity_oracle import (
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+
+
+# ---------------------------------------------------------------------------
+# The hMLP stem's ACTUAL claim: patch independence (commutation with masking)
+# ---------------------------------------------------------------------------
+# `apply_mask_after_stem` computes `stem(images)` and THEN multiplies by
+# `(1 - mask)` (model.py, docstring at :1050). So every assertion of the form
+# "masked positions are zero" is a re-verification of elementwise multiplication
+# by a 0/1 mask -- true for ANY stem, including one with total cross-patch
+# leakage. Three tests in this file asserted exactly that, and a fourth compared
+# `stem(x)` at unmasked positions against `stem(x) * (1 - mask)` at the same
+# positions: a value against itself.
+#
+# What the hMLP stem exists to claim (Touvron et al., "Three things everyone
+# should know about Vision Transformers", sec. 2) is that the stem is
+# PATCH-INDEPENDENT, which is what makes masking-after-stem equivalent to
+# masking-before-stem in MAE-style SSL. That claim is a commutation:
+#
+#     stem(images * pixel_mask)[unmasked] == stem(images)[unmasked]
+#
+# MEASURED 2026-08-18 at inference, patch_size=16, 64x64 input: max delta at
+# unmasked positions is EXACTLY 0.0 for both `stem_norm_layer="batch"` and
+# `"layer"`. The property holds. The companion assertion (masked positions DO
+# move: measured 0.106 for batch, 3.15 for layer) is the non-vacuity control --
+# without it, a stem that ignored its input entirely would satisfy the
+# commutation trivially.
+def _zero_masked_patches_in_pixels(
+    images: np.ndarray, mask: np.ndarray, patch: int
+) -> np.ndarray:
+    """Zero, IN PIXEL SPACE, the image region of every masked patch."""
+    images = np.asarray(keras.ops.convert_to_numpy(images))
+    b, h, w, c = images.shape
+    gh, gw = h // patch, w // patch
+    keep = (1.0 - np.asarray(mask, dtype="float32")).reshape(b, gh, gw, 1, 1, 1)
+    tiles = images.reshape(b, gh, patch, gw, patch, c).transpose(0, 1, 3, 2, 4, 5)
+    tiles = tiles * keep
+    return tiles.transpose(0, 1, 3, 2, 4, 5).reshape(b, h, w, c)
+
+
+def _assert_stem_is_patch_independent(stem, images, mask, patch: int) -> float:
+    """The stem must commute with masking; returns the measured masked-side delta."""
+    images = np.asarray(keras.ops.convert_to_numpy(images))
+    mask = np.asarray(keras.ops.convert_to_numpy(mask))
+    masked_images = _zero_masked_patches_in_pixels(images, mask, patch)
+    perturbed = np.asarray(
+        keras.ops.convert_to_numpy(stem(masked_images, training=False))
+    )
+    clean = np.asarray(keras.ops.convert_to_numpy(stem(images, training=False)))
+    assert perturbed.shape == clean.shape
+
+    kept, hidden = mask == 0, mask == 1
+    assert kept.any() and hidden.any(), "the mask must have both kinds of patch"
+
+    delta_kept = float(np.max(np.abs(perturbed[kept] - clean[kept])))
+    assert delta_kept <= 1e-5, (
+        "the hMLP stem LEAKS across patches: destroying the pixels of masked "
+        f"patches moved unmasked patch embeddings by max|delta| = "
+        f"{delta_kept:.3e} (measured 0.0 on a patch-independent stem). "
+        "Masking after the stem is then NOT equivalent to masking before it."
+    )
+    # Non-vacuity control: the perturbation must actually have reached the stem.
+    delta_hidden = float(np.max(np.abs(perturbed[hidden] - clean[hidden])))
+    assert delta_hidden > 1e-5, (
+        f"destroying the masked patches' pixels changed their own embeddings by "
+        f"only {delta_hidden:.3e}: the probe never reached the stem, so the "
+        "commutation above proves nothing."
+    )
+    return delta_hidden
+
 
 class TestViTHMLPInitialization:
     """Test suite for ViTHMLP model initialization with modern patterns."""
@@ -901,32 +974,27 @@ class TestViTHMLPMaskedLearning:
 
         model.build((None, 32, 32, 3))
 
-        # Create test scenario
         images = np.random.rand(2, 32, 32, 3).astype('float32')
-
-        # Test 1: Process with stem before masking
-        patches_before_mask = model.stem(images)
-
-        # Test 2: Create mask and apply after stem
         num_patches = (32 // 8) ** 2  # 16 patches
         mask = np.zeros((2, num_patches), dtype='float32')
         mask[:, :8] = 1.0  # Mask first half
 
+        # THE claim (see `_assert_stem_is_patch_independent` above): the stem
+        # commutes with masking. The old body asserted that
+        # `apply_mask_after_stem` zeroes the masked entries and leaves the rest
+        # equal to `stem(images)` -- but that function IS
+        # `stem(images) * (1 - mask)`, so both halves were true by definition
+        # for any stem whatsoever, leakage included.
+        _assert_stem_is_patch_independent(model.stem, images, mask, patch=8)
+
+        # The convenience wrapper's own contract, kept: it must agree with
+        # masking the stem's output directly.
         masked_patches, _ = apply_mask_after_stem(model.stem, images, mask)
-
-        # Test 3: The key property - masked patches should be cleanly zeroed
-        for b in range(2):
-            for p in range(8):  # First 8 patches are masked
-                assert np.allclose(masked_patches[b, p].numpy(), 0.0)
-
-            # Unmasked patches should match original
-            for p in range(8, num_patches):
-                np.testing.assert_allclose(
-                    patches_before_mask[b, p].numpy(),
-                    masked_patches[b, p].numpy(),
-                    rtol=1e-6, atol=1e-6,
-                    err_msg="Unmasked patches should be unchanged"
-                )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(masked_patches),
+            keras.ops.convert_to_numpy(model.stem(images)) * (1.0 - mask)[..., None],
+            rtol=1e-6, atol=1e-6,
+        )
 
 
 class TestViTHMLPEdgeCases:
@@ -984,16 +1052,33 @@ class TestViTHMLPEdgeCases:
         assert not np.any(np.isnan(output.numpy()))
 
     def test_different_stem_normalization(self):
-        """Test different stem normalization configurations."""
+        """``stem_norm_layer`` must build the requested stem normalization."""
         norm_types = ["batch", "layer"]
 
-        for norm_type in norm_types:
+        def _build(norm_type):
             model = ViTHMLP(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=5,
                 stem_norm_layer=norm_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # `model.stem.norm_layer == norm_type` is a knob ECHO. BatchNorm carries
+        # non-trainable moving mean/variance that LayerNorm does not, so the
+        # weight-shape signature says which normalization was actually built.
+        sigs = assert_structural_knob_changes_weights(
+            {n: (lambda n=n: _build(n)) for n in norm_types},
+            knob="stem_norm_layer",
+        )
+        assert len(sigs["batch"]) > len(sigs["layer"]), (
+            "stem_norm_layer='batch' should add moving-statistic weights the "
+            f"layer-norm stem has not: {len(sigs['batch'])} vs {len(sigs['layer'])}"
+        )
+
+        for norm_type in norm_types:
+            model = _build(norm_type)
 
             input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
@@ -1003,13 +1088,54 @@ class TestViTHMLPEdgeCases:
             assert model.stem.norm_layer == norm_type
 
     def test_different_normalization_configurations(self):
-        """Test different transformer normalization configurations using factories."""
+        """Both normalization axes must reach the graph.
+
+        The logits shape is ``(2, 5)`` under all four combinations, so the old
+        assertion was true whether or not either kwarg was honoured -- and the
+        two axes fail differently, so they need different instruments.
+        """
         configs = [
             {"normalization_type": "layer_norm", "normalization_position": "post"},
             {"normalization_type": "layer_norm", "normalization_position": "pre"},
             {"normalization_type": "rms_norm", "normalization_position": "post"},
             {"normalization_type": "rms_norm", "normalization_position": "pre"}
         ]
+
+        input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
+
+        def _build(**kwargs):
+            model = ViTHMLP(
+                input_shape=(64, 64, 3),
+                scale="tiny",
+                num_classes=5,
+                **kwargs
+            )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        # Axis 1 -- `normalization_type` is STRUCTURAL: RMSNorm has no centering
+        # shift, so it holds strictly fewer weights than LayerNorm. (Measured on
+        # the `tiny` scale: 127 tensors / 5,486,021 params vs 152 / 5,490,821.)
+        type_sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(normalization_type=t))
+             for t in ("layer_norm", "rms_norm")},
+            knob="normalization_type",
+        )
+        assert len(type_sigs["rms_norm"]) < len(type_sigs["layer_norm"])
+
+        # Axis 2 -- `normalization_position` is a VALUE knob: pre-norm and
+        # post-norm hold the SAME weights, so under one seed they are
+        # bit-identical and the whole output difference is the ordering. This is
+        # the axis a shape assertion is completely blind to.
+        for norm_type in ("layer_norm", "rms_norm"):
+            deltas = assert_value_knob_changes_output(
+                {pos: (lambda pos=pos: _build(
+                    normalization_type=norm_type, normalization_position=pos))
+                 for pos in ("post", "pre")},
+                input_tensor,
+                knob=f"normalization_position ({norm_type})",
+            )
+            assert min(deltas.values()) > 1e-5
 
         for config in configs:
             model = ViTHMLP(
@@ -1019,23 +1145,43 @@ class TestViTHMLPEdgeCases:
                 **config
             )
 
-            input_tensor = np.random.rand(2, 64, 64, 3).astype('float32')
             output = model(input_tensor)
 
             assert output.shape == (2, 5)
             assert not np.any(np.isnan(output.numpy()))
 
     def test_different_ffn_types(self):
-        """Test different FFN types using factory integration."""
+        """``ffn_type`` must build the requested FFN.
+
+        The logits shape is ``(1, 3)`` for every FFN, so the old assertion held
+        whether or not the factory ever saw the argument. The three FFNs have
+        genuinely different parameterisations -- SwiGLU fuses gate and up
+        projections, GEGLU adds a third matrix -- so the weight-shape signature
+        pins which one was built.
+        """
         ffn_types = ["mlp", "swiglu", "geglu"]  # Available types
 
-        for ffn_type in ffn_types:
+        def _build(ffn_type):
             model = ViTHMLP(
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=3,
                 ffn_type=ffn_type
             )
+            model(np.zeros((1, 64, 64, 3), 'float32'))
+            return model
+
+        sigs = assert_structural_knob_changes_weights(
+            {t: (lambda t=t: _build(t)) for t in ffn_types}, knob="ffn_type")
+        params = {
+            t: sum(int(np.prod(w)) for w in sigs[t]) for t in ffn_types
+        }
+        # All three parameter counts must be distinct -- two matching counts
+        # would mean two of the three names resolved to the same layer.
+        assert len(set(params.values())) == 3, f"ffn_type parameter counts: {params}"
+
+        for ffn_type in ffn_types:
+            model = _build(ffn_type)
 
             input_tensor = np.random.rand(1, 64, 64, 3).astype('float32')
             output = model(input_tensor)
@@ -1219,17 +1365,14 @@ class TestViTHMLPArchitectureValidation:
         assert not np.any(np.isnan(patches.numpy()))
         assert not np.any(np.isinf(patches.numpy()))
 
-        # Test that stem processes patches independently (no info leakage)
-        # This is the key advantage for SSL - we'll test masking compatibility
+        # Test that stem processes patches independently (no info leakage).
+        # This is the difference from a standard ViT stem, and it is a
+        # COMMUTATION, not a "the mask multiplies to zero" check -- the latter
+        # holds for any stem, see `_assert_stem_is_patch_independent`.
         mask = np.zeros((2, expected_patches), dtype='float32')
         mask[:, :8] = 1.0  # Mask half the patches
 
-        masked_patches, _ = apply_mask_after_stem(model.stem, test_input, mask)
-
-        # Masked patches should be clean zeros
-        for b in range(2):
-            for p in range(8):  # Masked patches
-                assert np.allclose(masked_patches[b, p].numpy(), 0.0)
+        _assert_stem_is_patch_independent(model.stem, test_input, mask, patch=16)
 
     def test_end_to_end_functionality(self):
         """Test complete end-to-end functionality."""
@@ -1308,15 +1451,109 @@ class TestViTHMLPArchitectureValidation:
 
         # 3. Verify masking worked correctly
         num_masked = int(0.75 * 16)  # 75% of 16 patches
+        mask_np = np.asarray(keras.ops.convert_to_numpy(mask_used))
         for b in range(batch_size):
-            masked_count = np.sum(mask_used[b].numpy())
-            assert masked_count == num_masked
+            assert np.sum(mask_np[b]) == num_masked
 
-            # Check that masked positions are actually zeroed
-            for p in range(16):
-                if mask_used[b, p] == 1:  # Masked
-                    assert np.allclose(masked_patches[b, p].numpy(), 0.0)
+        # 4. The property that makes step 2 legitimate at all: masking AFTER
+        # the stem equals masking BEFORE it, i.e. the stem does not mix
+        # patches. Asserting only "masked positions are zero" (what this test
+        # used to do) is true of `stem(x) * (1 - mask)` for every stem.
+        _assert_stem_is_patch_independent(model.stem, images, mask_np, patch=16)
+
+
+class TestViTHMLPPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `ViTHMLP.build` used to call `create_embedding_layer('positional_learned',
+    ..., dropout=...)` while the registry and `PositionalEmbedding.__init__`
+    both declare `dropout_rate`; the factory silently dropped unknown keys AT
+    THE TIME, so positional dropout was unconditionally 0.0.
+
+    Asserting `model.pos_dropout_rate` would be VACUOUS (that attribute was
+    always correct). This reads the real `keras.layers.Dropout` instance.
+
+    RE-RUNNING THE ORIGINAL RED-PROOF: the factory no longer drops silently
+    (`plan-2026-08-14T042537-ff96c6c6/D-002`, same iteration as this guard) —
+    it RAISES on an unregistered kwarg. Re-injecting the historical bug at the
+    KEYWORD level (`dropout=` for `dropout_rate=`) therefore now fails with
+    the factory's `ValueError: ... unsupported parameter(s) ['dropout']` at
+    construction, NOT with the `.rate == 0.5` assertion below. Inject at the
+    VALUE level to exercise this assertion.
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer(self):
+        model = ViTHMLP(
+            input_shape=(64, 64, 3),
+            num_classes=10,
+            scale="tiny",
+            patch_size=(16, 16),
+            pos_dropout_rate=0.5,
+        )
+        _ = model(np.zeros((1, 64, 64, 3), dtype=np.float32), training=False)
+
+        pos_dropout = model.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(historically: create_embedding_layer SILENTLY DROPPED an "
+            "unknown kwarg name; it now raises instead, so this assertion "
+            "firing today means a VALUE, not a keyword, went astray)"
+        )
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19 at scale="tiny", 64x64x3, patch 16 (a 4x4 = 16-patch grid
+# plus CLS): 162 trainable weights, 0 dead, 0 non-finite. No waiver needed and
+# none given. The geometry is the smallest one this file's own configs cover --
+# a gradient claim is per-weight, so it does not need 196 patches to be true,
+# and the suite already pins the 224/384 shapes elsewhere.
+#
+# The hMLP stem is the reason this package exists, and it is a multi-stage
+# convolutional stem whose per-stage weights are exactly the kind that get
+# built, saved and never executed if a stage is skipped by an off-by-one in
+# the depth loop.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestViTHMLPGradientFlow:
+    """Every trainable weight is on the backward graph."""
+
+    def test_gradients_reach_every_trainable_weight(self):
+        model = ViTHMLP(input_shape=(64, 64, 3), num_classes=10, scale="tiny", patch_size=16)
+        x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)  # subclassed model: unbuilt until first call
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) == 162, (
+            "the tiny variant's weight set changed shape; re-measure before "
+            "editing this number"
+        )
+        assert max(v for v in report.values() if v is not None) > 0.0
+
+    def test_gradients_reach_every_trainable_weight_without_top(self):
+        """``include_top=False`` removes the head, not the trunk's gradient path.
+
+        The pooled/no-head arm is the one a downstream user fine-tunes, and it
+        is a different forward path (no classifier Dense, a pooling reduction
+        instead). A trunk weight that only trains through the classification
+        head would be invisible to the arm above.
+        """
+        model = ViTHMLP(input_shape=(64, 64, 3), scale="tiny", patch_size=16, include_top=False, pooling="mean")
+        x = np.random.default_rng(1).random((2, 64, 64, 3)).astype("float32")
+        model(x, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0

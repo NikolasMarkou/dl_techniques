@@ -1081,3 +1081,124 @@ class TestPositionalModesIsolateOffPrefix:
             ops.convert_to_tensor(images), attention_mask=mask, training=False
         ))
         np.testing.assert_allclose(base, sequence[:, 0, :], rtol=0, atol=0)
+
+
+class TestVisionEncoderPositionalDropoutReachesTheLayer:
+    """D-2 regression guard: `pos_dropout_rate` must reach the BUILT
+    `keras.layers.Dropout` inside the positional-embedding sub-layer.
+
+    `VisionEncoder.__init__` used to call
+    `create_embedding_layer('positional_learned', ..., dropout=...)` while the
+    registry and `PositionalEmbedding.__init__` both declare `dropout_rate`;
+    `create_embedding_layer` silently filtered unknown keys out AT THE TIME, so
+    positional dropout was unconditionally 0.0 for every consumer of the three
+    public builders that route through this one call site.
+
+    Asserting `encoder.pos_dropout_rate` here would be VACUOUS — that stored
+    attribute was always correct and was never the bug. This reads the real
+    `keras.layers.Dropout` instance's `.rate`.
+
+    RE-RUNNING THE ORIGINAL RED-PROOF: the factory no longer drops silently
+    (`plan-2026-08-14T042537-ff96c6c6/D-002`, same iteration as this guard) —
+    it RAISES on an unregistered kwarg. Re-injecting the historical bug at the
+    KEYWORD level (`dropout=` for `dropout_rate=` at `vision_encoder.py`'s
+    positional call site) therefore now fails with the factory's
+    `ValueError: ... unsupported parameter(s) ['dropout']` at construction, NOT
+    with the `.rate == 0.5` assertions below. Inject at the VALUE level
+    (`dropout_rate=0.0`) to exercise those assertions — MEASURED, both cases
+    fire.
+    """
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer_direct(self):
+        encoder = VisionEncoder(
+            img_size=32, patch_size=8, embed_dim=64, depth=1, num_heads=4,
+            pos_dropout_rate=0.5,
+        )
+        _ = encoder(ops.convert_to_tensor(
+            np.zeros((1, 32, 32, 3), dtype='float32')), training=False)
+
+        pos_dropout = encoder.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout: "
+            f"got rate={pos_dropout.rate}, expected 0.5 "
+            "(historically: create_embedding_layer SILENTLY DROPPED an "
+            "unknown kwarg name; it now raises instead, so this assertion "
+            "firing today means a VALUE, not a keyword, went astray)"
+        )
+
+    def test_pos_dropout_rate_reaches_built_dropout_layer_via_public_builder(self):
+        """Same assertion through `create_vit_encoder`, one of the three public
+        builders that all funnel into the single fixed call site."""
+        encoder = create_vit_encoder(
+            img_size=32, patch_size=8, embed_dim=64, depth=1, num_heads=4,
+            pos_dropout_rate=0.5,
+        )
+        _ = encoder(ops.convert_to_tensor(
+            np.zeros((1, 32, 32, 3), dtype='float32')), training=False)
+
+        pos_dropout = encoder.pos_embed.dropout
+        assert isinstance(pos_dropout, keras.layers.Dropout)
+        assert pos_dropout.rate == 0.5, (
+            "positional dropout never reached the built keras.layers.Dropout via "
+            f"create_vit_encoder: got rate={pos_dropout.rate}, expected 0.5"
+        )
+
+
+# ---------------------------------------------------------------------
+# C-15 sibling (plan-2026-08-14T233721-d4f9beb2, step 36)
+#
+# `vit_siglip/model.py` accepted an odd `patch_size` and died at the first
+# forward because its two-stage stem's total stride is 2*(patch//2). Grepping the
+# changed symbol as a bare string found the SAME construction here, plus a
+# stronger version for 'conv' (2*2*(patch//4)). Both are now refused at
+# construction, with a message naming the constraint.
+# ---------------------------------------------------------------------
+
+
+class TestStemStrideMatchesPatchSize:
+    """The stem's product-of-strides must really equal `patch_size`."""
+
+    @pytest.mark.parametrize(
+        "patch_embed_type,patch_size,divisor",
+        [
+            ("siglip", 7, 2),
+            ("siglip", 9, 2),
+            ("conv", 6, 4),
+            ("conv", 10, 4),
+        ],
+    )
+    def test_bad_patch_size_raises_at_construction(
+        self, patch_embed_type, patch_size, divisor
+    ):
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError) as excinfo:
+            VisionEncoder(
+                img_size=patch_size * 4,
+                patch_size=patch_size,
+                patch_embed_type=patch_embed_type,
+                embed_dim=32,
+                depth=1,
+                num_heads=4,
+            )
+        message = str(excinfo.value)
+        assert f"divisible by {divisor}" in message, message
+        assert patch_embed_type in message, message
+
+    @pytest.mark.parametrize(
+        "patch_embed_type,patch_size",
+        [("siglip", 16), ("conv", 16), ("linear", 7), ("hybrid", 7)],
+    )
+    def test_valid_combinations_are_untouched(self, patch_embed_type, patch_size):
+        """Anti-vacuity: 'linear' and 'hybrid' have no multi-stage stem, so an
+        odd patch size is legal for them and must not be rejected."""
+        encoder = VisionEncoder(
+            img_size=patch_size * 4,
+            patch_size=patch_size,
+            patch_embed_type=patch_embed_type,
+            embed_dim=32,
+            depth=1,
+            num_heads=4,
+        )
+        assert encoder.patch_size == patch_size

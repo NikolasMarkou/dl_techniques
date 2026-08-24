@@ -1,43 +1,57 @@
-"""Fixed-weights, non-trainable conformal prediction-interval layer.
+"""
+Non-trainable conformal prediction-interval layer with frozen calibration.
 
-This module provides :class:`ConformalIntervalLayer`, a serializable Keras 3
-layer that bakes a post-hoc split-conformal radius ``q`` into a deployable
-graph. It is meant to be appended after a frozen (bias-free / Miyasawa)
-denoiser so that a single ``denoiser -> ConformalIntervalLayer`` Functional
-model exports a calibrated interval predictor as one ``.keras`` artifact.
+This layer embodies the principle of baking a post-hoc statistical guarantee
+into a deployable graph, a design paradigm that separates the fitting of a
+calibration constant from its application at inference. The core idea comes from
+split conformal prediction: given any point predictor, however complex or
+opaque, a distribution-free coverage guarantee can be attached to it by
+measuring residuals on held-out data and taking an appropriate quantile as an
+interval radius. The predictor need not be probabilistic, well-specified, or even
+understood; only exchangeability between calibration and test data is required.
 
-Design summary
---------------
-- **Non-trainable.** The whole layer is constructed ``trainable=False`` and its
-  single weight ``conformal_q`` (a scalar radius) is created with
-  ``trainable=False``. No gradients ever flow to it.
-- **Post-hoc calibration.** The radius ``q`` is NOT learned; it is fit
-  host-side on held-out data by
-  :func:`dl_techniques.utils.conformal_denoiser_intervals.calibrate_per_sigma`
-  (or :func:`~dl_techniques.utils.conformal_denoiser_intervals.conformal_quantile`)
-  and assigned into the frozen weight via :meth:`ConformalIntervalLayer.calibrate`
-  OUTSIDE ``call()``, exactly mirroring
-  :class:`dl_techniques.layers.time_series.forecasting_layers.ConformalQuantileHead`.
-- **Domain clip ``[0, 1]``.** ``call()`` clips the incoming point estimate
-  ``mu`` to ``[domain_min, domain_max]`` (default ``[0, 1]``), matching
-  ``DOMAIN_MIN`` / ``DOMAIN_MAX`` and the ``_predict_mu`` clip in
-  ``conformal_denoiser_intervals.py``. A mismatched domain silently breaks the
-  coverage guarantee the numpy calibration was fit under.
-- **Serialized domain / legacy artifacts.** ``domain_min`` / ``domain_max`` are
-  carried in :meth:`ConformalIntervalLayer.get_config`, so a model SAVED before
-  the ``[-0.5, +0.5] -> [0, 1]`` denoiser-domain migration keeps the OLD bounds
-  baked into its ``.keras`` config and will reload with them. That is intended:
-  such a graph wraps a legacy-domain denoiser and is invalid end-to-end anyway
-  (a bias-free net cannot be domain-shifted post hoc). There is deliberately NO
-  compat branch and NO migration shim — rebuild the graph around a ``[0, 1]``
-  denoiser instead.
-- **Scalar ``q`` (one deployment noise level).** One frozen scalar radius = one
-  deployment noise regime. Baking a full per-sigma table into a single graph is
-  a documented FUTURE EXTENSION (would require a second ``sigma`` call-time
-  input plus an index-lookup against a ``(num_sigmas,)`` grid) and is out of
-  scope here.
+The consequence for implementation is that this layer learns nothing. The radius
+`q` is a scalar fit host-side on a calibration split and then assigned into a
+frozen weight, so the layer's forward pass is a pure affine expansion of a point
+estimate into an interval:
 
-Backend-agnostic: uses ``keras.ops`` only, no raw TensorFlow ops.
+`mu_c = clip(mu, domain_min, domain_max)`
+`lower = mu_c - q`
+`upper = mu_c + q`
+
+Architecturally, the layer is constructed with `trainable=False` and its single
+weight `conformal_q` is created non-trainable, so no gradient ever reaches it.
+Calibration happens through an explicit `calibrate()` method that performs an
+`.assign()` outside `call()`, which keeps the statistical fitting procedure out
+of the training graph entirely. The practical payoff is packaging: appending this
+layer to a frozen denoiser yields a single `denoiser -> ConformalIntervalLayer`
+Functional model that exports a calibrated interval predictor as one `.keras`
+artifact, with the coverage guarantee travelling inside the file rather than
+alongside it as a loose constant.
+
+A single scalar radius encodes exactly one deployment noise regime.
+Conformal calibration is conditional on the distribution it was fit against, so a
+graph carrying one `q` is valid at one noise level. Per-sigma (Mondrian)
+deployment within a single graph would require a second `sigma` input and an
+index lookup against a noise grid, and is deliberately out of scope.
+
+The calibrated value is carried in `get_config` in addition to the weights
+archive. This is redundant by design: a config-only reload path such as
+`from_config` or `clone_model` bypasses the archive, and recovering an
+uncalibrated radius of zero would produce degenerate zero-width intervals that
+look valid.
+
+References:
+    - Vovk et al., 2005. Algorithmic Learning in a Random World. Springer.
+    - Lei et al., 2018. Distribution-Free Predictive Inference for Regression.
+      JASA 113(523). (https://arxiv.org/abs/1604.04173)
+    - Angelopoulos and Bates, 2021. A Gentle Introduction to Conformal
+      Prediction and Distribution-Free Uncertainty Quantification.
+      (https://arxiv.org/abs/2107.07511)
+    - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
+      Bias-Free Convolutional Neural Networks.
+      (https://arxiv.org/abs/1906.05478)
+
 """
 
 from typing import Any, Dict, Optional, Tuple, Union

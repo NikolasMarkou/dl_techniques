@@ -181,7 +181,10 @@ from train.common import (
     create_learning_rate_schedule,
 )
 from train.common.run_io import default_experiment_name, prepare_run_dir
-from train.common.args import explicitly_set_flags
+from train.common.args import (
+    config_values_from_args,
+    resolved_run_dir as resolved_output_dir,
+)
 
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.losses.sam3_detection_loss import (
@@ -633,30 +636,24 @@ def parse_arguments(
         can read the process-level dests in :data:`NON_CONFIG_DESTS`.
     :rtype: Tuple[argparse.Namespace, Sam3TrainingConfig]
     """
+    # DECISION plan-2026-08-03T191222-1d751f81/D-041
+    # Apply the preset HERE, in the builder, gated on PROVENANCE. Do NOT
+    # move it into `Sam3TrainingConfig.__post_init__`: by then the argv
+    # tokens are gone, so `--smoke --epochs 30` (30 being the flag's own
+    # default) is indistinguishable from a bare `--smoke`, and the preset
+    # silently overrides a value the caller really typed. And do NOT add a
+    # field to SMOKE_PRESET that changes WHAT is measured (variant, seed,
+    # learning rate, batch size, mask switch, DEEP-SUPERVISION switch,
+    # zero-instance rate, QUERY-SELECTION switch) -- only
+    # how much; `test_the_preset_changes_how_much_not_what` pins that list.
+    # The merge itself now lives in `train.common.args.config_values_from_args`
+    # (shared with sam/sam2, plan-2026-08-12T123743-e798a9e1/D-015); this
+    # decision still governs WHERE it is called from and what SMOKE_PRESET may
+    # contain, both of which are local to this file.
     parser = build_parser()
-    args = parser.parse_args(argv)
-    explicit_dests = explicitly_set_flags(parser, argv)
-    explicit_fields = {
-        CLI_TO_CONFIG[dest] for dest in explicit_dests if dest in CLI_TO_CONFIG
-    }
-
-    values = {
-        field: getattr(args, dest) for dest, field in CLI_TO_CONFIG.items()
-    }
-    if values.get("smoke"):
-        # DECISION plan-2026-08-03T191222-1d751f81/D-041
-        # Apply the preset HERE, in the builder, gated on PROVENANCE. Do NOT
-        # move it into `Sam3TrainingConfig.__post_init__`: by then the argv
-        # tokens are gone, so `--smoke --epochs 30` (30 being the flag's own
-        # default) is indistinguishable from a bare `--smoke`, and the preset
-        # silently overrides a value the caller really typed. And do NOT add a
-        # field to SMOKE_PRESET that changes WHAT is measured (variant, seed,
-        # learning rate, batch size, mask switch, DEEP-SUPERVISION switch,
-        # zero-instance rate, QUERY-SELECTION switch) -- only
-        # how much; `test_the_preset_changes_how_much_not_what` pins that list.
-        for field, preset_value in SMOKE_PRESET.items():
-            if field not in explicit_fields:
-                values[field] = preset_value
+    args, values = config_values_from_args(
+        parser, argv, CLI_TO_CONFIG, SMOKE_PRESET
+    )
     return args, Sam3TrainingConfig(**values)
 
 
@@ -672,25 +669,13 @@ def config_from_argv(
     return parse_arguments(argv)[1]
 
 
-def resolved_output_dir(config: Sam3TrainingConfig) -> Path:
-    """Resolve the run directory, anchoring a relative path at the REPO ROOT.
-
-    :param config: The run's config.
-    :type config: Sam3TrainingConfig
-    :return: ``<repo>/<output_dir>/<experiment_name>`` for a relative
-        ``output_dir``, or ``<output_dir>/<experiment_name>`` for an absolute
-        one.
-    :rtype: Path
-    """
-    # The editable install puts `<repo>/src` on `sys.path`, so
-    # `python -m train.sam3.train_sam3` resolves from ANY working directory and
-    # a bare `Path(config.output_dir)` would write a stray results tree wherever
-    # the user happened to be standing -- including `src/results/`, which the
-    # repo convention names explicitly as the wrong place.
-    root = Path(config.output_dir)
-    if not root.is_absolute():
-        root = Path(__file__).resolve().parents[3] / root
-    return root / str(config.experiment_name)
+# `resolved_output_dir` is `train.common.args.resolved_run_dir`, imported under
+# this module's own name at the top of the file (shared with sam/sam2,
+# plan-2026-08-12T123743-e798a9e1/D-015). The reasoning it used to carry -- the
+# editable install puts `<repo>/src` on `sys.path`, so a bare
+# `Path(config.output_dir)` would write a stray results tree wherever the user
+# happened to be standing, including `src/results/` -- moved with the body and
+# is still pinned here by `test_the_resolved_path_is_not_under_src`.
 
 
 # ---------------------------------------------------------------------------
@@ -1301,10 +1286,16 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
     # the majority of the selection scalar is a provably constant term. On seed
     # 3 that selected epoch 6 over epoch 29 on a **0.07%** val_loss margin and
     # cost box IoU 0.2360 vs 0.2724 -- and 0.2360 became the headline. The two
-    # callbacks are REBUILT rather than re-configured because
-    # `train.common.create_callbacks` derives `mode` as
-    # `'max' if 'accuracy' in monitor else 'min'`, so passing `val_box_iou`
-    # through it would silently select the WORST epoch. See decisions.md D-041.
+    # callbacks are REBUILT rather than re-configured so that this file owns the
+    # whole selection contract (metric, mode, patience, filepath) in one place.
+    # UPDATED (plan-2026-08-14T233721-d4f9beb2/D-051): the direction hazard this
+    # comment used to cite is GONE. `train.common.create_callbacks` no longer
+    # derives `mode` as `'max' if 'accuracy' in monitor else 'min'`; it resolves
+    # it from a metric-name registry that knows `iou` is a maximize metric, and
+    # it now accepts an explicit `monitor_mode=`. Routing `val_box_iou` through
+    # it would resolve to `max` today. The rebuild is kept anyway -- it is not
+    # load-bearing for the direction any more, only for locality.
+    # See decisions.md D-041 and D-051.
     callbacks = [callback for callback in callbacks
                  if not isinstance(callback, (keras.callbacks.EarlyStopping,
                                               keras.callbacks.ModelCheckpoint))]
@@ -1322,10 +1313,11 @@ def build_callbacks(config: Sam3TrainingConfig, output_dir: Path,
     # `GAP_SELECTION_METRIC` the `EarlyStopping` monitor and do NOT repoint
     # `best_model.keras` at it -- that changes which weights `fit` RESTORES
     # (`restore_best_weights=True`), i.e. a new variable that needs its own
-    # control arm, not a config tweak. `mode="max"` is HARDCODED for the same
-    # reason D-041 rebuilds the two callbacks above: `create_callbacks` derives
-    # `mode` as `'max' if 'accuracy' in monitor else 'min'`, which would select
-    # the WORST epoch here. `nan` is expected on any run without the
+    # control arm, not a config tweak. `mode="max"` is HARDCODED because this
+    # callback is built here rather than by `create_callbacks` -- the old
+    # `'max' if 'accuracy' in monitor else 'min'` hazard this comment used to
+    # cite was fixed in plan-2026-08-14T233721-d4f9beb2/D-051 and no longer
+    # applies. `nan` is expected on any run without the
     # all-category export and is MEASURED-safe (see GAP_SELECTION_METRIC).
     # See decisions.md D-003.
     callbacks.append(keras.callbacks.ModelCheckpoint(

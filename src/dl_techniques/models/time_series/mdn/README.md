@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of a **Mixture Density Network (MDN)** in **Keras 3**, based on the foundational paper ["Mixture Density Networks"](http://publications.aston.ac.uk/id/eprint/373/1/NCRG_94_004.pdf) by Christopher Bishop (1994).
+An implementation of a **Mixture Density Network (MDN)** in **Keras 3**, based on the foundational paper ["Mixture Density Networks"](http://publications.aston.ac.uk/id/eprint/373/1/NCRG_94_004.pdf) by Christopher Bishop (1994).
 
 The `MDNLayer` includes several practical improvements for training stability, such as independent processing paths, diversity regularization, and sigma constraints.
 

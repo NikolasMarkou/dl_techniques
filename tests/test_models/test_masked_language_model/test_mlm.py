@@ -91,7 +91,7 @@ def mlm_model(mock_encoder: MockEncoder) -> MaskedLanguageModel:
         special_token_ids=[0, 101, 102],  # PAD, CLS, SEP
         mlm_head_activation="gelu",
         initializer_range=0.02,
-        mlm_head_dropout=0.1,
+        mlm_head_dropout_rate=0.1,
         layer_norm_eps=1e-12,
     )
 
@@ -375,7 +375,7 @@ class TestMaskedLanguageModelInit:
         assert model.special_token_ids == []
         assert model.mlm_head_activation == "gelu"
         assert model.initializer_range == 0.02
-        assert model.mlm_head_dropout == 0.1
+        assert model.mlm_head_dropout_rate == 0.1
         assert model.layer_norm_eps == 1e-12
 
     def test_invalid_vocab_size(self, mock_encoder: MockEncoder) -> None:
@@ -467,15 +467,15 @@ class TestMaskedLanguageModelInit:
                 initializer_range=0.0,
             )
 
-    def test_invalid_mlm_head_dropout(self, mock_encoder: MockEncoder) -> None:
-        """Test that invalid mlm_head_dropout raises ValueError."""
+    def test_invalid_mlm_head_dropout_rate(self, mock_encoder: MockEncoder) -> None:
+        """Test that invalid mlm_head_dropout_rate raises ValueError."""
         with pytest.raises(
-                ValueError, match="mlm_head_dropout must be between 0 and 1"
+                ValueError, match="mlm_head_dropout_rate must be between 0 and 1"
         ):
             MaskedLanguageModel(
                 encoder=mock_encoder,
                 vocab_size=1000,
-                mlm_head_dropout=1.0,
+                mlm_head_dropout_rate=1.0,
             )
 
     def test_encoder_missing_hidden_size(self) -> None:
@@ -787,7 +787,7 @@ class TestMaskedLanguageModelSerialization:
         assert config["special_token_ids"] == [0, 101, 102]
         assert config["mlm_head_activation"] == "gelu"
         assert config["initializer_range"] == 0.02
-        assert config["mlm_head_dropout"] == 0.1
+        assert config["mlm_head_dropout_rate"] == 0.1
         assert config["layer_norm_eps"] == 1e-12
 
     def test_from_config(
@@ -964,3 +964,100 @@ class TestMaskedLanguageModelIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestCompiledMetricsAreReported:
+    """`compile(metrics=[...])` must reach `history.history`.
+
+    RED-proof for the defect where `MaskedLanguageModel.metrics` was overridden to
+    return ONLY `[loss_tracker, acc_metric]`. Keras still BUILT whatever was passed
+    to `compile(metrics=[...])` — so `compile()` raised nothing — but nothing ever
+    called `update_state` on it and nothing ever reported it. Measured before the
+    fix: `history keys: ['accuracy', 'loss']`, the requested metric absent.
+
+    NOT covered here, deliberately: weight tying. `mlm.py:49-53` documents the
+    untied head as a deliberate choice (the encoder is injectable and the embedding
+    table path is not stable across encoders), and D-002 records the decision not to
+    implement it.
+    """
+
+    def _tiny(self):
+        encoder = MockEncoder(vocab_size=32, hidden_size=16)
+        return MaskedLanguageModel(encoder=encoder, vocab_size=32, mask_token_id=3)
+
+    def test_named_compiled_metric_appears_in_history(self):
+        model = self._tiny()
+        model.compile(
+            optimizer="adam",
+            metrics=[keras.metrics.SparseCategoricalAccuracy(name="my_extra_metric")],
+        )
+        rng = np.random.default_rng(0)
+        x = {"input_ids": rng.integers(1, 32, (4, 8)).astype("int32")}
+        history = model.fit(x, epochs=1, batch_size=2, verbose=0)
+
+        assert "my_extra_metric" in history.history, (
+            f"compiled metric was dropped; history keys: {sorted(history.history)}"
+        )
+
+    def test_internal_trackers_keep_their_names(self):
+        """The union must not rename or displace `loss` / `accuracy`."""
+        model = self._tiny()
+        model.compile(
+            optimizer="adam",
+            metrics=[keras.metrics.SparseCategoricalAccuracy(name="my_extra_metric")],
+        )
+        names = [m.name for m in model.metrics]
+        assert "loss" in names and "accuracy" in names
+        assert names[:2] == ["loss", "accuracy"], (
+            f"internal trackers must stay first and keep their names, got {names}"
+        )
+
+
+# ---------------------------------------------------------------------
+# Gradient flow (plan-2026-08-19-a616f581 step 11)
+# ---------------------------------------------------------------------
+#
+# MEASURED 2026-08-19: 9 trainable weights (2 from ``MockEncoder``, 7 in the MLM
+# head), 0 dead, 0 non-finite.
+#
+# The encoder is the suite's own ``MockEncoder`` rather than a real transformer,
+# and that is not a shortcut: ``MaskedLanguageModel`` takes the encoder as a
+# CONSTRUCTOR ARGUMENT and its module docstring states the contract it is
+# written against -- "The wrapper accepts any encoder and cannot assume that an
+# embedding matrix is exposed ... The encoder must expose a `hidden_size`
+# attribute (a missing one raises `ValueError` at construction) and its `call`
+# must return a mapping containing `last_hidden_state`." ``MockEncoder``
+# satisfies exactly that contract, so it is a realization of the documented
+# input, not a fixture the real pipeline cannot emit. The head -- the part this
+# package actually ships -- is covered either way, and the assertion below pins
+# that all 7 head weights are among the live ones by name.
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+
+
+class TestMaskedLanguageModelGradientFlow:
+    """Every trainable weight is on the backward graph."""
+
+    def test_gradients_reach_every_trainable_weight(self, mlm_model):
+        rng = np.random.default_rng(0)
+        inputs = {
+            "input_ids": rng.integers(0, 1000, size=(2, 16)).astype("int32"),
+            "attention_mask": np.ones((2, 16), dtype="int32"),
+        }
+        mlm_model(inputs, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(mlm_model, inputs)
+
+        assert len(report) == len(mlm_model.trainable_weights)
+        assert len(report) > 0
+
+        # Anti-vacuity: the four head sub-layers this package OWNS must each be
+        # represented. A green oracle over an encoder-only weight set would say
+        # nothing about the MLM head at all.
+        head = [p for p in report if "mlm_" in p]
+        assert len(head) >= 6, (
+            f"expected the mlm_dense / mlm_norm / mlm_output weights in the "
+            f"report, found {head}"
+        )
+        assert all(report[p] is not None and report[p] > 0.0 for p in head), (
+            f"a head weight is dead: { {p: report[p] for p in head} }"
+        )

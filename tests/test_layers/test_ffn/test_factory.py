@@ -1214,6 +1214,31 @@ class TestOutputDimParamRegistryField:
 import ast as _sweep_ast
 from pathlib import Path as _SweepPath
 
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# This module drives `OrthogonalHypersphereInitializer` (the DEFAULT
+# `kernel_initializer` of `OrthoBlock` / `OrthoGLUFFN` / `NeuroGrid`) at shapes
+# where more orthogonal vectors are requested than the space has dimensions --
+# which is the ORDINARY case for a dimension-reducing projection. The advisory
+# at `initializers/hypersphere_orthogonal_initializer.py:190` is ours, it is
+# correct, and it reports a fallback that is the designed behaviour. Suppressed
+# HERE rather than in `pyproject.toml` so that a module which starts tripping
+# the fallback UNEXPECTEDLY still fails under `error::UserWarning`. The advisory
+# is pinned live (message text included) by
+# `tests/test_the_deliberate_advisories_still_fire.py`.
+
+# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
+# Our own advisory at `layers/transformers/transformer.py:620`: `moe_config`
+# supersedes `ffn_type` / `ffn_args`. This module drives exactly that
+# combination on purpose. Pinned live by
+# `tests/test_the_deliberate_advisories_still_fire.py`.
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:Orthogonality constraint violation:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:moe_config is provided:UserWarning"),
+]
+
 _SWEEP_SRC_ROOT = _SweepPath(__file__).resolve().parents[3] / "src" / "dl_techniques"
 _SWEEP_CALL_NAMES = frozenset({"create_ffn_layer", "create_ffn_from_config"})
 
@@ -1471,18 +1496,6 @@ def _b_transformer_decoder():
     return b.ffn_layer
 
 
-def _b_models_detr():
-    from dl_techniques.models.detr.model import DETR, DetrTransformer
-    backbone = keras.Sequential([keras.layers.Conv2D(32, 1)])
-    transformer = DetrTransformer(
-        hidden_dim=32, num_heads=2, num_encoder_layers=1,
-        num_decoder_layers=1, ffn_dim=64,
-    )
-    m = DETR(num_classes=3, num_queries=4, backbone=backbone,
-             transformer=transformer, hidden_dim=32)
-    return m.bbox_embed
-
-
 def _b_models_dino_v2():
     from dl_techniques.models.dino.dino_v2 import DINOv2Block
     b = DINOv2Block(dim=16, num_heads=2)
@@ -1557,7 +1570,12 @@ def _b_models_sam3_vitdet():
 
 def _b_models_prism():
     from dl_techniques.models.time_series.prism.model import PRISMModel
-    m = PRISMModel(context_len=16, forecast_len=4, num_features=2, num_layers=1)
+    # context_len must clear PRISMModel's band-length floor: at the default
+    # tree_depth=2 / num_wavelet_levels=3, context_len=16 gives min_band_len=0
+    # (hard ValueError) and 32 gives min_band_len=1 (degenerate-boundary WARNING).
+    # 64 builds clean with zero warnings. This is the probe's config, not a product
+    # defect: the refusal is deliberate (plan-2026-08-18T073231-52a93f8c/D-005).
+    m = PRISMModel(context_len=64, forecast_len=4, num_features=2, num_layers=1)
     return m.forecast_head
 
 
@@ -1590,7 +1608,6 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
         _b_progressive_focused_transformer,
     "layers/transformers/transformer.py": _b_transformer,
     "layers/transformers/transformer_decoder.py": _b_transformer_decoder,
-    "models/detr/model.py": _b_models_detr,
     "models/dino/dino_v2.py": _b_models_dino_v2,
     "models/fftnet/model.py": _b_models_fftnet,
     "models/gemma/components.py": _b_models_gemma,

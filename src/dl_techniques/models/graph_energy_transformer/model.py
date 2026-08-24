@@ -1,42 +1,99 @@
 """
-Graph Energy Transformer — shared backbone (and, in later steps, its two heads).
+Graph Energy Transformer — a shared graph trunk plus node-anomaly and graph-classification
+heads, built on the same recurrent energy-descent block as the image models.
 
-This module gives the ``EnergyTransformer`` block
-(``layers/transformers/energy_transformer.py``, arXiv:2302.07253) a GRAPH-domain trunk,
-the direct analog of ``models/energy_transformer/model.py``'s image backbone. It is the
-shared trunk consumed by BOTH graph heads:
+A message-passing GNN propagates information one hop per layer, so reaching a node `k` hops
+away requires `k` stacked layers with `k` parameter sets, and depth past a few layers
+oversmooths — repeated neighbourhood averaging drives every node representation toward the
+same value. The Energy Transformer takes a different route. A single scalar energy `E` is
+defined over the node states and the forward pass is `T` steps of gradient descent on it,
 
-* variant **B** — ``GraphAnomalyDetector`` (node anomaly; single block, ``descend_capture``),
-* variant **C-lite** — ``GraphClassifier`` (graph classification; ``S`` stacked blocks, a CLS
-  token, Laplacian positional encodings and eq.-27 saddle-escape noise).
+`x <- x - alpha * dE/dg`,  `g = EnergyLayerNorm(x)`,
 
-Only :class:`GraphEnergyTransformerBackbone` lives here for now; steps 5/7 add the two heads
-to this same file, so the seams below are intentional.
+so propagation is iterative refinement of one objective rather than a stack of distinct
+transforms, and one block's weights are reused across all `T` steps. What stops the states
+from collapsing is that they are descending toward *attractors* of an associative memory,
+not toward their neighbourhood mean: the energy is the sum of an attention term `E_ATT`,
+whose gradient mixes tokens along the graph, and a Hopfield term `E_HN` over a tied memory
+matrix, whose gradient pulls each node toward the nearest stored pattern independently of
+its neighbours. The second term is the restoring force the averaging lacks.
 
 **THE GRAPH ADJACENCY IS THE RANK-3 ``attention_mask``.** A binary ``(B, N, N)`` adjacency is
-fed to each block as its rank-3 ``attention_mask`` (a KEY x QUERY keep). PAD nodes are excluded
-from ``E_HN`` (and from attention) via the rank-2 ``(B, N)`` ``node_mask``. On this default path
-there is NO new gradient — the block already supports exactly this masking
-(``EnergyTransformer.call`` masking semantics; D-001/D-002 of this plan). The paper's eq.-25
-learned per-edge WEIGHTED adjacency is available **opt-in** via ``use_weighted_adjacency=True``
-(Branch A: a ``WeightedAdjacencyProjector`` computes ``Ŵ`` once per block, folded multiplicatively
-into the attention energy with a hand-derived, oracle-verified gradient); binary C-lite is the
-default and stays byte-identical.
+fed to each block as its rank-3 ``attention_mask`` (a KEY x QUERY keep), which is what turns
+the block's dense all-pairs attention into message passing restricted to real edges — the
+whole graph adaptation, with no new gradient on the default path, because the block already
+supports exactly this masking. PAD nodes are excluded from ``E_HN`` (and from attention) via
+the rank-2 ``(B, N)`` ``node_mask``. The paper's eq.-25 learned per-edge WEIGHTED adjacency is
+available **opt-in** via ``use_weighted_adjacency=True`` (Branch A: a
+``WeightedAdjacencyProjector`` computes ``Ŵ`` once per block, folded multiplicatively into the
+attention energy with a hand-derived, oracle-verified gradient); binary C-lite is the default
+and stays byte-identical.
+
+**The graph trunk defaults to ``attn_self=True``, unlike the image backbone.** With
+``attn_self=False`` ``EnergyAttention`` masks the adjacency DIAGONAL, so the self-loops that
+the graph loaders add become a measured no-op (bit-identical energy whether the diagonal is 1
+or 0) and a node can never attend to its own features. On images that is harmless; on graphs,
+where a node's own attributes are often the strongest signal, it is not. The flag stays
+configurable, with ``False`` recovering the image default.
+
+This module holds the trunk and both heads:
+
+* :class:`GraphEnergyTransformerBackbone` — node projection -> [Laplacian PE] -> [mask token]
+  -> [CLS] -> ``num_blocks`` ET blocks. Exposes three seams: ``embed`` (tokens only), ``call``
+  (the standard stacked descent), and ``descend_capture``, which drives a single block's
+  descent manually through its public ``.norm`` / ``.attention.update`` / ``.hopfield.update``
+  surface so intermediate LayerNormed states can be read without copying block internals.
+* :class:`GraphAnomalyDetector` — variant B. One block, and the readout concatenates the
+  target node's state at the FIRST descent step with its state at the LAST, ``g_1 || g_T``.
+  The early state still carries the raw one-hop neighbourhood; the converged one carries the
+  settled attractor, and the pair is a strictly richer readout than either alone. This is the
+  reason ``descend_capture`` exists.
+* :class:`GraphClassifier` — variant C-lite. ``S`` stacked blocks over a prepended learnable
+  CLS token, with Laplacian positional encodings and eq.-27 saddle-escape Langevin noise
+  (training only). The CLS token, its mask augmentation and the PE add all live in the
+  BACKBONE, not the head — CLS is prepended after the PE add (so CLS gets no PE) and the
+  rank-3 adjacency is augmented with an all-ones CLS row and column, leaving the original
+  adjacency in the ``[1:, 1:]`` block unchanged.
+
+Both heads slice index 0 statically — the CLS token, and the target node, which the fraud
+subgraph sampler always places first. A runtime gather would be the general solution but
+``take_along_axis`` with a broadcast index is rejected by tf2xla
+(``BroadcastArgs must be compile-time constant``), so the static slice is what keeps the
+fp16/XLA training path compilable. ``target_index`` remains in the input contract for
+forward-compatibility and is ignored. Both heads emit LOGITS with no sigmoid or softmax
+in-graph, per the house convention.
 
 **THE fp16/XLA DTYPE FIX IS REPLICATED VERBATIM FROM THE IMAGE BACKBONE (D-010/D-011).** Each
 block is built with ``dtype=self.dtype_policy.variable_dtype`` (NOT ``self.dtype_policy``) and
-:meth:`call` casts tokens IN to the block's variable dtype and back OUT. This is the fix for
-``EnergyLayerNorm``'s fp16 backward overflow under XLA, which SILENTLY freezes training. It is
-NOT fixed at the layer source — the consumer must do it, exactly as here.
+:meth:`call` casts tokens IN to the block's variable dtype and back OUT. ``EnergyLayerNorm``'s
+backward forms ``(var + eps)^(-3/2)``, which overflows fp16's 65504 under XLA and SILENTLY
+freezes training — the loss stays finite while no weight moves. It is NOT fixed at the layer
+source; the consumer must do it, exactly as here. Under float32/float64 the two spellings are
+identical, so no checkpoint is affected.
+
+Variant B and variant C backbones are INTENTIONALLY not weight-compatible: C owns a
+``pe_proj`` Dense and a ``cls_token`` that B does not, and the CLS token changes ``N``. A
+cross-variant warm-start is expected to transfer nothing. ``MaskTokenApply``, by contrast, is
+always created and always built even for a head that never masks nodes, so the trunk's weight
+surface does not depend on whether a masked-node pretext is used.
 
 References:
-    - Hoover et al., "Energy Transformer", NeurIPS 2023, arXiv:2302.07253 (§4, graph model).
+    - Hoover et al., 2023. Energy Transformer. NeurIPS 2023 (§4-§5, graph model).
+      (https://arxiv.org/abs/2302.07253)
+    - Ramsauer et al., 2020. Hopfield Networks is All You Need.
+      (https://arxiv.org/abs/2008.02217)
+    - Dwivedi & Bresson, 2020. A Generalization of Transformer Networks to Graphs.
+      (https://arxiv.org/abs/2012.09699)
+    - Kreuzer et al., 2021. Rethinking Graph Transformers with Spectral Attention.
+      (https://arxiv.org/abs/2106.03893)
+    - Welling & Teh, 2011. Bayesian Learning via Stochastic Gradient Langevin Dynamics.
+      ICML 2011.
 """
 
 import keras
 from keras import layers, ops
 from keras.saving import serialize_keras_object, deserialize_keras_object
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -79,7 +136,8 @@ class GraphEnergyTransformerBackbone(keras.Model):
           "node_mask":     (B, N),        # rank-2 per-node validity (1 = real, 0 = PAD)
           "pe":            (B, N, pe_dim), # only when `use_pe` (Laplacian eigenvectors)
           "node_replace_mask": (B, N) bool # optional — masked-node pretext (mask-token apply)
-          "target_index":  (B,)            # variant B only; read by the head, not the trunk
+          "target_index":  (B,)            # variant B only; accepted and NOT read by anything
+                                           # (the head takes a static index-0 slice — see D-003)
         }
 
     ``embed`` reads ``node_features`` / ``pe`` / ``node_replace_mask``; ``call`` additionally
@@ -657,14 +715,19 @@ class GraphAnomalyDetector(keras.Model):
     :type backbone: GraphEnergyTransformerBackbone
     :param mlp_hidden_dim: Hidden width of the readout MLP. Must be positive.
     :type mlp_hidden_dim: int
-    :param mlp_dropout: Dropout between the MLP's two Dense layers. Defaults to ``0.0``.
-    :type mlp_dropout: float
+    :param mlp_dropout_rate: Dropout between the MLP's two Dense layers. Defaults to ``0.0``.
+    :type mlp_dropout_rate: float
 
-    :raises ValueError: If ``mlp_hidden_dim <= 0`` or ``mlp_dropout`` is outside ``[0, 1]``.
+    :raises ValueError: If ``mlp_hidden_dim <= 0`` or ``mlp_dropout_rate`` is outside ``[0, 1]``.
 
     Input shape:
         The variant-B graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
-        "node_mask": (B, N), "target_index": (B,)}``.
+        "node_mask": (B, N), "target_index": (B,)}``. ``target_index`` is accepted for
+        forward-compatibility and is **ignored**: the readout is a static ``g[:, 0, :]``
+        slice, so the target node must be at index 0 (which the fraud subgraph sampler
+        guarantees). Passing any other value changes nothing — it does not raise, and it
+        does not move the readout. Pinned by
+        ``test_model.py::TestTargetIndexIsIgnored``. See D-003.
 
     Output shape:
         ``(batch, 1)`` — a single anomaly logit per target node.
@@ -674,7 +737,7 @@ class GraphAnomalyDetector(keras.Model):
             self,
             backbone: GraphEnergyTransformerBackbone,
             mlp_hidden_dim: int,
-            mlp_dropout: float = 0.0,
+            mlp_dropout_rate: float = 0.0,
             name: Optional[str] = "graph_anomaly_detector",
             **kwargs: Any
     ) -> None:
@@ -684,12 +747,12 @@ class GraphAnomalyDetector(keras.Model):
 
         if not isinstance(mlp_hidden_dim, int) or mlp_hidden_dim <= 0:
             raise ValueError(f"mlp_hidden_dim must be a positive integer, got {mlp_hidden_dim}")
-        if not (0.0 <= mlp_dropout <= 1.0):
-            raise ValueError(f"mlp_dropout must be in [0, 1], got {mlp_dropout}")
+        if not (0.0 <= mlp_dropout_rate <= 1.0):
+            raise ValueError(f"mlp_dropout_rate must be in [0, 1], got {mlp_dropout_rate}")
 
         self.backbone = backbone
         self.mlp_hidden_dim = int(mlp_hidden_dim)
-        self.mlp_dropout = float(mlp_dropout)
+        self.mlp_dropout_rate = float(mlp_dropout_rate)
         self.embed_dim = backbone.embed_dim
 
         # `head_` prefix so a B-pretext -> B warm-start (name-matched) moves ONLY the shared
@@ -713,7 +776,7 @@ class GraphAnomalyDetector(keras.Model):
         # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so the
         # layer structure does not depend on a numeric value.
         self.head_dropout = layers.Dropout(
-            self.mlp_dropout, name="head_mlp_dropout", dtype=self.dtype_policy
+            self.mlp_dropout_rate, name="head_mlp_dropout", dtype=self.dtype_policy
         )
         self.mlp_out = layers.Dense(1, name="head_mlp_out", dtype=self.dtype_policy)
 
@@ -794,7 +857,7 @@ class GraphAnomalyDetector(keras.Model):
         config.update({
             "backbone": serialize_keras_object(self.backbone),
             "mlp_hidden_dim": self.mlp_hidden_dim,
-            "mlp_dropout": self.mlp_dropout,
+            "mlp_dropout_rate": self.mlp_dropout_rate,
         })
         return config
 
@@ -851,11 +914,11 @@ class GraphClassifier(keras.Model):
     :type backbone: GraphEnergyTransformerBackbone
     :param num_classes: Number of graph classes ``C``. Must be ``>= 2``.
     :type num_classes: int
-    :param head_dropout: Dropout on the CLS representation before the classifier Dense. Defaults
+    :param head_dropout_rate: Dropout on the CLS representation before the classifier Dense. Defaults
         to ``0.0``.
-    :type head_dropout: float
+    :type head_dropout_rate: float
 
-    :raises ValueError: If ``num_classes < 2`` or ``head_dropout`` is outside ``[0, 1]``.
+    :raises ValueError: If ``num_classes < 2`` or ``head_dropout_rate`` is outside ``[0, 1]``.
 
     Input shape:
         The variant-C graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
@@ -869,7 +932,7 @@ class GraphClassifier(keras.Model):
             self,
             backbone: GraphEnergyTransformerBackbone,
             num_classes: int,
-            head_dropout: float = 0.0,
+            head_dropout_rate: float = 0.0,
             name: Optional[str] = "graph_classifier",
             **kwargs: Any
     ) -> None:
@@ -879,12 +942,12 @@ class GraphClassifier(keras.Model):
 
         if not isinstance(num_classes, int) or num_classes < 2:
             raise ValueError(f"num_classes must be an integer >= 2, got {num_classes}")
-        if not (0.0 <= head_dropout <= 1.0):
-            raise ValueError(f"head_dropout must be in [0, 1], got {head_dropout}")
+        if not (0.0 <= head_dropout_rate <= 1.0):
+            raise ValueError(f"head_dropout_rate must be in [0, 1], got {head_dropout_rate}")
 
         self.backbone = backbone
         self.num_classes = int(num_classes)
-        self.head_dropout_rate = float(head_dropout)
+        self.head_dropout_rate = float(head_dropout_rate)
         self.embed_dim = backbone.embed_dim
 
         # `head_` prefix so a warm-start (name-matched) moves ONLY the shared trunk
@@ -954,7 +1017,7 @@ class GraphClassifier(keras.Model):
         config.update({
             "backbone": serialize_keras_object(self.backbone),
             "num_classes": self.num_classes,
-            "head_dropout": self.head_dropout_rate,
+            "head_dropout_rate": self.head_dropout_rate,
         })
         return config
 
@@ -1008,7 +1071,7 @@ def create_graph_anomaly_detector(
         hopfield_dim: int,
         mlp_hidden_dim: int,
         num_steps: int = 12,
-        mlp_dropout: float = 0.0,
+        mlp_dropout_rate: float = 0.0,
         **overrides: Any,
 ) -> GraphAnomalyDetector:
     """Create a variant-B :class:`GraphAnomalyDetector` (backbone + target-node readout head).
@@ -1028,7 +1091,7 @@ def create_graph_anomaly_detector(
     :param hopfield_dim: Hopfield memory count ``K``.
     :param mlp_hidden_dim: Hidden width of the readout MLP.
     :param num_steps: Descent steps ``T`` (the head captures ``g_1`` and ``g_T``).
-    :param mlp_dropout: Dropout between the MLP's two Dense layers.
+    :param mlp_dropout_rate: Dropout between the MLP's two Dense layers.
     :param overrides: Any other backbone ctor kwarg (``step_size``, ``beta``,
         ``hopfield_activation``, ``hopfield_beta``, ``norm_epsilon``, ``attn_self``, ``seed``).
     :return: A :class:`GraphAnomalyDetector` whose trunk is named :data:`GRAPH_BACKBONE_NAME`.
@@ -1060,7 +1123,7 @@ def create_graph_anomaly_detector(
     return GraphAnomalyDetector(
         backbone=backbone,
         mlp_hidden_dim=mlp_hidden_dim,
-        mlp_dropout=mlp_dropout,
+        mlp_dropout_rate=mlp_dropout_rate,
     )
 
 
@@ -1077,7 +1140,7 @@ def create_graph_classifier(
         beta: Optional[float] = None,
         noise_std: float = 0.02,
         pe_dim: int = 15,
-        head_dropout: float = 0.0,
+        head_dropout_rate: float = 0.0,
         use_weighted_adjacency: bool = False,
         adjacency_kernel_size: int = 1,
         adjacency_proj_dim: Optional[int] = None,
@@ -1105,7 +1168,7 @@ def create_graph_classifier(
     :param beta: Attention inverse temperature; ``None`` -> ``1/sqrt(head_dim)``.
     :param noise_std: eq.-27 Langevin saddle-escape noise std (training only; Table 9: 0.02).
     :param pe_dim: Laplacian-PE width ``k`` (matches the dataset's ``k_pe``; default 15).
-    :param head_dropout: Dropout on the CLS representation before the classifier Dense.
+    :param head_dropout_rate: Dropout on the CLS representation before the classifier Dense.
     :param use_weighted_adjacency: If ``True``, each ET block learns the paper's eq.-25 per-edge
         weighted adjacency ``Ŵ`` (default ``False`` -> the C-lite binary-adjacency model,
         byte-identical to today).
@@ -1148,5 +1211,5 @@ def create_graph_classifier(
     return GraphClassifier(
         backbone=backbone,
         num_classes=num_classes,
-        head_dropout=head_dropout,
+        head_dropout_rate=head_dropout_rate,
     )

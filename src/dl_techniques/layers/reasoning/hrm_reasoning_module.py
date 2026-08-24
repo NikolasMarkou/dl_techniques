@@ -20,7 +20,9 @@ Key Architectural Features:
         - **Normalization Position:** 'post'
         - **Normalization Type:** 'rms_norm'
         - **Feed-Forward Network:** 'swiglu'
-        - **Attention Type:** 'multi_head'
+        - **Attention Type:** 'group_query' (with ``num_kv_heads == num_heads``,
+          i.e. arithmetically plain multi-head attention, chosen because it is
+          the only plain self-attention type that also applies RoPE to Q and K)
 
 2.  **Input Injection:**
     -   A defining feature of this module is its "input injection" mechanism. Before
@@ -42,6 +44,7 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 # local imports
 # ---------------------------------------------------------------------
 
+from ...initializers import clone_initializer
 from ..transformers import (
     TransformerLayer,
     AttentionType,
@@ -62,7 +65,8 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     mechanism: ``x = hidden_states + input_injection`` is processed sequentially
     through ``num_layers`` transformer blocks. Defaults to a high-performance
     configuration for hierarchical reasoning (post-norm RMSNorm, SwiGLU FFN,
-    multi-head attention) but is fully configurable.
+    grouped-query attention with ``num_kv_heads == num_heads`` and RoPE) but is
+    fully configurable.
 
     **Architecture Overview:**
 
@@ -101,8 +105,17 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     :type num_heads: int
     :param ffn_expansion_factor: FFN expansion factor. Defaults to 4.
     :type ffn_expansion_factor: int
-    :param attention_type: Attention mechanism type. Defaults to ``'multi_head'``.
+    :param attention_type: Attention mechanism type. Defaults to
+        ``'group_query'``, the only plain-self-attention registry type that also
+        carries RoPE; ``'multi_head'`` carries none.
     :type attention_type: AttentionType
+    :param max_seq_len: Maximum sequence length the attention RoPE tables cover.
+        Only consumed when ``attention_type`` is RoPE-capable. Defaults to 2048.
+    :type max_seq_len: int
+    :param rope_theta: Theta parameter for the attention's rotary position
+        embedding. Only consumed when ``attention_type`` is RoPE-capable.
+        Defaults to 10000.0.
+    :type rope_theta: float
     :param normalization_type: Normalization layer type. Defaults to ``'rms_norm'``.
     :type normalization_type: NormalizationType
     :param normalization_position: Norm position (``'pre'`` or ``'post'``). Defaults to ``'post'``.
@@ -127,7 +140,28 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         embed_dim: int,
         num_heads: int = 8,
         ffn_expansion_factor: int = 4,
-        attention_type: AttentionType = 'multi_head',
+        # DECISION plan-2026-08-17T183311-79c63e38/D-012: the default is
+        # 'group_query' with `num_kv_heads == num_heads` (arithmetically plain
+        # MHA) because it is the only registry entry reachable from
+        # `TransformerLayer` that gives plain self-attention AND carries RoPE.
+        #
+        # WHAT NOT TO DO: do NOT "simplify" this back to 'multi_head'. RoPE is a
+        # per-Q/K rotation applied INSIDE attention, and `MultiHeadAttention`
+        # declares no RoPE parameter at all. `HierarchicalReasoningCore` used to
+        # express its `pos_encodings='rope'` setting by constructing its OWN
+        # `RotaryPositionEmbedding` and building it — while every attention layer
+        # under it ran rope-free, because the core never handed that layer a Q or
+        # a K tensor. Nothing raised, nothing was dropped by the attention
+        # factory (HRM never populated `attention_args` at all, so even the
+        # strict factory of D-011 could not surface it), and the whole reasoning
+        # stack was exactly permutation-equivariant. MEASURED on CPU by
+        # `tests/test_models/test_hierarchical_reasoning_model/test_positional_signal.py::TestHRMIsPositionAware::test_reasoning_stack_is_not_permutation_equivariant`:
+        # `max|P f(x) - f(P x)| = 2.02656e-06` (float32 noise) before this
+        # change. Same defect and same fix as TRM's D-007, ModernBERT's D-007
+        # and DINOv3's D-010. See decisions.md D-012.
+        attention_type: AttentionType = 'group_query',
+        max_seq_len: int = 2048,
+        rope_theta: float = 10000.0,
         normalization_type: NormalizationType = 'rms_norm',
         normalization_position: NormalizationPositionType = 'post',
         ffn_type: FFNType = 'swiglu',
@@ -149,6 +183,10 @@ class HierarchicalReasoningModule(keras.layers.Layer):
             raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
         if ffn_expansion_factor <= 0:
             raise ValueError(f"ffn_expansion_factor must be positive, got {ffn_expansion_factor}")
+        if max_seq_len <= 0:
+            raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
+        if rope_theta <= 0:
+            raise ValueError(f"rope_theta must be positive, got {rope_theta}")
 
         # Store all configuration parameters for serialization
         self.num_layers = num_layers
@@ -156,6 +194,8 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         self.num_heads = num_heads
         self.ffn_expansion_factor = ffn_expansion_factor
         self.attention_type = attention_type
+        self.max_seq_len = max_seq_len
+        self.rope_theta = rope_theta
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
@@ -166,6 +206,20 @@ class HierarchicalReasoningModule(keras.layers.Layer):
 
         intermediate_size = self.embed_dim * self.ffn_expansion_factor
 
+        # RoPE arguments are forwarded ONLY to a type that declares all three.
+        # The attention factory raises on an undeclared key since D-011, so
+        # handing `max_seq_len`/`rope_theta` to e.g. 'multi_head' (which has no
+        # RoPE at all) would be a hard construction failure rather than the
+        # silent drop it used to be. 'multi_head_latent' is deliberately NOT
+        # included: it is RoPE-capable but has no `num_kv_heads`.
+        attention_args = None
+        if self.attention_type == 'group_query':
+            attention_args = {
+                'num_kv_heads': self.num_heads,
+                'max_seq_len': self.max_seq_len,
+                'rope_theta': self.rope_theta,
+            }
+
         # Create a list of TransformerLayer instances based on the provided configuration
         self.blocks: List[TransformerLayer] = []
         for i in range(self.num_layers):
@@ -175,6 +229,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
                 intermediate_size=intermediate_size,
                 # Pass configurable parameters directly to the TransformerLayer
                 attention_type=self.attention_type,
+                attention_args=attention_args,
                 normalization_type=self.normalization_type,
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
@@ -182,7 +237,19 @@ class HierarchicalReasoningModule(keras.layers.Layer):
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.dropout_rate,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. At the DEFAULT `attention_type=
+                # 'group_query'` this site is currently masked -- `GroupedQueryAttention`
+                # already clones per projection -- but the masking is another layer's
+                # property, not this one's. MEASURED at HEAD on a seeded 4-layer
+                # module with the declared `attention_type='multi_head'`: 12 of 24
+                # same-shape kernel pairs at `max|delta| = 0.0` (all 4 qkv, all 4
+                # proj). `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"transformer_layer_{i}"
             )
@@ -248,6 +315,8 @@ class HierarchicalReasoningModule(keras.layers.Layer):
             "num_heads": self.num_heads,
             "ffn_expansion_factor": self.ffn_expansion_factor,
             "attention_type": self.attention_type,
+            "max_seq_len": self.max_seq_len,
+            "rope_theta": self.rope_theta,
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,

@@ -70,13 +70,13 @@ class TestModernBERTModelInitialization:
         with pytest.raises(ValueError, match="Sizes and layer/head counts must be positive"):
             ModernBERT(vocab_size=1000, hidden_size=-100, num_layers=4, num_heads=8)
 
-        with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
+        with pytest.raises(ValueError, match="hidden_dropout_rate must be between 0 and 1"):
             ModernBERT(
                 vocab_size=1000,
                 hidden_size=256,
                 num_layers=4,
                 num_heads=8,
-                hidden_dropout_prob=1.5
+                hidden_dropout_rate=1.5
             )
 
         with pytest.raises(ValueError, match="global_attention_interval must be positive"):
@@ -90,14 +90,14 @@ class TestModernBERTModelInitialization:
             num_layers=8,
             num_heads=8,
             intermediate_size=1024,
-            hidden_dropout_prob=0.2,
+            hidden_dropout_rate=0.2,
             global_attention_interval=4,
             local_attention_window_size=TEST_WINDOW_SIZE, # FIX: Use small window size
         )
         assert model.vocab_size == 25000
         assert model.hidden_size == 512
         assert model.num_layers == 8
-        assert model.hidden_dropout_prob == 0.2
+        assert model.hidden_dropout_rate == 0.2
         assert model.global_attention_interval == 4
 
 
@@ -166,7 +166,15 @@ class TestModernBERTModelBuilding:
             batch_size, seq_length, basic_config['hidden_size']
         )
         assert "attention_mask" in outputs
-        assert outputs["attention_mask"] is None  # Since it wasn't provided
+        # DECISION plan-2026-08-18T140459-7991552f/D-031: an OMITTED mask is
+        # echoed back as all-ones, not as `None`. This line asserted `is None`
+        # until 2026-08-19 and was therefore pinning the defect that made
+        # `predict({"input_ids": ...})` raise "Structures don't have the same
+        # nested structure". The mask still does not reach the encoder --
+        # see the D-031 anchor in `modern_bert/model.py`.
+        echoed = keras.ops.convert_to_numpy(outputs["attention_mask"])
+        assert echoed.shape == (batch_size, seq_length)
+        assert (echoed == 1).all()
 
     def test_transformer_layers_configuration(self, basic_config):
         model = ModernBERT(**basic_config)
@@ -403,8 +411,13 @@ class TestModernBERTAdvancedFeatures:
 
         for i, layer in enumerate(model.encoder_layers):
             is_global = (i + 1) % interval == 0
-            expected_type = "multi_head" if is_global else "window"
+            # Global layers are 'group_query' with num_kv_heads == num_heads,
+            # which is arithmetically plain MHA plus RoPE. See the D-007 anchor
+            # in models/modern_bert/model.py: 'multi_head' cannot carry RoPE.
+            expected_type = "group_query" if is_global else "window"
             assert layer.attention_type == expected_type, f"Layer {i} has wrong attention type"
+            if is_global:
+                assert layer.attention_args["num_kv_heads"] == model.num_heads
 
     def test_pre_ln_and_geglu_config(self):
         """Verify that layers are configured for Pre-LN and GeGLU."""
@@ -426,6 +439,28 @@ class TestModernBERTAdvancedFeatures:
             model.summary()
         except Exception as e:
             pytest.fail(f"Model summary raised an exception: {e}")
+
+
+
+class TestPretrainedContract:
+    """`pretrained=True` must RAISE, never return a random-init model.
+
+    Before this contract, `ModernBERT.PRETRAINED_WEIGHTS` held placeholder URLs on a non-existent host,
+    `from_variant` caught the download failure, logged a warning and continued with
+    random initialization — so a caller asking for pretrained weights silently
+    got untrained ones and no error. Do not reinstate that.
+    """
+
+    def test_from_variant_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained ModernBERT weights"):
+            ModernBERT.from_variant("tiny", pretrained=True)
+
+    def test_pretrained_false_still_builds(self):
+        model = ModernBERT.from_variant("tiny", vocab_size=128)
+        assert isinstance(model, ModernBERT)
+
+    def test_no_placeholder_weight_table(self):
+        assert not hasattr(ModernBERT, "PRETRAINED_WEIGHTS")
 
 
 if __name__ == "__main__":

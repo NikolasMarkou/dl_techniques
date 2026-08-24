@@ -131,7 +131,7 @@ def _build_stack(
         num_layers=num_layers,
         pos_enc_at_input=pos_enc_at_input,
         dim_feedforward=DIM_FEEDFORWARD,
-        dropout=0.1,
+        dropout_rate=0.1,
         activation=activation,
         pos_enc_at_attn=pos_enc_at_attn,
         pos_enc_at_cross_attn_queries=pos_enc_at_cross_attn_queries,
@@ -235,7 +235,7 @@ class TestShippedConfiguration:
         layer = SAM2MemoryAttentionLayer()
         assert layer.d_model == 256
         assert layer.dim_feedforward == 2048
-        assert layer.dropout == pytest.approx(0.1)
+        assert layer.dropout_rate == pytest.approx(0.1)
         # relu, NOT the transformer-default gelu.
         assert layer.activation == "relu"
         assert layer.pos_enc_at_attn is False
@@ -284,7 +284,7 @@ class TestConfigAndShapes:
         layer = SAM2MemoryAttentionLayer()
         config = layer.get_config()
         for key in (
-                "d_model", "dim_feedforward", "dropout", "activation",
+                "d_model", "dim_feedforward", "dropout_rate", "activation",
                 "pos_enc_at_attn", "pos_enc_at_cross_attn_queries",
                 "pos_enc_at_cross_attn_keys", "num_heads", "downsample_rate",
                 "rope_theta", "feat_sizes", "kv_in_dim", "layer_norm_epsilon",
@@ -296,7 +296,7 @@ class TestConfigAndShapes:
         config = stack.get_config()
         for key in (
                 "d_model", "num_layers", "pos_enc_at_input", "dim_feedforward",
-                "dropout", "activation", "pos_enc_at_attn",
+                "dropout_rate", "activation", "pos_enc_at_attn",
                 "pos_enc_at_cross_attn_queries", "pos_enc_at_cross_attn_keys",
                 "num_heads", "downsample_rate", "rope_theta", "feat_sizes",
                 "kv_in_dim", "layer_norm_epsilon",
@@ -674,7 +674,7 @@ class TestNumKExcludeThreading:
         keras.utils.set_random_seed(SEED)
         stack = SAM2MemoryAttention(
             d_model=D_MODEL, num_layers=NUM_LAYERS,
-            dim_feedforward=DIM_FEEDFORWARD, dropout=0.1,
+            dim_feedforward=DIM_FEEDFORWARD, dropout_rate=0.1,
             num_heads=1, downsample_rate=1, feat_sizes=GRID,
             kv_in_dim=KV_IN_DIM,
         )

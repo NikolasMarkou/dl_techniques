@@ -940,7 +940,8 @@ class TestRegisteredKeyUniqueness:
     Run in a subprocess because the module is already imported in this one, so
     the "before" half is unobservable here. A duplicate bare
     ``@register_keras_serializable()`` OVERWRITES silently -- the one
-    SAM-1-perturbing mechanism the ``git diff`` proxy cannot see.
+    SAM-1-perturbing mechanism a source-text diff could never have seen, and
+    since D-092 the only SAM-1 guard left in this class (see the note below).
     """
 
     def test_every_key_is_absent_before_and_unique_after(self) -> None:
@@ -970,14 +971,18 @@ class TestRegisteredKeyUniqueness:
         assert "Custom>SAM" in registry
         assert registry["Custom>SAM"] is not SAM2
 
-    def test_sam1_source_is_untouched(self) -> None:
-        result = subprocess.run(
-            ["git", "diff", "--stat", "--", "src/dl_techniques/models/SAM/SAM1/"],
-            capture_output=True, text=True, check=True,
-        )
-        assert result.stdout.strip() == "", (
-            f"SAM 1 source was modified:\n{result.stdout}"
-        )
+    # DECISION plan-2026-08-22T035419-a11304c8/D-092
+    # `test_sam1_source_is_untouched` lived here and is DELETED, under the
+    # ruling D-072 already applied to its twin in `test_mask_decoder.py`: a
+    # `git diff --stat -- SAM/SAM1/` assertion is wrong in both directions --
+    # RED for a comment with zero behavioural effect, GREEN for a real
+    # behaviour change the moment it is `git add`ed or committed. It fired on
+    # exactly that false positive when D-091 documented SAM 1's dropout ruling
+    # at its own code site. The behavioural half it was proxying is covered by
+    # `test_mask_decoder.py`'s deterministic-weight golden forward through SAM
+    # 1's `MaskDecoder`; the registry-collision half is the two siblings above,
+    # which are the mechanism a text diff could not see anyway. Do NOT
+    # reinstate a source-text guard here.
 
 
 # ---------------------------------------------------------------------

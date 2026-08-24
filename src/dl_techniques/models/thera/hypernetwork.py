@@ -87,7 +87,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.grid_sample import make_grid, interpolate_grid
 from dl_techniques.layers.thera_heat_field import HeatField, DEFAULT_K_INIT
-from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -141,8 +140,11 @@ class TheraHypernetwork(keras.layers.Layer):
         out_dim: Output channel count (e.g. 3 for an RGB residual). Defaults to 3.
         w0: SIREN frequency multiplier forwarded to the :class:`HeatField`.
             Defaults to 1.0.
-        c: SIREN variance constant forwarded to the :class:`HeatField` (stored for
-            config fidelity). Defaults to 6.0.
+        c: **DEAD KNOB** -- forwarded to :class:`HeatField`, which also only
+            stores it. The reference's ``w_std = sqrt(c / dim_hidden) / w0``
+            SIREN init has no counterpart here: ``out_conv``, the 1x1 conv that
+            produces ``phi_kernel``, uses Keras' default ``glorot_uniform``.
+            Defaults to 6.0.
         k_init: Initial value of the heat-field scalar ``k``. Defaults to the
             THERA reference ``sqrt(log 4) / (2*pi^2)`` (same default as
             :class:`HeatField`).
@@ -401,12 +403,18 @@ class TheraHypernetwork(keras.layers.Layer):
         interp_coords = interpolate_grid(coords, source_coords, order=0)
 
         # Relative coord (query - nearest-source), scaled to source pixel units.
-        rel = coords - interp_coords  # (B, Hq, Wq, 2)
+        # The whole of this arithmetic is COORDINATE math and stays in float32 —
+        # `_source_grid` and `interpolate_grid` both work in float32 — and only
+        # the result is brought down to the layer's compute dtype. Under
+        # `mixed_float16` `coords` arrives as float16 and the subtraction raised.
+        # See decisions.md D-046.
+        rel = ops.cast(coords, "float32") - ops.cast(interp_coords, "float32")
         hs_f = ops.cast(ops.shape(encoding)[1], "float32")
         ws_f = ops.cast(ops.shape(encoding)[2], "float32")
         rel_h = rel[..., 0] * hs_f  # (B, Hq, Wq)
         rel_w = rel[..., 1] * ws_f
         rel = ops.stack([rel_h, rel_w], axis=-1)  # (B, Hq, Wq, 2)
+        rel = ops.cast(rel, self.compute_dtype)
         return rel, phi_phase, phi_kernel
 
     def decode(
@@ -493,14 +501,22 @@ class TheraHypernetwork(keras.layers.Layer):
         # full Jacobian; batch_jacobian computes only the per-pixel blocks).
         out_dim = self.out_dim
         hidden = self.hidden_dim
-        flat = tf.shape(rel)  # (B, Hq, Wq, 2)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `keras.ops`, not raw
+        # `tf`, for the shape arithmetic. `ops.shape` returns a TUPLE whose
+        # entries are ints where the dimension is static and tensors where it is
+        # dynamic, so the pieces below are assembled with Python tuple
+        # concatenation rather than `tf.concat` -- there is no tensor to
+        # concatenate. Only the `GradientTape` below stays raw: it is the
+        # documented exception (module docstring), because `keras.ops` has no
+        # `batch_jacobian`.
+        flat = ops.shape(rel)  # (B, Hq, Wq, 2)
         n = flat[0] * flat[1] * flat[2]
 
         rel_flat = ops.reshape(rel, (n, 2))  # (N, 2)
         phase_flat = ops.reshape(phi_phase, (n, hidden))  # (N, hidden)
         kernel_flat = ops.reshape(phi_kernel, (n, hidden, out_dim))  # (N, hidden, out)
         # t=0 broadcast to every pixel: (N, 1) zeros -> envelope == 1.
-        t_zero = tf.zeros((n, 1), dtype=rel_flat.dtype)
+        t_zero = ops.zeros((n, 1), dtype=rel_flat.dtype)
 
         # persistent=True is REQUIRED by tf: batch_jacobian with
         # experimental_use_pfor=False in eager mode unrolls a per-output loop that
@@ -518,9 +534,7 @@ class TheraHypernetwork(keras.layers.Layer):
         del jac_tape
 
         # Reshape back to (B, Hq, Wq, out_dim, 2).
-        out_shape = tf.concat(
-            [flat[:3], tf.constant([out_dim, 2], dtype=flat.dtype)], axis=0
-        )
+        out_shape = tuple(flat[:3]) + (out_dim, 2)
         jac = ops.reshape(jac_flat, out_shape)
         return out, jac
 

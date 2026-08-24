@@ -36,6 +36,8 @@ make docs       # generate documentation
 └── imgs/                # Images and assets
 ```
 
+> **NEVER delete anything under `results/`.** Not the tree, not a single run directory, not "test artifacts I just created" — no `rm -rf results/`, and no cleanup step that names `results/` by a relative path. `results/` is gitignored and untracked, so **deletion is unrecoverable**: there is no git history and no backup. If a probe or smoke run creates a run directory, leave it; the user removes them. On 2026-08-12 a badly-scoped cleanup instruction ("delete every `results/` dir you create afterwards") destroyed all 62 run directories at once — including a published paper's subject checkpoint — because the agent's own test had written to a pytest `tmp_path` and the relative paths in its log resolved against the repo root instead. Delete only absolute paths recorded at creation time and verified created, or do not delete at all.
+
 There is no committed documentation directory. `make docs` runs `generate_docs.py`, which generates one on demand; nothing exists at that path until you run it, and the output is not committed.
 
 ### src/dl_techniques/ (core library)
@@ -74,9 +76,21 @@ MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
 - Keras 3 patterns: `@keras.saving.register_keras_serializable()`, `keras.ops` for backend-agnostic ops
 - Config-driven construction via factory functions
 - Full round-trip serialization via `get_config()`
-- Python 3.11+ with type hints, Google-style docstrings
+- Python 3.11+ with type hints
+- **Docstring style is not uniform.** "Google-style docstrings" is a preference for new code, not a
+  description of the tree:
+
+  | | |
+  |---|---|
+  | `layers/` | predominantly Sphinx/reST |
+  | `models/` | measurably mixed — no package-wide rule in either direction |
+  | New `models/` package | follow `models/bert/bert.py`, which is entirely Sphinx/reST |
+
+  **Match the file you are editing; never convert a file wholesale.** The measured per-package
+  counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md`
+  § Core Conventions → Code Style — the single home for those numbers.
 - Centralized logging via `dl_techniques.utils.logger` — no print statements
 
-When instructed to create a new model or layer, follow the guide in `research/2026_keras_custom_models_instructions.md`.
+When instructed to create a new model or layer, follow the guide in `research/2026_keras_custom_models_instructions_v2.md`.
 
 See `src/dl_techniques/CLAUDE.md` for detailed conventions, patterns, and how to add new components.

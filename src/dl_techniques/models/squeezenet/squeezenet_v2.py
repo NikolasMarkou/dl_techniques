@@ -59,6 +59,13 @@ References:
     -   Iandola et al., "SqueezeNet: AlexNet-level accuracy with 50x fewer
         parameters and <0.5MB model size" (2016).
         https://arxiv.org/abs/1602.07360
+    -   Official SqueezeNet Caffe prototxts. Tsivgoulis et al. 2022 specify no
+        initialization; this model inherits SqueezeNet's macro-architecture, so
+        it inherits SqueezeNet's published fillers (`xavier` on conv1 and every
+        fire convolution, gaussian std=0.01 on conv10). Caffe's `xavier`
+        normalizes by fan_in, so its Keras equivalent is `lecun_uniform`, NOT
+        `glorot_uniform` -- see `caffe_reference_init.py`.
+        https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.1/train_val.prototxt
 """
 
 import keras
@@ -70,6 +77,11 @@ from typing import Optional, Tuple, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from .spatial_guard import validate_spatial_extent
+from .caffe_reference_init import (
+    CAFFE_HEAD_INITIALIZER,
+    CAFFE_XAVIER_INITIALIZER,
+)
 
 # ---------------------------------------------------------------------
 
@@ -110,24 +122,21 @@ class SimplifiedFireModule(keras.layers.Layer):
             s1x1: int,
             e3x3: int,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if s1x1 <= 0 or e3x3 <= 0:
             raise ValueError("All filter counts must be positive integers")
         if s1x1 >= e3x3:
             raise ValueError("Squeeze filters should be less than expand filters for compression")
 
-        # Store configuration
         self.s1x1 = s1x1
         self.e3x3 = e3x3
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer
 
-        # Create squeeze layer (1x1 convolution)
         self.squeeze = layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
@@ -150,10 +159,8 @@ class SimplifiedFireModule(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the Simplified Fire module by building all sub-layers."""
-        # Build squeeze layer
         self.squeeze.build(input_shape)
 
-        # Compute squeeze output shape
         squeeze_output_shape = self.squeeze.compute_output_shape(input_shape)
 
         # Build expand layer with squeeze output shape
@@ -167,7 +174,6 @@ class SimplifiedFireModule(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the Simplified Fire module."""
-        # Squeeze
         squeezed = self.squeeze(inputs, training=training)
 
         # Expand (3x3 only)
@@ -216,19 +222,27 @@ class SqueezeNoduleNetV2(keras.Model):
         **kwargs: Additional arguments for Model base class.
 
     Raises:
-        ValueError: If invalid configuration is provided.
+        ValueError: If invalid configuration is provided, or if the input's
+            spatial extent is below the variant's minimum (see
+            `spatial_guard.minimum_spatial_extent`): every downsampling stage
+            uses `padding='valid'`, and a stage that collapses an axis to length
+            zero yields an all-NaN output of the correct shape. All four
+            variants share one stem and pooling schedule, so the computed
+            minimum is 35 on every spatial axis, 2D and 3D alike.
 
     Example:
         >>> # Create SqueezeNodule-Net V2 for lung nodule classification
         >>> model = SqueezeNoduleNetV2.from_variant("v2", num_classes=2,
         >>>                                          input_shape=(50, 50, 1))
         >>>
-        >>> # Create 3D version for CT scans
+        >>> # Create 3D version for CT scans. Every variant of this model shares
+        >>> # the 7x7/stride-2 stem and pools after fire4 and fire8, so the
+        >>> # minimum extent on EVERY spatial axis is 35 -- a 32-voxel cube
+        >>> # collapses the last pooling stage to length 0.
         >>> model = SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2,
-        >>>                                          input_shape=(32, 32, 32, 1))
+        >>>                                          input_shape=(48, 48, 48, 1))
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "v1": {
             "fire_configs": [
@@ -299,8 +313,27 @@ class SqueezeNoduleNetV2(keras.Model):
     }
 
     # Architecture constants
-    STEM_INITIALIZER = "glorot_uniform"
-    HEAD_INITIALIZER = "glorot_uniform"
+    # DECISION plan-2026-08-23T091307-9a110062/D-481
+    # Transcribed from the official Caffe prototxt, NOT inherited from Keras.
+    # `STEM_INITIALIZER` is `conv1`'s `weight_filler { type: "xavier" }` and
+    # `HEAD_INITIALIZER` is `conv10`'s
+    # `weight_filler { type: "gaussian" mean: 0.0 std: 0.01 }`.
+    # https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.1/train_val.prototxt
+    #
+    # Do NOT collapse these two to one value and do NOT put `glorot_uniform`
+    # back. They are DIFFERENT fillers in the reference -- 25 convolutions
+    # xavier, `conv10` alone gaussian -- and Caffe's xavier normalizes by
+    # `fan_in`, which is `lecun_uniform` here, not `glorot_uniform`. The full
+    # measured derivation is in `caffe_reference_init.py`'s docstring.
+    # `HEAD_INITIALIZER` is a serialized CONFIG dict, not an `Initializer`
+    # instance: Keras resolves a config to a FRESH instance per consumer, while
+    # one shared seedless instance replays its draw (D-072). Consumers copy it
+    # with `dict(...)` at the call site -- a class attribute aliasing a
+    # module-level mutable is the same object under two names, which is what
+    # `test_package_api_contract.py::TestNoMutableDefaults` exists to catch.
+    # See decisions.md D-481.
+    STEM_INITIALIZER = CAFFE_XAVIER_INITIALIZER
+    HEAD_INITIALIZER = CAFFE_HEAD_INITIALIZER
 
     def __init__(
             self,
@@ -308,7 +341,7 @@ class SqueezeNoduleNetV2(keras.Model):
             variant_config: Optional[Dict[str, Any]] = None,
             dropout_rate: float = 0.5,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             include_top: bool = True,
             use_3d: bool = False,
             input_shape: Union[Tuple[int, int, int], Tuple[int, int, int, int]] = (224, 224, 3),
@@ -318,13 +351,19 @@ class SqueezeNoduleNetV2(keras.Model):
         if variant_config is None:
             variant_config = self.MODEL_VARIANTS["v2"]
 
-        # Validate inputs
         if num_classes <= 0:
             raise ValueError("num_classes must be a positive integer")
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
 
-        # Store configuration
+        # DECISION plan-2026-08-17T183311-79c63e38/D-020
+        # Validate here, in __init__, NOT in build(): input_shape is a required
+        # constructor argument already resolved to concrete ints, and this class
+        # calls super().__init__(inputs=..., outputs=...) -- by the time a
+        # functional Model's build() would run, the all-NaN graph is already
+        # assembled. Applies to every spatial axis, so it covers the 3D variants.
+        validate_spatial_extent(input_shape[:-1], variant_config, type(self).__name__)
+
         self.num_classes = num_classes
         self.variant_config = variant_config
         self.dropout_rate = dropout_rate
@@ -334,37 +373,31 @@ class SqueezeNoduleNetV2(keras.Model):
         self.use_3d = use_3d or variant_config.get("use_3d", False)
         self._input_shape = input_shape
 
-        # Extract variant configuration
         self.fire_configs = variant_config["fire_configs"]
         self.conv1_filters = variant_config["conv1_filters"]
         self.conv1_kernel = variant_config["conv1_kernel"]
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
 
-        # Initialize layer lists
         self.stem_layers = []
         self.fire_modules = []
         self.pool_layers = []
         self.head_layers = []
 
-        # Build the model
         inputs = keras.Input(shape=input_shape)
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the complete SqueezeNodule-Net model architecture."""
         x = inputs
 
-        # Build stem (initial convolution)
         x = self._build_stem(x)
 
         # Build Fire modules with pooling
         x = self._build_fire_modules(x)
 
-        # Build classification head if requested
         if self.include_top:
             x = self._build_head(x)
 
@@ -434,7 +467,6 @@ class SqueezeNoduleNetV2(keras.Model):
             x = fire_module(x)
             self.fire_modules.append(fire_module)
 
-            # Add pooling after specific Fire modules
             fire_number = idx + 2  # Convert to 1-based fire module number
             if fire_number in self.pool_indices:
                 pool_layer = MaxPool(
@@ -492,28 +524,30 @@ class SqueezeNoduleNetV2(keras.Model):
             Conv = layers.Conv2D
             GlobalPool = layers.GlobalAveragePooling2D
 
-        # Final convolution for classification
         conv10 = Conv(
             filters=self.num_classes,
             kernel_size=1,
             activation='relu',
             kernel_regularizer=self.kernel_regularizer,
-            kernel_initializer=self.HEAD_INITIALIZER,
+            kernel_initializer=dict(self.HEAD_INITIALIZER),
             name='conv10'
         )
         x = conv10(x)
         self.head_layers.append(conv10)
 
-        # Global average pooling
         globalpool = GlobalPool(name='globalpool')
         x = globalpool(x)
         self.head_layers.append(globalpool)
 
-        # Softmax activation for binary classification
-        if self.num_classes == 2:
-            activation = 'sigmoid'
-        else:
-            activation = 'softmax'
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-063: softmax at EVERY
+        # num_classes, including 2. Do NOT restore the num_classes == 2 ->
+        # 'sigmoid' special case: the head is Conv2D(num_classes) -> GAP, so with
+        # sigmoid the two outputs are independent and do not sum to 1, while the
+        # package's own num_classes=2 examples are compiled with
+        # categorical_crossentropy. SqueezeNetV1 softmaxes on the same argument.
+        # A single-logit sigmoid head would be the other consistent option; it is
+        # rejected because it changes the output SHAPE. See decisions.md D-063.
+        activation = 'softmax'
 
         final_activation = layers.Activation(activation, name='predictions')
         x = final_activation(x)
@@ -536,27 +570,42 @@ class SqueezeNoduleNetV2(keras.Model):
             variant: String, one of "v1", "v2", "v1_3d", "v2_3d"
             num_classes: Integer, number of output classes
             input_shape: Tuple, input shape
-            **kwargs: Additional arguments passed to the constructor
+            **kwargs: Additional arguments passed to the constructor. A
+                non-None ``weights`` here raises NotImplementedError; no
+                pretrained checkpoints are distributed with this package.
 
         Returns:
             SqueezeNoduleNetV2 model instance
 
         Raises:
-            ValueError: If variant is not recognized
+            NotImplementedError: If a non-None ``weights`` is passed.
+            ValueError: If variant is not recognized, or if `input_shape`'s
+                spatial extent is below the computed minimum of 35 (shared by
+                all four variants, which share one stem and pooling schedule).
 
         Example:
             >>> # SqueezeNodule-Net V2 for lung nodule classification
             >>> model = SqueezeNoduleNetV2.from_variant("v2", num_classes=2,
             >>>                                          input_shape=(50, 50, 1))
             >>>
-            >>> # 3D version for CT scans
+            >>> # 3D version for CT scans (48 voxels per axis: the minimum is 35)
             >>> model = SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2,
-            >>>                                          input_shape=(32, 32, 32, 1))
+            >>>                                          input_shape=(48, 48, 48, 1))
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available variants: "
                 f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        if kwargs.pop("weights", None) is not None:
+            # Guard lives HERE, not in create_squeezenet_v2: ``from_variant`` is the
+            # chokepoint both public entry points reach, and ``**kwargs``
+            # swallowed ``weights`` silently, returning a random model.
+            raise NotImplementedError(
+                f"No pretrained SqueezeNodule-Net weights are distributed with dl_techniques. "
+                f"Train from scratch, or load a local checkpoint with "
+                f"keras.models.load_model()."
             )
 
         variant_config = cls.MODEL_VARIANTS[variant]
@@ -586,7 +635,6 @@ class SqueezeNoduleNetV2(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SqueezeNoduleNetV2":
         """Create model from configuration."""
-        # Deserialize regularizer if present
         if config.get('kernel_regularizer'):
             config['kernel_regularizer'] = regularizers.deserialize(
                 config['kernel_regularizer']
@@ -596,11 +644,15 @@ class SqueezeNoduleNetV2(keras.Model):
                 config['kernel_initializer']
             )
 
-        # Remove base config keys that are handled by Model
-        base_config = {}
-        for key in ['name', 'layers', 'input_layers', 'output_layers']:
-            if key in config:
-                base_config[key] = config.pop(key)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-129
+        # Drop only the Functional-graph keys that ``__init__`` rebuilds. Do NOT
+        # add 'name' back to this list: dropping it renamed a nested backbone
+        # from 'backbone' to 'squeeze_net_v1' on reload, and
+        # ``utils/weight_transfer.py`` keys its layer map by ``layer.name``, so
+        # the whole backbone landed in missing_in_source and kept its random
+        # init while the call still returned normally.
+        for key in ('layers', 'input_layers', 'output_layers'):
+            config.pop(key, None)
 
         return cls(**config)
 
@@ -656,11 +708,15 @@ def create_squeezenodule_net_v2(
         variant: String, model variant ("v1", "v2", "v1_3d", "v2_3d")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape
-        weights: String, pretrained weights to load (not implemented)
+        weights: Unsupported; any non-None value raises NotImplementedError.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
         SqueezeNoduleNetV2 model instance
+
+    Raises:
+        NotImplementedError: If `weights` is not None.
+        ValueError: If `input_shape`'s spatial extent is below 35 on any axis.
 
     Example:
         >>> # Create SqueezeNodule-Net V2 for lung nodules
@@ -671,20 +727,16 @@ def create_squeezenodule_net_v2(
         >>> model = create_squeezenodule_net_v2("v1", num_classes=2,
         >>>                                     input_shape=(50, 50, 1))
         >>>
-        >>> # Create 3D version for CT volumes
+        >>> # Create 3D version for CT volumes (48 voxels per axis; minimum is 35)
         >>> model = create_squeezenodule_net_v2("v2_3d", num_classes=2,
-        >>>                                     input_shape=(32, 32, 32, 1))
+        >>>                                     input_shape=(48, 48, 48, 1))
     """
-    if weights is not None:
-        logger.info("Warning: Pretrained weights are not yet implemented")
-
-    model = SqueezeNoduleNetV2.from_variant(
+    return SqueezeNoduleNetV2.from_variant(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        weights=weights,
         **kwargs
     )
-
-    return model
 
 # ---------------------------------------------------------------------

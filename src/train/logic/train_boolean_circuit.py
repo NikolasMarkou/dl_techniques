@@ -166,7 +166,13 @@ def round_trip_check(model: keras.Model, X_test: np.ndarray, save_dir: str) -> f
     """Save + reload + re-predict; return max-abs prediction diff."""
     path = os.path.join(save_dir, "model.keras")
     model.save(path)
-    reloaded = keras.models.load_model(path)
+    # DECISION plan-2026-08-22T035419-a11304c8/D-015: `compile=False` for the same
+    # reason as `train_benchmark.roundtrip_check` -- see the full note there.
+    # `build_model` above returns a COMPILED model whose optimizer has no slot
+    # variables until the first gradient step, so a default reload warns
+    # ("Skipping variable loading for optimizer 'adamw' ...") and that warning is
+    # fatal under `-W error::UserWarning`. This helper compares predictions only.
+    reloaded = keras.models.load_model(path, compile=False)
     p1 = model.predict(X_test, verbose=0)
     p2 = reloaded.predict(X_test, verbose=0)
     return float(np.max(np.abs(p1 - p2)))

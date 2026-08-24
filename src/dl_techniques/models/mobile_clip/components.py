@@ -10,6 +10,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
 
 
 # ---------------------------------------------------------------------
@@ -182,6 +183,7 @@ class ImageProjectionHead(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MobileClipImageEncoder(keras.Model):
@@ -221,7 +223,7 @@ class MobileClipImageEncoder(keras.Model):
             with (e.g., 'imagenet'). Defaults to 'imagenet'.
         backbone_trainable: Boolean, whether to fine-tune the backbone weights.
             Defaults to True.
-        projection_dropout: Float between 0 and 1. Dropout rate for the
+        projection_dropout_rate: Float between 0 and 1. Dropout rate for the
             projection head. Defaults to 0.0.
         **kwargs: Additional arguments for the Model base class.
 
@@ -243,7 +245,7 @@ class MobileClipImageEncoder(keras.Model):
         projection_dim: int = 512,
         backbone_weights: Optional[str] = 'imagenet',
         backbone_trainable: bool = True,
-        projection_dropout: float = 0.0,
+        projection_dropout_rate: float = 0.0,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -254,13 +256,13 @@ class MobileClipImageEncoder(keras.Model):
         self.projection_dim = projection_dim
         self.backbone_weights = backbone_weights
         self.backbone_trainable = backbone_trainable
-        self.projection_dropout = projection_dropout
+        self.projection_dropout_rate = projection_dropout_rate
 
         # CREATE all sub-layers in __init__
         self.backbone = self._create_backbone()
         self.projection_head = ImageProjectionHead(
             projection_dim=self.projection_dim,
-            dropout_rate=self.projection_dropout,
+            dropout_rate=self.projection_dropout_rate,
             name='projection_head'
         )
 
@@ -324,7 +326,7 @@ class MobileClipImageEncoder(keras.Model):
             'projection_dim': self.projection_dim,
             'backbone_weights': self.backbone_weights,
             'backbone_trainable': self.backbone_trainable,
-            'projection_dropout': self.projection_dropout,
+            'projection_dropout_rate': self.projection_dropout_rate,
         })
         return config
 
@@ -447,6 +449,25 @@ class MobileClipTextEncoder(keras.layers.Layer):
             self.max_seq_len, self.embed_dim, self.dropout_rate,
             name='positional_embedding'
         )
+        # DECISION plan-2026-08-18T140459-7991552f/D-049
+        # `attention_norm_args` / `ffn_norm_args` carry the SAME
+        # `REFERENCE_NORM_EPSILON` as `self.layer_norm` below. Without them,
+        # `TransformerLayer._create_normalization_layer` reaches
+        # `layers/norms/factory.py`, which `setdefault`s `epsilon=1e-6`, so
+        # every one of the `2 * num_layers` norms in this tower ran at 1e-6
+        # while the single `ln_final` ran at torch's 1e-5. MEASURED at
+        # `num_layers=3`: six norms at 1e-06 and one at 1e-05 -- for
+        # `mobileclip2_s3` that is 24 wrong and 1 right, in a tower whose own
+        # D-028 anchor states the reference interface contract "applies to it
+        # at every construction site".
+        # WHAT NOT TO DO: do not fix this by changing
+        # `layers/norms/factory.py`'s 1e-6 default -- that factory is shared by
+        # every transformer in the repository and its default is not this
+        # port's business; and do not re-declare 1e-5 as a literal here, the
+        # constant has ONE definition (`layers/fastvit/reference.py`) on
+        # purpose. These two dicts are the per-site channel the factory already
+        # provides. See decisions.md D-049.
+        _norm_args = {'epsilon': REFERENCE_NORM_EPSILON}
         self.transformer_layers = [
             TransformerLayer(
                 hidden_size=self.embed_dim,
@@ -455,10 +476,26 @@ class MobileClipTextEncoder(keras.layers.Layer):
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
                 normalization_position='pre',
+                attention_norm_args=dict(_norm_args),
+                ffn_norm_args=dict(_norm_args),
                 name=f'transformer_layer_{i}'
             ) for i in range(self.num_layers)
         ]
-        self.layer_norm = layers.LayerNormalization(name='final_layer_norm')
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028
+        # `epsilon` is EXPLICIT and is imported, not written as a literal.
+        # This is the `ln_final` of the OpenCLIP-shaped text tower that
+        # `mobile_clip_v2.py:229` calls "the faithful MobileCLIP port"'s text
+        # transformer, so it is a normalization layer IN the port and
+        # `layers/fastvit/reference.py`'s interface contract applies to it:
+        # PyTorch's `nn.LayerNorm` defaults to 1e-5, Keras' to 1e-3.
+        # WHAT NOT TO DO: do not drop the argument back (Keras' 1e-3 default is
+        # 100x the reference and is invisible to every shape assertion — it
+        # shipped wrong once already in 86 of 114 layers of the FastViT tower),
+        # and do not re-declare the value as a local `1e-5` literal; the
+        # constant has ONE definition on purpose. See decisions.md D-028.
+        self.layer_norm = layers.LayerNormalization(
+            epsilon=REFERENCE_NORM_EPSILON, name='final_layer_norm'
+        )
 
         # Initialize weight attributes - created in build()
         self.projection_weights = None
@@ -523,7 +560,7 @@ class MobileClipTextEncoder(keras.layers.Layer):
             # graph-safety change and does not alter mixed-precision behaviour.
             causal_mask = ops.cast(
                 ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
-                keras.backend.floatx(),
+                keras.config.floatx(),
             )
             causal_mask = ops.expand_dims(causal_mask, axis=0)
 

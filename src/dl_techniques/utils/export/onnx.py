@@ -318,7 +318,6 @@ def export_with_dynamic_batch(
     import tensorflow as tf
     import tf2onnx
     import onnx
-    from onnx import helper
 
     # First export with fixed batch size
     temp_path = output_path.replace(".onnx", "_temp.onnx")

@@ -23,6 +23,7 @@ from dl_techniques.utils.logger import logger
 
 # Import the constraint to test (adjust import path as needed)
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from tests.optimizer_state import build_optimizer_state
 
 
 class TestValueRangeConstraint:
@@ -229,7 +230,6 @@ class TestValueRangeConstraint:
         layer = keras.layers.Dense(
             units=5,
             kernel_constraint=constraint,
-            input_shape=(sample_weights.shape[-1],)
         )
 
         # Build the layer
@@ -250,11 +250,11 @@ class TestValueRangeConstraint:
         """Test the constraint in a model context."""
         # Create a model with constrained layers
         model = keras.Sequential([
+            keras.Input(shape=(10,)),
             keras.layers.Dense(
                 units=32,
                 activation="relu",
                 kernel_constraint=ValueRangeConstraint(min_value=0.0, max_value=2.0),
-                input_shape=(10,)
             ),
             keras.layers.Dense(
                 units=16,
@@ -300,12 +300,12 @@ class TestValueRangeConstraint:
         """Test saving and loading a model with the constraint."""
         # Create a simple model with the constraint
         model = keras.Sequential([
+            keras.Input(shape=(8,)),
             keras.layers.Dense(
                 units=16,
                 activation="relu",
                 kernel_constraint=ValueRangeConstraint(min_value=-0.5, max_value=0.5),
                 bias_constraint=ValueRangeConstraint(min_value=0.0),
-                input_shape=(8,)
             ),
             keras.layers.Dense(units=1, activation="sigmoid")
         ])
@@ -325,6 +325,10 @@ class TestValueRangeConstraint:
             model_path = os.path.join(tmpdirname, "constrained_model.keras")
 
             # Save the model
+            # The optimizer's slot variables are allocated lazily, so a compiled-but-
+            # unfitted model would otherwise save an optimizer the reload cannot match.
+            # See tests/optimizer_state.py (D-016).
+            build_optimizer_state(model)
             model.save(model_path)
 
             # Load the model with custom objects

@@ -31,13 +31,20 @@ import keras
 import argparse
 import numpy as np
 import tensorflow as tf
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from train.common import setup_gpu, StepPlotCallback, set_seeds
+from train.common import (
+    setup_gpu,
+    StepPlotCallback,
+    set_seeds,
+    save_config_json,
+    save_training_history_json,
+)
 from train.common.nlp import (
     create_tokenizer,
     preprocess_clm_dataset,
@@ -59,6 +66,23 @@ from dl_techniques.losses import MaskedCausalLMLoss
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-08-13T091555-230c101d/D-012: this MUST stay a @dataclass.
+# It was a plain class with class-level attribute defaults until step 6 adopted
+# `save_config_json(config, results_dir)` below. MEASURED, not assumed: on a
+# plain class the helper takes its `hasattr(config, "__dict__")` branch and
+# serializes `vars(config)`, which holds only INSTANCE attributes —
+# `len(vars(FinetuneConfig()))` was **0**, so the adopted call wrote a
+# `config.json` containing `{}` while every default sat on the class and was
+# silently omitted (a run whose config.json records nothing looks healthy).
+# The `@dataclass` route makes `dataclasses.is_dataclass` true, so the helper
+# takes its `dataclasses.asdict` branch and records all 29 fields (MEASURED:
+# 0 keys written before, 29 after).
+# DO NOT revert this to a plain class, and DO NOT "fix" it inside
+# `save_config_json` by teaching it to walk class-level annotations — that
+# helper is shared by every trainer in `src/train/` and a class-attribute
+# fallback would start recording class defaults an instance never received.
+# See decisions.md D-012.
+@dataclass
 class FinetuneConfig:
     """Configuration for GPT-2 domain fine-tuning."""
 
@@ -361,6 +385,7 @@ def finetune_gpt2(
         analyzer_start_epoch=config.analysis_start_epoch,
     )
     callbacks.append(StepPlotCallback(save_dir=results_dir))
+    save_config_json(config, results_dir)
 
     # Train
     logger.info(
@@ -376,6 +401,7 @@ def finetune_gpt2(
         verbose=1,
     )
     logger.info("Fine-tuning completed!")
+    save_training_history_json(history, results_dir)
 
     # Save
     final_path = os.path.join(config.save_dir, "gpt2_finetuned.keras")

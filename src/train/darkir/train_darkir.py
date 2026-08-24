@@ -3,6 +3,13 @@ Training Script for DarkIR (Low-Light Image Restoration).
 
 Trains the DarkIR model on paired low/high light image data using
 DarkIRCompositeLoss (Charbonnier + SSIM + Perceptual) with PSNR/SSIM metrics.
+
+``--side-loss`` additionally supervises the model's bottleneck deep-supervision
+head. That head emits a map ``2 ** len(enc_blk_nums)`` times smaller than the
+input on each axis, so the auxiliary target is the ground truth area-downsampled
+by the same factor (``attach_side_targets``) and its loss is Charbonnier-only.
+Without that downsampling the two-output model builds and then dies at the first
+step, which is what the flag did before this wiring existed.
 """
 
 import os
@@ -112,7 +119,40 @@ def _create_synthetic_dataset(img_size, batch_size):
 
 # ---------------------------------------------------------------------
 
-def create_darkir_config(variant: str) -> Dict[str, Any]:
+def side_output_downsample_factor(model_config: Dict[str, Any]) -> int:
+    """Spatial factor between the main output and the side output.
+
+    The side head is tapped at the bottleneck, after one stride-2 downsample
+    per encoder stage, so it is ``2 ** len(enc_blk_nums)`` times smaller than
+    the input on each spatial axis. Derived from the config rather than
+    hard-coded, so ``--variant``/stage changes cannot desynchronize the target
+    pipeline from the model.
+    """
+    return 2 ** len(model_config['enc_blk_nums'])
+
+
+def attach_side_targets(ds: tf.data.Dataset, factor: int) -> tf.data.Dataset:
+    """Map ``(x, y)`` to ``(x, (y, downsample(y, factor)))``.
+
+    DECISION plan-2026-08-14T233721-d4f9beb2/D-044: the side output lives at
+    bottleneck resolution, so the auxiliary target is the ground truth
+    area-downsampled by the same factor. Area (not bilinear/nearest)
+    resampling is the box filter, which is what "the average colour of the
+    8x8 patch this bottleneck cell covers" means; it is also antialiased by
+    construction at large factors, where bilinear is not.
+    """
+
+    def _map(x, y):
+        shape = tf.shape(y)
+        small = tf.image.resize(
+            y, (shape[1] // factor, shape[2] // factor), method='area',
+        )
+        return x, (y, small)
+
+    return ds.map(_map, num_parallel_calls=tf.data.AUTOTUNE)
+
+
+def create_darkir_config(variant: str, use_side_loss: bool = False) -> Dict[str, Any]:
     """Create DarkIR configuration. Variants: 'medium' (width=32), 'large' (width=64)."""
     config = {
         'img_channels': 3,
@@ -122,7 +162,7 @@ def create_darkir_config(variant: str) -> Dict[str, Any]:
         'dec_blk_nums': [3, 1, 1],
         'dilations': [1, 4, 9],
         'extra_depth_wise': True,
-        'use_side_loss': False,
+        'use_side_loss': use_side_loss,
     }
 
     if variant == 'medium':
@@ -155,7 +195,15 @@ def visualize_restoration_results(
     os.makedirs(viz_dir, exist_ok=True)
 
     for inputs, targets in val_ds.take(1):
-        preds = np.clip(model.predict(inputs, verbose=0), 0.0, 1.0)
+        # Under --side-loss both the targets and the predictions are 2-tuples
+        # (full-resolution, bottleneck-resolution); only the first is an image
+        # worth plotting.
+        if isinstance(targets, (tuple, list)):
+            targets = targets[0]
+        preds = model.predict(inputs, verbose=0)
+        if isinstance(preds, (tuple, list)):
+            preds = preds[0]
+        preds = np.clip(preds, 0.0, 1.0)
 
         fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4 * num_samples))
         plt.suptitle("DarkIR Restoration Results (Low Light | Restored | Ground Truth)")
@@ -226,9 +274,19 @@ def train_model(args: argparse.Namespace):
     )
 
     # Model
-    model_config = create_darkir_config(args.variant)
+    model_config = create_darkir_config(args.variant, use_side_loss=args.side_loss)
     logger.info(f"Creating DarkIR model (Variant: {args.variant})")
     model = create_darkir_model(**model_config)
+
+    if args.side_loss:
+        factor = side_output_downsample_factor(model_config)
+        train_ds = attach_side_targets(train_ds, factor)
+        val_ds = attach_side_targets(val_ds, factor)
+        logger.info(
+            f"Side loss ON: auxiliary target is the ground truth downsampled "
+            f"{factor}x to the bottleneck resolution, weighted "
+            f"{args.side_loss_weight}."
+        )
 
     # Optimization
     lr_schedule = learning_rate_schedule_builder({
@@ -254,11 +312,33 @@ def train_model(args: argparse.Namespace):
         perceptual_weight=args.perceptual_weight,
         name='darkir_loss',
     )
-    model.compile(
-        optimizer=optimizer,
-        loss=loss_fn,
-        metrics=[PsnrMetric(max_val=1.0, name='psnr'), SsimMetric(max_val=1.0)],
-    )
+    if args.side_loss:
+        # Charbonnier only on the side head: SSIM's 11x11 window and the VGG
+        # perceptual features are not meaningful at 1/8 resolution (a 128px
+        # crop is 16px there, barely wider than the SSIM window).
+        side_loss_fn = DarkIRCompositeLoss(
+            charbonnier_weight=1.0,
+            ssim_weight=0.0,
+            perceptual_weight=0.0,
+            name='darkir_side_loss',
+        )
+        model.compile(
+            optimizer=optimizer,
+            loss=[loss_fn, side_loss_fn],
+            loss_weights=[1.0, args.side_loss_weight],
+            metrics=[
+                [PsnrMetric(max_val=1.0, name='psnr'), SsimMetric(max_val=1.0)],
+                [],
+            ],
+        )
+        monitor = f"val_{model.output_names[0]}_psnr"
+    else:
+        model.compile(
+            optimizer=optimizer,
+            loss=loss_fn,
+            metrics=[PsnrMetric(max_val=1.0, name='psnr'), SsimMetric(max_val=1.0)],
+        )
+        monitor = 'val_psnr'
     model.build((None, args.img_size, args.img_size, 3))
     model.summary(print_fn=logger.info)
 
@@ -266,7 +346,7 @@ def train_model(args: argparse.Namespace):
     callbacks, results_dir = create_callbacks(
         model_name=f"darkir_{args.variant}",
         results_dir_prefix="darkir",
-        monitor='val_psnr',
+        monitor=monitor,
         patience=args.patience,
         use_lr_schedule=True,
     )
@@ -324,6 +404,11 @@ def main():
     parser.add_argument('--warmup-steps', type=int, default=1000, help='LR warmup steps')
     parser.add_argument('--ssim-weight', type=float, default=0.2, help='Weight for SSIM loss component')
     parser.add_argument('--perceptual-weight', type=float, default=0.01, help='Weight for VGG perceptual loss')
+    parser.add_argument('--side-loss', action='store_true',
+                        help='Enable the bottleneck deep-supervision head. The auxiliary target is '
+                             'the ground truth downsampled to bottleneck resolution.')
+    parser.add_argument('--side-loss-weight', type=float, default=0.2,
+                        help='Weight of the bottleneck side loss (only used with --side-loss)')
 
     # Override base defaults for restoration task
     parser.set_defaults(

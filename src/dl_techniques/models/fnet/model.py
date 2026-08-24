@@ -1,56 +1,78 @@
 """
-FNet Model Implementation with Pretrained Support
-==================================================
+FNet, a transformer encoder whose token mixer is an unparameterized Fourier
+transform instead of self-attention.
 
-A complete and refactored implementation of the FNet (Fourier Transform-based
-Neural Network) architecture with support for loading pretrained weights. This
-version is designed as a pure foundation model, separating the core encoding
-logic from task-specific heads for maximum flexibility, especially in
-pre-training and multi-task fine-tuning scenarios.
+This model embodies the principle that most of what self-attention contributes
+to an encoder is token mixing, not the specific content-dependent weights it
+computes. Self-attention costs `O(L^2)` time and memory in sequence length and
+carries four projection matrices per layer; if the downstream layers can
+recover the needed interactions from any sufficiently rich mixing of positions,
+then the mixer itself need not be learned at all. FNet takes that idea to its
+limit and replaces the whole attention sublayer with a two-dimensional discrete
+Fourier transform:
 
-Based on: "FNet: Mixing Tokens with Fourier Transforms"
-(Lee-Thorp et al., 2021) https://arxiv.org/abs/2105.03824
+`y = Re(F_seq(F_hidden(x)))`
 
-Usage Examples:
---------------
+The transform is applied along the hidden dimension and then along the sequence
+dimension, and only the real part is kept. Discarding the imaginary component
+is not an approximation to be apologized for: it keeps the sublayer a real-valued
+map with the same shape as its input, so the residual connection and the
+feed-forward network that follow are untouched, and the imaginary part carries
+no information the subsequent layers are set up to consume.
 
-.. code-block:: python
+Two consequences follow, and they are the whole argument for the architecture.
+The mixer has zero parameters and zero learned state, so a layer's entire
+capacity sits in its feed-forward network. And because every output position is
+a fixed linear combination of every input position, one layer already achieves
+global receptive field -- the property attention is usually credited with -
+without any pairwise score matrix. The reported cost is a few points of
+accuracy against a BERT baseline in exchange for substantially faster training,
+which is a favourable trade whenever the encoder is a component rather than the
+product.
 
-    import keras
-    from dl_techniques.nlp.heads.factory import create_nlp_head
-    from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
+The consequence that matters in code is that masking works differently here,
+and the difference is easy to get wrong. There is no softmax to add a `-inf`
+bias to, so `attention_mask` is applied MULTIPLICATIVELY and only AFTER mixing:
+a padded position's own output is zeroed, but it has already contributed to the
+mixed values of every real token, because a DFT cannot be told to skip an
+index. The usual "masked tokens are invisible" guarantee therefore does not
+hold. The mask is still forwarded on the output so downstream heads can pool
+correctly.
 
-    # 1. Load pretrained FNet model
-    fnet_encoder = FNet.from_variant("base", pretrained=True)
+Everything else is a standard encoder: BERT-style embeddings, then
+`num_layers` blocks of `Fourier mix -> residual -> norm -> FFN -> residual ->
+norm` (post-normalization by default, with optional stochastic depth on each
+branch), emitting `{"last_hidden_state", "attention_mask"}` with no pooler and
+no task head, so a single encoder can back several heads at once. Four preset
+variants span tiny through large.
 
-    # 2. Load from local weights file
-    fnet_encoder = FNet.from_variant("large", pretrained="path/to/weights.keras")
+`normalization_position='pre'` switches every block to `x = input +
+branch(Norm(input))` and adds the stack-final normalization that arrangement
+requires; `position_embedding_type` selects between a learned absolute table and
+a fixed sinusoidal one. Both are real knobs as of 2026-08-15 — until then each
+was validated, stored and serialized while the value never reached the layer that
+would have honoured it, so `normalization_position='pre'` built a post-norm stack
+and `position_embedding_type` was ignored entirely.
 
-    # 3. Create FNet with custom configuration
-    fnet_encoder = FNet.from_variant("base", vocab_size=50000)
+No pretrained weights are distributed with this package. `pretrained=True`
+raises `NotImplementedError` rather than warning and returning a randomly
+initialized model, which is a deliberate choice: the previous behaviour held a
+table of unreachable weight URLs and swallowed the download failure, making an
+unavailable checkpoint silently indistinguishable from a successful load. Pass
+a local `.keras` path to `pretrained` instead.
 
-    # 4. Combine with task-specific head
-    sentiment_config = NLPTaskConfig(
-        name="sentiment",
-        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        num_classes=3
-    )
-    sentiment_head = create_nlp_head(
-        task_config=sentiment_config,
-        input_dim=fnet_encoder.hidden_size
-    )
-
-    # 5. Build complete model
-    inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
-        "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids")
-    }
-    fnet_outputs = fnet_encoder(inputs)
-    task_outputs = sentiment_head(fnet_outputs)
-    sentiment_model = keras.Model(inputs, task_outputs)
-
+References:
+    - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms.
+      (https://arxiv.org/abs/2105.03824)
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding.
+      (https://arxiv.org/abs/1810.04805)
+    - Tay et al., 2020. Efficient Transformers: A Survey.
+      (https://arxiv.org/abs/2009.06732)
+    - Tolstikhin et al., 2021. MLP-Mixer: An all-MLP Architecture for Vision.
+      (https://arxiv.org/abs/2105.01601)
 """
+
 
 import os
 import keras
@@ -61,11 +83,14 @@ from typing import Any, Dict, List, Optional, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
+from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
+from dl_techniques.utils.model_build import materialize_sublayers
 
 # ---------------------------------------------------------------------
 
@@ -118,9 +143,12 @@ class FNet(keras.Model):
     :param intermediate_size: Dimensionality of the "intermediate"
         (feed-forward) layer. Defaults to 3072.
     :type intermediate_size: int
-    :param hidden_dropout_prob: Dropout probability for all fully connected
-        layers in embeddings and encoder. Defaults to 0.1.
-    :type hidden_dropout_prob: float
+    :param hidden_dropout_rate: Dropout probability for all fully connected
+        layers in embeddings and encoder. Defaults to 0.1. Upstream this field is
+        ``FNetConfig.hidden_dropout_prob`` (BERT's spelling, which FNet inherits);
+        it is spelled ``_rate`` here because every dropout rate in this repository
+        is (D-130), and the value and meaning are unchanged.
+    :type hidden_dropout_rate: float
     :param max_position_embeddings: Maximum sequence length for positional
         embeddings. Defaults to 512.
     :type max_position_embeddings: int
@@ -134,14 +162,20 @@ class FNet(keras.Model):
     :type layer_norm_eps: float
     :param pad_token_id: ID of padding token. Defaults to 0.
     :type pad_token_id: int
-    :param position_embedding_type: Type of position embedding.
-        Defaults to "absolute".
+    :param position_embedding_type: How positional information is produced --
+        ``'learned'`` (default; BERT's learned absolute table) or
+        ``'sinusoidal'``. Forwarded to :class:`BertEmbeddings`, which raises on
+        anything else. The legacy spelling ``'absolute'`` is normalized to
+        ``'learned'``; it was this model's default while the value was never
+        forwarded at all.
     :type position_embedding_type: str
     :param normalization_type: Type of normalization layer.
         Defaults to "layer_norm".
     :type normalization_type: str
-    :param normalization_position: Position of normalization ('pre' or 'post').
-        Defaults to "post".
+    :param normalization_position: ``'post'`` (default, the original FNet
+        arrangement, ``x = Norm(input + branch(input))``) or ``'pre'``
+        (``x = input + branch(Norm(input))``, plus a stack-final normalization
+        this model owns). Forwarded to every :class:`FNetEncoderBlock`.
     :type normalization_position: str
     :param ffn_type: Type of feed-forward network. Defaults to "mlp".
     :type ffn_type: str
@@ -166,15 +200,12 @@ class FNet(keras.Model):
             # Create standard FNet-base model
             model = FNet.from_variant("base")
 
-            # Load pretrained FNet-base
-            model = FNet.from_variant("base", pretrained=True)
-
-            # Load from local file
+            # Load from local file (`pretrained=True` raises NotImplementedError)
             model = FNet.from_variant("large", pretrained="path/to/weights.keras")
 
             # Use the model
             inputs = {
-                "input_ids": keras.random.uniform((2, 128), 0, 30522, dtype="int32"),
+                "input_ids": keras.random.randint((2, 128), 0, 30522, dtype="int32"),
                 "attention_mask": keras.ops.ones((2, 128), dtype="int32")
             }
             outputs = model(inputs)
@@ -211,26 +242,6 @@ class FNet(keras.Model):
         },
     }
 
-    # Pretrained weights URLs (replace with actual URLs when available)
-    PRETRAINED_WEIGHTS = {
-        "base": {
-            "uncased": "https://example.com/fnet_base_uncased.keras",
-            "cased": "https://example.com/fnet_base_cased.keras",
-        },
-        "large": {
-            "uncased": "https://example.com/fnet_large_uncased.keras",
-            "cased": "https://example.com/fnet_large_cased.keras",
-        },
-        "small": {
-            "uncased": "https://example.com/fnet_small_uncased.keras",
-            "cased": "https://example.com/fnet_small_cased.keras",
-        },
-        "tiny": {
-            "uncased": "https://example.com/fnet_tiny_uncased.keras",
-            "cased": "https://example.com/fnet_tiny_cased.keras",
-        },
-    }
-
     # Default architecture constants
     DEFAULT_VOCAB_SIZE = 30522
     DEFAULT_MAX_POSITION_EMBEDDINGS = 512
@@ -245,13 +256,13 @@ class FNet(keras.Model):
         hidden_size: int = 768,
         num_layers: int = 12,
         intermediate_size: int = 3072,
-        hidden_dropout_prob: float = 0.1,
+        hidden_dropout_rate: float = 0.1,
         max_position_embeddings: int = DEFAULT_MAX_POSITION_EMBEDDINGS,
         type_vocab_size: int = DEFAULT_TYPE_VOCAB_SIZE,
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPSILON,
         pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
-        position_embedding_type: str = "absolute",
+        position_embedding_type: str = "learned",
         normalization_type: NormalizationType = "layer_norm",
         normalization_position: NormalizationPositionType = "post",
         ffn_type: FFNType = "mlp",
@@ -269,8 +280,8 @@ class FNet(keras.Model):
         :type num_layers: int
         :param intermediate_size: Dimensionality of the FFN layer.
         :type intermediate_size: int
-        :param hidden_dropout_prob: Dropout probability for embeddings/encoder.
-        :type hidden_dropout_prob: float
+        :param hidden_dropout_rate: Dropout probability for embeddings/encoder.
+        :type hidden_dropout_rate: float
         :param max_position_embeddings: Maximum sequence length.
         :type max_position_embeddings: int
         :param type_vocab_size: Vocabulary size for token type IDs.
@@ -281,11 +292,15 @@ class FNet(keras.Model):
         :type layer_norm_eps: float
         :param pad_token_id: ID of the padding token.
         :type pad_token_id: int
-        :param position_embedding_type: Type of position embedding.
+        :param position_embedding_type: ``'learned'`` (default) or
+            ``'sinusoidal'``; forwarded to :class:`BertEmbeddings`. ``'absolute'``
+            is accepted as the legacy spelling of ``'learned'``.
         :type position_embedding_type: str
         :param normalization_type: Type of normalization layer.
         :type normalization_type: str
-        :param normalization_position: Position of normalization ('pre'/'post').
+        :param normalization_position: ``'post'`` (default) or ``'pre'``;
+            forwarded to every :class:`FNetEncoderBlock`. ``'pre'`` also adds a
+            stack-final normalization.
         :type normalization_position: str
         :param ffn_type: Type of feed-forward network.
         :type ffn_type: str
@@ -298,19 +313,30 @@ class FNet(keras.Model):
         super().__init__(**kwargs)
 
         # Validate configuration parameters
-        self._validate_config(vocab_size, hidden_size, num_layers, hidden_dropout_prob)
+        self._validate_config(vocab_size, hidden_size, num_layers, hidden_dropout_rate)
 
         # Store all configuration parameters
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.intermediate_size = intermediate_size
-        self.hidden_dropout_prob = hidden_dropout_prob
+        self.hidden_dropout_rate = hidden_dropout_rate
         self.max_position_embeddings = max_position_embeddings
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.pad_token_id = pad_token_id
+        # `'absolute'` was this model's default until 2026-08-15, while the value
+        # was never forwarded to `BertEmbeddings` -- which has no such value at
+        # all (`VALID_POSITION_EMBEDDING_TYPES` is `('learned', 'sinusoidal')`)
+        # and defaulted to `'learned'`. Now that the value IS forwarded, the
+        # legacy spelling is normalized ONCE, here, so every stored config and
+        # every `get_config()` carries the single live spelling. This is a rename
+        # of a value that always meant BERT's learned absolute table, not a
+        # silent fallback: anything else `BertEmbeddings` does not recognize
+        # still raises there.
+        if position_embedding_type == "absolute":
+            position_embedding_type = "learned"
         self.position_embedding_type = position_embedding_type
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
@@ -331,7 +357,7 @@ class FNet(keras.Model):
         vocab_size: int,
         hidden_size: int,
         num_layers: int,
-        hidden_dropout_prob: float,
+        hidden_dropout_rate: float,
     ) -> None:
         """Validate model configuration parameters.
 
@@ -341,8 +367,8 @@ class FNet(keras.Model):
         :type hidden_size: int
         :param num_layers: Number of transformer layers.
         :type num_layers: int
-        :param hidden_dropout_prob: Dropout probability for hidden layers.
-        :type hidden_dropout_prob: float
+        :param hidden_dropout_rate: Dropout probability for hidden layers.
+        :type hidden_dropout_rate: float
         :raises ValueError: If any configuration value is invalid.
         """
         if vocab_size <= 0:
@@ -351,14 +377,20 @@ class FNet(keras.Model):
             raise ValueError(f"hidden_size must be positive, got {hidden_size}")
         if num_layers <= 0:
             raise ValueError(f"num_layers must be positive, got {num_layers}")
-        if not (0.0 <= hidden_dropout_prob <= 1.0):
+        if not (0.0 <= hidden_dropout_rate <= 1.0):
             raise ValueError(
-                f"hidden_dropout_prob must be between 0 and 1, "
-                f"got {hidden_dropout_prob}"
+                f"hidden_dropout_rate must be between 0 and 1, "
+                f"got {hidden_dropout_rate}"
             )
 
     def _build_architecture(self) -> None:
         """Build all model components (embeddings and encoder layers)."""
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: `position_embedding_type`
+        # is FORWARDED. It used to be validated, stored and serialized here while
+        # `BertEmbeddings` silently used its own default ('learned'), so
+        # `FNet(position_embedding_type='sinusoidal')` built a learned table. Do
+        # NOT drop the argument from this call to "keep the default stable" --
+        # that is the bug. See decisions.md D-071.
         self.embeddings = BertEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
@@ -366,8 +398,9 @@ class FNet(keras.Model):
             type_vocab_size=self.type_vocab_size,
             initializer_range=self.initializer_range,
             layer_norm_eps=self.layer_norm_eps,
-            dropout_rate=self.hidden_dropout_prob,
+            dropout_rate=self.hidden_dropout_rate,
             normalization_type=self.normalization_type,
+            position_embedding_type=self.position_embedding_type,
             name="embeddings",
         )
 
@@ -383,14 +416,43 @@ class FNet(keras.Model):
         for i in range(self.num_layers):
             encoder_layer = FNetEncoderBlock(
                 intermediate_dim=self.intermediate_size,
-                dropout_rate=self.hidden_dropout_prob,
+                dropout_rate=self.hidden_dropout_rate,
                 normalization_type=self.normalization_type,
+                normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=drop_path_rates[i],
                 name=f"encoder_layer_{i}",
             )
             self.encoder_layers.append(encoder_layer)
+
+        # A pre-norm stack leaves its last residual sum unnormalized, so the
+        # model owns the stack-final normalization. Built only for 'pre': adding
+        # it unconditionally would change every existing post-norm checkpoint's
+        # weight tree.
+        self.final_norm = None
+        if self.normalization_position == 'pre':
+            self.final_norm = create_normalization_layer(
+                normalization_type=self.normalization_type,
+                epsilon=self.layer_norm_eps,
+                name="final_norm",
+            )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method FNet inherits ``Layer.build``, which marks the
+        model built while every sub-layer is still unbuilt -- Keras warns about
+        exactly that at ``layers/layer.py:393``. The shared helper traces
+        ``call()`` on symbolic inputs, so what gets built cannot drift from what
+        gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -417,8 +479,12 @@ class FNet(keras.Model):
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
-                 - ``attention_mask``: The original attention mask, passed
-                   through for convenience in downstream models.
+                 - ``attention_mask``: The attention mask, passed through for
+                   convenience in downstream models. When the caller omitted
+                   it, an all-ones mask of the same shape as ``input_ids`` is
+                   returned rather than ``None``, so the output structure is
+                   independent of the input and ``predict()`` works on a
+                   single-key input dict.
         :rtype: Dict[str, keras.KerasTensor]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
@@ -445,13 +511,42 @@ class FNet(keras.Model):
                 hidden_states, attention_mask=attention_mask, training=training
             )
 
+        if self.final_norm is not None:
+            hidden_states = self.final_norm(hidden_states, training=training)
+
+        # DECISION plan-2026-08-18T140459-7991552f/D-031
+        # The echoed mask is RESOLVED here so the output structure is the same
+        # two fixed-rank tensors whether or not the caller supplied a mask.
+        # Echoing a bare `None` made `predict()` unusable on the ordinary
+        # single-key dict: MEASURED at HEAD ae2e2aa0a,
+        # `FNet.predict({"input_ids": ids})` -> `ValueError: Structures don't
+        # have the same nested structure` (Keras concatenates per-batch outputs
+        # and a `None` slot has no structure). `model(inputs)` always worked,
+        # which is why no test caught it.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT drop the "attention_mask" key when it is None. That makes
+        #     the OUTPUT structure depend on the INPUT, which is precisely why
+        #     this repair was declined in the 2026-08-17 round.
+        #   * Do NOT resolve the mask BEFORE the encoder loop. It is an exact
+        #     no-op here (measured max|delta| = 0.000000e+00 over the whole
+        #     FNet output, since the mask is multiplicative post-mix) but the
+        #     SAME edit in `modern_bert/model.py` is NOT a no-op -- measured
+        #     6.415714e-01 on a max|out| of 2.67 -- because `WindowAttention`
+        #     zero-pads a rank-2 mask up to its square grid and thereby masks
+        #     out the grid padding that an absent mask leaves attendable. Both
+        #     files therefore resolve at the RETURN only, so the numerics of
+        #     every shipped checkpoint are untouched. See decisions.md D-031.
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": attention_mask,
+            "attention_mask": (
+                attention_mask if attention_mask is not None
+                else keras.ops.ones_like(input_ids)
+            ),
         }
 
     def load_pretrained_weights(
-        self, weights_path: str, skip_mismatch: bool = True, by_name: bool = True
+        self, weights_path: str, skip_mismatch: bool = True
     ) -> None:
         """Load pretrained weights into the model.
 
@@ -464,8 +559,6 @@ class FNet(keras.Model):
         :param skip_mismatch: Whether to skip layers with mismatched shapes.
             Useful when loading weights with different vocab_size or config.
         :type skip_mismatch: bool
-        :param by_name: Whether to load weights by layer name.
-        :type by_name: bool
         :raises FileNotFoundError: If weights_path doesn't exist.
         :raises ValueError: If weights cannot be loaded.
 
@@ -482,7 +575,6 @@ class FNet(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
             if not self.built:
                 dummy_input = {
                     "input_ids": keras.random.uniform(
@@ -494,10 +586,20 @@ class FNet(keras.Model):
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            # Load weights with appropriate settings
-            self.load_weights(
-                weights_path, skip_mismatch=skip_mismatch, by_name=by_name
+            # Keras 3 removed `by_name` from `Model.load_weights` — the
+            # signature is `(filepath, skip_mismatch=False, **kwargs)` and it
+            # REJECTS the unknown keyword, so this call raised
+            # `ValueError: Invalid keyword arguments: {'by_name': True}` for
+            # every caller. It went unnoticed because the only route here was
+            # `pretrained=<path>` and the enclosing except turned the failure
+            # into a warning that continued with random weights.
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
+            logger.info(f"Weight transfer complete: {report}")
 
             if skip_mismatch:
                 logger.info(
@@ -510,56 +612,38 @@ class FNet(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
+    # `_download_weights` raises instead of falling back to random init. The
+    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
+    # a non-existent host; `from_variant` caught the download failure, logged a
+    # warning and continued with random initialization, so `pretrained=True`
+    # silently produced untrained weights. Do NOT reinstate a warn-and-return
+    # branch here or in `from_variant`. No public FNet weights are distributed
+    # with dl_techniques; pass a local path via
+    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Resolve a download path for pretrained weights of ``variant``.
 
-        :param variant: Model variant name.
+        Not implemented: no public FNet weights ship with ``dl_techniques``.
+        Always raises, so an unavailable checkpoint is never silently
+        indistinguishable from a successful load.
+
+        :param variant: Model variant name (unused).
         :type variant: str
-        :param dataset: Dataset/version the weights were trained on.
-            Options: "uncased", "cased".
+        :param dataset: Dataset/version identifier (unused).
         :type dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
-            If None, uses default Keras cache directory.
+        :param cache_dir: Cache directory (unused).
         :type cache_dir: Optional[str]
-        :return: Path to the downloaded weights file.
-        :rtype: str
-        :raises ValueError: If variant or dataset is not available.
-
-        Example:
-            .. code-block:: python
-
-                weights_path = FNet._download_weights("base", "uncased")
+        :raises NotImplementedError: Always.
         """
-        if variant not in FNet.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(FNet.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in FNet.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(FNet.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = FNet.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading FNet-{variant} ({dataset}) weights...")
-
-        # Download weights using Keras utility
-        weights_path = keras.utils.get_file(
-            fname=f"fnet_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/fnet",
+        raise NotImplementedError(
+            f"No pretrained FNet weights are distributed with dl_techniques "
+            f"(requested variant '{variant}', dataset '{dataset}'). Pass a local "
+            f"checkpoint instead: FNet.from_variant('{variant}', "
+            f"pretrained='/path/to/weights.keras')."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -575,8 +659,10 @@ class FNet(keras.Model):
         :param variant: The name of the variant, one of "base", "large",
             "small", "tiny".
         :type variant: str
-        :param pretrained: If True, loads pretrained weights from default URL.
-            If string, treats it as a path to local weights file.
+        :param pretrained: If a string, a path to a local ``.keras`` weights
+            file. If True, raises ``NotImplementedError`` -- no public FNet
+            weights ship with ``dl_techniques``. If False (default), the model
+            is randomly initialized.
         :type pretrained: Union[bool, str]
         :param weights_dataset: Dataset/version for pretrained weights.
             Options: "uncased", "cased".
@@ -589,21 +675,21 @@ class FNet(keras.Model):
         :return: An FNet model instance configured for the specified variant.
         :rtype: FNet
         :raises ValueError: If the specified variant is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is True.
 
         Example:
             .. code-block:: python
 
-                # Load pretrained FNet-base
-                model = FNet.from_variant("base", pretrained=True)
-
-                # Load pretrained FNet-large (cased)
-                model = FNet.from_variant("large", pretrained=True, weights_dataset="cased")
+                # Random init
+                model = FNet.from_variant("base")
 
                 # Load from local file
                 model = FNet.from_variant("base", pretrained="path/to/weights.keras")
 
                 # Create with custom vocab size (will skip embedding weights)
-                model = FNet.from_variant("base", pretrained=True, vocab_size=50000)
+                model = FNet.from_variant(
+                    "base", pretrained="path/to/weights.keras", vocab_size=50000
+                )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -617,30 +703,18 @@ class FNet(keras.Model):
         logger.info(f"Creating FNet-{variant.upper()} model")
         logger.info(f"Configuration: {description}")
 
-        # Handle pretrained weights
         load_weights_path = None
         skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
-                # Load from local file path
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # Download from URL
-                try:
-                    load_weights_path = cls._download_weights(
-                        variant=variant, dataset=weights_dataset, cache_dir=cache_dir
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download pretrained weights: {str(e)}. "
-                        f"Continuing with random initialization."
-                    )
-                    load_weights_path = None
+                load_weights_path = cls._download_weights(
+                    variant=variant, dataset=weights_dataset, cache_dir=cache_dir
+                )
 
-            # Determine if we need to skip mismatches
-            # Check if vocab_size differs from default
             pretrained_vocab_size = cls.DEFAULT_VOCAB_SIZE
             custom_vocab_size = kwargs.get("vocab_size", config.get("vocab_size"))
 
@@ -651,7 +725,6 @@ class FNet(keras.Model):
                     f"({pretrained_vocab_size}). Will skip embedding layer weights."
                 )
 
-            # Check if other architectural parameters differ
             pretrained_config_keys = [
                 "hidden_size",
                 "num_layers",
@@ -665,19 +738,14 @@ class FNet(keras.Model):
                         f"Will skip layers with shape mismatches."
                     )
 
-        # Override defaults with kwargs
         config.update(kwargs)
-
-        # Create model
         model = cls(**config)
 
-        # Load pretrained weights if available
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
                     weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch,
-                    by_name=True,
+                    skip_mismatch=skip_mismatch
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")
@@ -698,7 +766,7 @@ class FNet(keras.Model):
                 "hidden_size": self.hidden_size,
                 "num_layers": self.num_layers,
                 "intermediate_size": self.intermediate_size,
-                "hidden_dropout_prob": self.hidden_dropout_prob,
+                "hidden_dropout_rate": self.hidden_dropout_rate,
                 "max_position_embeddings": self.max_position_embeddings,
                 "type_vocab_size": self.type_vocab_size,
                 "initializer_range": self.initializer_range,
@@ -736,7 +804,7 @@ class FNet(keras.Model):
             f"  - Architecture: {self.num_layers} layers, "
             f"{self.hidden_size} hidden size"
         )
-        logger.info(f"  - Token Mixing: Fourier Transform (parameter-free)")
+        logger.info("  - Token Mixing: Fourier Transform (parameter-free)")
         logger.info(f"  - Vocabulary: {self.vocab_size} tokens")
         logger.info(f"  - Max sequence length: {self.max_position_embeddings}")
         logger.info(
@@ -814,11 +882,11 @@ def create_fnet_with_head(
                 num_classes=9
             )
 
-            # Create the full model with pretrained FNet
+            # Create the full model (pass a local .keras path to `pretrained`
+            # to warm-start; `pretrained=True` raises NotImplementedError)
             ner_model = create_fnet_with_head(
                 fnet_variant="base",
                 task_config=ner_task,
-                pretrained=True,
                 sequence_length=128, # Provide a fixed length
                 head_config_overrides={"use_task_attention": True}
             )
@@ -829,7 +897,6 @@ def create_fnet_with_head(
 
     logger.info(f"Creating FNet-{fnet_variant} with a '{task_config.name}' head.")
 
-    # 1. Create the foundational FNet model (with optional pretrained weights)
     fnet_encoder = FNet.from_variant(
         fnet_variant,
         pretrained=pretrained,
@@ -838,14 +905,12 @@ def create_fnet_with_head(
         **fnet_config_overrides,
     )
 
-    # 2. Create the task head
     task_head = create_nlp_head(
         task_config=task_config,
         input_dim=fnet_encoder.hidden_size,
         **head_config_overrides,
     )
 
-    # 3. Define inputs and build the end-to-end model
     input_shape = (sequence_length,) if sequence_length is not None else (None,)
     inputs = {
         "input_ids": keras.Input(shape=input_shape, dtype="int32", name="input_ids"),

@@ -82,6 +82,8 @@ import keras
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
+from dl_techniques.initializers.clone import clone_initializer
+
 # ---------------------------------------------------------------------
 
 # Feature maps allowed here are exactly the positively-homogeneous, non-negative
@@ -347,11 +349,18 @@ class LinearAttention(keras.layers.Layer):
         self.inner_dim = self.num_heads * self.head_dim
 
         # Create sub-layers in __init__ (unbuilt).
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
+        # projection. Do NOT "simplify" this back to a bare
+        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE reused
+        # across same-shape weights yields BIT-IDENTICAL tensors (MEASURED here:
+        # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
+        # key projections started life equal and the attention logits started
+        # symmetric. `seed=` is NOT the discriminator -- instance identity is.
         self.query_proj = layers.Dense(
             self.inner_dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='query_proj'
@@ -359,8 +368,8 @@ class LinearAttention(keras.layers.Layer):
         self.key_proj = layers.Dense(
             self.inner_dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='key_proj'
@@ -368,8 +377,8 @@ class LinearAttention(keras.layers.Layer):
         self.value_proj = layers.Dense(
             self.inner_dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='value_proj'
@@ -377,8 +386,8 @@ class LinearAttention(keras.layers.Layer):
         self.output_proj = layers.Dense(
             dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='output_proj'

@@ -474,9 +474,62 @@ def dino_model() -> keras.Model:
 
 
 def _labelled_dataset(seed: int, n: int = BATCH * 2) -> tf.data.Dataset:
+    """Pure noise with labels attached -- the labels carry NO signal.
+
+    Correct for every probe that only needs *some* batched ``(image, label)`` stream.
+    NOT correct for any probe that asserts a live extractor beats chance: see
+    :func:`_separable_labelled_dataset`.
+    """
     rng = np.random.default_rng(seed)
     images = rng.normal(size=(n, IMAGE_SIZE, IMAGE_SIZE, 3)).astype("float32")
     labels = (np.arange(n) % N_CLASSES).astype("int32")
+    return tf.data.Dataset.from_tensor_slices((images, labels)).batch(BATCH)
+
+
+# DECISION plan-2026-08-19T163559-499b6f0e/D-149: the class structure lives in IMAGE
+# space and is drawn ONCE, shared by every split; only the jitter is re-seeded. Do NOT
+# replace this with per-seed noise (`_labelled_dataset`) in any probe that asserts a
+# live extractor beats chance -- that fixture's labels are independent of its pixels,
+# so the live arm's score is a property of the untrained network's LUCK, not of the
+# code under test. It read 0.50 for months and fell to exactly chance (0.25) the moment
+# D-070 broke an unintended `fc1`/`fc2` initializer symmetry, i.e. the moment the draw
+# changed. Do NOT "fix" that by widening the 0.1 margin, re-seeding until green, or
+# xfail -- all three keep a guard that cannot discriminate. See decisions.md D-149.
+_CLASS_PATTERNS = (
+    np.random.default_rng(20260819).normal(size=(N_CLASSES, IMAGE_SIZE, IMAGE_SIZE, 3))
+    * 3.0
+).astype("float32")
+
+
+def _separable_labelled_dataset(
+        seed: int,
+        n: int = BATCH * 2,
+        jitter: float = 0.05,
+) -> tf.data.Dataset:
+    """One tight image-space cluster per class -- separable THROUGH the extractor.
+
+    The per-class pattern amplitude is 3.0 and the within-class jitter is 0.05, so the
+    within-class radius is ~60x below the between-class distance. Tight clusters stay
+    tight under any non-degenerate (Lipschitz) map, so an UNTRAINED ViT still maps each
+    class to its own neighbourhood and the k-NN scores at the ceiling -- for a reason,
+    not by a draw. Set ``jitter`` large (>= the pattern scale) to destroy separability;
+    that is the RED-proof for the NON-VACUITY arm of the dead-extractor probe.
+
+    Args:
+        seed: seeds the WITHIN-class jitter only; the class centres are fixed, so bank
+            and query splits share their class structure while sharing no sample.
+        n: number of samples; labels cycle ``0..N_CLASSES-1``.
+        jitter: within-class noise scale.
+
+    Returns:
+        A ``tf.data.Dataset`` of ``(image, label)`` batched at ``BATCH``.
+    """
+    rng = np.random.default_rng(seed)
+    labels = (np.arange(n) % N_CLASSES).astype("int32")
+    images = (
+        _CLASS_PATTERNS[labels]
+        + rng.normal(scale=jitter, size=(n, IMAGE_SIZE, IMAGE_SIZE, 3))
+    ).astype("float32")
     return tf.data.Dataset.from_tensor_slices((images, labels)).batch(BATCH)
 
 
@@ -759,8 +812,13 @@ class TestZeroStepControl:
             random_init_repeats=2,
         )
         kwargs.update(overrides)
+        # Separable, not noise: this class's dead-extractor probe compares the LIVE
+        # arm against chance, which is only a statement about the code under test if
+        # the live arm CAN separate the classes. D-149.
         return KNNEvalCallback(
-            _labelled_dataset(41), _labelled_dataset(42), **kwargs)
+            _separable_labelled_dataset(41),
+            _separable_labelled_dataset(42),
+            **kwargs)
 
     def test_the_control_json_carries_every_key_with_its_spread(
             self, dino_model: keras.Model, tmp_path: Any) -> None:
@@ -792,10 +850,18 @@ class TestZeroStepControl:
             self, dino_model: keras.Model, tmp_path: Any) -> None:
         """DEAD-COMPONENT PROBE: constant features must NOT score above chance.
 
-        RED-PROVEN: with the monkeypatch removed (i.e. the live extractor), the
-        same assertion fails -- the real network scores well above chance on the
-        separable fixture. That is what makes this test able to see a dead
-        extractor at all; a shape-only assertion could not.
+        RED-PROVEN, both arms (D-149):
+
+        * Kill the extractor for real and the dead arm's assertions are the ones that
+          fire -- that is the arm this test exists for.
+        * Feed :func:`_separable_labelled_dataset` a jitter large enough to destroy
+          separability and the NON-VACUITY assertion fires instead, because the live
+          arm drops to chance.
+
+        The fixture is separable IN IMAGE SPACE, so an untrained ViT still maps each
+        class to its own neighbourhood: live 1.00 vs dead 0.25, margin 0.75, stable
+        across repeats and across the initializer draw. It is deliberately NOT
+        ``_labelled_dataset`` -- see the D-149 anchor there.
         """
         live = self._callback(tmp_path, random_init_repeats=1)
         live.set_model(dino_model)

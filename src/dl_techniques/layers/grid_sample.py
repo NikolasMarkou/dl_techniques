@@ -1,17 +1,3 @@
-# DECISION plan_2026-06-11_f662207d/D-003
-# Placed as a pure-function module (NOT a keras.layers.Layer) because make_grid /
-# interpolate_grid are STATELESS pure functions with no weights, no build(), and no
-# serialization state -- wrapping them in a Layer would be a single-use empty shell.
-# Both functions must be callable BARE so the step-9 Jacobian-TV helper can invoke
-# interpolate_grid inside a nested tf.GradientTape (a built Layer would add nothing).
-# TF-native tf.gather + manual lerp is chosen over keras.ops here for the differentiable
-# bilinear (order=1) path: backend-agnosticism is explicitly WAIVED for this op (scope
-# decision Q4) and a hand-written 4-corner lerp gives an auditable gradient path to
-# coords. order=0 (nearest) is THERA's DEFAULT sampling mode; the coordinate Jacobian
-# in THERA flows through the DIRECT `coords` term of rel_coords (= coords -
-# interpolate_grid(...)), NOT through the (a.e. zero-gradient) nearest sampler -- see
-# decisions.md D-003. We still implement a fully differentiable order=1 path for
-# completeness and future use.
 """TF-native coordinate-grid helpers ported from THERA (`model/utils.py`).
 
 This module provides two stateless pure functions used by the THERA neural heat
@@ -137,7 +123,7 @@ def interpolate_grid(
             ``coords``).
 
     Returns:
-        ``(B, Hq, Wq, C)`` ``float32`` sampled values.
+        ``(B, Hq, Wq, C)`` sampled values, in ``grid``'s own dtype.
 
     Raises:
         ValueError: If ``order`` is not ``0`` or ``1``.
@@ -145,8 +131,22 @@ def interpolate_grid(
     if order not in (0, 1):
         raise ValueError(f"order must be 0 or 1, got {order}")
 
-    coords = tf.convert_to_tensor(coords, dtype=tf.float32)
-    grid = tf.convert_to_tensor(grid, dtype=tf.float32)
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-046
+    # The coordinate arithmetic is INDEX math and always runs in float32; the
+    # sampled VALUES come back in `grid`'s own dtype. This used to be
+    # `tf.convert_to_tensor(coords, dtype=tf.float32)`, which does not convert —
+    # it RAISES `ValueError` on a float16 tensor — so every caller under
+    # `mixed_float16` died here. Do NOT restore the float32-only contract: a
+    # float32 return would then meet a float16 activation in the caller, which is
+    # the same defect one frame later. Do NOT instead run the index math in
+    # float16 either: `pix = coord * size + (size - 1) / 2` is a pixel index and
+    # float16 cannot resolve adjacent integers past 2048.
+    # See decisions.md D-046.
+    coords = tf.cast(tf.convert_to_tensor(coords), tf.float32)
+    grid = tf.convert_to_tensor(grid)
+    if not grid.dtype.is_floating:
+        grid = tf.cast(grid, tf.float32)
+    value_dtype = grid.dtype
 
     grid_shape = tf.shape(grid)
     size_h = grid_shape[-3]
@@ -196,9 +196,10 @@ def interpolate_grid(
     v10 = _gather_hw(grid, h1c, w0c)
     v11 = _gather_hw(grid, h1c, w1c)
 
-    # Expand weights to (B, Hq, Wq, 1) to broadcast over channels.
-    fh = frac_h[..., tf.newaxis]
-    fw = frac_w[..., tf.newaxis]
+    # Expand weights to (B, Hq, Wq, 1) to broadcast over channels, and bring
+    # them down to the value dtype so the lerp does not mix precisions.
+    fh = tf.cast(frac_h[..., tf.newaxis], value_dtype)
+    fw = tf.cast(frac_w[..., tf.newaxis], value_dtype)
 
     top = v00 * (1.0 - fw) + v01 * fw
     bot = v10 * (1.0 - fw) + v11 * fw

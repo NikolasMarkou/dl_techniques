@@ -21,8 +21,9 @@ The architecture is best understood as two parallel, interacting streams: a
     -   **Information-Theoretic Patching**: An `EntropyModel`, itself a small
         transformer, first computes the per-byte information entropy `H(b) =
         -Σ p(b) log p(b)` for each byte `b` in the sequence. The sequence is
-        then dynamically segmented into patches at points of low entropy,
-        based on a learned `entropy_threshold`. The intuition is to group
+        then dynamically segmented: a byte whose entropy exceeds the fixed
+        `entropy_threshold` (a constructor hyperparameter in nats, not a
+        learned quantity) opens a new patch. The intuition is to group
         information-sparse regions (e.g., padding, repeated characters) into
         large patches and information-dense regions into smaller, more granular
         patches. This focuses the model's capacity on the most complex parts
@@ -254,6 +255,13 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.embeddings_regularizer = embeddings_regularizer
         self.kernel_regularizer = kernel_regularizer
+
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
+        # No construction-time degeneracy warning -- see the sibling anchor in
+        # models/byte_latent_transformer/model.py. The check moved to
+        # `DynamicPatcher.warn_if_segmentation_is_degenerate(entropy)`, which
+        # measures the OBSERVED boundary rate instead of doing arithmetic on
+        # vocab_size. Do not reintroduce a constructor-side variant here.
 
         # Calculate embedding scale
         self.embed_scale = math.sqrt(embed_dim)
@@ -577,7 +585,10 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         # Step 2: Create dynamic patches based on entropy
         patch_lengths = self.patcher(entropy, training=training)
-        patch_ids = self.patcher.compute_patch_ids(patch_lengths)
+        # Pass the STATIC sequence length; see the D-034 anchor on
+        # `PatchingLayer.compute_patch_ids`.
+        patch_ids = self.patcher.compute_patch_ids(
+            patch_lengths, seq_len=keras.ops.shape(byte_tokens)[1])
 
         # Step 3: Encode bytes to patch representations (local processing)
         patch_representations = self.local_encoder(

@@ -147,7 +147,7 @@ def _accumulate_cross_entropy(
 # BitsPerToken
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@keras.saving.register_keras_serializable()
 class BitsPerToken(keras.metrics.Metric):
     """Bits-per-token (== ``log2(perplexity)``) for CLM evaluation.
 
@@ -219,7 +219,7 @@ class BitsPerToken(keras.metrics.Metric):
 # BitsPerCharacter
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@keras.saving.register_keras_serializable()
 class BitsPerCharacter(keras.metrics.Metric):
     """Bits-per-character (== ``BitsPerToken / chars_per_token``).
 

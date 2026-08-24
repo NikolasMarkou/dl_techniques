@@ -67,6 +67,36 @@ class MatchChannels(keras.layers.Layer):
     which it is inserted. A tail slice is equally a coordinate projection, so it is
     just as weightless and degree-1 homogeneous as a head slice.
 
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────────────────┐
+        │  Input [B, H, W, C_in]                │
+        └──────────────────┬────────────────────┘
+                           ▼
+                ┌───────────────────────────┐
+                │  Compare C_in vs target   │
+                │  (static, at build time)  │
+                └────────────┬──────────────┘
+                             │
+              ┌──────────────┼───────────────┐
+              ▼              ▼               ▼
+        C_in < target     C_in == target   C_in > target
+        ┌─────────────┐   ┌─────────────┐  ┌───────────────────────┐
+        │  Zero-pad   │   │ Passthrough │  │  Slice                │
+        │  channels   │   │  (no-op)    │  │  slice_side='head':   │
+        │  [..., 0:Δ] │   │             │  │   inputs[...,:target] │
+        │  appended   │   │             │  │  slice_side='tail':   │
+        │             │   │             │  │   inputs[...,-target:]│
+        └──────┬──────┘   └──────┬──────┘  └──────────┬────────────┘
+               │                 │                    │
+               └─────────────────┼────────────────────┘
+                                 ▼
+                ┌───────────────────────────────┐
+                │  Output [B, H, W, target_C]   │
+                └───────────────────────────────┘
+
     Args:
         target_channels: Positive integer. The desired number of output channels
             (size of the last axis). Must be ``> 0``.

@@ -1,61 +1,101 @@
 """
-MobileNetV4: Universal and Efficient Neural Networks for Mobile Applications
-========================================================================
+A MobileNetV4-shaped classifier: a seven-stage `UniversalInvertedBottleneck` tower
+with optional Mobile Multi-Query Attention in the last two stages.
 
-A complete implementation of MobileNetV4 architecture with Universal Inverted Bottleneck
-(UIB) blocks and optional Mobile Multi-Query Attention (MQA). This version follows modern
-Keras 3 best practices for custom models.
+The generation's two published contributions are a *search space* and an attention
+block. The Universal Inverted Bottleneck generalizes V2's inverted residual by
+making the placement of depthwise convolutions a searchable choice rather than a
+fixed one: with an optional depthwise before the expansion and another after it,
+one parameterized block specializes to the inverted bottleneck (`dw` after
+expansion only), to a ConvNeXt-style block (`dw` before expansion, large kernel),
+to a transformer FFN (no depthwise at all), and to ExtraDW (both), so a NAS can
+trade spatial mixing against channel mixing per stage without changing block
+implementations. Mobile MQA is the second: multi-query attention with a *single*
+shared key/value head, which matters on mobile accelerators because those are
+bandwidth-bound rather than FLOP-bound, and K/V loading — not the matmul — is what
+dominates. It additionally strides the keys and values down by a factor of two
+spatially before attending, so the score matrix is `N x N/4` instead of `N x N`,
+and it enters the residual through a learnable scalar, `x + lambda * Attn(x)`,
+initialized to one.
 
-Based on: "MobileNetV4: Universal Inverted Bottleneck and Mobile MQA"
-Paper: https://arxiv.org/abs/2404.10518
+The per-stage `block_types` entries — `"IB"`, `"ConvNext"`, `"ExtraDW"`, `"FFN"` —
+select real structure. `_build_stage` maps each one to which of the block's two
+optional depthwise POSITIONS is occupied: `IB` takes the middle depthwise only,
+`ConvNext` the pre-expansion start depthwise only (with a `7x7` kernel, the
+convention that position exists for), `ExtraDW` both, `FFN` neither. **The
+selector is the position, not the count** — `IB` and `ConvNext` each own exactly
+one depthwise convolution and are different architectures, distinguishable only
+by the channel count it operates on (`ConvNext`'s sees the unexpanded input,
+`IB`'s the expanded tensor).
 
-Key Features:
-------------
-- Universal Inverted Bottleneck (UIB) blocks with multiple configurations
-- Optional Mobile Multi-Query Attention for hybrid models
-- Support for both Conv-only and Hybrid variants
-- Modular design with proper serialization support
-- Configurable width multipliers and input resolutions
-- Complete variant support (Small, Medium, Large, Hybrid variants)
+This was worth doing carefully because the obvious mapping is wrong. These entries
+used to be inert labels, and the fix this docstring itself prescribed was to pass
+`use_dw1` / `use_dw2` through from `_build_stage`. That would not have produced the
+paper's structures: both of those depthwise convolutions sit AFTER the expansion,
+so toggling them varies how many *middle* depthwise convs a block has (0, 1 or 2)
+and can never place one before the expansion. Implementing `ConvNext` and
+`ExtraDW` faithfully required a genuinely new third slot on
+`UniversalInvertedBottleneck` (`use_start_dw`, with its own `start_dw_kernel_size`),
+which is what `_build_stage` now drives. `use_dw2` — a second middle depthwise —
+survives as a layer-level knob but is no longer any block type's meaning.
 
-Architecture Overview:
----------------------
-MobileNetV4 consists of:
-1. **Stem**: Initial convolution block for feature extraction
-2. **Body**: Stack of UIB blocks organized in stages with progressive downsampling
-3. **Head**: Global average pooling and classification layer
+**What this module builds is still a simplification of the paper, and the
+remaining gap is worth stating plainly before the tables below are read as the
+paper's.** The stage tables in `MODEL_VARIANTS` are hand-written depth/width ladders,
+not the NAS-found MNv4-Conv-S/M/L specifications: there are no per-block kernel
+sizes and no per-block expansion ratios, which is exactly the freedom the UIB
+search space exists to exploit. Accuracy or latency numbers from the paper should
+not be attributed to models built here, and the variant keys are `"small"`,
+`"medium"`, `"large"`, `"hybrid_medium"`, `"hybrid_large"` — there is no
+`"conv_small"` or `"conv_medium"`.
 
-UIB Block Types:
-- IB (Inverted Bottleneck): Standard MobileNet block
-- ConvNext: ConvNext-style block with depthwise conv first
-- ExtraDW: Enhanced version with additional depthwise conv
-- FFN: Feed-forward network style block
+What the code does build is coherent on its own terms. A `3x3` stride-2 ReLU stem
+into `dims[0]`, then seven stages following `DEFAULT_STRIDES = [1, 2, 2, 2, 1, 2, 1]`
+with the stride applied to each stage's first block only, giving a `/32` final
+grid. The residual inside each block is added only where `stride == 1` and the
+input width already equals the output width, so a stage's first block is
+feed-forward and the rest are residual. The head is `GlobalAveragePooling ->
+Dense(1280) -> ReLU -> dropout -> Dense(num_classes, softmax)`. `width_multiplier`
+scales `dims` by plain truncation, with no round-to-multiple-of-8 rule.
 
-Model Variants:
---------------
-- MobileNetV4-ConvSmall: Lightweight conv-only model
-- MobileNetV4-ConvMedium: Balanced conv-only model
-- MobileNetV4-ConvLarge: High-capacity conv-only model
-- MobileNetV4-Hybrid-Medium: Medium model with Mobile MQA
-- MobileNetV4-Hybrid-Large: Large model with Mobile MQA
+The hybrid variants append one `MobileMQA` layer to the *end* of stages 5 and 6,
+after that stage's convolutional blocks, with `use_downsampling=True`. Two
+consequences are non-obvious. The attention layer carries no positional encoding
+of any kind — RoPE is hard-disabled in `MobileMQA` — so all spatial ordering
+information reaching it is whatever the convolutional stack has induced; this is
+by design in the paper, but it means the block is not usable as a standalone
+mixer. And its `num_heads` defaults to 8, so a stage width that is not divisible
+by 8 raises; `width_multiplier` values that break that divisibility on
+`dims[5]`/`dims[6]` will fail at construction rather than silently degrade.
 
-Usage Examples:
---------------
-```python
-# CIFAR-10 model (32x32 input)
-model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+`pretrained=True` on `create_mobilenetv4` raises `NotImplementedError`. No
+checkpoints ship with this package; combined with the hand-written stage tables
+above, this model should be treated as an architecture sketch to train from
+scratch, not as a MobileNetV4 reimplementation. It used to log a warning and
+return a randomly initialized model; the contract in `resnet/model.py` now holds
+here too. Warm-start from a local file with `model.load_weights(path)`.
+The mutable list defaults on
+`__init__` (`depths`, `dims`, `block_types`, `strides`, `attention_stages`) are a
+known defect inherited by copy-paste across this package: they are never mutated
+in place, so they are currently harmless, but they should not be copied into new
+code.
 
-# ImageNet model (224x224 input)
-model = MobileNetV4.from_variant("conv_medium", num_classes=1000)
-
-# Custom input size with hybrid attention
-model = MobileNetV4.from_variant("hybrid_medium", num_classes=100, input_shape=(128, 128, 3))
-```
+References:
+    - Qin et al., 2024. MobileNetV4: Universal Models for the Mobile Ecosystem.
+      (https://arxiv.org/abs/2404.10518)
+    - Shazeer, 2019. Fast Transformer Decoding: One Write-Head is All You Need.
+      (https://arxiv.org/abs/1911.02150) — the multi-query attention Mobile MQA
+      specializes.
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
+      (https://arxiv.org/abs/1801.04381)
+    - Liu et al., 2022. A ConvNet for the 2020s.
+      (https://arxiv.org/abs/2201.03545) — the ConvNeXt block the UIB search space
+      subsumes.
 """
 
 import keras
 from keras import layers, regularizers
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -64,6 +104,11 @@ from typing import List, Tuple, Optional, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.models.mobilenet.common import (
+    REFERENCE_BN_EPSILON,
+    REFERENCE_BN_MOMENTUM,
+    materialize_for_summary,
+)
 
 # ---------------------------------------------------------------------
 
@@ -106,11 +151,13 @@ class MobileNetV4(keras.Model):
         ValueError: If invalid attention stage indices are provided.
 
     Example:
-        >>> # Create MobileNetV4-ConvMedium for ImageNet
-        >>> model = MobileNetV4.from_variant("conv_medium", num_classes=1000)
+        >>> # Create MobileNetV4-Medium for ImageNet. The variant keys are
+        >>> # "small", "medium", "large", "hybrid_medium", "hybrid_large" --
+        >>> # there is no "conv_medium"/"conv_small"; see the module docstring.
+        >>> model = MobileNetV4.from_variant("medium", num_classes=1000)
         >>>
-        >>> # Create MobileNetV4-ConvSmall for CIFAR-10
-        >>> model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+        >>> # Create MobileNetV4-Small for CIFAR-10
+        >>> model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         >>>
         >>> # Create MobileNetV4-Hybrid with custom configuration
         >>> model = MobileNetV4(
@@ -170,13 +217,13 @@ class MobileNetV4(keras.Model):
     def __init__(
         self,
         num_classes: int = 1000,
-        depths: List[int] = [1, 2, 3, 4, 3, 3, 1],
-        dims: List[int] = [16, 24, 40, 80, 112, 192, 320],
-        block_types: List[str] = ["IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"],
-        strides: List[int] = [1, 2, 2, 2, 1, 2, 1],
+        depths: Sequence[int] = (1, 2, 3, 4, 3, 3, 1),
+        dims: Sequence[int] = (16, 24, 40, 80, 112, 192, 320),
+        block_types: Sequence[str] = ("IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"),
+        strides: Sequence[int] = (1, 2, 2, 2, 1, 2, 1),
         width_multiplier: float = 1.0,
         use_attention: bool = False,
-        attention_stages: List[int] = [5, 6],
+        attention_stages: Sequence[int] = (5, 6),
         dropout_rate: float = 0.2,
         weight_decay: float = 1e-5,
         kernel_initializer: str = "he_normal",
@@ -227,13 +274,18 @@ class MobileNetV4(keras.Model):
 
         # Store configuration
         self.num_classes = num_classes
-        self.depths = depths
-        self.dims = dims
-        self.block_types = block_types
-        self.strides = strides
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
+        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
+        # store as `list(...)` is what makes the conversion invisible: it is
+        # the type `get_config` has always emitted, so a saved config's JSON
+        # shape and every `== [..]` assertion in the suites are unchanged.
+        self.depths = list(depths)
+        self.dims = list(dims)
+        self.block_types = list(block_types)
+        self.strides = list(strides)
         self.width_multiplier = width_multiplier
         self.use_attention = use_attention
-        self.attention_stages = attention_stages
+        self.attention_stages = list(attention_stages)
         self.dropout_rate = dropout_rate
         self.weight_decay = weight_decay
         self.kernel_initializer = kernel_initializer
@@ -290,7 +342,11 @@ class MobileNetV4(keras.Model):
             kernel_regularizer=self.kernel_regularizer,
             name="stem_conv"
         )
-        stem_bn = layers.BatchNormalization(name="stem_bn")
+        stem_bn = layers.BatchNormalization(
+            momentum=REFERENCE_BN_MOMENTUM,
+            epsilon=REFERENCE_BN_EPSILON,
+            name="stem_bn",
+        )
         stem_activation = layers.ReLU(name="stem_relu")
         return stem_conv, stem_bn, stem_activation
 
@@ -308,15 +364,42 @@ class MobileNetV4(keras.Model):
             f"type={block_type}, stride={stage_stride}"
         )
 
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-011
+        # `block_type` used to be passed to the block as a LABEL only, so every
+        # stage — whatever its table said — got the layer's defaults and built a
+        # plain IB. What selects a structure is which of the two optional
+        # depthwise POSITIONS is occupied, so that is what this maps to. Do NOT
+        # "simplify" this to `use_dw1`/`use_dw2`, as this module's own docstring
+        # used to advise: both of those are POST-expansion, so that mapping
+        # varies the number of middle depthwise convs and cannot express a
+        # pre-expansion start DW at all. `use_dw2` is deliberately absent here —
+        # a second middle DW is the layer's own extra axis, not one of the four
+        # named structures. See decisions.md D-011.
+        block_structure = {
+            "IB": dict(use_start_dw=False, use_dw1=True, use_dw2=False),
+            "ConvNext": dict(
+                use_start_dw=True, start_dw_kernel_size=7,
+                use_dw1=False, use_dw2=False,
+            ),
+            "ExtraDW": dict(use_start_dw=True, use_dw1=True, use_dw2=False),
+            "FFN": dict(use_start_dw=False, use_dw1=False, use_dw2=False),
+        }[block_type]
+
         for block_idx in range(depth):
             block_stride = stage_stride if block_idx == 0 else 1
             block = UniversalInvertedBottleneck(
                 filters=dim,
                 stride=block_stride,
                 block_type=block_type,
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- see
+                # mobilenet_v1.py. Without this the block's norms take
+                # create_normalization_layer's own epsilon=1e-6 rather than the
+                # fetched TF Model Garden reference's 1e-3.
+                normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
-                name=f"stage_{stage_idx}_block_{block_idx}"
+                name=f"stage_{stage_idx}_block_{block_idx}",
+                **block_structure
             )
             stage_layers.append(block)
 
@@ -460,11 +543,12 @@ class MobileNetV4(keras.Model):
 
     def summary(self, **kwargs):
         """Print model summary with additional information."""
-        # Build the model on a dummy input if it hasn't been built yet
-        if not self.built and self._input_shape:
-            self.build(self._input_shape)
-            # In Keras 3, it's better to build by calling with dummy data
-            # self(ops.zeros((1, *self._input_shape)))
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass. The
+        # old `self.build(self._input_shape)` passed the UNBATCHED 3-tuple where
+        # Model.build() expects the batch shape, and even the batch-shaped form
+        # materializes no sub-layer weights on a subclassed model. See
+        # decisions.md D-065.
+        materialize_for_summary(self, self._input_shape)
 
         super().summary(**kwargs)
 
@@ -508,7 +592,8 @@ def create_mobilenetv4(
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
         width_multiplier: Float, multiplier for filter dimensions
-        pretrained: Boolean, whether to load pretrained weights (not implemented)
+        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
+            no MobileNetV4 checkpoints ship with this package.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -519,8 +604,18 @@ def create_mobilenetv4(
         >>> model = create_mobilenetv4("hybrid_medium", num_classes=1000)
         >>> model = create_mobilenetv4("medium", width_multiplier=0.75)
     """
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
     if pretrained:
-        logger.warning("Pretrained weights are not yet implemented")
+        raise NotImplementedError(
+            f"No pretrained MobileNetV4 weights are distributed with dl_techniques "
+            f"(requested variant '{variant}'). Build the architecture with "
+            f"pretrained=False and warm-start from a local checkpoint instead: "
+            f"model = create_mobilenetv4('{variant}', ...); "
+            f"model.load_weights('/path/to/weights.keras'). Prefer "
+            f"dl_techniques.utils.weight_transfer.load_weights_or_raise(model, "
+            f"path), which raises when a load changes ZERO variables -- raw "
+            f"load_weights is silent about a checkpoint that matches nothing."
+        )
 
     model = MobileNetV4.from_variant(
         variant,

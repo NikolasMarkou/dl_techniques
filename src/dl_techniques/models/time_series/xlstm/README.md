@@ -1,6 +1,6 @@
 # xLSTM: Extended Long Short-Term Memory
 
-A production-ready, fully-featured implementation of the **xLSTM** architecture in **Keras 3**, based on the paper ["xLSTM: Extended Long Short-Term Memory"](https://arxiv.org/abs/2405.04517) by Beck et al. (2024).
+An implementation of the **xLSTM** architecture in **Keras 3**, based on the paper ["xLSTM: Extended Long Short-Term Memory"](https://arxiv.org/abs/2405.04517) by Beck et al. (2024).
 
 ---
 
@@ -134,7 +134,7 @@ The block composition is controlled by the `mlstm_ratio` parameter, allowing you
 
 ## 3. About This Implementation
 
-This implementation provides a complete, production-ready xLSTM codebase that integrates seamlessly with the `dl_techniques` framework while following all Keras 3 best practices.
+This implementation provides a complete xLSTM codebase that integrates with the `dl_techniques` framework and follows Keras 3 serialization conventions. It has not been trained or benchmarked here; no performance claim is made for it.
 
 ### 3.1 Features
 

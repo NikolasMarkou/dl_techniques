@@ -1,19 +1,65 @@
 """
-2D anti-aliased downsampling via a fixed binomial blur (BlurPool).
+Anti-aliased 2D downsampling via a fixed binomial blur (BlurPool).
 
-Implements Zhang (2019) "Making Convolutional Networks Shift-Invariant Again"
-where the standard stride-s downsample is replaced by a fixed low-pass
-``[1, 3, 3, 1] / 8`` binomial blur applied depthwise, followed by sub-sampling.
-The blur kernel is non-trainable and shared across channels, so the operation
-adds no learnable parameters and roughly -14 dB of attenuation at Nyquist
-(versus ~-8 dB for a 2x2 box / average pool).
+This layer embodies the principle of treating downsampling as a signal
+processing problem rather than an architectural convenience, a design paradigm
+that inserts the low-pass filter that the sampling theorem requires before
+reducing spatial resolution. The core idea addresses a defect present in every
+strided convolution and pooling layer: subsampling a signal whose spectrum
+extends above the new Nyquist frequency aliases that high-frequency content down
+into the low frequencies, where it is indistinguishable from real structure.
+Because the aliased content depends on the phase of the sampling grid, a
+one-pixel shift of the input can change the output substantially. This is why
+convolutional networks, despite their weight sharing, are not shift-invariant in
+practice.
 
-Used as the anti-alias downsampler for axis A of the Clifford-algebra-compliant
-downsampling design space (analyses/analysis_2026-04-30_41b5e415/summary.md).
+The remedy is the classical one. Instead of subsampling directly, the signal is
+first attenuated above the target Nyquist frequency and only then sampled. The
+filter used is the 1-D binomial kernel
+
+`f = [1, 3, 3, 1] / 8`
+
+outer-producted with itself to form a separable 4x4 2-D kernel normalized to sum
+to one:
+
+`K = (f x f^T)`,  `sum(K) = 1`
+
+Binomial coefficients are the natural choice here: they are the discrete
+analogue of a Gaussian, strictly non-negative (so no ringing or overshoot is
+introduced), and cheap. Unit sum makes the operation a weighted average, which
+preserves the DC level and therefore leaves activation magnitudes and downstream
+normalization statistics undisturbed. Empirically this kernel delivers roughly
+-14 dB of attenuation at Nyquist, against approximately -8 dB for the 2x2 box
+filter that average pooling implicitly applies.
+
+Architecturally, the kernel is replicated once per channel and applied as a
+depthwise convolution with the configured stride, so blur and subsample are a
+single fused operation. Two properties follow from this construction. The filter
+is non-trainable and identical across channels, so the layer adds no learnable
+parameters and cannot be degraded by training away from its designed frequency
+response. And because it is depthwise, there is no cross-channel mixing: the
+layer is purely a resampling operator inserted where a strided downsample would
+otherwise sit, leaving the surrounding architecture's channel semantics
+untouched.
+
+The tradeoff is a modest loss of genuine high-frequency detail alongside the
+aliased content, since the filter cannot distinguish the two. In practice the
+shift-consistency and accuracy gains outweigh this, which is the empirical result
+Zhang reports across architectures.
+
+This layer serves as the anti-alias downsampler for axis A of the
+Clifford-algebra-compliant downsampling design space
+(analyses/analysis_2026-04-30_41b5e415/summary.md).
 
 References:
-    - Zhang, R. (2019). "Making Convolutional Networks Shift-Invariant Again",
-      ICML 2019, https://arxiv.org/abs/1904.11486
+    - Zhang, 2019. Making Convolutional Networks Shift-Invariant Again. ICML
+      2019. (https://arxiv.org/abs/1904.11486)
+    - Azulay and Weiss, 2019. Why do deep convolutional networks generalize so
+      poorly to small image transformations? JMLR 20(184).
+      (https://arxiv.org/abs/1805.12177)
+    - Burt and Adelson, 1983. The Laplacian Pyramid as a Compact Image Code.
+      IEEE Transactions on Communications 31(4).
+
 """
 
 import keras

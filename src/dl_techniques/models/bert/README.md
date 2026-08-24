@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **BERT (Bidirectional Encoder Representations from Transformers)** architecture in **Keras 3**. This implementation is based on the original paper by Devlin et al., providing a pure foundation model that separates the core encoding logic from task-specific heads for maximum flexibility.
+An implementation of the **BERT (Bidirectional Encoder Representations from Transformers)** architecture in **Keras 3**. This implementation is based on the original paper by Devlin et al., providing a pure foundation model that separates the core encoding logic from task-specific heads for maximum flexibility.
 
 The architecture's key feature is its stack of **Transformer Encoder Layers**, designed to produce rich, contextualized token embeddings. It includes built-in support for loading standard model variants (`base`, `large`, etc.) with or without pretrained weights.
 
@@ -285,13 +285,15 @@ print("🚀 Creating BERT-base model with a sentiment analysis head...")
 model = create_bert_with_head(
     bert_variant="base",
     task_config=sentiment_config,
-    pretrained=False  # Set to True to download pretrained weights
+    pretrained=False  # or a local ".keras" path; `True` raises NotImplementedError
 )
 
 # 3. Compile the model
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=2e-5),
-    loss="sparse_categorical_crossentropy",
+    # The head's `classifier`/`token_classifier` is a Dense with NO activation,
+    # so the model output is LOGITS. from_logits=True is not optional here.
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 print("✅ BERT model created and compiled successfully!")
@@ -308,12 +310,41 @@ dummy_inputs = {
 dummy_labels = np.random.randint(0, 3, size=(BATCH_SIZE,))
 
 # The model is ready for training
-# model.fit(dummy_inputs, dummy_labels, epochs=1)
+model.fit(dummy_inputs, dummy_labels, epochs=1)
 
-# Make a prediction
+# Make a prediction. The model's output is the bare logits tensor: the factory
+# drops the head's `probabilities` entry, which is exactly `softmax(logits)`,
+# because a dict output cannot be compiled with a string loss or ANY metric.
 predictions = model.predict(dummy_inputs)
 print(f"\nOutput predictions shape: {predictions.shape}") # (4, 3)
 ```
+
+> **Output contract.** `create_bert_with_head` returns a **bare tensor** whenever the
+> head produces a single informative tensor -- which is every classification-style
+> head. Keys that are pure functions of `logits` (`probabilities` = `softmax(logits)`,
+> `predictions` = `argmax(logits)`) are dropped, because no loss can consume them and
+> a dict output cannot be compiled with a string loss or ANY metric.
+> A head emitting genuinely independent tensors keeps a dict:
+> `QuestionAnsweringHead` returns `{"start_logits", "end_logits"}`, and there you
+> compile with a per-key `loss` dict.
+
+> **Input contract: all THREE keys are required.** The Functional wrapper
+> declares one `keras.Input` for each of `input_ids`, `attention_mask` and
+> `token_type_ids`, and Keras matches your data dict against that declaration
+> exactly. MEASURED — omitting `token_type_ids` raises
+> `ValueError: Missing data for input "token_type_ids". You passed a data
+> dictionary with keys ['input_ids', 'attention_mask']. Expected the following
+> keys: ['attention_mask', 'input_ids', 'token_type_ids']`. For a
+> single-segment task pass `np.zeros_like(input_ids)`, as the snippet above
+> does.
+>
+> This is stricter than the encoder it wraps, and stricter than HuggingFace.
+> `BERT` itself needs only `input_ids` — MEASURED,
+> `BERT.from_variant("tiny")({"input_ids": ids})` forwards fine and returns
+> `['last_hidden_state', 'attention_mask']`. Use the encoder directly (§9
+> Pattern 1) when you want the shorter call; the factory's signature is NOT
+> relaxed, because loosening a public factory's inputs is a breaking change for
+> a convenience gap.
 
 ---
 
@@ -345,12 +376,46 @@ The recommended high-level factory for creating a complete, end-to-end model for
 
 This implementation provides several standard configurations based on the original paper.
 
-| Variant | Hidden Size | Layers | Heads | Parameters | Use Case |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`tiny`** | 256 | 4 | 4 | ~15M | Quick tests, mobile/edge deployment |
-| **`small`**| 512 | 6 | 8 | ~40M | Resource-constrained environments |
-| **`base`** | 768 | 12 | 12 | ~110M | Standard for most applications |
-| **`large`** | 1024| 24 | 16 | ~340M | Maximum performance, requires significant compute |
+Every row is traced to a **released public checkpoint config**, fetched and compared on
+2026-08-22 (not recalled). `base`/`large` come from Devlin et al. 2019; `small`/`tiny` come from
+Turc et al. 2019, *Well-Read Students Learn Better* (https://arxiv.org/abs/1908.08962), which
+released a checkpoint for every `(L, H)` pair.
+
+| Variant | Hidden Size | Layers | Heads | Intermediate | Parameters (measured) | Upstream config (fetched) |
+|:---:|:---:|:---:|:---:|:---:|---:|:---|
+| **`tiny`** | 256 | 4 | 4 | 1024 | 11,104,768 | `google/bert_uncased_L-4_H-256_A-4` |
+| **`small`**| 512 | 6 | 8 | 2048 | 34,805,760 | `google/bert_uncased_L-6_H-512_A-8` |
+| **`base`** | 768 | 12 | 12 | 3072 | 108,891,648 | `bert-base-uncased` |
+| **`large`** | 1024| 24 | 16 | 4096 | 334,092,288 | `bert-large-uncased` |
+
+The Parameters column is **measured against the shipped code**, not quoted from a paper. Re-derive
+it rather than trusting this table -- it went stale once already (see below):
+
+```python
+from dl_techniques.models.bert import BERT
+
+for variant in ["tiny", "small", "base", "large"]:
+    model = BERT.from_variant(variant)
+    model.build((1, 16))          # subclassed: no weights exist until built
+    print(variant, f"{model.count_params():,}")
+```
+
+Last re-derived 2026-08-24 at commit `1765a73f9`. These are **encoder-only** counts at this
+package's defaults (`vocab_size=30522`, `max_position_embeddings=512`, `type_vocab_size=2`), and
+this `BERT` owns **no pooler and no task head** (see the module docstring). So they are not
+directly comparable to a published `BertModel` total, which includes a pooler `Dense` -- 768x768 +
+768 = 590,592 parameters at `base`. Add the head's own parameters when sizing a
+`create_bert_with_head(...)` model.
+
+This column previously read `~15M` / `~40M` / `~110M` / `~340M`. The first two were **35% and 15%
+overstatements** -- literature-shaped round numbers that had never been run. The table's config
+columns were re-derived from upstream checkpoints on 2026-08-22 while the Parameters column was
+left untouched, which is the failure mode the runnable snippet above exists to prevent.
+
+All four rows AGREE with their upstream `config.json` on `hidden_size`, `num_hidden_layers`,
+`num_attention_heads` and `intermediate_size`. `tiny`'s `intermediate_size` was **512 until
+2026-08-22**, the single row in this table that disagreed with its own named checkpoint; see
+`bert.py` `MODEL_VARIANTS` (decision `D-110`).
 
 ### Customizing the Configuration
 
@@ -392,6 +457,8 @@ model = BERT.from_variant("base", pretrained="/path/to/my/bert_weights.keras")
 NER is a token-level classification task. The factory handles this seamlessly.
 
 ```python
+import keras
+
 from dl_techniques.models.bert import create_bert_with_head
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
@@ -402,18 +469,29 @@ ner_config = NLPTaskConfig(
     num_classes=9  # e.g., O, B-PER, I-PER, B-LOC, I-LOC, etc.
 )
 
-# 2. Create the full model with a pretrained BERT encoder
+# 2. Create the full model (pass a local ".keras" path to `pretrained` to
+#    warm-start from a checkpoint; `pretrained=True` raises NotImplementedError)
 ner_model = create_bert_with_head(
     bert_variant="base",
     task_config=ner_config,
-    pretrained=True
+    pretrained=False
 )
 
 # 3. Inspect the model
 ner_model.summary()
 
-# The output shape will be (batch_size, sequence_length, num_classes)
-# perfect for training on a token-level objective.
+# `TokenClassificationHead` emits `logits` plus a `predictions` entry that is
+# exactly `argmax(logits, axis=-1)`; the factory drops that derived duplicate,
+# so the model's output is the logits tensor bare -- shape
+# (batch_size, sequence_length, num_classes) -- not a dict. That is what lets
+# you compile it on a token-level objective directly:
+ner_model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=2e-5),
+    # The head's `classifier`/`token_classifier` is a Dense with NO activation,
+    # so the model output is LOGITS. from_logits=True is not optional here.
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"]
+)
 ```
 
 ---
@@ -433,10 +511,13 @@ from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 bert_encoder = BERT.from_variant("base", pretrained=True)
 
 # 2. Define your own downstream model that uses BERT's outputs
+# `name=` is not decoration: an unnamed `keras.Input` inside a dict makes Keras
+# auto-name it `keras_tensor_N`, which is what the model then expects as a data
+# key. Omitting it emits a UserWarning and breaks `fit`/`predict` on a dict.
 inputs = {
-    "input_ids": keras.Input(shape=(None,), dtype="int32"),
-    "attention_mask": keras.Input(shape=(None,), dtype="int32"),
-    "token_type_ids": keras.Input(shape=(None,), dtype="int32")
+    "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+    "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
+    "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
 }
 bert_outputs = bert_encoder(inputs)
 sequence_output = bert_outputs["last_hidden_state"] # Shape: (batch, seq_len, 768)
@@ -455,34 +536,94 @@ feature_model.summary()
 
 Share a single BERT encoder across multiple tasks to improve performance and efficiency.
 
+> ⚠️ **The heads do not read `last_hidden_state`.** Every head in
+> `layers/heads/nlp/` reads `inputs['hidden_states']`, while `BERT` emits
+> `last_hidden_state`. You must build the rename yourself — step 4 below —
+> exactly as `create_bert_with_head` does internally (`bert.py:1205-1208`).
+> Feeding the encoder's dict straight into a head builds a graph that looks
+> fine and raises **at forward time**, because the heads' `build()` and
+> `compute_output_shape()` use `.get(..., default)` and never touch the missing
+> key. MEASURED: `keras.Model(...)` construction succeeds, then `predict()`
+> raises `KeyError: hidden_states ... inputs={'last_hidden_state': ...,
+> 'attention_mask': ...}` from `factory.py:468`. Pinned by
+> `tests/test_models/test_bert/test_the_head_wiring_needs_the_rename.py`.
+
 ```python
 import keras
+import numpy as np
 from dl_techniques.models.bert import BERT
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
+)
 
-# 1. Create one shared BERT encoder
-bert_encoder = BERT.from_variant("base", pretrained=True)
-bert_encoder.trainable = True # Fine-tune the encoder
+# 1. Create one shared BERT encoder ("base" needs a local checkpoint path or
+#    `pretrained=False`; `pretrained=True` raises NotImplementedError)
+bert_encoder = BERT.from_variant("tiny", pretrained=False)
+bert_encoder.trainable = True  # Fine-tune the encoder
 
-# 2. Define inputs
-inputs = { ... } # Same as above
+# 2. Define inputs -- same shape as Pattern 1, `name=` included
+inputs = {
+    "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+    "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
+    "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
+}
 
-# 3. Get shared features
-bert_outputs = bert_encoder(inputs)
+# 3. Get shared features: keys are {"last_hidden_state", "attention_mask"}
+encoder_outputs = bert_encoder(inputs)
 
-# 4. Create two different heads
-sentiment_head = TextClassificationHead(num_classes=2, name="sentiment")
-ner_head = TokenClassificationHead(num_classes=9, name="ner")
+# 4. THE RENAME. Heads read "hidden_states"; the encoder emits
+#    "last_hidden_state". Without this line the graph still builds and
+#    `predict()` raises KeyError: 'hidden_states'.
+head_inputs = {
+    "hidden_states": encoder_outputs["last_hidden_state"],
+    "attention_mask": encoder_outputs["attention_mask"],
+}
 
-# 5. Get task-specific outputs
-sentiment_output = sentiment_head(bert_outputs)
-ner_output = ner_head(bert_outputs)
+# 5. Create two different heads. They take a `task_config` and an `input_dim`,
+#    not a bare `num_classes`.
+sentiment_head = TextClassificationHead(
+    task_config=NLPTaskConfig(
+        name="sentiment",
+        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+        num_classes=2,
+    ),
+    input_dim=bert_encoder.hidden_size,
+    name="sentiment",
+)
+ner_head = TokenClassificationHead(
+    task_config=NLPTaskConfig(
+        name="ner",
+        task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        num_classes=9,
+    ),
+    input_dim=bert_encoder.hidden_size,
+    name="ner",
+)
 
-# 6. Build the multi-output model
+# 6. Get task-specific outputs. A head returns a DICT -- the classification
+#    head `{"logits", "probabilities"}`, the token head `{"logits",
+#    "predictions"}` -- so select the tensor you want to train on. (This is the
+#    same derived-duplicate shape `create_bert_with_head` collapses for you.)
+sentiment_output = sentiment_head(head_inputs)
+ner_output = ner_head(head_inputs)
+
+# 7. Build the multi-output model
 multi_task_model = keras.Model(
     inputs=inputs,
-    outputs={"sentiment": sentiment_output, "ner": ner_output}
+    outputs={"sentiment": sentiment_output["logits"], "ner": ner_output["logits"]},
 )
+
+ids = np.random.randint(0, 100, (2, 16)).astype("int32")
+predictions = multi_task_model.predict(
+    {
+        "input_ids": ids,
+        "attention_mask": np.ones_like(ids),
+        "token_type_ids": np.zeros_like(ids),
+    },
+    verbose=0,
+)
+# {'sentiment': (2, 2), 'ner': (2, 16, 9)}  -- MEASURED, this snippet was run
+print({key: value.shape for key, value in predictions.items()})
 ```
 
 ---

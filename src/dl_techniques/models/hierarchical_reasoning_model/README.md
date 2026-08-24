@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured implementation of the **Hierarchical Reasoning Model (HRM)** with **Adaptive Computation Time (ACT)** in **Keras 3**. This architecture mimics human cognitive processes by dynamically allocating "thinking time" based on problem complexity.
+An implementation of the **Hierarchical Reasoning Model (HRM)** with **Adaptive Computation Time (ACT)** in **Keras 3**. This architecture mimics human cognitive processes by dynamically allocating "thinking time" based on problem complexity.
 
 HRM addresses the limitations of fixed-depth transformers by using a reinforcement learning mechanism (Q-Learning) to decide when to halt computation, combined with a dual-system (High/Low level) recurrent core for deep reasoning.
 
@@ -44,7 +44,7 @@ It employs a **Dual-System Architecture**:
 ### Key Innovations of this Implementation
 
 1.  **Adaptive Computation Time (ACT)**: A Q-Learning head learns the optimal stopping point ($Q_{halt}$ vs $Q_{continue}$), allowing the model to "think" longer on hard puzzles and shorter on easy ones.
-2.  **Hierarchical Core**: A unified core that updates high and low-level states iteratively using cross-attention mechanisms.
+2.  **Hierarchical Core**: A unified core that updates high and low-level states iteratively. The coupling is **additive input injection, not cross-attention**: `HierarchicalReasoningModule` computes `x = hidden_states + input_injection` and then runs ordinary **self**-attention over `x` (`layers/reasoning/hrm_reasoning_module.py::HierarchicalReasoningModule.call`). No attention layer anywhere in this package attends from one state to the other.
 3.  **Efficient Gradient Flow**: Implements a "Truncated Backprop through Thinking" strategy, where intermediate reasoning cycles use `stop_gradient` to save memory, while the final step provides the learning signal.
 4.  **Keras 3 Native**: Fully serializable, compatible with JAX, TensorFlow, and PyTorch.
 
@@ -153,7 +153,7 @@ Create a "base" variant model for a vocabulary of 32k.
 
 ```python
 import keras
-from model import create_hierarchical_reasoning_model
+from dl_techniques.models.hierarchical_reasoning_model.model import create_hierarchical_reasoning_model
 
 # 1. Create Model
 # "base" variant matches the configuration from research papers
@@ -164,15 +164,19 @@ model = create_hierarchical_reasoning_model(
     halt_max_steps=10
 )
 
-# 2. Compile
-# AdamW is recommended for scale-invariant optimization
+# 2. Compilation is already done for you.
+# The factory compiles unless you pass `optimizer=None`; its default loss is
+# {"logits": StableMaxCrossEntropy()}, so `fit(batch, {"logits": labels})` works
+# with the stock `fit`. Recompile only to change that:
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss={
-        "logits": "sparse_categorical_crossentropy",
-        # Custom losses usually needed for Q-values in real training loops
-    }
+    loss={"logits": "sparse_categorical_crossentropy"},
 )
+# The Q-value halting term is NOT part of any compiled loss and cannot be: it
+# couples `q_halt_logits` with `target_q_continue`, and both are model OUTPUTS,
+# not labels, so Keras's per-output CompileLoss has nothing to pair them with.
+# ACT supervision needs `src/train/hrm/train_hrm.py`'s loop, which calls
+# `create_hrm_loss()` on the whole output dict directly.
 
 # 3. Dummy Inference
 inputs = {
@@ -212,6 +216,19 @@ model = HierarchicalReasoningModel(
 #### `create_hierarchical_reasoning_model(variant, ...)`
 The recommended way to instantiate.
 *   `variant`: `'micro'`, `'tiny'`, `'small'`, `'base'`, `'large'`, `'xlarge'`.
+*   `optimizer` / `learning_rate` / `loss`: the returned model **is compiled**
+    unless `optimizer=None`. It used to build the optimizer, log it and throw it
+    away while claiming to return an "optionally compiled" model, so following
+    the docstring got you `ValueError: You must call compile() before using the
+    model.` on `.fit()`.
+
+The core's `h_init` / `l_init` are **non-trainable** and always were in effect:
+they are read only when a halted sequence's carry is reset, and `call` applies
+`stop_gradient` to the incoming states before the single gradient-carrying step,
+so no gradient ever reached them. `count_params()` is unchanged (Keras counts
+non-trainable weights too) and so is the saved-weight order, but an optimizer
+state saved before this change has two more slots than the current model asks
+for and will not resume cleanly.
 
 ---
 

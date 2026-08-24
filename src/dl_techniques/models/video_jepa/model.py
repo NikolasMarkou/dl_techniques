@@ -26,12 +26,33 @@ Streaming inference (D-007)
 - :meth:`stream_reset(B)` — set internal embedding buffer to ``None``.
 - :meth:`stream_step(frame)` — encode one frame, append to the rolling
   ``K``-length buffer, run the predictor on the current buffer (up to
-  ``K`` frames), and emit the last frame's patch-prediction
-  ``(B, H_p, W_p, D)``. O(1) amortized per call once the buffer is full.
+  ``K`` frames), project the last position through the horizon head the
+  training loss supervises, and emit the ``h``-step forecast
+  ``(B, H_p, W_p, D)`` in encoder (``z``) space. O(1) amortized per call
+  once the buffer is full.
 
 The streaming path reuses the predictor on a growing (then rolling)
 ``(B, t, H_p, W_p, D)`` tensor with ``t ≤ K``; predictor accepts arbitrary
 ``T`` ≤ ``num_frames_max``.
+
+References:
+    - Assran et al., 2023. Self-Supervised Learning from Images with a Joint-
+      Embedding Predictive Architecture (I-JEPA). CVPR 2023.
+      (https://arxiv.org/abs/2301.08243) -- predict in EMBEDDING space, which
+      is what makes the pixel decoder unnecessary here.
+    - Bardes et al., 2024. Revisiting Feature Prediction for Learning Visual
+      Representations from Video (V-JEPA).
+      (https://arxiv.org/abs/2404.08471) -- the video form: temporal prediction
+      over frame embeddings.
+    - LeCun, 2022. A Path Towards Autonomous Machine Intelligence.
+      (OpenReview: BZ5a1r-kVsf) -- the JEPA framing.
+    - Hestenes and Sobczyk, 1984. Clifford Algebra to Geometric Calculus --
+      the geometric-algebra machinery behind the Clifford encoder
+      (``dl_techniques.layers.clifford``), which is what the "-Clifford" in the
+      name refers to.
+    - Grill et al., 2020. Bootstrap Your Own Latent (BYOL). NeurIPS 2020.
+      (https://arxiv.org/abs/2006.07733) -- the collapse problem SIGReg is here
+      to solve, and the EMA-target alternative this model does NOT take.
 """
 
 from __future__ import annotations
@@ -79,7 +100,7 @@ class VideoJEPA(keras.Model):
             img_channels=cfg.img_channels,
             depth=cfg.encoder_clifford_depth,
             shifts=tuple(cfg.encoder_shifts),
-            dropout=cfg.dropout,
+            dropout_rate=cfg.dropout_rate,
             name="encoder",
         )
         # DECISION plan_2026-05-23_15151c75/D-001 — EMA target encoder
@@ -97,7 +118,7 @@ class VideoJEPA(keras.Model):
             img_channels=cfg.img_channels,
             depth=cfg.encoder_clifford_depth,
             shifts=tuple(cfg.encoder_shifts),
-            dropout=cfg.dropout,
+            dropout_rate=cfg.dropout_rate,
             name="target_encoder",
         )
         # Freeze target — no gradient flows through this branch. Set here
@@ -114,7 +135,7 @@ class VideoJEPA(keras.Model):
             dim_head=cfg.predictor_dim_head,
             mlp_dim=cfg.predictor_mlp_dim,
             shifts=tuple(cfg.predictor_shifts),
-            dropout=cfg.dropout,
+            dropout_rate=cfg.dropout_rate,
             name="predictor",
         )
         self.sigreg = SIGRegLayer(
@@ -399,6 +420,110 @@ class VideoJEPA(keras.Model):
         self.ema_divergence_tracker.update_state(self._compute_ema_divergence())
 
     # ------------------------------------------------------------------
+    # Explicit build
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _require_pixels(mapping: Any) -> Any:
+        """Return ``mapping["pixels"]``, or raise the model's own contract error.
+
+        Interface contract (call sites: :meth:`build` and :meth:`call`). Shared
+        because both take the SAME dict-shaped argument -- one a nest of shapes,
+        one a nest of tensors -- and both must fail with the same named
+        ``ValueError``. ``build`` runs FIRST for an explicit
+        ``model.build(...)`` and for ``.keras`` deserialization, so a ``build``
+        that indexed the dict directly would convert this ``ValueError`` into a
+        bare ``KeyError`` and defeat ``test_rejects_missing_pixels_key``
+        (MEASURED: it did, 2026-08-23).
+
+        :param mapping: The dict passed to ``build`` or ``call``.
+        :return: The value under ``"pixels"``.
+        :raises ValueError: If ``mapping`` is not a dict, or has no ``"pixels"``.
+        """
+        # DECISION plan-2026-08-23T091307-9a110062/D-426
+        # Do NOT inline this back into `call` and index the dict directly in
+        # `build`. `build` runs FIRST on `model(...)`, so a direct index turns
+        # this named `ValueError` into a bare `KeyError` and defeats
+        # `test_rejects_missing_pixels_key` (MEASURED 2026-08-23). One validator,
+        # two callers -- not two copies of the message. See decisions.md D-426.
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                "VideoJEPA expects inputs as a dict with key 'pixels'. "
+                f"Got type={type(mapping)}."
+            )
+        if "pixels" not in mapping:
+            raise ValueError(
+                "VideoJEPA inputs dict must contain key 'pixels'. "
+                f"Got keys: {list(mapping.keys())}"
+            )
+        return mapping["pixels"]
+
+    def build(self, input_shape: Dict[str, Any]) -> None:
+        """Materialize every weight-bearing sub-layer.
+
+        # DECISION plan-2026-08-23T091307-9a110062/D-425
+        This walks the sub-layers by hand instead of tracing `call`, because
+        `call` cannot be traced: `self.add_loss(cfg.lambda_next_frame *
+        h_loss)` raises ``ValueError: add_loss() can only be called from inside
+        build() or call(), on a tensor input`` when `call` is invoked directly
+        on `KerasTensor` placeholders, which is exactly what
+        `materialize_sublayers` does (`.call`, never `.__call__`, to avoid
+        recursing into `build`).
+
+        The walk reuses `encode_frames` / `encode_frames_target` rather than
+        re-deriving their reshapes, and touches every stateful sub-layer:
+        `encoder`, `target_encoder`, `predictor`, EVERY entry of `pred_heads`,
+        and `sigreg`. `mask_gen` is skipped because `TubeMaskGenerator` owns
+        no weights (pure `keras.random.uniform` + `argsort`), and `mask_token`
+        is an `__init__`-time `add_weight` that exists before any build.
+
+        Two deliberate differences from `call`, neither of which changes a
+        weight shape:
+
+        * `pred_heads[i]` is applied to the FULL `pred`, not to the causal
+          slice `pred[:, :-h]`. These are `Dense` layers whose kernel depends
+          only on the last axis, and `call` SKIPS a horizon when
+          ``h >= T`` -- so slicing here would leave a head unbuilt for any
+          probe shape shorter than the largest horizon. Building all of them
+          unconditionally is the property that survives a short clip.
+        * The masking branch is not taken. It is training-only by D-001 above
+          and introduces no weights.
+
+        `target_encoder.trainable = False` is set in `__init__` and is NOT
+        touched here; the encoder is invoked exactly as `encode_frames_target`
+        invokes it.
+
+        A hand walk drifts from `call` silently, so the mitigation is a shipped
+        assertion rather than a comment: `test_the_explicit_build_materializes_
+        the_model.py` pins that this build materializes exactly the population
+        a real call does (MEASURED: 161 both ways).
+
+        The batch axis is made concrete (`1`): `encode_frames` multiplies
+        `B * T`, a `TypeError` on `None`, and no weight shape depends on it.
+
+        :param input_shape: dict with key ``pixels`` (B, T, H, W, C).
+        """
+        if self.built:
+            return
+        cfg = self.config
+        pixels_shape = tuple(self._require_pixels(input_shape)[1:])
+        pixels = keras.KerasTensor((1,) + pixels_shape)
+
+        z_online = self.encode_frames(pixels)
+        self.encode_frames_target(pixels)
+
+        pred = self.predictor(z_online)
+        for head in self.pred_heads:
+            head(pred)
+
+        t_probe = pixels_shape[0]
+        hp = cfg.patches_per_side
+        self.sigreg(
+            ops.reshape(z_online, (t_probe, hp * hp, cfg.embed_dim))
+        )
+
+        super().build(input_shape)
+
+    # ------------------------------------------------------------------
     # Training forward
     # ------------------------------------------------------------------
     def call(
@@ -412,17 +537,7 @@ class VideoJEPA(keras.Model):
         :param training: forwarded.
         :return: ``pred`` of shape (B, T, H_p, W_p, D).
         """
-        if not isinstance(inputs, dict):
-            raise ValueError(
-                "VideoJEPA expects inputs as a dict with key 'pixels'. "
-                f"Got type={type(inputs)}."
-            )
-        if "pixels" not in inputs:
-            raise ValueError(
-                "VideoJEPA inputs dict must contain key 'pixels'. "
-                f"Got keys: {list(inputs.keys())}"
-            )
-        pixels = inputs["pixels"]
+        pixels = self._require_pixels(inputs)
 
         cfg = self.config
         # Online (gradient-carrying) encoder — feeds the predictor and
@@ -492,13 +607,43 @@ class VideoJEPA(keras.Model):
         # DECISION plan_2026-05-23_0b664700/D-001: per-horizon Dense heads on
         # the shared predictor + same lambda per horizon + combined metric =
         # mean of per-horizon losses (decouples reported magnitude from N).
-        if cfg.num_frames >= 2:
+        # DECISION plan-2026-08-18T140459-7991552f/D-041: every frame count in
+        # the loss arithmetic below comes from THIS BATCH's ``T``, never from
+        # ``cfg.num_frames``. ``cfg.num_frames`` is only the *default training
+        # window*; ``encode_frames``/``predictor``/``stream_step`` are all
+        # T-generic and ``config.__post_init__`` constrains
+        # ``max(predict_horizons) < num_frames`` but nothing constrains the
+        # runtime ``T``. Two things went wrong when they disagreed:
+        #   (1) ``T <= h`` made ``pred[:, :-h]`` EMPTY. With masking off that is
+        #       ``ops.mean`` of an empty tensor -> a **NaN** loss straight
+        #       through ``add_loss`` into ``train_step`` (MEASURED: nan at
+        #       ``num_frames=8, predict_horizons=(1, 4), T=2``). With masking on
+        #       it is quieter and no better: ``sum(empty)/denom == 0.0``, so the
+        #       horizon silently contributes nothing.
+        #   (2) ``denom`` counted ``cfg.num_frames - h`` positions while the
+        #       tensor held ``T - h``, rescaling the loss by
+        #       ``(cfg.num_frames - h) / (T - h)`` (2.33x at
+        #       ``num_frames=8, T=4, h=1``).
+        # Do NOT "fix" this by re-validating ``T == cfg.num_frames`` at the
+        # entry point: variable-length clips are a supported input, not an error.
+        t_shape = getattr(pixels, "shape", None)
+        t_static = t_shape[1] if t_shape is not None and len(t_shape) > 1 else None
+        # A fully dynamic time axis cannot be branched on at trace time; the
+        # configured window is the only available answer there.
+        num_frames_batch = int(t_static) if t_static is not None else int(cfg.num_frames)
+
+        if num_frames_batch >= 2:
             unmasked_per_row = (
                 cfg.num_patches - self.mask_gen.num_masked
                 if masking_on else cfg.num_patches
             )
             per_horizon_losses = []
             for h_idx, h in enumerate(cfg.predict_horizons):
+                if h >= num_frames_batch:
+                    # No causal pair exists at this horizon for this clip. Skip
+                    # rather than emit a NaN (masking off) or a silent 0.0
+                    # (masking on); the horizon's tracker keeps its last value.
+                    continue
                 pred_ctx = pred[:, :-h]                  # (B, T-h, H_p, W_p, D)
                 pred_ctx = self.pred_heads[h_idx](pred_ctx)
                 # Target from EMA encoder (plan_2026-05-23_15151c75/D-001):
@@ -509,7 +654,12 @@ class VideoJEPA(keras.Model):
                 if masking_on:
                     w = (1.0 - M)  # broadcasts (B,1,H_p,W_p,1) -> (B,T-h,...)
                     denom = float(
-                        max(1, unmasked_per_row * (cfg.num_frames - h) * cfg.embed_dim)
+                        max(
+                            1,
+                            unmasked_per_row
+                            * (num_frames_batch - h)
+                            * cfg.embed_dim,
+                        )
                     )
                     h_loss = ops.sum(sq * w) / (
                         float(ops.shape(pred_ctx)[0]) * denom
@@ -522,11 +672,14 @@ class VideoJEPA(keras.Model):
                 per_horizon_losses.append(h_loss)
             # Combined tracker = mean of per-horizon losses; decouples reported
             # magnitude from N so dashboards stay comparable across runs.
-            combined = per_horizon_losses[0]
-            for hl in per_horizon_losses[1:]:
-                combined = combined + hl
-            combined = combined / float(len(per_horizon_losses))
-            self.next_frame_loss_tracker.update_state(combined)
+            # ``per_horizon_losses`` can now be EMPTY (every horizon skipped for
+            # a very short clip), in which case there is no L1 to report.
+            if per_horizon_losses:
+                combined = per_horizon_losses[0]
+                for hl in per_horizon_losses[1:]:
+                    combined = combined + hl
+                combined = combined / float(len(per_horizon_losses))
+                self.next_frame_loss_tracker.update_state(combined)
 
         # --- L2: mask-prediction loss (iter-2, D-008..D-012) ---
         # MSE between predictor output and *same-encoder* target at masked
@@ -537,8 +690,13 @@ class VideoJEPA(keras.Model):
             # was ``z`` (live target) — switched so masked-position
             # prediction has a moving but non-co-adapting target.
             sq_full = ops.square(pred - z_target)  # (B, T, H_p, W_p, D)
+            # D-041 again, one loss down: this normalizer counts the masked
+            # slots in ``sq_full``, whose time axis is the BATCH's ``T``. It
+            # used to read ``cfg.num_frames``. The finding (F-52) named only the
+            # horizon loss; this is the identical defect in its neighbour and is
+            # fixed with it rather than left as a known-wrong line.
             num_masked_per_clip = (
-                self.mask_gen.num_masked * cfg.num_frames * cfg.embed_dim
+                self.mask_gen.num_masked * num_frames_batch * cfg.embed_dim
             )
             denom = float(max(1, num_masked_per_clip))
             mask_loss = ops.sum(sq_full * M) / (
@@ -588,9 +746,24 @@ class VideoJEPA(keras.Model):
                     loss = loss + ops.cast(extra, "float32")
             else:
                 loss = ops.convert_to_tensor(0.0, dtype="float32")
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
+            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
+            # `tape.gradient` differentiates; the UNSCALED loss stays what is
+            # reported. Do NOT "simplify" this back to a gradient of the unscaled
+            # loss: under `mixed_float16` Keras wraps the optimizer in a
+            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
+            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
+            # divides the WHOLE weight update by the loss scale, with no warning of
+            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
+            # returns its argument unless `loss_scale_factor` is set. MEASURED here
+            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
+            # BEFORE f32 1.433110e+04 vs fp16 1.204127e-02, ratio 1.190e+06.
+            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
+            # (D-036).
+            scaled_loss = self.optimizer.scale_loss(loss)
         # trainable_variables excludes target_encoder weights because
         # ``target_encoder.trainable = False`` in __init__.
-        grads = tape.gradient(loss, self.trainable_variables)
+        grads = tape.gradient(scaled_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         # EMA update AFTER optimizer step — target now tracks the
         # **post-update** encoder weights (V-JEPA / BYOL convention).
@@ -623,11 +796,22 @@ class VideoJEPA(keras.Model):
     def stream_step(
         self,
         frame: keras.KerasTensor,
+        horizon: Optional[int] = None,
     ) -> keras.KerasTensor:
-        """Advance the stream by one frame and return its patch prediction.
+        """Advance the stream by one frame and return its patch forecast.
 
         :param frame: ``(B, H, W, C)`` single-frame pixel tensor.
-        :return: ``(B, H_p, W_p, D)`` patch-prediction for the latest frame.
+        :param horizon: which configured prediction horizon ``h`` to emit.
+            ``None`` (default) selects ``min(config.predict_horizons)`` —
+            the shortest-range forecast, and with the default
+            ``predict_horizons = (1,)`` the next frame. Must be a member of
+            ``config.predict_horizons``; anything else raises ``ValueError``,
+            because no head was trained for it.
+        :return: ``(B, H_p, W_p, D)`` prediction of the encoder embedding
+            ``h`` frames after the one just pushed, in the same ``z`` space
+            the encoder emits.
+        :raises ValueError: if ``horizon`` is not in
+            ``config.predict_horizons``.
 
         Rolling buffer (D-007): keeps the last ``K`` encoded frame grids in
         ``_stream_buf: (B, t, H_p, W_p, D)`` with ``t ≤ K``. The predictor
@@ -636,6 +820,24 @@ class VideoJEPA(keras.Model):
         """
         cfg = self.config
         K = cfg.history_size_k
+
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-043: the streaming output
+        # must be the SAME quantity training supervises, so it goes through
+        # `pred_heads[h_idx]` — the raw predictor output is not supervised in
+        # z-space at all when `mask_prediction_enabled=False`, and is
+        # supervised only as a same-timestep reconstruction when it is on.
+        # Do NOT "simplify" this back to `self.predictor(buf)[:, -1]`, and do
+        # NOT default `horizon` to `max(predict_horizons)` or to a fixed 1:
+        # `min(...)` is the shortest-range head, is always a configured
+        # horizon, and equals 1 under the default `(1,)`.
+        if horizon is None:
+            horizon = min(cfg.predict_horizons)
+        if horizon not in cfg.predict_horizons:
+            raise ValueError(
+                f"horizon={horizon} has no trained prediction head; "
+                f"config.predict_horizons is {cfg.predict_horizons!r}."
+            )
+        h_idx = cfg.predict_horizons.index(horizon)
 
         # Encode single frame: (B, H, W, C) → (B, H_p, W_p, D).
         enc = self.encoder(frame, training=False)
@@ -655,7 +857,10 @@ class VideoJEPA(keras.Model):
             self._stream_buf, training=False
         )  # (B, t, H_p, W_p, D)
 
-        return pred[:, -1]  # (B, H_p, W_p, D)
+        # The heads are pointwise (Dense over the last axis), so projecting
+        # the slice is identical to slicing the projection and costs t times
+        # less.
+        return self.pred_heads[h_idx](pred[:, -1])  # (B, H_p, W_p, D)
 
     # ------------------------------------------------------------------
     # Serialization
@@ -675,3 +880,47 @@ class VideoJEPA(keras.Model):
             else VideoJEPAConfig()
         )
         return cls(config=cfg, **config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_video_jepa(
+    config: Optional[VideoJEPAConfig] = None,
+    **overrides: Any,
+) -> VideoJEPA:
+    """Create a Video-JEPA-Clifford model.
+
+    There is no ``MODEL_VARIANTS`` table and none was invented: this port ships
+    one ``VideoJEPAConfig`` and is retuned field by field (embed_dim, depths,
+    horizons) rather than by selecting a named scale, and no scale family is
+    published for it.
+
+    :param config: A ``VideoJEPAConfig``; ``None`` uses the package defaults.
+    :param overrides: Individual ``VideoJEPAConfig`` field overrides applied on
+        top of ``config``. Keys that are not config fields are forwarded to
+        ``keras.Model`` instead (e.g. ``name``).
+    :returns: A configured ``VideoJEPA`` instance.
+    :raises ValueError: If the resulting config fails ``VideoJEPAConfig``
+        validation (e.g. ``patch_size`` not dividing ``img_size``).
+
+    Example::
+
+        model = create_video_jepa(img_size=32, patch_size=8, num_frames=2)
+        pred = model({"pixels": pixels})
+    """
+    base = config if config is not None else VideoJEPAConfig()
+    fields = set(VideoJEPAConfig.__dataclass_fields__)
+    cfg_overrides = {k: v for k, v in overrides.items() if k in fields}
+    model_kwargs = {k: v for k, v in overrides.items() if k not in fields}
+
+    if cfg_overrides:
+        merged = base.to_dict()
+        merged.update(cfg_overrides)
+        base = VideoJEPAConfig.from_dict(merged)
+
+    return VideoJEPA(config=base, **model_kwargs)
+
+# ---------------------------------------------------------------------

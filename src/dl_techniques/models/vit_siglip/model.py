@@ -1,18 +1,42 @@
 """
-SigLIP Vision Transformer Model Implementation
+Vision Transformer with a two-stage convolutional patch-embedding stem.
 
-This module provides a complete SigLIP Vision Transformer model implementation following
-modern Keras 3 best practices. The model leverages the dl_techniques framework's
-factory system for consistent component creation and configuration management.
+**The name is a misattribution, and it is corrected here rather than in a footnote.**
+SigLIP's contribution is a LOSS: the pairwise **sigmoid** objective that replaces
+CLIP's softmax over the in-batch similarity matrix, removing the need for a global
+normalization across all pairs and therefore for very large batches. It is not a
+patch-embedding scheme. SigLIP's own vision tower is a plain ViT with a single
+`Conv2D(k=s=patch)` stem, **no CLS token**, and a MAP (multi-head attention pooling)
+head. This module shares none of those three: it has a two-stage stem, it offers a
+`pooling='cls'` mode, and it has no MAP head. It also contains no text tower and no
+loss, so nothing here can be sigmoid-contrastive.
 
-SigLIP (Sigmoid-Loss for Language-Image Pre-training) introduces a two-stage patch
-embedding approach that provides better feature extraction compared to standard ViT.
-The implementation supports different scales and configurations with enhanced flexibility
-through factory-based component creation.
+What it actually is: a standard pre-norm ViT encoder whose patch embedding is split
+into two strided convolutions -- `Conv2D(embed_dim//2, k=s=patch//2)` -> LayerNorm ->
+GELU -> `Conv2D(embed_dim, k=s=2)` -- for a total stride of `2 * (patch // 2)`. That
+identity forces `patch_size` to be EVEN in both dimensions (an odd value gives a
+stride smaller than the declared patch size and a token count that does not match
+`num_patches`); the constructor raises rather than letting the mismatch surface as an
+opaque reshape failure at the first forward. Everything else -- attention,
+normalization, FFN -- is built through the `dl_techniques` factories, so the
+component types are configurable per instance.
+
+The class and the `SCALE_CONFIGS` keys keep the `SigLIP` name for source
+compatibility. Do NOT read a published SigLIP number as applying to a model built
+here, and do NOT "restore" the claim that two-stage patch embedding comes from
+SigLIP.
+
+References:
+    - Zhai et al., 2023. Sigmoid Loss for Language Image Pre-Training (SigLIP).
+      (https://arxiv.org/abs/2303.15343) -- the loss this package does not implement.
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words (ViT).
+      (https://arxiv.org/abs/2010.11929) -- the architecture this package does build.
+    - Lee et al., 2019. Set Transformer. (https://arxiv.org/abs/1810.00825) -- the
+      MAP/attention-pooling head SigLIP's tower uses and this one does not.
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
+from keras import ops, layers, activations, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -20,10 +44,15 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -41,14 +70,16 @@ FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', '
 @keras.saving.register_keras_serializable()
 class SigLIPVisionTransformer(keras.Model):
     """
-    SigLIP Vision Transformer model with factory-based component creation and modern Keras 3 patterns.
+    Vision Transformer with a two-stage convolutional patch-embedding stem.
 
-    This model implements the complete SigLIP Vision Transformer architecture using the dl_techniques
-    framework's factory system for consistent component creation. It features a two-stage patch
-    embedding approach that provides better feature extraction compared to standard ViT, along with
-    support for different scales and configurations for various vision_heads tasks.
+    The `SigLIP` in the name is historical and inaccurate -- SigLIP is a sigmoid
+    contrastive LOSS, not a patch-embedding scheme, and its own tower uses a
+    single-conv stem, no CLS token and a MAP head, none of which this class shares.
+    See the module docstring. What this class builds is a standard pre-norm ViT
+    encoder whose patch embedding is split into two strided convolutions, with every
+    sub-component created through the dl_techniques factories.
 
-    **Intent**: Provide a production-ready SigLIP Vision Transformer implementation that leverages
+    **Intent**: Provide a configurable SigLIP Vision Transformer implementation that leverages
     the dl_techniques framework's modular components while following modern Keras 3 best
     practices for robust serialization and deployment.
 
@@ -169,7 +200,9 @@ class SigLIPVisionTransformer(keras.Model):
         num_layers: Integer, number of transformer layers determined by scale.
         num_patches: Integer, total number of image patches.
         max_seq_len: Integer, maximum sequence length (num_patches + 1 for CLS).
-        siglip_patch_embed: SigLIP two-stage patch embedding layers.
+        siglip_patch_embed: the two-stage patch-embedding layers. The attribute
+            name keeps the `siglip_` prefix for source compatibility; the scheme is
+            NOT SigLIP's (see the module docstring).
         pos_embed: PositionalEmbedding layer for sequence position encoding.
         transformer_layers: List of TransformerLayer instances.
         norm: Final normalization layer.
@@ -216,8 +249,8 @@ class SigLIPVisionTransformer(keras.Model):
     Note:
         This implementation follows modern Keras 3 patterns with proper serialization
         support. All sub-components are created using dl_techniques factories for
-        consistency and configurability. The two-stage patch embedding is a key
-        differentiator from standard ViT implementations.
+        consistency and configurability. The two-stage patch embedding is what
+        differentiates this from a standard ViT -- it is not inherited from SigLIP.
     """
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
@@ -228,6 +261,12 @@ class SigLIPVisionTransformer(keras.Model):
         "large": (1024, 16, 24, 4.0), # SigLIP ViT-Large
         "huge": (1280, 16, 32, 4.0),  # SigLIP ViT-Huge
     }
+
+    # `MODEL_VARIANTS` is the canonical name across `models/` (see
+    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
+    # definition because the `scale=` constructor argument and the tests already
+    # name it; this is an alias to the same dict, not a copy.
+    MODEL_VARIANTS = SCALE_CONFIGS
 
     def __init__(
             self,
@@ -277,6 +316,20 @@ class SigLIPVisionTransformer(keras.Model):
             patch_h, patch_w = patch_size
             if patch_h <= 0 or patch_w <= 0:
                 raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
+
+        # The two-stage SigLIP stem is Conv2D(k=s=patch//2) then Conv2D(k=s=2),
+        # so its total stride is 2*(patch//2) -- equal to `patch` only when
+        # `patch` is EVEN. With an odd patch size the stem emits a different
+        # token count than the declared `num_patches`, and `call`'s reshape dies
+        # with an opaque error at the first forward instead of here.
+        if patch_h % 2 != 0 or patch_w % 2 != 0:
+            raise ValueError(
+                f"patch_size must be even in both dimensions, got {patch_size}: "
+                f"the two-stage patch-embedding stem has total stride "
+                f"2*(patch//2), which equals the patch size only for even "
+                f"values (an odd {patch_h} would give a stride of "
+                f"{2 * (patch_h // 2)})."
+            )
 
         # Validate divisibility for patch extraction
         if img_h % patch_h != 0:
@@ -337,7 +390,7 @@ class SigLIPVisionTransformer(keras.Model):
         # CREATE all sub-layers in __init__ (they are unbuilt)
         # Using factories for consistent component creation
 
-        # SigLIP two-stage patch embedding - custom implementation
+        # Two-stage patch embedding -- this module's own, not SigLIP's (module docstring)
         self.siglip_patch_embed = self._create_siglip_patch_embedding()
 
         # Positional embedding using factory
@@ -345,7 +398,7 @@ class SigLIPVisionTransformer(keras.Model):
             'positional_learned',
             max_seq_len=self.max_seq_len,
             dim=self.embed_dim,
-            dropout=self.pos_dropout_rate,
+            dropout_rate=self.pos_dropout_rate,
             name="pos_embed"
         )
 
@@ -364,8 +417,19 @@ class SigLIPVisionTransformer(keras.Model):
                 attention_dropout_rate=self.attention_dropout_rate,
                 activation=self.activation,
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                # DECISION plan-2026-08-23T091307-9a110062/D-560
+                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
+                # "simplify" this back to `self.kernel_initializer`: one seedless
+                # initializer INSTANCE replays its draw, so every same-shape kernel
+                # it reaches is bit-identical. MEASURED at HEAD before this change,
+                # on a seeded 12-layer build: 132 of 264 same-shape kernel pairs at
+                # `max|delta| = 0.0` -- all 12
+                # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
+                # pairwise identical (66 pairs), likewise the 12 `.../proj/kernel`.
+                # `seed=` is not the discriminator; instance identity is.
+                # See decisions.md D-560 (and D-540 for the first three ports).
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f"transformer_layer_{i}"
@@ -389,8 +453,8 @@ class SigLIPVisionTransformer(keras.Model):
 
             self.head = layers.Dense(
                 self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="head"
@@ -415,7 +479,7 @@ class SigLIPVisionTransformer(keras.Model):
 
     def _create_siglip_patch_embedding(self) -> keras.Sequential:
         """
-        Create SigLIP-style two-stage patch embedding.
+        Create the two-stage patch embedding (not SigLIP's -- see module docstring).
 
         The SigLIP approach uses a two-stage convolution:
         1. First stage: Coarse-grained patching with intermediate dimension
@@ -434,13 +498,26 @@ class SigLIPVisionTransformer(keras.Model):
                 strides=(patch_h // 2, patch_w // 2),
                 padding='valid',
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name='patch_embed_conv1'
             ),
-            layers.LayerNormalization(name='patch_embed_norm1'),
+            # DECISION plan-2026-08-17T183311-79c63e38/D-028
+            # Routed through the factory rather than constructed directly, so
+            # this norm's `epsilon` comes from the SAME source as the model's
+            # final norm (`create_normalization_layer`, which `setdefault`s
+            # 1e-6). Built directly it inherited Keras' `LayerNormalization`
+            # default of 1e-3 — a 100x divergence from the other normalization
+            # in this very file, invisible to every shape and dtype assertion.
+            # WHAT NOT TO DO: do not "simplify" this back to
+            # `layers.LayerNormalization(...)`, and do not restate 1e-6 as a
+            # literal here; the factory is the one place that value lives.
+            # The type is pinned to 'layer_norm' (not `self.normalization_type`)
+            # because that is what this stem shipped with — this decision is
+            # about epsilon only. See decisions.md D-028.
+            create_normalization_layer('layer_norm', name='patch_embed_norm1'),
             layers.Activation('gelu', name='patch_embed_activation1'),
 
             # Stage 2: Refinement to final embedding dimension
@@ -450,8 +527,8 @@ class SigLIPVisionTransformer(keras.Model):
                 strides=2,
                 padding='valid',
                 use_bias=True,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name='patch_embed_conv2'
@@ -527,7 +604,7 @@ class SigLIPVisionTransformer(keras.Model):
         """
         batch_size = ops.shape(inputs)[0]
 
-        # SigLIP two-stage patch embedding
+        # Two-stage patch embedding (module docstring: not SigLIP's scheme)
         x = self.siglip_patch_embed(inputs, training=training)  # (batch_size, patch_h, patch_w, embed_dim)
 
         # Reshape to sequence format
@@ -642,6 +719,46 @@ class SigLIPVisionTransformer(keras.Model):
             else:
                 return (batch_size, self.max_seq_len, self.embed_dim)
 
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            num_classes: int = 1000,
+            input_shape: Tuple[int, int, int] = (224, 224, 3),
+            **kwargs: Any
+    ) -> "SigLIPVisionTransformer":
+        """
+        Create a SigLIP vision transformer from a predefined variant.
+
+        Args:
+            variant: One of 'tiny', 'small', 'base', 'large', 'huge'.
+            num_classes: Number of output classes.
+            input_shape: Input image shape (height, width, channels).
+            **kwargs: Additional arguments passed to the constructor.
+
+        Returns:
+            SigLIPVisionTransformer model instance.
+
+        Raises:
+            ValueError: If the variant is not recognized.
+
+        Example:
+            >>> model = SigLIPVisionTransformer.from_variant("base", num_classes=1000)
+            >>> model = SigLIPVisionTransformer.from_variant(
+            ...     "small", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+        return cls(
+            input_shape=input_shape,
+            num_classes=num_classes,
+            scale=variant,
+            **kwargs
+        )
+
     def get_config(self) -> Dict[str, Any]:
         """
         Return configuration for serialization.
@@ -666,9 +783,52 @@ class SigLIPVisionTransformer(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            "activation": self.activation,
+            # DECISION plan-2026-08-23T091307-9a110062/D-400
+            # D-205 inlined this as a 17-line `isinstance(str)`-guarded
+            # expression at three sites. It is now the single shared pair in
+            # `dl_techniques.utils.activation_serialization`, which ~50 other
+            # classes in this tree also call. Do NOT re-inline it: the string
+            # passthrough is load-bearing (`keras.activations.serialize` REJECTS
+            # a bare string, and many callers store a dl_techniques
+            # activation-factory key such as 'mish' that is not a Keras
+            # activation at all), and a second copy of that rule is exactly the
+            # kind of hand-maintained lockstep this centralisation removes.
+            "activation": serialize_activation(self.activation),
         })
         return config
+
+    @classmethod
+    def from_config(
+            cls,
+            config: Dict[str, Any],
+            custom_objects: Optional[Dict[str, Any]] = None
+    ) -> "SigLIPVisionTransformer":
+        """
+        Create a model from its configuration.
+
+        The only key needing explicit handling is ``activation``: ``get_config``
+        writes a serialized form for callables, and it has to be turned back into
+        a callable BEFORE ``__init__`` hands it to ``TransformerLayer``, which
+        resolves it through ``keras.activations.get``. Every other key is either
+        a plain value or already handled by ``initializers.get`` /
+        ``regularizers.get`` inside ``__init__``.
+
+        Args:
+            config: Configuration dictionary from ``get_config``.
+            custom_objects: Optional mapping of names to custom callables, used
+                to resolve an activation that is not registered with
+                ``keras.saving.register_keras_serializable``.
+
+        Returns:
+            A new ``SigLIPVisionTransformer`` instance.
+        """
+        config = dict(config)
+        activation = config.get("activation")
+        if activation is not None and not isinstance(activation, str):
+            config["activation"] = deserialize_activation(
+                activation, custom_objects=custom_objects
+            )
+        return cls(**config)
 
     def get_feature_extractor(self) -> "SigLIPVisionTransformer":
         """
@@ -817,42 +977,11 @@ def create_siglip_vision_transformer(
         )
         ```
     """
-    # Validate basic parameters before model creation
-    if num_classes <= 0:
-        raise ValueError(f"num_classes must be positive, got {num_classes}")
-
-    if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
-        raise ValueError(f"input_shape must be a 3-element tuple/list, got {input_shape}")
-
-    if any(dim <= 0 for dim in input_shape):
-        raise ValueError(f"All input_shape dimensions must be positive, got {input_shape}")
-
-    # Validate patch_size and ensure compatibility with input_shape
-    if isinstance(patch_size, int):
-        if patch_size <= 0:
-            raise ValueError(f"patch_size must be positive, got {patch_size}")
-        patch_h = patch_w = patch_size
-    else:
-        if not isinstance(patch_size, (tuple, list)) or len(patch_size) != 2:
-            raise ValueError(f"patch_size must be int or 2-element tuple/list, got {patch_size}")
-        patch_h, patch_w = patch_size
-        if patch_h <= 0 or patch_w <= 0:
-            raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
-
-    img_h, img_w = input_shape[:2]
-    if img_h % patch_h != 0:
-        raise ValueError(f"Image height ({img_h}) must be divisible by patch height ({patch_h})")
-    if img_w % patch_w != 0:
-        raise ValueError(f"Image width ({img_w}) must be divisible by patch width ({patch_w})")
-
-    # Calculate and validate number of patches
-    num_patches = (img_h // patch_h) * (img_w // patch_w)
-    if num_patches <= 0:
-        raise ValueError(f"Number of patches must be positive, got {num_patches}")
-    if num_patches > 10000:  # Reasonable upper limit
-        logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
-
-    # Create model instance
+    # Argument validation lives in SigLIPVisionTransformer.__init__ and is NOT
+    # repeated here: this factory used to carry a second, hand-kept copy of the
+    # num_classes / input_shape / patch_size / divisibility checks, which is how
+    # the even-patch_size constraint (C-15) could be added to the constructor and
+    # still be pre-empted by the older duplicate.
     model = SigLIPVisionTransformer(
         input_shape=input_shape,
         num_classes=num_classes,
@@ -874,8 +1003,15 @@ def create_siglip_vision_transformer(
         **kwargs
     )
 
+    if model.num_patches > 10000:  # Reasonable upper limit
+        logger.warning(
+            f"Large number of patches ({model.num_patches}) may cause memory issues"
+        )
+
     logger.info(f"SigLIPVisionTransformer-{scale} created successfully")
-    logger.info(f"Configuration: {num_patches} patches ({img_h // patch_h}x{img_w // patch_w}), {num_classes} classes")
+    logger.info(
+        f"Configuration: {model.num_patches} patches, {num_classes} classes"
+    )
     return model
 
 

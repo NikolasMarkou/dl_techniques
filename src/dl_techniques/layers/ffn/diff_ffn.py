@@ -94,6 +94,7 @@ from typing import Callable, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers.clone import clone_initializer
 
 # ---------------------------------------------------------------------
 
@@ -241,12 +242,17 @@ class DifferentialFFN(keras.layers.Layer):
         # Following modern Keras 3 pattern - create but don't build here
 
         # Positive branch: Dense -> LayerNorm -> Activation -> Dense(gate)
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
+        # branch. Do NOT pass the shared `self.kernel_initializer` here: the positive
+        # and negative branches are the architecture, and one shared instance made
+        # positive_dense.kernel == negative_dense.kernel bit-for-bit (MEASURED
+        # max|delta| = 0.0), i.e. two "independent" branches that started identical.
         self.positive_dense = keras.layers.Dense(
             units=self.hidden_dim,
             activation=None,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="positive_dense"
@@ -260,8 +266,8 @@ class DifferentialFFN(keras.layers.Layer):
             units=self.hidden_dim // 2,
             activation=None,  # Activation applied separately for clarity
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="positive_proj"
@@ -272,8 +278,8 @@ class DifferentialFFN(keras.layers.Layer):
             units=self.hidden_dim,
             activation=None,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="negative_dense"
@@ -287,8 +293,8 @@ class DifferentialFFN(keras.layers.Layer):
             units=self.hidden_dim // 2,
             activation=None,  # Activation applied separately for clarity
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="negative_proj"
@@ -308,8 +314,8 @@ class DifferentialFFN(keras.layers.Layer):
             units=self.output_dim,
             activation=None,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="output_proj"

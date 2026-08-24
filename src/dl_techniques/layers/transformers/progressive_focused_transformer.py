@@ -51,6 +51,10 @@ from ..ffn.factory import create_ffn_layer
 from ..norms import create_normalization_layer
 from ..stochastic_depth import StochasticDepth
 from ..attention.progressive_focused_attention import ProgressiveFocusedAttention
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -119,10 +123,10 @@ class PFTBlock(keras.layers.Layer):
     :type mlp_ratio: float
     :param qkv_bias: Whether QKV projections use bias. Default: True.
     :type qkv_bias: bool
-    :param attention_dropout: Attention weight dropout. Default: 0.0.
-    :type attention_dropout: float
-    :param projection_dropout: Projection / FFN dropout. Default: 0.0.
-    :type projection_dropout: float
+    :param attention_dropout_rate: Attention weight dropout. Default: 0.0.
+    :type attention_dropout_rate: float
+    :param projection_dropout_rate: Projection / FFN dropout. Default: 0.0.
+    :type projection_dropout_rate: float
     :param drop_path_rate: Stochastic depth rate. Default: 0.0.
     :type drop_path_rate: float
     :param norm_type: Normalization layer type. Default: ``'layer_norm'``.
@@ -149,8 +153,8 @@ class PFTBlock(keras.layers.Layer):
             shift_size: int = 0,
             mlp_ratio: float = 4.0,
             qkv_bias: bool = True,
-            attention_dropout: float = 0.0,
-            projection_dropout: float = 0.0,
+            attention_dropout_rate: float = 0.0,
+            projection_dropout_rate: float = 0.0,
             drop_path_rate: float = 0.0,
             norm_type: NormalizationType = 'layer_norm',
             norm_kwargs: Optional[Dict[str, Any]] = None,
@@ -169,14 +173,14 @@ class PFTBlock(keras.layers.Layer):
         self._shift_size = shift_size
         self._mlp_ratio = mlp_ratio
         self._qkv_bias = qkv_bias
-        self._attention_dropout = attention_dropout
-        self._projection_dropout = projection_dropout
+        self._attention_dropout_rate = attention_dropout_rate
+        self._projection_dropout_rate = projection_dropout_rate
         self._drop_path_rate = drop_path_rate
         self._norm_type = norm_type
         self._norm_kwargs = norm_kwargs or {}
         self._ffn_type = ffn_type
         self._ffn_kwargs = ffn_kwargs or {}
-        self._ffn_activation = ffn_activation
+        self._ffn_activation = deserialize_activation(ffn_activation)
         self._use_lepe = use_lepe
 
         # ============ Validate Configuration ============
@@ -205,8 +209,8 @@ class PFTBlock(keras.layers.Layer):
             window_size=self._window_size,
             shift_size=self._shift_size,
             qkv_bias=self._qkv_bias,
-            attention_dropout=self._attention_dropout,
-            projection_dropout=self._projection_dropout,
+            attention_dropout_rate=self._attention_dropout_rate,
+            projection_dropout_rate=self._projection_dropout_rate,
             use_lepe=self._use_lepe,
             name="progressive_focused_attention"
         )
@@ -254,15 +258,15 @@ class PFTBlock(keras.layers.Layer):
                 f"between 0.0 and 1.0"
             )
 
-        if self._attention_dropout < 0.0 or self._attention_dropout > 1.0:
+        if self._attention_dropout_rate < 0.0 or self._attention_dropout_rate > 1.0:
             raise ValueError(
-                f"attention_dropout ({self._attention_dropout}) must be "
+                f"attention_dropout_rate ({self._attention_dropout_rate}) must be "
                 f"between 0.0 and 1.0"
             )
 
-        if self._projection_dropout < 0.0 or self._projection_dropout > 1.0:
+        if self._projection_dropout_rate < 0.0 or self._projection_dropout_rate > 1.0:
             raise ValueError(
-                f"projection_dropout ({self._projection_dropout}) must be "
+                f"projection_dropout_rate ({self._projection_dropout_rate}) must be "
                 f"between 0.0 and 1.0"
             )
 
@@ -345,7 +349,7 @@ class PFTBlock(keras.layers.Layer):
                 hidden_dim=hidden_dim,
                 output_dim=self._dim,
                 activation=self._ffn_activation,
-                dropout_rate=self._projection_dropout,
+                dropout_rate=self._projection_dropout_rate,
                 name="ffn",
                 **ffn_config
             )
@@ -357,7 +361,7 @@ class PFTBlock(keras.layers.Layer):
                 ffn_type='swiglu',
                 output_dim=self._dim,
                 ffn_expansion_factor=self._mlp_ratio,
-                dropout_rate=self._projection_dropout,
+                dropout_rate=self._projection_dropout_rate,
                 name="ffn",
                 **ffn_config
             )
@@ -368,7 +372,7 @@ class PFTBlock(keras.layers.Layer):
                 ffn_type='geglu',
                 hidden_dim=hidden_dim,
                 output_dim=self._dim,
-                dropout_rate=self._projection_dropout,
+                dropout_rate=self._projection_dropout_rate,
                 name="ffn",
                 **ffn_config
             )
@@ -380,7 +384,7 @@ class PFTBlock(keras.layers.Layer):
                 hidden_dim=hidden_dim,
                 output_dim=self._dim,
                 activation=self._ffn_activation,
-                dropout_rate=self._projection_dropout,
+                dropout_rate=self._projection_dropout_rate,
                 name="ffn",
                 **ffn_config
             )
@@ -392,7 +396,7 @@ class PFTBlock(keras.layers.Layer):
                 hidden_dim=hidden_dim,
                 output_dim=self._dim,
                 activation=self._ffn_activation,
-                dropout_rate=self._projection_dropout,
+                dropout_rate=self._projection_dropout_rate,
                 name="ffn",
                 **ffn_config
             )
@@ -524,14 +528,14 @@ class PFTBlock(keras.layers.Layer):
             "shift_size": self._shift_size,
             "mlp_ratio": self._mlp_ratio,
             "qkv_bias": self._qkv_bias,
-            "attention_dropout": self._attention_dropout,
-            "projection_dropout": self._projection_dropout,
+            "attention_dropout_rate": self._attention_dropout_rate,
+            "projection_dropout_rate": self._projection_dropout_rate,
             "drop_path_rate": self._drop_path_rate,
             "norm_type": self._norm_type,
             "norm_kwargs": self._norm_kwargs,
             "ffn_type": self._ffn_type,
             "ffn_kwargs": self._ffn_kwargs,
-            "ffn_activation": self._ffn_activation,
+            "ffn_activation": serialize_activation(self._ffn_activation),
             "use_lepe": self._use_lepe,
         })
         return config

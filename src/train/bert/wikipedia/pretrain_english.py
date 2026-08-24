@@ -12,6 +12,7 @@ Datasets:
 
 import os
 import keras
+import argparse
 import tensorflow as tf
 import datasets  # Hugging Face datasets
 from typing import Generator, Optional
@@ -219,8 +220,55 @@ def create_tf_dataset(config: PretrainConfig, preprocessor: TiktokenPreprocessor
 # Main Training Loop
 # ---------------------------------------------------------------------
 
-def main():
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse the CLI for English-only BERT pre-training.
+
+    Same minimal shape as the sibling `pretrain.py`, plus the one knob this
+    fork actually adds: `--max-non-ascii-ratio`.
+    """
+    parser = argparse.ArgumentParser(
+        description="English-only BERT MLM Pre-training on Wikipedia + BookCorpus"
+    )
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--variant', type=str, default=PretrainConfig.bert_variant,
+                        help='BERT variant')
+    parser.add_argument('--batch-size', type=int, default=PretrainConfig.global_batch_size,
+                        help='Global batch size')
+    parser.add_argument('--total-steps', type=int, default=PretrainConfig.total_steps,
+                        help='Total training steps')
+    parser.add_argument('--learning-rate', type=float, default=PretrainConfig.learning_rate,
+                        help='Peak learning rate')
+    parser.add_argument('--max-non-ascii-ratio', type=float,
+                        default=PretrainConfig.max_non_ascii_ratio,
+                        help='Max fraction of non-ASCII characters allowed per sample')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None):
+    # MUST be first -- see the note in the sibling `pretrain.py`: `--help` has
+    # to exit before MirroredStrategy, the streaming dataset build and model
+    # construction.
+    args = parse_arguments(argv)
+
+    # DECISION plan-2026-08-12T201216-50fc0975/D-006
+    # Function-scope import on purpose -- do NOT hoist. `train.common`'s
+    # package init allocates a GPU device at import time (see the fuller note
+    # in the sibling `pretrain.py`, and decisions.md D-006).
+    #
+    # SUPERSEDED 2026-08-13 by plan-2026-08-13T045759-fde437ba/D-003: that root
+    # cause is FIXED (`image_text.py`'s constants are plain lists; `import
+    # train.common` emits 0 `Created device` lines). This deferred import is
+    # now harmless, not load-bearing. Kept for the history.
+    from train.common import setup_gpu
+
+    setup_gpu(gpu_id=args.gpu)
+
     config = PretrainConfig()
+    config.bert_variant = args.variant
+    config.global_batch_size = args.batch_size
+    config.total_steps = args.total_steps
+    config.learning_rate = args.learning_rate
+    config.max_non_ascii_ratio = args.max_non_ascii_ratio
 
     # Strategy Setup
     try:
@@ -236,11 +284,16 @@ def main():
 
     # Model Setup
     with strategy.scope():
+        # `BERT.__init__` has no `dropout_rate` parameter; it takes the two
+        # separate probabilities below (both already default to 0.1). Passing
+        # `dropout_rate=` raised `ValueError: Unrecognized keyword arguments`.
+        # Call shape matches the working sibling `train/bert/pretrain.py:85-86`.
         bert_encoder = BERT.from_variant(
             variant=config.bert_variant,
             vocab_size=config.vocab_size,
             max_position_embeddings=config.max_seq_length,
-            dropout_rate=0.1
+            hidden_dropout_rate=0.1,
+            attention_probs_dropout_rate=0.1,
         )
 
         mlm_model = MaskedLanguageModel(
@@ -266,11 +319,23 @@ def main():
             "warmup_start_lr": 0.0,
         })
 
+        # DECISION plan-2026-08-13T045759-fde437ba/D-004
+        # Do NOT pass `jit_compile=` to a Keras 3 optimizer constructor, and do
+        # NOT "fix" that by moving it to `mlm_model.compile(jit_compile=True)`.
+        # This line used to read `jit_compile=True`; Keras 3 optimizers have no
+        # such parameter, so it raised `ValueError: Argument(s) not recognized`
+        # on an unconditional path and this script crashed at model compilation
+        # on EVERY run. XLA also cannot compile this step under a distribution
+        # strategy at all (`CollectiveGatherV2` has no XLA_GPU_JIT kernel; under
+        # fp16 `LossScaleOptimizer`'s `Cond` additionally trips `merge_call`),
+        # so moving the keyword to `compile()` would only relocate the crash.
+        # Full measurement and the rejected `--jit-compile` alternative are
+        # recorded once, at the sibling site in `pretrain.py`. Read that note
+        # before changing either file.
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
-            jit_compile=True
         )
 
         mlm_model.compile(optimizer=optimizer)

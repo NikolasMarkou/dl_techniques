@@ -275,3 +275,50 @@ class TestPublicAPI:
     def test_symbols_importable(self):
         assert superpoint_pkg.SuperPoint is SuperPoint
         assert superpoint_pkg.create_superpoint is create_superpoint
+
+
+# ---------------------------------------------------------------------------
+# DECISION plan-2026-08-19T163559-499b6f0e/D-119
+#
+# `compute_output_shape` ignored its own `input_shape` argument and reported
+# `self.input_height // 8` -- the CONSTRUCTION-time size -- for the detector
+# grid. The two heads are asymmetric and only one of them may read the argument:
+#
+#   * keypoints   -- genuinely a function of the tensor handed in. Measured on a
+#                    model built at 64x64: a 128x128 batch really produces a
+#                    16x16 grid and a 32x32 batch a 4x4 one, while the method
+#                    reported 8x8 for all three.
+#   * descriptors -- genuinely NOT. `_build_descriptor_head` resizes to the
+#                    construction-time (input_height, input_width) as a
+#                    graph-safe static target, so its shape is config-fixed and
+#                    the pre-fix code was already correct for it.
+#
+# The `// 8` divisor was also a hard-coded 3-stage assumption; it is now
+# `ENCODER_STRIDES ** len(depths)`.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("height", [64, 128, 32])
+@pytest.mark.parametrize("depths, dims", [((1, 1, 1), (8, 8, 16)),
+                                          ((1, 1, 1, 1), (8, 8, 8, 16))])
+def test_compute_output_shape_agrees_with_the_forward_pass(height, depths, dims):
+    keras.utils.set_random_seed(0)
+    model = SuperPoint(input_shape=(64, 64, 1), depths=depths, dims=dims,
+                       drop_path_rate=0.0)
+    real = model(keras.ops.zeros((2, height, height, 1)))
+    declared = model.compute_output_shape((None, height, height, 1))
+
+    for key in ("keypoints", "descriptors"):
+        assert tuple(real[key].shape)[1:] == tuple(declared[key])[1:], (
+            f"compute_output_shape declared {tuple(declared[key])} for '{key}' "
+            f"at input height {height} but the forward pass produced "
+            f"{tuple(real[key].shape)}"
+        )
+
+
+def test_the_descriptor_head_is_deliberately_construction_time_fixed():
+    """The other half of the asymmetry -- do NOT 'fix' this one too."""
+    keras.utils.set_random_seed(0)
+    model = SuperPoint(input_shape=(64, 64, 1), depths=(1, 1, 1), dims=(8, 8, 16),
+                       drop_path_rate=0.0)
+    for height in (32, 64, 128):
+        out = model(keras.ops.zeros((2, height, height, 1)))
+        assert tuple(out["descriptors"].shape)[1:3] == (64, 64)

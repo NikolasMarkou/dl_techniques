@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready, fully-featured Keras 3 implementation of a **YOLOv12-based multi-task learning model**. This framework is designed to simultaneously perform object detection, instance segmentation, and image classification using a shared, efficient feature extraction backbone. It is built for flexibility, allowing any combination of tasks to be enabled or disabled, and supports separate class configurations for each task.
+A Keras 3 implementation of a **YOLOv12-based multi-task learning model**. This framework is designed to simultaneously perform object detection, instance segmentation, and image classification using a shared, efficient feature extraction backbone. It is built for flexibility, allowing any combination of tasks to be enabled or disabled, and supports separate class configurations for each task.
 
 This implementation uses the Keras Functional API with named dictionary outputs, providing a clean and interpretable interface for complex multi-task scenarios. It is fully serializable and works seamlessly across TensorFlow, PyTorch, and JAX backends.
 
@@ -42,7 +42,7 @@ This is a powerful computer vision model that can perform multiple, distinct tas
 1.  **Shared Backbone Efficiency**: By sharing the most computationally expensive part of the network (the feature extractor), the model avoids redundant calculations. This makes it significantly faster and more memory-efficient than running separate models for each task.
 2.  **Implicit Regularization**: Training multiple tasks simultaneously encourages the shared backbone to learn more general and robust features. One task's learning process can help regularize and improve the performance of another, a phenomenon known as "knowledge transfer."
 3.  **Flexible Task Composition**: The architecture is fully modular. You can enable or disable tasks like `DETECTION`, `SEGMENTATION`, and `CLASSIFICATION` with a simple configuration flag. Crucially, it supports **separate class counts for each task** (e.g., 80 detection classes, but only 1 segmentation class).
-4.  **Named Dictionary Outputs**: For clarity in multi-task scenarios, the model returns a dictionary where keys correspond to task names (e.g., `{'detection': ..., 'segmentation': ...}`).
+4.  **Named Dictionary Outputs**: For clarity in multi-task scenarios, the model returns a dictionary where keys correspond to task names (e.g., `{'detection': ..., 'segmentation': ...}`). With exactly ONE task configured it returns that task's tensor directly — see Example 1.
 
 ### Why It Matters
 

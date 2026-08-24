@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A production-ready Keras 3 implementation of **LatentGMMRegistration**, a robust semi-supervised framework for rigid point cloud registration. This model learns to align two point clouds by mapping them into a shared latent Gaussian Mixture Model (GMM) space, handling noise, outliers, and large transformations effectively without expensive iterative optimization during inference.
+A Keras 3 implementation of **LatentGMMRegistration**, a robust semi-supervised framework for rigid point cloud registration. This model learns to align two point clouds by mapping them into a shared latent Gaussian Mixture Model (GMM) space, handling noise, outliers, and large transformations effectively without expensive iterative optimization during inference.
 
 ---
 
@@ -206,10 +206,15 @@ inputs = (source_pc, target_pc)
 gamma_x = model.correspondence_net((local_x, global_x))
 
 # Compute the centers of the Gaussian components
-from dl_techniques.models.latent_gmm import compute_gmm_params
+from dl_techniques.models.latent_gmm_registration import compute_gmm_params
 weights, means = compute_gmm_params(source_pc, gamma_x)
 
 # 'means' shape is (B, num_gaussians, 3)
+# These are responsibility-weighted centroids in the point cloud's own coordinate
+# frame -- mu_k = sum_i(gamma_ik * x_i) / sum_i(gamma_ik) -- so they are directly
+# comparable with the input coordinates and independent of the point count.
+# 'weights' (pi) are the mixing coefficients, mean responsibility per component,
+# summing to 1 across components.
 # These act like keypoints describing the object
 ```
 

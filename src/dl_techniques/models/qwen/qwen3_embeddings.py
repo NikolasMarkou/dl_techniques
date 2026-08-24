@@ -1,71 +1,91 @@
 """
-Qwen3 text embedding and reranking.
+Qwen3-style text embedding and reranking towers: a shared transformer trunk read out
+either as a pooled vector or as a two-token relevance judgment.
 
-This module provides Keras 3 implementations of the Qwen3 text embedding and
-reranking models, as detailed in the technical report "Qwen3 Embedding:
-Advancing Text Embedding and Reranking Through Foundation Models". The
-implementations are built using a factory-based, modular architecture,
-allowing for configurable components like attention and normalization layers
-while adhering to modern Keras patterns for robust serialization.
+Retrieval and reranking answer the same question at different budgets. An embedding
+model must reduce a passage to one vector *before* it knows what will be asked of
+it, so every document in a corpus can be encoded once and searched by inner product;
+the compression is the whole point and also the whole limitation. A reranker is
+allowed to read the query and the document together and spend a full forward pass
+per pair, so it can model interactions that no pair of independent vectors can
+represent. The two classes here share a trunk and differ only in the readout, which
+makes the trade explicit: one reads a hidden state, the other reads the language
+modelling head.
 
-**1. Qwen3 Text Embedding: Instruction-Aware Semantic Vectors**
+The embedding readout takes the hidden state at the last non-padding position rather
+than a prepended `[CLS]`. In a decoder-only model that position is the only one that
+has seen the entire sequence, which is the argument for the choice. The index is
+computed as `sum(attention_mask) - 1`, and that arithmetic assumes the padding is on
+the *right*: it counts real tokens rather than locating them, so a left-padded batch
+selects a position inside the padding and returns whatever that slot happens to hold.
+The gather itself is written with `take_along_axis` over an index broadcast to
+`(B, 1, D)` because the index rank must match the tensor's, not because a per-row
+scalar would be conceptually different.
 
-The embedding model leverages a causal transformer (decoder-only) architecture
-to generate dense vector representations of text. Its design is distinguished
-by several key principles that enhance performance on retrieval tasks:
+Two optional post-processing steps follow. `truncate_dim` slices the leading
+components of the vector, which is only meaningful under Matryoshka training — the
+property that a prefix of the vector is itself a usable embedding is created by the
+loss, not by the slice, so truncating an ordinarily-trained model degrades quality
+arbitrarily. L2 normalization projects to the unit sphere, after which inner product
+and cosine similarity coincide and a maximum-inner-product index answers cosine
+queries exactly. Note the order: truncation happens *before* normalization, so a
+truncated vector is a unit vector in its own subspace rather than a slice of a unit
+vector, which is the behaviour a downstream cosine search expects.
 
--   **Instruction-Awareness**: The model is trained to be sensitive to task-
-    specific instructions. For query-like inputs, a formatted instruction
-    (e.g., "Instruct: Retrieve relevant passages...") is prepended to the
-    text. This allows the model to adapt its embedding generation process to
-    the specific semantic context of the task, such as retrieval, classification,
-    or clustering. Documents are embedded without instructions to maintain a
-    general representation.
+The reranker scores a single prompt containing instruction, query and document, and
+converts the model's own next-token distribution into a probability. It reads the
+logits at the last non-padding position, extracts the two entries for the "yes" and
+"no" token ids, and softmaxes over just that pair:
 
--   **Last-Token Pooling**: Unlike BERT-style models that often use a special
-    [CLS] token, the final embedding is derived from the hidden state of the
-    last non-padding token in the sequence. In a causal model, this final state
-    is theoretically positioned to aggregate information from the entire
-    preceding sequence, making it a comprehensive representation.
+`score = softmax([logit_no, logit_yes])[1]`
 
--   **Matryoshka Representation Learning (MRL)**: The model supports generating
-    embeddings of variable dimensions without retraining. By simply truncating
-    the full-dimension embedding vector, users can obtain smaller, more
-    efficient vectors that retain a high degree of semantic quality. This is
-    achieved through specific training techniques that make the initial
-    dimensions of the vector the most informative.
+Restricting the softmax to two entries rather than the full vocabulary is what makes
+the number a calibrated binary probability instead of a quantity dominated by
+whatever else the model might have said. It also means the score depends on the
+tokenizer: `yes_token_id` and `no_token_id` default to 9891 and 2201, and pointing
+this model at a different vocabulary without changing them silently scores two
+unrelated tokens.
 
--   **L2 Normalization**: The final pooled and truncated vector is L2-normalized
-    to produce a unit vector. This standardizes the embeddings, making them
-    directly suitable for efficient similarity calculations using cosine
-    similarity or maximum inner product search (MIPS).
+**The two towers are deliberately masked differently, and the asymmetry is the
+point.** The reranker converts its own language-modelling head into a judgment, so
+it is a next-token prediction and is causal: `Qwen3RerankerLayer.call` builds the
+mask through `components.build_causal_attention_mask` — the same constructor
+`qwen3.py` and `qwen3_next.py` use — which OR-combines a lower-triangular mask with
+the caller's padding mask and returns ATTEND semantics. Before this was wired the
+head scored a position that had already attended to the tokens after it; perturbing
+a token at index 6 of a 12-token sequence moved every hidden state at index < 6 by
+up to 3.42e-01, and now moves them by exactly 0.0 while positions >= 6 still
+respond.
 
-**2. Qwen3 Reranking: Generative Relevance Classification**
+`Qwen3EmbeddingLayer` stays **bidirectional on purpose** and forwards the caller's
+2D padding mask unchanged. Nothing is predicted from the pooled vector, so there is
+no target to leak; bidirectional attention is strictly more informative for an
+encoder, and it is what the strong open embedding models do. The one thing it costs
+is the usual justification for last-token pooling — in a bidirectional trunk every
+position has seen the whole sequence, so reading the last real one is a convention
+carried over from the decoder-only lineage rather than a requirement. It remains a
+reasonable convention (that position is the only one guaranteed to exist and to be
+non-padding for every row), but do not read it as evidence of causality.
 
-The reranker model reframes the task of relevance scoring from a simple
-similarity calculation to a generative classification problem. It uses the
-advanced reasoning and context-understanding capabilities of a causal
-language model to make a nuanced judgment about a query-document pair.
+Position is encoded with *learned absolute* embeddings (`positional_learned` from
+the embedding factory), not the rotary embeddings used elsewhere in the Qwen family.
+Sequences longer than `max_seq_len` have no encoding to draw on. The trunk's
+attention, FFN and normalization types are all factory keys, so these classes
+describe a configurable transformer in the shape of the published models rather than
+a weight-compatible port; no pretrained weights are distributed and none of the
+published evaluation numbers should be expected from them.
 
--   **Prompt-Based Judgment**: Instead of comparing two separate embeddings, the
-    reranker processes a single, carefully crafted prompt that includes the
-    instruction, the query, and the document. The prompt concludes by framing
-    the task as a question for the model to answer, asking it to generate either
-    "yes" or "no" to indicate relevance.
-
--   **Probabilistic Scoring**: The final relevance score is not a simple logit
-    but the model's confidence in its judgment. It is calculated as the
-    softmax probability of the "yes" token over the logits of the "yes" and
-    "no" tokens. This approach directly leverages the model's generative
-    pre-training to produce a more reliable and context-aware relevance score.
-    Mathematically, this is expressed as:
-        Score = P("yes" | prompt) = softmax(logits["yes"], logits["no"])[1]
-
-**Foundational References:**
-
--   Zhang, Y., et al. (2025). *Qwen3 Embedding: Advancing Text Embedding and
-    Reranking Through Foundation Models*. arXiv:2506.05176.
--   Vaswani, A., et al. (2017). *Attention Is All You Need*. arXiv:1706.03762.
+References:
+    - Zhang et al., 2025. Qwen3 Embedding: Advancing Text Embedding and Reranking
+      Through Foundation Models. (https://arxiv.org/abs/2506.05176)
+    - Kusupati et al., 2022. Matryoshka Representation Learning.
+      (https://arxiv.org/abs/2205.13147)
+    - Wang et al., 2024. Improving Text Embeddings with Large Language Models.
+      (https://arxiv.org/abs/2401.00368)
+    - Nogueira et al., 2020. Document Ranking with a Pretrained Sequence-to-Sequence
+      Model. (https://arxiv.org/abs/2003.06713)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras
@@ -79,6 +99,8 @@ from typing import Optional, Tuple, Dict, Any, Union
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.factory import create_embedding_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
+
+from .components import build_causal_attention_mask
 
 # ---------------------------------------------------------------------
 
@@ -198,14 +220,22 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
             name='token_embeddings'
         )
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-020
+        # `dropout_rate` is forwarded here AND there is deliberately no second
+        # standalone `embedding_dropout` layer. Do NOT "restore" one: this call
+        # used to omit the kwarg and a separate Dropout(dropout_rate) was applied
+        # to the very same tensor on the next line, so forwarding it without
+        # removing that layer stacks two dropouts and gives an effective rate of
+        # 1-(1-p)^2 (0.19 for the shipped 0.1). Pinned by
+        # tests/test_models/test_qwen/test_embedding_dropout_applied_once.py.
+        # See D-020 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
         self.positional_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=max_seq_len,
             dim=hidden_size,
+            dropout_rate=dropout_rate,
             name='positional_embeddings'
         )
-
-        self.embedding_dropout = layers.Dropout(dropout_rate, name='embedding_dropout')
 
         # Create transformer layers
         self.transformer_layers = []
@@ -241,9 +271,6 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         # Build positional embeddings - expects (batch_size, seq_len, hidden_size)
         self.positional_embeddings.build((batch_size, seq_len, self.hidden_size))
 
-        # Build dropout layer
-        self.embedding_dropout.build((batch_size, seq_len, self.hidden_size))
-
         # Build transformer layers
         transformer_input_shape = (batch_size, seq_len, self.hidden_size)
         for transformer_layer in self.transformer_layers:
@@ -266,11 +293,9 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         # Token embeddings
         hidden_states = self.token_embeddings(input_ids)
 
-        # Add positional embeddings
-        hidden_states = self.positional_embeddings(hidden_states)
-
-        # Apply dropout
-        hidden_states = self.embedding_dropout(hidden_states, training=training)
+        # Add positional embeddings. The embedding dropout lives INSIDE this
+        # layer, so `training` has to be forwarded explicitly here.
+        hidden_states = self.positional_embeddings(hidden_states, training=training)
 
         # Process through transformer layers
         for transformer_layer in self.transformer_layers:
@@ -364,8 +389,8 @@ class Qwen3RerankerLayer(keras.layers.Layer):
     **Architecture**:
     ```
     Formatted Prompt -> Token Embeddings -> Positional Embeddings ->
-    N × TransformerLayer -> Language Modeling Head -> Logits["no", "yes"] ->
-    Softmax -> Score
+    N × TransformerLayer (CAUSAL + padding mask) -> Language Modeling Head ->
+    Logits["no", "yes"] -> Softmax -> Score
     ```
 
     **Mathematical Operation**:
@@ -455,14 +480,22 @@ class Qwen3RerankerLayer(keras.layers.Layer):
             name='token_embeddings'
         )
 
+        # DECISION plan-2026-08-18T140459-7991552f/D-020
+        # `dropout_rate` is forwarded here AND there is deliberately no second
+        # standalone `embedding_dropout` layer. Do NOT "restore" one: this call
+        # used to omit the kwarg and a separate Dropout(dropout_rate) was applied
+        # to the very same tensor on the next line, so forwarding it without
+        # removing that layer stacks two dropouts and gives an effective rate of
+        # 1-(1-p)^2 (0.19 for the shipped 0.1). Pinned by
+        # tests/test_models/test_qwen/test_embedding_dropout_applied_once.py.
+        # See D-020 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
         self.positional_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=max_seq_len,
             dim=hidden_size,
+            dropout_rate=dropout_rate,
             name='positional_embeddings'
         )
-
-        self.embedding_dropout = layers.Dropout(dropout_rate, name='embedding_dropout')
 
         # Create transformer layers
         self.transformer_layers = []
@@ -504,9 +537,6 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Build positional embeddings
         self.positional_embeddings.build((batch_size, seq_len, self.hidden_size))
 
-        # Build dropout layer
-        self.embedding_dropout.build((batch_size, seq_len, self.hidden_size))
-
         # Build transformer layers
         transformer_input_shape = (batch_size, seq_len, self.hidden_size)
         for transformer_layer in self.transformer_layers:
@@ -532,17 +562,24 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Token embeddings
         hidden_states = self.token_embeddings(input_ids)
 
-        # Add positional embeddings
-        hidden_states = self.positional_embeddings(hidden_states)
+        # Add positional embeddings. The embedding dropout lives INSIDE this
+        # layer, so `training` has to be forwarded explicitly here.
+        hidden_states = self.positional_embeddings(hidden_states, training=training)
 
-        # Apply dropout
-        hidden_states = self.embedding_dropout(hidden_states, training=training)
+        # The reranker reads its own LM head at the last real position, so it is
+        # a next-token prediction and MUST be causal: without the mask that
+        # position has already attended to the tokens it is being asked to
+        # score. Shared with qwen3.py / qwen3_next.py; returns ATTEND semantics
+        # and folds the padding mask in, so the raw 2D mask is not forwarded.
+        causal_attend_mask = build_causal_attention_mask(
+            hidden_states, attention_mask
+        )
 
         # Process through transformer layers
         for transformer_layer in self.transformer_layers:
             hidden_states = transformer_layer(
                 hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=causal_attend_mask,
                 training=training
             )
 
@@ -624,14 +661,15 @@ class Qwen3EmbeddingModel(keras.Model):
     """
     High-level Keras Model for Qwen3 Text Embedding.
 
-    This model provides a user-friendly interface for generating text embeddings
-    with support for different instruction types and document processing modes.
-    It wraps the `Qwen3EmbeddingLayer` and provides convenient methods for
-    processing queries and documents.
+    A thin `keras.Model` wrapper around `Qwen3EmbeddingLayer`. It defines
+    `__init__`, `call` and `get_config` and NOTHING ELSE: there are no
+    query/document helper methods, no instruction handling and no tokenizer.
+    Callers pass already-tokenized `input_ids`/`attention_mask` and prefix any
+    task instruction into the token ids themselves.
 
-    **Intent**: To offer a simple, `compile()`- and `fit()`-ready Keras Model
-    that abstracts tokenization details while providing flexible embedding
-    generation for various text types.
+    **Intent**: To offer a `compile()`- and `fit()`-ready Keras Model around the
+    embedding layer. It abstracts nothing about tokenization; that claim stood
+    in this docstring until 2026-08-19 and was never implemented.
 
     Args:
         vocab_size (int): Size of the vocabulary for token embeddings.
@@ -751,12 +789,15 @@ class Qwen3RerankerModel(keras.Model):
     """
     High-level Keras Model for Qwen3 Text Reranking.
 
-    This model provides a user-friendly interface for computing relevance scores
-    between query-document pairs. It wraps the `Qwen3RerankerLayer` and provides
-    methods for processing formatted reranking prompts.
+    A thin `keras.Model` wrapper around `Qwen3RerankerLayer`. It defines
+    `__init__`, `call` and `get_config` and NOTHING ELSE: there is no prompt
+    formatter and no method for processing query/document pairs. The caller is
+    responsible for building the "yes"/"no" prompt and tokenizing it, then
+    passing `input_ids`/`attention_mask`.
 
-    **Intent**: To offer a simple, end-to-end interface for reranking tasks
-    that can be easily integrated into retrieval and ranking pipelines.
+    **Intent**: To offer a `compile()`- and `fit()`-ready Keras Model around the
+    reranker layer. It is not an end-to-end reranking interface; that claim
+    stood in this docstring until 2026-08-19 and was never implemented.
 
     Args:
         vocab_size (int): Size of the vocabulary.

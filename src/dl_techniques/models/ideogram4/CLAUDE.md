@@ -93,6 +93,16 @@ The post-norm-inside-the-residual is unusual but replicated exactly.
   preset** (`in_channels == 32`).
 - **Trainer image-token slice**: the trainer model returns `velocity[:, T:]`
   (image-token velocities only) so the velocity MSE is computed on image tokens.
+- **Time convention settled (2026-08-15, C-26 / D-002)**: `t = 0` is clean data,
+  `t = 1` is noise, `v = x1 - x0` points data -> noise, and sampling integrates
+  DOWN with a negative step. Until this fix `pipeline.py`'s Euler loop paired an
+  ascending step grid with a *decreasing* `LogitNormalSchedule`, so it evaluated
+  the transformer from the clean-data timestep upward with a positive `dt` — the
+  exact inverse of the trainer — while every shipped test (shape, finiteness,
+  `[0, 1]` range, seed determinism) still passed. The loop index stays descending
+  because `guidance_schedule` is written in loop-index order; the grid index is
+  what got reversed. Do not "simplify" that reversal away; see the D-002 comment
+  at the loop and `tests/.../test_ideogram4/test_sampler_direction.py`.
 
 ### Known cosmetic issue
 
@@ -105,15 +115,18 @@ the smoke-train). Minor follow-up only — does not affect correctness.
 
 ## In-code DECISION anchors
 
-All anchors carry the plan-id prefix `plan_2026-06-12_59a18a10`:
+The port's own anchors carry the plan-id prefix `plan_2026-06-12_59a18a10`; the
+sampling-direction repair carries `plan-2026-08-14T233721-d4f9beb2`:
 
 | anchor | file:line | summary |
 |--------|-----------|---------|
+| D-002 (`plan-2026-08-14T233721-d4f9beb2`) | `models/ideogram4/pipeline.py`, in `Ideogram4Pipeline.__call__`'s Euler loop | reverse-indexed step grid so `t` descends noise -> data with `dt < 0` |
 | D-003 | `layers/embedding/multi_axis_rope.py:183` | static one-hot band-interleave (replaces dynamic scatter) |
 | D-004 | `layers/attention/ideogram4_attention.py:226` | additive finite block-diagonal segment mask (replaces boolean keep-mask) |
 | D-005 | `models/ideogram4/vae.py:317` | thin `Upsample` wrapper (replaces functional `upsample()` builder) |
 
-D-001 (overall scope) and D-002 (net-new `ScalarSinusoidalEmbedding` +
+Of the port plan (`plan_2026-06-12_59a18a10`), its D-001 (overall scope) and its
+D-002 (net-new `ScalarSinusoidalEmbedding` +
 `Ideogram4TransformerBlock`) are design-level decisions; D-002's anchor lives in
 `scalar_sinusoidal_embedding.py`. See `decisions.md`.
 

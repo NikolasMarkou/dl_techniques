@@ -118,7 +118,7 @@ SEQUENCE_POOLING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'aggregation_method': 'concat',
             'attention_hidden_dim': 256,
             'attention_num_heads': 1,
-            'attention_dropout': 0.0,
+            'attention_dropout_rate': 0.0,
             'weighted_max_seq_len': 512,
             'top_k': 10,
             'temperature': 1.0,
@@ -222,7 +222,7 @@ def validate_sequence_pooling_config(
         )
 
     # Validate probability/rate parameters (0.0 to 1.0)
-    rate_params = ['dropout_rate', 'attention_dropout']
+    rate_params = ['dropout_rate', 'attention_dropout_rate']
     for param in rate_params:
         if param in kwargs and not (0.0 <= kwargs[param] <= 1.0):
             raise ValueError(
