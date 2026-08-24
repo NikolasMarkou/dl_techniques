@@ -5,6 +5,22 @@ Zero adoption of ``gradient_flow_oracle`` / ``knob_sensitivity_oracle`` /
 ``smoke_contract_oracle`` before this file. All three are adopted; no new oracle
 is authored.
 
+Adoption baseline, re-measured 2026-08-24 before the step-9 edit
+---------------------------------------------------------------
+Adopted in this package at that point: ``gradient_flow_oracle``,
+``knob_sensitivity_oracle``, ``smoke_contract_oracle`` -- the three above, all
+added by Phase 5 batch A. NOT adopted: ``lazy_build_contract_oracle`` (zero
+occurrences of ``lazy_build`` anywhere under ``tests/test_models/test_beit/``),
+which ``TestBeitLazyBuildContract`` at the foot of this file now adopts.
+
+Two shared instruments are deliberately still not adopted here, because ``beit``
+already reaches them CENTRALLY and a per-package copy would duplicate an
+instrument rather than extend coverage: it is a registered subject in
+``tests/test_models/precision_arm_subjects.py:145-152``, which feeds both the
+family mixed-precision / XLA arm and ``test_roundtrip_instrument_family.py``.
+That is why this file grows a lazy-build class and no fp16, XLA or round-trip
+class.
+
 The one dead weight, and why it is not a defect
 -----------------------------------------------
 Measured 2026-08-21 on ``create_beit_classifier('tiny', (32,32,3), 16,
@@ -44,6 +60,7 @@ from ..gradient_flow_oracle import (
     stop_all_gradients,
 )
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
 from ..smoke_contract_oracle import (
     assert_contract_rejects_a_broken_forward,
     assert_finite,
@@ -218,3 +235,135 @@ class TestBeitSmokeContract:
         assert set(rejections) == {
             "collapse_to_scalar", "slice_leading_axis", "append_trailing_axis",
         }
+
+
+class TestBeitLazyBuildContract:
+    """``lazy_build_contract_oracle`` -- does BEiT's lazy build cost anything?
+
+    The oracle does NOT assert the contract ("is it built after ``build()``?").
+    It asserts the CONSEQUENCE: perturb every float weight, prove the
+    perturbation MOVED the output, then save/load and require an EXACT match at
+    ``atol=0.0``. Both real lazy-build defects this tree has ever found (D-029
+    ``SHGCNLinkPredictor``, D-049 ``BERT``) were found by that value comparison
+    and by nothing else.
+
+    Both heads are probed, because they materialize differently and because the
+    difference is the one this package already documents. ``mask_token`` is
+    built UNCONDITIONALLY -- the comment in ``BeitModel.build`` says "ALWAYS
+    built -- even in the classifier, which never calls it" -- precisely so a
+    lazy build cannot drop it on a ``.keras`` round trip. That is a claim about
+    save/load, and until this class nothing in this package tested it: the
+    ``expect_zero`` waiver above proves the weight is DEAD in the classifier,
+    which is exactly the condition under which a partial materialization would
+    lose it unnoticed. The MIM arm additionally puts a TWO-input model
+    ``(images, mask)`` through the oracle, so the mask branch of ``build`` is
+    materialized too.
+
+    MEASURED 2026-08-24, GPU 1 (RTX 4070), ``tiny`` at ``IMG``/``PATCH`` above,
+    ``drop_path_rate=0.0``:
+
+    ============================  ==================  ==================
+    ..                            classifier, 1 out   MIM head, 1 out
+    ============================  ==================  ==================
+    weights after one call        224                 224
+    weights after ``.build()``    224                 224
+    materialization ratio         1.0                 1.0
+    ``count_params()`` after      5,490,871           5,501,872
+    weights perturbed             224                 224
+    perturbation liveness         1.638e-01           2.488e-01
+    round-trip ``max|delta|``     0.000e+00           0.000e+00
+    ============================  ==================  ==================
+
+    The two weight counts being EQUAL at 224 is not a copy-paste slip: the heads
+    differ by one dense layer's kernel+bias against the classifier's, so the
+    parameter TOTALS differ (the third row) while the tensor count does not.
+    """
+
+    #: Measured 2026-08-24 on GPU 1; see the class docstring. The same 224 that
+    #: `GF_N_WEIGHTS_CLASSIFIER` pins for the gradient arm, reached by a
+    #: different route -- `len(model.weights)`, not the trainable set.
+    N_WEIGHTS = 224
+
+    @staticmethod
+    def _unbuilt_classifier():
+        """The file's standard subject WITHOUT ``_classifier()``'s forward pass.
+
+        ``_classifier()`` calls the model before returning it, which would hand
+        the oracle an already-materialized instance and delete the one thing its
+        materialization arm measures.
+        """
+        return create_beit_classifier(
+            "tiny", IMG, PATCH, num_classes=NUM_CLASSES, drop_path_rate=0.0,
+        )
+
+    @staticmethod
+    def _unbuilt_mim():
+        return create_beit_mim(
+            "tiny", IMG, PATCH, vocab_size=VOCAB, drop_path_rate=0.0,
+        )
+
+    def test_the_classifier_lazy_build_costs_nothing(self):
+        report = assert_lazy_build_costs_nothing(
+            build=self._unbuilt_classifier,
+            make_inputs=lambda: _images(1),
+            input_shape=(None,) + IMG,
+        )
+        assert report["n_weights"] == self.N_WEIGHTS
+        assert report["roundtrip_max_delta"] == 0.0
+        assert report["perturb_liveness"] > 1e-3
+        assert report["materialization"]["ratio"] == 1.0
+        assert report["materialization"]["n_weights_after_build"] == self.N_WEIGHTS, (
+            "BeitModel.build() no longer materializes every weight; a PARTIAL "
+            "materialization is the D-049 shape and a `> 0` assertion would "
+            "pass against exactly that"
+        )
+
+    def test_the_masked_image_modelling_lazy_build_costs_nothing(self):
+        """The two-input arm -- and the one that carries a LIVE ``mask_token``.
+
+        In the classifier the mask token is dead weight (see
+        ``CLASSIFIER_EXPECT_ZERO``), so a round trip that lost it would still
+        produce an identical output. Here it is applied, so its restoration is
+        inside the ``atol=0.0`` comparison rather than beside it.
+        """
+        report = assert_lazy_build_costs_nothing(
+            build=self._unbuilt_mim,
+            make_inputs=lambda: (_images(1), _mask(1)),
+            input_shape=[(None,) + IMG, (None, NUM_PATCHES)],
+        )
+        assert report["n_weights"] == self.N_WEIGHTS
+        assert report["roundtrip_max_delta"] == 0.0
+        assert report["perturb_liveness"] > 1e-3
+        assert report["materialization"]["ratio"] == 1.0
+
+    def test_the_lazy_build_assertion_can_fail(self):
+        """RED proof: a model whose forward ignores its weights must be caught.
+
+        The liveness arm is the whole instrument -- without it, a round trip
+        comparing an unperturbed model against itself passes over total weight
+        loss, which is how ``ScoreBasedNanoVLM``'s own round-trip test passed
+        3/3 while 464 of 1,305 tensors were never written. This injects exactly
+        that shape: a subject whose output is a CONSTANT of its inputs, so
+        perturbing all 224 weights moves nothing.
+        """
+
+        @keras.saving.register_keras_serializable(package="beit_test_red_proof")
+        class _WeightBlindClassifier(keras.Model):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.inner = create_beit_classifier(
+                    "tiny", IMG, PATCH, num_classes=NUM_CLASSES,
+                    drop_path_rate=0.0,
+                )
+
+            def call(self, inputs, training=None):
+                self.inner(inputs, training=training)
+                return keras.ops.zeros(
+                    (keras.ops.shape(inputs)[0], NUM_CLASSES), dtype="float32",
+                )
+
+        with pytest.raises(AssertionError, match="did not move the output"):
+            assert_lazy_build_costs_nothing(
+                build=_WeightBlindClassifier,
+                make_inputs=lambda: _images(1),
+            )
