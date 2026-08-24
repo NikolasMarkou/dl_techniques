@@ -1159,18 +1159,28 @@ def create_bert_with_head(
         ``decisions.md`` D-009 (plan-2026-08-23T203721-009b7ccf). Call the
         encoder directly when you want the two-key form.
 
-        The model's
-        output is a **bare tensor** whenever the head produces a single
-        informative tensor -- which is every classification-style head, since
-        their `probabilities` entry is exactly `softmax(logits)` and a token
-        head's `predictions` entry is exactly `argmax(logits, axis=-1)`; both
-        are dropped here as derived duplicates of `logits`, which is the only
-        one a loss can consume. A head that emits genuinely independent
-        tensors keeps a dict output; `QuestionAnsweringHead` is the example,
-        returning `{"start_logits": ..., "end_logits": ...}`. The bare-tensor
-        form is what makes `loss="sparse_categorical_crossentropy"` and
-        `metrics=["accuracy"]` compile, and what makes
-        `model.predict(x).shape` read.
+        **Output contract.** The head's dict is post-processed by exactly two
+        rules, in order. (1) If it contains `logits`, the derived duplicates
+        `probabilities` (`softmax(logits)`) and `predictions`
+        (`argmax(logits, axis=-1)`, int32, unusable as a loss target) are
+        dropped. (2) **ANY** dict that is left with a single key is then
+        unwrapped to that bare tensor -- this includes `{"embeddings": ...}`,
+        not only `{"logits": ...}`.
+
+        So of the 24 reachable task types, **22 give a bare tensor and 2 give a
+        dict**. The two are `QUESTION_ANSWERING` and `SPAN_EXTRACTION`, which
+        keep `{"start_logits": ..., "end_logits": ...}` because those are
+        genuinely independent tensors. Worth calling out explicitly, because
+        rule (2) is easy to miss: the three `TextSimilarityHead` tasks
+        (`TEXT_SIMILARITY`, `PARAPHRASE_DETECTION`, `DUPLICATE_DETECTION`)
+        return a **bare embeddings tensor** `(None, embedding_dim)`, NOT a
+        dict and NOT logits -- this factory always feeds the head a single
+        sequence, so the head's pair branch (which would emit three tensors) is
+        unreachable from here.
+
+        The bare-tensor form is what makes
+        `loss="sparse_categorical_crossentropy"` and `metrics=["accuracy"]`
+        compile, and what makes `model.predict(x).shape` read.
     :rtype: keras.Model
 
     Example:
@@ -1251,13 +1261,33 @@ def create_bert_with_head(
     # is HIGH blast radius (~20 model packages) and the heads' own dict
     # contract is used directly by callers that never go through this factory.
     # Do NOT collapse unconditionally either -- `QuestionAnsweringHead` emits
-    # `{'start_logits', 'end_logits'}` and `TextSimilarityHead` emits three
-    # independent tensors; those keep their dicts. The two names below are the
-    # complete derived set, RE-DERIVED by an AST walk over every `call()` in
+    # `{'start_logits', 'end_logits'}`, two genuinely independent tensors, and
+    # that dict is KEPT. The two names below are the complete derived set,
+    # RE-DERIVED by an AST walk over every `call()` in
     # `layers/heads/nlp/factory.py` rather than assumed: only
     # `TextClassificationHead` / `MultipleChoiceHead` (`probabilities`) and
     # `TokenClassificationHead` (`predictions`, an int32 argmax no loss can
     # consume) put a pure function of `logits` beside it.
+    #
+    # CORRECTED 2026-08-24 (step 13.2). This anchor used to say
+    # "`TextSimilarityHead` emits three independent tensors; those keep their
+    # dicts". That is the opposite of what the code does, and it named a branch
+    # this factory CANNOT REACH. `TextSimilarityHead.call` has two branches: the
+    # PAIR branch (`hidden_states_1`/`hidden_states_2`) returns
+    # `{'similarity_score', 'embeddings_1', 'embeddings_2'}`, and the
+    # SINGLE-SEQUENCE branch returns `{'embeddings': ...}`. `head_inputs` above
+    # is always the single-sequence form, so the pair branch is unreachable from
+    # here and TEXT_SIMILARITY / PARAPHRASE_DETECTION / DUPLICATE_DETECTION all
+    # arrive at the `len(...) == 1` unwrap and come out as a BARE TENSOR
+    # `(None, embedding_dim)` -- MEASURED. The rule this code actually
+    # implements, and the one to keep, is: drop the derived duplicates when
+    # `logits` is present, then unwrap ANY remaining single-key dict, INCLUDING
+    # `{'embeddings'}`. That is the right rule -- a one-key dict carries exactly
+    # one informative tensor, and leaving it wrapped would make the model
+    # non-compilable with plain `metrics=[...]` for no gain. Restricting the
+    # unwrap to logits-bearing dicts was considered and REJECTED for exactly
+    # that reason. Every reachable NLPTaskType's resulting contract is pinned by
+    # `tests/test_models/test_bert/test_every_head_family_output_contract.py`.
     derived_from_logits = ("probabilities", "predictions")
 
     model_outputs = task_outputs

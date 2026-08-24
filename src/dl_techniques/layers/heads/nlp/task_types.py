@@ -424,11 +424,29 @@ class NLPTaskConfig:
         if self.task_type in classification_tasks and self.num_classes is None:
             raise ValueError(f"{self.task_type} requires num_classes to be specified")
 
-        # Set vocabulary size for generation tasks
+        # Set vocabulary size for generation tasks.
+        #
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-022
+        # This list and `factory.get_head_class`'s generation rows are two
+        # hand-maintained spellings of "which task types need a vocabulary".
+        # They DISAGREED: this list carried MACHINE_TRANSLATION (which
+        # `get_head_class` REFUSES -- no head is implemented for it) and omitted
+        # TEXT_COMPLETION (which `get_head_class` maps to `TextGenerationHead`).
+        # MEASURED: `create_bert_with_head(task_type=TEXT_COMPLETION)` died with
+        # `ValueError: vocabulary_size must be specified for generation tasks`
+        # while its three siblings built fine. TEXT_COMPLETION is added below.
+        # Do NOT remove MACHINE_TRANSLATION to "match" -- `NLPTaskConfig` is
+        # also used by callers that never reach `get_head_class`, so dropping it
+        # would be a behaviour change, not a tidy-up. The lockstep itself is the
+        # defect; it is now CHECKED rather than trusted, by
+        # `tests/test_models/test_bert/test_every_head_family_output_contract.py`,
+        # which asserts every type `get_head_class` routes to
+        # `TextGenerationHead` gets a non-None `vocabulary_size` here.
         generation_tasks = [
             NLPTaskType.TEXT_GENERATION,
             NLPTaskType.MASKED_LANGUAGE_MODELING,
             NLPTaskType.TEXT_SUMMARIZATION,
+            NLPTaskType.TEXT_COMPLETION,
             NLPTaskType.MACHINE_TRANSLATION,
         ]
 
@@ -531,6 +549,7 @@ class NLPTaskConfiguration:
         generation_tasks = {
             NLPTaskType.TEXT_GENERATION,
             NLPTaskType.TEXT_SUMMARIZATION,
+            NLPTaskType.TEXT_COMPLETION,
             NLPTaskType.MACHINE_TRANSLATION,
             NLPTaskType.DIALOGUE_GENERATION,
         }
