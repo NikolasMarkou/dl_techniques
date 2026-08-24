@@ -906,9 +906,12 @@ class TestBiasFreeUNetParameterized:
     def test_different_kernel_sizes(self):
         """``kernel_size`` must reach the convolution kernels.
 
-        bfunet.py fixes the stem at ``initial_kernel_size=5`` (line 362) and the
-        output projection at 1x1, so those extents are present at every setting;
-        `kernel_size` governs every other conv.
+        In bfunet.py, ``_build_encoder_path`` gives the very first conv (level 0,
+        block 0) ``kernel_size=initial_kernel_size``, whose default is 5, and
+        ``_build_final_projection`` fixes the output projection at 1x1. Both extents
+        are therefore present at every setting; ``kernel_size`` governs every other
+        conv. Cited by SYMBOL, not by line: this suite already carried two line
+        citations into bfunet.py that a decomposition silently rotted.
         """
         builders = {
             k: (lambda k=k: create_bfunet_denoiser(
@@ -930,9 +933,10 @@ class TestBiasFreeUNetParameterized:
     def test_different_filter_multipliers(self):
         """``filter_multiplier`` must widen each successive level.
 
-        Structural. bfunet.py:339 computes
-        ``initial_filters * multiplier ** level``; at multiplier 1 the levels
-        are flat, so the parameter count must grow strictly with the multiplier.
+        Structural. In bfunet.py, ``create_bfunet_denoiser`` builds its
+        ``filter_sizes`` list as ``int(initial_filters * (filter_multiplier ** i))``
+        for each level ``i``; at multiplier 1 the levels are flat, so the parameter
+        count must grow strictly with the multiplier. Cited by SYMBOL, not by line.
         """
         multipliers = (1, 2, 3, 4)
         builders = {
