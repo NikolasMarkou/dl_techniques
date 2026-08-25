@@ -836,7 +836,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
 | Lines in `README.md` | 564 | `wc -l < README.md` |
 | Dicts named `*_REGISTRY` under `src/dl_techniques/` | 9 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
-| Keys in `ATTENTION_REGISTRY` | 32 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
+| Keys in `ATTENTION_REGISTRY` | 33 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `ACTIVATION_REGISTRY` | 22 | `awk 'index($0,"ACTIVATION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/activations/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `FFN_REGISTRY` | 21 | `awk 'index($0,"FFN_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/ffn/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `ANYLOSS_REGISTRY` | 16 | `awk 'index($0,"ANYLOSS_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/losses/any_loss.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |

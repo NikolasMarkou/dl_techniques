@@ -294,13 +294,49 @@ class TestModernBERTEdgeCases:
     """Test ModernBERT model edge cases."""
 
     def test_minimum_sequence_length(self):
+        """L=1 still runs, and emits a Keras advisory that is a FALSE POSITIVE.
+
+        Since 2026-08-25 the local layers are 1-D bands
+        (plan-2026-08-25T053412-0f1fa04f, D-012) and pad nothing, so at L=1 the
+        score tensor is genuinely ``(1, heads, 1, 1)`` and
+        ``keras.layers.Softmax`` warns that "this axis has size 1 ... will
+        always return the value 1". It is right about the mechanism and wrong
+        about the intent: with one token, attention to oneself with weight 1.0
+        IS the correct answer. This repo escalates warnings to errors under
+        pytest, so the warning is captured explicitly rather than left to blow
+        up the test.
+
+        Not band-specific, and NOT a regression this change introduced.
+        MEASURED 2026-08-25 at N=1, ``dim=64, num_heads=4``, under
+        ``-W error::UserWarning``: ``'multi_head'`` RAISES the same warning and
+        ``'window_band'`` RAISES it; ``'window'`` and ``'window_zigzag'`` do not,
+        because they pad N=1 up to a full tile -- i.e. the only reason the old
+        wiring was quiet here is the padding this plan removed. If
+        ``keras.layers.Softmax`` ever stops warning, ``pytest.warns`` fails
+        loudly and this docstring should be re-derived, not deleted.
+        """
         model = ModernBERT(
             vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8,
             local_attention_window_size=TEST_WINDOW_SIZE # FIX: Use small window size
         )
         input_ids = keras.ops.cast([[42]], dtype='int32')
-        outputs = model(input_ids, training=False)
+        with pytest.warns(UserWarning, match="axis has size 1"):
+            outputs = model(input_ids, training=False)
         assert outputs['last_hidden_state'].shape == (1, 1, 128)
+        assert np.all(np.isfinite(
+            keras.ops.convert_to_numpy(outputs['last_hidden_state'])
+        ))
+
+    def test_sequence_length_two_needs_no_warning_suppression(self):
+        """The control for the test above: the advisory is about L=1 ONLY, so
+        an ordinary short sequence must run clean. If this ever needs
+        ``pytest.warns`` too, the band is collapsing something it should not."""
+        model = ModernBERT(
+            vocab_size=1000, hidden_size=128, num_layers=2, num_heads=8,
+            local_attention_window_size=TEST_WINDOW_SIZE,
+        )
+        outputs = model(keras.ops.cast([[42, 7]], dtype='int32'), training=False)
+        assert outputs['last_hidden_state'].shape == (1, 2, 128)
 
 
 class TestModernBERTIntegrationFactory:
@@ -414,7 +450,10 @@ class TestModernBERTAdvancedFeatures:
             # Global layers are 'group_query' with num_kv_heads == num_heads,
             # which is arithmetically plain MHA plus RoPE. See the D-007 anchor
             # in models/language/modern_bert/model.py: 'multi_head' cannot carry RoPE.
-            expected_type = "group_query" if is_global else "window"
+            # 'window_band' since 2026-08-25 (plan-2026-08-25T053412-0f1fa04f,
+            # D-012): the local layers were 'window', a SPATIAL layer over a
+            # synthetic ceil(sqrt(L)) grid. They are now a 1-D symmetric band.
+            expected_type = "group_query" if is_global else "window_band"
             assert layer.attention_type == expected_type, f"Layer {i} has wrong attention type"
             if is_global:
                 assert layer.attention_args["num_kv_heads"] == model.num_heads

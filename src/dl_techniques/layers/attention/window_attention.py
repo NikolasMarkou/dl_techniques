@@ -13,19 +13,33 @@ reshape the sequence into a 2-D grid and partition it into tiles; ``'band'``
 does neither.
 
 **Read the cost model before reaching for this layer as an "efficient
-attention". The paragraph below is about ``'grid'`` and ``'zigzag'`` only** —
-``'band'`` is a dense ``N x N`` masked attention, ``O(N^2)``, the same order as
-plain global attention, with no ``window_size ** 2`` padding and therefore no
-``O(window_size ** 4)`` floor. Every ``'grid'``/``'zigzag'`` window is padded up
-to exactly ``M = window_size ** 2``
-positions, so the cost is ``O(max(N, M) * M)`` — asymptotically linear in
-``N`` only *above* ``N = M``, and pinned at a constant floor of ``M ** 2 =
-window_size ** 4`` below it. Whenever ``N <= M`` the padded grid is a single
-window and the layer computes **dense attention over an M-token padded
-sequence**, which costs ``(M / N) ** 2`` times *more* than plain global
-attention on the ``N`` real tokens, not less. At ``window_size = 128``
-(``M = 16384``) that threshold sits above any sequence most callers will
-ever pass. See "Foundational Mathematics" below for the derivation.
+attention", and read it PER MODE — the three modes do not share one.** With
+``M = window_size ** 2``:
+
+* ``'band'`` — a dense ``N x N`` banded mask over standard attention,
+  ``O(N^2)``, the same order as plain global attention. It never pads and has
+  no ``window_size ** 4`` floor. It is also NOT the ``O(N * window_size)`` that
+  "sliding window" is usually taken to mean; a fused banded kernel is not
+  reachable from ``keras.ops``.
+* ``'grid'`` — ``O(N * M)`` for ``N > M``, and ``O(N^2)`` for ``N <= M``, where
+  there is exactly one window and the layer attends over the ``N`` REAL tokens
+  with the relative-position bias gathered at their grid coordinates.
+* ``'zigzag'`` — ``O(max(N, M) * M)``, INCLUDING a constant ``O(M^2) =
+  O(window_size ** 4)`` floor for ``N <= M``, where the padded grid is a single
+  window and the layer computes dense attention over ``M`` padded positions:
+  ``(M / N) ** 2`` times *more* than global attention over the ``N`` real
+  tokens. At ``window_size = 128`` (``M = 16384``) that threshold sits above
+  any sequence most callers will ever pass.
+
+**``'grid'`` and ``'zigzag'`` had the SAME degenerate cost until 2026-08-25**
+(``plan-2026-08-25T053412-0f1fa04f``, D-001/D-002), when ``'grid'`` -- and only
+``'grid'`` -- gained the ``N <= M`` short-circuit. Both had their pad LEAK fixed
+(D-007/D-009/D-011: pad slots were entering the softmax, so the ragged regime
+was returning a WRONG answer, not merely an expensive one); only ``'grid'``'s
+COST was fixed. MEASURED that day on ``(1, 128, 64)`` at ``window_size=128``,
+CPU, peak RSS: ``'grid'`` 0.681 GB, ``'band'`` 0.679 GB, ``'multi_head'``
+0.674 GB, ``'zigzag'`` **17.503 GB**. Do not read ``'grid'``'s improvement as
+applying to ``'zigzag'``. See "Foundational Mathematics" below.
 
 Architecture:
     One pipeline, one branch. Both partition modes share the same five-stage
@@ -76,20 +90,33 @@ Foundational Mathematics:
 
     * ``N > M`` — the intended regime. ``O(N * M)``, linear in ``N`` for fixed
       ``M``, cheaper than ``O(N^2)`` global attention by a factor ``N / M``.
-    * ``N <= M`` — **degenerate**. ``H <= window_size``, so ``pad_h =
-      window_size - H``, the padded grid is exactly one ``window_size x
-      window_size`` tile, ``_window_partition`` yields a single window, and the
-      layer computes dense attention over ``M`` positions of which ``M - N``
-      are padding. The cost is the constant ``M^2`` regardless of ``N``, i.e.
-      ``(M / N)^2`` times *more* than global attention over the ``N`` real
-      tokens. At ``window_size = 128`` this covers every ``N <= 16384``: the
-      per-layer score matrix is ``16384 x 16384 ~ 2.7e8`` entries per head per
-      sample whether ``N`` is 128 or 8192.
+    * ``N <= M`` — the degenerate regime, and **the two grid modes now differ
+      here**. Geometrically the situation is the same in both: ``H <=
+      window_size``, the padded grid is exactly one ``window_size x
+      window_size`` tile, and ``_window_partition`` yields a single window
+      holding ``M`` positions of which ``M - N`` are padding.
 
-    Choosing ``window_size`` is therefore choosing a *minimum* cost, not a
-    maximum one: a window size picked to be "generous" makes the layer
-    strictly more expensive than the global attention it replaces at every
-    sequence length that fits inside one window.
+      - ``'zigzag'`` still computes dense attention over all ``M`` of them. The
+        cost is the constant ``M^2`` regardless of ``N``, i.e. ``(M / N)^2``
+        times *more* than global attention over the ``N`` real tokens. At
+        ``window_size = 128`` this covers every ``N <= 16384``: the per-layer
+        score matrix is ``16384 x 16384 ~ 2.7e8`` entries per head per sample
+        whether ``N`` is 128 or 8192.
+      - ``'grid'`` SHORT-CIRCUITS it (2026-08-25). One window means the
+        mathematically correct answer is dense attention over the ``N`` REAL
+        tokens with the relative-position bias gathered at their grid
+        coordinates, which is what it computes: ``O(N^2)``, never worse than
+        plain global attention. The result is bitwise identical to the old code
+        wherever the old code was correct, and the ragged cases where it was
+        not are now correct too -- the pad slots used to enter the softmax, so
+        an all-ones attention mask (a mathematical no-op) moved the output by up
+        to 0.980964.
+
+    For ``'zigzag'``, choosing ``window_size`` is therefore choosing a *minimum*
+    cost, not a maximum one: a window size picked to be "generous" makes the
+    layer strictly more expensive than the global attention it replaces at every
+    sequence length that fits inside one window. For ``'grid'`` that inversion
+    is gone; a generous window merely stops buying you anything.
 
     The other price is that information cannot cross a window boundary within
     one layer; both modes address this the same way a Swin stack does, by
@@ -191,8 +218,12 @@ Attention      O(max(N, M) × M)   ceil(N/M) windows, each an M×M score matrix
 Total          O(max(N, M) × M)   Linear in N only for N > M
 --             --                 --
 N > M          O(N × M)           The intended regime; beats O(N²) by N/M
-N <= M         O(M²)              ONE padded window: dense attention, and
-                                  (M/N)² times MORE work than global O(N²)
+N <= M 'grid'  O(N²)              ONE window, attended over the N REAL tokens
+                                  (short-circuit, 2026-08-25). Never worse
+                                  than plain global attention.
+N <= M zigzag  O(M²)              ONE PADDED window: dense attention over M
+                                  slots, (M/N)² times MORE work than global
+                                  O(N²). NOT short-circuited.
 ============== ================== ==============================================
 
 References:
@@ -253,23 +284,29 @@ class WindowAttention(keras.layers.Layer):
     All padding, reshaping, partitioning, and merging are handled
     internally.
 
-    **Cost — the paragraph below is about ``'grid'`` and ``'zigzag'`` only.**
-    ``'band'`` never pads: it is a dense ``N x N`` banded mask over standard
-    attention, ``O(N^2)``, the same order as plain global attention. That is
-    better than the ``O(window_size ** 4)`` floor described next, and it is NOT
-    the ``O(N * window_size)`` a "sliding window" is usually taken to mean.
+    **Cost, per mode — they do not share one.** With ``M = window_size ** 2``:
 
-    **Cost (``'grid'`` / ``'zigzag'``).** With ``M = window_size ** 2`` token slots per window, the cost is
-    ``O(max(N, M) * M)``: linear in ``N`` only while ``N > M``, and a constant
-    ``O(M^2)`` floor below that. For ``N <= M`` the internal grid pads up to a
-    single ``window_size x window_size`` tile, so this layer performs **dense
-    attention over M padded positions** — ``(M / N) ** 2`` times more work than
-    global attention over the ``N`` real tokens. This is a property of the
-    padding, not an approximation: see the module docstring's "Foundational
-    Mathematics" section, and
-    ``tests/test_models/test_modern_bert/test_shipped_window_size.py``, which
-    pins the degeneracy at the ``window_size = 128`` that ``ModernBERT``
-    actually ships.
+    * ``'band'`` never pads: a dense ``N x N`` banded mask over standard
+      attention, ``O(N^2)``, the same order as plain global attention. NOT the
+      ``O(N * window_size)`` a "sliding window" is usually taken to mean.
+    * ``'grid'``: ``O(N * M)`` for ``N > M``; ``O(N^2)`` for ``N <= M``, where a
+      short-circuit (2026-08-25) attends over the ``N`` REAL tokens instead of
+      ``M`` padded slots.
+    * ``'zigzag'``: ``O(max(N, M) * M)``, including a constant ``O(M^2)`` floor
+      for ``N <= M``, where the grid pads up to a single ``window_size x
+      window_size`` tile and this layer performs **dense attention over M padded
+      positions** — ``(M / N) ** 2`` times more work than global attention over
+      the ``N`` real tokens. A property of the padding, not an approximation.
+
+    MEASURED 2026-08-25 on ``(1, 128, 64)`` at ``window_size=128``, CPU, peak
+    RSS: ``'grid'`` 0.681 GB, ``'band'`` 0.679 GB, ``'multi_head'`` 0.674 GB,
+    ``'zigzag'`` 17.503 GB. See the module docstring's "Foundational
+    Mathematics" section. The guard that used to pin the degeneracy at
+    ``ModernBERT``'s shipped ``window_size = 128``
+    (``tests/test_models/test_modern_bert/test_shipped_window_size.py``) was
+    DELETED on 2026-08-25, per its own docstring's instruction, because
+    ModernBERT no longer uses this layout at all -- its local layers are
+    ``'band'``.
 
     **Architecture Overview:**
 

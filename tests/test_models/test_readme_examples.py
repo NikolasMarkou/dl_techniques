@@ -15,11 +15,15 @@ Do NOT weaken these to construction-only or shape-only assertions -- the
 `pretrained=` route in particular is a VALUE claim (weights actually arrive), and a
 shape assertion passes on a model that silently kept its random initialization.
 
-Deliberately small: `"tiny"`-class variants everywhere. Two measured reasons, not
-style. `ModernBERT`-base costs 20.1 GB of host RSS to CONSTRUCT (large: 24.2 GB)
-because its local layers pad to a single `window_size**2 = 16384` window, and a
-forward pass materializes a 16384x16384 score matrix per head. See decisions.md
-D-027 for that degeneracy and D-044 for this module.
+Deliberately small: `"tiny"`-class variants everywhere. The original reason was
+measured and is now HISTORICAL: `ModernBERT`-base cost 20.1 GB of host RSS to
+CONSTRUCT (large: 24.2 GB) because its local layers padded to a single
+`window_size**2 = 16384` window and built an O(window_size**4) relative-position
+index in `__init__`. plan-2026-08-25T053412-0f1fa04f fixed both (D-006 moved the
+index to `build()`, D-012 routed local layers to the 1-D `'window_band'`), and
+construction is 0.69 GB for all three variants as of 2026-08-25. `"tiny"` stays
+because a README example suite should be fast, not because base is unaffordable.
+See decisions.md D-027 for the original degeneracy and D-044 for this module.
 """
 
 import os

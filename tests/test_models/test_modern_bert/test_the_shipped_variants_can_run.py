@@ -7,43 +7,46 @@ RTX 4070, at a sequence length of **eight**::
     ModernBERT.from_variant("large")  -> ResourceExhaustedError
         Exception encountered when calling SingleWindowAttention.call()
 
-``tiny`` ran (16,305,160 params, 46 weight tensors, 2 relative-position-bias
-tables). ``base`` and ``large`` could not produce a single output tensor at any
-admissible length, on either GPU in this machine.
+``tiny`` ran. ``base`` and ``large`` could not produce a single output tensor at
+any admissible length, on either GPU in this machine.
 
-The mechanism is the one ``test_shipped_window_size.py`` already pins, taken to
-its conclusion. A ``window`` local layer folds ``(B, L, D)`` into a synthetic
-``ceil(sqrt(L))``-square grid and pads that grid up to a multiple of
-``window_size``; when ``L <= window_size**2`` the result is ONE window holding
-``window_size**2`` slots. At the ``window_size=128`` those two variants shipped,
-that is 16384 slots, so each of their 15 (``base``) / 19 (``large``) local
-layers built a ``16384 x 16384`` score matrix per head **independent of L** --
-12.9 GB per layer in float32 at 12 heads. It is not an inefficiency that shows
-up at long sequences; it is a fixed cost paid at every length, including 8.
+The mechanism: a ``window`` local layer folded ``(B, L, D)`` into a synthetic
+``ceil(sqrt(L))``-square grid and padded that grid up to a multiple of
+``window_size``; when ``L <= window_size**2`` the result was ONE window holding
+``window_size**2`` slots. At the ``window_size=128`` those two variants ship,
+that is 16384 slots, so each of their local layers built a ``16384 x 16384``
+score matrix per head **independent of L** -- 12.9 GB per layer in float32 at
+12 heads. Not an inefficiency that shows up at long sequences; a fixed cost paid
+at every length, including 8.
 
-The repair is per-variant configuration, not new code: ``base`` and ``large``
-now ship ``global_attention_interval = 1``, so ``is_global`` is true at every
-layer and the ``'window'`` branch is never selected for them. That preserves
-the all-to-all connectivity their padded single window already had, and adds
-the RoPE the local layers did not receive.
+**The 2026-08-21 repair has been REPLACED, 2026-08-25**
+(plan-2026-08-25T053412-0f1fa04f). That repair was per-variant configuration:
+``base``/``large`` shipped ``global_attention_interval = 1``, so no local layer
+was ever built. D-135 recorded it as conditional and named its own release
+condition -- *"the real fix is a 1-D sliding-window layer in
+``layers/attention/``, which does not exist"*. It exists now
+(``partition_mode='band'``, registry key ``'window_band'``), D-012 wired
+ModernBERT's local layers to it, and the paper's ``global_attention_interval=3``
+is restored on both variants. Re-measured on the same 12 GB RTX 4070, all
+constructing AND forwarding: ``base`` L=8 0.692 GB / L=2048 1.640 GB GPU peak,
+``large`` L=8 1.707 GB / L=2048 2.929 GB.
 
-Two alternatives were rejected and must not be reintroduced (see the D-019 /
-D-027 / D-135 anchors in ``model.py``):
+One alternative was rejected in 2026-08-21 and is STILL rejected: shrinking
+``local_attention_window_size`` until windowing engages. Note that D-012 is not
+that alternative even though the diff resembles it -- the stored value is
+unchanged at 128 and only its UNIT moved (2-D edge length -> 1-D full span), so
+the ``// 2`` at the call site is a span-to-half-width conversion. See the D-012
+anchor in ``model.py``.
 
-* shrinking ``local_attention_window_size`` until windowing engages -- the
-  window is a SPATIAL neighbourhood over a synthetic square grid, so a smaller
-  window buys a strided, non-contiguous token adjacency that is not the paper's
-  1-D window: a correctness change traded for the cost fix;
-* deleting the knobs -- ``tiny`` genuinely partitions above 4096 tokens and
-  would lose a real 4x saving.
+``test_a_local_layer_must_be_able_to_partition`` was the general rule behind the
+specific failure -- a ``window`` layer whose ``window_size**2`` exceeds
+``max_position_embeddings`` can never partition at any admissible length, so it
+is dense attention wearing a window's price tag. That rule has no referent once
+the local layers are 1-D bands: a band has no windows to partition into and pads
+nothing. It is replaced below by the rule that DOES still bite.
 
-``test_a_local_layer_must_be_able_to_partition`` is the general rule behind the
-specific failure, and is the arm that stays meaningful if the variant table
-grows: a ``window`` layer whose ``window_size**2`` exceeds
-``max_position_embeddings`` can never partition at ANY admissible length, so it
-is dense attention wearing a window's price tag.
-
-See decisions.md D-135 (plan-2026-08-19T163559-499b6f0e).
+See decisions.md D-135 (plan-2026-08-19T163559-499b6f0e) and D-012
+(plan-2026-08-25T053412-0f1fa04f).
 """
 
 import gc
@@ -110,30 +113,60 @@ class TestEveryShippedVariantIsReachable:
         )
 
 
-class TestNoVariantShipsAWindowThatCannotPartition:
+class TestNoVariantShipsALocalBandItCannotUse:
+    """REPLACES ``TestNoVariantShipsAWindowThatCannotPartition``.
+
+    Its rule was ``window_size**2 <= max_position_embeddings`` -- can this
+    layer ever partition into more than one window? A 1-D band has no windows,
+    so that question has no answer. The rule that still bites is about SPAN:
+    a local band whose full span covers every admissible sequence is global
+    attention wearing a local layer's name.
+    """
 
     @pytest.mark.parametrize("variant", VARIANTS)
-    def test_a_local_layer_must_be_able_to_partition(self, variant):
+    def test_a_local_band_must_be_narrower_than_the_longest_sequence(self, variant):
         config = ModernBERT.MODEL_VARIANTS[variant]
         if "local" not in _attention_schedule(variant):
             pytest.skip(f"{variant} emits no local layers")
 
-        window_slots = config["local_attention_window_size"] ** 2
+        span = config["local_attention_window_size"]
         max_len = ModernBERT.DEFAULT_MAX_POSITION_EMBEDDINGS
-        assert window_slots <= max_len, (
-            f"{variant} ships local layers at window_size="
-            f"{config['local_attention_window_size']}, so every window is "
-            f"padded to {window_slots} slots while the longest admissible "
-            f"sequence is {max_len}. The window can never partition: each "
-            f"local layer is a {window_slots}x{window_slots} score matrix per "
-            f"head at EVERY length, which is what made base/large unrunnable."
+        assert span < max_len, (
+            f"{variant} ships local layers at a band span of {span} tokens "
+            f"while the longest admissible sequence is {max_len}. Every query "
+            f"would see every key, so the local layers are global attention "
+            f"under another name and the hybrid schedule is decorative."
+        )
+
+    @pytest.mark.parametrize("variant", VARIANTS)
+    def test_the_layer_receives_half_the_configured_span(self, variant):
+        """The unit conversion D-012 turns on, pinned at the layer itself
+        rather than inferred from the config. If someone "restores"
+        ``window_size=self.local_attention_window_size`` at the call site the
+        span silently DOUBLES, and nothing else in the suite would notice."""
+        config = ModernBERT.MODEL_VARIANTS[variant]
+        schedule = _attention_schedule(variant)
+        if "local" not in schedule:
+            pytest.skip(f"{variant} emits no local layers")
+
+        model = ModernBERT.from_variant(variant)
+        local_index = schedule.index("local")
+        layer = model.encoder_layers[local_index]
+        assert layer.attention_type == "window_band"
+        assert layer.attention.partition_mode == "band"
+        assert layer.attention.window_size == (
+            config["local_attention_window_size"] // 2
+        ), (
+            f"{variant}: the band half-width is {layer.attention.window_size} "
+            f"but local_attention_window_size is "
+            f"{config['local_attention_window_size']}, a FULL span. Upstream's "
+            f"rule is sliding_window = local_attention // 2."
         )
 
     def test_tiny_still_partitions_and_keeps_its_local_layers(self):
-        """The control on the repair's scope. ``base``/``large`` were changed;
-        ``tiny`` must not have been swept along, because its windowing is real
-        (4 windows for 4097 <= L <= 8192) and deleting it would remove a
-        capability rather than a no-op."""
+        """The control on the repair's scope. ``tiny`` was never changed by
+        either repair -- it kept its hybrid schedule and its window size
+        throughout -- so it is the arm that shows the fixes were targeted."""
         schedule = _attention_schedule("tiny")
         assert schedule.count("local") > 0, schedule
         assert ModernBERT.MODEL_VARIANTS["tiny"][

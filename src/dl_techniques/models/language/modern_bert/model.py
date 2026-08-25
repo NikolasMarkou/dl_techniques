@@ -719,21 +719,30 @@ class ModernBERT(keras.Model):
         #   * Do NOT drop the "attention_mask" key when it is None -- that
         #     makes the OUTPUT structure depend on the INPUT.
         #   * Do NOT move this resolution ABOVE the encoder loop. It reads like
-        #     the cleaner spelling and it is NOT a no-op here: an all-ones
-        #     rank-2 mask reaching the LOCAL layers changes the output, because
-        #     `WindowAttention._call_grid` zero-pads a rank-2 mask up to its
-        #     square grid, so the ones-mask MASKS OUT the grid padding that an
-        #     absent mask leaves attendable. MEASURED on a 2-layer model,
-        #     seq_len 12, `local_attention_window_size=4`:
-        #       mixed local/global (interval=3): max|delta| = 6.415714e-01
-        #                                        on a max|out| of 2.67
-        #       all-global       (interval=1): max|delta| = 0.000000e+00
-        #     identical for an int32, float32 or bool ones-mask. So the global
-        #     path really is mask-invariant and only the window path is not --
-        #     that difference is what makes the pre-loop placement a silent
-        #     numerics change for every shipped ModernBERT variant, which is
-        #     why it is refused. `fnet/model.py` carries the twin anchor.
-        # See decisions.md D-031.
+        #     the cleaner spelling and the FIRST reason above is sufficient on
+        #     its own: the output structure must not follow the input.
+        #     `fnet/model.py` carries the twin anchor.
+        #
+        # THE SECOND REASON HAS LAPSED -- recorded so nobody re-derives it and
+        # concludes the anchor was wrong. Until 2026-08-25 this comment also
+        # argued that a pre-loop resolution is a silent NUMERICS change,
+        # because `WindowAttention._call_grid` zero-padded a rank-2 mask up to
+        # its square grid and the ones-mask therefore MASKED OUT grid padding
+        # that an absent mask left attendable. MEASURED then, on a 2-layer
+        # model, seq_len 12, `local_attention_window_size=4`:
+        #     mixed local/global (interval=3): max|delta| = 6.415714e-01
+        #                                      on a max|out| of 2.67
+        #     all-global         (interval=1): max|delta| = 0.000000e+00
+        # That was a DEFECT, not a mechanism: an all-ones mask masks no real
+        # token and must be a mathematical no-op. Two changes in
+        # plan-2026-08-25T053412-0f1fa04f removed it -- D-007/D-009/D-011
+        # stopped pad slots reaching the softmax in every partition mode, and
+        # D-012 routed the local layers to `'window_band'`, which pads nothing.
+        # RE-MEASURED 2026-08-25 on the same fixture: mixed local/global
+        # max|delta| = 0.000000e+00. Pinned by
+        # `tests/.../test_predict_single_key_dict.py::TestResolvedMaskMustNotReachTheEncoder`,
+        # whose first test now asserts `== 0.0` where it once asserted `> 1e-3`.
+        # See decisions.md D-031, and D-013 of the 2026-08-25 plan.
         return {
             "last_hidden_state": sequence_output,
             "attention_mask": (

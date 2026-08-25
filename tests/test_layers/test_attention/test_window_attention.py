@@ -1,4 +1,6 @@
 import pytest
+import zlib
+
 import numpy as np
 import keras
 import os
@@ -390,6 +392,15 @@ class TestAllOnesKeyMaskIsANoOp:
         window_size=7, N=25  ->  0.255033      window_size=2, N=4   ->  0.0  (N == ws**2)
         window_size=8, N=50  ->  0.0876751
 
+    Those five magnitudes, and the six in the D-011 anchor below, were sampled while
+    ``_delta`` seeded from ``hash(...)`` -- salted by ``PYTHONHASHSEED``, which pytest
+    does not pin -- so they are INDICATIVE OF SCALE, not reproducible constants. The
+    tell is in this file: ``zigzag ws=4, N=9`` reads ``0.341491`` here and ``0.3826489``
+    fifty lines down, from the same helper on the same defect. ``_delta`` seeds from
+    ``zlib.crc32`` since 2026-08-25 (D-013), so magnitudes recorded from here on ARE
+    reproducible; these historical ones cannot be recovered and are kept for their
+    order of magnitude and their sign, nothing more.
+
     The two zeros are the control: the leak appears if and only if there are pad slots.
     This was not merely an efficiency defect -- in the ``N < window_size ** 2`` regime
     the layer computed the WRONG attention, and that is exactly the regime ModernBERT's
@@ -459,6 +470,9 @@ class TestAllOnesKeyMaskIsANoOp:
         # grid ws=4 N=20 -> 0.7214095, grid ws=2 N=15 -> 0.2340506,
         # zigzag ws=4 N=9 -> 0.3826489, zigzag ws=7 N=25 -> 0.2675675,
         # zigzag ws=8 N=50 -> 0.0807583. All six read exactly 0.0 after it.
+        # Those six are INDICATIVE, not reproducible: they were sampled while
+        # `_delta` seeded from the PYTHONHASHSEED-salted `hash`. See D-013 and
+        # the note in this class's docstring.
         # `grid ws=8 N=100` is the worst case by construction: the grid side is 10
         # and pads to 16, so the last tile holds more pad slots than real tokens.
         ("grid", 2, 15),
@@ -526,7 +540,22 @@ class TestAllOnesKeyMaskIsANoOp:
             use_relative_position_bias=partition_mode != "band",
             dropout_rate=0.0,
         )
-        rng = np.random.default_rng(abs(hash((partition_mode, window_size, seq_len))) % (2 ** 32))
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-013
+        # `zlib.crc32`, NOT `hash`. `hash` on a tuple containing a `str` is
+        # salted by PYTHONHASHSEED, which pytest does not pin, so this seed --
+        # and therefore the input draw, and therefore every magnitude this
+        # helper has ever "recorded" -- differed between runs. The proof is in
+        # this module's own history: the class docstring records
+        # `zigzag ws=4, N=9 -> 0.341491` and the D-011 anchor below records
+        # `0.3826489` for the SAME cell measured by the SAME helper. Neither is
+        # wrong; they are two samples of a distribution that looked like a
+        # constant. `delta == 0.0` survives any seed, so the assertions were
+        # never at risk -- the NUMBERS IN THE PROSE were. WHAT NOT TO DO: do not
+        # go back to `hash` "because the seed is arbitrary anyway". An arbitrary
+        # but STABLE seed is what makes a recorded magnitude a fact rather than
+        # a sample. See decisions.md D-013.
+        seed = zlib.crc32(repr((partition_mode, window_size, seq_len)).encode()) % (2 ** 32)
+        rng = np.random.default_rng(seed)
         x = rng.standard_normal((batch, seq_len, dim)).astype("float32")
         ones = np.ones((batch, seq_len), dtype="int32")
 

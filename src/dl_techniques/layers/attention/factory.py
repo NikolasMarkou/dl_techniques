@@ -981,12 +981,25 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'Windowed multi-head self-attention from Swin Transformer, partitioning inputs '
             'into non-overlapping grids for local attention computation, with spatial '
             'awareness from an optional learnable relative position bias. '
-            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY: a 1-D input of '
-            'length N is folded into a ceil(sqrt(N))-square grid and every window is PADDED '
-            'up to window_size**2 slots, so cost is O(max(N, M) * M) with M = window_size**2. '
-            'It beats global attention only for N > M. For N <= M the grid pads to a SINGLE '
-            'window and this layer computes dense attention over M padded positions — '
-            '(M/N)**2 times MORE work than plain global attention over the N real tokens.'
+            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY. A 1-D input of '
+            'length N is folded into a ceil(sqrt(N))-square grid and attention runs inside '
+            'window_size-square blocks of it, so for a SEQUENCE this invents a strided, '
+            'non-contiguous adjacency — if your data has no 2-D layout you want the '
+            "'window_band' key, not this one. "
+            'THIS ENTRY WAS REWRITTEN 2026-08-25 and the claim it replaced was the exact '
+            'opposite. It used to say that for N <= M (M = window_size**2) the grid pads to '
+            'a SINGLE window and the layer costs (M/N)**2 times MORE than plain global '
+            'attention over the N real tokens. That was TRUE and is now FALSE: the layer '
+            'short-circuits that regime and attends over the N REAL tokens, gathering the '
+            'relative-position bias at their grid coordinates. MEASURED on the same '
+            '(1, 128, 64) input at window_size=128, CPU, peak RSS: 21.695 GB before the '
+            "fix, 0.681 GB after, against 'multi_head''s 0.674 GB on the same input — "
+            'parity, where it used to be an inversion. The padded slots were also LEAKING '
+            'into the softmax, so this was a CORRECTNESS fix as well as a cost fix: an '
+            'all-ones attention mask, a mathematical no-op, used to move the output by up '
+            "to 0.980964. NOTE the sibling 'window_zigzag' key was NOT short-circuited — "
+            'its leak is fixed, its cost is not, and it still measures 17.503 GB on this '
+            'same input.'
         ),
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
@@ -1014,9 +1027,21 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'detection, and semantic segmentation where input resolution scalability is crucial.'
         ),
         'complexity': (
-            'O(max(N, M) * M) with M = W**2 slots per window (W = window_size); '
-            'linear in N only for N > M, and a constant O(M**2) = O(W**4) floor for '
-            'N <= M, where it degenerates to dense attention over one padded window'
+            'O(N * M) with M = W**2 slots per window (W = window_size), for N > M. '
+            'For N <= M there is exactly one window and the cost is O(N**2) — dense '
+            'attention over the N REAL tokens, never over M padded slots. The '
+            'O(M**2) = O(W**4) floor this field advertised until 2026-08-25 is GONE; '
+            'so is the inversion it implied, where a large window cost MORE than global '
+            'attention. Measure both, do not trust this field: '
+            '.venv/bin/python -c "import resource, numpy as np; from '
+            'dl_techniques.layers.attention import create_attention_layer as c; '
+            "x = np.zeros((1, 128, 64), 'float32'); "
+            "c('window', dim=64, window_size=128, num_heads=4)(x); "
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)" '
+            '# MEASURED 2026-08-25 on CPU: 0.681 GB, against 0.674 GB for multi_head on '
+            'the same input. Before the short-circuit the same probe reported 21.695 GB. '
+            'CUDA_VISIBLE_DEVICES matters: with a GPU visible the same probe reads '
+            '1.361 GB for both, because the CUDA runtime dominates the number.'
         ),
         'paper': 'Swin Transformer: Hierarchical Vision Transformer using Shifted Windows'
     },
@@ -1055,9 +1080,21 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'better calibration or exploring alternatives to softmax.'
         ),
         'complexity': (
-            'O(max(N, M) * M) with M = W**2, same as standard window attention above — '
-            'including the O(M**2) floor: the zigzag path pads the reordered sequence up '
-            'to a multiple of M as well, so N <= M is one dense padded window here too'
+            'O(max(N, M) * M) with M = W**2, INCLUDING the O(M**2) = O(W**4) floor for '
+            'N <= M: the zigzag path pads the reordered sequence up to a multiple of M, '
+            'so N <= M really is one dense padded window here. UNLIKE the "window" key '
+            'above, which was short-circuited on 2026-08-25, this path was NOT — only its '
+            'pad LEAK was fixed (pad slots no longer reach the softmax, so the answer is '
+            'now correct), and the COST is unchanged. Do not read the "window" entry\'s '
+            'improvement as applying here. MEASURED 2026-08-25, same command, same '
+            '(1, 128, 64) input at window_size=128, CPU: '
+            "'window' 0.681 GB, 'multi_head' 0.674 GB, 'window_band' 0.679 GB, "
+            "'window_zigzag' 17.503 GB. Measure it yourself: "
+            '.venv/bin/python -c "import resource, numpy as np; from '
+            'dl_techniques.layers.attention import create_attention_layer as c; '
+            "x = np.zeros((1, 128, 64), 'float32'); "
+            "c('window_zigzag', dim=64, window_size=128, num_heads=4)(x); "
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)"'
         ),
         'paper': "Extends 'Swin Transformer' with zigzag partitioning and advanced normalization"
     },
