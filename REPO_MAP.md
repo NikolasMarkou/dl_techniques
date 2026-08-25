@@ -104,7 +104,7 @@ combined are smaller than either one.
 
 | Subpackage | `.py` | Role |
 |---|---|---|
-| **`src/dl_techniques/layers/`** | 298 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
+| **`src/dl_techniques/layers/`** | 299 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
 | **`src/dl_techniques/models/`** | 275 | **The second largest, and the only subpackage that is not flat.** Since the 2026-08-24 restructure (`d0b599ff2`, `452d663d2`) it is **11 family directories** — `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `tabular` — holding **80 leaf model packages** between them, with **4 subfamilies** nesting a third level (`src/dl_techniques/models/vision/image_restoration/`, `src/dl_techniques/models/vision/keypoints/`, `src/dl_techniques/models/vision/super_resolution/`, `src/dl_techniques/models/vision_language/sam/`). A *leaf* is a directory that carries an `__init__.py` and has no `__init__.py`-bearing child; a *container* is one that has such children. `vision/` alone holds 35 leaves and `language/` 17. **Listing one level down gives 11, not 80** — so every model-package row in the Numbers table walks to the leaves, and prints that walk in full. Re-derived 2026-08-25: **73 of 80** leaves bind a `create_*` factory in their own package init, **77 of 80** declare a curated `__all__`, **77 of 80** have a non-empty init, and **80 of 80** carry a `README.md`. The 7 that bind no factory are the four `time_series` leaves (`mdn`, `deepar`, `prism`, `tirex` — the curated `src/dl_techniques/models/time_series/__init__.py` re-exports them instead, and it is the one container that does re-export), `src/dl_techniques/models/common/power_sampling/`, and `src/dl_techniques/models/vision_language/sam/sam1/` and `src/dl_techniques/models/vision_language/sam/sam3/`; the 3 with an empty init are `deepar`, `prism` and `tirex`. `sam/` exports nothing on purpose — re-exporting the class `SAM2` there binds the name `SAM2` and shadows the `sam2/` subpackage (its own init docstring carries the reasoning and the exact `ImportError`). **`image_restoration/` is no longer the documentation-only directory this row described until 2026-08-25**: the restructure moved `darkir/`, `pw_fnet/` and `scunet/` underneath it, so it is now a subfamily container that *also* carries `BENCHMARKS.md` and `README.md` — and those tables are still quoted from papers, never measured here, which matters more now that implementations sit beside them. (Before 2026-08-25 this cell read "74 *top-level* model packages ... **71 of 74** bind a `create_*` ... **72 of 74** export a curated `__all__`", and before that "69 of 73" and "70 of 73": four consecutive wrong lists. Every one of them came from quoting a command whose scope had drifted from the question. Re-derive from the Numbers table, never from memory.) The full catalogue is `src/dl_techniques/models/CLAUDE.md`; the family taxonomy is `src/dl_techniques/models/README.md`. See Part C. |
 | `src/dl_techniques/losses/` | 43 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 41 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
@@ -387,7 +387,7 @@ thing you will meet and should not be surprised by.
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
   `src/dl_techniques/layers/attention/` — 357 modules carry Sphinx/reST
-  `:param:` and 230 carry a Google-style `Args:` block, and the two sets are not
+  `:param:` and 228 carry a Google-style `Args:` block, and the two sets are not
   disjoint: 17 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
@@ -806,19 +806,23 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > (`4.5M`, `2.6G`) were also re-run and both reproduce exactly** — they are unenforced because
 > their Values are not digits, not because they are unmeasured.
 
-> **Three rows below are KNOWINGLY RED, and are left red on purpose (2026-08-25,
-> `plan-2026-08-25-c71fc3ad/iter-1/step-9`, `decisions.md` D-028).** Measured against that
-> plan's own base commit `0222f3044`, they were already failing *before* it started, and
-> nothing that plan did moves them, so repairing them here would mix two populations in one
-> commit. They are: `` `.py` in `src/dl_techniques/layers/` `` (298 tabulated, 299 measured)
-> and `Modules in src/dl_techniques/layers/ using Sphinx :param` (258 / 259), both moved by
-> `4ab68e323` "[layers] cleaning up / normalizing" which added
-> `src/dl_techniques/layers/activations/common.py` (3 `:param ` lines); and `Library modules
-> using a Google-style Args: block OUTSIDE layers/attention/` (230 / 228), moved by the merge
+> **Those three rows were REPAIRED on 2026-08-25 by `plan-2026-08-25-704a9bcb/iter-1/step-7`,
+> in a commit containing no source file** — which is the "own change" the superseded note below
+> asked for. They had been left knowingly RED by `plan-2026-08-25-c71fc3ad/iter-1/step-9`
+> (`decisions.md` D-028) to avoid mixing two populations in one commit. Their provenance, kept
+> because the *cause* of a drift outlives the number: `` `.py` in `src/dl_techniques/layers/` ``
+> (298 -> **299**) and `Modules in src/dl_techniques/layers/ using Sphinx :param` (258 -> **259**)
+> were both moved by `4ab68e323` "[layers] cleaning up / normalizing", which added
+> `src/dl_techniques/layers/activations/common.py` (3 `:param ` lines); `Library modules using a
+> Google-style Args: block OUTSIDE layers/attention/` (230 -> **228**) was moved by the merge
 > `a89a25808`, which reshaped the docstrings of
 > `src/dl_techniques/models/neural_computer/ntm/model.py` and `model_multitask.py` so their
-> anchored `Args:` blocks no longer match. **Fix them in their own change**, and move
-> `src/dl_techniques/CLAUDE.md`'s `layers/` row (`258 of 298`) in the same edit.
+> anchored `Args:` blocks no longer match. The repair re-ran the **WHOLE** table, not the three
+> rows: all 76 enforceable rows were re-derived with their own commands and **exactly these 3
+> moved**, so the six ColBERT-review steps that preceded it in that plan moved none. Three
+> unenforced prose digits sourced from those rows moved in the SAME edit — this file's Part A
+> `layers/` subpackage cell (298 -> 299), its Part A docstring-split bullet (230 -> 228), and
+> `src/dl_techniques/CLAUDE.md`'s `layers/` docstring-style row (`258 of 298` -> `259 of 299`).
 
 | Quantity | Value | Command |
 |---|---|---|
@@ -826,7 +830,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Python files under `tests/` | 1061 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| `.py` in `src/dl_techniques/layers/` | 298 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/layers/` | 299 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/models/` | 275 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 43 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/utils/` | 41 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
@@ -894,9 +898,9 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files importing raw `tensorflow` | 58 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
-| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 258 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
+| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 259 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
 | Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 357 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 230 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 228 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 17 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 10 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 84 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
