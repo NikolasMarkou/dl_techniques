@@ -39,10 +39,53 @@ copies the golden layer's weights into the current layer BY WEIGHT PATH (not by
 this the two layers would hold different random kernels and the harness would compare
 noise -- passing or failing for the wrong reason.
 
-**Bitwise, not ``allclose``.** The comparison is ``np.array_equal``. This plan is a
-pure cost restructure with a CPU-pinned reference; there is no legitimate nonzero
-delta to absorb. A failure here is a defect to find, never a tolerance to widen
-(plan Pre-Mortem #1: do not widen the tolerance -- escalate with the measured delta).
+**Bitwise, not ``allclose`` -- for 30 of the 36 matrix cells.** The comparison is
+``np.array_equal``. This plan is a cost restructure with a CPU-pinned reference, so for
+every cell where the pre-restructure answer was CORRECT there is no legitimate nonzero
+delta to absorb. A failure in those cells is a defect to find, never a tolerance to
+widen (plan Pre-Mortem #1: do not widen the tolerance -- escalate with the measured
+delta).
+
+**The six exceptions, and why they are not a widened tolerance.**
+=================================================================
+Six cells -- ``partition_mode='grid'`` with ``1 < N < window_size ** 2``, i.e.
+``ws4-N9``, ``ws7-N25`` and ``ws8-N50`` at both ``rpb`` settings -- CANNOT be bitwise
+identical, because the pre-restructure output they would be pinned to is WRONG.
+
+Here is the defect, in plain words. On the pre-restructure path a short sequence is
+laid out row-major into a ``ceil(sqrt(N)) x ceil(sqrt(N))`` grid, that grid is
+zero-padded up to ``window_size x window_size``, and the whole tile is handed to
+``SingleWindowAttention`` as one window. The inner layer's OWN padding mask is built
+from ``N_actual`` versus ``N_target`` -- and by then those are both ``window_size ** 2``,
+so that mask is ALL ONES and masks nothing. The zero-filled pad slots therefore enter
+the softmax as ordinary keys and values, and every real token's output is a blend that
+includes them. The post-restructure layer attends the ``N`` real tokens and no pad
+slots at all. Two different sets of keys cannot produce the same bits.
+
+That this is a defect and not a preference was measured on the pre-restructure code
+itself, by handing it an explicit all-ones ``(B, N)`` attention mask. Such a mask masks
+no real token and is mathematically a NO-OP -- but at the ``WindowAttention`` level it
+is zero-padded alongside the sequence, so it DOES mask the pads, and the output moves:
+``ws=4, N=9`` -> 0.341491, ``ws=7, N=25`` -> 0.255033, ``ws=8, N=50`` -> 0.0876751.
+The control is the pair where there is nothing to pad, ``ws=8, N=64`` and ``ws=2, N=4``
+(``N == window_size ** 2``): both move by EXACTLY 0.0. A no-op that is not a no-op if
+and only if pad slots exist is a leak, not a rounding artefact.
+
+So those six cells are re-pinned, not relaxed and not deleted: the reference side is
+the SAME external golden layer, driven WITH an explicit all-ones ``(B, N)`` mask, which
+is what makes the golden path mask its own pads. Against that correctly pad-masked
+reference the current layer agrees to :data:`RAGGED_ATOL`; MEASURED worst case across
+all six cells 1.937e-07 here, 2.09e-07 in the ruling's own run -- one to two float32
+ulps at an output magnitude around 0.3, which is reduction-order noise and nothing else.
+Bitwise identity is unreachable here by ANY implementation, not just by this one:
+summing ``N`` products and summing ``window_size ** 2`` products of which
+``window_size ** 2 - N`` are exactly zero differ at float32 reduction order.
+
+Everything else keeps ``np.array_equal`` untouched: all 12 ``grid`` cells with
+``N >= window_size ** 2`` (which is every configuration Swin, FastVLM and TiRex run,
+since they call with ``N == window_size ** 2`` exactly), all 18 ``zigzag`` cells, and
+the ``@tf.function`` arm. See decisions.md D-007
+(``plan-2026-08-25T053412-0f1fa04f``).
 
 **Device.** CPU only, via the ``golden_reference_device`` fixture. A GPU digest cannot
 answer an inertness question in this repo: TF32 and non-deterministic reductions make
@@ -106,6 +149,56 @@ of this file (after the weight-path normalization fix documented in
 :func:`_copy_weights_by_path`) and reproduces the text above character for character --
 37 failed, 1 passed.
 
+RED-PROOF OF THE SIX RE-PINNED CELLS
+====================================
+A tolerance assertion that has never failed is not a guard, so the ragged cells were
+RED-proven separately, at :data:`RAGGED_ATOL` ``= 5e-7``, after the re-pin.
+
+Injection (a) -- DEAD BIAS, ``single_window_attention.py:777``,
+``attn = attn + keras.ops.expand_dims(relative_position_bias, 0)`` ->
+``... + keras.ops.expand_dims(relative_position_bias, 0) * 0.0``. All three ragged
+``rpb`` cells went red on the harness's own ``AssertionError``::
+
+    E  AssertionError: WindowAttention(window_size=4, partition_mode='grid', use_relative_position_bias=True) on (2, 9, 24) NOT agrees with the PAD-MASKED pre-restructure layer at ad27896189876609c006ea6adeea7b4ac6d31d29 to atol=5e-07 (D-007)
+    E    ragged single-window cell: True
+    E    mismatching elements: 432 of 432
+    E    max |delta|: 0.01694999635219574
+
+with ``ws=7, N=25`` at 0.011729839257895947 and ``ws=8, N=50`` at 0.007726696669124067
+-- four to five orders of magnitude above the tolerance. Whole file: **19 failed, 19
+passed**, exactly the 18 ``rpb=True`` cells plus the ``@tf.function`` arm, the same
+clean split the pre-re-pin version produced.
+
+Injection (b) -- SHIFTED GATHER. The first attempt was the literal one, offsetting the
+SLOT ids: ``slots = (slots + 1) % (window_size ** 2)`` in
+:meth:`SingleWindowAttention._relative_position_index`. **It did not go red at two of
+the three ragged cells, and that is a fact about the encoding, not a weak assertion.**
+The relative-position index is TRANSLATION-INVARIANT: it stores displacements, so
+adding a constant to every slot is an exact symmetry whenever the shift does not cross
+a row boundary. At ``ws=4, N=9`` the slot vector is ``[0,1,2,4,5,6,8,9,10]`` (grid side
+3 < window side 4), so ``+1`` is a pure one-column translation and every pairwise
+displacement is unchanged -- output bit-identical, cell green. Same at ``ws=7, N=25``.
+Only ``ws=8, N=50``, where the grid side EQUALS the window side so the shift wraps at
+each row end, went red (0.01317550241947174). Whole file: **17 failed, 21 passed**.
+
+So injection (b) was re-run as a shifted gather into the BIAS TABLE, which is not a
+symmetry: ``index = (index + 1) % ((2 * window_size - 1) ** 2)`` immediately before the
+index is cached. Every one of the three ragged ``rpb`` cells went red::
+
+    E  AssertionError: WindowAttention(window_size=4, partition_mode='grid', use_relative_position_bias=True) on (2, 9, 24) NOT agrees with the PAD-MASKED pre-restructure layer at ad27896189876609c006ea6adeea7b4ac6d31d29 to atol=5e-07 (D-007)
+    E    ragged single-window cell: True
+    E    mismatching elements: 432 of 432
+    E    max |delta|: 0.02104303240776062
+
+with ``ws=7, N=25`` at 0.013514146208763123 and ``ws=8, N=50`` at 0.011576232500374317.
+Whole file: **19 failed, 19 passed** -- again the ``rpb=True`` cells plus the
+``@tf.function`` arm. Both injections were reverted and the file re-run green.
+
+The lesson is worth keeping: "offset the indices by one" is a symmetry of a
+displacement encoding, and an injection that is a symmetry of the thing it perturbs
+proves nothing. The perturbation has to break the quantity the code actually reads --
+here, the ROW of the bias table.
+
 GREEN, on the unmodified tree
 =============================
 ``CUDA_VISIBLE_DEVICES='' MPLBACKEND=Agg .venv/bin/python -m pytest
@@ -118,6 +211,12 @@ tests/test_layers/test_attention -q -p no:randomly`` -> **1871 passed, 32 skippe
 1 xfailed / 1904 collected**, 250 s. That run matters beyond the count: this file
 mutates process-global state (``sys.modules``, the Keras custom-object registry), so
 "green alone" would not have been evidence that it leaves the other 1833 tests intact.
+
+After step 3.1 (this re-pin, plus the new ``TestAllOnesKeyMaskIsANoOp`` class in
+``test_window_attention.py``) the same two commands give **38 passed** and
+**1887 passed, 32 skipped, 7 xfailed**, 243 s. The directory deltas account exactly:
+``+16`` passed are the new class's :data:`NO_OP_CELLS`, ``+6`` xfailed are its
+strict-xfail :data:`LEAKY_CELLS`. Nothing moved from passed to failed or skipped.
 """
 
 import importlib.util
@@ -181,6 +280,32 @@ MATRIX = [
     for mode in PARTITION_MODES
     for rpb in (True, False)
 ]
+
+
+#: Absolute tolerance for the six ragged ``grid`` cells ONLY (see the module docstring
+#: and D-007). Deliberately a float32-ulp-scale number, not a "make it pass" number:
+#: the MEASURED worst case over all six cells is 1.937e-07 here and 2.09e-07 in the
+#: ruling's independent run, so this is ~2.5x the observed noise floor and roughly 5
+#: ulps at the |output| ~ 0.3 these cells produce. It is nowhere near large enough to
+#: absorb a real defect -- the two RED-proof injections recorded above move these cells
+#: by 1.8e-02 and 4.8e-01 respectively, i.e. five to six orders of magnitude above it.
+#: If a ragged cell ever exceeds this, WIDEN NOTHING: the bias gather or the slot map
+#: is wrong, which is exactly the class of error this number was chosen to expose.
+RAGGED_ATOL = 5e-7
+
+
+def _is_ragged_grid(ws: int, n: int, mode: str) -> bool:
+    """Is this the regime step 3's short-circuit rewrote?
+
+    ``grid`` with ``1 < N < window_size ** 2``: exactly one window, and the
+    pre-restructure path padded ``N`` real tokens up to ``window_size ** 2`` UNMASKED
+    slots. ``N == window_size ** 2`` is excluded on purpose -- there is nothing to pad
+    there, both paths see the same keys, and bitwise identity is still required (it is
+    also the exact ``N`` at which ``SwinTransformerBlock`` calls this layer). ``N == 1``
+    is excluded because the short-circuit itself excludes it (``keras.ops.softmax``
+    warns on a size-1 reduction axis and this repo escalates warnings to errors).
+    """
+    return mode == "grid" and 1 < n < ws * ws
 
 
 def _cell_id(cell) -> str:
@@ -364,8 +489,12 @@ def _copy_weights_by_path(source, target) -> int:
     return len(src)
 
 
-def _forward(layer, x) -> np.ndarray:
-    return np.asarray(keras.ops.convert_to_numpy(layer(x, training=False)))
+def _forward(layer, x, attention_mask=None) -> np.ndarray:
+    return np.asarray(
+        keras.ops.convert_to_numpy(
+            layer(x, attention_mask=attention_mask, training=False)
+        )
+    )
 
 
 # ---------------------------------------------------------------------
@@ -377,16 +506,32 @@ def test_the_spatial_forward_is_bitwise_unchanged(
     cell, golden_modules, current_window_attention, golden_reference_device
 ):
     """One matrix cell: the current layer and the pre-restructure layer, same weights,
-    same input, must agree BIT FOR BIT."""
+    same input.
+
+    For 30 of the 36 cells the verdict is BIT FOR BIT. For the six ragged ``grid``
+    cells selected by :func:`_is_ragged_grid` the golden layer is driven WITH an
+    all-ones ``(B, N)`` mask -- which masks no real token, and is therefore the same
+    question, but which makes the golden path mask its own PAD slots -- and the verdict
+    is agreement to :data:`RAGGED_ATOL`. The module docstring explains why those six
+    cannot be bitwise, and D-007 rules that they must not be.
+    """
     ws, n, dim, heads, mode, rpb = cell
     golden_window, _ = golden_modules
     x = _inputs(ws, n, dim)
+    ragged = _is_ragged_grid(ws, n, mode)
+    # The mask is a KEEP predicate (1 = attend) and every token here is real, so this
+    # is the identity mask. It is applied to the GOLDEN side only: it is how the
+    # pre-restructure code is asked for the pad-masked answer it should have been
+    # giving all along. The current side is driven with no mask at all -- the ordinary
+    # call path -- so this comparison also proves the fix is in the DEFAULT path and
+    # not something a caller has to opt into.
+    golden_mask = np.ones((BATCH, n), dtype="int32") if ragged else None
 
     with keras.device(golden_reference_device):
         golden_layer = _make(golden_window.WindowAttention, ws, n, dim, heads, mode, rpb)
         current_layer = _make(current_window_attention, ws, n, dim, heads, mode, rpb)
         copied = _copy_weights_by_path(golden_layer, current_layer)
-        golden_out = _forward(golden_layer, x)
+        golden_out = _forward(golden_layer, x, attention_mask=golden_mask)
         current_out = _forward(current_layer, x)
 
     assert copied >= 3, f"only {copied} weights copied -- suspiciously few"
@@ -399,12 +544,25 @@ def test_the_spatial_forward_is_bitwise_unchanged(
         f"{float(np.std(golden_out))}) -- a bitwise comparison against it is vacuous"
     )
 
-    if not np.array_equal(current_out, golden_out):
-        delta = np.abs(current_out.astype("float64") - golden_out.astype("float64"))
+    delta = np.abs(current_out.astype("float64") - golden_out.astype("float64"))
+    if ragged:
+        ok = float(delta.max()) <= RAGGED_ATOL
+        verdict = (
+            f"agrees with the PAD-MASKED pre-restructure layer at "
+            f"{PRE_RESTRUCTURE_COMMIT} to atol={RAGGED_ATOL:g} (D-007)"
+        )
+    else:
+        ok = np.array_equal(current_out, golden_out)
+        verdict = (
+            f"is bitwise identical to the pre-restructure layer at "
+            f"{PRE_RESTRUCTURE_COMMIT}"
+        )
+
+    if not ok:
         raise AssertionError(
             f"WindowAttention(window_size={ws}, partition_mode={mode!r}, "
-            f"use_relative_position_bias={rpb}) on {x.shape} is NOT bitwise identical "
-            f"to the pre-restructure layer at {PRE_RESTRUCTURE_COMMIT}\n"
+            f"use_relative_position_bias={rpb}) on {x.shape} NOT {verdict}\n"
+            f"  ragged single-window cell: {ragged}\n"
             f"  mismatching elements: {int((delta != 0).sum())} of {delta.size}\n"
             f"  max |delta|: {float(delta.max())}\n"
             f"  current head:  "

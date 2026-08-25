@@ -200,6 +200,7 @@ References:
 # ---------------------------------------------------------------------
 
 import math
+import numpy as np
 import keras
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
@@ -500,6 +501,30 @@ class WindowAttention(keras.layers.Layer):
 
         return keras.ops.argsort(combined_key)
 
+    @staticmethod
+    def _single_window_slots(seq_len: int, window_size: int) -> np.ndarray:
+        """Map each token of a degenerate one-window sequence to its tile slot.
+
+        The grid path lays a length-``seq_len`` sequence out row-major into a
+        ``H x W`` grid with ``H = W = ceil(sqrt(seq_len))``, pads that grid up to
+        ``window_size x window_size`` and flattens it row-major, so token ``i``
+        lands at tile slot ``(i // W) * window_size + (i % W)``. That mapping --
+        NOT the identity, whenever ``W < window_size`` -- is what the
+        relative-position bias must be gathered at.
+
+        :param seq_len: Number of real tokens, ``< window_size ** 2``.
+        :type seq_len: int
+        :param window_size: Side length of the square window, in tokens.
+        :type window_size: int
+        :return: int32 array of shape ``(seq_len,)`` of row-major tile slots.
+        :rtype: np.ndarray
+        """
+        grid_side = int(math.ceil(math.sqrt(seq_len)))
+        tokens = np.arange(seq_len, dtype=np.int32)
+        return (
+                (tokens // grid_side) * window_size + (tokens % grid_side)
+        ).astype(np.int32)
+
     def _window_partition(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Partition a 4-D grid tensor into non-overlapping windows.
 
@@ -619,9 +644,71 @@ class WindowAttention(keras.layers.Layer):
         :return: Output tensor ``(B, N, dim)``.
         :rtype: keras.KerasTensor
         """
+        ws = self.window_size
+
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-007
+        # When `N < window_size ** 2` the grid below degenerates to EXACTLY ONE
+        # window, and the pad-then-partition path attends `window_size ** 2`
+        # slots to answer a question about `N` tokens. MEASURED at
+        # `N=128, window_size=128`: `H_pad * W_pad / N == 128.0` -- 128 real
+        # tokens inflated to 16,384 slots, a `(1, 4, 16384, 16384)` float32 score
+        # matrix (4.0 GiB) with 3-4 live copies through clip / mask / softmax, for
+        # a peak of 17.69 GB against plain `multi_head`'s 0.678 GB on the same
+        # `(1, 128, 64)` input. So this branch attends the N REAL tokens instead,
+        # telling `SingleWindowAttention` where each of them sits in the tile so
+        # the relative-position bias is gathered at the SAME table rows.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT widen this to `N <= window_size ** 2`. At `N == window_size
+        #     ** 2` there is nothing to skip (the slots are `arange(N)` and the
+        #     sub-index IS the full index), so it buys nothing -- and that is the
+        #     exact `N` at which `SwinTransformerBlock` calls this layer with a
+        #     rank-3 pairwise mask in already-partitioned coordinates. Leaving
+        #     that case on the original path keeps the D-001 verbatim-mask
+        #     contract untouched and keeps Swin bit-for-bit unchanged.
+        #   * Do NOT take this branch when the sequence length is not statically
+        #     known: the slot vector is a numpy constant derived from `N`.
+        #   * Do NOT drop the `N > 1` guard. At `N == 1` the short-circuit is
+        #     mathematically right -- one token attends to itself, softmax over a
+        #     length-1 axis is exactly 1.0 -- but `keras.ops.softmax` emits a
+        #     `UserWarning` for a size-1 reduction axis, and this repo's pytest
+        #     config escalates warnings to errors, so
+        #     `test_arbitrary_shapes_and_windows[{3,4,8}-1-grid]` fail on the
+        #     WARNING, not on any value. `N == 1` therefore stays on the padding
+        #     path, where the softmax axis is `window_size ** 2`. It is the one
+        #     length at which this layer still inflates, and it is cheap for the
+        #     window sizes that reach it.
+        #   * Do NOT "simplify" by calling plain dense attention here. That drops
+        #     the relative-position bias, which is indexed by GRID COORDINATE --
+        #     token `i` sits at grid `(i // W, i % W)`, i.e. tile slot
+        #     `(i // W) * ws + (i % W)`, which is NOT `i` whenever `W < ws`.
+        #
+        # ACCEPTED COST -- and it is a VALUE change, not just a cost change.
+        # On the old path the `window_size ** 2 - N` zero-filled pad slots were
+        # never masked (the internal padding mask sees `N_actual == N_target ==
+        # window_size ** 2` and is all ones), so they contributed keys and values
+        # to every real token's softmax. MEASURED on the pre-fix code, no-mask
+        # versus an explicit all-ones `(B, N)` mask (which DOES mask the pads):
+        # max |delta| 0.350777 at `ws=4, N=9`, 0.0903779 at `ws=8, N=50`, and
+        # exactly 0.0 at `ws=8, N=64` (`N == ws**2`, nothing to pad). Removing
+        # those slots is the fix, and it necessarily moves the ragged-`N` output.
+        # See decisions.md D-007 (plan-2026-08-25T053412-0f1fa04f).
+        static_n = inputs.shape[1]
+        degenerate = (
+            static_n is not None
+            and 1 < int(static_n) < ws * ws
+            and (attention_mask is None or len(attention_mask.shape) == 2)
+        )
+        if degenerate:
+            return self.attention(
+                inputs,
+                attention_mask=attention_mask,
+                training=training,
+                window_slots=self._single_window_slots(int(static_n), ws),
+            )
+
         input_shape = keras.ops.shape(inputs)
         B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
-        ws = self.window_size
 
         H = W = keras.ops.cast(
             keras.ops.ceil(

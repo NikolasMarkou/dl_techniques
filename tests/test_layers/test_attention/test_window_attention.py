@@ -363,5 +363,186 @@ class TestWindowAttention:
         assert layer.probability_config == config
 
 
+class TestAllOnesKeyMaskIsANoOp:
+    """An all-ones ``(B, N)`` key mask masks NOTHING and must change NOTHING.
+
+    ``attention_mask`` is a KEEP predicate (``1 = attend``, pinned by
+    ``SingleWindowAttention``'s D-002 anchor and by ``common.apply_attention_mask``,
+    which performs no polarity inference). An all-ones mask therefore keeps every one
+    of the ``N`` real tokens: it is the identity, and the layer's output must be
+    literally the same bits it produces with ``attention_mask=None``.
+
+    **Why this guard exists.** Before plan ``plan-2026-08-25T053412-0f1fa04f`` step 3
+    it was FALSE, by a lot. ``WindowAttention._call_grid`` lays a short sequence into a
+    ``ceil(sqrt(N)) x ceil(sqrt(N))`` grid, zero-pads that grid up to a whole number of
+    ``window_size x window_size`` tiles, and hands each tile to
+    ``SingleWindowAttention`` as a full window. The inner layer's own padding mask is
+    derived from ``N_actual`` versus ``N_target``, which are equal by then, so it is
+    ALL ONES and masks nothing: the zero-filled pad slots entered every real token's
+    softmax as ordinary keys and values. Passing an explicit all-ones ``(B, N)`` mask
+    was the one thing that revealed it, because that mask IS zero-padded alongside the
+    sequence and so does mask the pads -- turning a mathematical no-op into a visible
+    output change. MEASURED on the pre-fix code (commit ``4cb5f47c9``), max |delta|
+    between the no-mask and all-ones-mask outputs::
+
+        window_size=4, N=9   ->  0.341491      window_size=8, N=64  ->  0.0  (N == ws**2)
+        window_size=7, N=25  ->  0.255033      window_size=2, N=4   ->  0.0  (N == ws**2)
+        window_size=8, N=50  ->  0.0876751
+
+    The two zeros are the control: the leak appears if and only if there are pad slots.
+    This was not merely an efficiency defect -- in the ``N < window_size ** 2`` regime
+    the layer computed the WRONG attention, and that is exactly the regime ModernBERT's
+    local layers ran in. See decisions.md D-007
+    (``plan-2026-08-25T053412-0f1fa04f``).
+
+    **The comparison is exact, not ``allclose``.** Both sides run the same kernels on
+    the same weights in the same process; the mask, being all ones, contributes
+    ``0 * -1e9 == 0.0`` to every score, so there is no legitimate nonzero delta to
+    absorb. MEASURED: every cell in :data:`NO_OP_CELLS` is bit-for-bit ``0.0``,
+    including ``window_size=8, N=63``, where a single pad slot would otherwise leak.
+    A tolerance would let exactly that one-slot case through.
+    """
+
+    #: ``(window_size, seq_len)`` where step 3's short-circuit, or the absence of any
+    #: padding, makes the identity mask a genuine no-op TODAY.
+    NO_OP_CELLS = [
+        # Ragged single window -- the regime step 3 rewrote. Pre-fix these leaked.
+        ("grid", 4, 9),
+        ("grid", 7, 25),
+        ("grid", 8, 50),
+        ("grid", 8, 63),
+        # N == window_size ** 2 -- one window, nothing to pad. This is how
+        # SwinTransformerBlock, FastVLM and TiRex call the layer.
+        ("grid", 2, 4),
+        ("grid", 8, 64),
+        ("zigzag", 2, 4),
+        ("zigzag", 8, 64),
+        # N > window_size ** 2 and the grid tiles exactly -- nothing to pad either.
+        ("grid", 2, 16),
+        ("grid", 4, 64),
+        ("grid", 7, 196),
+        ("grid", 8, 256),
+        ("zigzag", 2, 16),
+        ("zigzag", 4, 64),
+        ("zigzag", 7, 196),
+        ("zigzag", 8, 256),
+    ]
+
+    # DECISION plan-2026-08-25T053412-0f1fa04f/D-008
+    #: The SAME property, in the two regimes step 3 deliberately did NOT touch. These
+    #: are ``xfail(strict=True)``, not deletions and not comments: they are live
+    #: measurements that will turn XPASS -- and so fail the suite -- the moment either
+    #: regime is fixed, which is the only way a known-open defect stays visible. Do NOT
+    #: relax them to plain ``xfail``.
+    #:
+    #: 1. ``grid`` with ``N > window_size ** 2`` where the grid does not tile exactly:
+    #:    ``ceil(sqrt(N))**2 - N`` sequence pads and/or ``pad_h``/``pad_w`` tile pads
+    #:    still enter the softmax unmasked. Step 3's short-circuit covers only the
+    #:    single-window case ``N < window_size ** 2``.
+    #: 2. ``zigzag`` at ANY ragged ``N``: the short-circuit lives in ``_call_grid``
+    #:    only, so ``_call_zigzag`` still pads to a whole number of windows.
+    #:
+    #: The fourth field is the delta MEASURED by :meth:`_delta` on the current tree
+    #: (2026-08-25). It is reported in the failure message and is NOT asserted on:
+    #: a magnitude assertion inside an ``xfail`` would keep the cell red -- and the
+    #: ``xfail`` satisfied -- even after the leak was fixed, which is precisely the
+    #: guard-that-cannot-pass this repo has been burned by before. The ONLY assertion
+    #: is ``delta == 0.0``, so XPASS means fixed and nothing else can produce it.
+    #:
+    #: WHAT NOT TO DO: do not "fix" a red cell here by moving it out of this list, and
+    #: do not widen step 3's short-circuit to `N <= window_size ** 2` hoping to cover
+    #: them -- these two regimes need a pad mask inside the MULTI-window grid path and
+    #: a slot map for the permuted zigzag layout, and fixing zigzag additionally breaks
+    #: the 18 zigzag cells that `test_window_attention_restructure_is_inert.py` still
+    #: pins BITWISE to the leaky pre-restructure reference (D-007 narrowed the grid
+    #: cells only). See decisions.md D-008 (plan-2026-08-25T053412-0f1fa04f).
+    LEAKY_CELLS = [
+        ("grid", 2, 15, 0.298543),
+        ("grid", 4, 20, 0.678637),
+        ("grid", 8, 100, 1.000270),
+        ("zigzag", 4, 9, 0.271005),
+        ("zigzag", 7, 25, 0.382822),
+        ("zigzag", 8, 50, 0.086691),
+    ]
+
+    @staticmethod
+    def _delta(partition_mode, window_size, seq_len):
+        """max |output(no mask) - output(all-ones mask)| for one configuration."""
+        dim, num_heads, batch = 32, 4, 2
+        keras.utils.set_random_seed(7)
+        layer = WindowAttention(
+            dim=dim,
+            window_size=window_size,
+            num_heads=num_heads,
+            partition_mode=partition_mode,
+            use_relative_position_bias=True,
+            dropout_rate=0.0,
+        )
+        rng = np.random.default_rng(abs(hash((partition_mode, window_size, seq_len))) % (2 ** 32))
+        x = rng.standard_normal((batch, seq_len, dim)).astype("float32")
+        ones = np.ones((batch, seq_len), dtype="int32")
+
+        unmasked = np.asarray(keras.ops.convert_to_numpy(layer(x, training=False)))
+        masked = np.asarray(
+            keras.ops.convert_to_numpy(
+                layer(x, attention_mask=keras.ops.convert_to_tensor(ones), training=False)
+            )
+        )
+        # Non-vacuity: two constant (or NaN-free-but-dead) outputs would compare equal
+        # no matter how broken the layer is.
+        assert np.all(np.isfinite(unmasked)), "the unmasked output is not finite"
+        assert float(np.std(unmasked)) > 1e-6, (
+            f"the unmasked output is effectively constant "
+            f"(std={float(np.std(unmasked))}) -- this comparison would be vacuous"
+        )
+        assert unmasked.shape == masked.shape == (batch, seq_len, dim)
+        return float(np.abs(unmasked.astype("float64") - masked.astype("float64")).max())
+
+    @pytest.mark.parametrize(
+        "partition_mode,window_size,seq_len",
+        NO_OP_CELLS,
+        ids=[f"{m}-ws{w}-N{n}" for (m, w, n) in NO_OP_CELLS],
+    )
+    def test_an_all_ones_key_mask_does_not_change_the_output(
+        self, partition_mode, window_size, seq_len
+    ):
+        delta = self._delta(partition_mode, window_size, seq_len)
+        assert delta == 0.0, (
+            f"WindowAttention(window_size={window_size}, "
+            f"partition_mode={partition_mode!r}) on (2, {seq_len}, 32): an all-ones "
+            f"(B, N) key mask masks no real token and must be a NO-OP, but it moved "
+            f"the output by {delta}. That is the signature of unmasked PAD slots "
+            f"reaching the softmax -- the defect D-007 records "
+            f"(plan-2026-08-25T053412-0f1fa04f). Do NOT fix this by widening the "
+            f"assertion: find the pad slots."
+        )
+
+    @pytest.mark.parametrize(
+        "partition_mode,window_size,seq_len,measured",
+        LEAKY_CELLS,
+        ids=[f"{m}-ws{w}-N{n}" for (m, w, n, _) in LEAKY_CELLS],
+    )
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN OPEN: the unmasked-pad leak D-007 describes survives outside the "
+            "single-window grid regime step 3 fixed -- grid with a non-tiling N, and "
+            "zigzag at any ragged N. XPASS here means it was fixed; delete the cell "
+            "from LEAKY_CELLS and move it to NO_OP_CELLS."
+        ),
+    )
+    def test_the_all_ones_mask_leak_is_still_open_outside_the_fixed_regime(
+        self, partition_mode, window_size, seq_len, measured
+    ):
+        delta = self._delta(partition_mode, window_size, seq_len)
+        assert delta == 0.0, (
+            f"KNOWN OPEN (D-007): an all-ones (B, N) key mask still moves "
+            f"WindowAttention(window_size={window_size}, "
+            f"partition_mode={partition_mode!r}) on (2, {seq_len}, 32) by {delta} "
+            f"(recorded {measured} on 2026-08-25). Unmasked pad slots are still "
+            f"reaching the softmax in this regime."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

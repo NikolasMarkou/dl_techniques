@@ -384,54 +384,98 @@ class SingleWindowAttention(keras.layers.Layer):
         #     Under Keras 3's `StatelessScope` the assign is DISCARDED and the
         #     tensor stays ALL ZEROS in a real model -- this repo has 11 recorded
         #     instances. It is a CONSTANT, not a weight.
-        #   * Do NOT build it with `keras.ops` inside `build()`. `build()` can run
+        #   * Do NOT build it with `keras.ops`. `build()` and `call()` can both run
         #     during a `tf.function` trace, which would make the stored tensor a
         #     graph tensor owned by THAT trace and unusable from any other one.
         #     numpy has no graph affinity; the int32 values are exact either way,
         #     so the gather is bit-for-bit what it was.
-        # See decisions.md D-006 (plan-2026-08-25T053412-0f1fa04f).
+        #   * Do NOT build the FULL `(W**2, W**2)` index unconditionally in
+        #     `build()` either (step 2 did; step 3 does not). A caller that
+        #     supplies `window_slots` attends `n < W**2` real tokens and needs
+        #     only the `(n, n)` sub-index -- building the full one anyway would
+        #     hand back the entire O(W^4) cost the short-circuit exists to avoid.
+        #     It is therefore built ON FIRST USE, per distinct slot vector, and
+        #     cached in `_relative_position_index_cache`.
+        # See decisions.md D-006 and D-007 (plan-2026-08-25T053412-0f1fa04f).
         self.relative_position_index = None
+        self._relative_position_index_cache: Dict[bytes, np.ndarray] = {}
 
-    @staticmethod
-    def _relative_position_index(window_size: int) -> np.ndarray:
-        """Build the static intra-window relative-position index (Swin convention).
+    def _relative_position_index(
+            self, window_slots: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        """Build (and cache) the relative-position index for a set of window slots.
 
         Each entry ``index[i, j]`` is the row into the
         ``(2 * window_size - 1) ** 2`` relative-position bias table that encodes
-        the 2-D displacement from window slot ``j`` to window slot ``i``, both
-        slots being row-major positions in a ``window_size x window_size`` tile.
+        the 2-D displacement from slot ``window_slots[j]`` to slot
+        ``window_slots[i]``, where a slot is a row-major position in a
+        ``window_size x window_size`` tile.
 
         This is the same pairwise-difference computation the Swin reference
         implementation performs (``coords_flatten[:, :, None] -
-        coords_flatten[:, None, :]``, then row-major encode) and it is still
-        O(W^4) -- it is NOT a closed form, because upstream has none. The only
-        departure is that the two coordinate axes are differenced SEPARATELY and
-        accumulated in place, instead of being stacked into a ``(2, W**2, W**2)``
-        tensor that is then transposed and sliced. The integer result is
-        identical element for element; what changes is the transient footprint:
-        two ``(W**2, W**2)`` int32 buffers instead of a ``(2, W**2, W**2)``
-        buffer plus a transposed copy plus two slices plus an ``astype`` copy.
-        MEASURED at ``window_size=128``: 2.0 GB of transients instead of 6.0 GB.
-        See the D-006 anchor in ``__init__`` for why this runs in ``build()`` and
-        why it is numpy rather than ``keras.ops``.
+        coords_flatten[:, None, :]``, then row-major encode) -- it is NOT a closed
+        form, because upstream has none. Two things differ, both for memory and
+        neither for value. (a) The two coordinate axes are differenced SEPARATELY
+        and accumulated in place instead of being stacked into a
+        ``(2, n, n)`` tensor that is then transposed, sliced twice and
+        ``astype``-copied; MEASURED at ``window_size=128`` this is 2.0 GB of
+        transients instead of 6.0 GB. (b) The slot set is a PARAMETER, so a caller
+        attending ``n < window_size ** 2`` real tokens pays ``O(n^2)`` rather than
+        ``O(window_size ** 4)``.
 
-        :param window_size: Side length of the square window, in tokens.
-        :type window_size: int
-        :return: Index matrix of shape ``(window_size ** 2, window_size ** 2)``,
-            dtype ``int32``, every entry in ``[0, (2 * window_size - 1) ** 2)``.
+        :param window_slots: Row-major slot ids inside the window, shape ``(n,)``,
+            or ``None`` for the full window (``arange(window_size ** 2)``).
+        :type window_slots: Optional[np.ndarray]
+        :return: Index matrix of shape ``(n, n)``, dtype ``int32``, every entry in
+            ``[0, (2 * window_size - 1) ** 2)``.
         :rtype: np.ndarray
+        :raises RuntimeError: If the constructed index has the wrong shape, or is
+            all zeros at ``window_size > 1``.
         """
-        slots = np.arange(window_size * window_size, dtype=np.int32)
+        ws = self.window_size
+        cache_key = (
+            b"full" if window_slots is None else window_slots.tobytes()
+        )
+        cached = self._relative_position_index_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        slots = (
+            np.arange(ws * ws, dtype=np.int32)
+            if window_slots is None
+            else np.asarray(window_slots, dtype=np.int32)
+        )
         # Row-major slot -> (row, column) inside the window.
-        coords_h = slots // window_size
-        coords_w = slots % window_size
-        # (W**2, W**2): displacement along each axis, shifted to start at 0.
+        coords_h = slots // ws
+        coords_w = slots % ws
+        # (n, n): displacement along each axis, shifted to start at 0.
         index = coords_h[:, None] - coords_h[None, :]
-        index += window_size - 1
-        index *= 2 * window_size - 1
+        index += ws - 1
+        index *= 2 * ws - 1
         relative_w = coords_w[:, None] - coords_w[None, :]
-        relative_w += window_size - 1
+        relative_w += ws - 1
         index += relative_w
+
+        # The constant is checked rather than assumed: a silently-zero or
+        # wrongly-shaped index gathers row 0 of the bias table for every pair and
+        # turns the relative-position bias into a per-head scalar -- a change no
+        # shape assertion and no finiteness check can see.
+        expected_shape = (slots.shape[0], slots.shape[0])
+        if index.shape != expected_shape:
+            raise RuntimeError(
+                f"relative_position_index has shape {index.shape}, expected "
+                f"{expected_shape}."
+            )
+        if ws > 1 and slots.shape[0] > 1 and not index.any():
+            raise RuntimeError(
+                f"relative_position_index is all zeros at window_size={ws} over "
+                f"{slots.shape[0]} slots; only a single slot, or window_size=1, "
+                "may produce an all-zero index."
+            )
+
+        self._relative_position_index_cache[cache_key] = index
+        if window_slots is None:
+            self.relative_position_index = index
         return index
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -453,32 +497,9 @@ class SingleWindowAttention(keras.layers.Layer):
             return
 
         if self.use_relative_position_bias:
-            # Idempotent: `build()` may be called more than once, and
-            # recomputing an O(W^4) constant is exactly what this move exists to
-            # avoid.
-            if self.relative_position_index is None:
-                index = self._relative_position_index(self.window_size)
-                # The constant is the whole point of the move, so it is checked
-                # rather than assumed: a silently-zero or wrongly-shaped index
-                # gathers row 0 of the bias table for every pair and turns the
-                # relative-position bias into a per-head scalar -- a change no
-                # shape assertion and no finiteness check can see.
-                expected_shape = (
-                    self.window_size ** 2,
-                    self.window_size ** 2,
-                )
-                if index.shape != expected_shape:
-                    raise RuntimeError(
-                        f"relative_position_index has shape {index.shape}, "
-                        f"expected {expected_shape}."
-                    )
-                if self.window_size > 1 and not index.any():
-                    raise RuntimeError(
-                        "relative_position_index is all zeros at "
-                        f"window_size={self.window_size}; only window_size=1 "
-                        "may produce an all-zero index."
-                    )
-                self.relative_position_index = index
+            # The INDEX is not built here -- see the D-006/D-007 anchor in
+            # `__init__`. Only the (tiny) learnable table is a build-time
+            # allocation: `(2W-1)**2 x heads`, ~1.04 MB even at W=128.
             num_relative_positions = (2 * self.window_size - 1) ** 2
             self.relative_position_bias_table = self.add_weight(
                 name="relative_position_bias_table",
@@ -533,6 +554,7 @@ class SingleWindowAttention(keras.layers.Layer):
             inputs: keras.KerasTensor,
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
+            window_slots: Optional[np.ndarray] = None,
     ) -> keras.KerasTensor:
         """
         Forward pass for the unified single-window attention.
@@ -562,12 +584,46 @@ class SingleWindowAttention(keras.layers.Layer):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating whether in training mode.
         :type training: Optional[bool]
+        :param window_slots: Optional ``(N_actual,)`` int32 array naming, for each
+            input token, its row-major slot inside the ``window_size x
+            window_size`` tile. Supplying it asserts *these are all the tokens
+            there are*: the layer then attends the ``N_actual`` real tokens with
+            no internal padding, and gathers the relative-position bias at these
+            slots' coordinates. Leave it ``None`` for the original
+            pad-to-``window_size ** 2`` behaviour.
+        :type window_slots: Optional[np.ndarray]
         :return: Attended output of shape ``(B, N_actual, dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``window_slots`` is supplied and its length does
+            not match a statically-known sequence length, or any slot is outside
+            ``[0, window_size ** 2)``.
         """
         input_shape = keras.ops.shape(inputs)
         B_actual, N_actual = input_shape[0], input_shape[1]
-        N_target = self.window_size * self.window_size
+        if window_slots is None:
+            N_target = self.window_size * self.window_size
+        else:
+            window_slots = np.asarray(window_slots, dtype=np.int32)
+            static_n = inputs.shape[1]
+            if static_n is not None and int(static_n) != int(
+                    window_slots.shape[0]
+            ):
+                raise ValueError(
+                    f"window_slots has length {int(window_slots.shape[0])} but "
+                    f"the input sequence length is {int(static_n)}. It must name "
+                    "one window slot per input token."
+                )
+            if window_slots.min() < 0 or window_slots.max() >= (
+                    self.window_size * self.window_size
+            ):
+                raise ValueError(
+                    f"window_slots values must lie in "
+                    f"[0, {self.window_size ** 2}) for window_size="
+                    f"{self.window_size}; got range "
+                    f"[{int(window_slots.min())}, {int(window_slots.max())}]."
+                )
+            # No internal padding: the real tokens ARE the window.
+            N_target = int(window_slots.shape[0])
 
         padding_amount = N_target - N_actual
         # Shape: (B, N_actual, dim) -> (B, N_target, dim), N_target = window_size**2
@@ -697,18 +753,16 @@ class SingleWindowAttention(keras.layers.Layer):
         attn = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
 
         if self.use_relative_position_bias:
-            if self.relative_position_index is None:
-                raise RuntimeError(
-                    "relative_position_index is None: SingleWindowAttention's "
-                    "relative-position index is built in `build()` (it is "
-                    "O(window_size**4), see the D-006 anchor in `__init__`). "
-                    "Call `build(input_shape)` before invoking the layer."
-                )
             # Shape: table (2*Ws-1)^2 x H, gathered by (N_target*N_target,) index
-            #        -> (N_target*N_target, H)
+            #        -> (N_target*N_target, H). The index is the FULL
+            #        (Ws**2, Ws**2) one when the layer padded internally, and the
+            #        (N_target, N_target) sub-index at the caller's slots when it
+            #        did not -- the SAME table rows either way, so the bias a real
+            #        token pair receives does not depend on which path ran.
+            relative_position_index = self._relative_position_index(window_slots)
             relative_position_bias = keras.ops.take(
                 self.relative_position_bias_table,
-                keras.ops.reshape(self.relative_position_index, (-1,)),
+                keras.ops.reshape(relative_position_index, (-1,)),
                 axis=0,
             )
             # Shape: (N_target*N_target, H) -> (N_target, N_target, H)
