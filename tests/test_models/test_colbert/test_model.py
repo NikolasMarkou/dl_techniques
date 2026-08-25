@@ -1,0 +1,652 @@
+"""Guards for :class:`~dl_techniques.models.language.colbert.model.ColBERT`.
+
+Everything here runs on a deliberately TINY geometry (1 backbone layer, hidden
+16, dim 8, query 6, doc 10) so the whole module stays fast on CPU. The claims
+being pinned are structural and value-level, none of them scale-dependent.
+
+RED-proof record (guide v3 §14; injections applied to ``model.py``, restored
+from a ``cp`` backup and verified with ``diff -q`` -- never ``git stash`` and
+never ``git checkout --``):
+
+======================================================  ========================================================
+Injection                                               Named assertion that fired
+======================================================  ========================================================
+(a) delete ``materialize_sublayers(self, input_shape)``  ``test_the_explicit_build_matches_the_lazy_build``
+    from ``ColBERT.build``                               -- "explicit build materialized 0 weights"
+(b) give the document path its OWN second                ``test_the_query_and_document_share_one_projection``
+    ``ColBERTProjection`` instead of the shared one      -- "the document path must reuse the query projection"
+(c) drop the skiplist mask on the document path          ``test_a_skiplisted_document_position_is_zeroed``
+    (``_participation`` returns ``attention_mask``)      -- "a skiplisted position must project to exactly zero"
+======================================================  ========================================================
+
+Each injection was verified to redden its OWN named assertion -- the message
+quoted above is the one pytest printed, not a paraphrase -- and each was
+restored and re-verified green (66 passed / 66 collected for the directory).
+Injection (a) additionally reddens six further tests, which is expected: a model
+with zero materialized weights fails every claim that needs weights. Injections
+(b) and (c) are narrow: (b) reddens two tests, (c) exactly one.
+"""
+
+import os
+import tempfile
+
+import keras
+import numpy as np
+import pytest
+
+from dl_techniques.models.language.colbert.components import ColBERTProjection
+from dl_techniques.models.language.colbert.model import (
+    DOC_ATTENTION_MASK_KEY,
+    DOC_INPUT_IDS_KEY,
+    DOC_SKIPLIST_MASK_KEY,
+    QUERY_ATTENTION_MASK_KEY,
+    QUERY_INPUT_IDS_KEY,
+    ColBERT,
+    create_colbert,
+    create_colbert_v1,
+    create_colbert_v2,
+)
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
+
+# ---------------------------------------------------------------------
+# Tiny geometry shared by every test in this module.
+# ---------------------------------------------------------------------
+
+TINY = dict(
+    vocab_size=64,
+    hidden_size=16,
+    num_layers=1,
+    num_heads=2,
+    intermediate_size=32,
+    dim=8,
+    query_maxlen=6,
+    doc_maxlen=10,
+    max_position_embeddings=16,
+)
+
+BATCH = 2
+QUERY_LEN = TINY["query_maxlen"]
+DOC_LEN = TINY["doc_maxlen"]
+
+BUILD_SHAPES = {
+    QUERY_INPUT_IDS_KEY: (None, QUERY_LEN),
+    DOC_INPUT_IDS_KEY: (None, DOC_LEN),
+}
+
+
+def make_model(**overrides):
+    """Build a tiny ColBERT, unbuilt, with ``TINY`` overridden by ``overrides``."""
+    config = dict(TINY)
+    config.update(overrides)
+    return ColBERT(**config)
+
+
+def make_inputs(seed: int = 0):
+    """Deterministic input batch. Called repeatedly; must return equal values."""
+    rng = np.random.default_rng(seed)
+    return {
+        QUERY_INPUT_IDS_KEY: rng.integers(
+            0, TINY["vocab_size"], (BATCH, QUERY_LEN)
+        ).astype("int32"),
+        QUERY_ATTENTION_MASK_KEY: np.ones((BATCH, QUERY_LEN), dtype="int32"),
+        DOC_INPUT_IDS_KEY: rng.integers(
+            0, TINY["vocab_size"], (BATCH, DOC_LEN)
+        ).astype("int32"),
+        DOC_ATTENTION_MASK_KEY: np.ones((BATCH, DOC_LEN), dtype="int32"),
+        DOC_SKIPLIST_MASK_KEY: np.ones((BATCH, DOC_LEN), dtype="int32"),
+    }
+
+
+def weight_paths(model):
+    """Weight paths with the model's own uniquified root segment stripped.
+
+    Keras appends ``_1``, ``_2``, ... to the auto-generated name of the SECOND
+    and later instances of a class in one session, so two models built from the
+    same config carry ``col_bert/...`` and ``col_bert_1/...``. That difference
+    is the instance counter, not the architecture. Only the leading segment is
+    dropped -- the whole sub-layer tree below it is compared verbatim, so a
+    missing encoder layer or a duplicated projection is still visible.
+    """
+    return {w.path.split("/", 1)[1] for w in model.weights}
+
+
+# ---------------------------------------------------------------------
+# 1. Explicit build vs lazy build
+# ---------------------------------------------------------------------
+
+
+def test_the_explicit_build_matches_the_lazy_build():
+    """``build()`` must materialize exactly what a forward call materializes."""
+    explicit = make_model()
+    explicit.build(BUILD_SHAPES)
+
+    lazy = make_model()
+    lazy(make_inputs())
+
+    assert len(explicit.weights) > 0, (
+        "explicit build materialized 0 weights: ColBERT.build left the "
+        "sub-layer tree unmaterialized while marking the model built"
+    )
+    assert explicit.count_params() > 0, (
+        "explicit build reported count_params() == 0"
+    )
+    assert len(explicit.weights) == len(lazy.weights), (
+        f"explicit build produced {len(explicit.weights)} weights against the "
+        f"lazy build's {len(lazy.weights)}"
+    )
+    assert weight_paths(explicit) == weight_paths(lazy), (
+        "explicit and lazy builds disagree on the weight PATH set; only in "
+        f"explicit: {sorted(weight_paths(explicit) - weight_paths(lazy))}; only "
+        f"in lazy: {sorted(weight_paths(lazy) - weight_paths(explicit))}"
+    )
+    assert explicit.count_params() == lazy.count_params(), (
+        f"explicit count_params()={explicit.count_params()} against lazy "
+        f"{lazy.count_params()}"
+    )
+
+
+def test_the_lazy_build_costs_nothing():
+    """Shared oracle: a lazily-built model loses nothing across save/load."""
+    assert_lazy_build_costs_nothing(
+        build=make_model,
+        make_inputs=make_inputs,
+        input_shape=BUILD_SHAPES,
+    )
+
+
+# ---------------------------------------------------------------------
+# 2. Value-level .keras round trip, TWICE
+# ---------------------------------------------------------------------
+
+
+def test_two_keras_round_trips_preserve_every_weight_value_and_the_output():
+    """Save -> load -> save -> load, comparing values at ``atol=1e-6, rtol=0``.
+
+    Done twice on purpose: a save-side check cannot see a load-side loss, and a
+    model that reconstructs a sub-layer differently on reload only diverges on
+    the SECOND write.
+    """
+    inputs = make_inputs()
+    model = make_model()
+    reference_output = model(inputs, training=False)
+
+    reference_values = [
+        np.asarray(keras.ops.convert_to_numpy(w)) for w in model.weights
+    ]
+    reference_paths = [w.path.split("/", 1)[1] for w in model.weights]
+
+    current = model
+    with tempfile.TemporaryDirectory() as directory:
+        for cycle in (1, 2):
+            path = os.path.join(directory, f"colbert_{cycle}.keras")
+            current.save(path)
+            current = keras.models.load_model(path, compile=False)
+
+            restored_paths = [w.path.split("/", 1)[1] for w in current.weights]
+            assert restored_paths == reference_paths, (
+                f"cycle {cycle}: the reloaded weight path list changed; only "
+                f"after reload: {sorted(set(restored_paths) - set(reference_paths))}"
+            )
+
+            for name, before, weight in zip(
+                reference_paths, reference_values, current.weights
+            ):
+                after = np.asarray(keras.ops.convert_to_numpy(weight))
+                np.testing.assert_allclose(
+                    after,
+                    before,
+                    atol=1e-6,
+                    rtol=0,
+                    err_msg=(
+                        f"cycle {cycle}: weight {name} changed value across the "
+                        "round trip"
+                    ),
+                )
+
+            restored_output = current(inputs, training=False)
+            assert set(restored_output) == set(reference_output), (
+                f"cycle {cycle}: the output key set changed across the round trip"
+            )
+            for key in reference_output:
+                np.testing.assert_allclose(
+                    np.asarray(keras.ops.convert_to_numpy(restored_output[key])),
+                    np.asarray(keras.ops.convert_to_numpy(reference_output[key])),
+                    atol=1e-6,
+                    rtol=0,
+                    err_msg=(
+                        f"cycle {cycle}: output '{key}' changed across the "
+                        "round trip"
+                    ),
+                )
+
+
+# ---------------------------------------------------------------------
+# 3. The shared projection
+# ---------------------------------------------------------------------
+
+
+def test_the_query_and_document_share_one_projection(monkeypatch):
+    """The two towers must traverse the SAME projection object, not a twin.
+
+    Asserted with ``is``, and backed by a weight-count claim: a second
+    projection would add exactly one more kernel to the model. Comparing
+    configurations would pass on two independently-initialized twins, which is
+    the defect this guards.
+    """
+    model = make_model()
+    model.build(BUILD_SHAPES)
+
+    projection_kernels = [
+        w.path for w in model.weights if "projection" in w.path
+    ]
+    assert len(projection_kernels) == 1, (
+        "the document path must reuse the query projection: found "
+        f"{len(projection_kernels)} projection weights ({projection_kernels}), "
+        "so the two towers do not share one instance"
+    )
+
+    seen = []
+    original_call = ColBERTProjection.call
+
+    def recording_call(layer, *args, **kwargs):
+        seen.append(id(layer))
+        return original_call(layer, *args, **kwargs)
+
+    monkeypatch.setattr(ColBERTProjection, "call", recording_call)
+    model(make_inputs())
+
+    assert len(seen) >= 2, (
+        "the document path must reuse the query projection: the projection was "
+        f"invoked {len(seen)} time(s) in one forward pass, expected at least 2 "
+        "(query tower + document tower)"
+    )
+    assert set(seen) == {id(model.projection)}, (
+        "the document path must reuse the query projection: the forward pass "
+        f"invoked {len(set(seen))} distinct ColBERTProjection instances"
+    )
+
+
+def test_the_encoder_is_also_shared_by_both_towers():
+    """One BERT, not two: the model must hold a single backbone."""
+    model = make_model()
+    model.build(BUILD_SHAPES)
+    encoder_roots = {
+        w.path.split("/", 1)[1].split("/", 1)[0] for w in model.weights
+    }
+    assert encoder_roots == {"encoder", "projection"}, (
+        "expected exactly one 'encoder' subtree and one 'projection' subtree, "
+        f"found top-level weight groups {sorted(encoder_roots)}"
+    )
+
+
+# ---------------------------------------------------------------------
+# 4. from_variant contracts
+# ---------------------------------------------------------------------
+
+
+def test_from_variant_rejects_an_unknown_variant_and_lists_the_real_keys():
+    with pytest.raises(ValueError) as excinfo:
+        ColBERT.from_variant("nope")
+    message = str(excinfo.value)
+    assert "nope" in message
+    for key in ColBERT.MODEL_VARIANTS:
+        assert key in message, (
+            f"the ValueError must list the available variants; '{key}' is "
+            f"missing from: {message}"
+        )
+
+
+def test_from_variant_refuses_pretrained_true():
+    with pytest.raises(NotImplementedError) as excinfo:
+        ColBERT.from_variant("tiny", pretrained=True)
+    message = str(excinfo.value)
+    assert "tiny" in message, "the error must name the requested variant"
+    assert "pretrained=False" in message, (
+        "the error must name the supported route (pretrained=False plus "
+        f"load_weights); got: {message}"
+    )
+    assert "load_weights" in message
+
+
+@pytest.mark.parametrize("variant", sorted(ColBERT.MODEL_VARIANTS))
+def test_every_variant_row_carries_the_reference_colbert_defaults(variant):
+    """The ColBERT-side numbers are Class A and identical in every row."""
+    row = ColBERT.MODEL_VARIANTS[variant]
+    assert row["dim"] == 128
+    assert row["query_maxlen"] == 32
+    assert row["doc_maxlen"] == 220
+    assert row["description"]
+
+
+# ---------------------------------------------------------------------
+# 5. v1 and v2 build the same architecture
+# ---------------------------------------------------------------------
+
+
+def test_the_v1_and_v2_factories_build_the_same_architecture():
+    """The honest encoding of the shared-encoder ruling.
+
+    v1 and v2 are the same network -- the reference has no v1-only code path --
+    so the two factories must produce identical weight-path sets and identical
+    parameter counts. If a future change makes them diverge structurally, this
+    test is the place that says so out loud.
+    """
+    built = {}
+    for name, factory in (
+        ("v1", create_colbert_v1),
+        ("v2", create_colbert_v2),
+        ("neutral", create_colbert),
+    ):
+        model = factory("tiny", **TINY)
+        model.build(BUILD_SHAPES)
+        built[name] = model
+
+    reference = weight_paths(built["v1"])
+    assert reference, "the v1 factory produced a model with no weights"
+    for name in ("v2", "neutral"):
+        assert weight_paths(built[name]) == reference, (
+            f"create_colbert_{name} produced a different weight-path set than "
+            "create_colbert_v1; only in v1: "
+            f"{sorted(reference - weight_paths(built[name]))}; only in {name}: "
+            f"{sorted(weight_paths(built[name]) - reference)}"
+        )
+        assert built[name].count_params() == built["v1"].count_params()
+
+
+# ---------------------------------------------------------------------
+# 6. The punctuation skiplist reaches the document embeddings
+# ---------------------------------------------------------------------
+
+
+def test_a_skiplisted_document_position_is_zeroed():
+    """A skiplisted position must project to exactly zero and lose the MaxSim.
+
+    Two claims, because either alone is satisfiable by accident: the masked
+    position's embedding is exactly the zero vector (so it cannot contribute a
+    positive similarity), AND giving that position the query's own embedding --
+    the strongest possible match -- does not raise the score.
+    """
+    model = make_model()
+    inputs = make_inputs()
+
+    skiplist = np.ones((BATCH, DOC_LEN), dtype="int32")
+    skiplist[:, 3] = 0
+    masked_inputs = dict(inputs)
+    masked_inputs[DOC_SKIPLIST_MASK_KEY] = skiplist
+
+    unmasked = model(inputs, training=False)
+    masked = model(masked_inputs, training=False)
+
+    doc_embeddings = np.asarray(
+        keras.ops.convert_to_numpy(masked["doc_embeddings"])
+    )
+    np.testing.assert_allclose(
+        doc_embeddings[:, 3, :],
+        np.zeros((BATCH, TINY["dim"])),
+        atol=0.0,
+        rtol=0,
+        err_msg=(
+            "a skiplisted position must project to exactly zero; the skiplist "
+            "mask is not reaching the projection's mask multiply"
+        ),
+    )
+
+    unmasked_position = np.asarray(
+        keras.ops.convert_to_numpy(unmasked["doc_embeddings"])
+    )[:, 3, :]
+    assert np.max(np.abs(unmasked_position)) > 0.0, (
+        "control failed: position 3 is the zero vector even WITHOUT the "
+        "skiplist, so the zero above proves nothing"
+    )
+
+    # NOT a monotonicity claim. MEASURED 2026-08-25: dropping one position from
+    # the participation mask also changes the backbone's own attention mask, so
+    # every OTHER position's contextual representation moves too, and the total
+    # score can legitimately rise (observed +2.8e-04 on one batch item while the
+    # other fell by 0.36). "Masking cannot raise the score" is therefore FALSE
+    # here and pinning it would have been a guard that fails for a correct
+    # implementation. The claims that do hold are the exact zero above, and the
+    # liveness below; the adversarial arm in the next test is what pins that a
+    # masked position cannot WIN the max.
+    masked_score = np.asarray(keras.ops.convert_to_numpy(masked["score"]))
+    unmasked_score = np.asarray(keras.ops.convert_to_numpy(unmasked["score"]))
+    assert np.all(np.isfinite(masked_score))
+    assert np.max(np.abs(masked_score - unmasked_score)) > 0.0, (
+        "a skiplisted position must project to exactly zero and therefore "
+        "change the score: the skiplist mask made no difference at all, so it "
+        f"is inert (masked={masked_score}, unmasked={unmasked_score})"
+    )
+
+
+def test_a_skiplisted_position_cannot_win_the_max_even_when_it_is_the_best_match():
+    """The adversarial arm: plant a perfect match at a skiplisted position."""
+    model = make_model()
+    model.build(BUILD_SHAPES)
+
+    rng = np.random.default_rng(7)
+    query = rng.normal(size=(1, QUERY_LEN, TINY["dim"])).astype("float32")
+    query /= np.linalg.norm(query, axis=-1, keepdims=True)
+
+    docs = np.zeros((1, DOC_LEN, TINY["dim"]), dtype="float32")
+    docs[0, 0, 0] = 1.0
+    # Position 5 is a copy of every query term's ideal partner AND is masked.
+    docs[0, 5, :] = query[0, 0, :] * 50.0
+
+    doc_mask = np.ones((1, DOC_LEN), dtype="int32")
+    doc_mask[0, 5] = 0
+
+    score_masked = float(
+        keras.ops.convert_to_numpy(
+            model.score(query, docs, doc_mask=doc_mask)
+        )[0]
+    )
+    score_unmasked = float(
+        keras.ops.convert_to_numpy(
+            model.score(query, docs, doc_mask=np.ones((1, DOC_LEN), dtype="int32"))
+        )[0]
+    )
+
+    assert np.isfinite(score_masked)
+    assert score_masked < score_unmasked, (
+        "the masked position won the max anyway: masked score "
+        f"{score_masked} is not below the unmasked {score_unmasked}"
+    )
+
+
+# ---------------------------------------------------------------------
+# 7. Gradient flow, AFTER one real optimizer step
+# ---------------------------------------------------------------------
+
+
+def test_every_trainable_weight_receives_a_gradient_after_one_optimizer_step():
+    """Adopted after a real step, never at init.
+
+    A weight can look dead at initialization for reasons that have nothing to do
+    with wiring (an all-zero bias multiplying into a zero activation), so the
+    oracle is applied to a model that has already taken one gradient step.
+    """
+    model = make_model()
+    inputs = make_inputs()
+
+    def loss_fn(outputs):
+        return keras.ops.mean(keras.ops.square(outputs["score"]))
+
+    optimizer = keras.optimizers.SGD(learning_rate=0.1)
+    import tensorflow as tf
+
+    with tf.GradientTape() as tape:
+        loss = loss_fn(model(inputs, training=True))
+    gradients = tape.gradient(loss, model.trainable_weights)
+    optimizer.apply_gradients(
+        [
+            (g, w)
+            for g, w in zip(gradients, model.trainable_weights)
+            if g is not None
+        ]
+    )
+
+    assert_gradients_reach_every_trainable_weight(
+        model,
+        inputs,
+        loss_fn=loss_fn,
+    )
+
+
+# ---------------------------------------------------------------------
+# 8. get_config round trip
+# ---------------------------------------------------------------------
+
+
+def test_get_config_round_trip_reconstructs_an_equivalent_model():
+    model = make_model()
+    config = model.get_config()
+
+    for key, value in TINY.items():
+        assert config[key] == value, (
+            f"get_config lost constructor argument '{key}': expected {value}, "
+            f"got {config.get(key)}"
+        )
+    assert "mask_punctuation" in config
+    assert "mask_value" in config
+
+    rebuilt = ColBERT.from_config(config)
+    rebuilt.build(BUILD_SHAPES)
+    model.build(BUILD_SHAPES)
+
+    assert weight_paths(rebuilt) == weight_paths(model)
+    assert rebuilt.count_params() == model.count_params()
+    assert rebuilt.get_config()["dim"] == config["dim"]
+
+
+def test_a_structural_knob_changes_the_weight_signature():
+    """Shared oracle: ``num_layers`` and ``dim`` must reach the parameterisation."""
+    assert_structural_knob_changes_weights(
+        {
+            1: lambda: _built(make_model(num_layers=1)),
+            2: lambda: _built(make_model(num_layers=2)),
+            3: lambda: _built(make_model(num_layers=3)),
+        },
+        knob="num_layers",
+    )
+    assert_structural_knob_changes_weights(
+        {
+            4: lambda: _built(make_model(dim=4)),
+            8: lambda: _built(make_model(dim=8)),
+            16: lambda: _built(make_model(dim=16)),
+        },
+        knob="dim",
+    )
+
+
+def _built(model):
+    """Build ``model`` on the shared shapes and return it."""
+    model.build(BUILD_SHAPES)
+    return model
+
+
+# ---------------------------------------------------------------------
+# 9. .predict() on a dict input
+# ---------------------------------------------------------------------
+
+
+def test_predict_works_on_a_dict_input_with_and_without_the_optional_masks():
+    """The D-032 structural constraint, inherited from BERT.
+
+    ``model(inputs)`` works whatever the output structure is; ``.predict()``
+    concatenates per-batch outputs and breaks the moment a slot's presence
+    depends on the input. Both arms are exercised because the optional-mask arm
+    is the one that regresses.
+    """
+    model = make_model()
+    full = make_inputs()
+    minimal = {
+        QUERY_INPUT_IDS_KEY: full[QUERY_INPUT_IDS_KEY],
+        DOC_INPUT_IDS_KEY: full[DOC_INPUT_IDS_KEY],
+    }
+
+    for name, inputs in (("full", full), ("minimal", minimal)):
+        predicted = model.predict(inputs, verbose=0)
+        assert set(predicted) == {"score", "query_embeddings", "doc_embeddings"}, (
+            f"{name}: .predict() returned keys {sorted(predicted)}; the output "
+            "structure must not depend on which optional inputs were supplied"
+        )
+        assert np.asarray(predicted["score"]).shape == (BATCH,)
+        assert np.asarray(predicted["query_embeddings"]).shape == (
+            BATCH,
+            QUERY_LEN,
+            TINY["dim"],
+        )
+        assert np.all(np.isfinite(np.asarray(predicted["score"])))
+
+
+# ---------------------------------------------------------------------
+# Construction-time validation
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "overrides,needle",
+    [
+        ({"dim": 0}, "dim"),
+        ({"query_maxlen": 3}, "query_maxlen"),
+        ({"doc_maxlen": 2}, "doc_maxlen"),
+        ({"doc_maxlen": 999}, "max_position_embeddings"),
+    ],
+)
+def test_an_unusable_configuration_raises_naming_the_bad_value(overrides, needle):
+    with pytest.raises(ValueError) as excinfo:
+        make_model(**overrides)
+    assert needle in str(excinfo.value)
+
+
+def test_call_rejects_a_missing_input_ids_entry():
+    model = make_model()
+    inputs = make_inputs()
+    del inputs[DOC_INPUT_IDS_KEY]
+    with pytest.raises(ValueError, match=DOC_INPUT_IDS_KEY):
+        model(inputs)
+
+
+def test_encode_query_and_encode_document_return_normalized_embeddings():
+    """Both public encoders emit unit-norm vectors at kept positions."""
+    model = make_model()
+    inputs = make_inputs()
+
+    query = np.asarray(
+        keras.ops.convert_to_numpy(
+            model.encode_query(
+                {
+                    "input_ids": inputs[QUERY_INPUT_IDS_KEY],
+                    "attention_mask": inputs[QUERY_ATTENTION_MASK_KEY],
+                },
+                training=False,
+            )
+        )
+    )
+    document = np.asarray(
+        keras.ops.convert_to_numpy(
+            model.encode_document(
+                {
+                    "input_ids": inputs[DOC_INPUT_IDS_KEY],
+                    "attention_mask": inputs[DOC_ATTENTION_MASK_KEY],
+                    "skiplist_mask": inputs[DOC_SKIPLIST_MASK_KEY],
+                },
+                training=False,
+            )
+        )
+    )
+
+    assert query.shape == (BATCH, QUERY_LEN, TINY["dim"])
+    assert document.shape == (BATCH, DOC_LEN, TINY["dim"])
+    for name, array in (("query", query), ("document", document)):
+        norms = np.linalg.norm(array, axis=-1)
+        np.testing.assert_allclose(
+            norms,
+            np.ones_like(norms),
+            atol=1e-6,
+            rtol=0,
+            err_msg=f"{name} embeddings are not unit-norm at kept positions",
+        )
