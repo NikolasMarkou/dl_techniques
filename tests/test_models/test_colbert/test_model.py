@@ -388,6 +388,13 @@ def test_a_skiplisted_document_position_is_zeroed():
     positive similarity), AND giving that position the query's own embedding --
     the strongest possible match -- does not raise the score.
     """
+    # SEEDED, and the seed is load-bearing. After step 3.1 split the two document
+    # masks (D-029) the skiplist no longer reaches the backbone, so removing a
+    # position changes the score ONLY when that position was winning some query
+    # term's max. On an unseeded draw it often is not, and the liveness arm below
+    # then fails a CORRECT implementation -- measured 2 of 5 identical runs before
+    # this pin. `plans/LESSONS.md`: pin the draw, never widen the bar.
+    keras.utils.set_random_seed(3)
     model = make_model()
     inputs = make_inputs()
 
@@ -421,22 +428,37 @@ def test_a_skiplisted_document_position_is_zeroed():
         "skiplist, so the zero above proves nothing"
     )
 
-    # NOT a monotonicity claim. MEASURED 2026-08-25: dropping one position from
-    # the participation mask also changes the backbone's own attention mask, so
-    # every OTHER position's contextual representation moves too, and the total
-    # score can legitimately rise (observed +2.8e-04 on one batch item while the
-    # other fell by 0.36). "Masking cannot raise the score" is therefore FALSE
-    # here and pinning it would have been a guard that fails for a correct
-    # implementation. The claims that do hold are the exact zero above, and the
-    # liveness below; the adversarial arm in the next test is what pins that a
-    # masked position cannot WIN the max.
+    # NOT a monotonicity claim, and NOT an unconditional liveness claim.
+    #
+    # [CORRECTED 2026-08-25, step 3.2] The comment that stood here described the
+    # PRE-SPLIT model: it said masking a position also moves every other
+    # position's contextual representation "because the participation mask is
+    # also the backbone's attention mask". Step 3.1 (D-029) ended exactly that,
+    # so the sentence became false in the commit that fixed the defect it
+    # described. After the split, removing a document position changes the score
+    # if and only if that position was winning some query term's max -- the
+    # backbone's own output is now untouched by the skiplist.
+    #
+    # The liveness arm is therefore guarded by its own PRECONDITION rather than
+    # asserted unconditionally: at the pinned seed, position 3 wins at least one
+    # query term, so the score MUST move. Without the precondition the arm is a
+    # coin flip on the draw (measured 2 failures in 5 identical runs).
     masked_score = np.asarray(keras.ops.convert_to_numpy(masked["score"]))
     unmasked_score = np.asarray(keras.ops.convert_to_numpy(unmasked["score"]))
     assert np.all(np.isfinite(masked_score))
+
+    q = np.asarray(keras.ops.convert_to_numpy(unmasked["query_embeddings"]))
+    d = np.asarray(keras.ops.convert_to_numpy(unmasked["doc_embeddings"]))
+    winners = np.argmax(np.einsum("bqd,bsd->bqs", q, d), axis=-1)
+    assert np.any(winners == 3), (
+        "PRECONDITION failed at the pinned seed: position 3 wins no query "
+        "term's max, so the liveness arm below would be vacuous. Re-pin the "
+        f"seed rather than deleting the arm (winners={winners.tolist()})"
+    )
     assert np.max(np.abs(masked_score - unmasked_score)) > 0.0, (
-        "a skiplisted position must project to exactly zero and therefore "
-        "change the score: the skiplist mask made no difference at all, so it "
-        f"is inert (masked={masked_score}, unmasked={unmasked_score})"
+        "position 3 wins at least one query term's max, so skiplisting it MUST "
+        "change the score; it did not, so the skiplist is inert on the MaxSim "
+        f"path (masked={masked_score}, unmasked={unmasked_score})"
     )
 
 
