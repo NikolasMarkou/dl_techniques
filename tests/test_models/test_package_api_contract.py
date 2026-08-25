@@ -3410,6 +3410,33 @@ class TestMainModuleDocstringCitesReferences:
             f"{unexpected}"
         )
 
+    def test_no_waiver_names_a_package_that_no_longer_exists(self):
+        """The liveness arm. Without it a waiver can never fail.
+
+        The set difference above runs in ONE direction only: it catches a
+        package that newly needs a waiver. It cannot catch a waiver whose
+        subject has been deleted or renamed, so a stale key sits here forever,
+        silently excusing nothing. That is the same decay mode that let three
+        other pinned populations in this suite rot until the 2026-08-24 family
+        restructure falsified them all at once (``_FROZEN_STEP_OVERRIDES``,
+        ``PENDING_PUFFERY``, and the XLA compiling-subject census).
+
+        ``image_restoration`` is the one allowed dead key. It stopped being a
+        leaf package when the restructure moved ``darkir/``, ``pw_fnet/`` and
+        ``scunet/`` underneath it, making it a subfamily CONTAINER and so no
+        longer a member of the population at all. Its entry is retained rather
+        than deleted because the ``# DECISION`` anchor above conditions deletion
+        on a model landing there -- and three now have, one level down. Retiring
+        it is a deliberate act for whoever resolves that anchor, not a drive-by.
+        """
+        live = set(_package_names())
+        allowed_dead = {"image_restoration"}
+        dead = sorted(set(_PACKAGES_WITHOUT_MAIN_MODULE) - live - allowed_dead)
+        assert not dead, (
+            "these waiver keys name packages that no longer exist, so they "
+            f"excuse nothing and can never fail: {dead}"
+        )
+
     def test_predicate_fires_on_an_empty_references_section(self, tmp_path):
         """Dead-component probe: an EMPTY section must go RED, not just a missing one."""
         roots, src_root = _write_package_fixture(
