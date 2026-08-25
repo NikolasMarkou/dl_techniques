@@ -2,6 +2,7 @@
 
 - `bert/` — BERT
 - `byte_latent_transformer/` — Byte Latent Transformer (BLT)
+- `colbert/` — ColBERT v1/v2 (late interaction)
 - `distilbert/` — DistilBERT
 - `fftnet/` — FFTNet
 - `fnet/` — FNet (Fourier token mixing)

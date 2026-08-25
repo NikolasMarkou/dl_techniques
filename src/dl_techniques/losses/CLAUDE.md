@@ -35,6 +35,7 @@ from dl_techniques.losses import (
 - `chamfer_loss.py` — Chamfer distance for point clouds
 - `clip_contrastive_loss.py` / `siglip_contrastive_loss.py` — Contrastive losses for CLIP/SigLIP
 - `clustering_loss.py` — Clustering loss + metrics
+- `colbert_loss.py` — ColBERT retrieval losses: v1 pairwise/listwise softmax cross-entropy and v2 cross-encoder KL distillation
 - `decoupled_information_loss.py` — Information-theoretic regularization
 - `dino_loss.py` — DINO/iBOT self-supervised loss
 - `feature_alignment_loss.py` — Feature alignment for knowledge distillation

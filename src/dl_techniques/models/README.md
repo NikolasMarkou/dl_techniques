@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **79 leaf packages** grouped into **11 family directories**.
+Complete model architectures — **80 leaf packages** grouped into **11 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (79 of 79 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (80 of 80 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -36,7 +36,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | Family | Leaves | What it holds |
 |---|---|---|
 | [`vision/`](vision/) | **35** | image backbones, detectors, segmenters, denoisers, generators |
-| [`language/`](language/) | 16 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
+| [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **9** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 7 | forecasting, probabilistic and point |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
@@ -46,7 +46,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **79** | |
+| **Sum** | **80** | |
 
 ### `vision/` (35)
 
@@ -88,12 +88,13 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (16)
+### `language/` (17)
 
 | Package | |
 |---|---|
 | `bert/` | BERT — `bert/model.py` is the normative exemplar for a new model package |
 | `byte_latent_transformer/` | Byte Latent Transformer (BLT) |
+| `colbert/` | ColBERT v1/v2, late-interaction retrieval |
 | `distilbert/` | DistilBERT |
 | `fftnet/` | FFTNet |
 | `fnet/` | FNet, Fourier token mixing |
