@@ -311,6 +311,7 @@ class MaxSimScorer(keras.layers.Layer):
         :return: ``"float32"`` for a reduced-precision compute dtype, otherwise
             the incoming dtype unchanged.
         """
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-014
         # NOT `keras.backend.standardize_dtype`: `keras.backend.*` is a Keras-2
         # residue banned repo-wide by
         # `test_package_api_contract.py::TestNoKeras2Residues`, and this call
