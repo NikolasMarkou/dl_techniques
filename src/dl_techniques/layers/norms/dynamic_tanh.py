@@ -127,6 +127,10 @@ class DynamicTanh(keras.layers.Layer):
         # the build-normalized (positive) axes live in self._norm_axis.
         self.axis = list(axis) if isinstance(axis, (list, tuple)) else [axis]
         self._norm_axis: Optional[List[int]] = None
+        # Static broadcast tuple for weight/bias, derived once in build(). Kept
+        # None here so the `if self.built: return` early exit in build() can
+        # never leave it undefined.
+        self._broadcast_shape: Optional[Tuple[int, ...]] = None
         self.alpha_init_value = float(alpha_init_value)
 
         # Store serializable initializers/regularizers/constraints
@@ -213,6 +217,15 @@ class DynamicTanh(keras.layers.Layer):
             dtype=self.dtype
         )
 
+        # Static broadcast tuple: every value is known here (param_shape comes
+        # from input_shape), so call() never has to re-derive it from a dynamic
+        # per-call shape query. Built by axis index, not by the order the axes
+        # were written, so it stays identical to the previous construction.
+        axis_to_size = dict(zip(self._norm_axis, param_shape))
+        self._broadcast_shape = tuple(
+            axis_to_size[i] if i in axis_to_size else 1 for i in range(ndims)
+        )
+
         super().build(input_shape)
 
     def call(
@@ -237,21 +250,13 @@ class DynamicTanh(keras.layers.Layer):
         # Step 2: Apply hyperbolic tangent
         tanh_outputs = ops.tanh(scaled_inputs)
 
-        # Step 3: Apply affine transformation with proper broadcasting
-        input_shape = ops.shape(inputs)
-        ndims = len(inputs.shape)
-
-        # Create broadcast shape for weight and bias
-        broadcast_shape = []
-        for i in range(ndims):
-            if i in self._norm_axis:
-                broadcast_shape.append(input_shape[i])
-            else:
-                broadcast_shape.append(1)
-
-        # Reshape parameters for broadcasting
-        weight_broadcasted = ops.reshape(self.weight, broadcast_shape)
-        bias_broadcasted = ops.reshape(self.bias, broadcast_shape)
+        # Step 3: Apply affine transformation with proper broadcasting.
+        # The reshape is required: a naive `tanh_outputs * self.weight` raises
+        # for any non-trailing axis (measured: InvalidArgumentError,
+        # Incompatible shapes [2,8,16] vs [8] at axis=1). Its target shape is
+        # the static tuple computed in build().
+        weight_broadcasted = ops.reshape(self.weight, self._broadcast_shape)
+        bias_broadcasted = ops.reshape(self.bias, self._broadcast_shape)
 
         # Final affine transformation
         outputs = tanh_outputs * weight_broadcasted + bias_broadcasted
