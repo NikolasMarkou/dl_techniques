@@ -63,6 +63,7 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
+import numpy as np
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -363,30 +364,75 @@ class SingleWindowAttention(keras.layers.Layer):
             self.q_norm = None
             self.k_norm = None
 
-        # Precompute the static relative-position index table (Swin convention).
-        if self.use_relative_position_bias:
-            coords_h = keras.ops.arange(self.window_size, dtype="int32")
-            coords_w = keras.ops.arange(self.window_size, dtype="int32")
-            coords = keras.ops.stack(
-                keras.ops.meshgrid(coords_h, coords_w, indexing="ij")
-            )
-            coords_flatten = keras.ops.reshape(coords, (2, -1))
-            relative_coords = keras.ops.expand_dims(
-                coords_flatten, 2
-            ) - keras.ops.expand_dims(coords_flatten, 1)
-            relative_coords = keras.ops.transpose(
-                relative_coords, (1, 2, 0)
-            )
-            relative_coords_h = (
-                    relative_coords[:, :, 0] + self.window_size - 1
-            )
-            relative_coords_w = (
-                    relative_coords[:, :, 1] + self.window_size - 1
-            )
-            relative_coords_h *= 2 * self.window_size - 1
-            self.relative_position_index = (
-                    relative_coords_h + relative_coords_w
-            )
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-006
+        # The `(window_size**2, window_size**2)` relative-position INDEX is NOT
+        # built here. It is built in `build()`, by `_relative_position_index()`.
+        #
+        # WHY: it is O(window_size**4). MEASURED at `window_size=128`: the index
+        # itself is `16384*16384*4` bytes = 1.0 GiB resident, and the
+        # `(2, 16384, 16384)` int32 broadcast that produces it is another 2.0 GiB
+        # transient. Built here, every byte of that was charged to
+        # `WindowAttention(...)` CONSTRUCTION -- before any shape was known and
+        # even if the layer was never called. Measured construction peak RSS at
+        # `window_size=128` went 0.62 GB -> 5.64 GB from the
+        # `use_relative_position_bias` flag alone.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT move it back into `__init__` "so the attribute always
+        #     exists". Constructing a layer must not allocate O(W^4).
+        #   * Do NOT make it an `add_weight(zeros)` + `.assign()` in `build()`.
+        #     Under Keras 3's `StatelessScope` the assign is DISCARDED and the
+        #     tensor stays ALL ZEROS in a real model -- this repo has 11 recorded
+        #     instances. It is a CONSTANT, not a weight.
+        #   * Do NOT build it with `keras.ops` inside `build()`. `build()` can run
+        #     during a `tf.function` trace, which would make the stored tensor a
+        #     graph tensor owned by THAT trace and unusable from any other one.
+        #     numpy has no graph affinity; the int32 values are exact either way,
+        #     so the gather is bit-for-bit what it was.
+        # See decisions.md D-006 (plan-2026-08-25T053412-0f1fa04f).
+        self.relative_position_index = None
+
+    @staticmethod
+    def _relative_position_index(window_size: int) -> np.ndarray:
+        """Build the static intra-window relative-position index (Swin convention).
+
+        Each entry ``index[i, j]`` is the row into the
+        ``(2 * window_size - 1) ** 2`` relative-position bias table that encodes
+        the 2-D displacement from window slot ``j`` to window slot ``i``, both
+        slots being row-major positions in a ``window_size x window_size`` tile.
+
+        This is the same pairwise-difference computation the Swin reference
+        implementation performs (``coords_flatten[:, :, None] -
+        coords_flatten[:, None, :]``, then row-major encode) and it is still
+        O(W^4) -- it is NOT a closed form, because upstream has none. The only
+        departure is that the two coordinate axes are differenced SEPARATELY and
+        accumulated in place, instead of being stacked into a ``(2, W**2, W**2)``
+        tensor that is then transposed and sliced. The integer result is
+        identical element for element; what changes is the transient footprint:
+        two ``(W**2, W**2)`` int32 buffers instead of a ``(2, W**2, W**2)``
+        buffer plus a transposed copy plus two slices plus an ``astype`` copy.
+        MEASURED at ``window_size=128``: 2.0 GB of transients instead of 6.0 GB.
+        See the D-006 anchor in ``__init__`` for why this runs in ``build()`` and
+        why it is numpy rather than ``keras.ops``.
+
+        :param window_size: Side length of the square window, in tokens.
+        :type window_size: int
+        :return: Index matrix of shape ``(window_size ** 2, window_size ** 2)``,
+            dtype ``int32``, every entry in ``[0, (2 * window_size - 1) ** 2)``.
+        :rtype: np.ndarray
+        """
+        slots = np.arange(window_size * window_size, dtype=np.int32)
+        # Row-major slot -> (row, column) inside the window.
+        coords_h = slots // window_size
+        coords_w = slots % window_size
+        # (W**2, W**2): displacement along each axis, shifted to start at 0.
+        index = coords_h[:, None] - coords_h[None, :]
+        index += window_size - 1
+        index *= 2 * window_size - 1
+        relative_w = coords_w[:, None] - coords_w[None, :]
+        relative_w += window_size - 1
+        index += relative_w
+        return index
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -407,6 +453,32 @@ class SingleWindowAttention(keras.layers.Layer):
             return
 
         if self.use_relative_position_bias:
+            # Idempotent: `build()` may be called more than once, and
+            # recomputing an O(W^4) constant is exactly what this move exists to
+            # avoid.
+            if self.relative_position_index is None:
+                index = self._relative_position_index(self.window_size)
+                # The constant is the whole point of the move, so it is checked
+                # rather than assumed: a silently-zero or wrongly-shaped index
+                # gathers row 0 of the bias table for every pair and turns the
+                # relative-position bias into a per-head scalar -- a change no
+                # shape assertion and no finiteness check can see.
+                expected_shape = (
+                    self.window_size ** 2,
+                    self.window_size ** 2,
+                )
+                if index.shape != expected_shape:
+                    raise RuntimeError(
+                        f"relative_position_index has shape {index.shape}, "
+                        f"expected {expected_shape}."
+                    )
+                if self.window_size > 1 and not index.any():
+                    raise RuntimeError(
+                        "relative_position_index is all zeros at "
+                        f"window_size={self.window_size}; only window_size=1 "
+                        "may produce an all-zero index."
+                    )
+                self.relative_position_index = index
             num_relative_positions = (2 * self.window_size - 1) ** 2
             self.relative_position_bias_table = self.add_weight(
                 name="relative_position_bias_table",
@@ -625,6 +697,13 @@ class SingleWindowAttention(keras.layers.Layer):
         attn = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
 
         if self.use_relative_position_bias:
+            if self.relative_position_index is None:
+                raise RuntimeError(
+                    "relative_position_index is None: SingleWindowAttention's "
+                    "relative-position index is built in `build()` (it is "
+                    "O(window_size**4), see the D-006 anchor in `__init__`). "
+                    "Call `build(input_shape)` before invoking the layer."
+                )
             # Shape: table (2*Ws-1)^2 x H, gathered by (N_target*N_target,) index
             #        -> (N_target*N_target, H)
             relative_position_bias = keras.ops.take(
