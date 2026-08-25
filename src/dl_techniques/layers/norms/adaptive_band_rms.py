@@ -385,8 +385,18 @@ class AdaptiveBandRMS(keras.layers.Layer):
         :return: Normalized tensor with adaptive RMS-based scaling.
         :rtype: keras.KerasTensor
         """
-        # Cast to float32 for numerical stability in mixed precision
-        inputs_fp32 = keras.ops.cast(inputs, "float32")
+        # Store original dtype for casting back
+        original_dtype = inputs.dtype
+
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the output matched a float32
+        # reference exactly and missed the float64 one by 2.6e-8). This also
+        # feeds the internal Dense at the policy's dtype, so a float64 policy no
+        # longer promotes a float32 tensor against a float64 kernel.
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, stat_dtype)
 
         # Step 1: Compute RMS for normalization
         mean_square = keras.ops.mean(
@@ -420,10 +430,17 @@ class AdaptiveBandRMS(keras.layers.Layer):
 
         # Step 6: Reshape for broadcasting and apply adaptive scaling
         scale_factors = self._reshape_scaling_factors(scale_factors)
-        output = normalized * keras.ops.cast(scale_factors, "float32")
+        # DECISION plan-2026-08-25T195813-d5a035ab/D-005: this cast is NOT redundant
+        # with the one above and must not be deleted. `self.dense_layer` returns its
+        # own COMPUTE dtype, which under mixed_float16 is float16 while `normalized`
+        # is float32 - measured: `fp32 * fp16` raises
+        # `InvalidArgumentError: cannot compute Mul as input #1 ... is a half tensor`.
+        # The destination is `stat_dtype` rather than a hardcoded "float32" so a
+        # float64 policy keeps the multiply in float64.
+        output = normalized * keras.ops.cast(scale_factors, stat_dtype)
 
         # Cast back to original dtype
-        return keras.ops.cast(output, inputs.dtype)
+        return keras.ops.cast(output, original_dtype)
 
     def compute_output_shape(
         self,

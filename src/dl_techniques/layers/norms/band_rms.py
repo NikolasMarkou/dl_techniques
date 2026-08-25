@@ -256,8 +256,16 @@ class BandRMS(keras.layers.Layer):
             L2 norm approximately in [(1-max_band_width)*sqrt(D), sqrt(D)].
         :rtype: keras.KerasTensor
         """
-        # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Store original dtype for casting back
+        original_dtype = inputs.dtype
+
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the output matched a float32
+        # reference exactly and missed the float64 one by 2.6e-8).
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: RMS normalization to achieve dimension-independent scaling
         # Compute RMS: sqrt(mean(x²))
@@ -282,10 +290,14 @@ class BandRMS(keras.layers.Layer):
         # Step 2: Apply learnable scaling within [1-α, 1] band
         # Use sigmoid to map the band_param to [0, 1]
         # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
-        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to fp32 explicitly.
-        # Under mixed_float16, variables auto-cast on read (LESSONS L136); without
-        # this cast, the subsequent multiply against fp32 `normalized` crashes.
-        band_param_fp32 = ops.cast(self.band_param, "float32")
+        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to the statistics
+        # dtype explicitly. Under mixed_float16, variables auto-cast on read
+        # (LESSONS L136); without this cast, the subsequent multiply against
+        # `normalized` crashes on a dtype mismatch. The destination is `stat_dtype`,
+        # not a hardcoded "float32", so the multiply stays in whatever dtype the
+        # active policy makes the statistics
+        # (DECISION plan-2026-08-25T195813-d5a035ab/D-005).
+        band_param_fp32 = ops.cast(self.band_param, stat_dtype)
         band_activation = ops.sigmoid(5.0 * band_param_fp32)
 
         # Scale the activation to be within [1-max_band_width, 1]

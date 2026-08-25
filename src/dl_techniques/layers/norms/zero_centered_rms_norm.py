@@ -295,8 +295,13 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the centered tensor collapsed to
+        # exactly zero on an input whose float64 answer is O(1)).
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: Compute mean and center the input
         mean = ops.mean(

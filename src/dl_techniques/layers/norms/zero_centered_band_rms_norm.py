@@ -282,8 +282,13 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the centered tensor collapsed to
+        # exactly zero on an input whose float64 answer is O(1)).
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: Compute mean and center the input (zero-centering innovation)
         mean = ops.mean(
@@ -314,11 +319,14 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
 
         # Step 4: Apply learnable band scaling within [1-α, 1] range
         # Use sigmoid to map the band_param to [0, 1] with 5x multiplier for smoothness
-        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to fp32 explicitly.
-        # Under mixed_float16, variables auto-cast on read (LESSONS L136), so
-        # `5.0 * self.band_param` would return fp16 and crash the subsequent
-        # multiply against the fp32 `normalized` tensor.
-        band_param_fp32 = ops.cast(self.band_param, "float32")
+        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to the statistics
+        # dtype explicitly. Under mixed_float16, variables auto-cast on read
+        # (LESSONS L136), so `5.0 * self.band_param` would return fp16 and crash the
+        # subsequent multiply against the `normalized` tensor. The destination is
+        # `stat_dtype`, not a hardcoded "float32", so the multiply stays in whatever
+        # dtype the active policy makes the statistics
+        # (DECISION plan-2026-08-25T195813-d5a035ab/D-005).
+        band_param_fp32 = ops.cast(self.band_param, stat_dtype)
         band_activation = ops.sigmoid(5.0 * band_param_fp32)
 
         # Scale the activation to be within [1-max_band_width, 1]

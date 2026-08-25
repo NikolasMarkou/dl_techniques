@@ -315,8 +315,15 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
         """Apply zero-centered adaptive RMS normalization."""
         original_dtype = inputs.dtype
 
-        # Cast to fp32 internally for numerical stability under mixed precision.
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the centered tensor collapsed to
+        # exactly zero on an input whose float64 answer is O(1)). This also
+        # feeds the internal Dense at the policy's dtype, so a float64 policy no
+        # longer promotes a float32 tensor against a float64 kernel.
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: Zero-centering.
         mean = ops.mean(inputs_fp32, axis=self.axis, keepdims=True)
@@ -345,7 +352,14 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
 
         # Step 5: Reshape and apply adaptive scaling.
         scale_factors = self._reshape_scaling_factors(scale_factors)
-        output = normalized * ops.cast(scale_factors, "float32")
+        # DECISION plan-2026-08-25T195813-d5a035ab/D-005: this cast is NOT redundant
+        # with the one above and must not be deleted. `self.dense_layer` returns its
+        # own COMPUTE dtype, which under mixed_float16 is float16 while `normalized`
+        # is float32 - measured: `fp32 * fp16` raises
+        # `InvalidArgumentError: cannot compute Mul as input #1 ... is a half tensor`.
+        # The destination is `stat_dtype` rather than a hardcoded "float32" so a
+        # float64 policy keeps the multiply in float64.
+        output = normalized * ops.cast(scale_factors, stat_dtype)
 
         return ops.cast(output, original_dtype)
 

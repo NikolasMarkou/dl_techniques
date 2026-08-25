@@ -275,8 +275,13 @@ class RMSNorm(keras.layers.Layer):
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = keras.ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the output matched a float32
+        # reference exactly and missed the float64 one by 1.5e-8).
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, stat_dtype)
 
         # Compute RMS: sqrt(mean(x²) + ε)
         mean_square = keras.ops.mean(
