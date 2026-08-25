@@ -347,6 +347,8 @@ ColBERT paper reports them.
 ### Customizing
 
 ```python
+from dl_techniques.models.language.colbert import create_colbert_v2
+
 model = create_colbert_v2(
     "base",
     vocab_size=100277,          # match your tokenizer's encoding
@@ -544,7 +546,14 @@ one the test pins, is `err(nbits=2) < err(nbits=1)`.
 
 Every item here is a place where this implementation knowingly differs from
 `stanford-futuredata/ColBERT`. None of them is an accident, and none is hidden in a code
-comment only.
+comment only. Each is pinned by at least one test, so a silent drift back would be caught.
+
+This list has been wrong once. Iteration 1 shipped a **tenth**, unlisted divergence — the
+document punctuation skiplist was being fed to the BERT backbone as its attention mask,
+where the reference passes the plain padding mask and applies the skiplist only to the
+projected embeddings. That is now **fixed**, not documented: the two masks are separate
+tensors and the document path matches the reference exactly (§14.5). It is named here
+because the claim "this list is complete" is only worth as much as its track record.
 
 ### 9.1 The `[Q]` / `[D]` markers come from free Tiktoken slots, not `[unused0]` / `[unused1]`
 
@@ -601,9 +610,31 @@ naturally use for both purposes — and `ColBERT` does exactly that. Copying the
 default would multiply every augmented `[MASK]` embedding by zero, killing the paper's headline
 mechanism while every shape, dtype and round-trip test stayed green.
 
-**Cost**: the `[MASK]` positions are additionally visible as attention keys to the real query
-terms. Pass `attend_to_mask_tokens=False` to reproduce the reference's transformer-side
-behaviour; both values are pinned by test.
+**Cost**: under the default, the `[MASK]` positions are additionally visible as attention keys
+to the real query terms — relative to the reference, which hides them.
+
+**`attend_to_mask_tokens=False` is not an escape hatch back to the reference.** It does more
+than reproduce the reference's transformer-side masking: because the query path derives its
+participation mask from the same emitted tensor, setting it to `False` also deletes the
+augmented `[MASK]` slots from MaxSim entirely — the very outcome the `True` default exists to
+prevent. In the reference *both* settings leave all positions participating. MEASURED
+2026-08-25, `ColBERTTokenizer(query_maxlen=8, attend_to_mask_tokens=...)` on
+`"late interaction"` (5 content slots, 3 augmented), per-position L2 norms after
+`encode_query`:
+
+| `attend_to_mask_tokens` | emitted `attention_mask` | per-position L2 norm |
+|---|---|---|
+| `True` (default) | `[1, 1, 1, 1, 1, 1, 1, 1]` | `[1, 1, 1, 1, 1, 1, 1, 1]` |
+| `False` | `[1, 1, 1, 1, 1, 0, 0, 0]` | `[1, 1, 1, 1, 1, 0, 0, 0]` |
+
+So the honest statement of the divergence is: **the query path here carries one mask where the
+reference carries two**, and the flag moves both roles at once. There is currently no way to
+get the reference's exact combination (attention 0 at the augmented slots, participation 1) out
+of this tokenizer; doing so would mean emitting a second, query-side participation mask. The
+document path does *not* have this problem — its two masks were split in §14.5. Both flag
+values are pinned by test at the tokenizer's emitted mask
+(`test_the_attend_to_mask_tokens_policy_is_pinned`) **and** downstream at the `[MASK]` rows' L2
+norms (`test_the_flag_decides_whether_augmented_slots_reach_maxsim`).
 
 ### 9.4 The BERT backbone runs `gelu_tanh`, not exact GELU
 
@@ -718,20 +749,39 @@ CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_mod
 CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_losses/test_colbert_loss.py -q
 ```
 
-The suite is guard-heavy by design. Beyond construction, forward pass and serialization, it
-pins:
+The suite is guard-heavy by design. There are four test modules, not one file per guard;
+each row below names the module and the function inside it, so every path here can be run
+verbatim with `pytest <file>::<function>`. Beyond construction, forward pass and
+serialization, it pins:
 
-| Guard | Claim |
+| Guard (`tests/test_models/test_colbert/`) | Claim |
 |---|---|
-| `test_the_maxsim_matches_an_independent_oracle.py` | MaxSim agrees with a numpy oracle **derived from the reference formula**, not transcribed from `components.py` |
-| `test_the_padded_doc_positions_cannot_win_the_max.py` | a masked position with a deliberately huge embedding cannot be selected, in `float32` and `mixed_float16`, and an all-masked document scores finite |
-| `test_the_query_is_mask_augmented.py` | augmentation applies to queries only — both directions |
-| `test_the_punctuation_filter_is_documents_only.py` | the skiplist applies to documents only — both directions |
-| `test_the_keras_roundtrip_preserves_values.py` | values survive save → load → save → load (**twice**: a save-side check cannot see a load-side loss) |
-| `test_the_explicit_build_matches_the_lazy_build.py` | explicit and lazy build produce identical weight signatures, with `count_params() > 0` |
-| `test_the_codec_is_index_time_only.py` | `err(nbits=2) < err(nbits=1)`, decode is unit-norm, and no codec symbol is reachable from `ColBERT.call` or either loss |
+| `test_components.py::test_the_maxsim_matches_the_reference_derived_oracle` | MaxSim agrees with a numpy oracle **derived from the reference formula**, not transcribed from `components.py` |
+| `test_components.py::test_a_padded_doc_position_with_a_huge_embedding_cannot_win_the_max` | a masked position with a deliberately huge embedding cannot be selected |
+| `test_components.py::test_an_all_masked_document_yields_a_finite_score` | an all-masked document scores finite, in `float32` and `mixed_float16` |
+| `test_components.py::test_the_mask_is_applied_before_the_normalize` | the mask multiply precedes L2-normalize, so a filtered row is exactly zero and not renormalized back to unit norm |
+| `test_tokenization.py::test_every_query_slot_after_sep_is_mask_and_never_pad` | augmentation applies to queries — every post-`[SEP]` slot is `[MASK]`, never `[PAD]` |
+| `test_tokenization.py::test_documents_are_pad_padded_and_never_mask_augmented` | the other direction: documents are never mask-augmented |
+| `test_tokenization.py::test_the_punctuation_skiplist_is_documents_only` | the skiplist applies to documents only — both directions |
+| `test_tokenization.py::test_the_attend_to_mask_tokens_policy_is_pinned` | the flag's effect on the **emitted** attention mask, both values |
+| `test_tokenization.py::test_the_flag_decides_whether_augmented_slots_reach_maxsim` | the flag's **downstream** effect: the augmented rows' post-`encode_query` L2 norms, both values (see §9.3) |
+| `test_model.py::test_two_keras_round_trips_preserve_every_weight_value_and_the_output` | values survive save → load → save → load (**twice**: a save-side check cannot see a load-side loss) |
+| `test_model.py::test_the_explicit_build_matches_the_lazy_build` | explicit and lazy build produce identical weight signatures, with `count_params() > 0` |
+| `test_model.py::test_the_query_and_document_share_one_projection` | the two towers traverse the *same* projection object, asserted with `is` |
+| `test_model.py::test_a_skiplisted_document_position_is_zeroed` | a skiplisted document position projects to exactly zero and moves the score |
+| `test_model.py::test_a_skiplisted_position_cannot_win_the_max_even_when_it_is_the_best_match` | the adversarial arm: a perfect match planted at a skiplisted position still cannot win |
+| `test_model.py::test_a_kept_position_is_untouched_by_a_skiplist_elsewhere` | the skiplist does **not** reach the backbone's attention mask — a kept position's embedding is bit-identical whether or not another position is skiplisted (the reference ordering — see §14.5) |
+| `test_compression.py::test_two_bits_reconstruct_strictly_better_than_one_bit` | `err(nbits=2) < err(nbits=1)` |
+| `test_compression.py::test_decoded_vectors_are_unit_norm` | decode returns unit-norm vectors |
+| `test_compression.py::test_no_codec_symbol_is_reachable_from_the_model_or_the_losses` | no codec symbol is reachable from `ColBERT.call` or either loss — the codec is index-time only |
 
-Every one of these was proven RED by injection before being committed.
+Every guard above was proven RED by injection before being committed. The per-module
+injection ledgers — each naming the exact assertion the injection fired — are in the
+docstring at the top of each of the four files; injections were applied from a `cp` backup
+and restored with `diff -q`, never `git stash`. One test **not** in the table,
+`test_model.py::test_the_v1_and_v2_factories_build_the_same_architecture`, cannot currently
+fail: `create_colbert_v1` and `create_colbert_v2` have identical bodies (§3.3), so it is a
+future-regression tripwire rather than a measurement, and its docstring says so.
 
 ---
 
@@ -802,6 +852,40 @@ and not another. An output structure that depends on which optional inputs were 
 therefore works under `model(inputs)` and breaks under `.predict()` — which is exactly why that
 defect ships unnoticed. All optional inputs are resolved to concrete tensors before the return,
 so the returned dict is unconditional.
+
+### 14.5 The document path carries TWO masks, and they must stay separate
+
+`ColBERT._encode` takes a padding `attention_mask` and a `participation_mask`, and they are
+distinct tensors on the document path:
+
+* the **padding mask** — and nothing else — is what `self.encoder` receives as its
+  `attention_mask`, so a punctuation token stays fully visible as attention *context* to its
+  neighbours;
+* the **participation mask** (`attention_mask * skiplist_mask`) drives the projection's mask
+  multiply and the MaxSim candidate set, so a punctuation token contributes exactly zero to
+  the score.
+
+This is the reference's ordering: `doc()` passes the plain padding mask to `self.bert` and
+multiplies the skiplist onto the *projected, pre-normalization* embeddings.
+
+Iteration 1 originally collapsed the two into one tensor and passed it to both, which fed the
+skiplist to the backbone. MEASURED on a random-init 2-layer `tiny` (10 document positions,
+skiplist zeroing positions 3 and 7), comparing the **kept**, non-punctuation positions'
+embeddings with and without the skiplist:
+
+| Ordering | kept-position `max abs(delta)` |
+|---|---|
+| collapsed (one mask for both roles) | `0.0010412931` |
+| split (current, matches the reference) | `0.0` exactly |
+
+The effect grows with depth and with a trained backbone. Neither of the two skiplist guards
+that existed at the time could see it — both assert only that the *filtered* position is zero,
+and both pass under either ordering, which is exactly why the collapse shipped.
+`test_model.py::test_a_kept_position_is_untouched_by_a_skiplist_elsewhere` pins the axis they
+are blind to. Do not re-collapse the masks; the anchor at the split site says the same thing.
+
+Note that the *query* path still uses one tensor for both roles — that is §9.3's residual
+divergence, and it is a property of the tokenizer emitting a single mask, not of `_encode`.
 
 ---
 

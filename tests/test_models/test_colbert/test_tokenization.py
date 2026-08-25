@@ -28,11 +28,13 @@ and verified with ``diff -q``:
   assertion ``"query position 1 must be the [Q] marker"``.
 """
 
+import keras
 import string
 import pytest
 import tiktoken
 import numpy as np
 
+from dl_techniques.models.language.colbert.model import ColBERT
 from dl_techniques.models.language.colbert.tokenization import (
     ColBERTTokenizer,
     MIN_DOC_MAXLEN,
@@ -379,6 +381,88 @@ def test_the_attend_to_mask_tokens_policy_is_pinned(
     )
     # Real content is attended either way.
     assert np.all(attention[~augmented] == 1)
+
+
+@pytest.mark.parametrize(
+    "attend_to_mask_tokens, expected_mask_row_norm",
+    [(True, 1.0), (False, 0.0)],
+)
+def test_the_flag_decides_whether_augmented_slots_reach_maxsim(
+    attend_to_mask_tokens, expected_mask_row_norm
+):
+    """The DOWNSTREAM arm the tokenizer-side pin above cannot be.
+
+    The test above stops at the emitted ``attention_mask``. That is not where
+    the consequence lives: :class:`ColBERT` derives the query *participation*
+    mask from the same tensor, so ``attend_to_mask_tokens=False`` does not only
+    reproduce the reference's transformer-side masking -- it additionally
+    DELETES the augmented ``[MASK]`` slots from MaxSim, which is the precise
+    defect the ``True`` default exists to prevent. In the reference both
+    settings leave every position participating, because its participation mask
+    is ``x != pad_id`` computed AFTER the pads were overwritten with ``[MASK]``.
+
+    MEASURED 2026-08-25 (``query_maxlen=8``, ``"late interaction"``, 5 content
+    slots + 3 augmented):
+
+    ==========================  ===========================  ===================
+    ``attend_to_mask_tokens``   emitted ``attention_mask``    per-position L2
+    ==========================  ===========================  ===================
+    ``True``  (default)         ``[1,1,1,1,1,1,1,1]``        ``[1.]*8``
+    ``False``                   ``[1,1,1,1,1,0,0,0]``        ``[1,1,1,1,1,0,0,0]``
+    ==========================  ===========================  ===================
+
+    This is a pin on the CURRENT behaviour, not an endorsement of it; README
+    §9.3 states the cost in the same terms.
+    """
+    tokenizer = ColBERTTokenizer(
+        query_maxlen=8,
+        doc_maxlen=16,
+        attend_to_mask_tokens=attend_to_mask_tokens,
+    )
+    out = tokenizer.tokenize_queries(["late interaction"])
+    ids = np.asarray(out["input_ids"])
+    attention = np.asarray(out["attention_mask"])
+    augmented = ids[0] == tokenizer.mask_token_id
+    assert augmented.any(), "fixture must leave augmented slots"
+
+    keras.utils.set_random_seed(3)
+    model = ColBERT(
+        vocab_size=int(ids.max()) + 1,
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        intermediate_size=32,
+        dim=8,
+        query_maxlen=8,
+        doc_maxlen=16,
+        max_position_embeddings=16,
+    )
+    embeddings = np.asarray(
+        keras.ops.convert_to_numpy(
+            model.encode_query(
+                {"input_ids": ids, "attention_mask": attention}, training=False
+            )
+        )
+    )
+    norms = np.linalg.norm(embeddings[0], axis=-1)
+
+    # Control: the real content slots are unit-norm under BOTH settings, so a
+    # zero below is the flag's doing and not a dead forward pass.
+    np.testing.assert_allclose(norms[~augmented], 1.0, atol=1e-5, rtol=0)
+
+    np.testing.assert_allclose(
+        norms[augmented],
+        expected_mask_row_norm,
+        atol=1e-5,
+        rtol=0,
+        err_msg=(
+            f"with attend_to_mask_tokens={attend_to_mask_tokens} the augmented "
+            f"[MASK] rows must have L2 norm {expected_mask_row_norm} after "
+            f"encode_query; got {norms.tolist()}. A norm of 0.0 under the True "
+            "default would mean query augmentation is dead in MaxSim; a norm "
+            "of 1.0 under False would mean README §9.3's stated cost is stale."
+        ),
+    )
 
 
 def test_the_default_attends_to_mask_tokens():
