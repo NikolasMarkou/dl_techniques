@@ -7,6 +7,7 @@ fact and its citation, and ``components.py`` for the scoring mechanics.
 """
 
 from .components import ColBERTProjection, MaxSimScorer
+from .compression import ResidualCompressionCodec
 from .tokenization import ColBERTTokenizer
 from .model import (
     ColBERT,
@@ -20,6 +21,7 @@ __all__ = [
     "ColBERTProjection",
     "ColBERTTokenizer",
     "MaxSimScorer",
+    "ResidualCompressionCodec",
     "create_colbert",
     "create_colbert_v1",
     "create_colbert_v2",
