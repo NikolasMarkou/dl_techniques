@@ -611,6 +611,39 @@ class WindowAttention(keras.layers.Layer):
                 (tokens // grid_side) * window_size + (tokens % grid_side)
         ).astype(np.int32)
 
+    @staticmethod
+    def _pads_exist(seq_len: Optional[int], window_size: int) -> bool:
+        """Does the grid path create pad slots for this sequence length?
+
+        The grid path lays ``seq_len`` tokens row-major into an ``S x S`` grid with
+        ``S = ceil(sqrt(seq_len))`` and then pads that grid up to a whole number of
+        ``window_size x window_size`` tiles. Two independent pads can appear:
+
+        * a SEQUENCE pad of ``S ** 2 - seq_len`` slots, nonzero unless ``seq_len``
+          is a perfect square;
+        * a TILE pad of ``(window_size - S % window_size) % window_size`` rows and
+          the same number of columns, nonzero unless ``S`` is a multiple of
+          ``window_size``.
+
+        :param seq_len: Statically-known sequence length, or ``None``.
+        :type seq_len: Optional[int]
+        :param window_size: Tile side length, in tokens.
+        :type window_size: int
+        :return: ``True`` if either pad is nonzero, or if ``seq_len`` is unknown --
+            an unknown length is treated as padded, because masking pads that do not
+            exist is a no-op while failing to mask pads that do exist is the D-011
+            leak.
+        :rtype: bool
+        """
+        if seq_len is None:
+            return True
+        seq_len = int(seq_len)
+        grid_side = int(math.ceil(math.sqrt(seq_len)))
+        return (
+            grid_side * grid_side != seq_len
+            or grid_side % window_size != 0
+        )
+
     def _window_partition(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Partition a 4-D grid tensor into non-overlapping windows.
 
@@ -819,6 +852,7 @@ class WindowAttention(keras.layers.Layer):
         windows = keras.ops.reshape(windows, (-1, ws * ws, C))
 
         window_mask = None
+        key_mask = None
         if attention_mask is not None and len(attention_mask.shape) == 3:
             # DECISION plan-2026-07-31T042809-ddc92265/D-001
             # A rank-3 mask is already expressed in PARTITIONED WINDOW
@@ -854,8 +888,53 @@ class WindowAttention(keras.layers.Layer):
                     f"a rank-2 (B, N) key mask instead."
                 )
             window_mask = attention_mask
-        elif attention_mask is not None:
-            mask = keras.ops.pad(attention_mask, [[0, 0], [0, pad_amount_seq]])
+        else:
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-011
+            # `attention_mask=None` is NOT "no mask" here -- it is "every token is
+            # real", and the pad slots this method just created are not tokens. When
+            # the caller passes nothing, an all-ones key mask is SYNTHESIZED so the
+            # sequence pad (`ceil(sqrt(N))**2 - N` slots) and the tile pad
+            # (`pad_h`/`pad_w` rows and columns) travel down the SAME zero-padding
+            # pipeline the caller's own mask would, and are excluded from the
+            # softmax. Before this, `None` skipped the pipeline entirely and the
+            # zero-filled pads entered every real token's softmax as ordinary keys
+            # and values.
+            #
+            # MEASURED on 8435dcc2f, max |delta| between `attention_mask=None` and
+            # an explicit all-ones `(B, N)` mask -- a mask that masks no REAL token
+            # and is therefore a mathematical no-op:
+            #     ws=8, N=100 -> 1.0258900   (grid side 10 padded to 16: the pads
+            #                                 outnumber the real tokens in the last
+            #                                 tile, so the softmax is dominated by
+            #                                 zeros)
+            #     ws=4, N=20  -> 0.7214095
+            #     ws=2, N=15  -> 0.2340506
+            # and exactly 0.0 wherever there is nothing to pad. See D-011.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT synthesize the mask UNCONDITIONALLY. When the geometry
+            #     tiles exactly there are no pads, the synthesized mask is all ones
+            #     through to `apply_attention_mask`, and it is a no-op -- but a
+            #     no-op that allocates a `(B, ws**2)` int32 tensor per window on the
+            #     path Swin, FastVLM and TiRex take, for nothing. The `_pads_exist`
+            #     guard keeps `N == ws**2` and every exactly-tiling `N` on the
+            #     byte-identical original path, which is what keeps the 12 strict
+            #     bitwise cells of
+            #     `test_window_attention_restructure_is_inert.py` bitwise.
+            #   * Do NOT "fix" this inside `SingleWindowAttention` instead. By the
+            #     time the windows reach it, `N_actual == N_target == ws**2` and its
+            #     own padding mask is all ones: the pads are indistinguishable from
+            #     real tokens down there. The geometry is only known HERE.
+            #   * Do NOT build the ones with `keras.ops.ones((B, N_actual), ...)`.
+            #     `B` and `N_actual` come from `keras.ops.shape`, so they are TENSORS
+            #     under a `tf.function` trace; `ones_like` on a rank-2 slice of the
+            #     input carries the dynamic shape without materializing it as a
+            #     Python value.
+            key_mask = attention_mask
+            if key_mask is None and self._pads_exist(inputs.shape[1], ws):
+                key_mask = keras.ops.ones_like(inputs[:, :, 0], dtype="int32")
+        if window_mask is None and key_mask is not None:
+            mask = keras.ops.pad(key_mask, [[0, 0], [0, pad_amount_seq]])
             mask = keras.ops.reshape(mask, (B, H, W))
             mask = keras.ops.pad(mask, [[0, 0], [0, pad_h], [0, pad_w]])
             mask = keras.ops.expand_dims(mask, axis=-1)
@@ -1000,6 +1079,7 @@ class WindowAttention(keras.layers.Layer):
         input_shape = keras.ops.shape(inputs)
         B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
         win_len = self.window_size * self.window_size
+        pad_len_win = (win_len - (self.N_grid % win_len)) % win_len
 
         padded_inputs = keras.ops.pad(
             inputs, [[0, 0], [0, self.pad_len_seq], [0, 0]]
@@ -1009,16 +1089,47 @@ class WindowAttention(keras.layers.Layer):
             padded_inputs, self.zigzag_indices, axis=1
         )
 
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-011
+        # The SAME synthesized-mask fix as `_call_grid`, for the SAME reason, on a
+        # path that never had the D-007 short-circuit at all. This method pads
+        # twice -- `pad_len_seq` slots to square the sequence into the zigzag grid,
+        # then `pad_len_win` slots to fill the last window -- and with
+        # `attention_mask=None` neither pad was ever masked, so the zero-filled
+        # slots entered the softmax as ordinary keys and values at EVERY ragged
+        # `N`, not merely below `window_size ** 2`.
+        #
+        # MEASURED on 8435dcc2f, max |delta| between `attention_mask=None` and an
+        # explicit all-ones `(B, N)` mask (a mathematical no-op):
+        #     ws=4, N=9  -> 0.3826489   (pad_len_seq=0, pad_len_win=7 of 16 slots)
+        #     ws=7, N=25 -> 0.2675675   (pad_len_seq=0, pad_len_win=24 of 49)
+        #     ws=8, N=50 -> 0.0807583   (pad_len_seq=14, pad_len_win=0)
+        # and exactly 0.0 at `N in {4, 16, 64, 196, 256}` for their window sizes,
+        # where both pads are zero. See D-011.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT gate on `self.pad_len_seq` alone. `ws=4, N=9` has
+        #     `pad_len_seq == 0` -- 9 is a perfect square, so the zigzag grid is
+        #     exactly 3x3 -- and leaks 0.38 anyway, entirely through `pad_len_win`.
+        #     Both pads have to be in the condition.
+        #   * Do NOT permute the synthesized mask by hand. It is created in
+        #     UNPERMUTED token coordinates and then passed through the same
+        #     `pad -> take(zigzag_indices) -> pad` pipeline as the data, so the
+        #     zigzag permutation is applied to it exactly once, by the same code.
+        #     Building it after the permutation would make the pad positions a
+        #     second, hand-maintained copy of the layout.
+        key_mask = attention_mask
+        if key_mask is None and (self.pad_len_seq > 0 or pad_len_win > 0):
+            key_mask = keras.ops.ones_like(inputs[:, :, 0], dtype="int32")
+
         zigzag_mask = None
-        if attention_mask is not None:
+        if key_mask is not None:
             padded_mask = keras.ops.pad(
-                attention_mask, [[0, 0], [0, self.pad_len_seq]]
+                key_mask, [[0, 0], [0, self.pad_len_seq]]
             )
             zigzag_mask = keras.ops.take(
                 padded_mask, self.zigzag_indices, axis=1
             )
 
-        pad_len_win = (win_len - (self.N_grid % win_len)) % win_len
         padded_zigzag_seq = keras.ops.pad(
             zigzag_sequence, [[0, 0], [0, pad_len_win], [0, 0]]
         )

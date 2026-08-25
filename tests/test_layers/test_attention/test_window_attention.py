@@ -396,6 +396,26 @@ class TestAllOnesKeyMaskIsANoOp:
     local layers ran in. See decisions.md D-007
     (``plan-2026-08-25T053412-0f1fa04f``).
 
+    **The leak was WIDER than D-007 scoped, and step 4.1 closed the rest.** Step 3
+    fixed only the degenerate single-window grid case (``1 < N < window_size ** 2``).
+    Two regimes survived it: ``grid`` with ``N > window_size ** 2`` where the padded
+    grid side is not a multiple of ``window_size`` (the sequence pad and the tile pad
+    still entered the softmax), and ``zigzag`` at ANY ragged ``N`` (the short-circuit
+    lived in ``_call_grid`` only). Those six cells sat here as ``xfail(strict=True)``
+    between step 3.1 and step 4.1. MEASURED on ``8435dcc2f``, the commit immediately
+    before the fix::
+
+        grid    ws=8, N=100 -> 1.0258900      zigzag  ws=4, N=9  -> 0.3826489
+        grid    ws=4, N=20  -> 0.7214095      zigzag  ws=7, N=25 -> 0.2675675
+        grid    ws=2, N=15  -> 0.2340506      zigzag  ws=8, N=50 -> 0.0807583
+
+    ``grid ws=8, N=100`` is the worst case by construction: the grid side is 10 and
+    pads to 16, so the last tile holds more pad slots than real tokens and the
+    softmax is dominated by zeros. Step 4.1 SYNTHESIZES the all-ones key mask
+    whenever the geometry creates pads, so ``None`` and an explicit all-ones mask now
+    travel the same pipeline by construction. All six read exactly ``0.0`` after it.
+    See decisions.md D-011 (``plan-2026-08-25T053412-0f1fa04f``).
+
     **The comparison is exact, not ``allclose``.** Both sides run the same kernels on
     the same weights in the same process; the mask, being all ones, contributes
     ``0 * -1e9 == 0.0`` to every score, so there is no legitimate nonzero delta to
@@ -427,9 +447,29 @@ class TestAllOnesKeyMaskIsANoOp:
         ("zigzag", 4, 64),
         ("zigzag", 7, 196),
         ("zigzag", 8, 256),
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-011
+        # The six cells below were `LEAKY_CELLS` -- strict xfails -- between step
+        # 3.1 and step 4.1. Step 4.1 closed the general leak (the grid path with a
+        # non-tiling N, and the zigzag path at any ragged N) by SYNTHESIZING an
+        # all-ones key mask whenever the geometry creates pad slots, so `None` and
+        # an explicit all-ones mask now take the same pipeline. They assert
+        # `delta == 0.0` like every other cell; nothing about them is special any
+        # more except their history. MEASURED leak on 8435dcc2f, immediately
+        # before the fix, in this same helper: grid ws=8 N=100 -> 1.0258900,
+        # grid ws=4 N=20 -> 0.7214095, grid ws=2 N=15 -> 0.2340506,
+        # zigzag ws=4 N=9 -> 0.3826489, zigzag ws=7 N=25 -> 0.2675675,
+        # zigzag ws=8 N=50 -> 0.0807583. All six read exactly 0.0 after it.
+        # `grid ws=8 N=100` is the worst case by construction: the grid side is 10
+        # and pads to 16, so the last tile holds more pad slots than real tokens.
+        ("grid", 2, 15),
+        ("grid", 4, 20),
+        ("grid", 8, 100),
+        ("zigzag", 4, 9),
+        ("zigzag", 7, 25),
+        ("zigzag", 8, 50),
         # 'band' NEVER pads -- there is no tile to pad up to -- so the D-007
         # property must hold at EVERY N, ragged or not, including the ragged
-        # lengths where 'grid' leaked and 'zigzag' still does (LEAKY_CELLS).
+        # lengths where 'grid' and 'zigzag' used to leak.
         ("band", 3, 17),
         ("band", 4, 9),
         ("band", 8, 50),
@@ -438,42 +478,37 @@ class TestAllOnesKeyMaskIsANoOp:
         ("band", 64, 33),
     ]
 
-    # DECISION plan-2026-08-25T053412-0f1fa04f/D-008
-    #: The SAME property, in the two regimes step 3 deliberately did NOT touch. These
-    #: are ``xfail(strict=True)``, not deletions and not comments: they are live
-    #: measurements that will turn XPASS -- and so fail the suite -- the moment either
-    #: regime is fixed, which is the only way a known-open defect stays visible. Do NOT
-    #: relax them to plain ``xfail``.
+    #: RED-PROOF of the six moved cells, and of every other cell in
+    #: :data:`NO_OP_CELLS`. ``WindowAttention._pads_exist`` was made to
+    #: ``return False`` unconditionally and the ``zigzag`` synthesis condition was
+    #: ``and``-ed with ``False`` -- the D-011 defect itself put back, with every
+    #: shape, weight and code path otherwise untouched. Observed, verbatim::
     #:
-    #: 1. ``grid`` with ``N > window_size ** 2`` where the grid does not tile exactly:
-    #:    ``ceil(sqrt(N))**2 - N`` sequence pads and/or ``pad_h``/``pad_w`` tile pads
-    #:    still enter the softmax unmasked. Step 3's short-circuit covers only the
-    #:    single-window case ``N < window_size ** 2``.
-    #: 2. ``zigzag`` at ANY ragged ``N``: the short-circuit lives in ``_call_grid``
-    #:    only, so ``_call_zigzag`` still pads to a whole number of windows.
+    #:     E  AssertionError: WindowAttention(window_size=8, partition_mode='grid') on (2, 100, 32): an all-ones (B, N) key mask masks no real token and must be a NO-OP, but it moved the output by 1.1499272659420967. That is the signature of unmasked PAD slots reaching the softmax -- the defect D-007 records (plan-2026-08-25T053412-0f1fa04f). Do NOT fix this by widening the assertion: find the pad slots.
+    #:     E  assert 1.1499272659420967 == 0.0
     #:
-    #: The fourth field is the delta MEASURED by :meth:`_delta` on the current tree
-    #: (2026-08-25). It is reported in the failure message and is NOT asserted on:
-    #: a magnitude assertion inside an ``xfail`` would keep the cell red -- and the
-    #: ``xfail`` satisfied -- even after the leak was fixed, which is precisely the
-    #: guard-that-cannot-pass this repo has been burned by before. The ONLY assertion
-    #: is ``delta == 0.0``, so XPASS means fixed and nothing else can produce it.
+    #: Exactly six cells of this class went red -- ``grid`` ws2-N15 / ws4-N20 /
+    #: ws8-N100 and ``zigzag`` ws4-N9 / ws7-N25 / ws8-N50 -- and no other, which is
+    #: the correct split: every remaining cell either pads nothing or is a ``band``
+    #: cell, and neither reaches the synthesis. Reverted immediately.
     #:
-    #: WHAT NOT TO DO: do not "fix" a red cell here by moving it out of this list, and
-    #: do not widen step 3's short-circuit to `N <= window_size ** 2` hoping to cover
-    #: them -- these two regimes need a pad mask inside the MULTI-window grid path and
-    #: a slot map for the permuted zigzag layout, and fixing zigzag additionally breaks
-    #: the 18 zigzag cells that `test_window_attention_restructure_is_inert.py` still
-    #: pins BITWISE to the leaky pre-restructure reference (D-007 narrowed the grid
-    #: cells only). See decisions.md D-008 (plan-2026-08-25T053412-0f1fa04f).
-    LEAKY_CELLS = [
-        ("grid", 2, 15, 0.298543),
-        ("grid", 4, 20, 0.678637),
-        ("grid", 8, 100, 1.000270),
-        ("zigzag", 4, 9, 0.271005),
-        ("zigzag", 7, 25, 0.382822),
-        ("zigzag", 8, 50, 0.086691),
-    ]
+    #: TWO injections that do NOT red this class, recorded because the reason is
+    #: instructive: permuting the synthesized zigzag mask by
+    #: ``inverse_zigzag_indices``, and flipping the window pad to
+    #: ``constant_values=1``. Both corrupt ``key_mask``, which the ``None`` side and
+    #: the all-ones side now SHARE, so both sides move together and the relation
+    #: this class measures survives. An injection that moves both sides of a
+    #: comparison proves nothing about that comparison. Those two are RED-proven in
+    #: ``test_window_attention_restructure_is_inert.py``, which compares against an
+    #: EXTERNAL reference and therefore does see them. Neither instrument is
+    #: redundant.
+    #:
+    #: WAS ``LEAKY_CELLS`` (D-008): six strict-xfail cells pinning the residual
+    #: unmasked-pad leak in the two regimes step 3.1 deliberately did not touch.
+    #: Step 4.1 fixed both (D-011), so all six moved into :data:`NO_OP_CELLS` above
+    #: and assert ``delta == 0.0`` like every other cell. The list is gone rather
+    #: than emptied: a strict xfail list with no members is a guard that can never
+    #: speak, and the property it guarded is now stated positively.
 
     @staticmethod
     def _delta(partition_mode, window_size, seq_len):
@@ -528,32 +563,6 @@ class TestAllOnesKeyMaskIsANoOp:
             f"reaching the softmax -- the defect D-007 records "
             f"(plan-2026-08-25T053412-0f1fa04f). Do NOT fix this by widening the "
             f"assertion: find the pad slots."
-        )
-
-    @pytest.mark.parametrize(
-        "partition_mode,window_size,seq_len,measured",
-        LEAKY_CELLS,
-        ids=[f"{m}-ws{w}-N{n}" for (m, w, n, _) in LEAKY_CELLS],
-    )
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN OPEN: the unmasked-pad leak D-007 describes survives outside the "
-            "single-window grid regime step 3 fixed -- grid with a non-tiling N, and "
-            "zigzag at any ragged N. XPASS here means it was fixed; delete the cell "
-            "from LEAKY_CELLS and move it to NO_OP_CELLS."
-        ),
-    )
-    def test_the_all_ones_mask_leak_is_still_open_outside_the_fixed_regime(
-        self, partition_mode, window_size, seq_len, measured
-    ):
-        delta = self._delta(partition_mode, window_size, seq_len)
-        assert delta == 0.0, (
-            f"KNOWN OPEN (D-007): an all-ones (B, N) key mask still moves "
-            f"WindowAttention(window_size={window_size}, "
-            f"partition_mode={partition_mode!r}) on (2, {seq_len}, 32) by {delta} "
-            f"(recorded {measured} on 2026-08-25). Unmasked pad slots are still "
-            f"reaching the softmax in this regime."
         )
 
 

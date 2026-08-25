@@ -39,7 +39,7 @@ copies the golden layer's weights into the current layer BY WEIGHT PATH (not by
 this the two layers would hold different random kernels and the harness would compare
 noise -- passing or failing for the wrong reason.
 
-**Bitwise, not ``allclose`` -- for 30 of the 36 matrix cells.** The comparison is
+**Bitwise, not ``allclose`` -- for 34 of the 40 matrix cells.** The comparison is
 ``np.array_equal``. This plan is a cost restructure with a CPU-pinned reference, so for
 every cell where the pre-restructure answer was CORRECT there is no legitimate nonzero
 delta to absorb. A failure in those cells is a defect to find, never a tolerance to
@@ -81,11 +81,48 @@ Bitwise identity is unreachable here by ANY implementation, not just by this one
 summing ``N`` products and summing ``window_size ** 2`` products of which
 ``window_size ** 2 - N`` are exactly zero differ at float32 reduction order.
 
-Everything else keeps ``np.array_equal`` untouched: all 12 ``grid`` cells with
+Everything else keeps ``np.array_equal`` untouched: all 14 ``grid`` cells with
 ``N >= window_size ** 2`` (which is every configuration Swin, FastVLM and TiRex run,
-since they call with ``N == window_size ** 2`` exactly), all 18 ``zigzag`` cells, and
+since they call with ``N == window_size ** 2`` exactly), all 20 ``zigzag`` cells, and
 the ``@tf.function`` arm. See decisions.md D-007
 (``plan-2026-08-25T053412-0f1fa04f``).
+
+**Step 4.1 widened WHICH golden gets the pad mask, and NOT which cells are bitwise.**
+================================================================================
+D-007 scoped the leak to ``grid`` with ``1 < N < window_size ** 2``. It was wider
+(D-011): the ``grid`` path also leaks whenever ``N > window_size ** 2`` and the padded
+grid side is not a multiple of ``window_size``, and the ``zigzag`` path leaks at ANY
+ragged ``N`` -- it never had step 3's short-circuit at all. MEASURED on ``8435dcc2f``,
+``max |output(no mask) - output(all-ones (B,N) mask)|``, i.e. the size of a
+mathematical no-op::
+
+    grid    ws=8, N=100 -> 1.0258900      zigzag  ws=4, N=9  -> 0.3826489
+    grid    ws=4, N=20  -> 0.7214095      zigzag  ws=7, N=25 -> 0.2675675
+    grid    ws=2, N=15  -> 0.2340506      zigzag  ws=8, N=50 -> 0.0807583
+
+So :func:`_pads_exist_in_layout` -- not :func:`_is_ragged_grid` -- now decides which
+cells drive the GOLDEN side with an all-ones mask: 16 of the 40, being every
+``(ws, N)`` whose layout creates a sequence pad or a tile pad, in either mode.
+
+**But the tolerance did NOT spread with it, and that is the point worth reading.**
+Ten of those 16 -- all six newly pad-masked ``zigzag`` cells and both newly pad-masked
+multi-window ``grid`` cells at ``ws=4, N=20`` -- are EXACTLY BITWISE against the
+pad-masked golden, ``np.array_equal``, MEASURED ``max |delta| == 0.0``. That is
+structural, not luck: step 4.1's fix is to SYNTHESIZE the all-ones key mask when the
+geometry pads, so ``attention_mask=None`` and an explicit all-ones mask become the
+same code path by construction -- the current side with no mask and the golden side
+with the mask run identical kernels on identical values. Only the six degenerate
+``grid`` cells stay on :data:`RAGGED_ATOL`, because there the current code takes step
+3's short-circuit and sums ``N`` products where the golden sums ``window_size ** 2``,
+which no implementation can make bit-identical. The distinction is carried by two
+separate predicates on purpose: relaxing the ten to a tolerance "because the golden
+takes a mask now" would give up a real bitwise guarantee for a cosmetic symmetry.
+
+Twelve ``zigzag`` cells (``ws=2, N=16``/``N=4``; ``ws=4, N=64``; ``ws=7, N=196``;
+``ws=8, N=256``/``N=64``) keep BOTH a ``None`` golden and ``np.array_equal``: their
+layouts pad nothing, so :func:`_pads_exist_in_layout` is False and the synthesized
+mask is never created. Those are the cells that prove step 4.1 did not touch the
+non-padded path.
 
 **Device.** CPU only, via the ``golden_reference_device`` fixture. A GPU digest cannot
 answer an inertness question in this repo: TF32 and non-deterministic reductions make
@@ -199,6 +236,85 @@ displacement encoding, and an injection that is a symmetry of the thing it pertu
 proves nothing. The perturbation has to break the quantity the code actually reads --
 here, the ROW of the bias table.
 
+RED-PROOF OF THE TEN CELLS STEP 4.1 RE-PINNED
+=============================================
+Ten cells changed reference side in step 4.1 -- the eight ``zigzag`` cells whose layout
+pads (``ws=4, N=9``; ``ws=4, N=20``; ``ws=7, N=25``; ``ws=8, N=50``, each at both
+``rpb`` settings) and the two multi-window ragged ``grid`` cells at ``ws=4, N=20`` --
+and all ten stayed ``np.array_equal``. A bitwise assertion against a NEW reference is
+not known to work until it has failed against that reference, so three injections were
+applied to the CURRENT tree, each run, each observed to fail on the harness's own
+``AssertionError``, each reverted.
+
+Injection (c) -- DEAD PAD-MASK SYNTHESIS, i.e. the D-011 defect itself put back.
+``WindowAttention._pads_exist`` was made to ``return False`` unconditionally and the
+``zigzag`` synthesis condition was ``and``-ed with ``False``, so ``attention_mask=None``
+once again skips the mask pipeline while every shape, weight and code path stays
+otherwise identical. Observed, verbatim::
+
+    E           AssertionError: WindowAttention(window_size=4, partition_mode='grid', use_relative_position_bias=True) on (2, 20, 24) NOT is bitwise identical to the pre-restructure layer at ad27896189876609c006ea6adeea7b4ac6d31d29
+    E             golden driven with an all-ones pad mask: True; tolerance cell: False
+    E             mismatching elements: 192 of 960
+    E             max |delta|: 0.8278006613254547
+    E             current head:  [-0.428276  0.195618 -0.133111 -0.146402  0.446417 -0.768761]
+    E             golden  head:  [-0.428276  0.195618 -0.133111 -0.146402  0.446417 -0.768761]
+
+    E           AssertionError: WindowAttention(window_size=4, partition_mode='zigzag', use_relative_position_bias=True) on (2, 9, 24) NOT is bitwise identical to the pre-restructure layer at ad27896189876609c006ea6adeea7b4ac6d31d29
+    E             golden driven with an all-ones pad mask: True; tolerance cell: False
+    E             mismatching elements: 432 of 432
+    E             max |delta|: 0.2276197075843811
+
+Across this file plus ``TestAllOnesKeyMaskIsANoOp``: **16 failed, 54 passed** -- exactly
+the ten re-pinned cells here and the six cells that class moved out of its old
+``LEAKY_CELLS``. Not one cell more. In particular the six ``RAGGED_ATOL`` ``grid`` cells
+stayed GREEN, which is the right split: they take step 3's short-circuit and never
+reach ``_pads_exist`` at all. Note the ``grid ws=4, N=20`` head above -- the first six
+values are IDENTICAL to six decimals and only 192 of 960 elements move, because the
+leak is confined to the tiles that actually contain pads. An ``allclose`` at any
+sane tolerance would still have caught 0.83, but a head-eyeball would not have.
+
+Injection (d) -- WRONG-GEOMETRY MASK, shape-preserving. The synthesized zigzag mask was
+permuted by ``self.inverse_zigzag_indices`` instead of ``self.zigzag_indices``: same
+shape, same number of masked slots, wrong POSITIONS. Observed::
+
+    E           AssertionError: WindowAttention(window_size=8, partition_mode='zigzag', use_relative_position_bias=True) on (2, 50, 32) NOT is bitwise identical to the pre-restructure layer at ad27896189876609c006ea6adeea7b4ac6d31d29
+    E             golden driven with an all-ones pad mask: True; tolerance cell: False
+    E             mismatching elements: 3200 of 3200
+    E             max |delta|: 0.1894042268395424
+
+**4 failed, 66 passed** -- and the two cells it did NOT reach are the interesting part.
+``zigzag ws=4, N=9`` and ``ws=7, N=25`` have ``pad_len_seq == 0`` (both ``N`` are
+perfect squares), so the vector being permuted at that point is ALL ONES and any
+permutation of it is the identity. This is the same shape of trap as step 3.1's uniform
+slot shift: an injection that is a SYMMETRY of the object it perturbs proves nothing
+about the cells where it is a symmetry.
+
+Injection (e) -- KEEP THE WINDOW PADS, for exactly those cells. The second zigzag mask
+pad was flipped to ``constant_values=1``, so the ``pad_len_win`` slots that fill the
+last window are marked "attend" while the ``pad_len_seq`` slots stay masked. Observed::
+
+    E           AssertionError: WindowAttention(window_size=4, partition_mode='zigzag', use_relative_position_bias=True) on (2, 9, 24) NOT is bitwise identical to the pre-restructure layer at ad27896189876609c006ea6adeea7b4ac6d31d29
+    E             golden driven with an all-ones pad mask: True; tolerance cell: False
+    E             mismatching elements: 432 of 432
+    E             max |delta|: 0.2276197075843811
+
+**6 failed, 64 passed** -- precisely the six cells with ``pad_len_win > 0``
+(``ws=4, N=9``; ``ws=4, N=20``; ``ws=7, N=25``), while ``ws=8, N=50``, whose
+``pad_len_win == 0``, correctly stayed green. ``(d) union (e)`` covers all eight
+zigzag cells; ``(c)`` covers all ten on its own.
+
+**What (d) and (e) also demonstrate about the OTHER instrument.** Neither of them turns
+a single ``TestAllOnesKeyMaskIsANoOp`` cell red, and that is correct, not a gap: that
+class asserts a RELATIONAL property (``None`` and an all-ones mask agree), and both
+injections corrupt the shared ``key_mask`` on BOTH sides equally, so the relation
+survives. An injection that moves both sides of a comparison proves nothing about that
+comparison (``plans/LESSONS.md``). The two instruments are complementary -- the no-op
+class catches "the pads are not masked at all", this file catches "the pads are masked
+in the wrong places" -- and only injection (c), which is the real defect, reds both.
+
+All three injections were reverted and the tree confirmed clean before the green run
+below.
+
 GREEN, on the unmodified tree
 =============================
 ``CUDA_VISIBLE_DEVICES='' MPLBACKEND=Agg .venv/bin/python -m pytest
@@ -263,6 +379,13 @@ ROWS = [
     (2, 4, 32, 4),    # N=4  == ws**2=4   -> degenerate, boundary
     (4, 64, 32, 4),   # N=64 >  ws**2=16  -> 4 windows
     (4, 9, 24, 3),    # N=9  <  ws**2=16  -> degenerate, ragged (grid 3x3 padded to 4x4)
+    (4, 20, 24, 3),   # N=20 >  ws**2=16  -> MULTI-window AND ragged: grid side 5 pads
+                      #                     to 8 (2x2 tiles), so BOTH a 5-slot sequence
+                      #                     pad and a 3-row/3-col tile pad exist. This
+                      #                     is the regime step 4.1 fixed (D-011) and the
+                      #                     only row where `grid` pads WITHOUT being
+                      #                     degenerate; without it the grid half of that
+                      #                     fix is ungraded here.
     (7, 196, 32, 4),  # N=196 > ws**2=49  -> 4 windows
     (7, 25, 32, 4),   # N=25 <  ws**2=49  -> degenerate, ragged
     (8, 256, 24, 3),  # N=256 > ws**2=64  -> 4 windows
@@ -306,6 +429,54 @@ def _is_ragged_grid(ws: int, n: int, mode: str) -> bool:
     warns on a size-1 reduction axis and this repo escalates warnings to errors).
     """
     return mode == "grid" and 1 < n < ws * ws
+
+
+def _is_padded_zigzag(ws: int, n: int, mode: str) -> bool:
+    """Is this a ``zigzag`` cell whose layout creates pad slots?
+
+    ``_call_zigzag`` pads TWICE and either pad alone is enough to leak:
+
+    * ``pad_len_seq = ceil(sqrt(N)) ** 2 - N`` slots, to square the sequence into the
+      zigzag grid;
+    * ``pad_len_win = (ws ** 2 - N_grid % ws ** 2) % ws ** 2`` slots, to fill the last
+      window.
+
+    Both are recomputed here from ``(ws, n)`` ALONE, in the same arithmetic the layer
+    uses, rather than hard-coding the three affected rows: a hard-coded list would go
+    stale the moment :data:`ROWS` gains an entry, and would go stale SILENTLY, by
+    demanding bitwise identity of a cell whose golden output is leaky.
+
+    Note that the two pads are independent. ``ws=4, N=9`` has ``pad_len_seq == 0``
+    (9 is a perfect square, so the zigzag grid is exactly 3x3) and leaks entirely
+    through ``pad_len_win = 7``; ``ws=8, N=50`` is the mirror image, ``pad_len_seq =
+    14`` with ``pad_len_win == 0``. A predicate that tested either one alone would
+    miss half of them.
+    """
+    if mode != "zigzag":
+        return False
+    grid_side = int(np.ceil(np.sqrt(n)))
+    n_grid = grid_side * grid_side
+    win_len = ws * ws
+    pad_len_seq = n_grid - n
+    pad_len_win = (win_len - (n_grid % win_len)) % win_len
+    return pad_len_seq > 0 or pad_len_win > 0
+
+
+def _pads_exist_in_layout(ws: int, n: int, mode: str) -> bool:
+    """Does this cell's partition layout create pad slots at all?
+
+    True for the degenerate ragged ``grid`` regime, for a multi-window ``grid``
+    whose padded side is not a multiple of ``window_size`` (or whose ``N`` is not a
+    perfect square), and for a ``zigzag`` with either pad nonzero. When it is True
+    the GOLDEN side must be driven with an explicit all-ones ``(B, N)`` mask, which
+    masks no real token and is therefore the same question -- but which makes the
+    pre-restructure path mask its own pads, i.e. asks it for the answer it should
+    have been giving all along (D-007, D-011).
+    """
+    if mode == "grid":
+        grid_side = int(np.ceil(np.sqrt(n)))
+        return grid_side * grid_side != n or grid_side % ws != 0
+    return _is_padded_zigzag(ws, n, mode)
 
 
 def _cell_id(cell) -> str:
@@ -518,6 +689,21 @@ def test_the_spatial_forward_is_bitwise_unchanged(
     ws, n, dim, heads, mode, rpb = cell
     golden_window, _ = golden_modules
     x = _inputs(ws, n, dim)
+    # Does this cell's LAYOUT create pad slots? If so the golden side is driven with
+    # an explicit all-ones mask, which is what makes the pre-restructure path mask
+    # its own pads. Two independent predicates, because the two partition paths pad
+    # by different arithmetic.
+    pad_masked_golden = _pads_exist_in_layout(ws, n, mode)
+    # ...and is the verdict still BIT FOR BIT? It is, everywhere except the
+    # degenerate single-window `grid` regime. There -- and only there -- the current
+    # code takes step 3's short-circuit and sums `N` products where the golden layer
+    # sums `window_size ** 2` products of which `window_size ** 2 - N` are exactly
+    # zero, so the two disagree at float32 REDUCTION ORDER no matter how either is
+    # implemented. Everywhere else the fix is a mask synthesis on an otherwise
+    # unchanged path, so the two sides run the identical kernels on the identical
+    # values and MEASURE exactly 0.0 -- including all six newly pad-masked `zigzag`
+    # cells and both newly pad-masked multi-window `grid` cells. Do NOT relax those
+    # to the tolerance just because the golden side now takes a mask.
     ragged = _is_ragged_grid(ws, n, mode)
     # The mask is a KEEP predicate (1 = attend) and every token here is real, so this
     # is the identity mask. It is applied to the GOLDEN side only: it is how the
@@ -525,7 +711,7 @@ def test_the_spatial_forward_is_bitwise_unchanged(
     # giving all along. The current side is driven with no mask at all -- the ordinary
     # call path -- so this comparison also proves the fix is in the DEFAULT path and
     # not something a caller has to opt into.
-    golden_mask = np.ones((BATCH, n), dtype="int32") if ragged else None
+    golden_mask = np.ones((BATCH, n), dtype="int32") if pad_masked_golden else None
 
     with keras.device(golden_reference_device):
         golden_layer = _make(golden_window.WindowAttention, ws, n, dim, heads, mode, rpb)
@@ -562,7 +748,8 @@ def test_the_spatial_forward_is_bitwise_unchanged(
         raise AssertionError(
             f"WindowAttention(window_size={ws}, partition_mode={mode!r}, "
             f"use_relative_position_bias={rpb}) on {x.shape} NOT {verdict}\n"
-            f"  ragged single-window cell: {ragged}\n"
+            f"  golden driven with an all-ones pad mask: {pad_masked_golden}; "
+            f"tolerance cell: {ragged}\n"
             f"  mismatching elements: {int((delta != 0).sum())} of {delta.size}\n"
             f"  max |delta|: {float(delta.max())}\n"
             f"  current head:  "
