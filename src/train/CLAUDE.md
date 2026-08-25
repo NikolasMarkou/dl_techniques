@@ -1,6 +1,6 @@
 # Training Scripts
 
-Production-grade training pipelines for models in `dl_techniques/models/`. Each subdirectory corresponds to a model architecture.
+Production-grade training pipelines for models in `dl_techniques/models/`. Each subdirectory corresponds to a model architecture, except for the two **grouped** families `time_series/` and `language/`, whose trainers sit one level further down.
 
 ## Structure
 
@@ -27,6 +27,8 @@ src/train/
 │   ├── prism/           # PRISM probabilistic forecaster
 │   ├── tirex/           # TiRex patch transformer
 │   └── adaptive_ema/    # Adaptive EMA slope filter
+├── language/            # Language trainers (grouped)
+│   └── colbert/         # ColBERT v1 / v2 late-interaction retrieval
 ├── bert/                # BERT pretrain/finetune
 ├── ...
 └── CLAUDE.md
@@ -681,7 +683,7 @@ That is the same anti-pattern this document already forbids in the tree_transfor
 | Claim | Command | Value |
 |---|---|---|
 | Schedule interpolators | classification of the 68 `*Callback`-based classes above — see (a) | **7**, not 12 |
-| Canonical `set_seeds` users | `grep -rl "set_seeds(" src/train/ \| grep -v "common/seed.py\|common/__init__.py\|README.md\|CLAUDE.md" \| wc -l` | **72** (was **65** before the 7 inline seeders were migrated on 2026-08-13; never 70) |
+| Canonical `set_seeds` users | `grep -rl "set_seeds(" src/train/ \| grep -v "common/seed.py\|common/__init__.py\|README.md\|CLAUDE.md" \| wc -l` | **66**, re-derived 2026-08-25 (was **65** before the 7 inline seeders were migrated on 2026-08-13; never 70). The **72** recorded here previously does not reproduce under its own printed command at any commit tried, including `0222f3044`, which returns **64** — that drift predates `plan-2026-08-25-c71fc3ad` and was repaired here only because that plan's two new trainers moved the same cell |
 | `src/train/` entry points | `grep -rl '__name__ == .__main__.' src/train/ --include="*.py" \| grep -v "/common/\|/__init__\.py$\|/test_"` | **125**. The often-quoted **115 is not reproducible under any filter tried** — the raw guard grep gives 127, and 125 after excluding `common/`, `__init__.py` and `test_*`. State your filter whenever you quote this. |
 | Direct `keras.optimizers.*` calls | `grep -rn -E "keras\.optimizers\.(Adam\|AdamW\|SGD\|RMSprop)\(" --include="*.py" src/train/` | **63 across 49 files** — CONFIRMED exactly. The `--include="*.py"` filter is **required**: without it you get 66, and the three extra hits are prose mentions inside this very file. |
 

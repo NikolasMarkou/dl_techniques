@@ -24,7 +24,7 @@ make docs       # generate documentation
 
 ```
 src/dl_techniques/
-├── models/          # 79 leaf model packages in 11 family dirs — catalogue in models/README.md
+├── models/          # 80 leaf model packages in 11 family dirs — catalogue in models/README.md
 ├── layers/          # Custom layers (attention, FFN, norms, embeddings, MoE, transformers, geometric, etc.)
 ├── losses/          # Loss functions (contrastive, focal, calibration, segmentation, GAN, etc.)
 ├── metrics/         # Custom metrics (capsule, CLIP, perplexity, PSNR, time series)
@@ -41,7 +41,7 @@ src/dl_techniques/
 
 Each package has its own `CLAUDE.md` with detailed documentation.
 
-`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 79 leaf
+`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 80 leaf
 packages sit under 11 family directories (`common`, `general_purpose`, `graph`, `language`,
 `memory`, `neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`,
 `vision_language`), four of which nest one level further
@@ -75,8 +75,8 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 |---|---|---|
 | `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 258 of 298 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
-| `models/` | **NO package-wide style — measurably MIXED** | 82 Google-only, 75 Sphinx-only, 8 both, 105 neither, over 270 `.py` files |
-| `losses/` | Google (`Args:`) majority | 32 of 42 carry `Args:`, 8 carry `:param `, 1 both |
+| `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 81 Sphinx-only, 8 both, 106 neither, over 275 `.py` files |
+| `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
 | `metrics/` | Google majority | 12 of 15 / 2 |
 | `utils/` | Google majority | 22 of 41 / 11, 3 both |
 | `optimization/` | Google majority | 9 of 14 / 2 |
@@ -102,17 +102,17 @@ Re-derive (`--include=*.py` is **load-bearing** — without it the greps match t
 and the numbers invalidate themselves):
 
 ```bash
-find src/dl_techniques/models -name '*.py' | wc -l                                   # 270
-grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   #  90 = Google-only + both
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  83 = Sphinx-only + both
+find src/dl_techniques/models -name '*.py' | wc -l                                   # 275
+grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   #  88 = Google-only + both
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  89 = Sphinx-only + both
 # comm -12 of those two sorted file lists -> 8 (both)
-# Google-only = 90 - 8 = 82;  Sphinx-only = 83 - 8 = 75;  neither = 270 - 82 - 75 - 8 = 105
+# Google-only = 88 - 8 = 80;  Sphinx-only = 89 - 8 = 81;  neither = 275 - 80 - 81 - 8 = 106
 ```
 
 > **The `Args:` anchor is load-bearing, and the numbers are not comparable without it.** An
-> unanchored `grep -rl "Args:"` over the same tree returns **91**, not 90 — it also matches `Args:`
+> unanchored `grep -rl "Args:"` over the same tree returns **89**, not 88 — it also matches `Args:`
 > mid-line, inside prose and inside code. Re-running the commands exactly as printed above is
-> what produced 82/75/8/105; a hand-rolled regex over the same tree on the same day produced
+> what produced 80/81/8/106; a hand-rolled regex over the same tree on the same day produced
 > 81/73/14/102. Do not mix a number from one instrument into a table derived by another.
 
 **This table rots.** It said "248 of 285" for `layers/` until 2026-08-14 (correct on 2026-08-11,
@@ -126,7 +126,18 @@ which moved neither count. Re-derived on **2026-08-25** by re-running the printe
 7 -> 8, `utils/` 22 of 39/9 -> 22 of 41/11, and `bert.py` back to **81** `:param ` (the "78" recorded
 on 2026-08-19 does not reproduce under the printed command). The restructure was a pure `git mv` and
 moved no docstring, so the `models/` swing is the instrument, not the tree — see the anchor note
-above. **Re-run the block above before quoting any of it** — a derived number is a perishable good.
+above. Re-derived again on 2026-08-25 (later the same day) by
+`plan-2026-08-25-c71fc3ad/iter-1/step-9` after the `models/language/colbert/` package landed:
+`models/` 270 -> **275** files and `:param ` 85 -> **89**. **Two of the figures recorded in the
+sentence before this one never reproduced**: re-running the printed commands against the commit
+*preceding* that plan (`0222f3044`) returns anchored-`Args:` **88**, not 90, and `:param ` **85**,
+not 83 — so Google-only was 80 and Sphinx-only 77 on 2026-08-25 morning, not 82 and 75. The
+arithmetic in the block was carried forward from mis-transcribed inputs; the `neither` figure
+matching (105) was a coincidence of two compensating errors. That drift is **not** this plan's and
+predates it; it is repaired here only because leaving half a measurement block updated would make
+the file contradict itself. **Re-run the block above before quoting any of it** — a derived number
+is a perishable good, and this table has now been wrong twice in the same week in two different
+ways.
 
 ### Factory Pattern
 
@@ -193,8 +204,8 @@ Mirrors `src/` — `tests/test_models/test_mobilenet/`, `tests/test_layers/test_
 > **`tests/test_models/` is FLAT and deliberately does not mirror the `models/` family nesting**
 > (plan `plan-2026-08-24T205033-8fd4f20d` D-001). There is no `test_vision/` or `test_language/`
 > level. The rule that holds is the one that always mattered: **leaf package `x` is tested by
-> `tests/test_models/test_<x>/`** — measured 2026-08-25, 79 test directories against 79 leaf
-> packages, agreeing on 77 names; the two that differ are `sam1` (covered by `test_sam/`, which
+> `tests/test_models/test_<x>/`** — measured 2026-08-25, 80 test directories against 80 leaf
+> packages, agreeing on 78 names; the two that differ are `sam1` (covered by `test_sam/`, which
 > also owns the shared `dead_component_oracle.py`) and `lewm` (untested), against the grouping
 > directories `test_sam/` and `test_time_series/`. Nesting them was evaluated and rejected: 215
 > relative imports (`from ..gradient_flow_oracle` and friends) reach shared oracles at
@@ -204,7 +215,7 @@ Mirrors `src/` — `tests/test_models/test_mobilenet/`, `tests/test_layers/test_
 | File kind | Convention |
 |---|---|
 | Comprehensive suite | `class TestModelName`, pytest fixtures for configs and sample data |
-| **Single-claim guard** | sentence-named after the claim: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py`. **62** carry the `test_the_` form (`find tests -name 'test_the_*.py' -not -path '*__pycache__*' | wc -l`, 2026-08-25: 47 under `test_models/`, 6 under `test_layers/`, 3 under `test_train/`, 6 loose at `tests/`); the earlier "15 such files, 2026-08-19" quoted no command and does not reproduce |
+| **Single-claim guard** | sentence-named after the claim: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py`. **65** carry the `test_the_` form (`find tests -name 'test_the_*.py' -not -path '*__pycache__*' | wc -l`, 2026-08-25: 47 under `test_models/`, 6 under `test_layers/`, 6 under `test_train/`, 6 loose at `tests/`); the earlier "15 such files, 2026-08-19" quoted no command and does not reproduce |
 | **Meta-test** | prefixed `test_the_guard_…` / `test_the_probe_…` / `test_the_contract_…` |
 | **Shared instrument** | **no `test_` prefix**, so pytest does not collect it; each has a mirrored `test_<name>.py` RED proof |
 
