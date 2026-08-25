@@ -266,16 +266,5 @@ class BandLogitNorm(keras.layers.Layer):
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BandLogitNorm':
-        """Create a layer instance from its configuration.
-
-        :param config: Layer configuration dictionary.
-        :type config: Dict[str, Any]
-
-        :return: New layer instance.
-        :rtype: BandLogitNorm
-        """
-        return cls(**config)
 
 # ---------------------------------------------------------------------

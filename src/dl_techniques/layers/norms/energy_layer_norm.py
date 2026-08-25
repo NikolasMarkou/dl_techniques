@@ -320,33 +320,16 @@ class EnergyLayerNorm(keras.layers.Layer):
             # Serialized EXPLICITLY (D-010). If it were dropped from get_config, a saved
             # model would silently reload with an UNCONSTRAINED gamma and could then train
             # itself into energy ascent — the exact defect this constraint exists to stop.
+            # `constraints.get()` in `__init__` accepts this serialized dict as-is, so the
+            # BASE `Layer.from_config` (a plain `cls(**config)`) rebuilds it exactly — this
+            # class deliberately does NOT override `from_config`. A serialized `None`
+            # reloads as an explicit `None` (deliberately unconstrained), NOT as the default
+            # floor; the `_DEFAULT_CONSTRAINT` sentinel is only for a caller who never
+            # mentioned the argument at all. Both facts are pinned by
+            # `tests/test_layers/test_norms/test_the_base_from_config_round_trips.py`.
             'gamma_constraint': constraints.serialize(self.gamma_constraint),
         })
         return config
 
-    # -----------------------------------------------------------------
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "EnergyLayerNorm":
-        """Reconstruct the layer from its serialized configuration.
-
-        :param config: Configuration dictionary produced by :meth:`get_config`.
-        :type config: Dict[str, Any]
-
-        :return: A new ``EnergyLayerNorm`` instance.
-        :rtype: EnergyLayerNorm
-        """
-        config = dict(config)
-        for key in ('gamma_initializer', 'delta_initializer'):
-            if key in config:
-                config[key] = initializers.deserialize(config[key])
-        if 'gamma_constraint' in config:
-            # NOTE: a serialized `None` round-trips as an explicit `None` (deliberately
-            # unconstrained), NOT as the default floor — the sentinel is only for a caller
-            # who never mentioned the argument at all.
-            config['gamma_constraint'] = constraints.deserialize(
-                config['gamma_constraint']
-            )
-        return cls(**config)
 
 # ---------------------------------------------------------------------
