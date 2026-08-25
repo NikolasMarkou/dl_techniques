@@ -49,8 +49,8 @@ from typing import Any, Dict, Literal, Optional
 
 from dl_techniques.utils.logger import logger
 
-from .arithmetic_operators import LearnableArithmeticOperator
 from .logic_operators import LearnableLogicOperator
+from .arithmetic_operators import LearnableArithmeticOperator
 from .neural_circuit import CircuitDepthLayer, LearnableNeuralCircuit
 
 # ---------------------------------------------------------------------

@@ -79,6 +79,10 @@ References:
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.models.language.bert.model import BERT
@@ -90,7 +94,7 @@ from .components import (
 )
 
 # ---------------------------------------------------------------------
-# Constants
+# constants
 # ---------------------------------------------------------------------
 
 #: Shortest usable query/document length: ``[CLS] [Q|D] <one token> [SEP]``.
@@ -106,7 +110,7 @@ DOC_SKIPLIST_MASK_KEY = "doc_skiplist_mask"
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable()
 class ColBERT(keras.Model):
     """Late-interaction retrieval encoder: BERT, a shared projection, MaxSim.
 

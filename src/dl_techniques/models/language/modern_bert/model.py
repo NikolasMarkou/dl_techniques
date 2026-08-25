@@ -29,13 +29,6 @@ linear cost, while the periodic global layers stitch the windows together so
 information still crosses the whole sequence -- a token pair `L` apart is
 connected after one global layer, not after `L / window` local ones.
 
-One honest caveat about the cost half of that claim, as implemented here: the
-band is applied as a dense `N x N` mask over standard attention, so a local
-layer is `O(N^2)`, the same order as a global one. It removes the wrong
-ADJACENCY (see the `window_band` history in the class docstring), not the
-quadratic term; a genuinely linear banded kernel is not reachable from
-`keras.ops`. The modelling behaviour is the paper's; the speedup is not.
-
 References:
     - Warner et al., 2024. Smarter, Better, Faster, Longer: A Modern
       Bidirectional Encoder. (https://arxiv.org/abs/2412.13663)
@@ -53,7 +46,6 @@ References:
 
 import os
 import keras
-from keras import layers, ops
 from typing import Optional, Union, Any, Dict, List
 
 # ---------------------------------------------------------------------
@@ -61,12 +53,11 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
-from dl_techniques.utils.model_build import materialize_sublayers
-
 
 # ---------------------------------------------------------------------
 
@@ -317,12 +308,6 @@ class ModernBERT(keras.Model):
             outputs = model(inputs)
             print(outputs["last_hidden_state"].shape)
             # (2, 256, 768)
-
-    Note:
-        No pretrained ModernBERT weights are distributed with
-        ``dl_techniques``. ``pretrained=True`` raises ``NotImplementedError``;
-        pass a local checkpoint via
-        ``pretrained='/path/to/weights.keras'`` instead.
     """
 
     MODEL_VARIANTS = {
@@ -342,66 +327,6 @@ class ModernBERT(keras.Model):
             "num_heads": 12,
             "intermediate_size": 1152,
             "use_bias": False,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-135
-            # `global_attention_interval: 1` -- EVERY layer global -- is not a
-            # tuning choice, it is what makes this variant RUNNABLE. At the
-            # inherited `3`, two thirds of the layers were `window` layers at
-            # `local_attention_window_size=128`, and a window is padded to
-            # `128**2 = 16384` slots INDEPENDENT of L, so `from_variant("base")`
-            # raised `ResourceExhaustedError` inside `SingleWindowAttention.call`
-            # at a sequence length of EIGHT, on a 12 GB GPU (measured
-            # 2026-08-21). Do NOT "restore the hybrid schedule" by putting `3`
-            # back, and do NOT shrink `local_attention_window_size` instead: the
-            # window layer is a SPATIAL layer over a synthetic sqrt(L) grid, so a
-            # smaller window buys a strided, non-contiguous adjacency that is not
-            # the paper's 1-D window -- see the D-019/D-027 anchors in `_build`,
-            # which forbid exactly that shrink. The real fix is a 1-D
-            # sliding-window layer in `layers/attention/`, which does not exist.
-            # `local_attention_window_size` is retained and stays reachable via
-            # `from_variant("base", global_attention_interval=3)`.
-            # See decisions.md D-135.
-            #
-            # SUPERSEDED 2026-08-25 by plan-2026-08-25T053412-0f1fa04f/D-012.
-            # D-135's prohibition was explicitly CONDITIONAL -- "the real fix is
-            # a 1-D sliding-window layer in `layers/attention/`, which does not
-            # exist". It exists now: `WindowAttention(partition_mode='band')`,
-            # reachable as the `'window_band'` registry key, and the local
-            # branch in `_build_architecture` selects it. The condition is gone,
-            # so `global_attention_interval` returns to the paper's `3`.
-            # PINNED BY MEASUREMENT, the way D-135 pinned its own claim
-            # (CUDA_VISIBLE_DEVICES=1, the same 12 GB RTX 4070, memory growth on,
-            # `tf.config.experimental.get_memory_info('GPU:0')['peak']`):
-            #   from_variant("base", global_attention_interval=3)
-            #     L=8    -> ran, 0.692 GB GPU peak, host RSS 1.430 GB
-            #     L=512  -> ran, host RSS 1.429 GB
-            #     L=2048 -> ran, 1.640 GB GPU peak, host RSS 1.661 GB
-            # (L=8 is the exact length at which D-135 measured
-            # `ResourceExhaustedError`.) The prohibition D-135 shares with
-            # D-019/D-027/D-139 -- do NOT shrink `local_attention_window_size`
-            # -- STILL STANDS and is not touched here: the value is still 128.
-            # See the D-012 anchor in `_build_architecture` for why its `// 2`
-            # is a unit conversion and not that shrink.
-            #
-            # DECISION plan-2026-08-25T053412-0f1fa04f/D-016
-            # TRADE-OFF, recorded 2026-08-25. `3` is here for
-            # ARCHITECTURAL FIDELITY only. Do NOT justify it as a memory
-            # optimization, and do NOT "revert to 1" on the strength of the
-            # numbers below. The band is a dense `N x N` masked attention --
-            # the SAME O(N^2) order as global, plus the mask -- so past
-            # L ~ 2048 the hybrid schedule costs slightly MORE than all-global.
-            # MEASURED (CPU, host peak RSS via `ru_maxrss`, construct + one
-            # forward, n=3 draws per cell, min-max):
-            #   L=1024  interval=1 1.820-1.830 GB  interval=3 1.689-1.739 GB
-            #   L=2048  interval=1 2.323-2.529 GB  interval=3 2.303-2.489 GB
-            #   L=4096  interval=1 4.758-4.952 GB  interval=3 5.122-5.135 GB
-            # i.e. the hybrid wins at 1024, TIES at 2048 (overlapping ranges --
-            # a single draw there shows either sign) and loses ~4% at 4096,
-            # which is below `DEFAULT_MAX_POSITION_EMBEDDINGS = 8192`. The
-            # measuring command is in the `global_attention_interval` parameter
-            # docstring. Fidelity to the published architecture outranks a ~4%
-            # delta; D-135's only reason for forcing 1 was that the local layer
-            # was BROKEN, and that reason has lapsed.
-            # See decisions.md D-016 (plan-2026-08-25T053412-0f1fa04f).
             "global_attention_interval": 3,
             "local_attention_window_size": 128,
             "description": (
@@ -415,23 +340,6 @@ class ModernBERT(keras.Model):
             "num_heads": 16,
             "intermediate_size": 2624,
             "use_bias": False,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-135
-            # Same repair, same reason, same measurement as `base` above:
-            # `from_variant("large")` raised `ResourceExhaustedError` at L=8.
-            # See decisions.md D-135.
-            #
-            # SUPERSEDED 2026-08-25 by plan-2026-08-25T053412-0f1fa04f/D-012,
-            # same reason and same shape as `base` above. Re-measured on the
-            # same 12 GB RTX 4070: `from_variant("large", global_attention_interval=3)`
-            #     L=8    -> ran, 1.707 GB GPU peak, host RSS 1.445 GB
-            #     L=512  -> ran, host RSS 1.447 GB
-            #     L=2048 -> ran, 2.929 GB GPU peak, host RSS 1.749 GB
-            # The D-016 TRADE-OFF recorded on `base` above applies verbatim
-            # here: `3` is architectural fidelity, NOT a memory optimization,
-            # and past L ~ 2048 it costs slightly more than all-global. Do not
-            # revert it on cost grounds.
-            # `local_attention_window_size` is UNCHANGED at 128; the shrink
-            # D-135/D-019/D-027/D-139 forbid has not been performed.
             "global_attention_interval": 3,
             "local_attention_window_size": 128,
             "description": (
@@ -634,27 +542,6 @@ class ModernBERT(keras.Model):
             is_global = (i + 1) % self.global_attention_interval == 0
             attention_type = "group_query" if is_global else "window_band"
 
-            # DECISION plan-2026-08-25T053412-0f1fa04f/D-012
-            # THIS IS NOT THE FORBIDDEN SHRINK. D-019/D-027/D-139 forbid
-            # "fixing" ModernBERT by making `local_attention_window_size`
-            # SMALLER. The value here is UNCHANGED (128 at `base`/`large`, 64 at
-            # `tiny`); what changed is its UNIT. It used to be a 2-D edge length
-            # consumed by `'window'` (partition_mode='grid'), which folds the
-            # 1-D token sequence into a ceil(sqrt(L)) square and attends within
-            # `window_size`-square blocks -- a synthetic adjacency the text does
-            # not have. It is now a 1-D FULL SPAN in tokens, matching upstream:
-            # `transformers/modular_modernbert.py` sets
-            # `sliding_window = local_attention // 2` and documents
-            # `local_attention=128` as "64 tokens either side". `'window_band'`
-            # takes the HALF-WIDTH, so the `// 2` below is a span -> half-width
-            # UNIT CONVERSION, not a reduction of the window. The diff will read
-            # like `128` arriving at the layer as `64`; it is the same
-            # neighbourhood expressed in the layer's own units, and it is
-            # STRICTLY LARGER along the sequence than what `'grid'` gave (a
-            # 128-wide grid block is a set of strided runs, not a contiguous
-            # span). Do NOT "restore" `window_size=self.local_attention_window_size`
-            # here: that would silently double the span to 256 tokens.
-            # See decisions.md D-012.
             attention_args = (
                 {
                     "num_kv_heads": self.num_heads,
@@ -665,17 +552,6 @@ class ModernBERT(keras.Model):
                 else {"window_size": self.local_attention_window_size // 2}
             )
 
-            # DECISION plan-2026-08-19T070627-a616f581/D-007
-            # `layer_norm_eps` used to reach ONLY the embeddings and
-            # `final_norm` below. This loop passed neither `attention_norm_args`
-            # nor `ffn_norm_args`, so `TransformerLayer` fell through to
-            # `create_normalization_layer`'s `epsilon=1e-6` default and all
-            # `2 * num_layers` encoder norms ran at 1e-6 while `final_norm` ran
-            # at ModernBERT's own 1e-12. MEASURED pre-fix at `num_layers=2`:
-            # 4 of 4 block norms at 1e-06, final_norm at 1e-12.
-            # WHAT NOT TO DO: do not change the factory's shared 1e-6 default,
-            # and do not hard-code 1e-12 here -- a test asserts the block norms
-            # TRACK `self.layer_norm_eps`. See decisions.md D-007.
             layer = TransformerLayer(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -698,7 +574,7 @@ class ModernBERT(keras.Model):
             self.encoder_layers.append(layer)
 
         # Final normalization layer after the transformer stack
-        self.final_norm = layers.LayerNormalization(
+        self.final_norm = keras.layers.LayerNormalization(
             epsilon=self.layer_norm_eps,
             center=self.use_bias,  # Use bias for centering if use_bias=True
             name="final_layer_norm"
@@ -777,49 +653,11 @@ class ModernBERT(keras.Model):
 
         sequence_output = self.final_norm(hidden_states, training=training)
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-031
-        # The echoed mask is RESOLVED here so the output structure is the same
-        # two fixed-rank tensors whether or not the caller supplied a mask.
-        # Echoing a bare `None` made `predict()` unusable on the ordinary
-        # single-key dict: MEASURED at HEAD ae2e2aa0a,
-        # `ModernBERT.predict({"input_ids": ids})` -> `ValueError: Structures
-        # don't have the same nested structure`. `model(inputs)` always worked,
-        # which is why no test caught it; `README.md` documented it as a
-        # limitation instead.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT drop the "attention_mask" key when it is None -- that
-        #     makes the OUTPUT structure depend on the INPUT.
-        #   * Do NOT move this resolution ABOVE the encoder loop. It reads like
-        #     the cleaner spelling and the FIRST reason above is sufficient on
-        #     its own: the output structure must not follow the input.
-        #     `fnet/model.py` carries the twin anchor.
-        #
-        # THE SECOND REASON HAS LAPSED -- recorded so nobody re-derives it and
-        # concludes the anchor was wrong. Until 2026-08-25 this comment also
-        # argued that a pre-loop resolution is a silent NUMERICS change,
-        # because `WindowAttention._call_grid` zero-padded a rank-2 mask up to
-        # its square grid and the ones-mask therefore MASKED OUT grid padding
-        # that an absent mask left attendable. MEASURED then, on a 2-layer
-        # model, seq_len 12, `local_attention_window_size=4`:
-        #     mixed local/global (interval=3): max|delta| = 6.415714e-01
-        #                                      on a max|out| of 2.67
-        #     all-global         (interval=1): max|delta| = 0.000000e+00
-        # That was a DEFECT, not a mechanism: an all-ones mask masks no real
-        # token and must be a mathematical no-op. Two changes in
-        # plan-2026-08-25T053412-0f1fa04f removed it -- D-007/D-009/D-011
-        # stopped pad slots reaching the softmax in every partition mode, and
-        # D-012 routed the local layers to `'window_band'`, which pads nothing.
-        # RE-MEASURED 2026-08-25 on the same fixture: mixed local/global
-        # max|delta| = 0.000000e+00. Pinned by
-        # `tests/.../test_predict_single_key_dict.py::TestResolvedMaskMustNotReachTheEncoder`,
-        # whose first test now asserts `== 0.0` where it once asserted `> 1e-3`.
-        # See decisions.md D-031, and D-013 of the 2026-08-25 plan.
         return {
             "last_hidden_state": sequence_output,
             "attention_mask": (
                 attention_mask if attention_mask is not None
-                else ops.ones_like(input_ids)
+                else keras.ops.ones_like(input_ids)
             ),
         }
 
@@ -841,14 +679,6 @@ class ModernBERT(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
         try:
             if not self.built:
-                # DECISION plan-2026-08-17T183311-79c63e38/D-044
-                # `keras.random.randint`, NOT `keras.random.uniform(..., dtype=
-                # "int32")`. Keras 3 rejects an integer dtype on `uniform`
-                # ("requires a floating point dtype"), so this build raised on
-                # EVERY unbuilt model and the whole `pretrained="<path>"` route
-                # was unreachable -- the README documented it as the supported
-                # alternative to the (raising) `pretrained=True`. Same defect
-                # and same fix as `distilbert/model.py` (D-024 there).
                 dummy_input = {
                     "input_ids": keras.random.randint(
                         (1, 128), 0, self.vocab_size, dtype="int32"
@@ -856,13 +686,7 @@ class ModernBERT(keras.Model):
                 }
                 self(dummy_input, training=False)
             logger.info(f"Loading pretrained weights from {weights_path}")
-            # Keras 3 removed `by_name` from `Model.load_weights` — the
-            # signature is `(filepath, skip_mismatch=False, **kwargs)` and it
-            # REJECTS the unknown keyword, so this call raised
-            # `ValueError: Invalid keyword arguments: {'by_name': True}` for
-            # every caller. It went unnoticed because the only route here was
-            # `pretrained=<path>` and the enclosing except turned the failure
-            # into a warning that continued with random weights.
+
             report = load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
@@ -880,14 +704,6 @@ class ModernBERT(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
-    # a non-existent host; `from_variant` caught the download failure, logged a
-    # warning and continued with random initialization, so `pretrained=True`
-    # silently produced untrained weights. Do NOT reinstate a warn-and-return
-    # branch here or in `from_variant`. No public ModernBERT weights are
-    # distributed with dl_techniques; pass a local path via
-    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
     @staticmethod
     def _download_weights(
             variant: str,
@@ -1131,7 +947,7 @@ def create_modern_bert_with_head(
 
     # Some heads (like QuestionAnsweringHead) may internally use ops that
     # require the attention mask to be a float. This cast ensures compatibility.
-    attention_mask_float = ops.cast(
+    attention_mask_float = keras.ops.cast(
         encoder_outputs["attention_mask"],
         dtype=encoder_outputs["last_hidden_state"].dtype
     )

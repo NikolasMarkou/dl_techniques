@@ -83,9 +83,7 @@ References:
 """
 
 import math
-
 import keras
-from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
@@ -225,7 +223,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         # C4 (plan_2026-05-13_3a2f1d23): when apply_sigmoid=False the layer
         # assumes inputs already lie in [0, 1]. Stacking arithmetic experts
         # upstream violates that. force_clip_when_no_sigmoid=True applies
-        # ops.clip(x, 0, 1) defensively.
+        # keras.ops.clip(x, 0, 1) defensively.
         self.force_clip_when_no_sigmoid = force_clip_when_no_sigmoid
         self.softplus_temperature = softplus_temperature
         self.gumbel_softmax = gumbel_softmax
@@ -334,7 +332,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Result of soft AND operation.
         :rtype: keras.KerasTensor
         """
-        return ops.multiply(x1, x2)
+        return keras.ops.multiply(x1, x2)
 
     def _soft_logic_or(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -347,7 +345,10 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Result of soft OR operation.
         :rtype: keras.KerasTensor
         """
-        return ops.add(ops.add(x1, x2), ops.negative(ops.multiply(x1, x2)))
+        return keras.ops.add(
+            keras.ops.add(x1, x2),
+            keras.ops.negative(
+                keras.ops.multiply(x1, x2)))
 
     def _soft_logic_xor(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -360,7 +361,9 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Result of soft XOR operation.
         :rtype: keras.KerasTensor
         """
-        return ops.subtract(ops.add(x1, x2), ops.multiply(2.0, ops.multiply(x1, x2)))
+        return keras.ops.subtract(
+            keras.ops.add(x1, x2),
+            keras.ops.multiply(2.0, keras.ops.multiply(x1, x2)))
 
     def _soft_logic_not(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -371,7 +374,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Result of soft NOT operation.
         :rtype: keras.KerasTensor
         """
-        return ops.subtract(1.0, x)
+        return keras.ops.subtract(1.0, x)
 
     def _soft_logic_nand(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -384,7 +387,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Result of soft NAND operation.
         :rtype: keras.KerasTensor
         """
-        return ops.subtract(1.0, ops.multiply(x1, x2))
+        return keras.ops.subtract(1.0, keras.ops.multiply(x1, x2))
 
     def _soft_logic_nor(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -397,46 +400,53 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Result of soft NOR operation.
         :rtype: keras.KerasTensor
         """
-        or_result = ops.add(ops.add(x1, x2), ops.negative(ops.multiply(x1, x2)))
-        return ops.subtract(1.0, or_result)
+        or_result = (
+            keras.ops.add(
+                keras.ops.add(x1, x2),
+                keras.ops.negative(
+                    keras.ops.multiply(x1, x2)
+                )
+            )
+        )
+        return keras.ops.subtract(1.0, or_result)
 
     # --- Łukasiewicz t-norm / t-conorm -----------------------------------
     def _luk_and(self, x1, x2):
         """Łukasiewicz AND: max(0, p + q - 1)."""
-        return ops.maximum(0.0, ops.subtract(ops.add(x1, x2), 1.0))
+        return keras.ops.maximum(0.0, keras.ops.subtract(keras.ops.add(x1, x2), 1.0))
 
     def _luk_or(self, x1, x2):
         """Łukasiewicz OR: min(1, p + q)."""
-        return ops.minimum(1.0, ops.add(x1, x2))
+        return keras.ops.minimum(1.0, keras.ops.add(x1, x2))
 
     # --- Gödel t-norm / t-conorm -----------------------------------------
     def _godel_and(self, x1, x2):
         """Gödel AND: min(p, q)."""
-        return ops.minimum(x1, x2)
+        return keras.ops.minimum(x1, x2)
 
     def _godel_or(self, x1, x2):
         """Gödel OR: max(p, q)."""
-        return ops.maximum(x1, x2)
+        return keras.ops.maximum(x1, x2)
 
     # --- Implication family ----------------------------------------------
     def _implies(self, x1, x2):
         """Kleene-Dienes implication: max(1 - p, q)."""
-        return ops.maximum(ops.subtract(1.0, x1), x2)
+        return keras.ops.maximum(keras.ops.subtract(1.0, x1), x2)
 
     def _lukasiewicz_implies(self, x1, x2):
         """Łukasiewicz implication: min(1, 1 - p + q)."""
-        return ops.minimum(1.0, ops.add(ops.subtract(1.0, x1), x2))
+        return keras.ops.minimum(1.0, keras.ops.add(keras.ops.subtract(1.0, x1), x2))
 
     def _reichenbach_implies(self, x1, x2):
         """Reichenbach (probabilistic) implication: 1 - p + p*q."""
-        return ops.add(ops.subtract(1.0, x1), ops.multiply(x1, x2))
+        return keras.ops.add(keras.ops.subtract(1.0, x1), keras.ops.multiply(x1, x2))
 
     def _goguen_implies(self, x1, x2):
         """Goguen implication: min(1, q / max(p, eps)). Identity when p<=q."""
         # eps prevents 0/0 at p=0 (where formal value should be 1 because
         # ⊥→anything is vacuously true). Clamp p, take ratio, clip to <=1.
-        p_safe = ops.maximum(x1, 1e-9)
-        return ops.minimum(1.0, ops.divide(x2, p_safe))
+        p_safe = keras.ops.maximum(x1, 1e-9)
+        return keras.ops.minimum(1.0, keras.ops.divide(x2, p_safe))
 
     # --- Hamacher / Yager t-norms (M4) -----------------------------------
     # DECISION plan_2026-05-13_e33114da/D-002 — Both Hamacher t-norms have a
@@ -444,50 +454,50 @@ class LearnableLogicOperator(keras.layers.Layer):
     # continuity is 0 for AND and 1 for OR. Prior implementation used
     # asymmetric eps strategies (additive for AND, max-clamp for OR) which
     # gave wrong limits — most visibly, OR(1,1) returned 0 instead of 1.
-    # Unified with ops.where: when denom is near-singular, return the
+    # Unified with keras.ops.where: when denom is near-singular, return the
     # mathematical limit; otherwise return the standard ratio.
     _HAMACHER_SINGULAR_EPS = 1e-7
 
     def _hamacher_and(self, x1, x2):
         """Hamacher product t-norm: p*q / (p + q - p*q). Limit at (0,0) = 0."""
-        pq = ops.multiply(x1, x2)
-        denom = ops.subtract(ops.add(x1, x2), pq)
-        denom_safe = ops.maximum(denom, 1e-9)
-        singular = ops.less(denom, self._HAMACHER_SINGULAR_EPS)
-        ratio = ops.divide(pq, denom_safe)
-        return ops.where(singular, ops.zeros_like(ratio), ratio)
+        pq = keras.ops.multiply(x1, x2)
+        denom = keras.ops.subtract(keras.ops.add(x1, x2), pq)
+        denom_safe = keras.ops.maximum(denom, 1e-9)
+        singular = keras.ops.less(denom, self._HAMACHER_SINGULAR_EPS)
+        ratio = keras.ops.divide(pq, denom_safe)
+        return keras.ops.where(singular, keras.ops.zeros_like(ratio), ratio)
 
     def _hamacher_or(self, x1, x2):
         """Hamacher sum t-conorm: (p + q - 2 p q) / (1 - p q). Limit at (1,1) = 1."""
-        pq = ops.multiply(x1, x2)
-        num = ops.subtract(ops.add(x1, x2), ops.multiply(2.0, pq))
-        denom = ops.subtract(1.0, pq)
-        denom_safe = ops.maximum(denom, 1e-9)
-        singular = ops.less(denom, self._HAMACHER_SINGULAR_EPS)
-        ratio = ops.divide(num, denom_safe)
-        return ops.where(singular, ops.ones_like(ratio), ratio)
+        pq = keras.ops.multiply(x1, x2)
+        num = keras.ops.subtract(keras.ops.add(x1, x2), keras.ops.multiply(2.0, pq))
+        denom = keras.ops.subtract(1.0, pq)
+        denom_safe = keras.ops.maximum(denom, 1e-9)
+        singular = keras.ops.less(denom, self._HAMACHER_SINGULAR_EPS)
+        ratio = keras.ops.divide(num, denom_safe)
+        return keras.ops.where(singular, keras.ops.ones_like(ratio), ratio)
 
     def _yager_and(self, x1, x2):
         """Yager t-norm: 1 - min(1, ((1-p)^w + (1-q)^w)^(1/w))."""
         w = self.yager_p
-        a = ops.power(ops.maximum(ops.subtract(1.0, x1), 0.0), w)
-        b = ops.power(ops.maximum(ops.subtract(1.0, x2), 0.0), w)
-        s = ops.power(ops.add(a, b), 1.0 / w)
-        return ops.subtract(1.0, ops.minimum(s, 1.0))
+        a = keras.ops.power(keras.ops.maximum(keras.ops.subtract(1.0, x1), 0.0), w)
+        b = keras.ops.power(keras.ops.maximum(keras.ops.subtract(1.0, x2), 0.0), w)
+        s = keras.ops.power(keras.ops.add(a, b), 1.0 / w)
+        return keras.ops.subtract(1.0, keras.ops.minimum(s, 1.0))
 
     def _yager_or(self, x1, x2):
         """Yager t-conorm: min(1, (p^w + q^w)^(1/w))."""
         w = self.yager_p
-        a = ops.power(ops.maximum(x1, 0.0), w)
-        b = ops.power(ops.maximum(x2, 0.0), w)
-        s = ops.power(ops.add(a, b), 1.0 / w)
-        return ops.minimum(s, 1.0)
+        a = keras.ops.power(keras.ops.maximum(x1, 0.0), w)
+        b = keras.ops.power(keras.ops.maximum(x2, 0.0), w)
+        s = keras.ops.power(keras.ops.add(a, b), 1.0 / w)
+        return keras.ops.minimum(s, 1.0)
 
     # --- DARTS-style helpers ---------------------------------------------
     def _resolve_temperature(self) -> keras.KerasTensor:
         if self.softplus_temperature:
-            return ops.maximum(ops.softplus(self.temperature), 1e-7)
-        return ops.maximum(self.temperature, 1e-7)
+            return keras.ops.maximum(keras.ops.softplus(self.temperature), 1e-7)
+        return keras.ops.maximum(self.temperature, 1e-7)
 
     def _operation_probs(
         self,
@@ -522,36 +532,36 @@ class LearnableLogicOperator(keras.layers.Layer):
 
         if self.gumbel_softmax and not skip_gumbel:
             uniform = keras.random.uniform(
-                shape=ops.shape(weights), minval=1e-9, maxval=1.0
+                shape=keras.ops.shape(weights), minval=1e-9, maxval=1.0
             )
-            gumbel = ops.negative(ops.log(ops.negative(ops.log(uniform))))
-            noisy = ops.add(weights, gumbel)
+            gumbel = keras.ops.negative(keras.ops.log(keras.ops.negative(keras.ops.log(uniform))))
+            noisy = keras.ops.add(weights, gumbel)
             if self.use_temperature:
                 temp = self._resolve_temperature()
-                logits = ops.divide(noisy, temp)
+                logits = keras.ops.divide(noisy, temp)
             else:
                 logits = noisy
-            soft = ops.softmax(logits, axis=-1)
+            soft = keras.ops.softmax(logits, axis=-1)
             if self.gumbel_hard:
-                idx = ops.argmax(soft, axis=-1)
-                hard = ops.cast(
-                    ops.one_hot(idx, num_classes=self.num_operations), soft.dtype
+                idx = keras.ops.argmax(soft, axis=-1)
+                hard = keras.ops.cast(
+                    keras.ops.one_hot(idx, num_classes=self.num_operations), soft.dtype
                 )
-                return ops.add(soft, ops.stop_gradient(ops.subtract(hard, soft)))
+                return keras.ops.add(soft, keras.ops.stop_gradient(keras.ops.subtract(hard, soft)))
             return soft
 
         if self.use_temperature:
             temp = self._resolve_temperature()
-            logits = ops.divide(weights, temp)
+            logits = keras.ops.divide(weights, temp)
         else:
             logits = weights
-        return ops.softmax(logits, axis=-1)
+        return keras.ops.softmax(logits, axis=-1)
 
     def _maybe_add_entropy_loss(self, probs: keras.KerasTensor) -> None:
         if self.entropy_coefficient > 0:
-            log_p = ops.log(ops.add(probs, 1e-12))
-            ent = ops.negative(ops.sum(ops.multiply(probs, log_p)))
-            self.add_loss(ops.multiply(self.entropy_coefficient, ent))
+            log_p = keras.ops.log(keras.ops.add(probs, 1e-12))
+            ent = keras.ops.negative(keras.ops.sum(keras.ops.multiply(probs, log_p)))
+            self.add_loss(keras.ops.multiply(self.entropy_coefficient, ent))
 
     def to_symbolic(self, top_k: int = 1, deterministic: bool = True) -> str:
         """Return a string of the dominant op(s) by selection probability.
@@ -562,7 +572,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         """
         if self.operation_weights is None:
             raise RuntimeError("Layer has not been built yet.")
-        probs_arr = ops.convert_to_numpy(
+        probs_arr = keras.ops.convert_to_numpy(
             self._operation_probs(deterministic=deterministic)
         )
         if self.selection_mode == "per_channel":
@@ -626,13 +636,13 @@ class LearnableLogicOperator(keras.layers.Layer):
         # Normalize inputs to [0, 1] range using sigmoid (skip when caller
         # already provides values in [0, 1] — e.g. stacked logic layers).
         if self.apply_sigmoid:
-            x1 = ops.sigmoid(x1)
-            x2 = ops.sigmoid(x2)
+            x1 = keras.ops.sigmoid(x1)
+            x2 = keras.ops.sigmoid(x2)
         elif self.force_clip_when_no_sigmoid:
             # C4: defensive clipping when upstream may produce unbounded
             # outputs (e.g. an arithmetic expert above a logic expert).
-            x1 = ops.clip(x1, 0.0, 1.0)
-            x2 = ops.clip(x2, 0.0, 1.0)
+            x1 = keras.ops.clip(x1, 0.0, 1.0)
+            x2 = keras.ops.clip(x2, 0.0, 1.0)
 
         # Compute operation selection probabilities
         operation_probs = self._operation_probs(training=training)
@@ -684,16 +694,19 @@ class LearnableLogicOperator(keras.layers.Layer):
 
         # Vectorized weighted combination.
         if self.selection_mode == "per_channel":
-            stacked = ops.stack(operations, axis=-1)  # (..., C, N)
+            stacked = keras.ops.stack(operations, axis=-1)  # (..., C, N)
             rank = len(stacked.shape)
             probs_bshape = (1,) * (rank - 2) + (self._channels, self.num_operations)
-            weights = ops.reshape(operation_probs, probs_bshape)
-            output = ops.sum(ops.multiply(weights, stacked), axis=-1)
+            weights = keras.ops.reshape(operation_probs, probs_bshape)
+            output = keras.ops.sum(
+                keras.ops.multiply(weights, stacked),
+                axis=-1
+            )
         else:
-            stacked = ops.stack(operations, axis=0)
+            stacked = keras.ops.stack(operations, axis=0)
             weight_shape = (self.num_operations,) + (1,) * (len(stacked.shape) - 1)
-            weights = ops.reshape(operation_probs, weight_shape)
-            output = ops.sum(ops.multiply(weights, stacked), axis=0)
+            weights = keras.ops.reshape(operation_probs, weight_shape)
+            output = keras.ops.sum(keras.ops.multiply(weights, stacked), axis=0)
         return output
 
     def compute_output_shape(

@@ -35,28 +35,20 @@ Optional features (all opt-in, default off):
     sigmoid-of-sigmoid range collapse), ``'all'`` (legacy), or ``'none'``.
 """
 
-import warnings
-
 import keras
-from keras import ops
+import warnings
 from typing import List, Optional, Union, Any, Dict, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from .logic_operators import LearnableLogicOperator
 from .arithmetic_operators import LearnableArithmeticOperator
 
+# ---------------------------------------------------------------------
 
-# DECISION plan_2026-05-13_3a2f1d23/D-002 (rationale corrected in
-# plan_2026-05-13_e33114da/D-007)
-# The H6 rename swapped ``load_balance_coefficient`` for the canonical name
-# ``gate_entropy_coefficient``. The implementation computes
-# ``coef * N * mean(sum(beta^2, axis=-1))`` which is the **Shazeer (2017)
-# importance regularizer** — algebraically equivalent (up to constant) to
-# the CV^2 of importance values when N is fixed — and is **L2 of the gate
-# probability vector**, NOT entropy. Both forms are convex measures of
-# peakiness and have the same optimum (uniform β), but the *name* is a
-# misnomer in the strict sense. We keep the canonical name for back-compat
-# (anchored in saved models) and document the math accurately here.
 def _resolve_gate_entropy_coefficient(
     gate_entropy_coefficient: Optional[float],
     load_balance_coefficient: Optional[float],
@@ -201,12 +193,6 @@ class CircuitDepthLayer(keras.layers.Layer):
         self._channels = None  # set in build() for per_channel mode
         # M5: diversity regularizer coefficient.
         self.diversity_coefficient = float(diversity_coefficient)
-
-        # G1 (plan_2026-05-13_e33114da): inner_*_kwargs forwards arbitrary
-        # configuration into the inner LearnableLogicOperator and
-        # LearnableArithmeticOperator instances. Wrapper-controlled keys
-        # (listed in _WRAPPER_OWNED_*) cannot be overridden — the wrapper
-        # always wins. Collisions are warned, not errored.
         self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
         self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
@@ -316,12 +302,6 @@ class CircuitDepthLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Children must be built by the parent's build() per Keras 3 contract.
-        # H9 (plan_2026-05-13_3a2f1d23): keep these explicit child.build()
-        # calls — removing them was attempted in plan_a2b0f17b and reversed
-        # because Keras 3 does NOT auto-build sub-layers that aren't called
-        # via __call__ in the parent's call(); .keras save/load round-trip
-        # then fails. See LESSONS L42 and plan_a2b0f17b D-003.
         for op in self.logic_operators:
             op.build(input_shape)
         for op in self.arithmetic_operators:
@@ -360,8 +340,8 @@ class CircuitDepthLayer(keras.layers.Layer):
         n = float(self.num_logic_ops + self.num_arithmetic_ops)
         # Per-row L2 (axis=-1 = op axis). For 1-D global (N,), this is just
         # sum(beta^2); for per-channel (C, N), it's per-channel L2 then mean.
-        per_row_l2 = ops.sum(ops.square(combination_probs), axis=-1)
-        aux = ops.mean(per_row_l2) if len(combination_probs.shape) > 1 else per_row_l2
+        per_row_l2 = keras.ops.sum(keras.ops.square(combination_probs), axis=-1)
+        aux = keras.ops.mean(per_row_l2) if len(combination_probs.shape) > 1 else per_row_l2
         self.add_loss(self.load_balance_coefficient * n * aux)
 
     def _maybe_diversity_loss(self) -> None:
@@ -385,15 +365,16 @@ class CircuitDepthLayer(keras.layers.Layer):
             for op in ops_group:
                 p = op._operation_probs(deterministic=True)
                 if len(p.shape) > 1:
-                    p = ops.mean(p, axis=0)
+                    p = keras.ops.mean(p, axis=0)
                 vecs.append(p)
-            stacked = ops.stack(vecs, axis=0)  # (K, M)
-            norms = ops.add(ops.norm(stacked, axis=-1, keepdims=True), 1e-12)
-            stacked = ops.divide(stacked, norms)
-            gram = ops.matmul(stacked, ops.transpose(stacked))
+            stacked = keras.ops.stack(vecs, axis=0)  # (K, M)
+            norms = keras.ops.add(
+                keras.ops.norm(stacked, axis=-1, keepdims=True), 1e-12)
+            stacked = keras.ops.divide(stacked, norms)
+            gram = keras.ops.matmul(stacked, keras.ops.transpose(stacked))
             # Upper triangle sum excluding diagonal = (sum(gram) - trace) / 2.
-            diag = ops.sum(ops.multiply(gram, ops.eye(len(ops_group), dtype=gram.dtype)))
-            upper_sum = ops.divide(ops.subtract(ops.sum(gram), diag), 2.0)
+            diag = keras.ops.sum(keras.ops.multiply(gram, keras.ops.eye(len(ops_group), dtype=gram.dtype)))
+            upper_sum = keras.ops.divide(keras.ops.subtract(keras.ops.sum(gram), diag), 2.0)
             k = len(ops_group)
             pair_count = k * (k - 1) // 2
             return upper_sum, pair_count
@@ -409,10 +390,10 @@ class CircuitDepthLayer(keras.layers.Layer):
         if logic_sum is not None:
             total_sim = logic_sum
         if arith_sum is not None:
-            total_sim = arith_sum if total_sim is None else ops.add(total_sim, arith_sum)
+            total_sim = arith_sum if total_sim is None else keras.ops.add(total_sim, arith_sum)
 
-        mean_sim = ops.divide(total_sim, float(total_pairs))
-        self.add_loss(ops.multiply(self.diversity_coefficient, mean_sim))
+        mean_sim = keras.ops.divide(total_sim, float(total_pairs))
+        self.add_loss(keras.ops.multiply(self.diversity_coefficient, mean_sim))
 
     def call(
             self,
@@ -420,7 +401,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the depth layer."""
-        combination_probs = ops.softmax(self.combination_weights, axis=-1)
+        combination_probs = keras.ops.softmax(self.combination_weights, axis=-1)
         # _maybe_load_balance_loss now handles both (N,) and (C, N) shapes
         # natively — per-channel L2 then mean (B4 fix, D-005).
         self._maybe_load_balance_loss(combination_probs)
@@ -431,16 +412,16 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         if self.circuit_routing == "classic":
             # Legacy behavior — input attenuation by softmax(routing_weights).
-            routing_probs = ops.softmax(self.routing_weights)
-            input_rank = len(ops.shape(inputs))
+            routing_probs = keras.ops.softmax(self.routing_weights)
+            input_rank = len(keras.ops.shape(inputs))
 
             for i, logic_op in enumerate(self.logic_operators):
                 weight = routing_probs[i]
-                weighted_input = ops.multiply(inputs, weight)
+                weighted_input = keras.ops.multiply(inputs, weight)
                 all_outputs.append(logic_op(weighted_input, training=training))
             for j, arithmetic_op in enumerate(self.arithmetic_operators):
                 weight = routing_probs[self.num_logic_ops + j]
-                weighted_input = ops.multiply(inputs, weight)
+                weighted_input = keras.ops.multiply(inputs, weight)
                 all_outputs.append(arithmetic_op(weighted_input, training=training))
         else:
             # output_only — every expert sees full X; only fusion is gated.
@@ -452,22 +433,22 @@ class CircuitDepthLayer(keras.layers.Layer):
         # Vectorized weighted fusion.
         n = self.num_logic_ops + self.num_arithmetic_ops
         if self.selection_mode == "per_channel":
-            stacked = ops.stack(all_outputs, axis=-1)  # (..., C, N)
+            stacked = keras.ops.stack(all_outputs, axis=-1)  # (..., C, N)
             rank = len(stacked.shape)
             weight_shape = (1,) * (rank - 2) + (self._channels, n)
-            weights = ops.reshape(combination_probs, weight_shape)
-            combined_output = ops.sum(ops.multiply(weights, stacked), axis=-1)
+            weights = keras.ops.reshape(combination_probs, weight_shape)
+            combined_output = keras.ops.sum(keras.ops.multiply(weights, stacked), axis=-1)
         else:
-            stacked = ops.stack(all_outputs, axis=0)
+            stacked = keras.ops.stack(all_outputs, axis=0)
             weight_shape = (n,) + (1,) * (len(stacked.shape) - 1)
-            weights = ops.reshape(combination_probs, weight_shape)
-            combined_output = ops.sum(ops.multiply(weights, stacked), axis=0)
+            weights = keras.ops.reshape(combination_probs, weight_shape)
+            combined_output = keras.ops.sum(keras.ops.multiply(weights, stacked), axis=0)
 
         if self._channel_mix_layer is not None:
             combined_output = self._channel_mix_layer(combined_output)
 
         if self.use_residual:
-            combined_output = ops.add(combined_output, inputs)
+            combined_output = keras.ops.add(combined_output, inputs)
 
         return combined_output
 
@@ -491,7 +472,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             lines.append(f"logic_op_{i}: {op.to_symbolic(top_k=top_k)}")
         for j, op in enumerate(self.arithmetic_operators):
             lines.append(f"arithmetic_op_{j}: {op.to_symbolic(top_k=top_k)}")
-        cw = ops.convert_to_numpy(ops.softmax(self.combination_weights, axis=-1))
+        cw = keras.ops.convert_to_numpy(keras.ops.softmax(self.combination_weights, axis=-1))
         if cw.ndim > 1:
             cw = cw.mean(axis=0)
         names = (
@@ -624,13 +605,6 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
         self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
-        # C4 (plan_2026-05-13_3a2f1d23): when first_only mode is on and
-        # depths >= 1 inner logic ops have apply_sigmoid=False, any source of
-        # out-of-[0,1] values feeding into them breaks fuzzy semantics. Two
-        # sources: (a) arithmetic experts at depth 0 (unbounded outputs);
-        # (b) use_residual=True propagates the raw input X to depth 1.
-        # DECISION plan_2026-05-13_e33114da/D-004 — risky_stack now triggers
-        # on EITHER source. B3 widened the prior guard which only caught (a).
         risky_stack = (
             self.apply_sigmoid_per_depth == "first_only"
             and self.circuit_depth >= 2
@@ -650,8 +624,6 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                 "to silence."
             )
 
-        # DECISION plan_2026-05-13_a2b0f17b/D-002 — sublayers created in
-        # __init__, build lazily via __call__.
         self.circuit_layers: List[CircuitDepthLayer] = []
         for depth in range(self.circuit_depth):
             apply_sigmoid = self._sigmoid_for_depth(depth)
