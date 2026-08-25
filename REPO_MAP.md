@@ -831,7 +831,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1025 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1061 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1065 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 299 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
