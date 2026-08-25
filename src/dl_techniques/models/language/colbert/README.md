@@ -712,7 +712,7 @@ Two trainers live under `src/train/language/colbert/`:
 | Entry point | Recipe | Loss |
 |---|---|---|
 | `train_colbert_v1.py` | pairwise/listwise softmax CE over `<q, d+, d-...>` tuples, positive first | `ColBERTPairwiseSoftmaxLoss` |
-| `train_colbert_v2.py` | cross-encoder KL distillation over `nway` tuples, optional in-batch negatives | `ColBERTDistillationLoss` |
+| `train_colbert_v2.py` | cross-encoder KL distillation over `nway` tuples | `ColBERTDistillationLoss` |
 
 ```bash
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.language.colbert.train_colbert_v1 --help

@@ -944,9 +944,9 @@ def create_colbert_v2(
     ``src/train/language/colbert/train_colbert_v2.py``: KL divergence between
     ``log_softmax`` of the student scores and ``log_softmax`` of
     ``distillation_alpha``-scaled cross-encoder teacher scores over ``nway``
-    (typically 64) candidates, with optional in-batch negatives. Index-time
-    residual compression (``compression.ResidualCompressionCodec``) is the other
-    v2 addition; it is never part of the forward pass or of any loss.
+    (typically 64) candidates. Index-time residual compression
+    (``compression.ResidualCompressionCodec``) is the other v2 addition; it is
+    never part of the forward pass or of any loss.
 
     **This builds exactly the same network as** :func:`create_colbert_v1` --
     see that docstring for the citation. v2 changed the supervision and the
