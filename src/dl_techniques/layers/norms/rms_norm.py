@@ -150,6 +150,9 @@ class RMSNorm(keras.layers.Layer):
         # never leave the attribute undefined.
         self._scale_broadcast_shape = None
 
+        # Enable masking support
+        self.supports_masking = True
+
         logger.debug(f"Initialized RMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
 
     def _validate_inputs(self, axis: Union[int, Tuple[int, ...]], epsilon: float) -> None:

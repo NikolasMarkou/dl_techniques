@@ -109,6 +109,9 @@ class MaxLogitNorm(keras.layers.Layer):
         self.axis = axis
         self.epsilon = epsilon
 
+        # Enable masking support
+        self.supports_masking = True
+
         logger.debug(f"Initialized MaxLogitNorm with axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(self, epsilon: float) -> None:

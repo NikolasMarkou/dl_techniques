@@ -140,6 +140,9 @@ class BandLogitNorm(keras.layers.Layer):
             name=f"{self.name}_layer_norm",
         )
 
+        # Enable masking support
+        self.supports_masking = True
+
         logger.debug(
             f"Initialized BandLogitNorm with "
             f"axis={axis}, "

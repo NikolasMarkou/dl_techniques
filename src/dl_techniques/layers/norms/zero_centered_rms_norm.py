@@ -165,6 +165,9 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         # never leave the attribute undefined.
         self._scale_broadcast_shape = None
 
+        # Enable masking support
+        self.supports_masking = True
+
         logger.debug(
             f"Initialized ZeroCenteredRMSNorm with "
             f"axis={axis}, "

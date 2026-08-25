@@ -176,6 +176,9 @@ class BandRMS(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.band_param = None
 
+        # Enable masking support
+        self.supports_masking = True
+
         logger.debug(f"Initialized BandRMS with max_band_width={max_band_width}, axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(

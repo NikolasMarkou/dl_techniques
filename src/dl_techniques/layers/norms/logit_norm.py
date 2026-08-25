@@ -134,6 +134,9 @@ class LogitNorm(keras.layers.Layer):
         self.axis = axis
         self.epsilon = epsilon
 
+        # Enable masking support
+        self.supports_masking = True
+
         logger.debug(f"Initialized LogitNorm with temperature={temperature}, axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(self, temperature: float, epsilon: float) -> None:
