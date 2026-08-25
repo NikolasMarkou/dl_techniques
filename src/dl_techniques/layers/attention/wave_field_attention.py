@@ -497,7 +497,7 @@ class WaveFieldAttention(keras.layers.Layer):
         :return: Float tensor of field positions with shape ``(seq_len,)``.
         :rtype: keras.KerasTensor
         """
-        seq_idx = keras.ops.cast(ops.arange(seq_len), "float32")
+        seq_idx = keras.ops.cast(keras.ops.arange(seq_len), "float32")
         return keras.ops.clip(seq_idx * self._field_stride, 0.0, float(self.field_size - 1))
 
     def _build_scatter_gather_matrices(
@@ -517,7 +517,7 @@ class WaveFieldAttention(keras.layers.Layer):
         """
         G = self.field_size
 
-        idx_lo = keras.ops.cast(ops.floor(field_pos), "int32")
+        idx_lo = keras.ops.cast(keras.ops.floor(field_pos), "int32")
         idx_lo = keras.ops.clip(idx_lo, 0, G - 2)
         idx_hi = idx_lo + 1
 
@@ -549,12 +549,12 @@ class WaveFieldAttention(keras.layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         G = self.field_size
-        t = keras.ops.cast(ops.arange(G), "float32")
+        t = keras.ops.cast(keras.ops.arange(G), "float32")
 
         # Force fp32 for the kernel even under mixed-precision: wave params
         # are autocast to compute_dtype (e.g. fp16) when read here, but the
         # kernel feeds an FFT pipeline that runs in fp32.
-        alpha = keras.ops.softplus(ops.cast(self.wave_damping, "float32"))
+        alpha = keras.ops.softplus(keras.ops.cast(self.wave_damping, "float32"))
         omega = keras.ops.cast(self.wave_frequency, "float32")
         phi = keras.ops.cast(self.wave_phase, "float32")
 
@@ -565,7 +565,7 @@ class WaveFieldAttention(keras.layers.Layer):
 
         kernels = keras.ops.exp(-alpha * t) * keras.ops.cos(omega * t + phi)
 
-        norm = keras.ops.maximum(ops.sum(ops.abs(kernels), axis=1, keepdims=True), 1e-8)
+        norm = keras.ops.maximum(keras.ops.sum(keras.ops.abs(kernels), axis=1, keepdims=True), 1e-8)
         kernels = kernels / norm
 
         kernels_padded = keras.ops.pad(kernels, [[0, 0], [0, G]])
@@ -686,9 +686,9 @@ class WaveFieldAttention(keras.layers.Layer):
         # 5-D reshape + transpose + tensor[0]/[1]/[2] indexing for backend
         # robustness across Keras 3 backends.
         q, k, v = keras.ops.split(qkv, 3, axis=-1)
-        q = keras.ops.transpose(ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
-        k = keras.ops.transpose(ops.reshape(k, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
-        v = keras.ops.transpose(ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        q = keras.ops.transpose(keras.ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        k = keras.ops.transpose(keras.ops.reshape(k, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        v = keras.ops.transpose(keras.ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
 
         # 2. Field positions + scatter/gather matrices
         # Built in float32 for index precision, then cast to compute_dtype
@@ -699,7 +699,7 @@ class WaveFieldAttention(keras.layers.Layer):
         gather_mat = keras.ops.cast(gather_mat, self.compute_dtype)
 
         # 3. Deposit = V * ||K||
-        k_mag = keras.ops.sqrt(ops.sum(ops.square(k), axis=-1, keepdims=True) + 1e-8)
+        k_mag = keras.ops.sqrt(keras.ops.sum(keras.ops.square(k), axis=-1, keepdims=True) + 1e-8)
         deposit = v * k_mag  # (B, H, N, D_h)
 
         # Apply padding mask to deposits
@@ -707,7 +707,7 @@ class WaveFieldAttention(keras.layers.Layer):
             # Cast to float compute dtype so bool / int masks are accepted.
             attention_mask = keras.ops.cast(attention_mask, self.compute_dtype)
             # attention_mask: (B, N) -> (B, 1, N, 1)
-            mask_4d = keras.ops.expand_dims(ops.expand_dims(attention_mask, 1), -1)
+            mask_4d = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), -1)
             deposit = deposit * mask_4d
 
         # Scatter onto field

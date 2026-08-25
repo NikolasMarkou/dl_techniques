@@ -680,13 +680,13 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # normalization the sigmoid saturates and gradient is starved.
         if self.input_normalization == "l2":
             inv_norm = keras.ops.rsqrt(
-                keras.ops.sum(ops.square(inputs_2d), axis=-1, keepdims=True)
+                keras.ops.sum(keras.ops.square(inputs_2d), axis=-1, keepdims=True)
                 + self._BASIS_NORM_EPS
             )
             inputs_2d = inputs_2d * inv_norm
         elif self.input_normalization == "rms":
             inv_norm = keras.ops.rsqrt(
-                keras.ops.mean(ops.square(inputs_2d), axis=-1, keepdims=True)
+                keras.ops.mean(keras.ops.square(inputs_2d), axis=-1, keepdims=True)
                 + self._BASIS_NORM_EPS
             )
             inputs_2d = inputs_2d * inv_norm

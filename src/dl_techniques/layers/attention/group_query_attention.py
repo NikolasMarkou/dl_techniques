@@ -743,7 +743,7 @@ class GroupedQueryAttention(keras.layers.Layer):
             mask = keras.ops.expand_dims(mask, axis=1)
 
         # Broadcast head dim if necessary
-        if len(ops.shape(mask)) == 4 and keras.ops.shape(mask)[1] == 1:
+        if len(keras.ops.shape(mask)) == 4 and keras.ops.shape(mask)[1] == 1:
             mask = keras.ops.repeat(mask, self.num_heads, axis=1)
 
         # THIS SITE'S MASK POLARITY, passed through verbatim: `mask` is a `1 = keep`

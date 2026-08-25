@@ -341,9 +341,9 @@ class FNetFourierTransform(keras.layers.Layer):
         """
         a, b = matrix[..., 0], matrix[..., 1]
         c, d = vector[..., 0], vector[..., 1]
-        real_part = ops.matmul(c, a) - ops.matmul(d, b)
-        imag_part = ops.matmul(c, b) + ops.matmul(d, a)
-        return ops.stack([real_part, imag_part], axis=-1)
+        real_part = keras.ops.matmul(c, a) - keras.ops.matmul(d, b)
+        imag_part = keras.ops.matmul(c, b) + keras.ops.matmul(d, a)
+        return keras.ops.stack([real_part, imag_part], axis=-1)
 
     def _apply_dft_along_axis(
             self,
@@ -365,9 +365,9 @@ class FNetFourierTransform(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         if axis == -2:
-            inputs_transposed = ops.transpose(inputs_complex, [0, 2, 1, 3])
+            inputs_transposed = keras.ops.transpose(inputs_complex, [0, 2, 1, 3])
             result = self._complex_matmul(dft_matrix, inputs_transposed)
-            return ops.transpose(result, [0, 2, 1, 3])
+            return keras.ops.transpose(result, [0, 2, 1, 3])
         elif axis == -1:
             return self._complex_matmul(dft_matrix, inputs_complex)
         else:
@@ -400,9 +400,9 @@ class FNetFourierTransform(keras.layers.Layer):
         # explicit last dimension rather than a complex dtype, because `keras.ops`
         # has no backend-agnostic complex tensor.
         # Shape: (B, S, H) -> (B, S, H) [zeros]
-        zeros_like_input = ops.zeros_like(inputs)
+        zeros_like_input = keras.ops.zeros_like(inputs)
         # Shape: (B, S, H) + (B, S, H) -> (B, S, H, 2)
-        inputs_complex = ops.stack([inputs, zeros_like_input], axis=-1)
+        inputs_complex = keras.ops.stack([inputs, zeros_like_input], axis=-1)
 
         # Apply first DFT along sequence dimension
         # Shape: (B, S, H, 2) -> (B, S, H, 2)   [contracts axis -2 against (S, S)]
@@ -431,9 +431,9 @@ class FNetFourierTransform(keras.layers.Layer):
         if attention_mask is not None:
             # Expand mask from [batch, seq_len] to [batch, seq_len, 1]
             # Shape: (B, S) -> (B, S, 1)   [broadcasts over H]
-            mask_expanded = ops.expand_dims(attention_mask, axis=-1)
+            mask_expanded = keras.ops.expand_dims(attention_mask, axis=-1)
             # Ensure mask is same dtype and multiply
-            output *= ops.cast(mask_expanded, output.dtype)
+            output *= keras.ops.cast(mask_expanded, output.dtype)
 
         return output
 

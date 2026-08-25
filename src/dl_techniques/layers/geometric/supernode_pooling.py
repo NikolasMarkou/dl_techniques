@@ -329,7 +329,7 @@ class SupernodePooling(keras.layers.Layer):
         super_expanded = keras.ops.expand_dims(supernode_positions, 0)
 
         diff = pos_expanded - super_expanded
-        sq_distances = keras.ops.sum(ops.square(diff), axis=-1)  # (num_points, num_supernodes)
+        sq_distances = keras.ops.sum(keras.ops.square(diff), axis=-1)  # (num_points, num_supernodes)
 
         # Find k nearest neighbors for each supernode
         k = keras.ops.minimum(self.k_neighbors, num_points)
@@ -342,7 +342,7 @@ class SupernodePooling(keras.layers.Layer):
 
         # This is a simplified approach - in practice, you'd use scatter operations
         # For now, we'll use top-k based selection
-        threshold_distances = keras.ops.take_along_axis(-ops.sort(-sq_distances, axis=0)[:k, :],
+        threshold_distances = keras.ops.take_along_axis(-keras.ops.sort(-sq_distances, axis=0)[:k, :],
                                                   keras.ops.array([k - 1]), axis=0)  # (1, num_supernodes)
         mask = sq_distances <= threshold_distances
 
@@ -361,7 +361,7 @@ class SupernodePooling(keras.layers.Layer):
 
         if self.mode == "abspos":
             # Absolute position mode: embed all positions
-            pos_embed_all = self.pos_embed(ops.expand_dims(positions, 0), training=training)  # (1, num_points, hidden_dim)
+            pos_embed_all = self.pos_embed(keras.ops.expand_dims(positions, 0), training=training)  # (1, num_points, hidden_dim)
             pos_embed_all = keras.ops.squeeze(pos_embed_all, 0)  # (num_points, hidden_dim)
 
             super_embed_all = self.pos_embed(
@@ -384,7 +384,7 @@ class SupernodePooling(keras.layers.Layer):
 
             relative_pos = super_expanded - pos_expanded  # (num_points, num_supernodes, ndim)
             distances = keras.ops.sqrt(
-                keras.ops.sum(ops.square(relative_pos), axis=-1, keepdims=True))  # (num_points, num_supernodes, 1)
+                keras.ops.sum(keras.ops.square(relative_pos), axis=-1, keepdims=True))  # (num_points, num_supernodes, 1)
 
             # Combine relative position with distance magnitude
             rel_pos_with_dist = keras.ops.concatenate([relative_pos, distances],
@@ -399,7 +399,7 @@ class SupernodePooling(keras.layers.Layer):
         messages = self.message_mlp(combined, training=training)
 
         # Mask out non-neighbors
-        mask_expanded = keras.ops.expand_dims(ops.cast(neighbor_mask, messages.dtype), -1)
+        mask_expanded = keras.ops.expand_dims(keras.ops.cast(neighbor_mask, messages.dtype), -1)
         messages = messages * mask_expanded
 
         return messages

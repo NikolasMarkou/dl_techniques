@@ -261,7 +261,7 @@ class RFFKernelLayer(keras.layers.Layer):
         )
 
         # Pre-compute scale factor for efficiency
-        self._scale_factor = ops.sqrt(2.0 / self.n_features)
+        self._scale_factor = keras.ops.sqrt(2.0 / self.n_features)
 
         # Build the output Dense layer
         # The input to Dense will be the random features of shape (..., n_features).
@@ -286,11 +286,11 @@ class RFFKernelLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor"""
         # Random projection: z = x @ omega + b
         # Shape: (..., input_dim) @ (input_dim, n_features) -> (..., n_features)
-        projection = ops.matmul(inputs, self.omega) + self.b
+        projection = keras.ops.matmul(inputs, self.omega) + self.b
 
         # Generate random Fourier features: φ(x) = sqrt(2/D) * cos(z)
         # This creates the feature representation that approximates the kernel
-        features = self._scale_factor * ops.cos(projection)
+        features = self._scale_factor * keras.ops.cos(projection)
 
         # Apply linear transformation to get output
         # Shape: (..., n_features) -> (..., output_dim)
@@ -326,12 +326,12 @@ class RFFKernelLayer(keras.layers.Layer):
             'gamma': self.gamma,
             'use_bias': self.use_bias,
             'activation': keras.activations.serialize(self.activation),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-            'kernel_constraint': constraints.serialize(self.kernel_constraint),
-            'bias_constraint': constraints.serialize(self.bias_constraint),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'kernel_constraint': keras.constraints.serialize(self.kernel_constraint),
+            'bias_constraint': keras.constraints.serialize(self.bias_constraint),
         })
         return config
 
