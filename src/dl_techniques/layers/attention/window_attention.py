@@ -32,14 +32,16 @@ attention", and read it PER MODE — the three modes do not share one.** With
   any sequence most callers will ever pass.
 
 **``'grid'`` and ``'zigzag'`` had the SAME degenerate cost until 2026-08-25**
-(``plan-2026-08-25T053412-0f1fa04f``, D-001/D-002), when ``'grid'`` -- and only
-``'grid'`` -- gained the ``N <= M`` short-circuit. Both had their pad LEAK fixed
-(D-007/D-009/D-011: pad slots were entering the softmax, so the ragged regime
-was returning a WRONG answer, not merely an expensive one); only ``'grid'``'s
-COST was fixed. MEASURED that day on ``(1, 128, 64)`` at ``window_size=128``,
-CPU, peak RSS: ``'grid'`` 0.681 GB, ``'band'`` 0.679 GB, ``'multi_head'``
-0.674 GB, ``'zigzag'`` **17.503 GB**. Do not read ``'grid'``'s improvement as
-applying to ``'zigzag'``. See "Foundational Mathematics" below.
+(``plan-2026-08-25T053412-0f1fa04f``, D-001/D-002). Both partition modes had
+their pad LEAK fixed (D-007/D-009/D-011: pad slots were entering the softmax, so
+the ragged regime was returning a WRONG answer, not merely an expensive one),
+and both now carry the ``N < M`` short-circuit -- ``'grid'`` first, ``'zigzag'``
+in step 7.1 (D-014), which is the change that removed the last inversion.
+MEASURED on ``(1, 128, 64)`` at ``window_size=128``, CPU, peak RSS: ``'grid'``
+0.680 GB, ``'band'`` 0.679 GB, ``'multi_head'`` 0.674 GB, ``'zigzag'``
+0.678 GB. Before the two short-circuits those read 21.695 GB and 17.503 GB
+respectively. NO partition mode of this layer costs more than plain global
+attention at any ``N``. See "Foundational Mathematics" below.
 
 Architecture:
     One pipeline, one branch. Both partition modes share the same five-stage
@@ -90,33 +92,39 @@ Foundational Mathematics:
 
     * ``N > M`` — the intended regime. ``O(N * M)``, linear in ``N`` for fixed
       ``M``, cheaper than ``O(N^2)`` global attention by a factor ``N / M``.
-    * ``N <= M`` — the degenerate regime, and **the two grid modes now differ
-      here**. Geometrically the situation is the same in both: ``H <=
-      window_size``, the padded grid is exactly one ``window_size x
-      window_size`` tile, and ``_window_partition`` yields a single window
-      holding ``M`` positions of which ``M - N`` are padding.
+    * ``N <= M`` — the degenerate regime. Geometrically the situation is the
+      same in both grid modes: ``H <= window_size``, the padded grid is exactly
+      one ``window_size x window_size`` tile, and ``_window_partition`` yields a
+      single window holding ``M`` positions of which ``M - N`` are padding.
+      Computing dense attention over all ``M`` of them costs the constant
+      ``M^2`` regardless of ``N``, i.e. ``(M / N)^2`` times *more* than global
+      attention over the ``N`` real tokens — at ``window_size = 128`` that is
+      every ``N <= 16384``, with a ``16384 x 16384`` score matrix per head per
+      sample whether ``N`` is 128 or 8192.
 
-      - ``'zigzag'`` still computes dense attention over all ``M`` of them. The
-        cost is the constant ``M^2`` regardless of ``N``, i.e. ``(M / N)^2``
-        times *more* than global attention over the ``N`` real tokens. At
-        ``window_size = 128`` this covers every ``N <= 16384``: the per-layer
-        score matrix is ``16384 x 16384 ~ 2.7e8`` entries per head per sample
-        whether ``N`` is 128 or 8192.
-      - ``'grid'`` SHORT-CIRCUITS it (2026-08-25). One window means the
-        mathematically correct answer is dense attention over the ``N`` REAL
-        tokens with the relative-position bias gathered at their grid
-        coordinates, which is what it computes: ``O(N^2)``, never worse than
-        plain global attention. The result is bitwise identical to the old code
-        wherever the old code was correct, and the ragged cases where it was
-        not are now correct too -- the pad slots used to enter the softmax, so
-        an all-ones attention mask (a mathematical no-op) moved the output by up
-        to 0.980964.
+      **Both grid modes SHORT-CIRCUIT that regime** — ``'grid'`` since
+      2026-08-25, ``'zigzag'`` since later the same day (step 7.1). One window
+      means the mathematically correct answer is dense attention over the ``N``
+      REAL tokens, with the relative-position bias gathered at the slots the
+      layout gives them (their grid coordinates under ``'grid'``, their position
+      in the scan under ``'zigzag'``), which is what both now compute:
+      ``O(N^2)``, never worse than plain global attention. The result is bitwise
+      identical to the old code wherever the old code was correct, and the ragged
+      cases where it was not are now correct too -- the pad slots used to enter
+      the softmax, so an all-ones attention mask (a mathematical no-op) moved the
+      output by up to 0.980964.
 
-    For ``'zigzag'``, choosing ``window_size`` is therefore choosing a *minimum*
-    cost, not a maximum one: a window size picked to be "generous" makes the
+      MEASURED on ``(1, 128, 64)`` at ``window_size=128``, CPU peak RSS via the
+      registry keys: ``'window'`` 0.680 GB, ``'window_band'`` 0.679,
+      ``'multi_head'`` 0.674 and ``'window_zigzag'`` 0.678 -- all four at parity.
+      Before the two short-circuits the same two window keys read 21.695 GB and
+      17.503 GB.
+
+    Choosing ``window_size`` is therefore choosing a *minimum* cost, never a
+    maximum one, in neither mode any more: a "generous" window used to make the
     layer strictly more expensive than the global attention it replaces at every
-    sequence length that fits inside one window. For ``'grid'`` that inversion
-    is gone; a generous window merely stops buying you anything.
+    sequence length that fits inside one window, and now merely stops buying you
+    anything.
 
     The other price is that information cannot cross a window boundary within
     one layer; both modes address this the same way a Swin stack does, by
@@ -218,12 +226,13 @@ Attention      O(max(N, M) × M)   ceil(N/M) windows, each an M×M score matrix
 Total          O(max(N, M) × M)   Linear in N only for N > M
 --             --                 --
 N > M          O(N × M)           The intended regime; beats O(N²) by N/M
-N <= M 'grid'  O(N²)              ONE window, attended over the N REAL tokens
-                                  (short-circuit, 2026-08-25). Never worse
-                                  than plain global attention.
-N <= M zigzag  O(M²)              ONE PADDED window: dense attention over M
-                                  slots, (M/N)² times MORE work than global
-                                  O(N²). NOT short-circuited.
+N < M          O(N²)              ONE window, attended over the N REAL tokens
+                                  (short-circuit, 2026-08-25 -- 'grid' first,
+                                  'zigzag' in step 7.1). Never worse than
+                                  plain global attention, in EITHER mode.
+N == M         O(M²) = O(N²)      ONE window with nothing to pad; the ordinary
+                                  partition path, and how Swin calls this
+                                  layer. Identical cost, kept bitwise.
 ============== ================== ==============================================
 
 References:
@@ -292,15 +301,16 @@ class WindowAttention(keras.layers.Layer):
     * ``'grid'``: ``O(N * M)`` for ``N > M``; ``O(N^2)`` for ``N <= M``, where a
       short-circuit (2026-08-25) attends over the ``N`` REAL tokens instead of
       ``M`` padded slots.
-    * ``'zigzag'``: ``O(max(N, M) * M)``, including a constant ``O(M^2)`` floor
-      for ``N <= M``, where the grid pads up to a single ``window_size x
-      window_size`` tile and this layer performs **dense attention over M padded
-      positions** — ``(M / N) ** 2`` times more work than global attention over
-      the ``N`` real tokens. A property of the padding, not an approximation.
+    * ``'zigzag'``: ``O(max(N, M) * M)``, with NO ``O(M^2)`` floor since step
+      7.1 — for ``N < M`` the zigzag layout is also exactly one window (it folds
+      the sequence into a ``ceil(sqrt(N))``-square grid, so ``N_grid <= M``), and
+      that case is short-circuited to ``O(N^2)`` over the ``N`` real tokens with
+      the relative-position bias gathered at each token's position in the SCAN.
 
     MEASURED 2026-08-25 on ``(1, 128, 64)`` at ``window_size=128``, CPU, peak
-    RSS: ``'grid'`` 0.681 GB, ``'band'`` 0.679 GB, ``'multi_head'`` 0.674 GB,
-    ``'zigzag'`` 17.503 GB. See the module docstring's "Foundational
+    RSS: ``'grid'`` 0.680 GB, ``'band'`` 0.679 GB, ``'multi_head'`` 0.674 GB,
+    ``'zigzag'`` 0.678 GB — four-way parity. Before the two short-circuits the
+    two window modes read 21.695 GB and 17.503 GB. See the module docstring's "Foundational
     Mathematics" section. The guard that used to pin the degeneracy at
     ``ModernBERT``'s shipped ``window_size = 128``
     (``tests/test_models/test_modern_bert/test_shipped_window_size.py``) was
@@ -598,31 +608,61 @@ class WindowAttention(keras.layers.Layer):
             self.zigzag_indices = None
             self.inverse_zigzag_indices = None
 
+    # DECISION plan-2026-08-25T053412-0f1fa04f/D-014
+    # This is NUMPY, not ``keras.ops``, and the layout it describes therefore
+    # has exactly ONE representation that both the tensor pipeline and the
+    # relative-position bias can read.
+    #
+    # WHAT NOT TO DO, and why:
+    #   * Do NOT put it back on ``keras.ops``. ``build()`` can run inside a
+    #     ``tf.function`` trace, so the returned tensor would be owned by THAT
+    #     trace and unusable from any other one -- the same trap D-006 records
+    #     for the relative-position index. Worse for step 7.1: the degenerate
+    #     short-circuit needs the INVERSE permutation as a Python-visible
+    #     numpy array (``SingleWindowAttention``'s ``window_slots`` contract is
+    #     numpy by construction, because it selects bias-table ROWS at trace
+    #     time), and ``convert_to_numpy`` on a graph tensor raises.
+    #   * Do NOT compute a SECOND, hand-written zigzag permutation next to the
+    #     short-circuit instead of reusing this one. Two copies of a layout is
+    #     the "kept in lockstep" shape this repo treats as a defect, and a
+    #     wrong permutation is INVISIBLE whenever the vector it permutes is all
+    #     ones (measured, step 4.1 injection (d)).
+    #   * Do NOT worry about ``argsort`` tie-breaking differing from
+    #     ``keras.ops.argsort``: ``combined_key = s * H + secondary`` is
+    #     INJECTIVE (for a fixed anti-diagonal ``s`` the secondary key is a
+    #     bijection of the row index, and the per-``s`` ranges
+    #     ``[s*H, s*H + H - 1]`` are disjoint), so the sort has no ties to
+    #     break and both spellings return the identical permutation.
+    # See decisions.md D-014 (plan-2026-08-25T053412-0f1fa04f).
+
     @staticmethod
-    def _generate_zigzag_indices(
-        H: keras.KerasTensor, W: keras.KerasTensor
-    ) -> keras.KerasTensor:
+    def _generate_zigzag_indices(H: int, W: int) -> np.ndarray:
         """Generate zigzag scan indices for an ``H x W`` grid.
 
-        :param H: Grid height.
-        :type H: keras.KerasTensor
-        :param W: Grid width.
-        :type W: keras.KerasTensor
-        :return: 1-D int32 index tensor of length ``H * W``.
-        :rtype: keras.KerasTensor
-        """
-        r_coords = keras.ops.arange(0, H, dtype="int32")
-        c_coords = keras.ops.arange(0, W, dtype="int32")
-        r_grid, c_grid = keras.ops.meshgrid(r_coords, c_coords, indexing="ij")
+        ``result[p]`` is the row-major position, in the ``H x W`` grid, of the
+        ``p``-th token of the zigzag scan -- i.e. exactly the gather index
+        :meth:`_call_zigzag` feeds to ``keras.ops.take``.
 
-        r_flat = keras.ops.reshape(r_grid, (-1,))
-        c_flat = keras.ops.reshape(c_grid, (-1,))
+        :param H: Grid height.
+        :type H: int
+        :param W: Grid width.
+        :type W: int
+        :return: 1-D int32 index array of length ``H * W``.
+        :rtype: np.ndarray
+        """
+        r_grid, c_grid = np.meshgrid(
+            np.arange(H, dtype=np.int32),
+            np.arange(W, dtype=np.int32),
+            indexing="ij",
+        )
+        r_flat = r_grid.reshape(-1)
+        c_flat = c_grid.reshape(-1)
 
         s = r_flat + c_flat
-        secondary_key = keras.ops.where(s % 2 == 1, r_flat, H - 1 - r_flat)
+        secondary_key = np.where(s % 2 == 1, r_flat, H - 1 - r_flat)
         combined_key = s * H + secondary_key
 
-        return keras.ops.argsort(combined_key)
+        return np.argsort(combined_key).astype(np.int32)
 
     @staticmethod
     def _single_window_slots(seq_len: int, window_size: int) -> np.ndarray:
@@ -744,14 +784,15 @@ class WindowAttention(keras.layers.Layer):
             self.N_grid = self.H * self.W
             self.pad_len_seq = self.N_grid - N_actual
 
-            H_tensor = keras.ops.convert_to_tensor(self.H, dtype="int32")
-            W_tensor = keras.ops.convert_to_tensor(self.W, dtype="int32")
-            self.zigzag_indices = self._generate_zigzag_indices(
-                H_tensor, W_tensor
-            )
-            self.inverse_zigzag_indices = keras.ops.argsort(
+            self.zigzag_indices = self._generate_zigzag_indices(self.H, self.W)
+            # `inverse_zigzag_indices[i]` is the ZIGZAG POSITION of grid slot `i`.
+            # It is both the scatter-back gather of `_call_zigzag` and, restricted
+            # to the first `N_actual` entries, the `window_slots` vector the
+            # degenerate short-circuit hands to `SingleWindowAttention` -- one
+            # array, two readers, no second copy of the layout.
+            self.inverse_zigzag_indices = np.argsort(
                 self.zigzag_indices
-            )
+            ).astype(np.int32)
 
         self.attention.build(
             (None, self.window_size * self.window_size, self.dim)
@@ -1113,9 +1154,68 @@ class WindowAttention(keras.layers.Layer):
         :return: Output tensor ``(B, N, dim)``.
         :rtype: keras.KerasTensor
         """
+        ws = self.window_size
+
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-014
+        # The SAME degenerate-single-window short-circuit `_call_grid` has carried
+        # since step 3 (D-007), on the path that never got it. When
+        # `N < window_size ** 2` the zigzag layout below is ALSO exactly one window:
+        # it squares the sequence into a `ceil(sqrt(N)) x ceil(sqrt(N))` grid, so
+        # `N_grid = ceil(sqrt(N)) ** 2 <= window_size ** 2` and `num_windows == 1`.
+        # Every token attends every other token either way -- the zigzag order is a
+        # PERMUTATION of the single window's slots, not a different neighbourhood --
+        # so the only things the padding path adds are the `win_len - N` zero slots
+        # (which D-011 then has to mask back out) and their cost.
+        #
+        # MEASURED, `(1, 128, 64)` at `window_size=128`, CPU peak RSS, this repo's
+        # four comparable modes: `window` (grid) 0.649 GB, `window_band` 0.648,
+        # `multi_head` 0.643, and `window_zigzag` 21.695 -- 128 real tokens inflated
+        # to 16,384 slots and attended densely, a 33x penalty for asking a LOCAL
+        # attention layer a question plain global attention answers in 0.643 GB.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT reuse `_single_window_slots`. That is the GRID layout's slot
+        #     map (`(i // grid_side) * ws + (i % grid_side)`), and zigzag does not
+        #     lay tokens out row-major. The right slot for token `i` is its ZIGZAG
+        #     POSITION, `inverse_zigzag_indices[i]`, which is what the padding path
+        #     below puts it at -- so the relative-position bias is gathered at the
+        #     identical table rows and the bias is bit-for-bit unchanged.
+        #   * Do NOT widen this to `N <= ws ** 2`. At `N == ws ** 2` both pads are
+        #     zero, so the padding path attends exactly the N real tokens already
+        #     and there is nothing to save; taking the short-circuit there would
+        #     only move 8 harness cells off the byte-identical path for no gain.
+        #   * Do NOT drop the `N > 1` guard, for the same reason `_call_grid` keeps
+        #     it: `keras.ops.softmax` warns on a size-1 reduction axis and this
+        #     repo's pytest config escalates warnings to errors.
+        #   * Do NOT take this branch on a rank-3 mask. `_call_zigzag`'s mask
+        #     pipeline is rank-2-only (it pads and permutes a `(B, N)` key mask); a
+        #     rank-3 pairwise mask has no meaning here and must reach the existing
+        #     code, which is where it fails.
+        #
+        # ACCEPTED COST -- a VALUE change in this regime, exactly as D-007 ruled for
+        # grid. The short-circuit sums `N` products where the padding path summed
+        # `win_len` products of which `win_len - N` are exactly zero, AND it sums
+        # them in token order rather than zigzag order, so the two differ at float32
+        # REDUCTION ORDER. MEASURED against the pad-masked pre-restructure reference,
+        # worst case over the six affected harness cells: 2.086e-07, one to two
+        # float32 ulps. See decisions.md D-007, D-009 and D-014.
+        static_n = inputs.shape[1]
+        degenerate = (
+            static_n is not None
+            and 1 < int(static_n) < ws * ws
+            and (attention_mask is None or len(attention_mask.shape) == 2)
+        )
+        if degenerate:
+            return self.attention(
+                inputs,
+                attention_mask=attention_mask,
+                training=training,
+                window_slots=self.inverse_zigzag_indices[: int(static_n)],
+            )
+
         input_shape = keras.ops.shape(inputs)
         B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
-        win_len = self.window_size * self.window_size
+        win_len = ws * ws
         pad_len_win = (win_len - (self.N_grid % win_len)) % win_len
 
         padded_inputs = keras.ops.pad(

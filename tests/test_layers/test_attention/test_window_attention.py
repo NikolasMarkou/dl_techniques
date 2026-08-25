@@ -595,6 +595,275 @@ class TestAllOnesKeyMaskIsANoOp:
         )
 
 
+class TestTheDegenerateWindowIsShortCircuited:
+    """When ``N < window_size ** 2`` the layer must attend ``N`` slots, not ``ws ** 2``.
+
+    This class grades the COST DECISION, which no value comparison in this repo can
+    see. Both partition paths are correct either way -- the padding path masks its
+    pads (D-011) and the short-circuit never creates them -- so an implementation that
+    silently stopped taking the cheap branch would return the same numbers to within a
+    float32 ulp and every existing guard would stay green while the layer went back to
+    costing 33x plain global attention. MEASURED on ``(1, 128, 64)`` at
+    ``window_size=128``, CPU peak RSS, before step 7.1 and after::
+
+        mode            before      after
+        window   (grid)  0.649 GB   0.649 GB   (short-circuited since step 3)
+        window_band      0.648 GB   0.648 GB   (never tiles, so never inflated)
+        multi_head       0.643 GB   0.643 GB   (the reference: full global attention)
+        window_zigzag   21.695 GB   0.649 GB   <- step 7.1
+
+    So the assertion is on the SHAPE the inner ``SingleWindowAttention`` is handed --
+    the one directly observable proxy for "how many slots enter the softmax" -- and it
+    is made for BOTH modes, because ``'zigzag'`` spent steps 3 through 7 as the one
+    path the short-circuit had never reached.
+
+    RED-PROOF (a) -- DISABLE THE SHORT-CIRCUIT. ``_call_zigzag``'s ``degenerate``
+    condition was ``and``-ed with ``False``, so the cheap branch is never taken while
+    every value, weight and mask stays as it was. Observed, verbatim::
+
+        E           AssertionError: WindowAttention(window_size=4, partition_mode='zigzag') on N=9 handed SingleWindowAttention a sequence of 16 slots to answer a question about 9 real tokens (window_slots=None). The degenerate single-window short-circuit is not being taken: at window_size=128 that inflation is 0.649 GB -> 21.695 GB, i.e. 33x the cost of plain global attention.
+        E           assert 16 == 9
+
+    **8 failed, 7 passed** in this class -- the three ``zigzag`` slot-count cells plus
+    all five slot-map cells (which cannot grade a slot map that was never handed over),
+    while all three ``grid`` slot-count cells and all four non-degenerate cells stayed
+    green. That is the correct split for an injection confined to ``_call_zigzag``.
+
+    Note what did NOT move, because it is the reason this class exists:
+    ``TestAllOnesKeyMaskIsANoOp`` **28 passed** and
+    ``test_window_attention_restructure_is_inert.py`` **42 passed** -- both fully GREEN
+    under an injection that puts a 33x cost regression back. With the short-circuit off
+    the padding path masks its own pads (D-011), so it agrees with the pad-masked
+    golden BITWISE and with the all-ones mask EXACTLY. Every VALUE instrument in this
+    plan is blind to the cost decision. Reverted.
+
+    RED-PROOF (b) -- WRONG ADJACENCY, the forward/inverse confusion. The slot vector
+    was changed to ``self.zigzag_indices[: int(static_n)]`` (the SCATTER order) from
+    ``self.inverse_zigzag_indices[: int(static_n)]`` (the token's own position in the
+    scan). Same shape, same values as a set, wrong pairing: token ``i`` is then told it
+    sits where the ``i``-th SCANNED token sits, so every relative-position bias row is
+    gathered for the wrong pair of slots. Observed, verbatim::
+
+        E       AssertionError: zigzag window_slots for window_size=4, N=9 are [0, 1, 3, 6, 4, 2, 5, 7, 8], but token i must be told the position it occupies in the zigzag SCAN, which is [0, 1, 5, 2, 4, 6, 3, 7, 8]. These two vectors are permutations of each other, so nothing about the shapes, the weights or the attention PATTERN can tell them apart -- only the relative-position bias, which is gathered by slot, moves.
+
+    **5 failed, 10 passed** in this class -- all five slot-map cells, and no other, so
+    the slot-count arm correctly stayed green (the short-circuit IS being taken; it is
+    taken with the wrong map). And the external instrument saw it too:
+    ``test_window_attention_restructure_is_inert.py`` **3 failed, 39 passed** --
+    exactly the three ``use_relative_position_bias=True`` ragged ``zigzag`` cells, at
+    ``max |delta|`` 0.02612234279513359 (``ws=4, N=9``), 0.01416805386543274
+    (``ws=7, N=25``) and 0.011001929640769958 (``ws=8, N=50``), i.e. four to five
+    orders of magnitude above that file's ``RAGGED_ATOL`` of 5e-7. Their three ``rpb=False`` twins
+    stayed green, and that split is itself the evidence the injection acts through the
+    BIAS GATHER and nowhere else: with no bias table there is no slot map to get wrong,
+    because a single window attends every token to every other regardless of the order
+    they are listed in. Reverted.
+
+    Why (b) is not a symmetry: step 4.1 recorded an injection that permuted the
+    synthesized zigzag MASK and proved nothing at two of three cells, because the
+    vector it permuted was all ones and every permutation of all-ones is the identity.
+    This injection permutes a vector of DISTINCT slot ids that indexes a table of
+    distinct rows, so no permutation of it is a symmetry -- except the identity, which
+    is the correct answer.
+    """
+
+    #: ``(partition_mode, window_size, seq_len)``. Every cell has
+    #: ``1 < N < window_size ** 2``, the regime the short-circuit owns, in both modes.
+    DEGENERATE_CELLS = [
+        ("grid", 4, 9),
+        ("grid", 7, 25),
+        ("grid", 8, 50),
+        ("zigzag", 4, 9),
+        ("zigzag", 7, 25),
+        ("zigzag", 8, 50),
+    ]
+
+    #: ``(partition_mode, window_size, seq_len)`` where the short-circuit must NOT be
+    #: taken. ``N == window_size ** 2`` is the exact boundary -- one window with
+    #: nothing to pad, so there is nothing to save and it is how ``SwinTransformerBlock``
+    #: calls this layer -- and ``N > window_size ** 2`` genuinely tiles.
+    NON_DEGENERATE_CELLS = [
+        ("grid", 8, 64),
+        ("zigzag", 8, 64),
+        ("grid", 4, 64),
+        ("zigzag", 4, 64),
+    ]
+
+    @staticmethod
+    def _record(monkeypatch):
+        """Spy on every ``SingleWindowAttention.call``, returning the record list.
+
+        Patched on the CLASS, not the instance, and with the identical signature:
+        Keras 3 introspects ``call``'s signature to decide how to route ``training``
+        and the mask, so an instance attribute or a ``*args`` wrapper changes the
+        behaviour being measured.
+        """
+        seen = []
+        original = SingleWindowAttention.call
+
+        def spy(self, inputs, attention_mask=None, training=None,
+                window_slots=None, pad_to_window=True):
+            seen.append(
+                {
+                    "slots_in": int(inputs.shape[1]),
+                    "window_slots": (
+                        None if window_slots is None else np.asarray(window_slots)
+                    ),
+                }
+            )
+            return original(
+                self,
+                inputs,
+                attention_mask=attention_mask,
+                training=training,
+                window_slots=window_slots,
+                pad_to_window=pad_to_window,
+            )
+
+        monkeypatch.setattr(SingleWindowAttention, "call", spy)
+        return seen
+
+    @staticmethod
+    def _run(partition_mode, window_size, seq_len):
+        keras.utils.set_random_seed(11)
+        layer = WindowAttention(
+            dim=32,
+            window_size=window_size,
+            num_heads=4,
+            partition_mode=partition_mode,
+            use_relative_position_bias=True,
+            dropout_rate=0.0,
+        )
+        x = np.zeros((2, seq_len, 32), dtype="float32")
+        layer(x, training=False)
+        return layer
+
+    @pytest.mark.parametrize(
+        "partition_mode,window_size,seq_len",
+        DEGENERATE_CELLS,
+        ids=[f"{m}-ws{w}-N{n}" for (m, w, n) in DEGENERATE_CELLS],
+    )
+    def test_a_degenerate_window_attends_N_slots_not_window_size_squared(
+        self, partition_mode, window_size, seq_len, monkeypatch
+    ):
+        """Why this can fail if the implementation is wrong: this is the ONLY guard in
+        the plan that can. The padded path and the short-circuit agree to a float32
+        ulp, so a regression that stopped taking the cheap branch is invisible to every
+        value comparison and shows up only as 33x the memory."""
+        seen = self._record(monkeypatch)
+        self._run(partition_mode, window_size, seq_len)
+
+        assert len(seen) == 1, (
+            f"expected exactly one SingleWindowAttention call for a degenerate "
+            f"single-window sequence, saw {len(seen)}"
+        )
+        assert seen[0]["slots_in"] == seq_len, (
+            f"WindowAttention(window_size={window_size}, "
+            f"partition_mode={partition_mode!r}) on N={seq_len} handed "
+            f"SingleWindowAttention a sequence of {seen[0]['slots_in']} slots to "
+            f"answer a question about {seq_len} real tokens "
+            f"(window_slots={seen[0]['window_slots']}). The degenerate "
+            f"single-window short-circuit is not being taken: at window_size=128 "
+            f"that inflation is 0.649 GB -> 21.695 GB, i.e. 33x the cost of plain "
+            f"global attention."
+        )
+        assert seen[0]["window_slots"] is not None, (
+            "the short-circuit was taken but no window_slots vector was supplied, so "
+            "the relative-position bias is being gathered at slot arange(N) -- the "
+            "identity map, which is the RIGHT answer only when the grid side equals "
+            "the window side"
+        )
+
+    @pytest.mark.parametrize(
+        "partition_mode,window_size,seq_len",
+        NON_DEGENERATE_CELLS,
+        ids=[f"{m}-ws{w}-N{n}" for (m, w, n) in NON_DEGENERATE_CELLS],
+    )
+    def test_the_short_circuit_is_not_taken_when_there_is_nothing_to_save(
+        self, partition_mode, window_size, seq_len, monkeypatch
+    ):
+        """``N >= window_size ** 2`` keeps the ordinary partition path.
+
+        Why this can fail if the implementation is wrong: widening the condition to
+        ``N <= window_size ** 2`` costs nothing at run time and would look like a
+        harmless generalization, but ``N == window_size ** 2`` is the exact call
+        ``SwinTransformerBlock`` makes -- with a rank-3 pairwise mask in
+        already-partitioned coordinates that the short-circuit does not accept -- and
+        it is the case pinned BITWISE against the pre-restructure layer.
+        """
+        seen = self._record(monkeypatch)
+        self._run(partition_mode, window_size, seq_len)
+
+        assert all(r["slots_in"] == window_size * window_size for r in seen), (
+            f"WindowAttention(window_size={window_size}, "
+            f"partition_mode={partition_mode!r}) on N={seq_len} did not use the "
+            f"ordinary partition path: inner sequence lengths were "
+            f"{[r['slots_in'] for r in seen]}, expected every one to be "
+            f"window_size**2 = {window_size * window_size}"
+        )
+        assert all(r["window_slots"] is None for r in seen), (
+            "window_slots was supplied on a non-degenerate call; it means 'these are "
+            "the only real tokens in the tile', which is false here"
+        )
+
+    @pytest.mark.parametrize(
+        "window_size,seq_len",
+        [(4, 9), (7, 25), (8, 50), (4, 5), (8, 33)],
+        ids=lambda v: str(v),
+    )
+    def test_the_zigzag_slot_map_is_the_tokens_own_position_in_the_scan(
+        self, window_size, seq_len, monkeypatch
+    ):
+        """The short-circuit must attend the tokens at the slots the LAYOUT gives them.
+
+        Why this can fail if the implementation is wrong: a single window attends every
+        token to every other token whatever order they are listed in, so a wrong
+        permutation is invisible in the attention pattern. It is visible in exactly one
+        place -- the relative-position bias, which is gathered by SLOT. The forward and
+        inverse zigzag permutations have the same shape and the same values as a set,
+        and confusing them is the natural mistake here, so the expected slot vector is
+        re-derived below from the SCAN ORDER ITSELF rather than from either array the
+        layer holds.
+
+        The scan is boustrophedon over anti-diagonals of the ``S x S`` grid the zigzag
+        path folds the sequence into (``S = ceil(sqrt(N))``): anti-diagonals in
+        increasing ``s = r + c``, and within one anti-diagonal the row index ascends
+        when ``s`` is odd and descends when ``s`` is even.
+        """
+        side = int(np.ceil(np.sqrt(seq_len)))
+        scan = sorted(
+            ((r, c) for r in range(side) for c in range(side)),
+            key=lambda rc: (
+                rc[0] + rc[1],
+                rc[0] if (rc[0] + rc[1]) % 2 == 1 else side - 1 - rc[0],
+            ),
+        )
+        # Position in the scan of each row-major grid slot; token `i` occupies grid
+        # slot `i` (the sequence is laid out row-major before the permutation).
+        position_of = {r * side + c: p for p, (r, c) in enumerate(scan)}
+        expected = np.array(
+            [position_of[i] for i in range(seq_len)], dtype="int32"
+        )
+
+        seen = self._record(monkeypatch)
+        self._run("zigzag", window_size, seq_len)
+
+        assert len(seen) == 1 and seen[0]["window_slots"] is not None, (
+            "the zigzag short-circuit was not taken, so there is no slot map to "
+            "grade -- see "
+            "test_a_degenerate_window_attends_N_slots_not_window_size_squared"
+        )
+        actual = seen[0]["window_slots"]
+        assert np.array_equal(actual, expected), (
+            f"zigzag window_slots for window_size={window_size}, N={seq_len} are "
+            f"{actual.tolist()}, but token i must be told the position it occupies "
+            f"in the zigzag SCAN, which is {expected.tolist()}. These two vectors "
+            f"are permutations of each other, so nothing about the shapes, the "
+            f"weights or the attention PATTERN can tell them apart -- only the "
+            f"relative-position bias, which is gathered by slot, moves."
+        )
+
+
 class TestBandPartitionMode:
     """``partition_mode='band'`` — a 1-D SYMMETRIC band, proven by PERTURBATION.
 

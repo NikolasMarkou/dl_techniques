@@ -997,9 +997,10 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'parity, where it used to be an inversion. The padded slots were also LEAKING '
             'into the softmax, so this was a CORRECTNESS fix as well as a cost fix: an '
             'all-ones attention mask, a mathematical no-op, used to move the output by up '
-            "to 0.980964. NOTE the sibling 'window_zigzag' key was NOT short-circuited — "
-            'its leak is fixed, its cost is not, and it still measures 17.503 GB on this '
-            'same input.'
+            "to 0.980964. The sibling 'window_zigzag' key got the SAME short-circuit later "
+            'the same day and is now at parity too (0.678 GB on this input, from '
+            '17.503 GB); no partition mode of this layer costs more than full attention '
+            'any more.'
         ),
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
@@ -1080,16 +1081,19 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'better calibration or exploring alternatives to softmax.'
         ),
         'complexity': (
-            'O(max(N, M) * M) with M = W**2, INCLUDING the O(M**2) = O(W**4) floor for '
-            'N <= M: the zigzag path pads the reordered sequence up to a multiple of M, '
-            'so N <= M really is one dense padded window here. UNLIKE the "window" key '
-            'above, which was short-circuited on 2026-08-25, this path was NOT — only its '
-            'pad LEAK was fixed (pad slots no longer reach the softmax, so the answer is '
-            'now correct), and the COST is unchanged. Do not read the "window" entry\'s '
-            'improvement as applying here. MEASURED 2026-08-25, same command, same '
-            '(1, 128, 64) input at window_size=128, CPU: '
-            "'window' 0.681 GB, 'multi_head' 0.674 GB, 'window_band' 0.679 GB, "
-            "'window_zigzag' 17.503 GB. Measure it yourself: "
+            'O(max(N, M) * M) with M = W**2, and NO O(M**2) = O(W**4) floor: for N <= M '
+            'the zigzag layout degenerates to a single window (it folds the sequence into '
+            'a ceil(sqrt(N))-square grid, so N_grid <= M), and that case is '
+            'SHORT-CIRCUITED to dense attention over the N REAL tokens with the '
+            'relative-position bias gathered at each token\'s position in the scan — '
+            'O(N**2), never worse than plain global attention. THIS ENTRY WAS REWRITTEN '
+            '2026-08-25 (twice). It first said the cost was an unavoidable W**4 floor; it '
+            'then said the "window" key\'s short-circuit did NOT apply here and this path '
+            'still measured 17.503 GB. Both are now FALSE. MEASURED 2026-08-25 after the '
+            'fix, same command, same (1, 128, 64) input at window_size=128, CPU peak RSS: '
+            "'window' 0.680 GB, 'multi_head' 0.674 GB, 'window_band' 0.679 GB, "
+            "'window_zigzag' 0.678 GB — four-way parity, where this key used to be a "
+            '26x inversion. Measure it yourself: '
             '.venv/bin/python -c "import resource, numpy as np; from '
             'dl_techniques.layers.attention import create_attention_layer as c; '
             "x = np.zeros((1, 128, 64), 'float32'); "

@@ -39,7 +39,7 @@ copies the golden layer's weights into the current layer BY WEIGHT PATH (not by
 this the two layers would hold different random kernels and the harness would compare
 noise -- passing or failing for the wrong reason.
 
-**Bitwise, not ``allclose`` -- for 34 of the 40 matrix cells.** The comparison is
+**Bitwise, not ``allclose`` -- for 28 of the 40 matrix cells.** The comparison is
 ``np.array_equal``. This plan is a cost restructure with a CPU-pinned reference, so for
 every cell where the pre-restructure answer was CORRECT there is no legitimate nonzero
 delta to absorb. A failure in those cells is a defect to find, never a tolerance to
@@ -85,7 +85,9 @@ Everything else keeps ``np.array_equal`` untouched: all 14 ``grid`` cells with
 ``N >= window_size ** 2`` (which is every configuration Swin, FastVLM and TiRex run,
 since they call with ``N == window_size ** 2`` exactly), all 20 ``zigzag`` cells, and
 the ``@tf.function`` arm. See decisions.md D-007
-(``plan-2026-08-25T053412-0f1fa04f``).
+(``plan-2026-08-25T053412-0f1fa04f``). (Step 7.1 later moved six of those ``zigzag``
+cells to the same tolerance for the same reason -- see the last section of this
+docstring.)
 
 **Step 4.1 widened WHICH golden gets the pad mask, and NOT which cells are bitwise.**
 ================================================================================
@@ -100,7 +102,7 @@ mathematical no-op::
     grid    ws=4, N=20  -> 0.7214095      zigzag  ws=7, N=25 -> 0.2675675
     grid    ws=2, N=15  -> 0.2340506      zigzag  ws=8, N=50 -> 0.0807583
 
-So :func:`_pads_exist_in_layout` -- not :func:`_is_ragged_grid` -- now decides which
+So :func:`_pads_exist_in_layout` -- not :func:`_is_degenerate_short_circuit` -- now decides which
 cells drive the GOLDEN side with an all-ones mask: 16 of the 40, being every
 ``(ws, N)`` whose layout creates a sequence pad or a tile pad, in either mode.
 
@@ -122,7 +124,58 @@ Twelve ``zigzag`` cells (``ws=2, N=16``/``N=4``; ``ws=4, N=64``; ``ws=7, N=196``
 ``ws=8, N=256``/``N=64``) keep BOTH a ``None`` golden and ``np.array_equal``: their
 layouts pad nothing, so :func:`_pads_exist_in_layout` is False and the synthesized
 mask is never created. Those are the cells that prove step 4.1 did not touch the
-non-padded path.
+non-padded path. (Step 7.1 left all twelve exactly where they are; the six ``zigzag``
+cells it DID move are ragged ones, and are listed further down.)
+
+**Step 7.1 moved six ``zigzag`` cells to the tolerance, for D-007's reason exactly.**
+==================================================================================
+Step 3's degenerate-single-window short-circuit lived in ``_call_grid`` only, so
+``'zigzag'`` was still inflating ``N`` real tokens to ``window_size ** 2`` slots and
+attending them densely. MEASURED on ``(1, 128, 64)`` at ``window_size=128``, CPU peak
+RSS: ``window`` (grid) 0.649 GB, ``window_band`` 0.648, ``multi_head`` 0.643, and
+``window_zigzag`` **21.695** -- the user's original complaint, surviving in a third
+path. Step 7.1 extended the short-circuit to ``_call_zigzag``, which brings
+``window_zigzag`` to **0.649 GB**, and :func:`_is_degenerate_short_circuit` therefore
+stopped testing the mode.
+
+The consequence here is the one D-007 already ruled on, in the same words: in the
+``1 < N < window_size ** 2`` regime the current ``zigzag`` code sums ``N`` products
+where the golden sums ``window_size ** 2`` products of which ``window_size ** 2 - N``
+are exactly zero -- and, additionally, sums them in TOKEN order rather than in zigzag
+SCAN order, since a single window's answer does not depend on the order its keys are
+listed in but its float32 reduction does. Both are reduction-order effects and neither
+is reachable by any implementation. So six ``zigzag`` cells -- ``ws4-N9``, ``ws7-N25``
+and ``ws8-N50`` at both ``rpb`` settings -- moved from ``np.array_equal`` to
+:data:`RAGGED_ATOL`, giving **12 tolerance cells and 28 bitwise cells**. MEASURED with
+:data:`RAGGED_ATOL` forced to ``0.0`` so every tolerance cell reports its own delta::
+
+    grid   ws4-N9  rpb 1.937e-07     zigzag ws4-N9  rpb 2.086e-07  <- worst overall
+    grid   ws4-N9  no  1.788e-07     zigzag ws4-N9  no  1.788e-07
+    grid   ws7-N25 rpb 1.490e-07     zigzag ws7-N25 rpb 1.490e-07
+    grid   ws7-N25 no  9.313e-08     zigzag ws7-N25 no  1.788e-07
+    grid   ws8-N50 rpb 1.490e-07     zigzag ws8-N50 rpb 1.192e-07
+    grid   ws8-N50 no  1.043e-07     zigzag ws8-N50 no  1.490e-07
+
+Two ``zigzag`` cells that DO pad were deliberately left bitwise: ``ws4-N20`` at both
+``rpb`` settings. ``N=20 > window_size ** 2 = 16``, so that layout genuinely tiles into
+several windows, the short-circuit does not apply, and step 4.1's synthesized pad mask
+keeps it byte-identical to the pad-masked golden. And the twelve ``zigzag`` cells whose
+layout pads NOTHING (``ws=2, N=16``/``N=4``; ``ws=4, N=64``; ``ws=7, N=196``;
+``ws=8, N=256``/``N=64``) keep BOTH a ``None`` golden and ``np.array_equal``: they are
+the cells that prove neither step 4.1 nor step 7.1 touched the non-padded path.
+
+WHAT NOT TO DO: do not "simplify" :func:`_is_degenerate_short_circuit` and
+:func:`_pads_exist_in_layout` into one predicate. They answer different questions and
+their answers differ on four cells -- ``grid ws4-N20`` and ``zigzag ws4-N20`` pad but
+are bitwise; ``grid ws8-N50`` and ``zigzag ws8-N50`` are short-circuited AND pad.
+Merging them would relax a real bitwise guarantee for a cosmetic symmetry.
+
+**A cost regression is INVISIBLE to this file.** Measured, step 7.1 RED-proof (a):
+disabling the zigzag short-circuit leaves all 42 tests here GREEN, because the padding
+path masks its own pads and therefore agrees with the pad-masked golden BITWISE. The
+guard that does see it is
+``test_window_attention.py::TestTheDegenerateWindowIsShortCircuited``, which asserts on
+the SLOT COUNT handed to the inner layer. Neither instrument is redundant.
 
 **Device.** CPU only, via the ``golden_reference_device`` fixture. A GPU digest cannot
 answer an inertness question in this repo: TF32 and non-deterministic reductions make
@@ -417,18 +470,28 @@ MATRIX = [
 RAGGED_ATOL = 5e-7
 
 
-def _is_ragged_grid(ws: int, n: int, mode: str) -> bool:
-    """Is this the regime step 3's short-circuit rewrote?
+def _is_degenerate_short_circuit(ws: int, n: int, mode: str) -> bool:
+    """Is this the regime the degenerate-single-window short-circuit rewrote?
 
-    ``grid`` with ``1 < N < window_size ** 2``: exactly one window, and the
-    pre-restructure path padded ``N`` real tokens up to ``window_size ** 2`` UNMASKED
-    slots. ``N == window_size ** 2`` is excluded on purpose -- there is nothing to pad
-    there, both paths see the same keys, and bitwise identity is still required (it is
-    also the exact ``N`` at which ``SwinTransformerBlock`` calls this layer). ``N == 1``
+    ``1 < N < window_size ** 2``, in EITHER partition mode: the layout collapses to
+    exactly one window, and the pre-restructure path padded ``N`` real tokens up to
+    ``window_size ** 2`` UNMASKED slots. Step 3 put the short-circuit in ``_call_grid``
+    only; step 7.1 extended it to ``_call_zigzag``, where the same arithmetic holds --
+    zigzag squares the sequence into a ``ceil(sqrt(N)) x ceil(sqrt(N))`` grid, so
+    ``N_grid <= window_size ** 2`` and ``num_windows == 1`` for exactly these ``N``.
+
+    ``N == window_size ** 2`` is excluded on purpose -- there is nothing to pad there,
+    both paths see the same keys, and bitwise identity is still required (it is also
+    the exact ``N`` at which ``SwinTransformerBlock`` calls this layer). ``N == 1``
     is excluded because the short-circuit itself excludes it (``keras.ops.softmax``
     warns on a size-1 reduction axis and this repo escalates warnings to errors).
+
+    The mode is deliberately NOT tested here any more. A predicate that said
+    ``mode == 'grid'`` would have gone stale SILENTLY the moment the short-circuit
+    reached the second path -- by demanding bitwise identity of a zigzag cell whose
+    golden output sums ``window_size ** 2`` products where the current one sums ``N``.
     """
-    return mode == "grid" and 1 < n < ws * ws
+    return 1 < n < ws * ws
 
 
 def _is_padded_zigzag(ws: int, n: int, mode: str) -> bool:
@@ -679,12 +742,13 @@ def test_the_spatial_forward_is_bitwise_unchanged(
     """One matrix cell: the current layer and the pre-restructure layer, same weights,
     same input.
 
-    For 30 of the 36 cells the verdict is BIT FOR BIT. For the six ragged ``grid``
-    cells selected by :func:`_is_ragged_grid` the golden layer is driven WITH an
-    all-ones ``(B, N)`` mask -- which masks no real token, and is therefore the same
-    question, but which makes the golden path mask its own PAD slots -- and the verdict
-    is agreement to :data:`RAGGED_ATOL`. The module docstring explains why those six
-    cannot be bitwise, and D-007 rules that they must not be.
+    For 28 of the 40 cells the verdict is BIT FOR BIT. For the twelve degenerate
+    single-window cells selected by :func:`_is_degenerate_short_circuit` -- ``grid``
+    AND, since step 7.1, ``zigzag`` -- the golden layer is driven WITH an all-ones
+    ``(B, N)`` mask, which masks no real token and is therefore the same question, but
+    which makes the golden path mask its own PAD slots; the verdict there is agreement
+    to :data:`RAGGED_ATOL`. The module docstring explains why those twelve cannot be
+    bitwise, and D-007 (extended by D-014) rules that they must not be.
     """
     ws, n, dim, heads, mode, rpb = cell
     golden_window, _ = golden_modules
@@ -696,15 +760,19 @@ def test_the_spatial_forward_is_bitwise_unchanged(
     pad_masked_golden = _pads_exist_in_layout(ws, n, mode)
     # ...and is the verdict still BIT FOR BIT? It is, everywhere except the
     # degenerate single-window `grid` regime. There -- and only there -- the current
-    # code takes step 3's short-circuit and sums `N` products where the golden layer
-    # sums `window_size ** 2` products of which `window_size ** 2 - N` are exactly
-    # zero, so the two disagree at float32 REDUCTION ORDER no matter how either is
-    # implemented. Everywhere else the fix is a mask synthesis on an otherwise
-    # unchanged path, so the two sides run the identical kernels on the identical
-    # values and MEASURE exactly 0.0 -- including all six newly pad-masked `zigzag`
-    # cells and both newly pad-masked multi-window `grid` cells. Do NOT relax those
-    # to the tolerance just because the golden side now takes a mask.
-    ragged = _is_ragged_grid(ws, n, mode)
+    # code takes the degenerate short-circuit and sums `N` products where the golden
+    # layer sums `window_size ** 2` products of which `window_size ** 2 - N` are
+    # exactly zero, so the two disagree at float32 REDUCTION ORDER no matter how
+    # either is implemented. Since step 7.1 that regime is BOTH modes, not just
+    # `grid`. Everywhere else the fix is a mask synthesis on an otherwise unchanged
+    # path, so the two sides run the identical kernels on the identical values and
+    # MEASURE exactly 0.0 -- including the two newly pad-masked multi-window `grid`
+    # cells and the two multi-window `zigzag` cells at `ws=4, N=20`. Do NOT relax
+    # those to the tolerance just because the golden side now takes a mask.
+    # NOTE the predicate does NOT test the mode: step 7.1 gave `zigzag` the same
+    # short-circuit, and a predicate that still said `mode == 'grid'` would have gone
+    # stale silently, by demanding bitwise identity of a cell that cannot have it.
+    ragged = _is_degenerate_short_circuit(ws, n, mode)
     # The mask is a KEEP predicate (1 = attend) and every token here is real, so this
     # is the identity mask. It is applied to the GOLDEN side only: it is how the
     # pre-restructure code is asked for the pad-masked answer it should have been
