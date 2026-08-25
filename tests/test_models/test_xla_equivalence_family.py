@@ -10,9 +10,9 @@ found and fixed was measured EAGERLY.
 
 What the sweep found
 --------------------
-Over the 53 registered subjects, run once each:
+Over the 52 registered subjects, run once each:
 
-* **51 compile and agree with eager.** The largest relative disagreement is
+* **50 compile and agree with eager.** The largest relative disagreement is
   ``lewm``'s 3.6e-3; the arm's default ``rtol=1e-2`` clears the whole registry
   with ~2.7x margin.
 * **1 is documented NOT to compile** -- ``superpoint``, whose bicubic upsample
@@ -88,16 +88,26 @@ def test_exactly_one_subject_is_documented_as_not_compiling():
 
     "How many of these models actually run under XLA" is the question this
     family exists to answer, and an answer that drifts silently is no answer.
-    51 compile, 1 (``superpoint``) is documented not to, and ``SAM`` is
+    50 compile, 1 (``superpoint``) is documented not to, and ``SAM`` is
     represented by its traceable ``fit()`` wrapper. If a second package
     acquires an ``expect='raises'`` entry, that is a regression someone must
     justify here, not a table edit.
+
+    Re-pinned 2026-08-25, 52 -> 51, and the justification this docstring
+    demands: the population lost exactly one subject, ``memory_bank``, because
+    the model package ``dl_techniques.models.memory_bank`` was DELETED by the
+    2026-08-24 family restructure (commits ``d0b599ff2`` / ``452d663d2``). Its
+    ``_sub("memory_bank", ...)`` registration was removed from
+    ``precision_arm_subjects.py`` in ``377ab9565``. Verified by diffing the
+    ``^_sub("`` set against ``452d663d2``: 53 -> 52 registered, and
+    ``memory_bank`` is the only name that left. No model stopped compiling --
+    the raising set is still exactly ``["superpoint"]``, unchanged.
     """
     raising = sorted(n for n in subject_names()
                      if xla_subject(n)[2].get("expect") == "raises")
     assert raising == ["superpoint"], (
         f"the not-XLA-compilable set changed: {raising}")
-    assert len(subject_names()) - len(raising) == 52, (
+    assert len(subject_names()) - len(raising) == 51, (
         "the compiling-subject count moved; re-measure before editing this")
 
 
