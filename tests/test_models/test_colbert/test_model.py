@@ -27,6 +27,10 @@ Injection                                               Named assertion that fir
 (f) build the backbone with ``hidden_act="gelu"``        ``test_the_backbone_runs_the_tanh_gelu_approximation``
     (the exact erf form, not the tanh                    -- "the ColBERT backbone's activation drifted away from
     approximation README §9.4 documents)                    the tanh GELU approximation documented in README §9.4"
+(g) narrow the D-007 reduction dtype in                  ``test_a_fully_masked_document_scores_the_exact_sentinel_under_xla``
+    ``components.py`` (``MaxSimScorer._reduction_dtype`` -- "the XLA-compiled score is not float32 under
+    returns the incoming dtype unchanged, dropping          mixed_float16: got <dtype: 'float16'>"
+    the float32 promotion)
 ======================================================  ========================================================
 
 Each injection was verified to redden its OWN named assertion -- the message
@@ -44,6 +48,14 @@ mask on the way to the backbone would have shipped green. Injections (e) and
 (f) each reddened EXACTLY ONE test (1 failed / 90 passed for the directory), at
 the assertion quoted above, and both were restored from the ``cp`` backup and
 re-verified byte-identical with ``diff -q``.
+
+Injection (g) is the only one applied to ``components.py`` rather than to
+``model.py``. It is invisible under the default ``float32`` policy -- the
+promotion it removes is a no-op there -- which is why the guard runs under
+``mixed_float16``: with the promotion gone the compiled score came back
+``float16`` and valued ``-inf``, so BOTH the dtype assertion quoted above and
+the ``query_maxlen * mask_value`` value assertion below it are live. Restored
+from the ``cp`` backup and re-verified byte-identical with ``diff -q``.
 """
 
 import os
@@ -869,3 +881,88 @@ def test_encode_query_and_encode_document_return_normalized_embeddings():
             rtol=0,
             err_msg=f"{name} embeddings are not unit-norm at kept positions",
         )
+
+
+# ---------------------------------------------------------------------
+# 10. XLA-compiled forward pass
+# ---------------------------------------------------------------------
+
+
+def test_a_fully_masked_document_scores_the_exact_sentinel_under_xla():
+    """The D-006/D-007 arithmetic survives ``jit_compile=True``.
+
+    This is the module's only XLA-compiled guard, and it runs the whole
+    ``from_variant("tiny")`` forward pass -- backbone, projection and
+    ``MaxSimScorer`` -- inside ``tf.function(..., jit_compile=True)`` under
+    ``mixed_float16``, the policy the promotion exists for.
+
+    The reference is HAND-DERIVED, not a second run of the same source. A
+    document whose ``doc_attention_mask`` is all zeros puts every document
+    position behind the sentinel, so every one of the ``query_maxlen`` query
+    terms maxes to ``mask_value`` and the sum is exactly
+    ``query_maxlen * mask_value`` -- ``32 * -1e4 = -320000.0`` for every
+    variant row. That number is arithmetic, so an injection can only move the
+    measured side; an eager-vs-XLA comparison of the same source would move
+    both sides and could never fail. Same construction and same claim as
+    ``test_components.py``'s
+    ``test_an_all_masked_document_yields_a_finite_score``, lifted to the full
+    model and to XLA.
+
+    The scorer's return dtype is asserted too: it is ``float32`` under
+    ``mixed_float16`` by D-007's deliberately accepted consequence, and a
+    float16 sum of 32 sentinels overflows binary16's 65504 to ``-inf``.
+    """
+    import tensorflow as tf
+
+    previous = keras.mixed_precision.global_policy()
+    try:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+
+        model = ColBERT.from_variant("tiny")
+        query_len = model.query_maxlen
+        doc_len = 16
+        rng = np.random.default_rng(17)
+        inputs = {
+            QUERY_INPUT_IDS_KEY: rng.integers(
+                0, model.vocab_size, (BATCH, query_len)
+            ).astype("int32"),
+            QUERY_ATTENTION_MASK_KEY: np.ones((BATCH, query_len), dtype="int32"),
+            DOC_INPUT_IDS_KEY: rng.integers(
+                0, model.vocab_size, (BATCH, doc_len)
+            ).astype("int32"),
+            # Every document position masked out.
+            DOC_ATTENTION_MASK_KEY: np.zeros((BATCH, doc_len), dtype="int32"),
+            DOC_SKIPLIST_MASK_KEY: np.ones((BATCH, doc_len), dtype="int32"),
+        }
+
+        compiled = tf.function(
+            lambda batch: model(batch, training=False), jit_compile=True
+        )
+        outputs = compiled(inputs)
+
+        assert outputs["score"].dtype == tf.float32, (
+            "the XLA-compiled score is not float32 under mixed_float16: got "
+            f"{outputs['score'].dtype}; the D-007 promotion did not survive "
+            "XLA lowering, and a float16 sum of "
+            f"{query_len} sentinels overflows to -inf"
+        )
+
+        score = np.asarray(
+            keras.ops.convert_to_numpy(outputs["score"]), dtype=np.float64
+        )
+        assert np.all(np.isfinite(score)), (
+            f"an all-masked document produced a non-finite score under XLA: "
+            f"{score}"
+        )
+        np.testing.assert_allclose(
+            score,
+            np.full((BATCH,), query_len * model.scorer.mask_value),
+            atol=1e-6,
+            rtol=0,
+            err_msg=(
+                "the XLA-compiled all-masked score is not "
+                "query_maxlen * mask_value"
+            ),
+        )
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
