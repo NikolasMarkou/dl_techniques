@@ -138,40 +138,63 @@ class TestGlobalLayersArePositionAware:
                        num_heads=4, intermediate_size=48, **{field: value})
 
     def test_config_round_trip_carries_the_rope_fields(self):
+        # `local_attention_window_size=2` is HISTORICAL and now merely tidy.
+        # With the default `global_attention_interval=3` and `num_layers=1`,
+        # layer 0 is a LOCAL layer. It used to build `window` attention at the
+        # shipped default of 128, whose relative-position index is
+        # O(window_size**4) and was built in `__init__` -- ~5 GB at CONSTRUCTION
+        # time, and this test builds two models (the original and the
+        # `from_config` clone), so it peaked at 6.7 GB before this argument was
+        # added. Two changes in plan-2026-08-25T053412-0f1fa04f removed that
+        # cost: D-006 moved the index into `build()`, and D-012 routed local
+        # layers to `'window_band'`, which has no index at all. Construction of
+        # a full `base` is 0.69 GB now. Keep the argument anyway -- it costs
+        # nothing and nothing here asserts anything about the band.
         model = ModernBERT(vocab_size=VOCAB, hidden_size=32, num_layers=1,
                            num_heads=4, intermediate_size=48,
+                           local_attention_window_size=2,
                            max_position_embeddings=256, global_rope_theta=5000.0)
         clone = ModernBERT.from_config(model.get_config())
         assert clone.max_position_embeddings == 256
         assert clone.global_rope_theta == pytest.approx(5000.0)
+        assert clone.local_attention_window_size == 2
 
 
-class TestLocalWindowAdjacencyIsSynthetic:
-    """PINS A KNOWN, DOCUMENTED PROPERTY — this is not a bug report.
+class TestLocalNeighbourhoodIsAContiguousOneDimensionalBand:
+    """REPLACES ``TestLocalWindowAdjacencyIsSynthetic`` (deleted 2026-08-25).
 
-    ``window`` attention is a spatial layer. Given a rank-3 text sequence it
-    does **not** raise; it reshapes ``(B, L, D)`` into a synthetic
-    ``ceil(sqrt(L))``-square grid and attends inside ``window_size``-square
-    blocks of that grid. With ``L=16`` and ``window_size=2`` the grid is 4x4 and
-    the first block is grid cells (0,0), (0,1), (1,0), (1,1) — i.e. tokens
-    0, 1, 4 and 5. Tokens 2 and 3, which a genuine 1-D window of any width >= 2
-    would include before token 4, are invisible to token 0.
+    That class pinned a documented DEFECT: ``window`` attention is a spatial
+    layer, so given a rank-3 text sequence it reshaped ``(B, L, D)`` into a
+    synthetic ``ceil(sqrt(L))``-square grid and attended inside
+    ``window_size``-square blocks. At ``L=16, window_size=2`` the grid was 4x4
+    and token 0's neighbourhood was tokens 0, 1, 4, 5 -- while tokens 2 and 3,
+    which a genuine 1-D window of any width >= 2 includes BEFORE token 4, were
+    invisible to it. It asserted exactly that: ``influence(4) > 1e-3`` and
+    ``influence(2) == 0.0``.
 
-    If a 1-D sliding-window attention layer is ever added to
-    ``layers/attention/`` and wired in here, this test SHOULD fail, and the
-    correct response is to delete it — not to reinstate the grid.
+    Its own docstring set its termination condition: *"If a 1-D sliding-window
+    attention layer is ever added to ``layers/attention/`` and wired in here,
+    this test SHOULD fail, and the correct response is to delete it -- not to
+    reinstate the grid."* ``partition_mode='band'`` landed
+    (plan-2026-08-25T053412-0f1fa04f, D-003/D-010) and D-012 wired it in, so the
+    class is gone and this one states the property that replaced it.
+
+    ``local_attention_window_size`` is now a 1-D FULL SPAN, so at 2 the layer
+    receives half-width 1: token ``i`` attends exactly ``i-1, i, i+1``. The
+    claim is measured the only way it can be honestly measured -- by
+    PERTURBATION, one input token at a time, never by reading the mask back.
     """
 
-    def test_local_neighbourhood_follows_the_synthetic_grid(self):
+    def test_the_local_neighbourhood_is_contiguous_and_the_grid_is_gone(self):
         keras.utils.set_random_seed(7)
         model = ModernBERT(
             vocab_size=VOCAB, hidden_size=32, num_layers=1, num_heads=4,
             intermediate_size=48,
             global_attention_interval=999,  # no layer is global
-            local_attention_window_size=2,
+            local_attention_window_size=2,  # full span 2 -> half-width 1
             hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0,
         )
-        assert model.encoder_layers[0].attention_type == "window"
+        assert model.encoder_layers[0].attention_type == "window_band"
 
         base = (np.arange(16, dtype="int32") + 1).reshape(1, 16)
         reference = _forward(model, base)[0, 0, :]
@@ -181,13 +204,21 @@ class TestLocalWindowAdjacencyIsSynthetic:
             perturbed[0, position] = VOCAB - 1
             return float(np.max(np.abs(_forward(model, perturbed)[0, 0, :] - reference)))
 
-        same_grid_block = influence_on_token_0(4)
-        adjacent_in_1d = influence_on_token_0(2)
+        in_band = influence_on_token_0(1)
+        just_outside = influence_on_token_0(2)
+        old_grid_partner = influence_on_token_0(4)
 
-        assert same_grid_block > 1e-3, (
-            "token 4 shares a 2x2 grid block with token 0 and must influence it"
+        assert in_band > 1e-3, (
+            "token 1 is inside token 0's half-width-1 band and must influence it; "
+            "if this is 0.0 the band is dead, not narrow"
         )
-        assert adjacent_in_1d == 0.0, (
-            "token 2 influenced token 0, so the window is no longer the "
-            "synthetic 2-D grid this test documents"
+        assert just_outside == 0.0, (
+            f"token 2 is outside a half-width-1 band and moved token 0 by "
+            f"{just_outside}. The band is wider than local_attention_window_size // 2, "
+            f"or the mask is not being applied."
+        )
+        assert old_grid_partner == 0.0, (
+            f"token 4 moved token 0 by {old_grid_partner}. Token 4 was token 0's "
+            f"partner in the OLD 2x2 synthetic grid block and is 4 positions away "
+            f"in 1-D -- a nonzero here means the grid adjacency is back."
         )

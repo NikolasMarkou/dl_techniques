@@ -73,8 +73,15 @@ SEQ_LEN = 16
 HIDDEN = 32
 BUILD_SEED = 0
 
-#: Measured 2026-08-21, one Adam step, ramp loss.
-GF_WEIGHTS = 42
+#: Measured 2026-08-25, one Adam step, ramp loss. Was 42 (measured 2026-08-21).
+#: The two lost tensors are the local layers' `relative_position_bias_table`:
+#: plan-2026-08-25T053412-0f1fa04f D-012 routed ModernBERT's local layers to
+#: `'window_band'`, and D-010 makes that layout REFUSE
+#: `use_relative_position_bias` -- the bias is indexed by 2-D tile coordinates a
+#: 1-D band does not have. This is a weight-SET change, so pre-2026-08-25
+#: `.keras` files with local layers will not load. Re-derive, never transcribe:
+#: `len(_built().trainable_weights)`.
+GF_WEIGHTS = 40
 
 
 def ramp_loss(outputs: Any) -> Any:
@@ -193,7 +200,9 @@ class TestModernBERTKnobSensitivity:
         It was written as a value knob first, on the reasoning that deciding
         *which* blocks attend globally changes no weight shape. The value
         instrument rejected that: at ``num_layers=4`` the two settings hold
-        **46 tensors / 39428 parameters** vs **43 / 39366** -- a global block
+        **44 tensors** vs **40** (measured 2026-08-25; they were 46 / 43 and
+        39428 / 39366 parameters until then, before D-012 removed the local
+        layers' `relative_position_bias_table` -- see GF_WEIGHTS) -- a global block
         and a local block are not the same parameterisation in this
         implementation, so the two configurations draw different random
         numbers and an output-difference claim between them would prove
@@ -207,7 +216,7 @@ class TestModernBERTKnobSensitivity:
         }
         signatures = assert_structural_knob_changes_weights(
             builders, knob="global_attention_interval")
-        assert len(signatures[2]) == 46 and len(signatures[4]) == 43, (
+        assert len(signatures[2]) == 44 and len(signatures[4]) == 40, (
             f"the measured tensor counts moved: "
             f"{ {k: len(v) for k, v in signatures.items()} }"
         )

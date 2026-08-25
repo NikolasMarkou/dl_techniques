@@ -40,7 +40,7 @@ A Keras 3 implementation of **ModernBERT**, a successor to the classic BERT arch
 1.  **Rotary Positional Embeddings (RoPE)**: Replaces traditional absolute positional embeddings with RoPE, which is proven to excel in both short- and long-context scenarios and allows for easier context extension.
 2.  **Pre-Layer Normalization (Pre-LN)**: Applies layer normalization *before* attention and feed-forward blocks, significantly improving training stability and convergence.
 3.  **GeGLU Activation Function**: Uses a Gated GELU (GeGLU) in the feed-forward network, which provides a more sophisticated gating mechanism for improved performance.
-4.  **Alternating Local & Global Attention**: Employs a hybrid attention strategy. Most layers use **windowed (local) attention**, while periodic **global attention** layers (every 3rd layer) ensure that long-range dependencies are captured. In the paper this is what makes the 8192 native sequence length affordable. **In this implementation it is not** — the reused `window` layer pads every window to `window_size**2` slots, so for `base` and `large` (`window_size=128`, threshold 16384 > the 8192 max position) no admissible length is ever windowed and their local layers are *more* expensive than global ones, not less. `tiny` (`window_size=64`, threshold 4096) is the one exception: for `4097 <= L <= 8192` it really does partition into four windows. See § 4.3; this is a known deviation, and an open decision.
+4.  **Alternating Local & Global Attention**: Employs a hybrid attention strategy. Most layers use a **1-D sliding band** spanning `local_attention_window_size` tokens, while periodic **global attention** layers (every 3rd layer) ensure that long-range dependencies are captured. Since 2026-08-25 this is the paper's local layer: `local_attention_window_size` is the FULL span, exactly as upstream's `local_attention`, and the layer receives half of it as the half-width (`transformers/modular_modernbert.py`: `sliding_window = local_attention // 2`). **What is still NOT reproduced is the cost benefit**, and the reason is now a plain one: the band is applied as a dense `N x N` mask over standard attention, so a local layer is `O(N^2)` — the same order as a global one. It removes the wrong adjacency, not the quadratic term. See § 4.3.
 5.  **Bias-Free Layers**: Removes bias parameters from most linear and normalization layers to optimize the parameter budget and improve stability.
 6.  **Modern Training Recipe**: Trained on 2 trillion tokens with a modern BPE tokenizer, a modified trapezoidal learning rate schedule, and advanced optimizers like StableAdamW.
 
@@ -69,15 +69,19 @@ ModernBERT Approach:
   5. Benefit (AS PUBLISHED): near-linear attention complexity, making it a
      versatile and efficient backbone for modern NLP tasks.
 
-  NOT REPRODUCED HERE: step 1's cost benefit. The `window` layer this package
-  reuses pads every window to `window_size**2` slots, so its cost is
-  O(max(L, M) * M) with M = window_size**2 -- a CONSTANT O(M^2) floor for
-  L <= M rather than a linear-in-L saving. For base/large (window_size=128,
-  M = 16384 > the 8192 max position) every local layer is dense attention
-  over a padded 16384-slot window at every admissible L. For tiny
-  (window_size=64, M = 4096) it is dense for L <= 4096 and a genuine 4-window
-  partition for 4097 <= L <= 8192. Modelling quality is unaffected in kind;
-  the efficiency claim is inverted for base/large. See § 4.3.
+  NOT REPRODUCED HERE: step 1's cost benefit, though the reason changed on
+  2026-08-25 and the old reason was much worse. Step 1's ADJACENCY is now
+  correct -- local layers are 1-D bands of `local_attention_window_size`
+  tokens (`window_band`), which is what the paper specifies. But the band is a
+  dense N x N mask over standard attention, so a local layer is O(N^2), the
+  same order as a global one; a fused banded kernel is not reachable from
+  keras.ops. Until 2026-08-25 the local layers were `window`, a SPATIAL layer
+  that folded the sequence into a ceil(sqrt(L)) grid and padded every window to
+  window_size**2 slots -- for base/large (window_size=128, M = 16384 > the 8192
+  max position) that was dense attention over a padded 16384-slot window at
+  EVERY admissible L, i.e. the efficiency claim was inverted, and the padded
+  slots were leaking into the softmax so the answer was wrong as well.
+  Modelling behaviour is the paper's now; only the speedup is not. See § 4.3.
 ```
 
 ### Real-World Impact
@@ -218,11 +222,17 @@ Input (from previous layer)
 ### 4.3 Hybrid Attention
 
 -   **Global Attention**: Every 3rd layer uses standard global attention with **RoPE** on its queries and keys. This allows information to be exchanged across the entire 8192-token sequence, ensuring that long-range dependencies are captured. It is built as the factory's `group_query` type with `num_kv_heads == num_heads`, which is arithmetically plain multi-head attention — that is the only registry entry that reaches plain self-attention *and* carries RoPE. `multi_head` declares no RoPE parameter. Until 2026-08-17 `create_attention_layer` silently dropped keys it does not declare, so `attention_args={"use_rope": True}` on a `multi_head` layer built cleanly and did nothing; that factory is now strict and raises a `ValueError` naming the key, so the same mistake fails at construction.
--   **Windowed (Local) Attention**: Most layers (2 out of every 3) use windowed attention. **This implementation deviates from the paper**, and the deviation is deliberate and documented rather than hidden: the reused `window` attention layer is a *spatial* one. It reshapes the `(B, L, D)` token sequence into a synthetic `ceil(sqrt(L))`-square grid and attends inside `window_size`-square blocks of that grid. Consequences, both measurable:
-    -   A local layer's neighbourhood is **not** a contiguous 1-D window. With `L=16` and `window_size=2` the grid is 4x4 and token 0's window is `{0, 1, 4, 5}` — tokens 2 and 3 are invisible to it while token 4 is not. Pinned by `tests/test_models/test_modern_bert/test_positional_signal.py::TestLocalWindowAdjacencyIsSynthetic`.
-    -   Whenever `L <= window_size**2` (16384 at the default `window_size=128`) a single window covers the whole padded grid, so the layer is full attention, not `O(N * W)`. `DEFAULT_MAX_POSITION_EMBEDDINGS` is 8192, so for `base` and `large` (`window_size=128`) **no admissible sequence length is ever windowed**. `tiny` (`window_size=64`, threshold 4096) is the only variant where windowing engages, and only for `4096 < L <= 8192`.
-    -   The cost is not merely un-improved, it is *worse than global attention*. Windows are padded to `window_size**2` slots, so a local layer's score matrix is `window_size**2 x window_size**2` **independent of `L`**: `16384 x 16384 ~ 2.7e8` entries per head per sample at the default. That is ~16,384x dense attention at `L=128` and ~4x dense attention at `L=8192`. General form: `O(max(L, M) * M)` with `M = window_size**2`, i.e. an `O(M^2)` floor below `L = M` rather than a linear saving. Pinned by `tests/test_models/test_modern_bert/test_shipped_window_size.py` (the rest of the suite runs at `TEST_WINDOW_SIZE = 16`, where the same degeneracy holds but is invisible).
-    Within-window order comes from the layer's learnable Swin-convention relative position bias over that synthetic grid, not from RoPE and not from 1-D token distance. No 1-D sliding-window attention layer exists in `layers/attention/`; adding one is the real fix.
+-   **Local (Banded) Attention**: Most layers (2 out of every 3) use `window_band` attention — a **1-D symmetric sliding band** over the token sequence: query `i` attends key `j` iff `abs(i - j) <= local_attention_window_size // 2`. Non-causal, because this is an encoder. `local_attention_window_size` is the FULL span in tokens, matching upstream exactly (`transformers/modular_modernbert.py`: `sliding_window = local_attention // 2`, with `local_attention=128` documented as "64 tokens either side"). There is no grid folding, no square padding and no relative position bias; local layers carry no positional term of their own, and position reaches them through the residual stream from the global layers' RoPE. Pinned by `tests/test_models/test_modern_bert/test_positional_signal.py::TestLocalNeighbourhoodIsAContiguousOneDimensionalBand` (measured by perturbation: at `L=16, local_attention_window_size=2`, token 1 moves token 0 and tokens 2 and 4 move it by exactly 0.0) and by `test_the_shipped_variants_can_run.py::TestNoVariantShipsALocalBandItCannotUse::test_the_layer_receives_half_the_configured_span`.
+
+    **What the cost is, honestly.** The band is a dense `N x N` mask over standard attention, so a local layer is `O(N^2)` — the same order as a global one, and NOT the `O(N * W)` that "sliding window" is usually taken to mean. A fused banded kernel is not reachable from `keras.ops`. What the band buys is the correct adjacency, not a lower asymptotic.
+
+    **What this replaced, and why the old text read like a compliment.** Until 2026-08-25 the local layers used `window` attention, a *spatial* layer that reshaped `(B, L, D)` into a synthetic `ceil(sqrt(L))`-square grid and attended inside `window_size`-square blocks. Three measured consequences, all now gone:
+    -   A local layer's neighbourhood was **not** contiguous. At `L=16, window_size=2` the grid was 4x4 and token 0's window was `{0, 1, 4, 5}` — tokens 2 and 3 invisible to it while token 4 was not.
+    -   Whenever `L <= window_size**2` (16384 at `window_size=128`) a single window covered the whole padded grid. `DEFAULT_MAX_POSITION_EMBEDDINGS` is 8192, so for `base` and `large` **no admissible sequence length was ever windowed**.
+    -   The cost was not merely un-improved, it was *worse than global attention*: a local layer's score matrix was `16384 x 16384 ~ 2.7e8` entries per head per sample **independent of `L`**, about 16,384x dense attention at `L=128`. That is what made `from_variant("base")` raise `ResourceExhaustedError` at a sequence length of EIGHT on a 12 GB GPU.
+    -   And it was not only expensive: the padded slots leaked into the softmax, so an all-ones attention mask — a mathematical no-op — moved the output by up to 0.980964. The `N < window_size**2` regime, which is precisely the regime these local layers ran in, was computing the WRONG attention.
+
+    `tests/test_models/test_modern_bert/test_shipped_window_size.py`, which pinned all of that, was **deleted** on 2026-08-25 per its own docstring's instruction. See `plans/plan-2026-08-25T053412-0f1fa04f/decisions.md` D-001..D-013.
 
 ---
 
@@ -246,12 +256,14 @@ import numpy as np
 # Local imports from your project structure
 from dl_techniques.models.language.modern_bert.model import ModernBERT
 
-# 1. Create a model. Every example below that runs a FORWARD pass uses `"tiny"`.
-#    This is not a stylistic choice: because the local layers pad to a single
-#    `window_size**2` window (§ 4.3), `"base"`/`"large"` materialize a
-#    16384 x 16384 score matrix PER HEAD -- ~12.9 GB in float32 at `hidden_size=768`,
-#    which OOMs a 12 GB GPU at any sequence length. Measured 2026-08-18, peak host
-#    RSS for CONSTRUCTION alone: tiny 1.05 GB, base 20.1 GB, large 24.2 GB.
+# 1. Create a model. The examples below use `"tiny"` for speed; since 2026-08-25
+#    `"base"` and `"large"` are also affordable, which they were NOT before.
+#    Peak host RSS for CONSTRUCTION alone, CPU: tiny 0.69 GB, base 0.69 GB,
+#    large 0.69 GB (measured 2026-08-25). It was tiny 1.05 GB, base 20.1 GB,
+#    large 24.2 GB on 2026-08-18, when the local layers built a
+#    16384 x 16384 relative-position index at construction time (§ 4.3).
+#    Forward peak, 12 GB RTX 4070, global_attention_interval=3:
+#    base L=2048 1.640 GB, large L=2048 2.929 GB.
 model = ModernBERT.from_variant("tiny")
 
 # 2. Compile the model (optional for inference)
@@ -304,6 +316,15 @@ The paper releases two main variants, which are provided here.
 | :-------- | :---------- | :----- | :---- | :------------- | :----- | :-------------- | :---------- |
 | **`base`**| 768         | 22     | 12    | 2304           | 149M   | 3               | 128         |
 | **`large`** | 1024        | 28     | 16    | 5248           | 395M   | 3               | 128         |
+
+The `Params` and `FFN (GLU) Size` columns are the PAPER's, not this implementation's:
+`MODEL_VARIANTS` ships `intermediate_size` 1152 / 2624 (the per-branch width; the GLU
+pair is twice that). Measured here on 2026-08-25 at the shipped
+`global_attention_interval = 3`, `from_variant(v)` plus one forward at `L=8`:
+`base` **152,720,384 parameters / 208 weight tensors**, `large` **399,560,704 / 264**.
+Both counts move with `global_attention_interval` — between 2026-08-21 and 2026-08-25
+these variants shipped `1` and measured 160,584,704 / 268 and 409,522,176 / 340 — so
+never quote a ModernBERT parameter count without the interval it was measured at.
 
 ---
 
@@ -566,13 +587,17 @@ if __name__ == '__main__':
 
 **Q: What is the main difference between ModernBERT and classic BERT?**
 
-A: The five key upgrades are: **1) Rotary Positional Embeddings (RoPE)** for long context; **2) Pre-Layer Normalization** for stability; **3) GeGLU activation** for better performance; **4) Alternating windowed/global attention** (for efficiency in the paper — see the next question for what this implementation actually does); and **5) Bias-free layers**.
+A: The five key upgrades are: **1) Rotary Positional Embeddings (RoPE)** for long context; **2) Pre-Layer Normalization** for stability; **3) GeGLU activation** for better performance; **4) Alternating local-band/global attention** (for efficiency in the paper — see the next question for what this implementation actually delivers); and **5) Bias-free layers**.
 
 **Q: Why use alternating attention instead of another efficient attention mechanism?**
 
 A: In the paper, alternating attention is a simple and effective strategy: computationally cheap (dominated by the fast local attention) while still allowing full sequence-level information flow through the periodic global layers.
 
-**This implementation does not deliver that efficiency, and it is worth being blunt about the direction.** The local layers are built from the `window` attention layer, which folds the sequence into a synthetic `ceil(sqrt(L))`-square grid and pads every window to `window_size**2` token slots. Cost is therefore `O(max(L, M) * M)` with `M = window_size**2`, which has a constant `O(M^2)` floor rather than a linear-in-`L` saving. At the `window_size=128` that `base` and `large` ship, `M = 16384` exceeds the 8192 max position, so a local layer computes a `16384 x 16384` score matrix *whatever `L` is* — about 16,384x dense attention at `L=128`, and still ~4x dense attention at `L=8192`. For those two variants the schedule collapses to an all-global stack that is slower than a plain all-global stack would be. `tiny` (`window_size=64`, `M = 4096`) is the only variant where the schedule does not collapse, and only above 4096 tokens, where it partitions into four windows — so "windowing always degenerates here" is as wrong as the paper's linear-cost claim. Modelling behaviour is what § 4.3 describes; only the speed claim is wrong. `tests/test_models/test_modern_bert/test_shipped_window_size.py` pins this at the shipped size. Fixing it means writing a genuine 1-D sliding-window attention layer — none exists in `layers/attention/` — which is an open decision, not a pending patch.
+**This implementation reproduces the ADJACENCY but not the SPEEDUP, and it is worth being blunt about which.** Since 2026-08-25 the local layers are `window_band`: a 1-D symmetric band of `local_attention_window_size` tokens, which is what the paper specifies and what upstream implements. The band is applied as a dense `N x N` mask over standard attention, so a local layer costs `O(N^2)` — the same order as a global one. It is not the linear-in-`L` saving the paper reports; a fused banded kernel is not reachable from `keras.ops`.
+
+Before that date the direction was not merely un-improved, it was INVERTED, and the record is kept here so nobody re-derives the old claim from the old code. The local layers were `window`, which folds the sequence into a synthetic `ceil(sqrt(L))`-square grid and pads every window to `window_size**2` token slots: cost `O(max(L, M) * M)` with `M = window_size**2`, a constant `O(M^2)` floor rather than a linear saving. At the `window_size=128` that `base` and `large` ship, `M = 16384` exceeds the 8192 max position, so a local layer computed a `16384 x 16384` score matrix *whatever `L` was* — about 16,384x dense attention at `L=128`. `from_variant("base")` raised `ResourceExhaustedError` at a sequence length of EIGHT on a 12 GB GPU, which is why `base`/`large` shipped `global_attention_interval = 1` between 2026-08-21 and 2026-08-25. The padded slots also leaked into the softmax, so the answer was wrong and not only expensive.
+
+Measured after the fix, same 12 GB RTX 4070, `global_attention_interval=3`, construct AND forward: `base` L=8 0.692 GB / L=2048 1.640 GB GPU peak; `large` L=8 1.707 GB / L=2048 2.929 GB. Construction alone, CPU host RSS: 0.69 GB for all three variants, against 20.1 GB (`base`) and 24.2 GB (`large`) on 2026-08-18. `tests/test_models/test_modern_bert/test_shipped_window_size.py`, which pinned the old degeneracy, was deleted per its own docstring's instruction.
 
 **Q: Is ModernBERT a drop-in replacement for `bert-base-uncased`?**
 

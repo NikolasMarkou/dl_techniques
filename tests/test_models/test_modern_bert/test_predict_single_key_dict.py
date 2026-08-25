@@ -6,16 +6,19 @@ Keras' per-batch output concatenation raised ``ValueError: Structures don't
 have the same nested structure``. MEASURED RED at commit ae2e2aa0a.
 
 The second class here pins the part of D-031 that is easy to "clean up" and
-must not be: the mask is resolved AT THE RETURN, not before the encoder loop.
-Resolving it earlier is NOT a no-op for ModernBERT, because
-`WindowAttention._call_grid` zero-pads a rank-2 mask up to its square grid and
-thereby masks out grid padding that an absent mask leaves attendable. Measured
-2026-08-19 on this fixture: mixed local/global max|delta| = 6.415714e-01
-against max|out| = 2.67; all-global max|delta| = 0.000000e+00.
+must not be: the mask is resolved AT THE RETURN, not before the encoder loop,
+so the OUTPUT structure never depends on whether the caller supplied a mask.
 
-`local_attention_window_size=4` is used throughout: the shipped default of 128
-pads every window to 128*128 = 16384 token slots, which does not fit on a
-12 GB test GPU at any batch size worth testing.
+That class also used to pin a DEFECT as a positive claim -- see its own
+docstring. Until 2026-08-25 an all-ones mask moved the output by 6.415714e-01
+on this fixture, because the window layers zero-padded a rank-2 mask up to a
+square grid. It measures exactly 0.0 now, and the test asserts that instead.
+
+`local_attention_window_size=4` is used throughout. Since 2026-08-25 that is a
+1-D band FULL SPAN (the layer receives the half-width, 2); before it was a 2-D
+edge length, and the shipped default of 128 padded every window to
+128*128 = 16384 token slots, which did not fit on a 12 GB test GPU at any batch
+size worth testing.
 """
 
 import numpy as np
@@ -83,11 +86,37 @@ class TestModernBertPredictOnSingleKeyDict:
 
 
 class TestResolvedMaskMustNotReachTheEncoder:
-    """Guards D-031's placement. Both tests go RED if the resolution moves."""
+    """Guards D-031's placement, and pins the mask no-op law.
 
-    def test_ones_mask_changes_the_window_layers(self, mixed_model):
-        """If this ever measures 0.0 the window-mask mechanism has changed and
-        the D-031 argument must be re-derived, not assumed."""
+    **This class asserted the OPPOSITE until 2026-08-25.** Its first test was
+    named ``test_ones_mask_changes_the_window_layers`` and required
+    ``max|delta| > 1e-3``, i.e. it pinned a DEFECT as a positive claim: an
+    all-ones ``(B, N)`` mask masks no real token and is therefore a
+    mathematical no-op, but ``WindowAttention._call_grid`` zero-padded a rank-2
+    mask up to its square grid and so masked out grid padding that an absent
+    mask left attendable. Two independent things retired that claim
+    (plan-2026-08-25T053412-0f1fa04f):
+
+    * D-007/D-009/D-011 closed the pad leak in every partition mode, so an
+      all-ones mask is now bit-exact in ``'grid'`` and ``'zigzag'`` too.
+    * D-012 routed ModernBERT's local layers to ``'window_band'``, which pads
+      nothing at all, so there is no grid padding left for a mask to reach.
+
+    The test is CORRECTED rather than deleted, and inverted rather than
+    relaxed: the same measurement is taken, and the bound is now ``== 0.0``.
+    That is a strictly stronger guard than the old one, and it goes RED if
+    anything ever reintroduces a padded slot into a ModernBERT local layer.
+
+    D-031's DECISION -- resolve the echoed mask AT THE RETURN, not before the
+    encoder loop -- is untouched and still guarded, on its FIRST reason: the
+    OUTPUT structure must not depend on whether the caller supplied a mask.
+    Only D-031's SECOND reason (that the pre-loop placement is a silent
+    numerics change) has lapsed.
+    """
+
+    def test_ones_mask_is_an_exact_no_op_in_the_local_layers(self, mixed_model):
+        """MEASURED 2026-08-25: 0.0, where the pre-fix code measured
+        6.415714e-01 on this same fixture against a max|out| of 2.67."""
         ids = _ids()
         default = ops.convert_to_numpy(
             mixed_model({"input_ids": ids}, training=False)["last_hidden_state"]
@@ -97,12 +126,30 @@ class TestResolvedMaskMustNotReachTheEncoder:
                          "attention_mask": np.ones((4, SEQ), dtype="int32")},
                         training=False)["last_hidden_state"]
         )
-        assert np.max(np.abs(default - with_ones)) > 1e-3
+        assert np.max(np.abs(default - with_ones)) == 0.0
         assert np.max(np.abs(default)) > 1e-3  # anti-vacuity
 
+    def test_a_real_mask_still_reaches_the_local_layers(self, mixed_model):
+        """Anti-vacuity for the test above: the no-op result must come from the
+        mask being a no-op, NOT from the mask being ignored. A mask that
+        actually masks something must move the output."""
+        ids = _ids()
+        default = ops.convert_to_numpy(
+            mixed_model({"input_ids": ids}, training=False)["last_hidden_state"]
+        )
+        partial = np.ones((4, SEQ), dtype="int32")
+        partial[:, SEQ // 2:] = 0
+        masked = ops.convert_to_numpy(
+            mixed_model({"input_ids": ids, "attention_mask": partial},
+                        training=False)["last_hidden_state"]
+        )
+        assert np.max(np.abs(default - masked)) > 1e-3
+
     def test_ones_mask_is_an_exact_no_op_when_every_layer_is_global(self):
-        """The global (group_query) path IS mask-invariant, so the difference
-        above is attributable to the window layers and nothing else."""
+        """The global (group_query) path was ALWAYS mask-invariant. It is kept
+        as the control: before 2026-08-25 it was the only schedule that measured
+        0.0, which is what attributed the delta to the window layers. Both
+        schedules measure 0.0 now."""
         model = _model(global_attention_interval=1)
         ids = _ids()
         default = ops.convert_to_numpy(

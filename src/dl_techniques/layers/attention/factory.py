@@ -31,14 +31,16 @@ improved freely; the data above may not.
 
 Registry entries whose 'class' is NOT a class
 ---------------------------------------------
-Two of the 32 entries map to module-level FUNCTIONS rather than layer classes:
+Three of the 33 entries map to module-level FUNCTIONS rather than layer classes:
 
     'window'         -> create_grid_window_attention    (window_attention.py)
     'window_zigzag'  -> create_zigzag_window_attention  (window_attention.py)
+    'window_band'    -> create_band_window_attention    (window_attention.py)
 
-Both wrappers construct a `WindowAttention` locked to one `partition_mode` ('grid' /
-'zigzag') carrying that mode's `use_relative_position_bias` default — a distinction the
-class itself does not encode, which is exactly why the keys point at the wrappers.
+All three wrappers construct a `WindowAttention` locked to one `partition_mode` ('grid' /
+'zigzag' / 'band') carrying that mode's `use_relative_position_bias` default — a
+distinction the class itself does not encode, which is exactly why the keys point at the
+wrappers.
 Consequence: the general `WindowAttention` class, the one whose `partition_mode` the
 caller chooses, has **no factory key of its own** and must be imported directly
 (`from dl_techniques.layers.attention import WindowAttention`).
@@ -104,7 +106,8 @@ from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
 from .wave_field_attention import WaveFieldAttention
 from .window_attention import (
     create_zigzag_window_attention,
-    create_grid_window_attention
+    create_grid_window_attention,
+    create_band_window_attention
 )
 
 # ---------------------------------------------------------------------
@@ -143,7 +146,8 @@ AttentionType = Literal[
     'tripse4',
     'wave_field',
     'window',
-    'window_zigzag'
+    'window_zigzag',
+    'window_band'
 ]
 """
 Type alias for supported attention mechanisms.
@@ -559,7 +563,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
             # DECISION plan-2026-08-22T035419-a11304c8/D-160
-            # Declared on 'multi_head' and 'multi_head_cross' ONLY, of the 32
+            # Declared on 'multi_head' and 'multi_head_cross' ONLY, of the 33
             # registered types: these two are the ones whose output projection
             # is the transformer block's residual-path projection (GPT-2's
             # `attn.c_proj`). Leaving it undeclared everywhere else is
@@ -977,12 +981,26 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'Windowed multi-head self-attention from Swin Transformer, partitioning inputs '
             'into non-overlapping grids for local attention computation, with spatial '
             'awareness from an optional learnable relative position bias. '
-            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY: a 1-D input of '
-            'length N is folded into a ceil(sqrt(N))-square grid and every window is PADDED '
-            'up to window_size**2 slots, so cost is O(max(N, M) * M) with M = window_size**2. '
-            'It beats global attention only for N > M. For N <= M the grid pads to a SINGLE '
-            'window and this layer computes dense attention over M padded positions — '
-            '(M/N)**2 times MORE work than plain global attention over the N real tokens.'
+            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY. A 1-D input of '
+            'length N is folded into a ceil(sqrt(N))-square grid and attention runs inside '
+            'window_size-square blocks of it, so for a SEQUENCE this invents a strided, '
+            'non-contiguous adjacency — if your data has no 2-D layout you want the '
+            "'window_band' key, not this one. "
+            'THIS ENTRY WAS REWRITTEN 2026-08-25 and the claim it replaced was the exact '
+            'opposite. It used to say that for N <= M (M = window_size**2) the grid pads to '
+            'a SINGLE window and the layer costs (M/N)**2 times MORE than plain global '
+            'attention over the N real tokens. That was TRUE and is now FALSE: the layer '
+            'short-circuits that regime and attends over the N REAL tokens, gathering the '
+            'relative-position bias at their grid coordinates. MEASURED on the same '
+            '(1, 128, 64) input at window_size=128, CPU, peak RSS: 21.695 GB before the '
+            "fix, 0.681 GB after, against 'multi_head''s 0.674 GB on the same input — "
+            'parity, where it used to be an inversion. The padded slots were also LEAKING '
+            'into the softmax, so this was a CORRECTNESS fix as well as a cost fix: an '
+            'all-ones attention mask, a mathematical no-op, used to move the output by up '
+            "to 0.980964. The sibling 'window_zigzag' key got the SAME short-circuit later "
+            'the same day and is now at parity too (0.678 GB on this input, from '
+            '17.503 GB); no partition mode of this layer costs more than full attention '
+            'any more.'
         ),
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
@@ -1010,9 +1028,21 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'detection, and semantic segmentation where input resolution scalability is crucial.'
         ),
         'complexity': (
-            'O(max(N, M) * M) with M = W**2 slots per window (W = window_size); '
-            'linear in N only for N > M, and a constant O(M**2) = O(W**4) floor for '
-            'N <= M, where it degenerates to dense attention over one padded window'
+            'O(N * M) with M = W**2 slots per window (W = window_size), for N > M. '
+            'For N <= M there is exactly one window and the cost is O(N**2) — dense '
+            'attention over the N REAL tokens, never over M padded slots. The '
+            'O(M**2) = O(W**4) floor this field advertised until 2026-08-25 is GONE; '
+            'so is the inversion it implied, where a large window cost MORE than global '
+            'attention. Measure both, do not trust this field: '
+            '.venv/bin/python -c "import resource, numpy as np; from '
+            'dl_techniques.layers.attention import create_attention_layer as c; '
+            "x = np.zeros((1, 128, 64), 'float32'); "
+            "c('window', dim=64, window_size=128, num_heads=4)(x); "
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)" '
+            '# MEASURED 2026-08-25 on CPU: 0.681 GB, against 0.674 GB for multi_head on '
+            'the same input. Before the short-circuit the same probe reported 21.695 GB. '
+            'CUDA_VISIBLE_DEVICES matters: with a GPU visible the same probe reads '
+            '1.361 GB for both, because the CUDA runtime dominates the number.'
         ),
         'paper': 'Swin Transformer: Hierarchical Vision Transformer using Shifted Windows'
     },
@@ -1051,11 +1081,95 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'better calibration or exploring alternatives to softmax.'
         ),
         'complexity': (
-            'O(max(N, M) * M) with M = W**2, same as standard window attention above — '
-            'including the O(M**2) floor: the zigzag path pads the reordered sequence up '
-            'to a multiple of M as well, so N <= M is one dense padded window here too'
+            'O(max(N, M) * M) with M = W**2, and NO O(M**2) = O(W**4) floor: for N <= M '
+            'the zigzag layout degenerates to a single window (it folds the sequence into '
+            'a ceil(sqrt(N))-square grid, so N_grid <= M), and that case is '
+            'SHORT-CIRCUITED to dense attention over the N REAL tokens with the '
+            'relative-position bias gathered at each token\'s position in the scan — '
+            'O(N**2), never worse than plain global attention. THIS ENTRY WAS REWRITTEN '
+            '2026-08-25 (twice). It first said the cost was an unavoidable W**4 floor; it '
+            'then said the "window" key\'s short-circuit did NOT apply here and this path '
+            'still measured 17.503 GB. Both are now FALSE. MEASURED 2026-08-25 after the '
+            'fix, same command, same (1, 128, 64) input at window_size=128, CPU peak RSS: '
+            "'window' 0.680 GB, 'multi_head' 0.674 GB, 'window_band' 0.679 GB, "
+            "'window_zigzag' 0.678 GB — four-way parity, where this key used to be a "
+            '26x inversion. Measure it yourself: '
+            '.venv/bin/python -c "import resource, numpy as np; from '
+            'dl_techniques.layers.attention import create_attention_layer as c; '
+            "x = np.zeros((1, 128, 64), 'float32'); "
+            "c('window_zigzag', dim=64, window_size=128, num_heads=4)(x); "
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)"'
         ),
         'paper': "Extends 'Swin Transformer' with zigzag partitioning and advanced normalization"
+    },
+    # NOTE: also a FUNCTION, pinning partition_mode='band' (and defaulting
+    # use_relative_position_bias to False, which 'band' in fact REFUSES if set True).
+    'window_band': {
+        'class': create_band_window_attention,
+        'description': (
+            'One-dimensional SYMMETRIC sliding-band self-attention over the token sequence: '
+            'query i attends key j iff abs(i - j) <= window_size. Here window_size is a '
+            'HALF-WIDTH IN TOKENS, not a 2-D edge length — there is no grid folding and no '
+            'square padding, unlike the "window" and "window_zigzag" keys above. This is the '
+            'layout text encoders specify (Longformer / Mistral / ModernBERT); upstream '
+            "ModernBERT's local_attention is a FULL span, so pass local_attention // 2. "
+            'Non-causal, so it is an ENCODER band, not a decoder one. '
+            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY: the band is a '
+            'dense N x N mask over standard attention, which is O(N^2) — the SAME '
+            'asymptotics as plain multi_head attention, NOT the O(N*W) the name suggests. '
+            'The relative position bias is unavailable (it indexes a 2-D tile this layout '
+            'does not have) and defaults to False here.'
+        ),
+        'required_params': ['dim', 'window_size', 'num_heads'],
+        'optional_params': {
+            'qkv_bias': True,
+            'qk_scale': None,
+            'dropout_rate': 0.0,
+            'proj_bias': True,
+            'attention_mode': 'linear',
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None,
+            'use_relative_position_bias': False,
+            'kan_grid_size': 5,
+            'kan_spline_order': 3,
+            'kan_activation': 'swish',
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'Text encoders whose local layers must see a 1-D token neighbourhood — the '
+            'ModernBERT / Longformer local-attention pattern, interleaved with global '
+            'layers. Use it wherever a sequence has no meaningful 2-D layout, i.e. wherever '
+            'folding it into a ceil(sqrt(N)) square would invent an adjacency the data does '
+            'not have.'
+        ),
+        'complexity': (
+            'O(N^2) — a dense N x N banded mask over standard attention, the SAME order as '
+            'full multi_head attention, and deliberately NOT advertised as O(N*W): a true '
+            'banded kernel is not reachable from keras.ops. What it does remove is the '
+            "'window' key's O(W**4) floor — N real tokens are never inflated to "
+            'window_size**2 slots. THE PREMIUM OVER multi_head GROWS WITH N, so one '
+            'measuring point is not a cost model. MEASURED CPU peak RSS, dim=64, '
+            'window_size=64, interpreter+import floor 0.655 GB: at N=512 window_band '
+            '0.705 GB vs multi_head 0.684 GB (+3.1%); at N=8192 window_band 5.751 GB vs '
+            'multi_head 2.796 GB (+105.7%) — the dense N x N int32 band predicate is '
+            'itself O(N^2) and at N=8192 it costs about as much as the scores. Pick this '
+            'key for the ADJACENCY it gives a 1-D sequence, never to save memory. Measure '
+            'at YOUR N, do not trust this field: '
+            '.venv/bin/python -c "import sys, resource, numpy as np; from '
+            'dl_techniques.layers.attention import create_attention_layer as c; '
+            "N = int(sys.argv[1]); x = np.zeros((1, N, 64), 'float32'); "
+            "c('window_band', dim=64, window_size=64, num_heads=4)(x); "
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)" 8192'
+        ),
+        'paper': (
+            'Longformer / Mistral / ModernBERT 1-D sliding-window attention '
+            '(ModernBERT: local_attention, half-width local_attention // 2)'
+        )
     },
 
     # DECISION plan_2026-06-14_0c5d4a21/D-007: gated/performer/ring/rpc registered
@@ -1319,7 +1433,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         )
 
     # NOTE (documented shape, not fixed here): everything below is a FLAT ALLOWLIST OF
-    # PARAMETER NAMES applied uniformly to all 32 attention types — there are no per-type
+    # PARAMETER NAMES applied uniformly to all 33 attention types — there are no per-type
     # schemas. A parameter is range-checked because of its NAME, wherever it appears, and
     # a type-specific bound cannot be expressed. Per-type schemas would be the right
     # shape; the conversion is out of scope for a behavior-preserving pass because it

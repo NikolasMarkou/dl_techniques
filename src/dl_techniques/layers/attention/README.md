@@ -42,17 +42,18 @@ The following layers are supported by the factory system with automated paramete
 | `tripse4` | `TripSE4` | Hybrid 3D Attention with Affine Fusion of logits. | Advanced vision tasks requiring deep integration of spatial/channel contexts. | `(batch, H, W, channels)` |
 | `single_window` | `SingleWindowAttention` | Single-window Multi-Head Attention over the full sequence as one window (optional relative-position bias). | Vision/sequence models needing windowed attention without grid partitioning. | `(batch, seq_len, dim)` |
 | `wave_field` | `WaveFieldAttention` | FFT-based token mixing with a learned wave-field coupling kernel. | Long-sequence models seeking efficient frequency-domain mixing. | `(batch, seq_len, dim)` |
-| `window` | `WindowAttention` [^win] | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
-| `window_zigzag` | `WindowAttention` [^win] | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
+| `window` | `WindowAttention` [^win] | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. `O(N*M)` for `N > M = window_size**2`, `O(N^2)` for `N <= M` (short-circuited 2026-08-25; the `O(W^4)` floor it used to have is gone). Folds a 1-D sequence into a `ceil(sqrt(N))` grid, so for text you want `window_band`. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
+| `window_zigzag` | `WindowAttention` [^win] | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. Short-circuited for `N < M` since 2026-08-25 (step 7.1), like `window`: no `O(W^4)` floor. MEASURED 2026-08-25 on `(1,128,64)` at `window_size=128`, CPU peak RSS: `window` 0.680 GB, `window_band` 0.679 GB, `multi_head` 0.674 GB, `window_zigzag` **0.678 GB** (was 17.503 GB). | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
+| `window_band` | `WindowAttention` [^win] | 1-D **symmetric** sliding band over the token sequence: query `i` attends key `j` iff `abs(i - j) <= window_size`, where `window_size` is a HALF-WIDTH IN TOKENS. No grid folding, no square padding. Cost is `O(N^2)`, the same order as `multi_head`, and it is **not** `O(N*W)` — a fused banded kernel is not reachable from `keras.ops`. What it buys over `window` is the right ADJACENCY for a sequence, not a lower asymptotic. | Text encoders with local layers (ModernBERT / Longformer): pass `local_attention // 2`. | `(batch, seq_len, dim)` |
 
-[^win]: The `window` and `window_zigzag` registry entries dispatch through the factory functions `create_grid_window_attention` / `create_zigzag_window_attention` (which set the partitioning mode); the instance they return is a `WindowAttention` layer.
+[^win]: The `window`, `window_zigzag` and `window_band` registry entries dispatch through the factory functions `create_grid_window_attention` / `create_zigzag_window_attention` / `create_band_window_attention` (which set the partitioning mode); the instance they return is a `WindowAttention` layer.
 
 ### Window-attention factory facts
 
 Three details of the window family are easy to get wrong; they are stated here explicitly because
 they are the frozen reality of the registry, not accidents to be "tidied":
 
-- **The general `WindowAttention` class has no factory key of its own.** `ATTENTION_REGISTRY['window']['class']` and `['window_zigzag']['class']` are the module-level **wrapper functions** `create_grid_window_attention` and `create_zigzag_window_attention` (defined in `window_attention.py`), not the class. Each wrapper fixes the partitioning mode and returns a `WindowAttention` instance. To construct the class with an arbitrary configuration, import it directly (`from dl_techniques.layers.attention import WindowAttention`).
+- **The general `WindowAttention` class has no factory key of its own.** `ATTENTION_REGISTRY['window']['class']`, `['window_zigzag']['class']` and `['window_band']['class']` are the module-level **wrapper functions** `create_grid_window_attention`, `create_zigzag_window_attention` and `create_band_window_attention` (defined in `window_attention.py`), not the class. Each wrapper fixes the partitioning mode and returns a `WindowAttention` instance. To construct the class with an arbitrary configuration, import it directly (`from dl_techniques.layers.attention import WindowAttention`).
 - **`SingleWindowAttention` *is* factory-registered**, under the key `single_window`, with `'class': SingleWindowAttention` — it is a normal registry entry, not a direct-instantiation-only layer.
 - **`create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are test-only.** They live in `window_attention.py` and are exercised only by `tests/test_layers/test_attention/test_window_attention.py`. They are intentionally **not** registered in the factory and **not** exported from the package `__init__.py`; they are convenience constructors for tests, not part of the public surface.
 
@@ -563,6 +564,20 @@ attn = create_attention_layer(
     num_heads=4,
     probability_type='adaptive',
     probability_config={'min_temp': 0.1, 'max_temp': 2.0}
+)
+```
+
+### `window_band`
+**Required:** `dim`, `window_size` (a HALF-WIDTH IN TOKENS), `num_heads`
+**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True), `probability_type` (default: 'softmax'), `probability_config` (default: None), `use_relative_position_bias` (default: False, and `True` RAISES — the bias indexes a 2-D tile this layout does not have)
+```python
+# ModernBERT's local_attention=128 means "64 tokens either side", so the
+# half-width to pass is local_attention // 2.
+attn = create_attention_layer(
+    'window_band',
+    dim=768,
+    window_size=128 // 2,
+    num_heads=12
 )
 ```
 
