@@ -574,6 +574,16 @@ COMPOSE_NUM_CENTROIDS = 16
 # scales with the query length the test happens to use.
 COMPOSE_RELATIVE_DRIFT_BOUND = {1: 0.10, 2: 0.08}
 
+# Floor on the DIFFERENTIAL arm: how many times larger the reconstruction error
+# of a centroid-only decode (plain 16-way vector quantization -- i.e. the codec
+# with its residual stage dead) must be than the real decode's, per bit width.
+# This is the arm that makes the residual stage earn its existence; the drift
+# bounds above cannot do it (see the docstring's DIFFERENTIAL ARM section).
+# Measured over 12 seeds (0..11) at this geometry: the ratio never fell below
+# 1.5846 at nbits=1 or 2.5392 at nbits=2, so these floors carry ~20% margin,
+# while a dead residual stage pins the ratio at exactly 1.0.
+COMPOSE_RESIDUAL_GAIN_FLOOR = {1: 1.3, 2: 2.0}
+
 
 def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> None:
     """The codec's reason to exist, composed end to end, on real embeddings.
@@ -627,8 +637,54 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
     **nbits=2 -> 0.803324 absolute / 0.037316 relative**. The asserted bounds
     are ``COMPOSE_RELATIVE_DRIFT_BOUND`` = 0.10 at 1 bit and 0.08 at 2 bits --
     each roughly **2x** its measured maximum, so an ordinary seed-to-seed swing
-    cannot redden this guard while a broken decode moves the score by an order
-    of magnitude and does.
+    cannot redden this guard. What the bounds do **not** do is detect a broken
+    decode: they are one-sided tolerances, and the section below records the
+    measurement that proves they tolerate the death of the codec's defining
+    mechanism. Only a total decode failure (all-zero output, injection (d))
+    moves the drift far enough to redden them.
+
+    **DIFFERENTIAL ARM: the drift bounds alone cannot see a dead residual
+    stage.** Replacing the reconstruction with ``centroids[codes] +
+    residuals * 0.0`` -- which reduces "residual compression" to plain 16-way
+    vector quantization and discards every quantized residual bit at both bit
+    widths -- leaves the drift assertions GREEN. Measured relative MaxSim drift
+    for that centroid-only decode, same geometry, 12 seeds: 0.033810, 0.028049,
+    0.030800, 0.010378, 0.049580, 0.037165, 0.058220, 0.020338, 0.023961,
+    0.021655, 0.046885, 0.037876 -- worst 0.0582, under both bounds on 11 of 12
+    seeds and, at 1 bit, *below* the real decode's own drift on 6 of those 12.
+    The cause is H-3: on a randomly initialized encoder the token embeddings do
+    not cluster, so a 1-bit residual quantizer adds noise to a MaxSim score as
+    often as it removes it. **So the ordering "real decode drifts less than
+    centroid-only" is measurably FALSE here and is deliberately NOT asserted**
+    -- 6/12 at nbits=1, 10/12 at nbits=2 (seeds 1 and 3 invert it at 2 bits
+    too). Asserting it would ship a flaky guard stating something untrue.
+
+    What IS true at every seed, and is asserted, is the same comparison on
+    **reconstruction error** rather than on MaxSim -- the quantity the residual
+    stage actually optimizes. Mean ``||v_normalized - decoded||`` over the 12
+    seeds, real decode vs the centroid-only decode of the same codec:
+
+    ==== ============ ============ ========== ============ ==========
+    seed nbits=1      nbits=2      centroid   gain @1bit   gain @2bit
+    ==== ============ ============ ========== ============ ==========
+    0    0.500249     0.312397     0.793246   1.5857       2.5392
+    1    0.484295     0.299281     0.776897   1.6042       2.5959
+    2    0.463910     0.288718     0.741446   1.5983       2.5681
+    3    0.480875     0.298135     0.772611   1.6067       2.5915
+    4    0.498103     0.310091     0.789788   1.5856       2.5470
+    5    0.506204     0.312394     0.805901   1.5920       2.5798
+    6    0.463585     0.287452     0.740292   1.5969       2.5754
+    7    0.478720     0.297228     0.765056   1.5981       2.5740
+    8    0.482068     0.300808     0.763893   1.5846       2.5395
+    9    0.470125     0.293195     0.751105   1.5977       2.5618
+    10   0.461963     0.286271     0.739599   1.6010       2.5836
+    11   0.477578     0.299358     0.761298   1.5941       2.5431
+    ==== ============ ============ ========== ============ ==========
+
+    The gain ratio never fell below **1.5846** at 1 bit or **2.5392** at 2 bits
+    (and the real decode beat centroid-only on **12 of 12** seeds at both bit
+    widths). ``COMPOSE_RESIDUAL_GAIN_FLOOR`` asserts 1.3 / 2.0, ~20% under
+    those minima, and a dead residual stage pins the ratio at exactly 1.0.
 
     **TOP-1 IS DELIBERATELY NOT ASSERTED, AT EITHER BIT WIDTH.** The same 8
     seeds were checked for it and it does **not** hold: top-1 was preserved on
@@ -648,6 +704,15 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
     make a load-bearing assertion out of. The strict bit-width property is
     already guarded, on reconstruction error rather than on MaxSim, by
     ``test_two_bits_reconstruct_strictly_better_than_one_bit``.
+
+    RED-PROOF OF THE DIFFERENTIAL ARM (injection (e), 2026-08-25). Line
+    ``reconstructed = self.centroids[code_array] + residuals`` in
+    ``ResidualCompressionCodec.decode`` was replaced in place in ``src/`` with
+    ``... + residuals * 0.0``. RED: this test, at the named assertion "the
+    residual stage did not earn its existence at nbits=1 (seed 0): dropping it
+    -- decoding to the bare centroid -- costs only 1.0000x the reconstruction
+    error", while every drift assertion above still passed. Restored from a
+    ``cp`` backup and verified byte-identical with ``diff -q``.
 
     RED-PROOF (injection (d), 2026-08-25). ``ResidualCompressionCodec.decode``
     was replaced in place in ``src/`` -- never a scratch copy, because
@@ -725,6 +790,7 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
         )
 
         flat = documents.reshape(-1, model.dim)
+        truth = compression_module._colbert_codec_l2_normalize(flat)
         for nbits in SUPPORTED_NBITS:
             codec = ResidualCompressionCodec(
                 dim=model.dim,
@@ -732,7 +798,9 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
                 num_centroids=COMPOSE_NUM_CENTROIDS,
                 seed=seed,
             ).fit(flat)
-            decoded = codec.decode(*codec.encode(flat)).reshape(documents.shape)
+            codes, packed = codec.encode(flat)
+            decoded_flat = codec.decode(codes, packed)
+            decoded = decoded_flat.reshape(documents.shape)
 
             compressed = np.asarray(
                 keras.ops.convert_to_numpy(scorer(queries, decoded)),
@@ -752,4 +820,47 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
                 f"uncompressed value at nbits={nbits} (seed {seed}), above the "
                 f"{bound} bound derived from an 8-seed population whose maximum "
                 f"was 0.050728 at nbits=1 and 0.037316 at nbits=2"
+            )
+
+            # DECISION plan-2026-08-25T165753-704a9bcb/D-009
+            # This arm compares RECONSTRUCTION ERROR, not MaxSim drift. Do NOT
+            # "simplify" it to `relative_drift(real) <= relative_drift(
+            # centroid_only)`: that ordering was measured over 12 seeds at this
+            # geometry and HOLDS ONLY 6/12 at nbits=1 and 10/12 at nbits=2 (see
+            # the docstring's DIFFERENTIAL ARM table). Under H-3 a randomly
+            # initialized encoder produces unclustered embeddings, so a 1-bit
+            # residual quantizer perturbs a MaxSim score as often as it helps
+            # it. Asserting the MaxSim ordering ships a flaky guard that states
+            # something untrue; the reconstruction-error ordering holds 12/12
+            # with a >=1.58x margin. See decisions.md D-009.
+            # DIFFERENTIAL ARM. The bound above is a one-sided tolerance and a
+            # dead residual stage passes it (measured; see the docstring). This
+            # arm compares the real decode against the SAME codec with its
+            # residual stage removed -- a centroid-only decode, renormalized
+            # exactly as decode() renormalizes -- and requires the residual
+            # bits to buy a measured factor of reconstruction accuracy.
+            centroid_only = compression_module._colbert_codec_l2_normalize(
+                codec.centroids[codes]
+            )
+            error_real = float(
+                np.linalg.norm(truth - decoded_flat, axis=-1).mean()
+            )
+            error_centroid_only = float(
+                np.linalg.norm(truth - centroid_only, axis=-1).mean()
+            )
+            assert error_real > 0.0, (
+                f"seed {seed}, nbits={nbits}: the real decode reconstructs the "
+                "embeddings exactly, which is impossible for a lossy codec and "
+                "makes the gain ratio below undefined"
+            )
+            gain = error_centroid_only / error_real
+            floor = COMPOSE_RESIDUAL_GAIN_FLOOR[nbits]
+            assert gain >= floor, (
+                f"the residual stage did not earn its existence at nbits="
+                f"{nbits} (seed {seed}): dropping it -- decoding to the bare "
+                f"centroid -- costs only {gain:.4f}x the reconstruction error "
+                f"({error_centroid_only:.6f} vs {error_real:.6f}), below the "
+                f"{floor} floor derived from a 12-seed population whose "
+                "minimum was 1.5846 at nbits=1 and 2.5392 at nbits=2; a gain "
+                "of exactly 1.0 means the residual bits are being discarded"
             )
