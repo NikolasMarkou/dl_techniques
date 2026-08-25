@@ -94,7 +94,7 @@ class DynamicTanh(keras.layers.Layer):
     :param bias_constraint: Optional constraint for bias parameters.
     :type bias_constraint: Optional[constraints.Constraint]
 
-    :raises ValueError: If alpha_init_value is not a number.
+    :raises ValueError: If alpha_init_value is not a positive number.
     :raises ValueError: If axis is out of bounds for input tensor.
     """
 
@@ -115,6 +115,12 @@ class DynamicTanh(keras.layers.Layer):
         # Validate alpha initialization value
         if not isinstance(alpha_init_value, (int, float)):
             raise ValueError(f"alpha_init_value must be a number, got {type(alpha_init_value)}")
+        # Sign check mirrored from validate_normalization_config's 'dynamic_tanh'
+        # branch in factory.py (same message). A non-positive alpha flips the
+        # transform's sign, and alpha == 0 makes the layer the constant-zero map
+        # tanh(0 * x); the factory has always refused both.
+        if alpha_init_value <= 0:
+            raise ValueError("alpha_init_value must be a positive number")
 
         # Store ALL configuration parameters. self.axis keeps the constructor value
         # verbatim (never mutated by build) so get_config is build-state-independent;

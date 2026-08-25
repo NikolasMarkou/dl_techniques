@@ -565,6 +565,11 @@ def validate_normalization_config(
             constant = kwargs['constant']
             if not isinstance(constant, (int, float)):
                 raise ValueError("constant must be a number")
+            # Sign check mirrored from DecoupledMaxLogit._validate_inputs (same
+            # message), so validate_normalization_config never green-lights a
+            # config the class itself refuses.
+            if constant <= 0:
+                raise ValueError(f"constant must be positive, got {constant}")
 
     if normalization_type in ['rms_norm', 'zero_centered_rms_norm']:
         if 'epsilon' in kwargs:
