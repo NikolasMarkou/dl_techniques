@@ -1,80 +1,76 @@
 """
-Differential Multi-Head Attention Implementation.
+Differential multi-head attention: two parallel attention streams whose weighted
+difference cancels the common-mode component of the attention distribution.
 
-This module implements Differential Multi-Head Attention as described in the paper
-"DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise".
+Ordinary softmax attention is normalized, so its weights must sum to one whether
+or not anything in the context is worth attending to. When nothing is, the mass
+does not disappear — it spreads thinly over irrelevant tokens, and that diffuse
+allocation is added to the value aggregate as noise. The effect grows with
+context length, because there are more irrelevant tokens to spread over.
+Differential attention borrows the fix from analog electronics. A differential
+amplifier rejects interference by measuring the difference between two lines that
+carry the same interference and different signal; here two attention streams read
+the same values through different query/key projections, and their difference
+keeps what only one stream selects while cancelling what both select equally.
 
-The Differential Attention mechanism employs two parallel scaled dot-product attention
-streams and computes a weighted difference between them:
-``Attention_diff = SDPA1(x) - lambda * SDPA2(x)``.
-This design amplifies relevant context signals while attenuating noise, resulting
-in more focused attention patterns.
+The structure that makes this a cancellation rather than an arbitrary linear
+combination is that ``V`` is SHARED. Both streams multiply the same value matrix,
+so the operator actually applied to the values is the single matrix
+``A1 - lambda * A2``: the two streams differ only in *where* they look, never in
+*what* they read. A key that both streams weight equally contributes
+``(1 - lambda) * A1_ij`` and is attenuated; a key only the first stream selects
+keeps its full weight. Note that the rows of that operator sum to ``1 - lambda``
+rather than ``1``. The mechanism is deliberately not a convex combination, and
+that is the point.
 
-The adaptive lambda parameter is computed as:
-``lambda(l) = (0.8 - 0.6 * exp(-0.3 * (l - 1))) * lambda_learned``
-and bounded to ``[0.1, 0.9]`` for training stability.
+The mixing coefficient is scheduled by depth,
+``lambda(l) = clip((0.8 - 0.6 * exp(-0.3 * max(l - 1, 0))) * lambda_learned, 0.1, 0.9)``,
+starting shallow layers near 0.2 and saturating deep layers near 0.8, so
+cancellation strengthens with depth while early layers keep their attention
+mostly intact. The clip is a training-stability guard: at ``lambda -> 1`` the
+operator's rows sum to zero and the residual stream loses its DC component. The
+learned scalar multiplies the schedule rather than replacing it, so a layer can
+soften its own cancellation but not escape the depth trend.
 
-This implementation uses **manual scaled dot-product attention** rather than two
-``keras.layers.MultiHeadAttention`` instances. This makes the per-stream attention
-probability normalization customizable via :class:`ProbabilityOutput` and exposes an
-optional QK-norm hook applied independently to each stream's Q/K projections.
+Attention is computed manually rather than by delegating to two
+`keras.layers.MultiHeadAttention` instances. That is what makes the per-stream
+probability normalization pluggable — each stream owns its own
+`ProbabilityOutput`, so softmax can be swapped for sparsemax or threshmax — and
+what exposes the optional QK-norm hook applied independently to each stream's Q
+and K projections. Five separate `Dense` layers produce ``Q1, K1, Q2, K2`` and
+the one shared ``V``; there is no fused QKV matmul, which keeps per-site
+debugging and weight inspection straightforward.
 
-Architecture:
-    Five separate ``Dense`` projections produce ``Q1, K1, Q2, K2`` and a single
-    **shared** ``V``. Each ``(Q, K)`` pair drives an independent SDPA stream with its
-    own optional QK-norm, its own :class:`ProbabilityOutput` instance and its own
-    attention dropout, but both streams read the same ``V``. The two contexts are
-    combined by ``out1 - lambda * out2``, merged across heads, projected and dropped
-    out.
+Two conventions in this file are load-bearing and deliberately non-standard.
+`layer_idx` is a *call* argument, not constructor state, because a stack of these
+layers must tell each one its own depth; it is therefore absent from
+`get_config()`, and a reloaded layer defaults to ``layer_idx=0`` unless the caller
+passes it again. And there is no `dim % num_heads` check, because `head_dim` is an
+explicit required argument here: `dim` and `num_heads * head_dim` are independent,
+and the output projection reconciles them.
 
-    Two structural properties are load-bearing:
+Foundational mathematics, with ``s = 1 / sqrt(head_dim)`` and shared ``V``::
 
-    -   ``V`` is shared, not duplicated. The two streams differ only in *where* they
-        look, never in *what* they read, which is what makes their difference a
-        noise cancellation rather than an arbitrary linear combination of two
-        unrelated attentions.
-    -   ``layer_idx`` is a **call** argument, not constructor state, so it is absent
-        from ``get_config()``. It only feeds the lambda schedule.
-
-Foundational Mathematics:
-    With ``s = 1 / sqrt(d_head)`` and a shared value matrix ``V``::
-
-        A1 = P(Q1 K1^T s) ,   A2 = P(Q2 K2^T s)
-        out = (A1 - lambda * A2) V
-
-    Both streams multiply the same ``V``, so the operator applied to the values is
-    the single matrix ``A1 - lambda * A2``. Its rows sum to ``1 - lambda`` rather
-    than ``1``: the mechanism is deliberately **not** a convex combination, and that
-    is the point. Any key ``j`` that both streams attend to equally contributes
-    ``(1 - lambda) * A1_ij``, i.e. is attenuated, while a key that only the first
-    stream selects keeps its full weight. Common-mode attention — the diffuse,
-    context-independent mass that ordinary softmax attention spreads over irrelevant
-    tokens — is therefore subtracted out, in exact analogy to a differential
-    amplifier rejecting common-mode voltage.
-
-    The mixing coefficient is scheduled by depth::
-
-        lambda(l) = clip( (0.8 - 0.6 * exp(-0.3 * max(l - 1, 0))) * lambda_learned,
-                          0.1, 0.9 )
-
-    which starts shallow layers near 0.2 and saturates deep layers near 0.8, so
-    cancellation strengthens with depth. The clip is a training-stability guard: at
-    ``lambda -> 1`` the operator's rows sum to zero and the residual stream loses its
-    DC component.
+    A1  = P(Q1 K1^T s) ,   A2 = P(Q2 K2^T s)
+    out = (A1 - lambda * A2) V
 
 References:
-    Ye, T., Dong, L., Xia, Y., Sun, Y., Zhu, Y., Huang, G., & Wei, F.
-    "DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context
-    while canceling noise". (https://arxiv.org/abs/2410.05258)
-
-    Vaswani et al. (2017). "Attention Is All You Need". NeurIPS.
-    (https://arxiv.org/abs/1706.03762)
+    - Ye et al., 2024. Differential Transformer: Amplifying attention to the
+      relevant context while canceling noise.
+      (https://arxiv.org/abs/2410.05258)
+    - Vaswani et al., 2017. Attention Is All You Need. NeurIPS.
+      (https://arxiv.org/abs/1706.03762)
+    - Martins and Astudillo, 2016. From Softmax to Sparsemax: A Sparse Model of
+      Attention and Multi-Label Classification. (the alternative normalizations
+      the pluggable ``ProbabilityOutput`` makes reachable)
+      (https://arxiv.org/abs/1602.02068)
+    - Henry et al., 2020. Query-Key Normalization for Transformers. (the optional
+      QK-norm hook) (https://arxiv.org/abs/2010.04245)
 """
 
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -82,9 +78,10 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms import create_normalization_layer
+
 from .common import apply_attention_mask, compute_attention_scale
-from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -92,24 +89,19 @@ from ..norms.factory import create_normalization_layer
 @keras.saving.register_keras_serializable()
 class DifferentialMultiHeadAttention(keras.layers.Layer):
     """
-    Differential multi-head attention mechanism with customizable probability
-    normalization and optional QK-norm.
+    Differential multi-head attention with pluggable normalization and optional QK-norm.
 
-    This layer implements differential attention using two parallel manual
-    scaled-dot-product-attention (SDPA) streams. It computes their weighted
-    difference to amplify relevant context while canceling noise. The key
-    innovation is the learnable lambda parameter that balances the contribution
-    of the two attention mechanisms.
+    Two parallel manual scaled-dot-product-attention streams whose weighted
+    difference amplifies relevant context and cancels noise:
+    ``Attention_diff = SDPA1(x) - lambda * SDPA2(x)``. The first stream captures
+    the primary patterns, the second identifies the diffuse common-mode
+    allocation, and ``lambda`` — scheduled by depth, scaled by a learned parameter
+    — controls how much of it is subtracted.
 
-    The differential attention is computed as:
-    ``Attention_diff = SDPA1(x) - lambda * SDPA2(x)``
-    where SDPA1 captures primary patterns, SDPA2 identifies noise, and lambda
-    controls the noise cancellation strength.
-
-    Each stream's softmax is replaced by an instance of :class:`ProbabilityOutput`
-    (``self.attn_prob_1`` / ``self.attn_prob_2``), enabling arbitrary probability
-    types (softmax / sparsemax / threshmax / adaptive). Two separate instances are
-    used so that per-site debugging and weight inspection remains
+    Each stream's softmax is an instance of :class:`ProbabilityOutput`
+    (``self.attn_prob_1`` / ``self.attn_prob_2``), so any probability type
+    (softmax / sparsemax / threshmax / adaptive) can be used. Two separate
+    instances are constructed so per-site debugging and weight inspection stay
     straightforward.
 
     **[EXTRA CALL ARGUMENT — intentional, frozen]** ``call()`` takes an extra
@@ -136,53 +128,66 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────┐
-        │              DifferentialMultiHeadAttention             │
-        │                                                         │
-        │  Input [B, L, D]                                        │
-        │         │                                               │
-        │         ▼                                               │
-        │   5 separate Dense -> Q1, K1, Q2, K2, V  (V is SHARED   │
-        │   by both streams; there is NO fused QKV matmul)        │
-        │         │                                               │
-        │   ┌─────┴───────────────┬──────────────────┐            │
-        │   ▼                     ▼                  ▼            │
-        │  Q1,K1               Q2,K2                 V            │
-        │   │                     │                  │            │
-        │   ▼                     ▼                  │            │
-        │ optional q/k_norm_1  optional q/k_norm_2   │            │
-        │   │                     │                  │            │
-        │   ▼                     ▼                  │            │
-        │ scores1 = Q1@K1^T/√d   scores2 = Q2@K2^T/√d│            │
-        │   │                     │                  │            │
-        │   ▼                     ▼                  │            │
-        │ [+ attention_mask]   [+ attention_mask]    │            │
-        │  (one mask, both streams; keep-predicate)  │            │
-        │   │                     │                  │            │
-        │   ▼                     ▼                  │            │
-        │ attn_prob_1          attn_prob_2           │            │
-        │   │                     │                  │            │
-        │   ▼                     ▼                  │            │
-        │ attn_dropout_1       attn_dropout_2 (opt)  │            │
-        │   │                     │                  │            │
-        │   └──── @V ──┐   ┌── @V ┘                  │            │
-        │              ▼   ▼                                      │
-        │           out1   out2                                   │
-        │              │   │                                      │
-        │              └── - lambda * ──┐                         │
-        │                               │                         │
-        │                               ▼                         │
-        │                     Differential Output                 │
-        │                               │                         │
-        │                               ▼                         │
-        │                        Output Projection                │
-        │                               │                         │
-        │                               ▼                         │
-        │                            Dropout                      │
-        │                               │                         │
-        │                               ▼                         │
-        │                       Output [B, L, D]                  │
-        └─────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────┐
+        │  Input [B, L, D]                     │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  5 separate Dense → Q1, K1, Q2, K2, V                        │
+        │    V is SHARED by both streams; there is NO fused QKV matmul  │
+        │    each projection is [B, L, num_heads · head_dim]            │
+        └───────┬──────────────────────┬───────────────────────┬───────┘
+                ▼                      ▼                       │
+             Q1, K1                 Q2, K2                      │  V
+                ▼                      ▼                        │
+        ┌───────────────────┐  ┌───────────────────┐            │
+        │ q_norm_1/k_norm_1 │  │ q_norm_2/k_norm_2 │  optional  │
+        └───────┬───────────┘  └───────┬───────────┘            │
+                ▼                      ▼                        │
+        ┌───────────────────┐  ┌───────────────────┐            │
+        │ Q1@K1ᵀ / √d_head  │  │ Q2@K2ᵀ / √d_head  │            │
+        └───────┬───────────┘  └───────┬───────────┘            │
+                ▼                      ▼                        │
+        ┌──────────────────────────────────────────┐            │
+        │  + attention_mask (ONE mask, both streams,│           │
+        │    keep-predicate semantics)              │           │
+        └───────┬──────────────────────┬───────────┘            │
+                ▼                      ▼                        │
+        ┌───────────────────┐  ┌───────────────────┐            │
+        │ attn_prob_1       │  │ attn_prob_2       │            │
+        │ attn_dropout_1    │  │ attn_dropout_2    │  optional  │
+        └───────┬───────────┘  └───────┬───────────┘            │
+                └────── @V ────┐  ┌─── @V ─────────────────────-┘
+                               ▼  ▼
+                            out1   out2         both [B, H, L, D_h]
+                               │    │
+                               ▼    ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  diff = out1 − lambda · out2                                 │
+        │    lambda = clip((0.8 − 0.6·exp(−0.3·max(l−1,0)))·λ_learned, │
+        │                  0.1, 0.9)                                   │
+        │    rows of (A1 − lambda·A2) sum to 1 − lambda, NOT to 1      │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  merge heads → [B, L, H · D_h]       │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  proj: Dense(dim) → dropout          │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output [B, L, D]                    │
+        └──────────────────────────────────────┘
+
+    **Lambda schedule by depth:**
+
+    .. code-block:: text
+
+        layer_idx    0      1      2      4      8     16     ∞
+        lambda    0.200  0.200  0.356  0.530  0.720  0.797  0.800
+                  (times the learned scalar, then clipped to [0.1, 0.9])
 
     :param dim: Integer, input and output dimension. Must be positive and should be
         divisible by num_heads for optimal performance.
@@ -242,6 +247,46 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         underlying exception is logged and re-raised as a ``ValueError``.
     :raises ValueError: From ``build()``, if the input is not 3D or its last
         dimension does not match ``dim``.
+
+    Input shape:
+        3D tensor with shape ``(batch_size, sequence_length, dim)``. The optional
+        ``attention_mask`` may be ``(batch, kv_seq)``, ``(batch, q_seq, kv_seq)`` or
+        ``(batch, num_heads, q_seq, kv_seq)``, in keep-predicate semantics, and is
+        applied to BOTH streams.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, sequence_length, dim)`` — unchanged
+        from the input, since the output projection maps
+        ``num_heads * head_dim`` back to ``dim``.
+
+    Example:
+        >>> attn = DifferentialMultiHeadAttention(dim=512, num_heads=8, head_dim=64)
+        >>> x = keras.random.normal((2, 128, 512))
+        >>> y = attn(x, training=False)                 # (2, 128, 512)
+        >>>
+        >>> # A layer deep in a stack passes its own depth
+        >>> y = attn(x, layer_idx=11, training=False)
+        >>>
+        >>> # Sparse per-stream normalization plus QK-norm
+        >>> attn = DifferentialMultiHeadAttention(
+        ...     dim=512, num_heads=8, head_dim=64,
+        ...     probability_type="sparsemax", qk_norm_type="rms_norm",
+        ... )
+
+    Note:
+        ``head_dim`` is required and independent of ``dim``: this layer performs no
+        ``dim % num_heads`` check, and ``num_heads * head_dim`` need not equal
+        ``dim``. The output projection reconciles the two.
+
+    Attributes:
+        q1_dense, k1_dense, q2_dense, k2_dense: Per-stream Q/K projections.
+        v_dense: The single SHARED value projection.
+        proj: Output projection back to ``dim``.
+        attn_prob_1, attn_prob_2: Per-stream ``ProbabilityOutput`` instances.
+        attn_dropout_1, attn_dropout_2: Per-stream attention dropout, or ``None``.
+        q_norm_1, k_norm_1, q_norm_2, k_norm_2: Optional QK-norms, or ``None``.
+        lambda_param: The learned scalar multiplying the depth schedule.
+        scale: The ``1 / sqrt(head_dim)`` temperature.
     """
 
     def __init__(
@@ -263,7 +308,11 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         activity_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the differential multi-head attention layer."""
+        """Validate the configuration and create every sub-layer.
+
+        ``lambda_param`` is the only weight this layer owns directly and is created
+        in :meth:`build`. See the class docstring for the parameter reference.
+        """
         super().__init__(activity_regularizer=activity_regularizer, **kwargs)
 
         # Validate inputs
@@ -324,15 +373,6 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         self._proj_dim = self.num_heads * self.head_dim
 
         # Scale factor for scaled dot-product attention.
-        # stdlib math.sqrt (Python float), not ops.sqrt; see D-002 in
-        # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
-        #
-        # R13: was written out as `1.0 / math.sqrt(float(self.head_dim))`, which is
-        # the shared helper's body character-for-character — the swap is a rename,
-        # not a numerics change. Re-confirmed with `.hex()` across 27 realistic head
-        # dims (1..512) rather than trusted by inspection. Still a Python float
-        # computed in `__init__`, never in `call()`, per
-        # `plan_2026-06-14_33b77a7a/D-002`.
         self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
@@ -423,15 +463,18 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         self.lambda_param = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and create the lambda parameter weight.
+        """Create the lambda parameter and explicitly build every sub-layer.
 
-        Creates the learnable lambda parameter and explicitly builds all sub-layers
-        for robust serialization following modern Keras 3 patterns.
+        Each sub-layer is built by hand, at the shape it will actually see — the
+        score shape for the probability layers and attention dropout, the per-head
+        shape for the QK-norms, and ``(B, L, num_heads · head_dim)`` for the output
+        projection. Weight restoration requires those variables to already exist.
 
         :param input_shape: Shape tuple of the input tensor, expected as
             ``(batch_size, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 3, or if its last
+            dimension does not equal ``dim``.
         """
         if self.built:
             return
@@ -493,12 +536,13 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def get_lambda(self, layer_idx: int = 0) -> keras.KerasTensor:
-        """
-        Compute the lambda value with layer-dependent adaptation.
+        """Compute the mixing coefficient for a given depth.
 
-        The lambda parameter is adapted based on layer depth following the paper's
-        initialization strategy: ``lambda = 0.8 - 0.6 * exp(-0.3 * (layer_idx - 1))``.
-        The learned ``lambda_param`` is then applied as a multiplicative factor.
+        The depth schedule ``0.8 - 0.6 * exp(-0.3 * (layer_idx - 1))`` follows the
+        paper's initialization strategy; the learned ``lambda_param`` multiplies
+        it, and the result is clipped to ``[0.1, 0.9]`` for stability — at
+        ``lambda -> 1`` the differential operator's rows sum to zero and the
+        residual stream loses its DC component.
 
         :param layer_idx: Integer, index of the layer in the network stack (0-based).
             Used to compute layer-dependent lambda initialization.
@@ -508,56 +552,19 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             ``lambda_param`` itself). :meth:`call` casts it to the dtype of the
             attention streams before combining them.
         :rtype: keras.KerasTensor
-
-        .. note::
-            **FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b).** The schedule used
-            to be hard-coded to ``float32`` (``ops.cast(layer_idx, "float32")``),
-            which made this layer unable to run under ANY non-``float32`` policy,
-            with or without a mask:
-
-            * under ``float64`` the multiply on the next line raised
-              ``InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
-              expected to be a float tensor but is a double tensor``, because
-              ``lambda_param`` is created in ``variable_dtype`` (``float64``);
-            * under ``mixed_float16`` it survived here but then raised at
-              ``out1 - lambda_val * out2`` in :meth:`call`, with ``... but is a half
-              tensor``.
-
-            The schedule is now evaluated in ``variable_dtype`` — the dtype
-            ``lambda_param`` actually has, so it is ``float32`` under both
-            ``float32`` and ``mixed_float16`` (bit-identical to the old behavior)
-            and ``float64`` under a ``float64`` policy (full precision, rather than
-            a ``float32`` schedule silently truncating a ``float64`` parameter).
-            Do NOT "simplify" this to ``self.compute_dtype``: under
-            ``mixed_float16`` that would evaluate the schedule in ``float16`` and
-            round the clip bounds, changing the layer's numerics for no benefit.
         """
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-016
-        # Evaluate the whole schedule in the dtype `lambda_param` actually has.
-        #
-        # WHAT NOT TO DO:
-        #   * Do NOT restore the hard-coded `"float32"`. It made this layer unable
-        #     to run under `mixed_float16` OR `float64` at all, with or without a
-        #     mask (see the note in this method's docstring for both verbatim
-        #     raises).
-        #   * Do NOT use `self.compute_dtype` instead. Under `mixed_float16` that
-        #     evaluates the schedule in float16 and rounds the 0.1 / 0.9 clip
-        #     bounds, changing the number this layer computes for no benefit. The
-        #     narrowing to the compute dtype belongs at the ONE place the value is
-        #     consumed, in `call()`.
-        # See decisions.md D-016.
         dtype = self.variable_dtype
 
         # Layer-dependent initialization following the paper
         # lambda_init = 0.8 - 0.6*exp(-0.3*(layer_idx - 1))
-        layer_factor = ops.cast(layer_idx, dtype=dtype)
-        exp_term = ops.exp(-0.3 * ops.maximum(layer_factor - 1.0, 0.0))
+        layer_factor = keras.ops.cast(layer_idx, dtype=dtype)
+        exp_term = keras.ops.exp(-0.3 * keras.ops.maximum(layer_factor - 1.0, 0.0))
         layer_dependent_init = 0.8 - 0.6 * exp_term
 
         # Apply learned lambda parameter as multiplicative factor
         # Clip to ensure training stability
-        lambda_val = ops.clip(
-            layer_dependent_init * ops.cast(self.lambda_param[0], dtype),
+        lambda_val = keras.ops.clip(
+            layer_dependent_init * keras.ops.cast(self.lambda_param[0], dtype),
             0.1,
             0.9,
         )
@@ -569,8 +576,11 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         scores: keras.KerasTensor,
         attention_mask: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """
-        Apply attention mask to scores tensor.
+        """Broadcast the mask up to rank 4 and apply it to the scores.
+
+        A rank-2 mask is treated as a padding mask over keys and a rank-3 mask as a
+        full per-query mask; both are expanded on the head axis. Masking itself is
+        delegated to the shared helper, which owns the fp16-safe form.
 
         :param scores: Attention scores of shape ``(batch, num_heads, q_seq, kv_seq)``.
         :type scores: keras.KerasTensor
@@ -580,92 +590,13 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         :type attention_mask: keras.KerasTensor
         :return: Masked scores tensor with same shape as input scores.
         :rtype: keras.KerasTensor
-
-        .. note::
-            **FIXED (plan-2026-07-27T183600-b4ef45f0, step 5).** This used to be the
-            eighth catalogued instance of the systemic fp16 mask-NaN bug in
-            ``layers/attention``: the arithmetic form
-            ``scores + (1.0 - attention_mask) * -1e9`` evaluated in ``scores.dtype``,
-            which under ``mixed_precision.set_global_policy('mixed_float16')`` is
-            ``0 * -inf = NaN`` at every **unmasked** position. It now delegates the
-            bias to :func:`~dl_techniques.layers.attention.common.apply_attention_mask`,
-            which builds it with ``ops.where`` inside
-            :func:`~dl_techniques.layers.attention.common.mask_dtype`, so the product
-            cannot be formed at all.
-
-        .. note::
-            **ALSO FIXED (same plan, step 5b).** A separate dtype defect used to keep
-            this layer from running under ``mixed_float16`` or ``float64`` AT ALL,
-            with or without a mask: :meth:`get_lambda` hard-coded its schedule to
-            ``float32``. That is now evaluated in ``variable_dtype`` and cast to the
-            streams' dtype in :meth:`call`; see the notes at those two sites. All
-            three policies are exercised end-to-end by the mask tests in
-            ``tests/test_layers/test_attention/test_differential_attention.py``.
         """
-        attention_mask = ops.cast(attention_mask, scores.dtype)
+        attention_mask = keras.ops.cast(attention_mask, scores.dtype)
         if len(attention_mask.shape) == 2:
-            attention_mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+            attention_mask = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), 1)
         elif len(attention_mask.shape) == 3:
-            attention_mask = ops.expand_dims(attention_mask, 1)
-        # R13: NOT unified with the sibling `_apply_attention_mask` bodies in
-        # `multi_head_cross_attention.py` / `multi_head_latent_attention.py` /
-        # `group_query_attention.py`. Those were diffed line-by-line in step 4 of the
-        # normalization plan and found to differ in cast order and rank-probe form,
-        # so a shared helper would change op ordering somewhere. Left local; only the
-        # BIAS is shared now, and the cast/expand lines above are byte-identical.
-        #
-        # THIS SITE'S MASK POLARITY, passed through verbatim: `attention_mask` is a
-        # `1 = keep` predicate (already cast to the scores dtype on its own untouched
-        # line above), so it IS the keep predicate `apply_attention_mask` wants. Do
-        # NOT "normalize" it into a `> 0` comparison or invert it — the helper
-        # performs no polarity inference by design, so an inversion here raises
-        # nothing, changes no shape and stays finite; the layer would just attend to
-        # the padding. `TestDifferentialAttentionMaskBiasExpression::
-        # test_masked_positions_receive_no_probability_mass` is the only guard that
-        # can see it.
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
-        # in the compute dtype (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE`
-        # is `-inf` again. That is deliberate and is NOT the bug being fixed: the bug
-        # was the `0 * -inf` PRODUCT of the arithmetic form, which `ops.where` inside
-        # `mask_dtype(...)` cannot form at all, and a row keeping >= 1 key softmaxes
-        # correctly with `-inf` entries. MEASURED on this method directly at
-        # (B=2, H=4, N=64) under `mixed_float16`: the pre-fix expression gave
-        # 32768/32768 non-finite attention weights for an ALL-ONES mask (one that
-        # masks nothing), for padding and for causal; float32 and float64 gave 0.
-        # Do NOT "improve" this to `out_dtype=None`: the next consumer is
-        # `attn_prob`, a Keras layer with autocasting ON, which drags a float32
-        # tensor straight back to the compute dtype.
-        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-        # The fully-masked-row rescue arrives via `apply_attention_mask`'s DEFAULT
-        # `rescue_axis=-1`: a query row that keeps NOTHING is treated as keeping
-        # EVERYTHING, so the all-`-inf` row is never FORMED and no NaN gradient is
-        # created either.
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-        # The axis is DERIVED from this layer's own `probability_config` rather than
-        # left to the helper's `-1` default. BOTH streams' softmaxes (`attn_prob_1` /
-        # `attn_prob_2`) are built from that one config, so one derivation covers both.
-        # `ProbabilityOutput` reads its softmax `axis` from `type_config`
-        # (`activations/probability_output.py:180`) and this layer forwards
-        # `probability_config` VERBATIM, so a caller can move the reduction axis and the
-        # pre-step-10 "checked, not assumed" claim held only for the DEFAULT config.
-        # MEASURED at the sibling `gated_attention` under `mixed_float16` with
-        # `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192 non-finite.
-        # WHAT NOT TO DO: do NOT restore a bare `-1` (correct only while the caller
-        # leaves the config alone) and do NOT read this as the rank/shape INFERENCE the
-        # D-009 anchor in `common.py` forbids — this reads the site's own declared
-        # config. The full argument lives at the D-017 anchors in `common.py` and
-        # `gated_attention.py`. See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
-        #
-        # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" —
-        # the user ruled the finite-garbage semantics package-wide on 2026-07-28, and
-        # opting out also restores the NaN GRADIENT on that row. The full argument
-        # lives at the D-009 / D-008 anchors in `common.py`.
-        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+            attention_mask = keras.ops.expand_dims(attention_mask, 1)
+
         return apply_attention_mask(
             scores,
             attention_mask,
@@ -679,9 +610,19 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         batch_size: keras.KerasTensor,
         seq_len: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Reshape a projected tensor ``(B, L, H*D_h)`` to ``(B, H, L, D_h)``."""
-        x = ops.reshape(x, (batch_size, seq_len, self.num_heads, self.head_dim))
-        return ops.transpose(x, (0, 2, 1, 3))
+        """Reshape a projected tensor ``(B, L, H*D_h)`` to ``(B, H, L, D_h)``.
+
+        :param x: A projection output of shape ``(B, L, num_heads * head_dim)``.
+        :type x: keras.KerasTensor
+        :param batch_size: Dynamic batch size, from ``keras.ops.shape``.
+        :type batch_size: keras.KerasTensor
+        :param seq_len: Dynamic sequence length, from ``keras.ops.shape``.
+        :type seq_len: keras.KerasTensor
+        :return: The same values as ``(B, num_heads, L, head_dim)``.
+        :rtype: keras.KerasTensor
+        """
+        x = keras.ops.reshape(x, (batch_size, seq_len, self.num_heads, self.head_dim))
+        return keras.ops.transpose(x, (0, 2, 1, 3))
 
     def _stream(
         self,
@@ -695,20 +636,42 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor],
         training: Optional[bool],
     ) -> keras.KerasTensor:
-        """
-        Run a single SDPA stream and return ``(B, H, L, D_h)`` context.
+        """Run a single SDPA stream and return its ``(B, H, L, D_h)`` context.
 
-        Applies optional QK-norm, computes scaled dot-product scores, optional
-        mask, calls the supplied ``ProbabilityOutput`` to normalize the scores,
-        applies optional attention-weight dropout, and returns ``attn @ v``.
+        Applies optional QK-norm, computes scaled dot-product scores, applies the
+        optional mask, normalizes through the supplied ``ProbabilityOutput``,
+        applies optional attention-weight dropout, and returns ``attn @ v``. Both
+        streams call this with the SAME ``v``, which is what makes their difference
+        a cancellation.
+
+        :param q: Per-head queries, ``(B, H, L, D_h)``.
+        :type q: keras.KerasTensor
+        :param k: Per-head keys, ``(B, H, L, D_h)``.
+        :type k: keras.KerasTensor
+        :param v: Per-head values, ``(B, H, L, D_h)``. Shared between streams.
+        :type v: keras.KerasTensor
+        :param q_norm: This stream's query norm, or ``None``.
+        :type q_norm: Optional[keras.layers.Layer]
+        :param k_norm: This stream's key norm, or ``None``.
+        :type k_norm: Optional[keras.layers.Layer]
+        :param attn_prob: This stream's probability normalization layer.
+        :type attn_prob: ProbabilityOutput
+        :param attn_dropout_layer: This stream's attention dropout, or ``None``.
+        :type attn_dropout_layer: Optional[keras.layers.Dropout]
+        :param attention_mask: Optional mask, already in the caller's raw rank.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Keras training flag.
+        :type training: Optional[bool]
+        :return: The stream's context, ``(B, H, L, D_h)``.
+        :rtype: keras.KerasTensor
         """
         if q_norm is not None:
             q = q_norm(q, training=training)
         if k_norm is not None:
             k = k_norm(k, training=training)
 
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
-        scores = scores * ops.cast(self.scale, q.dtype)
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
+        scores = scores * keras.ops.cast(self.scale, q.dtype)
 
         if attention_mask is not None:
             scores = self._apply_attention_mask(scores, attention_mask)
@@ -718,7 +681,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         if attn_dropout_layer is not None:
             attn = attn_dropout_layer(attn, training=training)
 
-        return ops.matmul(attn, v)
+        return keras.ops.matmul(attn, v)
 
     def call(
         self,
@@ -727,21 +690,21 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         layer_idx: int = 0,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Apply differential attention mechanism.
+        """Apply the differential attention mechanism.
 
-        Computes the differential attention as:
-        ``Attention_diff = SDPA1(x) - lambda * SDPA2(x)``
-        where SDPA1 captures primary attention patterns, SDPA2 identifies noise
-        patterns, and lambda controls the balance between them.
+        Computes ``Attention_diff = SDPA1(x) - lambda * SDPA2(x)``, where the first
+        stream captures the primary attention patterns, the second identifies the
+        common-mode allocation, and ``lambda`` — from the depth schedule — controls
+        how much of it is cancelled.
 
         :param inputs: Input tensor of shape ``(batch_size, sequence_length, dim)``.
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional attention mask tensor. Can be 2D, 3D, or 4D
-            for different masking strategies.
+            for different masking strategies. One mask serves both streams.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Integer, index of the layer in the network stack (0-based).
-            Used for layer-dependent lambda computation. Defaults to 0.
+            Used for layer-dependent lambda computation. Defaults to 0. NOT stored
+            in the config — a stack must pass its own depth on every call.
         :type layer_idx: int
         :param training: Optional boolean indicating whether in training mode.
         :type training: Optional[bool]
@@ -749,8 +712,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             applying differential attention and output projection.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # Project to Q1, K1, Q2, K2, V and reshape to per-head format.
         q1 = self._project_to_heads(self.q1_dense(inputs), batch_size, seq_len)
@@ -775,22 +738,14 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         )
 
         # Compute layer-dependent lambda value (same schedule as original).
-        #
-        # FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b): `get_lambda` returns
-        # the schedule in `variable_dtype`, which under `mixed_float16` is
-        # `float32` while `out2` is `float16`. Combining them without this cast
-        # raised `InvalidArgumentError: cannot compute Mul as input #1(zero-based)
-        # was expected to be a float tensor but is a half tensor` — with NO mask
-        # supplied, so the layer could not run under mixed precision at all. The
-        # cast is an identity under `float32` and `float64`.
-        lambda_val = ops.cast(self.get_lambda(layer_idx), out2.dtype)
+        lambda_val = keras.ops.cast(self.get_lambda(layer_idx), out2.dtype)
 
         # Differential attention: SDPA1 - lambda*SDPA2
         diff = out1 - lambda_val * out2
 
         # Merge heads: (B, H, L, D_h) -> (B, L, H*D_h)
-        diff = ops.transpose(diff, (0, 2, 1, 3))
-        diff = ops.reshape(diff, (batch_size, seq_len, self._proj_dim))
+        diff = keras.ops.transpose(diff, (0, 2, 1, 3))
+        diff = keras.ops.reshape(diff, (batch_size, seq_len, self._proj_dim))
 
         # Apply output projection and dropout
         output = self.proj(diff, training=training)
@@ -801,7 +756,10 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape, same as input shape for attention layers.
+        """Return the output shape, which equals the input shape.
+
+        The output projection maps ``num_heads * head_dim`` back to ``dim``, so the
+        layer is shape-preserving even when those two differ.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -812,6 +770,9 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
+
+        ``layer_idx`` is deliberately absent: it is a ``call`` argument, so a
+        reloaded layer defaults to ``layer_idx=0`` unless the caller passes it.
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]

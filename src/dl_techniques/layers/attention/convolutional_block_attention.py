@@ -1,51 +1,58 @@
 """
-The Convolutional Block Attention Module (CBAM), a lightweight attention block for CNNs.
+The Convolutional Block Attention Module (CBAM): channel attention then spatial
+attention, applied in sequence.
 
-CBAM infers attention maps along two separate dimensions — channel and spatial —
-and applies them sequentially to the input feature map for adaptive feature
-refinement. The key architectural choice is the ordering: channel attention runs
-first, so the spatial stage operates on features that have *already* been
-recalibrated for channel-wise importance.
+A convolutional feature map has three axes worth attending over, and a dense
+attention map across all of them would cost ``O(H*W*C)`` parameters — more than the
+convolution it is meant to refine. CBAM's premise is that the two questions being
+asked are separable: WHICH feature detectors matter here, and WHERE in the image
+they matter. Factorizing the 3D problem into a per-channel vector and a per-location
+map drops the cost to ``O(C^2/r + k^2)``, small enough to insert after every block
+of a backbone, while still expressing both kinds of selectivity.
+
+The ordering is the substantive design choice, and it is sequential rather than
+parallel. Channel attention runs first, so the spatial stage sees features that have
+already been recalibrated for channel-wise importance — it decides where to look in
+a map whose channels have been reweighted, not in the raw one. Running them in
+parallel and summing would ask both questions of the same unrefined input, which
+loses that conditioning; the paper measures the sequential order, channel-first, as
+the better arrangement.
+
+Each stage aggregates with BOTH average and max pooling, over its own axes. The
+average carries global context; the max reports the strongest single response, which
+survives when a signal is concentrated rather than spread. Channel attention pools
+over ``(H, W)`` and feeds both descriptors through a SHARED bottleneck MLP before
+summing — shared, so the two descriptors are scored by the same function, and
+bottlenecked at ratio ``r`` so the module stays cheap. Spatial attention pools over
+the channel axis, concatenates the two resulting 2D maps, and convolves them with a
+single large kernel, because saliency is a neighbourhood property.
 
 This module is deliberately a **composition, not a re-implementation**. It owns no
 attention math of its own: the two stages are the package's existing
-:class:`~dl_techniques.layers.attention.channel_attention.ChannelAttention` and
-:class:`~dl_techniques.layers.attention.spatial_attention.SpatialAttention` layers,
-instantiated as sub-layers. See the ``[REUSE]`` note on :class:`CBAM` below.
+`ChannelAttention` and `SpatialAttention` layers, held as sub-layers, and `call` is
+just the two broadcasting multiplies that wire them together. `channels` is
+forwarded to the channel stage only, because `SpatialAttention` fully reduces the
+channel axis before its convolution and is therefore channel-count agnostic.
 
-Architecture:
-    The block factorizes 3D attention over ``(H, W, C)`` into two cheap 1D/2D
-    problems applied back to back:
+Foundational mathematics::
 
-    1.  **Channel Attention (`Mc`) — "what" matters.** Spatial information is
-        aggregated by average-pooling and max-pooling across the spatial
-        dimensions ``(H x W)``, producing two context descriptors per channel.
-        Both are processed by a *shared* bottleneck MLP, merged by element-wise
-        summation, and passed through a sigmoid. The result encodes the
-        inter-channel relationship of features.
+    F'  = M_c(F)  (x) F
+    F'' = M_s(F') (x) F'
 
-    2.  **Spatial Attention (`Ms`) — "where" matters.** Operating on the
-        channel-refined features, this stage aggregates channel information at
-        each spatial location via average- and max-pooling along the channel
-        axis. The two resulting 2D maps are concatenated and passed through a
-        single convolution, then a sigmoid, highlighting the most salient
-        spatial regions.
-
-Foundational Mathematics:
-    The complete CBAM operation is a sequential (not parallel) multiplication::
-
-        F'  = M_c(F)  ⊗ F
-        F'' = M_s(F') ⊗ F'
-
-    where ``⊗`` is element-wise multiplication with broadcasting: ``M_c`` has
-    shape ``(B, 1, 1, C)`` and broadcasts over space, while ``M_s`` has shape
-    ``(B, H, W, 1)`` and broadcasts over channels. Factorizing attention into two
-    sequential, decoupled modules is what makes CBAM cheap: it costs
-    ``O(C^2/r + k^2)`` parameters rather than the ``O(H*W*C)`` of a dense 3D map.
+where ``(x)`` is element-wise multiplication with broadcasting: ``M_c`` is
+``(B, 1, 1, C)`` and broadcasts over space, ``M_s`` is ``(B, H, W, 1)`` and
+broadcasts over channels. Both gates are sigmoid-bounded, so each stage can only
+attenuate.
 
 References:
-    - Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM: Convolutional
-      Block Attention Module". ECCV. (https://arxiv.org/abs/1807.06521)
+    - Woo et al., 2018. CBAM: Convolutional Block Attention Module. ECCV.
+      (https://arxiv.org/abs/1807.06521)
+    - Hu et al., 2018. Squeeze-and-Excitation Networks. (the channel-attention
+      ancestor CBAM's first stage extends with max pooling)
+      (https://arxiv.org/abs/1709.01507)
+    - Park et al., 2018. BAM: Bottleneck Attention Module. (the same authors'
+      PARALLEL-branch variant, which CBAM's sequential ordering is measured
+      against) (https://arxiv.org/abs/1807.06514)
 """
 
 # ---------------------------------------------------------------------
@@ -66,14 +73,14 @@ from .spatial_attention import SpatialAttention
 @keras.saving.register_keras_serializable()
 class CBAM(keras.layers.Layer):
     """
-    Convolutional Block Attention Module for sequential channel-spatial feature refinement.
+    CBAM: sequential channel-then-spatial feature refinement.
 
-    Implements the CBAM attention mechanism that sequentially applies channel
-    and spatial attention to input feature maps. Channel attention first
-    recalibrates "what" features matter, then spatial attention refines "where"
-    to focus. The complete operation is
-    ``F'' = M_s(M_c(F) * F) * (M_c(F) * F)``, where ``M_c`` and ``M_s``
-    are channel and spatial attention maps respectively.
+    Applies channel attention and then spatial attention to a convolutional
+    feature map. Channel attention first recalibrates "what" features matter, then
+    spatial attention refines "where" to focus — in that order, so the spatial
+    stage operates on already-recalibrated features. The complete operation is
+    ``F'' = M_s(M_c(F) * F) * (M_c(F) * F)``, where ``M_c`` and ``M_s`` are the
+    channel and spatial attention maps.
 
     **[REUSE]** This layer contains **no attention math of its own**. Both stages
     are the package's existing standalone layers, held as sub-layers:
@@ -96,28 +103,50 @@ class CBAM(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────┐
-        │                          CBAM                           │
-        │                                                         │
-        │   Input F [B, H, W, C]                                  │
-        │          │                                              │
-        │          ▼                                              │
-        │   ┌─────────────────────────────────────────────┐       │
-        │   │      Channel Attention   M_c: [B,1,1,C]     │       │
-        │   └──────────────────────┬──────────────────────┘       │
-        │                          ▼                              │
-        │             F' = M_c(F) ⊗ F                             │
-        │                          │                              │
-        │                          ▼                              │
-        │   ┌─────────────────────────────────────────────┐       │
-        │   │      Spatial Attention   M_s: [B,H,W,1]     │       │
-        │   └──────────────────────┬──────────────────────┘       │
-        │                          ▼                              │
-        │            F'' = M_s(F') ⊗ F'                           │
-        │                          │                              │
-        │                          ▼                              │
-        │   Output [B, H, W, C]                                   │
-        └─────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Input F [B, H, W, C]                                        │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ├──────────────────────────────┐
+                        ▼                              │
+        ┌──────────────────────────────────────────┐   │
+        │  channel_attention → M_c [B, 1, 1, C]    │   │
+        │    pool over (H, W): avg AND max         │   │
+        │    → SHARED bottleneck MLP (ratio r)     │   │
+        │    → sum → sigmoid                       │   │
+        │    "WHAT matters"                        │   │
+        └──────────────────┬───────────────────────┘   │
+                           ▼                           │
+                          (×)◄─────────────────────────┘
+                           │  broadcast over space
+                           ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  F' [B, H, W, C]  — channel-refined                          │
+        └───────────────┬──────────────────────────────┬───────────────┘
+                        ▼                              │
+        ┌──────────────────────────────────────────┐   │
+        │  spatial_attention → M_s [B, H, W, 1]    │   │
+        │    pool over C: avg AND max → concat     │   │
+        │    → Conv2D(1 filter, k×k) → sigmoid     │   │
+        │    "WHERE it matters" — computed from F',│   │
+        │    NOT from F: that conditioning is why  │   │
+        │    the order is sequential, not parallel │   │
+        └──────────────────┬───────────────────────┘   │
+                           ▼                           │
+                          (×)◄─────────────────────────┘
+                           │  broadcast over channels
+                           ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output F'' [B, H, W, C] — shape unchanged; both gates are   │
+        │  sigmoid-bounded, so each stage can only attenuate           │
+        └──────────────────────────────────────────────────────────────┘
+
+    **Cost:**
+
+    .. code-block:: text
+
+        channel stage   O(C² / r)   the shared MLP bottleneck
+        spatial stage   O(k²)       one k×k filter over a 2-channel map
+        dense 3D map    O(H·W·C)    what the factorization avoids
 
     :param channels: Number of input channels. Must be positive.
     :type channels: int
@@ -151,6 +180,31 @@ class CBAM(keras.layers.Layer):
     :raises ValueError: If ``channels`` is not positive.
     :raises ValueError: If ``ratio`` is not positive.
     :raises ValueError: If ``kernel_size`` is not positive.
+    :raises ValueError: From the sub-layers, if ``channels`` is not divisible by
+        ``ratio`` (raised by :class:`ChannelAttention` during construction) or if
+        ``kernel_size`` is even (raised by :class:`SpatialAttention`).
+
+    Input shape:
+        4D tensor with shape ``(batch_size, height, width, channels)``, where the
+        channel count must equal ``channels``.
+
+    Output shape:
+        4D tensor with shape ``(batch_size, height, width, channels)`` —
+        identical to the input. This layer returns the REFINED features, not the
+        attention maps.
+
+    Example:
+        >>> # Drop-in refinement after a conv block
+        >>> cbam = CBAM(channels=256)
+        >>> feats = keras.random.normal((4, 32, 32, 256))
+        >>> refined = cbam(feats)                     # (4, 32, 32, 256)
+        >>>
+        >>> # Cheaper channel stage, smaller spatial kernel
+        >>> cbam = CBAM(channels=256, ratio=16, kernel_size=3)
+        >>>
+        >>> # Per-stage regularization
+        >>> cbam = CBAM(channels=256,
+        ...             channel_kernel_regularizer=keras.regularizers.L2(1e-4))
     """
 
     def __init__(
@@ -166,6 +220,12 @@ class CBAM(keras.layers.Layer):
         spatial_use_bias: bool = True,
         **kwargs: Any
     ) -> None:
+        """Validate the three cheap invariants and create the two attention stages.
+
+        Everything else is delegated: the ``channel_*`` and ``spatial_*``
+        parameters are forwarded verbatim to the sub-layers, which own their own
+        validation. See the class docstring for the parameter reference.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -217,13 +277,16 @@ class CBAM(keras.layers.Layer):
             name='spatial_attention'
         )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+    def build(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> None:
+        """Build both attention stages explicitly.
 
-        Explicitly builds each sub-layer for robust serialization, ensuring
-        all weight variables exist before weight restoration during model
-        loading.
+        Both stages take the SAME ``input_shape``: the channel stage's map
+        broadcasts rather than reshapes, so the spatial stage still sees a
+        ``(B, H, W, C)`` tensor. Building by hand is what guarantees every weight
+        variable exists before Keras restores a checkpoint into it.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple
@@ -245,6 +308,10 @@ class CBAM(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """
         Apply sequential channel-then-spatial CBAM attention to the input tensor.
+
+        Note that the spatial map is computed from ``channel_refined``, not from
+        ``inputs`` — that conditioning is the whole reason the two stages are
+        sequential rather than parallel.
 
         :param inputs: Input tensor of shape
             ``(batch_size, height, width, channels)``.
@@ -272,9 +339,14 @@ class CBAM(keras.layers.Layer):
 
         return refined_features
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the layer.
+        Return the output shape, which equals the input shape.
+
+        Both stages are multiplicative gates, so neither changes the shape.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple
@@ -286,6 +358,9 @@ class CBAM(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """
         Return the layer configuration for serialization.
+
+        Every constructor argument is included, so both stages are reconstructed
+        from config rather than serialized as sub-layers.
 
         :return: Dictionary containing the complete layer configuration.
         :rtype: dict

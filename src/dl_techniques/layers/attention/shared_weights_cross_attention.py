@@ -59,16 +59,18 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops
 from typing import Any, List, Union, Tuple, Optional, Dict
 
 # ---------------------------------------------------------------------
-# Local imports
+# local imports
 # ---------------------------------------------------------------------
 
-from .common import compute_attention_scale, validate_head_divisibility
-from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms import create_normalization_layer
+from .common import (
+    compute_attention_scale,
+    validate_head_divisibility
+)
 
 # ---------------------------------------------------------------------
 
@@ -261,7 +263,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qk_norm_kwargs = qk_norm_kwargs
 
         # Scale factor for attention scores.
-        # stdlib math.sqrt (Python float), not ops.sqrt; see D-002 in
+        # stdlib math.sqrt (Python float), not keras.ops.sqrt; see D-002 in
         # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
         #
         # R13: the expression that stood here, `1.0 / math.sqrt(float(head_dim))`,
@@ -418,8 +420,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         # Compute Q, K, V for all tokens
         qkv = self.qkv_dense(inputs)  # (batch_size, total_seq_len, dim * 3)
         # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
-        qkv = ops.reshape(qkv, (-1, total_seq_len, 3, self.num_heads, self.head_dim))
-        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, total_seq_len, head_dim)
+        qkv = keras.ops.reshape(qkv, (-1, total_seq_len, 3, self.num_heads, self.head_dim))
+        qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, total_seq_len, head_dim)
 
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -469,46 +471,46 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         # Check for equal-sized modalities for optimization
         if mod_a_len == mod_b_len:
             # Optimized path for equal sizes
-            q_combined = ops.concatenate(q_splits, axis=0)  # Stack batch dims
-            k_swapped = ops.concatenate([k_splits[1], k_splits[0]], axis=0)
-            v_swapped = ops.concatenate([v_splits[1], v_splits[0]], axis=0)
+            q_combined = keras.ops.concatenate(q_splits, axis=0)  # Stack batch dims
+            k_swapped = keras.ops.concatenate([k_splits[1], k_splits[0]], axis=0)
+            v_swapped = keras.ops.concatenate([v_splits[1], v_splits[0]], axis=0)
 
             # Compute attention
-            scores = ops.matmul(q_combined, ops.transpose(k_swapped, (0, 1, 3, 2))) * self.scale
+            scores = keras.ops.matmul(q_combined, keras.ops.transpose(k_swapped, (0, 1, 3, 2))) * self.scale
             attn_weights = self.attn_prob(scores)
 
             if self.dropout_layer is not None:
                 attn_weights = self.dropout_layer(attn_weights, training=training)
 
-            attn_out = ops.matmul(attn_weights, v_swapped)
+            attn_out = keras.ops.matmul(attn_weights, v_swapped)
 
             # Split back and concatenate
-            attn_a, attn_b = ops.split(attn_out, 2, axis=0)
-            combined_out = ops.concatenate([attn_a, attn_b], axis=2)
+            attn_a, attn_b = keras.ops.split(attn_out, 2, axis=0)
+            combined_out = keras.ops.concatenate([attn_a, attn_b], axis=2)
         else:
             # General case for different sizes
             # Modality A attends to Modality B
-            scores_a = ops.matmul(q_splits[0], ops.transpose(k_splits[1], (0, 1, 3, 2))) * self.scale
+            scores_a = keras.ops.matmul(q_splits[0], keras.ops.transpose(k_splits[1], (0, 1, 3, 2))) * self.scale
             attn_weights_a = self.attn_prob(scores_a)
             if self.dropout_layer is not None:
                 attn_weights_a = self.dropout_layer(attn_weights_a, training=training)
-            attn_out_a = ops.matmul(attn_weights_a, v_splits[1])
+            attn_out_a = keras.ops.matmul(attn_weights_a, v_splits[1])
 
             # Modality B attends to Modality A
-            scores_b = ops.matmul(q_splits[1], ops.transpose(k_splits[0], (0, 1, 3, 2))) * self.scale
+            scores_b = keras.ops.matmul(q_splits[1], keras.ops.transpose(k_splits[0], (0, 1, 3, 2))) * self.scale
             attn_weights_b = self.attn_prob(scores_b)
             if self.dropout_layer is not None:
                 attn_weights_b = self.dropout_layer(attn_weights_b, training=training)
-            attn_out_b = ops.matmul(attn_weights_b, v_splits[0])
+            attn_out_b = keras.ops.matmul(attn_weights_b, v_splits[0])
 
             # Combine outputs
-            combined_out = ops.concatenate([attn_out_a, attn_out_b], axis=2)
+            combined_out = keras.ops.concatenate([attn_out_a, attn_out_b], axis=2)
 
         # Reshape and project
         _, _, total_seq_len, _ = combined_out.shape
-        combined_out = ops.transpose(combined_out, (0, 2, 1, 3))
+        combined_out = keras.ops.transpose(combined_out, (0, 2, 1, 3))
         # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
-        combined_out = ops.reshape(combined_out, (-1, total_seq_len, self.dim))
+        combined_out = keras.ops.reshape(combined_out, (-1, total_seq_len, self.dim))
 
         return self.proj_dense(combined_out)
 
@@ -554,27 +556,27 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         v_mod_b_anchor = v[:, :, mod_a_total:mod_a_total + mod_b_anchor, :]  # Only B anchors
 
         # Modality A (anchors + queries) attends to Modality B anchors
-        scores_a = ops.matmul(q_mod_a, ops.transpose(k_mod_b_anchor, (0, 1, 3, 2))) * self.scale
+        scores_a = keras.ops.matmul(q_mod_a, keras.ops.transpose(k_mod_b_anchor, (0, 1, 3, 2))) * self.scale
         attn_weights_a = self.attn_prob(scores_a)
         if self.dropout_layer is not None:
             attn_weights_a = self.dropout_layer(attn_weights_a, training=training)
-        attn_out_a = ops.matmul(attn_weights_a, v_mod_b_anchor)
+        attn_out_a = keras.ops.matmul(attn_weights_a, v_mod_b_anchor)
 
         # Modality B (anchors + queries) attends to Modality A anchors
-        scores_b = ops.matmul(q_mod_b, ops.transpose(k_mod_a_anchor, (0, 1, 3, 2))) * self.scale
+        scores_b = keras.ops.matmul(q_mod_b, keras.ops.transpose(k_mod_a_anchor, (0, 1, 3, 2))) * self.scale
         attn_weights_b = self.attn_prob(scores_b)
         if self.dropout_layer is not None:
             attn_weights_b = self.dropout_layer(attn_weights_b, training=training)
-        attn_out_b = ops.matmul(attn_weights_b, v_mod_a_anchor)
+        attn_out_b = keras.ops.matmul(attn_weights_b, v_mod_a_anchor)
 
         # Combine outputs
-        combined_out = ops.concatenate([attn_out_a, attn_out_b], axis=2)
+        combined_out = keras.ops.concatenate([attn_out_a, attn_out_b], axis=2)
 
         # Reshape and project
         _, _, total_seq_len, _ = combined_out.shape
-        combined_out = ops.transpose(combined_out, (0, 2, 1, 3))
+        combined_out = keras.ops.transpose(combined_out, (0, 2, 1, 3))
         # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
-        combined_out = ops.reshape(combined_out, (-1, total_seq_len, self.dim))
+        combined_out = keras.ops.reshape(combined_out, (-1, total_seq_len, self.dim))
 
         return self.proj_dense(combined_out)
 

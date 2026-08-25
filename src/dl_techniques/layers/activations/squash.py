@@ -46,7 +46,6 @@ References:
 """
 
 import keras
-from keras import ops, backend
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -144,7 +143,7 @@ class SquashLayer(keras.layers.Layer):
 
         # Store configuration
         self.axis = axis
-        self.epsilon = epsilon if epsilon is not None else backend.epsilon()
+        self.epsilon = epsilon if epsilon is not None else keras.backend.epsilon()
 
         logger.debug(f"Initialized SquashLayer with axis={axis}, epsilon={self.epsilon}")
 
@@ -169,15 +168,15 @@ class SquashLayer(keras.layers.Layer):
         """
         # Compute squared L2 norm along specified axis
         # Shape: input_shape with axis dimension reduced to 1
-        squared_norm = ops.sum(
-            ops.square(inputs),
+        squared_norm = keras.ops.sum(
+            keras.ops.square(inputs),
             axis=self.axis,
             keepdims=True
         )
 
         # Compute safe norm to avoid division by zero
         # Add epsilon for numerical stability
-        safe_norm = ops.sqrt(squared_norm + self.epsilon)
+        safe_norm = keras.ops.sqrt(squared_norm + self.epsilon)
 
         # Compute scale factor: ||v||^2 / (1 + ||v||^2)
         # This ensures output norm is in [0, 1)

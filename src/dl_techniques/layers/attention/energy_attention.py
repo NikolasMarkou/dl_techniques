@@ -1,6 +1,4 @@
 """
-Energy Attention for Keras 3.x.
-
 Implements the multi-head *energy* attention of the Energy Transformer (ET), Hoover,
 Liang, Pham, Panda, Strobelt, Zaki, Chau, Krotov, "Energy Transformer", NeurIPS 2023
 (https://arxiv.org/abs/2302.07253), equations (3)-(4).

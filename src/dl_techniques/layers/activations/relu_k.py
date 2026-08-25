@@ -59,7 +59,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
@@ -159,7 +158,7 @@ class ReLUK(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Apply ReLU to get non-negative values: max(0, x)
-        relu_output = ops.maximum(0.0, inputs)
+        relu_output = keras.ops.maximum(0.0, inputs)
 
         # Apply power transformation
         if self.k == 1:
@@ -167,7 +166,7 @@ class ReLUK(keras.layers.Layer):
             return relu_output
         else:
             # Apply power: max(0, x)^k
-            return ops.power(relu_output, float(self.k))
+            return keras.ops.power(relu_output, float(self.k))
 
     def compute_output_shape(
             self,

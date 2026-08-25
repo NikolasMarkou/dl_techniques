@@ -82,10 +82,9 @@ References:
       Network Language Model". AISTATS.
 """
 
-import functools
 import keras
+import functools
 import numpy as np
-from keras import ops
 from typing import Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -667,33 +666,33 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         perm[input_rank - 1] = self._normalized_axis
 
         if self._normalized_axis != input_rank - 1:
-            inputs_transposed = ops.transpose(inputs, perm)
+            inputs_transposed = keras.ops.transpose(inputs, perm)
         else:
             inputs_transposed = inputs
 
         # C3: pull the static feature dim from the kernel rather than from
         # ``inputs.shape[-1]`` which can be ``None`` under symbolic tracing.
         feature_dim = self.kernel.shape[0]
-        inputs_2d = ops.reshape(inputs_transposed, (-1, feature_dim))
+        inputs_2d = keras.ops.reshape(inputs_transposed, (-1, feature_dim))
 
         # --- Step 0b: Optional input normalization (H-2) ---
         # Cosine-basis logits scale linearly with ``||x||``; without
         # normalization the sigmoid saturates and gradient is starved.
         if self.input_normalization == "l2":
-            inv_norm = ops.rsqrt(
-                ops.sum(ops.square(inputs_2d), axis=-1, keepdims=True)
+            inv_norm = keras.ops.rsqrt(
+                keras.ops.sum(ops.square(inputs_2d), axis=-1, keepdims=True)
                 + self._BASIS_NORM_EPS
             )
             inputs_2d = inputs_2d * inv_norm
         elif self.input_normalization == "rms":
-            inv_norm = ops.rsqrt(
-                ops.mean(ops.square(inputs_2d), axis=-1, keepdims=True)
+            inv_norm = keras.ops.rsqrt(
+                keras.ops.mean(ops.square(inputs_2d), axis=-1, keepdims=True)
                 + self._BASIS_NORM_EPS
             )
             inputs_2d = inputs_2d * inv_norm
 
         # --- Step 1: Decision logits ---
-        decision_logits = ops.matmul(inputs_2d, self.kernel)
+        decision_logits = keras.ops.matmul(inputs_2d, self.kernel)
         if self.bias is not None:
             decision_logits = decision_logits + self.bias
 
@@ -702,20 +701,20 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # smallest fp16 normal (~6.1e-5), so clipping in fp16 would round the
         # floor to zero. Doing the sigmoid+clip and the entire tree
         # accumulation in float32 is the supported path under mixed precision.
-        decision_logits = ops.cast(decision_logits, "float32")
+        decision_logits = keras.ops.cast(decision_logits, "float32")
 
-        decision_probs = ops.sigmoid(decision_logits)
-        decision_probs = ops.clip(
+        decision_probs = keras.ops.sigmoid(decision_logits)
+        decision_probs = keras.ops.clip(
             decision_probs, self.epsilon, 1.0 - self.epsilon
         )
 
         # --- Step 2: Initialize root probability mass = 1.0 ---
         # decision_probs is already float32 from the cast above; the tree
         # accumulation continues in float32 regardless of compute dtype.
-        mask_mul = ops.convert_to_tensor(self._mask_mul_np, dtype="float32")
-        mask_add = ops.convert_to_tensor(self._mask_add_np, dtype="float32")
-        batch_size = ops.shape(inputs_2d)[0]
-        padded_probs = ops.ones((batch_size, 1), dtype="float32")
+        mask_mul = keras.ops.convert_to_tensor(self._mask_mul_np, dtype="float32")
+        mask_add = keras.ops.convert_to_tensor(self._mask_add_np, dtype="float32")
+        batch_size = keras.ops.shape(inputs_2d)[0]
+        padded_probs = keras.ops.ones((batch_size, 1), dtype="float32")
 
         # --- Step 3: Iteratively split tree (with per-parent overrides) ---
         # At each level k, p_eff[k, j] = p_decision * mask_mul[k, j]
@@ -737,10 +736,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             probs_for_left = padded_probs * p_go_left
             probs_for_right = padded_probs * p_go_right
 
-            combined = ops.stack(
+            combined = keras.ops.stack(
                 [probs_for_left, probs_for_right], axis=2
             )
-            padded_probs = ops.reshape(combined, (-1, 2 ** (i + 1)))
+            padded_probs = keras.ops.reshape(combined, (-1, 2 ** (i + 1)))
 
         # --- Step 4: Slice and renormalize (fp drift cleanup) ---
         # With structural masking, leaves at index >= output_dim are
@@ -752,8 +751,8 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         else:
             unnormalized_probs = padded_probs[:, :self.output_dim]
         if self.normalize:
-            prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
-            safe_denom = ops.maximum(prob_sum, self._RENORM_TINY)
+            prob_sum = keras.ops.sum(unnormalized_probs, axis=-1, keepdims=True)
+            safe_denom = keras.ops.maximum(prob_sum, self._RENORM_TINY)
             final_probs = unnormalized_probs / safe_denom
         else:
             final_probs = unnormalized_probs
@@ -770,25 +769,25 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         if inputs.dtype == "float16":
             pass  # keep final_probs as fp32
         else:
-            final_probs = ops.cast(final_probs, inputs.dtype)
+            final_probs = keras.ops.cast(final_probs, inputs.dtype)
 
         # --- Step 5: Reshape back to original rank ---
-        input_transposed_shape = ops.shape(inputs_transposed)
-        input_transposed_shape_tensor = ops.convert_to_tensor(
+        input_transposed_shape = keras.ops.shape(inputs_transposed)
+        input_transposed_shape_tensor = keras.ops.convert_to_tensor(
             input_transposed_shape, dtype="int32"
         )
         batch_shape_tensor = input_transposed_shape_tensor[:-1]
-        target_dim_tensor = ops.convert_to_tensor(
+        target_dim_tensor = keras.ops.convert_to_tensor(
             [self.output_dim], dtype="int32"
         )
-        target_shape_tensor = ops.concatenate(
+        target_shape_tensor = keras.ops.concatenate(
             [batch_shape_tensor, target_dim_tensor], axis=0
         )
-        outputs_transposed = ops.reshape(final_probs, target_shape_tensor)
+        outputs_transposed = keras.ops.reshape(final_probs, target_shape_tensor)
 
         # --- Step 6: Restore original axis order ---
         if self._normalized_axis != input_rank - 1:
-            outputs = ops.transpose(outputs_transposed, perm)
+            outputs = keras.ops.transpose(outputs_transposed, perm)
         else:
             outputs = outputs_transposed
 
@@ -853,7 +852,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         This override only changes the declared dtype; the shape logic still
         delegates to ``compute_output_shape``.
         """
-        from keras import KerasTensor  # local import to avoid module cycles
         input_shape = inputs.shape if hasattr(inputs, "shape") else inputs
         output_shape = self.compute_output_shape(input_shape)
         # D-005: under fp16 compute_dtype, output stays fp32.
@@ -865,7 +863,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             out_dtype = (
                 inputs.dtype if hasattr(inputs, "dtype") else self.compute_dtype
             )
-        return KerasTensor(output_shape, dtype=out_dtype)
+        return keras.KerasTensor(output_shape, dtype=out_dtype)
 
     def get_build_config(self) -> Dict[str, Any]:
         """Return the input shape so the layer can rebuild on load.

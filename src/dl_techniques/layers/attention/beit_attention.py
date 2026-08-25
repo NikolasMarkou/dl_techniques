@@ -24,27 +24,6 @@ no existing layer in this package can express:
     ``(2*W - 1) ** 2`` square-window form with no cls slots, so its index arithmetic is
     a different function of the window size and cannot be shared.
 
-Architecture:
-    ::
-
-        Input  (B, N + 1, dim)          N = Wh * Ww patch tokens, +1 cls token
-          |
-          +-- q = Dense(dim, use_bias=qv_bias)
-          +-- k = Dense(dim, use_bias=False)      <- ALWAYS bias-free (BEiT)
-          +-- v = Dense(dim, use_bias=qv_bias)
-          |
-          v   reshape each to (B, num_heads, N + 1, head_dim)
-        scores = q @ k^T * scale                  (B, num_heads, N+1, N+1)
-          |
-          +-- + relative_position_bias_table[rel_pos_index]   <- pre-softmax, ADDITIVE
-          +-- + additive attention-mask bias (only when a mask is supplied)
-          |
-        attn = softmax(scores, axis=-1)  ->  dropout  ->  @ v
-          |
-        merge heads -> Dense(dim, use_bias=use_proj_bias) -> dropout
-          |
-        Output (B, N + 1, dim)
-
 Foundational Mathematics:
     With queries ``Q``, keys ``K``, values ``V`` and per-head dimension ``d_h``, the
     attention of head ``h`` over a sequence of ``N + 1`` tokens is::
@@ -88,21 +67,19 @@ References:
 
 # ---------------------------------------------------------------------
 
-from typing import Any, Dict, Optional, Tuple, Union
-
 import keras
 import numpy as np
-from keras import ops
+from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ...initializers import clone_initializer
+from dl_techniques.initializers import clone_initializer
 from .common import (
+    mask_dtype,
     apply_attention_mask,
     compute_attention_scale,
-    mask_dtype,
     validate_head_divisibility,
 )
 
@@ -516,8 +493,8 @@ class BeitAttention(keras.layers.Layer):
         v = self._split_heads(self.v_dense(inputs), seq_len)
 
         # (B, H, N+1, head_dim) @ (B, H, head_dim, N+1) -> (B, H, N+1, N+1)
-        scores = ops.matmul(
-            q * self._scale_value, ops.transpose(k, (0, 1, 3, 2))
+        scores = keras.ops.matmul(
+            q * self._scale_value, keras.ops.transpose(k, (0, 1, 3, 2))
         )
 
         if self.use_relative_position_bias:
@@ -530,16 +507,16 @@ class BeitAttention(keras.layers.Layer):
             # `_rel_pos_index` is a numpy array (see the D-011 note in `build()`);
             # it is converted HERE so the constant is materialized in the graph that
             # is currently tracing, not in whichever graph happened to build it.
-            bias = ops.take(
+            bias = keras.ops.take(
                 self.relative_position_bias_table,
-                ops.convert_to_tensor(self._rel_pos_index, dtype="int32"),
+                keras.ops.convert_to_tensor(self._rel_pos_index, dtype="int32"),
                 axis=0,
             )
-            bias = ops.reshape(bias, (seq_len, seq_len, self.num_heads))
+            bias = keras.ops.reshape(bias, (seq_len, seq_len, self.num_heads))
             # (N+1, N+1, heads) -> (heads, N+1, N+1) -> (1, heads, N+1, N+1)
-            bias = ops.transpose(bias, (2, 0, 1))
-            scores = scores + ops.expand_dims(
-                ops.cast(bias, scores.dtype), axis=0
+            bias = keras.ops.transpose(bias, (2, 0, 1))
+            scores = scores + keras.ops.expand_dims(
+                keras.ops.cast(bias, scores.dtype), axis=0
             )
 
         # The softmax runs in float32 (or float64 under a float64 policy) regardless of
@@ -557,17 +534,17 @@ class BeitAttention(keras.layers.Layer):
                 scores, keep, out_dtype=softmax_dtype, rescue_axis=-1
             )
         else:
-            scores = ops.cast(scores, softmax_dtype)
+            scores = keras.ops.cast(scores, softmax_dtype)
 
-        attn = ops.softmax(scores, axis=-1)
-        attn = ops.cast(attn, self.compute_dtype)
+        attn = keras.ops.softmax(scores, axis=-1)
+        attn = keras.ops.cast(attn, self.compute_dtype)
         attn = self.attn_dropout(attn, training=training)
 
         # (B, H, N+1, N+1) @ (B, H, N+1, head_dim) -> (B, H, N+1, head_dim)
-        out = ops.matmul(attn, v)
+        out = keras.ops.matmul(attn, v)
         # (B, H, N+1, head_dim) -> (B, N+1, H, head_dim) -> (B, N+1, dim)
-        out = ops.transpose(out, (0, 2, 1, 3))
-        out = ops.reshape(out, (-1, seq_len, self.dim))
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.reshape(out, (-1, seq_len, self.dim))
         out = self.proj(out)
         out = self.proj_dropout(out, training=training)
         return out
@@ -586,10 +563,10 @@ class BeitAttention(keras.layers.Layer):
         :return: Head-split tensor.
         :rtype: keras.KerasTensor
         """
-        reshaped = ops.reshape(
+        reshaped = keras.ops.reshape(
             projected, (-1, seq_len, self.num_heads, self.head_dim)
         )
-        return ops.transpose(reshaped, (0, 2, 1, 3))
+        return keras.ops.transpose(reshaped, (0, 2, 1, 3))
 
     def _broadcast_mask(
             self,
@@ -608,9 +585,9 @@ class BeitAttention(keras.layers.Layer):
         """
         rank = len(attention_mask.shape)
         if rank == 2:
-            return ops.reshape(attention_mask, (-1, 1, 1, seq_len))
+            return keras.ops.reshape(attention_mask, (-1, 1, 1, seq_len))
         if rank == 3:
-            return ops.reshape(attention_mask, (-1, 1, seq_len, seq_len))
+            return keras.ops.reshape(attention_mask, (-1, 1, seq_len, seq_len))
         if rank == 4:
             return attention_mask
         raise ValueError(

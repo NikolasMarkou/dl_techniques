@@ -22,41 +22,6 @@ text tokens attend to each other (and themselves) in one shared attention, which
 is the structural difference from a single-stream DiT. The layer owns only the
 projection + norm + SDPA math; AdaLN modulation lives in the surrounding block.
 
-Architecture:
-
-::
-
-    ┌───────────────────────────────────────────────────────────────────────┐
-    │    MMDiTJointAttention — dual-stream joint attention (module view)    │
-    │                                                                       │
-    │  image stream (B, N_img, dim)     text stream (B, N_txt, dim)         │
-    │        │ to_q / to_k / to_v             │ add_q_proj / add_k_proj     │
-    │        │ Dense(dim), reshape            │ / add_v_proj, reshape       │
-    │        │ ► (B, H, N_img, hd)            │ ► (B, H, N_txt, hd)         │
-    │        │ norm_q / norm_k (RMSNorm)      │ norm_added_q / norm_added_k │
-    │        │   over head_dim, if qk_norm    │   over head_dim, if qk_norm │
-    │        └───────────────┬────────────────┘                             │
-    │                        │  JOIN: concatenate on the sequence           │
-    │                        │  axis (axis=2) — this is the 'joint'         │
-    │                        ▼                                              │
-    │        Q, K, V  (B, H, N_img+N_txt, hd)                               │
-    │                        │  scores = Q · Kᵀ · head_dim^-0.5             │
-    │                        │  softmax in float32, cast back, · V          │
-    │                        ▼                                              │
-    │        merge heads ► (B, N_img+N_txt, dim)                            │
-    │                        │  FORK: split at N_img                        │
-    │        ┌───────────────┴────────────────┐                             │
-    │        ▼                                ▼                             │
-    │  to_out (Dense dim)               to_add_out (Dense dim)              │
-    │  image_out (B, N_img, dim)        text_out (B, N_txt, dim)            │
-    │                                                                       │
-    │  context_pre_only=True: to_add_out is never created and call()        │
-    │  returns image_out alone, not a 2-element list.                       │
-    │  No attention mask is accepted anywhere on this forward path,         │
-    │  and the PyTorch source's paging / KV-cache is deliberately           │
-    │  dropped (see the # DECISION anchor in call()).                       │
-    └───────────────────────────────────────────────────────────────────────┘
-
 When ``context_pre_only`` is True (the final MMDiT block discards the text path),
 ``to_add_out`` is not created and ``call`` returns only the image stream.
 
@@ -86,23 +51,10 @@ from dl_techniques.layers.norms.rms_norm import RMSNorm
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-07-27T130643-38c5646a/D-008
-# `package="dl_techniques.layers"` is the LONE deviation from this package's bare
-# `@keras.saving.register_keras_serializable()` house form (rubric R3). It is
-# DELIBERATELY LEFT AS-IS.
-#
-# WHAT NOT TO DO: do NOT "normalize" this to the bare form. The `package=` kwarg is not
-# cosmetic — it is half of the registry KEY. Keras registers the class as
-# `f"{package}>{name}"`, so this class is keyed `dl_techniques.layers>MMDiTJointAttention`
-# while the bare form would key it `Custom>MMDiTJointAttention`. Every already-saved
-# `.keras` file containing an SD3 MMDiT block stores the OLD key in its config; after the
-# change `keras.models.load_model` cannot resolve it and raises at load time. No test in
-# the suite loads a pre-existing checkpoint, so this breakage would ship silently.
-# Registry-neutrality is not provable here (it is provably FALSE), so the rubric yields.
-# See decisions.md D-008.
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class MMDiTJointAttention(keras.layers.Layer):
-    """SD3 MMDiT dual-stream joint attention (image + text).
+    """
+    SD3 MMDiT dual-stream joint attention (image + text).
 
     Projects an image token stream and a text/context token stream to Q/K/V,
     applies optional per-head RMS QK-norm to each stream, concatenates the two

@@ -665,12 +665,12 @@ class FFTNet(keras.Model):
         │  final normalization                 │
         └───────────────┬──────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
-        │  Output dict, ALL THREE always       │
-        │    "last_hidden_state"  [B, N+1, D]  │
-        │    "cls_token"          [B, D]    x[:,0]
-        │    "patch_features"     [B, N, D] x[:,1:]
-        └──────────────────────────────────────┘
+        ┌──────────────────────────────────────────┐
+        │  Output dict, ALL THREE always           │
+        │    "last_hidden_state"  [B, N+1, D]      │
+        │    "cls_token"          [B, D]    x[:,0] │
+        │    "patch_features"     [B, N, D] x[:,1:]│
+        └──────────────────────────────────────────┘
 
         FIXED RESOLUTION: each mixer's W_base is sized by N+1,
         so the encoder is tied to the token count it was built

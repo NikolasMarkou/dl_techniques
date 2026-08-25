@@ -163,7 +163,10 @@ class DifferentiableStep(keras.layers.Layer):
         self.slope = None
         self.shift = None
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+    def build(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> None:
         """
         Create the layer's trainable weights based on the ``axis`` configuration.
 
@@ -240,7 +243,10 @@ class DifferentiableStep(keras.layers.Layer):
         scaled_shifted_x = self.slope * (inputs - self.shift)
         return (keras.ops.tanh(scaled_shifted_x) + 1.0) / 2.0
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """
         Compute the output shape of the layer.
 

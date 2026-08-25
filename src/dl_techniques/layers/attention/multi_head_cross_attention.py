@@ -1,68 +1,91 @@
 """
-A unified multi-head attention with adaptive temperature and optional hierarchical routing.
+One multi-head attention engine serving both cross-attention and self-attention,
+with pluggable score normalization and optional QK-norm.
 
-This layer provides a versatile implementation of multi-head attention that
-can operate in both self-attention and cross-attention modes. It extends
-the standard mechanism with an optional adaptive temperature softmax, which
-dynamically adjusts the sharpness of the attention distribution based on
-the input, potentially improving model calibration and performance.
+Cross-attention and self-attention are the same computation under different
+symmetry assumptions. Both score queries against keys and average values by the
+result; they differ only in whether the two sequences are the same object. Writing
+them as separate layers duplicates the reshape/score/normalize/merge pipeline —
+along with every masking subtlety in it — so this layer parameterizes the
+difference instead. Supplying a distinct ``kv_input`` gives the asymmetric case,
+where a possibly short query sequence reads from a possibly long key/value one, as
+in encoder-decoder cross-attention and Perceiver-style latent bottlenecks. Omitting
+it gives the symmetric case.
 
-Architecture:
-    The layer is designed for flexibility. It can function in two primary
-    configurations determined by the inputs:
+The projection strategy follows that asymmetry rather than being an independent
+knob. Cross-attention needs Q computed from one tensor and K, V from another, so
+two `Dense` layers are the natural shape. Self-attention reads all three from one
+tensor, which permits a single fused `Dense(3 * dim)` — fewer, larger matmuls and
+one weight to load. That is why `shared_qk_projections=True` is rejected alongside
+a `kv_input`: the fused projection has no second tensor to read from, so the
+combination is not a configuration but a contradiction.
 
-1.  **Cross-Attention:** When provided with distinct ``query`` and ``kv_input``
-    tensors, it performs cross-attention. This is an asymmetric setup
-    where a set of query vectors attends to a separate set of key-value
-    pairs. This mode is fundamental to encoder-decoder models and
-    architectures like Perceiver, where a small set of latent queries
-    attends to a large set of input features.
+Score normalization is not implemented here. It is delegated to the shared
+`ProbabilityOutput`, so softmax, sparsemax, threshmax and the adaptive-temperature
+variant are one constructor string apart and are each tested in one place. The
+adaptive variant is the interesting option: it reads the entropy of a query's
+pre-softmax scores and adjusts that row's temperature, sharpening a diffuse
+distribution and softening an over-peaked one, which is a per-query calibration
+that a fixed `1/sqrt(d_k)` cannot express. Routing and hierarchical strategies are
+rejected — they require a fixed `output_dim` and consume features, whereas a score
+tensor's last axis is the key sequence length. QK-norm is likewise delegated to the
+norm factory, which makes all registered norm types available for free.
 
-2.  **Self-Attention:** When only a single input tensor is provided, it
-    performs self-attention. This is a symmetric setup where all
-    tokens in a sequence attend to all other tokens. The layer offers a
-    ``shared_qk_projections`` option for this mode, which uses a single
-    projection matrix to generate Q, K, and V. This is a parameter-
-    efficient variant suitable for standard transformer blocks.
+Masking carries the most accumulated knowledge in this file, and it is
+site-specific by decision rather than by accident. The bias is BUILT with
+`keras.ops.where` rather than the arithmetic `(1 - keep) * MASK_BIAS_VALUE` form,
+because the latter produces `0 * -inf = NaN` at every UNMASKED position in fp16; a
+query row that keeps nothing is rescued to keep everything, so an all-`-inf` row is
+never formed and no NaN gradient with it; and the rescue axis is read from this
+layer's own `probability_config` rather than hard-coded, since a caller may move
+the reduction axis. Three near-identical mask helpers exist across the package and
+are deliberately not unified — the differences in cast order, rank probing and
+head-axis handling are load-bearing at each site.
 
-    Neither the score-normalization strategy nor the optional QK-norm is
-    implemented here: both are delegated to shared components — see the
-    ``[REUSE]`` note on the class below.
+This class is the shared engine behind two thin facades,
+`multi_head_attention.MultiHeadAttention` (self-attention preset) and
+`perceiver_attention.PerceiverAttention` (cross-attention preset), so any change to
+`call`'s semantics is a change to all three.
 
-Foundational Mathematics:
-    The core of this layer is the scaled dot-product attention mechanism
-    with an optional adaptive temperature ``T`` that is a function of the input::
+Foundational mathematics::
 
-        Attention(Q, K, V) = softmax( (Q @ K.T) / (sqrt(d_k) * T) ) @ V
+    Attention(Q, K, V) = P( (Q K^T) / (sqrt(d_k) * T) ) V
 
-    The adaptive temperature ``T`` is determined dynamically based on the
-    entropy of the pre-softmax attention scores for each query. High entropy
-    (uniform scores) yields low temperature to sharpen the distribution, while
-    low entropy (peaked scores) yields high temperature to soften it.
+where ``P`` is the configured normalization and ``T`` is either 1 or, for the
+adaptive strategy, a per-query function of the pre-softmax score entropy.
 
 References:
-    - The scaled dot-product attention mechanism was introduced in:
-      Vaswani, A., et al. (2017). "Attention Is All You Need".
-
-    - The use of temperature to control the sharpness of a softmax is a
-      well-established technique, famously used in knowledge distillation:
-      Hinton, G., Vinyals, O., & Dean, J. (2015). "Distilling the
-      Knowledge in a Neural Network".
+    - Vaswani et al., 2017. Attention Is All You Need. (scaled dot-product
+      attention, and the encoder-decoder cross-attention this generalizes)
+      (https://arxiv.org/abs/1706.03762)
+    - Hinton et al., 2015. Distilling the Knowledge in a Neural Network. (softmax
+      temperature as a sharpness control) (https://arxiv.org/abs/1503.02531)
+    - Jaegle et al., 2021. Perceiver: General Perception with Iterative Attention.
+      (latent queries attending to a large input set — the asymmetric case this
+      layer's cross mode serves) (https://arxiv.org/abs/2103.03206)
+    - Martins and Astudillo, 2016. From Softmax to Sparsemax: A Sparse Model of
+      Attention and Multi-Label Classification. (https://arxiv.org/abs/1602.02068)
+    - Henry et al., 2020. Query-Key Normalization for Transformers. (the optional
+      QK-norm) (https://arxiv.org/abs/2010.04245)
 """
 
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, List
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import apply_attention_mask, compute_attention_scale, validate_head_divisibility
-from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
+
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms import create_normalization_layer
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale,
+    validate_head_divisibility
+)
 
 # ---------------------------------------------------------------------
 
@@ -70,18 +93,18 @@ from ..norms.factory import create_normalization_layer
 @keras.saving.register_keras_serializable()
 class MultiHeadCrossAttention(keras.layers.Layer):
     """
-    Unified, highly configurable multi-head attention layer with advanced features.
+    Unified multi-head attention: cross- or self-attention, pluggable normalization.
 
-    This layer serves as a versatile attention mechanism supporting both cross-attention
-    and self-attention modes with flexible projection strategies, comprehensive masking,
-    and optional adaptive temperature softmax for enhanced attention normalization.
+    Supports both attention modes with flexible projection strategies,
+    comprehensive masking, and any of the shared probability strategies including
+    adaptive-temperature softmax.
 
-    In cross-attention mode, separate projection matrices generate Q from the query input
-    and K, V from a distinct key-value input. In self-attention mode with shared projections,
-    a single dense layer generates Q, K, and V from the same input. The core computation
-    follows: ``Attention(Q, K, V) = Normalize(Q @ K^T / sqrt(d_k)) @ V`` where
-    Normalize is either standard softmax, adaptive temperature softmax, or hierarchical
-    routing probabilities.
+    In cross-attention mode, separate projection matrices generate Q from the query
+    input and K, V from a distinct key-value input. In self-attention mode with
+    shared projections, a single dense layer generates Q, K and V from the same
+    input. The core computation is
+    ``Attention(Q, K, V) = Normalize(Q @ K^T / sqrt(d_k)) @ V``, where Normalize is
+    standard softmax, adaptive-temperature softmax, or another registered strategy.
 
     **[REUSE]** Two responsibilities are delegated rather than reimplemented:
 
@@ -101,61 +124,84 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     ``perceiver_attention.PerceiverAttention`` (cross-attention preset). Any
     change to ``call()``'s semantics is a change to all three.
 
-    **Architecture Overview:**
+    **Architecture Overview — cross-attention (separate projections):**
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────────────────────────┐
-        │          Cross-Attention Mode (separate projections)          │
-        │                                                               │
-        │  Query Input [B, Q_seq, D] ──► Q_proj ──► Q [B, H, Q_seq, D_h]│
-        │                                             │                 │
-        │  KV Input [B, KV_seq, D] ──► KV_proj ──► K, V [B,H,KV_seq,D_h]│
-        │                                             │                 │
-        │                                             ▼                 │
-        │                               scores = Q @ K^T / sqrt(d_k)    │
-        │                                             │                 │
-        │  Mask [B, Q_seq, KV_seq] ──────────────► [+ mask]             │
-        │  NOTE: bias BUILT by ops.where, not (1-keep)*MASK_BIAS_VALUE. │
-        │  A fully-masked row gets NO bias: its RAW scores are used.    │
-        │                                             │                 │
-        │                                             ▼                 │
-        │                               AdaptiveSoftmax / Softmax       │
-        │                                             │                 │
-        │                                             ▼                 │
-        │                                    weights @ V                │
-        │                                             │                 │
-        │                                             ▼                 │
-        │                                     Output Projection         │
-        │                                             │                 │
-        │                                             ▼                 │
-        │                                  Output [B, Q_seq, D]         │
-        └───────────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────┐   ┌──────────────────────────────┐
+        │ query_input [B, Q_seq, D]    │   │ kv_input [B, KV_seq, D]      │
+        └──────────────┬───────────────┘   └──────────────┬───────────────┘
+                       ▼                                  ▼
+        ┌──────────────────────────┐   ┌──────────────────────────────────┐
+        │ q: Dense(D) → heads      │   │ kv: Dense(2·D) → split → heads   │
+        │   Q [B, H, Q_seq, D_h]   │   │   K, V [B, H, KV_seq, D_h]       │
+        └──────────────┬───────────┘   └──────────────┬───────────────────┘
+                       ▼                              │
+        ┌──────────────────────────┐                  │
+        │ optional q_norm / k_norm │◄─────────────────┤
+        └──────────────┬───────────┘                  │
+                       ▼                              │
+        ┌──────────────────────────────────────────┐  │
+        │ scores = Q @ Kᵀ · scale                  │  │
+        │   [B, H, Q_seq, KV_seq]                  │  │
+        └──────────────┬───────────────────────────┘  │
+                       ▼                              ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │ [+ attention_mask]  rank 2 (B, KV_seq) or rank 3             │
+        │ (B, Q_seq, KV_seq), keep-predicate                           │
+        │   the bias is BUILT by keras.ops.where, NOT by               │
+        │   (1 − keep) · MASK_BIAS_VALUE — that form gives 0 · −inf =  │
+        │   NaN in fp16 at every UNMASKED position                     │
+        │   a fully-masked row is RESCUED to keep everything, so an    │
+        │   all-−inf row is never formed (D-009)                       │
+        └──────────────┬───────────────────────────────────────────────┘
+                       ▼                              │
+        ┌──────────────────────────────────────────┐  │
+        │ attn_prob (softmax / sparsemax /         │  │
+        │ threshmax / adaptive) → dropout          │  │
+        └──────────────┬───────────────────────────┘  │
+                       └────────── @V ◄───────────────┘
+                                    ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │ merge heads → proj: Dense(D)                                 │
+        └──────────────┬───────────────────────────────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │ Output [B, Q_seq, D] — the QUERY's length, not the KV's      │
+        └──────────────────────────────────────────────────────────────┘
 
-        ┌───────────────────────────────────────────────────────────────┐
-        │           Self-Attention Mode (shared projections)            │
-        │                                                               │
-        │  Input [B, seq, D] ──► QKV_proj ──► Q, K, V [B, H, seq, D_h]  │
-        │                                        │                      │
-        │                                        ▼                      │
-        │                          scores = Q @ K^T / sqrt(d_k)         │
-        │                                        │                      │
-        │  Mask [B, seq, seq] ──────────────► [+ mask]                  │
-        │  NOTE: bias BUILT by ops.where, not (1-keep)*MASK_BIAS_VALUE. │
-        │  A fully-masked row gets NO bias: its RAW scores are used.    │
-        │                                        │                      │
-        │                                        ▼                      │
-        │                          AdaptiveSoftmax / Softmax            │
-        │                                        │                      │
-        │                                        ▼                      │
-        │                               weights @ V                     │
-        │                                        │                      │
-        │                                        ▼                      │
-        │                                Output Projection              │
-        │                                        │                      │
-        │                                        ▼                      │
-        │                              Output [B, seq, D]               │
-        └───────────────────────────────────────────────────────────────┘
+    **Self-attention (shared projections):**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────────────────────────────┐
+        │ input [B, seq, D]                                            │
+        └──────────────┬───────────────────────────────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │ qkv: ONE Dense(3·D) → split 3 → heads                        │
+        │   Q, K, V [B, H, seq, D_h]                                   │
+        │   fewer, larger matmuls and one weight — only possible       │
+        │   because all three read the SAME tensor, which is why       │
+        │   shared_qk_projections=True + kv_input is rejected          │
+        └──────────────┬───────────────────────────────────────────────┘
+                       ▼
+              … identical from here on: QK-norm, scores, mask,
+                attn_prob, dropout, @V, merge, proj …
+                       ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │ Output [B, seq, D]                                           │
+        └──────────────────────────────────────────────────────────────┘
+
+    **Mode selection:**
+
+    .. code-block:: text
+
+        kv_input   shared_qk_projections   mode              projections
+        None                False           self-attention    q + kv (2 Dense)
+        None                True            self-attention    qkv    (1 Dense)
+        given               False           cross-attention   q + kv (2 Dense)
+        given               True            ValueError        —
 
     :param dim: Integer, input/output dimension. Must be positive and divisible
         by num_heads.
@@ -199,7 +245,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     :param probability_config: Optional dictionary of arguments forwarded to the
         underlying :class:`ProbabilityOutput` strategy. For ``"adaptive"`` accepts
         keys such as ``min_temp``, ``max_temp``, ``entropy_threshold``,
-        ``polynomial_coeffs``.
+        ``polynomial_coeffs``. Its ``axis`` entry, if present, also supplies the
+        mask rescue axis; see :meth:`_apply_attention_mask`.
     :type probability_config: Optional[Dict[str, Any]]
     :param qk_norm_type: Optional normalization type applied to Q and K projections
         before computing attention scores (QK-norm). Forwarded to
@@ -213,6 +260,64 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     :raises ValueError: If ``dim`` is not divisible by ``num_heads``, or if
         parameters are invalid.
     :raises ValueError: If ``shared_qk_projections=True`` is used with ``kv_input``.
+    :raises ValueError: If ``probability_type`` is a routing/hierarchical variant.
+    :raises ValueError: From ``build()``, if a cross-attention ``input_shape`` is
+        not a pair, if the query shape is not rank 3, or if its last dimension is
+        known and does not equal ``dim``.
+
+    Input shape:
+        - Self-attention: a 3D tensor ``(batch, seq_len, dim)``.
+        - Cross-attention: ``query_input`` ``(batch, query_seq_len, dim)`` plus
+          ``kv_input`` ``(batch, kv_seq_len, dim)``; ``build`` accepts the pair as a
+          list of two shapes.
+
+        The optional ``attention_mask`` is a ``1 = keep`` predicate of shape
+        ``(batch, kv_seq_len)``, ``(batch, query_seq_len, kv_seq_len)``, or any
+        broadcastable shape.
+
+    Output shape:
+        3D tensor ``(batch, query_seq_len, dim)`` — the QUERY's sequence length in
+        both modes, which is what makes the asymmetric case useful. One output mode
+        only; attention weights are never returned.
+
+    Example:
+        >>> # Cross-attention: 64 latents read a 4096-token input
+        >>> attn = MultiHeadCrossAttention(dim=512, num_heads=8)
+        >>> latents = keras.random.normal((2, 64, 512))
+        >>> inputs = keras.random.normal((2, 4096, 512))
+        >>> out = attn(latents, kv_input=inputs)          # (2, 64, 512)
+        >>>
+        >>> # Self-attention with the fused projection
+        >>> attn = MultiHeadCrossAttention(dim=512, num_heads=8,
+        ...                                shared_qk_projections=True)
+        >>> x = keras.random.normal((2, 128, 512))
+        >>> out = attn(x)                                  # (2, 128, 512)
+        >>>
+        >>> # Adaptive temperature plus QK-norm
+        >>> attn = MultiHeadCrossAttention(
+        ...     dim=512, num_heads=8, probability_type="adaptive",
+        ...     probability_config={"min_temp": 0.5, "max_temp": 2.0},
+        ...     qk_norm_type="rms_norm",
+        ... )
+
+    Note:
+        A fully-masked query row does not produce ``NaN``: it is rescued to attend
+        uniformly instead. That is finite garbage rather than a loud failure, and it
+        is a deliberate package-wide ruling — see the anchors in
+        :meth:`_apply_attention_mask`. Note also that the ``-inf`` entries handed to
+        the probability sub-layer are a CONTRACT ON THAT SUB-LAYER; softmax meets
+        it, and not every strategy does.
+
+    Attributes:
+        qkv_dense: Fused Q/K/V projection, or ``None`` when not shared.
+        q_dense, kv_dense: Separate projections, or ``None`` when shared.
+        proj_dense: Output projection; the one Dense that may take
+            ``output_kernel_initializer``.
+        dropout_layer: Attention-weight dropout, or ``None`` at rate 0.
+        attn_prob: The shared ``ProbabilityOutput`` normalizer.
+        q_norm, k_norm: Optional QK-norms, or ``None``.
+        head_dim: ``dim // num_heads``.
+        scale: The ``1 / sqrt(head_dim)`` temperature, a Python float.
     """
 
     def __init__(
@@ -233,6 +338,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the projections, normalizer and norms.
+
+        Which projections are created depends on ``shared_qk_projections``; the
+        unused attributes are set to ``None`` so both paths have the same attribute
+        surface. See the class docstring for the parameter reference.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -270,7 +381,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # Scale factor for attention scores.
         # DECISION plan_2026-06-14_a5ed2c2a/D-002: use stdlib math.sqrt (a Python
-        # float), NOT keras.ops.sqrt. ops.sqrt returns a backend tensor even for a
+        # float), NOT keras.ops.sqrt. keras.ops.sqrt returns a backend tensor even for a
         # static int head_dim; when __init__ runs inside a symbolic scratch graph
         # (lazy build under compute_output_spec / functional trace) that tensor
         # leaks out of scope ("<tf.Tensor '.../truediv:0'> is out of scope").
@@ -370,15 +481,20 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> None:
-        """
-        Build the layer by creating weight variables and building sub-layers.
+        """Build every sub-layer, at the shapes each will actually see.
 
-        Explicitly builds each sub-layer for robust serialization, ensuring
-        weight variables exist before weight restoration during loading.
+        A single shape means self-attention; a list of two means cross-attention,
+        and the query and key/value lengths are then tracked separately — which
+        matters, because the score, dropout and probability layers are built at
+        ``(B, H, Q_seq, KV_seq)`` while the Q and K norms are built at their own
+        per-head sequence lengths.
 
         :param input_shape: Shape tuple of the input tensor(s). A single tuple for
             self-attention or a list of two tuples for cross-attention.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        :raises ValueError: If a list is given with a length other than 2, if the
+            query shape is not rank 3, or if its last dimension is known and does
+            not equal ``dim``.
         """
         if self.built:
             return
@@ -460,8 +576,13 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             scores: keras.KerasTensor,
             attention_mask: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Apply attention mask to scores tensor.
+        """Broadcast the mask to rank 4 and apply it to the scores.
+
+        A rank-2 mask is a key-padding mask shared by every query row; a rank-3
+        mask is per-query. Both are expanded on the head axis and then handed to
+        the shared helper, which owns the fp16-safe bias construction and the
+        fully-masked-row rescue. Everything about WHY this site's arguments differ
+        from the other nine is in the anchors below.
 
         :param scores: Attention scores of shape ``(batch, num_heads, query_seq, kv_seq)``.
         :type scores: keras.KerasTensor
@@ -491,13 +612,13 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # A single implementation must pick one cast order, one rank probe and one
         # head-axis strategy, silently changing the other two call sites.
         #
-        attention_mask = ops.cast(attention_mask, scores.dtype)
+        attention_mask = keras.ops.cast(attention_mask, scores.dtype)
 
         # Expand mask dimensions to match scores shape (batch, num_heads, query_seq, kv_seq)
         if len(attention_mask.shape) == 2:  # Padding mask (batch, kv_seq)
-            attention_mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)  # (batch, 1, 1, kv_seq)
+            attention_mask = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), 1)  # (batch, 1, 1, kv_seq)
         elif len(attention_mask.shape) == 3:  # Full mask (batch, query_seq, kv_seq)
-            attention_mask = ops.expand_dims(attention_mask, 1)  # (batch, 1, query_seq, kv_seq)
+            attention_mask = keras.ops.expand_dims(attention_mask, 1)  # (batch, 1, query_seq, kv_seq)
 
         # THIS SITE'S MASK POLARITY, passed through verbatim: `attention_mask` is a
         # `1 = keep` predicate (already cast to the scores dtype above, on its own
@@ -507,71 +628,6 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # nothing, changes no shape and stays finite; the layer would just attend to
         # the padding. `TestMultiHeadCrossAttentionMaskPolarity` is the only guard
         # that can see it.
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores return
-        # in the compute dtype (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE`
-        # is `-inf` again. That is deliberate and is NOT the bug being fixed:
-        #   * The bug is `0 * -inf = NaN` at every UNMASKED position, produced by the
-        #     ARITHMETIC form this line replaces. `ops.where` inside `mask_dtype(...)`
-        #     removes that product structurally, and a row keeping >= 1 key softmaxes
-        #     correctly with `-inf` entries. MEASURED on unfixed HEAD
-        #     (B=2, N=64, D=64, H=4): an ALL-ONES mask — masking NOTHING — gave
-        #     8192/8192 NaN.
-        #     SCOPE OF THAT CLAIM (correction, plan-2026-07-28T134123-420f6ccb/R-A):
-        #     "a row keeping >= 1 key survives the `-inf` entries" was verified for
-        #     `probability_type='softmax'` ONLY — the measurement above and the tests
-        #     that pin it all use the default softmax path. It is NOT a property of
-        #     this line, and it does NOT generalise to every `probability_type`:
-        #     `probability_type='sparsemax'` returned all-`NaN` on exactly such a row
-        #     until the D-017 fix in `layers/activations/sparsemax.py`. Handing `-inf`
-        #     to the probability sub-layer is therefore a CONTRACT ON THAT SUB-LAYER,
-        #     which each one must meet for itself.
-        #     This says nothing about whether any given `probability_type` is fully
-        #     non-finite-safe, and this layer does not make it so. `Sparsemax` in
-        #     particular still carries FOUR measured, OPEN, UNGUARDED defects; read the
-        #     `# DECISION plan-2026-07-28T134123-420f6ccb/D-017` anchor in
-        #     `layers/activations/sparsemax.py` for the open set before assuming
-        #     otherwise.
-        #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
-        #     also rescue a FULLY-MASKED query row. It cannot: the next consumer is
-        #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
-        #     float32 input inside its own `call()` as float16 — the promotion is
-        #     silently undone and all that remains is a wider, slower add. Pinned by
-        #     `TestMultiHeadCrossAttentionMaskHazardIsReal::
-        #     test_the_probability_sublayer_autocasts_a_float32_input`.
-        #   * A FULLY-MASKED query row is a SEPARATE hazard that no `out_dtype` choice can
-        #     touch. It is handled by the rescue below (D-009), not here.
-        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-        # The fully-masked-row rescue IS applied here, and it supersedes the "not applied
-        # here" note above: a query row that keeps NOTHING is treated as keeping EVERYTHING,
-        # so the all-`-inf` row is never FORMED and no NaN gradient is created either. It
-        # arrives via `apply_attention_mask`'s DEFAULT `rescue_axis=-1` — step 4c flipped
-        # the step-4b opt-in default on the user's direction ("I care about correctness, not
-        # backwards compatibility").
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-        # The axis is DERIVED from this layer's own `probability_config` rather than left
-        # to the helper's `-1` default: `ProbabilityOutput` reads its softmax `axis` from
-        # `type_config` (`activations/probability_output.py:180`) and this layer forwards
-        # `probability_config` VERBATIM, so a caller can move the reduction axis and the
-        # pre-step-10 "checked, not assumed" claim held only for the DEFAULT config.
-        # MEASURED at the sibling `gated_attention` under `mixed_float16` with
-        # `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192 non-finite.
-        # WHAT NOT TO DO: do NOT restore a bare `-1` (correct only while the caller leaves
-        # the config alone) and do NOT read this as the rank/shape INFERENCE the D-009
-        # anchor in `common.py` forbids — this reads the site's own declared config.
-        # The full argument lives at the D-017 anchors in `common.py` and
-        # `gated_attention.py`. See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
-        #
-        # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" — the
-        # user ruled the finite-garbage semantics package-wide on 2026-07-28, and opting out
-        # also restores the NaN GRADIENT on that row; do NOT move the rescue after the
-        # softmax (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward
-        # pass). The full argument lives at the D-009 / D-008 anchors in `common.py`.
-        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
         scores_dtype = keras.backend.standardize_dtype(scores.dtype)
         return apply_attention_mask(
             scores,
@@ -587,11 +643,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through multi-head attention with optional masking and adaptive softmax.
+        """Forward pass; cross-attention when ``kv_input`` is given, else self-attention.
 
-        Computes scaled dot-product attention with optional adaptive temperature
-        softmax or hierarchical routing for attention weight normalization.
+        The projection branch is chosen by ``shared_qk_projections`` and everything
+        after it is common: score, mask, normalize, drop out, attend, merge,
+        project. The output always has the QUERY's sequence length.
 
         :param query_input: Query tensor of shape ``(batch, query_seq_len, dim)``.
         :type query_input: keras.KerasTensor
@@ -606,13 +662,16 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor with shape ``(batch_size, query_seq_len, dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``kv_input`` is supplied while
+            ``shared_qk_projections=True`` — the fused projection has no second
+            tensor to read from.
         """
         # --- 1. Initial Setup and Shape Extraction ---
         # We extract the batch size and query sequence length from the query input.
         # These values will be used repeatedly for reshaping tensors throughout the process.
         # query_input shape: (B, Q_seq, D)
-        batch_size = ops.shape(query_input)[0]
-        query_seq_len = ops.shape(query_input)[1]
+        batch_size = keras.ops.shape(query_input)[0]
+        query_seq_len = keras.ops.shape(query_input)[1]
 
         # --- 2. Project Inputs to Query, Key, and Value Tensors ---
         # This is the core projection step. Depending on the `shared_qk_projections`
@@ -637,11 +696,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
             # Reshape to separate Q, K, V and split the model dimension into heads.
             # Shape: (B, Q_seq, 3, H, D_h)
-            qkv = ops.reshape(qkv, (batch_size, query_seq_len, 3, self.num_heads, self.head_dim))
+            qkv = keras.ops.reshape(qkv, (batch_size, query_seq_len, 3, self.num_heads, self.head_dim))
 
             # Transpose to bring the head dimension forward, which is the standard
             # format for multi-head attention computation: (3, B, H, Q_seq, D_h)
-            qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
+            qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
 
             # Unpack the first dimension to get separate Q, K, V tensors.
             # Each tensor shape: (B, H, Q_seq, D_h)
@@ -666,22 +725,22 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             q = self.q_dense(query_input)
             # Reshape and transpose to multi-head format.
             # Shape (after reshape): (B, Q_seq, H, D_h)
-            q = ops.reshape(q, (batch_size, query_seq_len, self.num_heads, self.head_dim))
+            q = keras.ops.reshape(q, (batch_size, query_seq_len, self.num_heads, self.head_dim))
             # Shape (after transpose): (B, H, Q_seq, D_h)
-            q = ops.transpose(q, (0, 2, 1, 3))
+            q = keras.ops.transpose(q, (0, 2, 1, 3))
 
             # --- Project Key and Value ---
             # kv_source shape: (B, KV_seq, D)
-            kv_seq_len = ops.shape(kv_source)[1]
+            kv_seq_len = keras.ops.shape(kv_source)[1]
             # kv_dense projects to 2 * D to hold both K and V data.
             # kv shape (after dense): (B, KV_seq, 2 * D)
             kv = self.kv_dense(kv_source)
             # Reshape to separate K, V and split into heads.
             # Shape (after reshape): (B, KV_seq, 2, H, D_h)
-            kv = ops.reshape(kv, (batch_size, kv_seq_len, 2, self.num_heads, self.head_dim))
+            kv = keras.ops.reshape(kv, (batch_size, kv_seq_len, 2, self.num_heads, self.head_dim))
             # Transpose to standard multi-head format.
             # Shape (after transpose): (2, B, H, KV_seq, D_h)
-            kv = ops.transpose(kv, (2, 0, 3, 1, 4))
+            kv = keras.ops.transpose(kv, (2, 0, 3, 1, 4))
             # Unpack to get separate K, V tensors.
             # Each tensor shape: (B, H, KV_seq, D_h)
             k, v = kv[0], kv[1]
@@ -699,11 +758,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # k shape:      (B, H, KV_seq, D_h)
         # k transposed: (B, H, D_h, KV_seq)
         # scores shape: (B, H, Q_seq, KV_seq)
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
 
         # Scale scores by the inverse square root of head dimension to prevent gradients
         # from becoming too small. The cast ensures type compatibility.
-        scores = scores * ops.cast(self.scale, q.dtype)
+        scores = scores * keras.ops.cast(self.scale, q.dtype)
 
         # --- 4. Apply Attention Mask (Optional) ---
         # If a mask is provided, we apply it to the scores. This sets the scores
@@ -732,7 +791,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # attn_weights shape: (B, H, Q_seq, KV_seq)
         # v shape:            (B, H, KV_seq, D_h)
         # out shape (context vectors): (B, H, Q_seq, D_h)
-        out = ops.matmul(attn_weights, v)
+        out = keras.ops.matmul(attn_weights, v)
 
         # --- 8. Reshape and Project Final Output ---
         # The outputs from all heads are concatenated and passed through a final
@@ -740,11 +799,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # First, transpose to bring the sequence and head dimensions together.
         # Shape (after transpose): (B, Q_seq, H, D_h)
-        out = ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
 
         # Reshape to concatenate the head outputs, effectively merging the heads.
         # Shape (after reshape): (B, Q_seq, H * D_h) -> (B, Q_seq, D)
-        out = ops.reshape(out, (batch_size, query_seq_len, self.dim))
+        out = keras.ops.reshape(out, (batch_size, query_seq_len, self.dim))
 
         # Apply the final linear projection. This allows the model to mix information
         # learned from the different attention heads.
@@ -755,7 +814,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
-        """Compute output shape, returns query input shape.
+        """Return the QUERY's shape, which is the output's in both modes.
+
+        For cross-attention that is the FIRST of the two input shapes — the key/value
+        length does not appear in the output.
 
         :param input_shape: Shape tuple or list of shape tuples.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
@@ -774,6 +836,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
+
+        ``output_kernel_initializer`` is emitted as ``None`` when it was never
+        supplied, so a round trip does not silently pin ``proj`` to a separate
+        initializer.
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]

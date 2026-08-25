@@ -56,7 +56,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, List, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -189,7 +188,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
             f"max_temp={max_temp}, entropy_threshold={entropy_threshold}"
         )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+    def build(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> None:
         """
         Build the layer by validating input shape.
 
@@ -214,7 +216,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _evaluate_polynomial(self, coeffs: List[float], x: keras.KerasTensor) -> keras.KerasTensor:
+    def _evaluate_polynomial(
+            self,
+            coeffs: List[float], x: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """
         Evaluate polynomial using Horner's method for numerical stability.
 
@@ -226,19 +231,22 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         if not coeffs:
-            return ops.zeros_like(x)
+            return keras.ops.zeros_like(x)
 
         # Horner's method: efficient polynomial evaluation
         # P(x) = a_n * x^n + ... + a_1 * x + a_0
         # P(x) = (...((a_n * x + a_{n-1}) * x + a_{n-2}) * x + ... + a_1) * x + a_0
-        result = ops.full_like(x, coeffs[0])
+        result = keras.ops.full_like(x, coeffs[0])
 
         for coeff in coeffs[1:]:
             result = result * x + coeff
 
         return result
 
-    def _compute_entropy(self, probabilities: keras.KerasTensor) -> keras.KerasTensor:
+    def _compute_entropy(
+            self,
+            probabilities: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """
         Compute Shannon entropy: ``H = -Sigma p_i * log(p_i + epsilon)``.
 
@@ -248,15 +256,18 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Clamp probabilities to avoid log(0)
-        safe_probs = ops.clip(probabilities, self.eps, 1.0 - self.eps)
+        safe_probs = keras.ops.clip(probabilities, self.eps, 1.0 - self.eps)
 
         # Compute entropy: H = -Σ p * log(p)
-        log_probs = ops.log(safe_probs)
+        log_probs = keras.ops.log(safe_probs)
         entropy = -ops.sum(safe_probs * log_probs, axis=-1, keepdims=True)
 
         return entropy
 
-    def _compute_adaptive_temperature(self, entropy: keras.KerasTensor) -> keras.KerasTensor:
+    def _compute_adaptive_temperature(
+            self,
+            entropy: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """
         Compute adaptive temperature using polynomial mapping.
 
@@ -275,7 +286,7 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         poly_value = self._evaluate_polynomial(self.polynomial_coeffs, entropy)
 
         # Clamp polynomial output to [0, 1] range
-        clamped_poly = ops.clip(poly_value, 0.0, 1.0)
+        clamped_poly = keras.ops.clip(poly_value, 0.0, 1.0)
 
         # Scale to [min_temp, max_temp] range
         temperature_range = self.max_temp - self.min_temp
@@ -284,10 +295,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         # Apply adaptation conditionally:
         # - If entropy > threshold: use adaptive temperature
         # - Otherwise: use standard temperature (1.0)
-        temperature = ops.where(
+        temperature = keras.ops.where(
             needs_adaptation,
             scaled_temp,
-            ops.ones_like(scaled_temp)
+            keras.ops.ones_like(scaled_temp)
         )
 
         return temperature
@@ -308,7 +319,7 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Step 1: Compute initial probability distribution
-        initial_probs = ops.nn.softmax(inputs, axis=-1)
+        initial_probs = keras.ops.nn.softmax(inputs, axis=-1)
 
         # Step 2: Compute Shannon entropy of initial distribution
         entropy = self._compute_entropy(initial_probs)
@@ -318,15 +329,18 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
 
         # Step 4: Scale logits with inverse temperature
         # Use safe division to prevent division by zero
-        safe_temperature = ops.maximum(temperature, self.eps)
+        safe_temperature = keras.ops.maximum(temperature, self.eps)
         scaled_logits = inputs / safe_temperature
 
         # Step 5: Apply final softmax to get adaptive probabilities
-        output_probs = ops.nn.softmax(scaled_logits, axis=-1)
+        output_probs = keras.ops.nn.softmax(scaled_logits, axis=-1)
 
         return output_probs
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape of the layer.
 
@@ -337,7 +351,9 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         """
         return input_shape
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(
+            self
+    ) -> Dict[str, Any]:
         """
         Get layer configuration for serialization.
 

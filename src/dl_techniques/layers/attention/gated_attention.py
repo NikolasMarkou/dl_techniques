@@ -95,7 +95,6 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-from keras import layers, initializers, regularizers, ops
 from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -103,11 +102,12 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.attention.common import apply_attention_mask, compute_attention_scale
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
-from ..activations import ProbabilityOutput, resolve_activation_layer
-from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
+
+from .common import apply_attention_mask, compute_attention_scale
 
 # ---------------------------------------------------------------------
 
@@ -347,10 +347,10 @@ class GatedAttention(keras.layers.Layer):
         self.kv_dim = self.num_kv_heads * self.head_dim
 
         # DECISION plan_2026-06-14_ab855e7e/D-001: precompute the static attention
-        # scale as a Python float (math.sqrt, NOT ops.sqrt on a cast scalar). An
-        # ops.sqrt on a static int returns a backend tensor that can leak when
+        # scale as a Python float (math.sqrt, NOT keras.ops.sqrt on a cast scalar). An
+        # keras.ops.sqrt on a static int returns a backend tensor that can leak when
         # __init__ runs inside a symbolic scratch graph (the D-002 pattern; same
-        # fix already applied to cross/diff/MLA). Do NOT revert to ops.sqrt here.
+        # fix already applied to cross/diff/MLA). Do NOT revert to keras.ops.sqrt here.
         #
         # The expression now lives in `common.compute_attention_scale`, which is
         # `1.0 / math.sqrt(float(head_dim))` — byte-identical to what it replaced. The
@@ -650,102 +650,30 @@ class GatedAttention(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Transpose to [batch, num_heads, seq_len, head_dim] for attention computation
-        q = ops.transpose(q, axes=[0, 2, 1, 3])
-        k = ops.transpose(k, axes=[0, 2, 1, 3])
-        v = ops.transpose(v, axes=[0, 2, 1, 3])
+        q = keras.ops.transpose(q, axes=[0, 2, 1, 3])
+        k = keras.ops.transpose(k, axes=[0, 2, 1, 3])
+        v = keras.ops.transpose(v, axes=[0, 2, 1, 3])
 
         # Compute attention scores
-        matmul_qk = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
+        matmul_qk = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 1, 3, 2]))
 
         # Scale by 1/sqrt(head_dim) for numerical stability (precomputed Python
         # float self.scale; see D-001 anchor in __init__).
-        scaled_attention_logits = matmul_qk * ops.cast(self.scale, matmul_qk.dtype)
+        scaled_attention_logits = matmul_qk * keras.ops.cast(self.scale, matmul_qk.dtype)
 
         if attention_mask is not None:
             # The mask can be (batch, seq_len) for padding or (batch, seq_len, seq_len) for causal.
             # We must broadcast it to (batch, num_heads, seq_len, seq_len).
-            mask_ndim = ops.ndim(attention_mask)
+            mask_ndim = keras.ops.ndim(attention_mask)
             if mask_ndim == 2:
                 # Padding mask: (batch, seq_len) -> (batch, 1, 1, seq_len)
-                mask = ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+                mask = keras.ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
             elif mask_ndim == 3:
                 # Causal/Combined mask: (batch, seq_len, seq_len) -> (batch, 1, seq_len, seq_len)
-                mask = ops.expand_dims(attention_mask, 1)
+                mask = keras.ops.expand_dims(attention_mask, 1)
             else:
                 mask = attention_mask  # Assume it's already broadcastable
 
-            # THIS SITE'S MASK POLARITY, passed through verbatim: `mask` is a
-            # `1 = keep` predicate, so it IS the keep predicate that
-            # `apply_attention_mask` wants. Do NOT "normalize" it into a `> 0`
-            # comparison or invert it: the helper performs no polarity inference by
-            # design, so an inversion here would raise nothing, change no shape and
-            # stay perfectly finite — the layer would simply attend to the padding.
-            # `TestGatedAttentionMaskPolarity` is the only guard that can see that.
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-            # `out_dtype` is pinned to the LOGITS' own dtype, i.e. the biased logits
-            # are cast back into the compute dtype (fp16 under `mixed_float16`),
-            # where `MASK_BIAS_VALUE` is `-inf` again. That looks like it throws the
-            # fix away. It does not, and the alternative does not help:
-            #   * The bug being fixed is `0 * -inf = NaN` at every UNMASKED position,
-            #     produced by the ARITHMETIC form this line replaces. `ops.where`
-            #     inside `mask_dtype(...)` removes that product structurally, and a
-            #     row that keeps >= 1 key softmaxes correctly with `-inf` entries.
-            #     MEASURED on unfixed HEAD (B=2, N=64, D=64, H=4): an ALL-ONES mask —
-            #     one that masks NOTHING — gave 8192/8192 NaN.
-            #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping
-            #     to also rescue a FULLY-MASKED row. It cannot: the next consumer is
-            #     `self.attn_prob`, a Keras layer with autocasting ON, which is
-            #     MEASURED to see a float32 input inside its own `call()` as float16.
-            #     The promotion is silently undone at that boundary, and the only
-            #     effect left would be a wider, slower add. Pinned by
-            #     `TestGatedAttentionMaskHazardIsReal::
-            #     test_the_probability_sublayer_autocasts_a_float32_input`.
-            #   * A FULLY-MASKED query row is a SEPARATE hazard that no `out_dtype` choice can
-            #     touch. It is handled by the rescue below (D-009), not here.
-            # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-            # The fully-masked-row rescue IS applied here, and it supersedes the "not applied
-            # here" note above: a query row that keeps NOTHING is treated as keeping EVERYTHING,
-            # so the all-`-inf` row is never FORMED and no NaN gradient is created either. It
-            # arrives via `apply_attention_mask`'s `rescue_axis` — step 4c flipped
-            # the step-4b opt-in default on the user's direction ("I care about correctness, not
-            # backwards compatibility").
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-            # The axis is DERIVED from this layer's own `probability_config`, not inherited
-            # from the helper's `-1` default. `ProbabilityOutput` reads its softmax `axis`
-            # from `type_config` (`activations/probability_output.py:180`) and
-            # `__init__` forwards `probability_config` VERBATIM (see the `self.attn_prob`
-            # construction), so a caller CAN move the reduction axis, and the pre-step-10
-            # claim that "`-1` is correct because this site reduces over the KEY axis —
-            # checked, not assumed" was true only for the DEFAULT config. MEASURED on the
-            # pre-step-10 code under `mixed_float16` with `probability_config={"axis": -2}`
-            # and a rank-3 mask blanking one KEY COLUMN: 8192/8192 non-finite outputs
-            # (float32 control 0/8192) — the whole-batch NaN class this plan set out to
-            # eliminate, alive at a supported public configuration, because the rescue was
-            # looking down the wrong axis.
-            #
-            # WHAT NOT TO DO, and why:
-            #   * Do NOT restore a bare `-1` "because every site reduces over keys". This
-            #     site does so ONLY while the caller leaves `probability_config` alone.
-            #   * Do NOT read this as the axis INFERENCE that the D-009 anchor in
-            #     `common.py` forbids. Inference means guessing from a tensor's rank or
-            #     shape; this reads the site's OWN declared configuration — the same dict
-            #     the softmax itself is built from — which is the opposite.
-            #   * Do NOT "helpfully" fall back to `-1` when the configured axis makes the
-            #     mask degenerate. `apply_attention_mask` REJECTS a size-1 rescue axis
-            #     (D-017) precisely so that combination is loud; e.g. `axis=-2` plus a
-            #     rank-2 key-padding mask now raises instead of returning 8192/8192 NaN.
-            # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
-            #
-            # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" — the
-            # user ruled the finite-garbage semantics package-wide on 2026-07-28, and opting out
-            # also restores the NaN GRADIENT on that row; do NOT move the rescue after the
-            # softmax (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward
-            # pass). The full argument lives at the D-009 / D-008 anchors in `common.py`.
-            # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
             logits_dtype = keras.backend.standardize_dtype(
                 scaled_attention_logits.dtype
             )
@@ -764,10 +692,10 @@ class GatedAttention(keras.layers.Layer):
             attention_weights = self.dropout(attention_weights, training=training)
 
         # Apply attention to values
-        output = ops.matmul(attention_weights, v)
+        output = keras.ops.matmul(attention_weights, v)
 
         # Transpose back to [batch, seq_len, num_heads, head_dim]
-        output = ops.transpose(output, axes=[0, 2, 1, 3])
+        output = keras.ops.transpose(output, axes=[0, 2, 1, 3])
 
         return output
 
@@ -796,8 +724,8 @@ class GatedAttention(keras.layers.Layer):
         x = self.input_linear(inputs, training=training)
 
         # Get batch and sequence dimensions dynamically
-        batch_size = ops.shape(x)[0]
-        seq_len = ops.shape(x)[1]
+        batch_size = keras.ops.shape(x)[0]
+        seq_len = keras.ops.shape(x)[1]
 
         # Generate Q, K, V projections
         # Shape: (B, S, dim) -> (B, S, attention_dim) each, where
@@ -814,9 +742,9 @@ class GatedAttention(keras.layers.Layer):
         # Reshape for multi-head attention and RoPE
         # [batch, seq, attention_dim] -> [batch, seq, num_heads, head_dim]
         # Shape: (B, S, attention_dim) -> (B, S, H, head_dim)
-        q_reshaped = ops.reshape(q_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k_reshaped = ops.reshape(k_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
-        v_reshaped = ops.reshape(v_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
+        q_reshaped = keras.ops.reshape(q_norm, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k_reshaped = keras.ops.reshape(k_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
+        v_reshaped = keras.ops.reshape(v_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
 
         # Apply Partial RoPE to Q and K (not V).
         #
@@ -847,11 +775,11 @@ class GatedAttention(keras.layers.Layer):
         # only): 4.04e+00 in the (B, S, H, D) frame, exactly 0.0e+00 here.
         # `group_query_attention.py` has always transposed first; this is now
         # the single convention. See decisions.md D-083.
-        q_rope = ops.transpose(
+        q_rope = keras.ops.transpose(
             self.rope(ops.transpose(q_reshaped, (0, 2, 1, 3)), training=training),
             (0, 2, 1, 3),
         )
-        k_rope = ops.transpose(
+        k_rope = keras.ops.transpose(
             self.rope(ops.transpose(k_reshaped, (0, 2, 1, 3)), training=training),
             (0, 2, 1, 3),
         )
@@ -863,8 +791,8 @@ class GatedAttention(keras.layers.Layer):
         # num_kv_groups. `ops.tile` would interleave the groups instead and
         # silently pair each query head with the wrong K/V head.
         if self.num_kv_groups > 1:
-            k_rope = ops.repeat(k_rope, self.num_kv_groups, axis=2)
-            v_reshaped = ops.repeat(v_reshaped, self.num_kv_groups, axis=2)
+            k_rope = keras.ops.repeat(k_rope, self.num_kv_groups, axis=2)
+            v_reshaped = keras.ops.repeat(v_reshaped, self.num_kv_groups, axis=2)
 
         # Apply scaled dot-product attention
         # Shape: 3x (B, S, H, head_dim) -> (B, S, H, head_dim)
@@ -874,7 +802,7 @@ class GatedAttention(keras.layers.Layer):
 
         # Reshape back to [batch, seq, attention_dim]
         # Shape: (B, S, H, head_dim) -> (B, S, attention_dim)
-        attention_output = ops.reshape(
+        attention_output = keras.ops.reshape(
             attention_output, (batch_size, seq_len, self.attention_dim)
         )
 

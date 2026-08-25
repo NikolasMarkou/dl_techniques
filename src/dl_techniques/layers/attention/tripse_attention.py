@@ -94,8 +94,8 @@ from typing import Optional, Tuple, Any, Dict, List
 # local imports
 # ---------------------------------------------------------------------
 
-from ..squeeze_excitation import SqueezeExcitation
-from ..activations import resolve_activation_layer
+from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
+from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

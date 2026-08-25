@@ -39,16 +39,15 @@ References:
 
 import keras
 from typing import Optional, Dict, Any, Tuple, Union
-from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import apply_attention_mask, compute_attention_scale
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
-from ..activations import ProbabilityOutput
+from dl_techniques.layers.activations import ProbabilityOutput
+from .common import apply_attention_mask, compute_attention_scale
 
 # ---------------------------------------------------------------------
 
@@ -222,8 +221,8 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         rope_theta: float = 10000.0,
         rope_percentage: float = 1.0,
         qk_norm_type: str = "rms_norm",
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         probability_type: str = "softmax",
         probability_config: Optional[Dict[str, Any]] = None,
@@ -272,8 +271,8 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.qk_norm_kwargs = qk_norm_kwargs
         self.probability_type = probability_type
         self.probability_config = probability_config
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Scaling factor for attention scores
         # Scale by sqrt(total_qk_dim) for numerical stability
@@ -295,7 +294,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # 1. Query Path: Optional compression via down-project -> norm -> up-project
         if self.q_latent_dim is not None:
-            self.q_down_proj = layers.Dense(
+            self.q_down_proj = keras.layers.Dense(
                 q_latent_dim,
                 use_bias=use_bias,
                 kernel_initializer=self.kernel_initializer,
@@ -307,7 +306,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
                 name="q_norm",
                 **(self.qk_norm_kwargs or {})
             )
-            self.q_up_proj = layers.Dense(
+            self.q_up_proj = keras.layers.Dense(
                 num_heads * (qk_nope_head_dim + qk_rope_head_dim),
                 use_bias=use_bias,
                 kernel_initializer=self.kernel_initializer,
@@ -325,7 +324,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             )
 
         # 2. KV Compression Path
-        self.kv_down_proj = layers.Dense(
+        self.kv_down_proj = keras.layers.Dense(
             kv_latent_dim,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -339,7 +338,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         )
 
         # 3. KV Up-Projection: Generates K_nope and V from latent
-        self.kv_up_proj = layers.Dense(
+        self.kv_up_proj = keras.layers.Dense(
             num_heads * (qk_nope_head_dim + v_head_dim),
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -349,7 +348,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # 4. Decoupled RoPE Key projection (shared across heads)
         #    This generates positional keys directly from input, NOT from latent
-        self.k_rope_proj = layers.Dense(
+        self.k_rope_proj = keras.layers.Dense(
             qk_rope_head_dim,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -368,7 +367,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         )
 
         # 6. Output Projection: Combines all heads back to model dimension
-        self.output_proj = layers.Dense(
+        self.output_proj = keras.layers.Dense(
             dim,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -385,7 +384,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # 8. Optional Dropout on attention weights
         if dropout_rate > 0.0:
-            self.dropout_layer = layers.Dropout(dropout_rate, name="attn_dropout")
+            self.dropout_layer = keras.layers.Dropout(dropout_rate, name="attn_dropout")
         else:
             self.dropout_layer = None
 
@@ -801,8 +800,5 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------

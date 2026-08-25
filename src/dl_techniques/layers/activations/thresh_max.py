@@ -40,7 +40,6 @@ References:
 """
 
 import keras
-from keras import ops, initializers, regularizers, constraints
 from typing import Optional, Any, Tuple, Dict, Union
 
 # ---------------------------------------------------------------------
@@ -126,9 +125,9 @@ class ThreshMax(keras.layers.Layer):
             slope: float = 10.0,
             epsilon: float = 1e-12,
             trainable_slope: bool = False,
-            slope_initializer: Union[str, initializers.Initializer] = "ones",
-            slope_regularizer: Optional[Union[str, regularizers.Regularizer]] = None, # default: L2_custom(-1e-4)
-            slope_constraint: Optional[Union[str, constraints.Constraint]] = None, # default: ValueRangeConstraint(1.0, 50.0)
+            slope_initializer: Union[str, keras.initializers.Initializer] = "ones",
+            slope_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None, # default: L2_custom(-1e-4)
+            slope_constraint: Optional[Union[str, keras.constraints.Constraint]] = None, # default: ValueRangeConstraint(1.0, 50.0)
             **kwargs: Any
     ) -> None:
         """Initialize the ThreshMax layer.
@@ -167,9 +166,9 @@ class ThreshMax(keras.layers.Layer):
         self.slope_initial_value = float(slope)
         self.epsilon = float(epsilon)
         self.trainable_slope = trainable_slope
-        self.slope_initializer = initializers.get(slope_initializer)
-        self.slope_regularizer = regularizers.get(slope_regularizer)
-        self.slope_constraint = constraints.get(slope_constraint)
+        self.slope_initializer = keras.initializers.get(slope_initializer)
+        self.slope_regularizer = keras.regularizers.get(slope_regularizer)
+        self.slope_constraint = keras.constraints.get(slope_constraint)
         self.slope_weight = None
 
         logger.info(
@@ -189,13 +188,13 @@ class ThreshMax(keras.layers.Layer):
         init = self.slope_initializer
         # Use slope_initial_value if using default "ones" initializer
         is_default_ones = (
-                isinstance(init, initializers.Ones) or
+                isinstance(init, keras.initializers.Ones) or
                 (isinstance(init, str) and init == 'ones') or
                 (hasattr(init, 'get_config') and init.get_config().get('class_name') == 'Ones')
         )
 
         if is_default_ones and self.slope_initial_value != 1.0:
-            init = initializers.Constant(self.slope_initial_value)
+            init = keras.initializers.Constant(self.slope_initial_value)
 
         self.slope_weight = self.add_weight(
             name='slope',
@@ -229,12 +228,12 @@ class ThreshMax(keras.layers.Layer):
         """
         # Cast scalar inputs to tensor if x is a tensor for consistent broadcasting
         if isinstance(slope, (int, float)):
-            slope = ops.convert_to_tensor(slope, dtype=x.dtype)
+            slope = keras.ops.convert_to_tensor(slope, dtype=x.dtype)
         if isinstance(shift, (int, float)):
-            shift = ops.convert_to_tensor(shift, dtype=x.dtype)
+            shift = keras.ops.convert_to_tensor(shift, dtype=x.dtype)
 
         scaled_shifted_x = slope * (x - shift)
-        return (ops.tanh(scaled_shifted_x) + 1.0) / 2.0
+        return (keras.ops.tanh(scaled_shifted_x) + 1.0) / 2.0
 
     def _compute_threshmax(
             self,
@@ -254,8 +253,8 @@ class ThreshMax(keras.layers.Layer):
         y_soft = keras.activations.softmax(x, axis=self.axis)
 
         # Step 2: Compute confidence difference from uniform probability
-        num_classes = ops.shape(x)[self.axis]
-        uniform_prob = 1.0 / ops.cast(num_classes, x.dtype)
+        num_classes = keras.ops.shape(x)[self.axis]
+        uniform_prob = 1.0 / keras.ops.cast(num_classes, x.dtype)
         confidence_diff = y_soft - uniform_prob
 
         # Step 3: Compute soft gating mask
@@ -269,7 +268,7 @@ class ThreshMax(keras.layers.Layer):
         # Step 5: Renormalize
         # The sum of y_stepped is theoretically lower-bounded around 0.5 (for uniform inputs)
         # and higher for peaked inputs, so explicit degenerate case handling is dead code.
-        total_sum = ops.sum(y_stepped, axis=self.axis, keepdims=True)
+        total_sum = keras.ops.sum(y_stepped, axis=self.axis, keepdims=True)
         return y_stepped / (total_sum + self.epsilon)
 
     def call(
@@ -313,9 +312,9 @@ class ThreshMax(keras.layers.Layer):
             'slope': self.slope_initial_value,
             'epsilon': self.epsilon,
             'trainable_slope': self.trainable_slope,
-            'slope_initializer': initializers.serialize(self.slope_initializer),
-            'slope_regularizer': regularizers.serialize(self.slope_regularizer),
-            'slope_constraint': constraints.serialize(self.slope_constraint),
+            'slope_initializer': keras.initializers.serialize(self.slope_initializer),
+            'slope_regularizer': keras.regularizers.serialize(self.slope_regularizer),
+            'slope_constraint': keras.constraints.serialize(self.slope_constraint),
         })
         return config
 

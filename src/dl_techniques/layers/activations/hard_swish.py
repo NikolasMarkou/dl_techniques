@@ -153,3 +153,5 @@ class HardSwish(keras.layers.Layer):
         config = super().get_config()
         # No additional parameters to add for this parameter-free activation
         return config
+
+# ---------------------------------------------------------------------

@@ -59,10 +59,14 @@ from keras import ops, layers, initializers, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import apply_attention_mask, compute_attention_scale
-from ..activations.probability_output import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.activations.probability_output import ProbabilityOutput
+
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale
+)
 
 # ---------------------------------------------------------------------
 

@@ -76,9 +76,13 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import compute_attention_scale, validate_head_divisibility
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.embedding.multi_axis_rope import apply_rotary_pos_emb
+
+from .common import (
+    compute_attention_scale,
+    validate_head_divisibility
+)
 
 # ---------------------------------------------------------------------
 

@@ -1,66 +1,72 @@
-"""Capsule layers V2 — single-step attention routing with decoupled length & probability.
+"""
+Capsule routing in a single attention step, with capsule length and detection
+probability decoupled.
 
-This module provides a modernised capsule routing primitive that addresses
-several documented limitations of the iterative dynamic-routing scheme used in
-`dl_techniques.layers.capsules.RoutingCapsule`:
+Dynamic routing between capsules is an agreement procedure: each lower capsule
+casts a prediction for each higher one, the higher capsules pool those
+predictions, and predictions that agree with the pooled result have their
+coupling coefficients increased. Running that as a loop
+(``b_{i+1} = b_i + agreement(v_i)``) makes every iteration depend on the last, so
+the routing is sequential inside what is otherwise a feed-forward layer -- it
+cannot be fused, and it leaves accelerators idle. This module replaces the loop
+with one learned query per output capsule and a single softmax over agreement
+scores. Routing becomes one parallel pass: ``score = <u_hat, q> / sqrt(D_out)``,
+softmax, aggregate. Agreement is still what decides the coupling, but it is
+agreement with a learned prototype rather than with an iteratively refined
+consensus.
 
-* **No iterative inner loop.** Routing is computed in a single forward pass via
-  attention-style scoring. This makes the layer fully parallel, XLA-fusable, and
-  removes the sequential ``b_{i+1} = b_i + agreement(v_i)`` data dependency that
-  blocks GPU/TPU utilization in the legacy implementation.
-* **Decoupled length and probability.** The capsule output is constructed as
-  ``v = sigmoid(prob_head(s)) * (s / ||s||)`` — magnitude is a learned scalar
-  per capsule (the detection probability under margin loss), and direction is a
-  unit vector encoding the pose. This eliminates the squash function's
-  saturation at zero and the conflation of "vector magnitude" with "detection
-  probability".
-* **Optional Top-K sparsity.** Each routing softmax can be restricted to the
-  top-k input capsules, keeping per-output cost sub-quadratic when scaling to
-  many input capsules (a la mixture-of-experts gating).
-* **Optional auxiliary load-balancing loss.** When enabled, an importance loss
-  on the routing assignments is added via ``self.add_loss`` during training to
-  discourage coupling collapse (a single output capsule monopolizing the
-  routing).
+The second departure concerns what a capsule's magnitude means. In the original
+formulation ``squash`` maps a vector's length into ``(0, 1)`` and that length IS
+the detection probability, so pose and confidence share one degree of freedom:
+a strong pose cannot be reported with low confidence, and the map saturates to
+zero magnitude for small ``||s||``, which flattens the gradient exactly where a
+weak-but-real detection lives. Here the two are separated,
+``v = sigmoid(prob_head(s)) * s / ||s||``: direction is a unit vector carrying
+the pose, magnitude is a learned scalar per capsule read as the probability under
+margin loss. ``||v||`` still lies in ``(0, 1)`` by construction, so margin loss
+applies unchanged, but nothing forces the two quantities to move together and the
+saturation at zero is gone.
 
-The companion :class:`CapsuleBlockV2` wraps :class:`AttentionRoutingCapsule`
-with optional dropout and a length-preserving direction-only normalizer.
+Two optional mechanisms borrow from sparsely-gated mixtures rather than from the
+capsule literature. Top-k masking restricts each routing softmax to its ``k``
+largest scores, which keeps per-output cost sub-quadratic as the input capsule
+count grows; the mask is taken along the SAME axis the softmax reduces, which is
+what guarantees no row is left entirely masked. And an auxiliary importance loss
+penalizes the squared coefficient of variation of routing usage, discouraging the
+collapse where one output capsule monopolizes the assignments. It is added
+through ``add_loss`` only when ``training`` is truthy, so it never appears in an
+inference graph.
 
-Architecture:
-    Two layers, one of which composes the other::
+Two layers, one composing the other. :class:`AttentionRoutingCapsule` is the
+routing primitive. :class:`CapsuleBlockV2` wraps it with optional dropout and an
+optional direction-only normalizer, and forwards every routing argument through,
+so the two classes share one parameter vocabulary. The normalizer is
+length-preserving on purpose: a plain ``LayerNormalization`` would rescale
+``||x||`` and destroy the detection probability the routing capsule just encoded
+there, so magnitude is held aside, the direction is normalized and re-unit-ized,
+and the magnitude is restored. ``CapsuleBlockV2`` is consumed in production by
+``models/vision/capsnet/model_v2.py``.
 
-        AttentionRoutingCapsule : (B, N_in, D_in) -> (B, N_out, D_out)
-            u_hat -> score -> [top-k] -> softmax -> aggregate -> decoupled output
+Foundational mathematics::
 
-        CapsuleBlockV2 : (B, N_in, D_in) -> (B, N_out, D_out)
-            AttentionRoutingCapsule -> [Dropout] -> [direction-only LayerNorm]
-
-    ``CapsuleBlockV2`` forwards every routing argument through to the capsule it
-    owns, so the two classes share one parameter vocabulary. It is consumed in
-    production by ``models/vision/capsnet/model_v2.py``.
-
-Foundational Mathematics:
-    Routing is one softmax over agreement scores rather than an iterative
-    agreement loop::
-
-        u_hat[b,i,o,:] = W[i,o,:,:] @ u[b,i,:]
-        score[b,i,o]   = <u_hat[b,i,o,:], q[o,:]> / sqrt(D_out)
-        a              = softmax(score, axis = output | input)
-        s[b,o,:]       = sum_i a[b,i,o] * u_hat[b,i,o,:]  (+ bias)
-        v[b,o,:]       = sigmoid(prob_head(s)) * s / (||s|| + eps)
-
-    The final line is the decoupling: ``||v||`` is a learned scalar in ``(0, 1)``
-    read as a detection probability, while ``v / ||v||`` carries the pose. The
-    classic ``squash`` conflates the two and saturates to zero magnitude for
-    small ``||s||``; this form cannot.
+    u_hat[b,i,o,:] = W[i,o,:,:] @ u[b,i,:]
+    score[b,i,o]   = <u_hat[b,i,o,:], q[o,:]> / sqrt(D_out)
+    a              = softmax(score, axis = output | input)
+    s[b,o,:]       = sum_i a[b,i,o] * u_hat[b,i,o,:]  (+ bias)
+    v[b,o,:]       = sigmoid(prob_head(s)) * s / (||s|| + eps)
 
 References:
-    - Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
-      capsules. Advances in NeurIPS 30.
-    - Hahn, T., Pyeon, M., & Kim, G. (2019). Self-Routing Capsule Networks.
-    - Tsai, Y.-H. H., et al. (2020). Capsules with Inverted Dot-Product Attention
-      Routing.
-    - Shazeer, N., et al. (2017). Outrageously Large Neural Networks: The
-      Sparsely-Gated Mixture-of-Experts Layer (load-balancing loss).
+    - Sabour et al., 2017. Dynamic Routing Between Capsules. NeurIPS 30.
+      (https://arxiv.org/abs/1710.09829)
+    - Hinton et al., 2018. Matrix Capsules with EM Routing. ICLR.
+    - Hahn et al., 2019. Self-Routing Capsule Networks. NeurIPS 32.
+    - Tsai et al., 2020. Capsules with Inverted Dot-Product Attention Routing.
+      ICLR. (https://arxiv.org/abs/2002.04764)
+    - Shazeer et al., 2017. Outrageously Large Neural Networks: The
+      Sparsely-Gated Mixture-of-Experts Layer. (the importance / load-balancing
+      loss) (https://arxiv.org/abs/1701.06538)
+    - Vaswani et al., 2017. Attention Is All You Need. (the scaled dot-product
+      form the routing score borrows) (https://arxiv.org/abs/1706.03762)
 """
 
 # ---------------------------------------------------------------------
@@ -79,47 +85,77 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class AttentionRoutingCapsule(keras.layers.Layer):
-    """Single-step attention-routing capsule layer.
+    """
+    Single-step attention-routing capsule layer.
 
-    A drop-in replacement for the iterative :class:`RoutingCapsule` that uses
-    a learned per-output query to score the prediction vectors ``u_hat`` and
-    a single softmax to compute the routing weights, then aggregates with a
-    decoupled magnitude/direction output.
+    A drop-in replacement for the iterative :class:`RoutingCapsule`. A learned
+    per-output query scores the prediction vectors ``u_hat``, one softmax turns
+    those scores into routing weights, and the aggregate is emitted with its
+    magnitude and direction produced separately: direction is the unit pose
+    vector, magnitude is ``sigmoid`` of a learned scalar head, so ``||v||`` lies
+    in ``(0, 1)`` without ``squash``'s saturation at zero.
+
+    Everything is one forward pass -- no inner loop, no sequential dependency, so
+    the layer is fully parallel and XLA-fusable.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────┐
-        │     AttentionRoutingCapsule — single-step attention routing     │
-        │                                                                 │
-        │  Input u [B, N_in, D_in] — N_in must be STATIC: W is indexed    │
-        │  per input capsule, and build() raises if it is None.           │
-        │                             ▼                                   │
-        │  u_hat = einsum('iode,bie->biod', W, u)   a pose transform,     │
-        │          W     [N_in, N_out, D_out, D_in]  NOT a Q/K/V          │
-        │          u_hat [B, N_in, N_out, D_out]     projection           │
-        │                             ▼                                   │
-        │  score = sum_d(u_hat · q) / sqrt(D_out)   q [1,1,N_out,D_out]   │
-        │          [B, N_in, N_out]  (a DIVIDE, not a reciprocal mult)    │
-        │                             ▼                                   │
-        │  optional top_k: where(score >= kth, score, -1e9), taken on     │
-        │  the SAME axis the softmax reduces — so no row is all-masked    │
-        │                             ▼                                   │
-        │  a = softmax(score, axis=2 'output' | axis=1 'input')           │
-        │                             ▼                                   │
-        │  s = sum_i (a · u_hat)  (+ bias)           [B, N_out, D_out]    │
-        │                             ▼                                   │
-        │  decoupled output — length and pose are learned separately:     │
-        │    direction = s / (||s|| + eps)           unit pose vector     │
-        │    mag       = sigmoid(prob_head(s))       Dense(1) over D_out  │
-        │    v         = mag * direction             ||v|| ∈ (0, 1)       │
-        │                             ▼                                   │
-        │  Output v [B, N_out, D_out]                                     │
-        │                                                                 │
-        │  No heads, no residual, no mask argument.  When training and    │
-        │  use_load_balancing: add_loss(weight · cv²(usage)) as well.     │
-        └─────────────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Input u [B, N_in, D_in]                                     │
+        │    N_in must be STATIC: W is indexed per input capsule, and  │
+        │    build() raises if it is None.                             │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  u_hat = einsum('iode,bie->biod', W, u)                      │
+        │    W     [N_in, N_out, D_out, D_in]   a POSE TRANSFORM,      │
+        │    u_hat [B, N_in, N_out, D_out]      not a Q/K/V projection │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  score = sum_d(u_hat · q) / sqrt(D_out)                      │
+        │    q [1, 1, N_out, D_out];  [B, N_in, N_out]                 │
+        │    a DIVIDE, not a reciprocal multiply                       │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  optional top_k: where(score >= kth, score, -1e9)            │
+        │    taken on the SAME axis the softmax reduces, so no row is  │
+        │    ever all-masked                                           │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  a = softmax(score, axis=2 'output' | axis=1 'input')        │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  s = sum_i (a · u_hat)  (+ bias)          [B, N_out, D_out]  │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  decoupled output — length and pose learned separately:      │
+        │    direction = s / (||s|| + eps)      unit pose vector       │
+        │    mag       = sigmoid(prob_head(s))  Dense(1) over D_out    │
+        │    v         = mag * direction        ||v|| ∈ (0, 1)         │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output v [B, N_out, D_out]                                  │
+        └──────────────────────────────────────────────────────────────┘
+
+        No heads, no residual, no mask argument. When training and
+        use_load_balancing: add_loss(weight · cv²(usage)) as well.
+
+    **Softmax axis:**
+
+    .. code-block:: text
+
+        'output' (default)   softmax over axis 2 — each INPUT capsule competes
+                             for where to send itself. Dynamic-routing semantics.
+        'input'              softmax over axis 1 — each OUTPUT capsule receives a
+                             normalised mixture of inputs. Classic attention.
 
     :param num_capsules: Number of output capsules ``N_out``. Must be positive.
     :type num_capsules: int
@@ -173,6 +209,44 @@ class AttentionRoutingCapsule(keras.layers.Layer):
     :raises ValueError: If ``load_balancing_weight`` is negative.
     :raises ValueError: From ``build()``, if the input is not 3D, or if the
         number of input capsules is not statically known.
+
+    Input shape:
+        3D tensor with shape ``(batch_size, num_input_capsules,
+        input_dim_capsules)``. The capsule axis must be statically known.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, num_capsules, dim_capsules)``. One
+        output mode only; every capsule's norm lies in ``(0, 1)``.
+
+    Example:
+        >>> # Classifier-style routing to 10 output capsules
+        >>> caps = AttentionRoutingCapsule(num_capsules=10, dim_capsules=16)
+        >>> u = keras.random.normal((4, 1152, 8))
+        >>> v = caps(u)                       # (4, 10, 16)
+        >>>
+        >>> # Sparse routing with the load-balancing loss during training
+        >>> caps = AttentionRoutingCapsule(
+        ...     num_capsules=32, dim_capsules=16, top_k=8,
+        ...     use_load_balancing=True, load_balancing_weight=0.01,
+        ... )
+        >>>
+        >>> # Attention semantics instead of dynamic-routing semantics
+        >>> caps = AttentionRoutingCapsule(10, 16, softmax_axis="input")
+
+    Note:
+        ``||v||`` is a detection probability and ``v / ||v||`` is a pose, by
+        construction rather than by convention. Anything downstream that rescales
+        the capsule vector — a plain ``LayerNormalization``, for instance —
+        destroys the first while preserving the second. See
+        :class:`CapsuleBlockV2` for the length-preserving alternative.
+
+    Attributes:
+        W: Pose transformation tensor, ``(N_in, N_out, D_out, D_in)``.
+        q: Learned per-output-capsule query, ``(1, 1, N_out, D_out)``.
+        bias: Aggregate bias ``(1, N_out, D_out)``, or ``None``.
+        prob_head: ``Dense(1)`` producing the magnitude logit per capsule.
+        num_input_capsules: ``N_in``, resolved in ``build``.
+        input_dim_capsules: ``D_in``, resolved in ``build``.
     """
 
     def __init__(
@@ -189,6 +263,12 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any,
     ) -> None:
+        """Validate the routing configuration and create the probability head.
+
+        ``W``, ``q`` and the optional bias depend on the input capsule count and
+        are therefore created in :meth:`build`, not here. See the class docstring
+        for the parameter reference.
+        """
         super().__init__(**kwargs)
 
         if num_capsules <= 0:
@@ -249,32 +329,6 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         :return: ``None``.
         :rtype: None
         """
-        # DECISION plan-2026-07-27T130643-38c5646a/D-013
-        # This guard, and its twin in CapsuleBlockV2.build below, are the ONE
-        # executable change plan-2026-07-27T130643-38c5646a made to a forward-adjacent
-        # path. That plan's invariant 1 is "identical numerics, no executable change";
-        # these two `if self.built: return` lines are its single, deliberate carve-out.
-        #
-        # WHY IT IS SAFE: on the ONLY path any test or production caller exercises —
-        # one build() per layer instance — the guard is unreachable, because
-        # `self.built` is False on entry and `super().build()` sets it on the way out.
-        # It can only fire on a SECOND build(), which today does the wrong thing: it
-        # re-enters the three add_weight() calls below (W, q, bias) and orphans the
-        # variables Keras has already restored into. So the guard changes behavior
-        # only in the case that was already broken.
-        #
-        # WHY IT WAS ADDED AT ALL: this file predates the package-wide sweep in commit
-        # 1cdd4767, which added exactly this guard to 29 other build() methods. It was
-        # the only attention module still missing it (the plan predicted the gap was in
-        # `ideogram4_attention.py` — that prediction was wrong; ideogram4 already had
-        # it).
-        #
-        # WHAT NOT TO DO: do not remove it to "restore byte-identity" with the
-        # pre-plan file. The correct record is that the exception is charged in
-        # decisions.md D-013, not that the guard is reverted.
-        #
-        # NOT COVERED BY ANY TEST, in either direction: the capsnet suite only ever
-        # builds once. See decisions.md D-013.
         if self.built:
             return
 
@@ -403,6 +457,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         return masked
 
     # ------------------------------------------------------------------
+
     def call(
         self,
         inputs: keras.KerasTensor,
@@ -489,6 +544,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         return v
 
     # ------------------------------------------------------------------
+
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
@@ -532,43 +588,53 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class CapsuleBlockV2(keras.layers.Layer):
-    """Capsule block built on :class:`AttentionRoutingCapsule`.
+    """
+    Capsule block: :class:`AttentionRoutingCapsule` plus optional dropout and norm.
 
-    Wraps :class:`AttentionRoutingCapsule` with optional dropout and an
-    optional length-preserving direction-only LayerNormalization. The
-    direction-only normalizer matches the bug-fixed behavior of the legacy
-    :class:`CapsuleBlock` — it normalizes the unit-direction subspace
-    without rescaling capsule magnitudes (which encode detection
-    probability).
+    Wraps the routing capsule with optional dropout and an optional
+    length-preserving direction-only ``LayerNormalization``, and forwards every
+    routing argument through to the capsule it owns, so the two classes share one
+    parameter vocabulary.
+
+    The normalizer matches the bug-fixed behaviour of the legacy
+    :class:`CapsuleBlock`: it normalizes the unit-direction subspace WITHOUT
+    rescaling capsule magnitudes, because those magnitudes are the detection
+    probabilities the routing capsule just encoded.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────┐
-        │    CapsuleBlockV2 — routing + dropout + direction-only norm     │
-        │                                                                 │
-        │  Input u [B, N_in, D_in]                                        │
-        │                             ▼                                   │
-        │  AttentionRoutingCapsule ('block_routing')  [B, N_out, D_out]   │
-        │  — the box above; every routing argument is forwarded to it     │
-        │                             ▼                                   │
-        │  Dropout        only if dropout_rate > 0 (else no sub-layer)    │
-        │                             ▼                                   │
-        │  direction-only LayerNormalization, only if the flag is set.    │
-        │  This split/recombine is what keeps the block LENGTH-           │
-        │  PRESERVING:                                                    │
-        │    mag = ||x||                     magnitude held aside         │
-        │    dir = x / mag                                                │
-        │    dir = LayerNorm(dir)            pose normalized ...          │
-        │    dir = dir / ||dir||             ... then re-unit-ized        │
-        │    x   = mag * dir                 magnitude restored           │
-        │                             ▼                                   │
-        │  Output v [B, N_out, D_out]                                     │
-        │                                                                 │
-        │  A plain LayerNorm on x would rescale ||x|| and destroy the     │
-        │  detection probability the routing capsule just encoded in it.  │
-        └─────────────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────┐
+        │  Input u [B, N_in, D_in]             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  block_routing: AttentionRoutingCapsule   [B, N_out, D_out]  │
+        │    the box above; every routing argument is forwarded to it  │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  block_dropout — created ONLY when dropout_rate > 0          │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  block_dir_norm — created ONLY when direction_only_norm.     │
+        │  The split/recombine is what keeps the block LENGTH-         │
+        │  PRESERVING:                                                 │
+        │    mag = ||x||               magnitude held aside            │
+        │    dir = x / mag                                             │
+        │    dir = LayerNorm(dir)      pose normalized ...             │
+        │    dir = dir / ||dir||       ... then re-unit-ized           │
+        │    x   = mag * dir           magnitude restored              │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output v [B, N_out, D_out]          │
+        └──────────────────────────────────────┘
+
+        A plain LayerNorm on x would rescale ||x|| and destroy the detection
+        probability the routing capsule just encoded in it.
 
     :param num_capsules: Number of output capsules. Forwarded to
         :class:`AttentionRoutingCapsule`, which validates it.
@@ -620,6 +686,35 @@ class CapsuleBlockV2(keras.layers.Layer):
     :raises TypeError: If ``direction_only_norm`` is not a ``bool``.
     :raises ValueError: From the wrapped :class:`AttentionRoutingCapsule`, for any
         invalid routing argument (see its ``:raises:`` list).
+
+    Input shape:
+        3D tensor with shape ``(batch_size, num_input_capsules,
+        input_dim_capsules)``. The capsule axis must be statically known.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, num_capsules, dim_capsules)``.
+        Neither dropout nor the direction-only normalizer changes the shape, and
+        the normalizer does not change the norm either.
+
+    Example:
+        >>> block = CapsuleBlockV2(num_capsules=10, dim_capsules=16,
+        ...                        dropout_rate=0.1, direction_only_norm=True)
+        >>> u = keras.random.normal((4, 1152, 8))
+        >>> v = block(u, training=False)      # (4, 10, 16)
+        >>>
+        >>> # Bare block: no dropout, no norm — neither sub-layer is created
+        >>> block = CapsuleBlockV2(10, 16)
+
+    Note:
+        With ``direction_only_norm=True`` the block is length-preserving by
+        construction: ``||output|| == ||routing output||`` up to ``eps``, so the
+        detection probabilities survive normalization. Substituting a plain
+        ``LayerNormalization`` here silently discards them.
+
+    Attributes:
+        routing: The wrapped ``AttentionRoutingCapsule``, named ``block_routing``.
+        dropout: The ``Dropout`` sub-layer, or ``None``.
+        layer_norm: The ``LayerNormalization`` sub-layer, or ``None``.
     """
 
     def __init__(
@@ -638,6 +733,14 @@ class CapsuleBlockV2(keras.layers.Layer):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any,
     ) -> None:
+        """Validate the block's own arguments and create the three sub-layers.
+
+        Routing arguments are not validated here — they are forwarded verbatim and
+        validated by :class:`AttentionRoutingCapsule`'s constructor. Dropout and
+        the normalizer are created only when enabled, so a disabled feature
+        contributes no sub-layer at all. See the class docstring for the parameter
+        reference.
+        """
         super().__init__(**kwargs)
 
         if not (0.0 <= dropout_rate < 1.0):

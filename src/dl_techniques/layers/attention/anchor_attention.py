@@ -27,22 +27,6 @@ two tiers come from separate projections, which lets the layer learn a distinct
 "read from summary" behaviour for spokes and a "build the summary" behaviour for
 hubs.
 
-Architecture:
-    Q, K and V come from three ``Dense`` projections, plus a **fourth** ``Dense``
-    (``query_token_proj``) used only by the spoke tokens. In hierarchical mode the
-    anchor queries and the spoke queries are concatenated along the sequence axis in
-    original token order and scored against the anchor keys alone, producing an
-    ``(N, K)`` score matrix instead of ``(N, N)``. Because the concatenation
-    preserves token order, the output needs no re-scatter.
-
-    Two structural properties are load-bearing:
-
-    -   The mode is a **call** argument (``num_anchor_tokens``), not constructor
-        state, so it is absent from ``get_config()``. A reloaded model runs in
-        standard mode unless the caller passes the argument again.
-    -   Hierarchical mode requires a statically-known sequence length; see the
-        ``plan_2026-06-14_ab855e7e/D-002`` anchor in ``_hierarchical_attention``.
-
 Foundational Mathematics:
     Write ``A`` for the anchor block (the first ``K`` tokens) and ``Q`` for the
     remaining ``N - K``. Standard attention factorizes token ``i``'s output as a
@@ -74,15 +58,17 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops, initializers, regularizers
 from typing import Optional, Any, Dict, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import compute_attention_scale, validate_head_divisibility
-from ..activations import ProbabilityOutput
+from dl_techniques.layers.activations import ProbabilityOutput
+from .common import (
+    compute_attention_scale,
+    validate_head_divisibility
+)
 
 # ---------------------------------------------------------------------
 
@@ -277,10 +263,10 @@ class AnchorAttention(keras.layers.Layer):
             use_bias: bool = True,
             probability_type: str = "softmax",
             probability_config: Optional[Dict[str, Any]] = None,
-            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-            bias_initializer: Union[str, initializers.Initializer] = "zeros",
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         """Initialize the AnchorAttention layer.
@@ -320,10 +306,10 @@ class AnchorAttention(keras.layers.Layer):
         self.use_bias = use_bias
         self.probability_type = probability_type
         self.probability_config = probability_config
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Total width of the concatenated heads. This equals `dim` only in the
         # default case; every Q/K/V projection and every merge-heads reshape must
@@ -508,8 +494,8 @@ class AnchorAttention(keras.layers.Layer):
         :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(x)[0]
-        seq_len = ops.shape(x)[1]
+        batch_size = keras.ops.shape(x)[0]
+        seq_len = keras.ops.shape(x)[1]
 
         # Linear projections: (batch, seq, inner_dim)
         q = self.query_proj(x)
@@ -517,17 +503,17 @@ class AnchorAttention(keras.layers.Layer):
         v = self.value_proj(x)
 
         # Split heads: (batch, seq, num_heads, head_dim)
-        q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k = ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
-        v = ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
+        q = keras.ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k = keras.ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
+        v = keras.ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
 
         # Move heads ahead of the sequence: (batch, num_heads, seq, head_dim)
-        q = ops.transpose(q, (0, 2, 1, 3))
-        k = ops.transpose(k, (0, 2, 1, 3))
-        v = ops.transpose(v, (0, 2, 1, 3))
+        q = keras.ops.transpose(q, (0, 2, 1, 3))
+        k = keras.ops.transpose(k, (0, 2, 1, 3))
+        v = keras.ops.transpose(v, (0, 2, 1, 3))
 
         # Scaled dot-product scores: (batch, heads, seq, seq)
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2))) * self.scale
 
         # Normalize scores into attention weights
         attn_weights = self.score_activation(scores)
@@ -536,11 +522,11 @@ class AnchorAttention(keras.layers.Layer):
             attn_weights = self.dropout_layer(attn_weights, training=training)
 
         # Weighted sum of values: (batch, heads, seq, head_dim)
-        out = ops.matmul(attn_weights, v)
+        out = keras.ops.matmul(attn_weights, v)
 
         # Merge heads: (batch, seq, heads, head_dim) -> (batch, seq, inner_dim)
-        out = ops.transpose(out, (0, 2, 1, 3))
-        out = ops.reshape(out, (batch_size, seq_len, self.inner_dim))
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.reshape(out, (batch_size, seq_len, self.inner_dim))
 
         return self.output_proj(out)
 
@@ -568,13 +554,13 @@ class AnchorAttention(keras.layers.Layer):
 
         :raises ValueError: If the sequence dimension is not statically known.
         """
-        batch_size = ops.shape(x)[0]
+        batch_size = keras.ops.shape(x)[0]
         # DECISION plan_2026-06-14_ab855e7e/D-002: hierarchical mode needs a static
         # sequence length — the `num_anchor_tokens >= seq_len` branch below is a
         # Python-bool decision that crashes under @tf.function when seq_len is a
-        # dynamic ops.shape() tensor (static-shape defect class; capsule/PFA
+        # dynamic keras.ops.shape() tensor (static-shape defect class; capsule/PFA
         # precedent). Fail loud on None; batch stays dynamic. Do NOT revert to
-        # ops.shape for the sequence dim here. _standard_attention (no branch on
+        # keras.ops.shape for the sequence dim here. _standard_attention (no branch on
         # seq_len) is intentionally left dynamic-safe.
         seq_len = x.shape[1]
         if seq_len is None:
@@ -603,48 +589,48 @@ class AnchorAttention(keras.layers.Layer):
         anchor_k = self.key_proj(anchor_tokens)
         anchor_v = self.value_proj(anchor_tokens)
 
-        anchor_q = ops.reshape(
+        anchor_q = keras.ops.reshape(
             anchor_q,
             (batch_size, num_anchor_tokens, self.num_heads, self.head_dim)
         )
-        anchor_k = ops.reshape(
+        anchor_k = keras.ops.reshape(
             anchor_k,
             (batch_size, num_anchor_tokens, self.num_heads, self.head_dim)
         )
-        anchor_v = ops.reshape(
+        anchor_v = keras.ops.reshape(
             anchor_v,
             (batch_size, num_anchor_tokens, self.num_heads, self.head_dim)
         )
 
         # (batch, heads, num_anchors, head_dim)
-        anchor_q = ops.transpose(anchor_q, (0, 2, 1, 3))
-        anchor_k = ops.transpose(anchor_k, (0, 2, 1, 3))
-        anchor_v = ops.transpose(anchor_v, (0, 2, 1, 3))
+        anchor_q = keras.ops.transpose(anchor_q, (0, 2, 1, 3))
+        anchor_k = keras.ops.transpose(anchor_k, (0, 2, 1, 3))
+        anchor_v = keras.ops.transpose(anchor_v, (0, 2, 1, 3))
 
         # -----------------------------------------------------------------
         # Query tier: Q only, from its own projection. No K/V is computed here,
         # which is where the (N-K)^2 term disappears.
         # -----------------------------------------------------------------
         query_q = self.query_token_proj(query_tokens)
-        query_q = ops.reshape(
+        query_q = keras.ops.reshape(
             query_q,
             (batch_size, num_query_tokens, self.num_heads, self.head_dim)
         )
-        query_q = ops.transpose(query_q, (0, 2, 1, 3))
+        query_q = keras.ops.transpose(query_q, (0, 2, 1, 3))
 
         # -----------------------------------------------------------------
         # Concatenate queries as [anchors ; queries]. This order matches the
         # original token order, so the output needs no re-scatter.
         # Shape: (batch, heads, seq_len, head_dim)
         # -----------------------------------------------------------------
-        combined_q = ops.concatenate([anchor_q, query_q], axis=2)
+        combined_q = keras.ops.concatenate([anchor_q, query_q], axis=2)
 
         # -----------------------------------------------------------------
         # All tokens attend only to anchors: (batch, heads, seq_len, num_anchors)
         # -----------------------------------------------------------------
-        scores = ops.matmul(
+        scores = keras.ops.matmul(
             combined_q,
-            ops.transpose(anchor_k, (0, 1, 3, 2))
+            keras.ops.transpose(anchor_k, (0, 1, 3, 2))
         ) * self.scale
 
         attn_weights = self.score_activation(scores)
@@ -655,11 +641,11 @@ class AnchorAttention(keras.layers.Layer):
         # attn_weights: (batch, heads, seq_len, num_anchors)
         # anchor_v:     (batch, heads, num_anchors, head_dim)
         # out:          (batch, heads, seq_len, head_dim)
-        out = ops.matmul(attn_weights, anchor_v)
+        out = keras.ops.matmul(attn_weights, anchor_v)
 
         # Merge heads: (batch, seq, heads, head_dim) -> (batch, seq, inner_dim)
-        out = ops.transpose(out, (0, 2, 1, 3))
-        out = ops.reshape(out, (batch_size, seq_len, self.inner_dim))
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.reshape(out, (batch_size, seq_len, self.inner_dim))
 
         return self.output_proj(out)
 
@@ -667,7 +653,8 @@ class AnchorAttention(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape, identical to the input shape in both modes.
+        """
+        Compute output shape, identical to the input shape in both modes.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -677,7 +664,8 @@ class AnchorAttention(keras.layers.Layer):
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization, includes all constructor parameters.
+        """
+        Return configuration for serialization, includes all constructor parameters.
 
         Note that ``num_anchor_tokens`` is a call argument rather than constructor
         state and is therefore not captured here.

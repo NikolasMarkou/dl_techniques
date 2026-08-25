@@ -1,76 +1,103 @@
 """
-Grouped Query Attention (GQA) Implementation with Rotary Position Embeddings.
+Grouped Query Attention: many query heads sharing few key/value heads, with
+rotary position embeddings.
 
-This module implements Grouped Query Attention, an efficient attention mechanism that
-reduces the computational and memory requirements of multi-head attention by sharing
-key and value projections across multiple query heads while maintaining model quality.
+Autoregressive decoding is bound by memory bandwidth, not arithmetic. Every
+generated token re-reads the entire KV cache, and that cache scales with the
+number of key/value heads, so multi-head attention spends most of a decode step
+moving keys and values rather than computing with them. Multi-query attention
+takes the extreme fix — one K,V head for all queries — and pays for it in
+quality: the heads lose their ability to look for different things, because they
+can no longer disagree about what a key IS, only about how much to weight it.
 
-Architecture:
-    Standard Multi-Head Attention uses ``num_heads`` query, key, and value
-    projections. Grouped Query Attention reduces this to ``num_heads`` query
-    projections but only ``num_kv_heads`` key and value projections (where
-    ``num_kv_heads < num_heads``), creating groups where
-    ``group_size = num_heads // num_kv_heads``. Each K,V pair is shared across
-    ``group_size`` query heads by repeating along the head dimension.
+Grouped query attention is the interpolation. ``num_heads`` query projections are
+kept, but only ``num_kv_heads`` key/value projections, with
+``group_size = num_heads // num_kv_heads`` query heads sharing each K,V pair. The
+cache shrinks by exactly ``num_heads / num_kv_heads`` while each group retains its
+own query subspace, and the published result is that a grouped model interpolates
+smoothly between MHA quality and MQA speed rather than falling off a cliff.
 
-    RoPE, score normalization and the optional QK-norm are shared components,
-    not local implementations — see the ``[REUSE]`` note on the class below.
-    This class is also the base of ``mobile_mqa.MobileMQA``.
+The sharing is a repeat, not a projection. K and V are computed in their native
+``num_kv_heads`` shape and expanded along the head axis at score time, so what is
+STORED is ``num_kv_heads`` heads and what is COMPUTED against is ``num_heads`` — the
+expansion is never materialized in the cache, which is the whole point. The
+optional QK-norm follows the same discipline: K is normalized in its native
+``num_kv_heads`` shape, before grouping, so a group's members see identical
+normalized keys.
 
-Foundational Mathematics:
-    The attention computation follows::
+Three responsibilities are delegated rather than reimplemented — rotary position
+embeddings, score normalization (so `probability_type` selects softmax, sparsemax
+or adaptive with no branching in `call`), and the optional QK-norms. Mask handling
+is deliberately NOT shared: this is the third of three broadcasting variants in the
+package and the most different, because 4D vision inputs arrive with a flattened
+``H*W`` sequence axis and the head axis is materialized by an explicit repeat
+rather than broadcast. The reasons are anchored at `_apply_mask`.
 
-        Attention(Q, K, V) = softmax( Q @ K^T / sqrt(d_k) ) @ V
+Both 3D sequence inputs and 4D vision inputs are accepted; for 4D the spatial axes
+are flattened before attention and restored afterwards. `mobile_mqa.MobileMQA`
+subclasses this layer and overrides only `call`, so the attribute names it reads
+are part of the contract.
 
-    with optional Rotary Position Embeddings (RoPE) applied to Q and K before
-    scoring, and ``d_k = dim // num_heads``. The KV cache shrinks by exactly
-    ``num_heads / num_kv_heads`` because only the ``num_kv_heads`` distinct K,V
-    heads are stored; the repeat to ``num_heads`` happens at score time and is
-    never materialized in the cache.
+Foundational mathematics, with ``d_k = dim // num_heads``::
+
+    Attention(Q, K, V) = softmax( Q @ K^T / sqrt(d_k) ) @ V
+
+with RoPE optionally applied to Q and K before scoring, and K, V repeated from
+``num_kv_heads`` to ``num_heads`` immediately before the score matmul.
 
 References:
-    - Ainslie, J., et al. (2023). "GQA: Training Generalized Multi-Query Transformer
-      Models from Multi-Head Checkpoints." https://arxiv.org/abs/2305.13245
-
-    - Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need."
-      https://arxiv.org/abs/1911.02150 (Multi-Query Attention predecessor)
-
-    - Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
-      Embedding." https://arxiv.org/abs/2104.09864 (RoPE integration)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer
+      Models from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Shazeer, 2019. Fast Transformer Decoding: One Write-Head is All You Need.
+      (the multi-query predecessor this interpolates towards)
+      (https://arxiv.org/abs/1911.02150)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Henry et al., 2020. Query-Key Normalization for Transformers. (the optional
+      QK-norm) (https://arxiv.org/abs/2010.04245)
 """
 
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops
 from typing import Optional, Union, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
-from .common import apply_attention_mask, compute_attention_scale, validate_head_divisibility
-from ..activations import ProbabilityOutput
-from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
-from ..norms.factory import create_normalization_layer
+from dl_techniques.initializers import clone_initializer
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
+
+from .common import (
+    apply_attention_mask, 
+    compute_attention_scale, 
+    validate_head_divisibility
+)
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GroupedQueryAttention(keras.layers.Layer):
     """
-    Grouped Query Attention layer with optional rotary position embeddings.
+    Grouped query attention with optional rotary position embeddings.
 
-    This layer implements an efficient attention mechanism that reduces computational
-    and memory costs by sharing key-value projections across multiple query heads.
-    It supports both 3D (sequence) and 4D (vision) inputs.
+    ``num_heads`` query projections share ``num_kv_heads`` key/value projections,
+    with ``group_size = num_heads // num_kv_heads`` queries per K,V pair. This cuts
+    KV-cache memory by ``num_heads / num_kv_heads`` in autoregressive decoding
+    while keeping most of full multi-head attention's representational power —
+    every query head keeps its own subspace, only the keys and values are shared.
+    ``num_heads % num_kv_heads == 0`` is required, and the repeat that expands K,V
+    to ``num_heads`` happens at score time, never in the cache.
 
-    The key insight is that ``num_heads % num_kv_heads == 0``, creating groups where
-    each K,V pair is shared across ``group_size = num_heads // num_kv_heads`` query heads.
-    This reduces memory usage for K,V caches in autoregressive generation while
-    maintaining most of the representational power of full multi-head attention.
+    Both 3D sequence inputs ``(B, S, D)`` and 4D vision inputs ``(B, H, W, D)`` are
+    accepted; 4D inputs are flattened to ``S = H*W`` for attention and restored
+    afterwards.
 
     **[REUSE]** Three responsibilities are delegated rather than reimplemented:
 
@@ -93,42 +120,68 @@ class GroupedQueryAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────────────────────────┐
-        │                    GroupedQueryAttention                     │
-        │                                                              │
-        │  Input [B, seq, dim] or [B, H, W, dim]                       │
-        │         │                                                    │
-        │         ├──────────────────┬──────────────────┐              │
-        │         ▼                  ▼                  ▼              │
-        │  ┌────────────┐    ┌────────────┐    ┌────────────┐          │
-        │  │  Q_proj    │    │  K_proj    │    │  V_proj    │          │
-        │  │ (num_heads)│    │(num_kv_hds)│    │(num_kv_hds)│          │
-        │  └─────┬──────┘    └─────┬──────┘    └─────┬──────┘          │
-        │        │                 │                 │                 │
-        │        ▼                 ▼                 │                 │
-        │  ┌────────────────────────────┐            │                 │
-        │  │  (Optional) RoPE(Q, K)     │            │                 │
-        │  └────────────┬───────────────┘            │                 │
-        │               │                            │                 │
-        │        ┌──────┴──────┐                     │                 │
-        │        ▼             ▼                     ▼                 │
-        │     Q [H]      K,V repeated ──────► K,V [H]                  │
-        │        │         (group broadcast)    │                      │
-        │        └──────┬───────────────────────┘                      │
-        │               ▼                                              │
-        │     scores = Q @ K^T / sqrt(d_k)                             │
-        │               │                                              │
-        │               ▼                                              │
-        │         [+ attention_mask]                                   │
-        │               │                                              │
-        │               ▼                                              │
-        │        softmax ──► dropout ──► weights @ V                   │
-        │               │                                              │
-        │               ▼                                              │
-        │        Output Projection                                     │
-        │               │                                              │
-        │               ▼                                              │
-        │  Output [B, seq, dim] or [B, H, W, dim]                      │
+        │  Input [B, S, dim]  or  [B, H, W, dim]                       │
+        └───────┬──────────────────────┬───────────────────────┬───────┘
+                ▼                      ▼                       ▼
+        ┌───────────────┐   ┌───────────────────┐   ┌───────────────────┐
+        │ w_q           │   │ w_k               │   │ w_v               │
+        │ num_heads·d_h │   │ num_kv_heads·d_h  │   │ num_kv_heads·d_h  │
+        └───────┬───────┘   └─────────┬─────────┘   └─────────┬─────────┘
+                ▼                     ▼                       │
+        ┌──────────────────────────────────────────┐          │
+        │  [4D only] flatten H·W → S, then reshape │          │
+        │  to per-head and transpose               │          │
+        │    Q [B, num_heads,    S, d_h]           │          │
+        │    K [B, num_kv_heads, S, d_h]           │          │
+        └───────┬──────────────────────┬───────────┘          │
+                ▼                      ▼                      │
+        ┌──────────────────────────────────────────┐          │
+        │  optional RoPE(Q), RoPE(K)               │          │
+        │  optional q_norm(Q), k_norm(K)           │          │
+        │    K is normalized in its NATIVE         │          │
+        │    num_kv_heads shape, BEFORE grouping   │          │
+        └───────┬──────────────────────┬───────────┘          │
+                │                      ▼                      ▼
+                │        ┌──────────────────────────────────────────────────┐
+                │        │  keras.ops.repeat(K, num_groups) — and V likewise│
+                │        │    num_kv_heads → num_heads, at SCORE time.      │
+                │        │    Never materialized in the KV cache; that      │
+                │        │    is where the memory saving lives.             │
+                │        └──────────────────┬───────────────────────────────┘
+                ▼                           ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  scores = Q @ Kᵀ · scale          [B, num_heads, S, S]       │
+        │    scale is a Python float from __init__ (D-001)             │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  [+ attention_mask]  rank 2/3/4, keep-predicate; the head    │
+        │  axis is REPEATED, not broadcast (see _apply_mask)           │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  attn_prob → dropout → weights @ V   │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  merge heads → w_o                   │
+        │  [4D only] restore H, W              │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output [B, S, dim]  or  [B, H, W, dim]                      │
+        │  return_attention_weights=True → (output, weights)           │
         └──────────────────────────────────────────────────────────────┘
+
+    **Grouping:**
+
+    .. code-block:: text
+
+        num_heads  num_kv_heads  num_groups  cache size   equivalent to
+            8            8            1         1.00×     full MHA
+            8            4            2         0.50×     GQA-4
+            8            2            4         0.25×     GQA-2
+            8            1            8         0.125×    MQA
 
     :param dim: Integer, input/output dimension (embedding size). Must be positive and
         divisible by num_heads.
@@ -171,7 +224,8 @@ class GroupedQueryAttention(keras.layers.Layer):
         features rather than logits.
     :type probability_type: str
     :param probability_config: Optional dictionary forwarded to
-        :class:`ProbabilityOutput` as ``type_config``. Defaults to ``None``.
+        :class:`ProbabilityOutput` as ``type_config``. Also supplies the mask
+        rescue axis; see :meth:`_apply_mask`. Defaults to ``None``.
     :type probability_config: Optional[Dict[str, Any]]
     :param qk_norm_type: Optional normalization type applied per-head to Q and K
         before scoring, forwarded to :func:`create_normalization_layer`. K is
@@ -191,6 +245,53 @@ class GroupedQueryAttention(keras.layers.Layer):
     :raises ValueError: If ``dropout_rate`` or ``rope_percentage`` is outside
         ``[0, 1]``.
     :raises ValueError: If ``probability_type`` is a routing/hierarchical variant.
+
+    Input shape:
+        3D tensor ``(batch_size, seq_len, dim)`` or 4D tensor
+        ``(batch_size, height, width, dim)``. The optional ``attention_mask`` is a
+        ``1 = keep`` predicate of rank 2 ``(B, S)``, rank 3 ``(B, S, S)`` or
+        rank 4 ``(B, heads, S, S)``.
+
+    Output shape:
+        Same shape as the input — 3D in, 3D out; 4D in, 4D out. With
+        ``return_attention_weights=True`` the return is
+        ``(output, weights)`` where weights is
+        ``(batch_size, num_heads, seq_len, seq_len)``.
+
+    Example:
+        >>> # GQA-2: eight query heads over two K,V heads, quarter-size cache
+        >>> attn = GroupedQueryAttention(dim=512, num_heads=8, num_kv_heads=2)
+        >>> x = keras.random.normal((2, 128, 512))
+        >>> y = attn(x, training=False)                    # (2, 128, 512)
+        >>>
+        >>> # Vision input: spatial axes flattened internally, restored on output
+        >>> img = keras.random.normal((2, 16, 16, 512))
+        >>> y = attn(img, training=False)                  # (2, 16, 16, 512)
+        >>>
+        >>> # No RoPE, sparse scores, QK-norm on
+        >>> attn = GroupedQueryAttention(
+        ...     dim=512, num_heads=8, num_kv_heads=2, rope_percentage=0.0,
+        ...     probability_type="sparsemax", qk_norm_type="rms_norm",
+        ... )
+
+    Note:
+        The KV-cache saving comes from what is STORED, not from what is computed:
+        K and V exist in ``num_kv_heads`` shape everywhere except the score matmul,
+        where ``ops.repeat`` expands them. Materializing the repeat earlier — in a
+        cache, or before the QK-norm — gives up the entire benefit.
+
+    Attributes:
+        w_q, w_k, w_v: Query and (narrower) key/value projections; each gets a
+            CLONED initializer, so the four roles do not start identical.
+        w_o: Output projection back to ``dim``.
+        dropout: Attention-weight dropout.
+        rope: Shared ``RotaryPositionEmbedding``, or ``None``.
+        attn_prob: Shared ``ProbabilityOutput`` score normalizer.
+        q_norm, k_norm: Optional QK-norms, or ``None``.
+        head_dim: ``dim // num_heads``.
+        num_groups: ``num_heads // num_kv_heads``.
+        scale: The ``1 / sqrt(head_dim)`` temperature, a Python float. Read by
+            ``MobileMQA``.
     """
 
     def __init__(
@@ -213,6 +314,11 @@ class GroupedQueryAttention(keras.layers.Layer):
         qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and create every sub-layer.
+
+        This layer owns no weights of its own; :meth:`build` only materializes the
+        sub-layers. See the class docstring for the parameter reference.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -256,8 +362,8 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.num_groups = self.num_heads // self.num_kv_heads
 
         # DECISION plan_2026-06-14_ab855e7e/D-001: static attention scale as a
-        # Python float (math.sqrt, NOT ops.sqrt on a cast scalar — D-002 pattern).
-        # Inherited by MobileMQA. Do NOT revert to ops.sqrt.
+        # Python float (math.sqrt, NOT keras.ops.sqrt on a cast scalar — D-002 pattern).
+        # Inherited by MobileMQA. Do NOT revert to keras.ops.sqrt.
         #
         # R13: the expression now lives in `common.compute_attention_scale`, which IS
         # `1.0 / math.sqrt(float(head_dim))` — verified repr-identical for every
@@ -371,6 +477,11 @@ class GroupedQueryAttention(keras.layers.Layer):
     ) -> None:
         """Validate initialization parameters.
 
+        Two divisibility invariants are checked, and they are NOT the same: the
+        head split (``dim`` by ``num_heads``) is delegated to the shared validator,
+        while the grouping (``num_heads`` by ``num_kv_heads``) stays local for the
+        reason anchored inline.
+
         :param dim: Model dimension.
         :type dim: int
         :param num_heads: Number of query heads.
@@ -385,6 +496,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         :type rope_percentage: float
         :param rope_theta: RoPE base frequency.
         :type rope_theta: float
+        :raises ValueError: If any parameter is invalid.
         """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -416,10 +528,13 @@ class GroupedQueryAttention(keras.layers.Layer):
             raise ValueError(f"rope_percentage must be in [0, 1], got {rope_percentage}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and every sub-layer explicitly.
 
-        Explicitly builds sub-layers for robust serialization.
+        The projections are rank-agnostic, but RoPE, the score normalizer and the
+        QK-norms are not: their build shapes are derived from the input rank, with
+        4D inputs contributing ``seq_len = H * W``. Note that Q's norm is built at
+        ``num_heads`` and K's at ``num_kv_heads`` — the grouping repeat has not
+        happened yet at that point in ``call``.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -482,17 +597,19 @@ class GroupedQueryAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         return_attention_weights: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """
-        Apply grouped query attention.
+        """Apply grouped query attention.
 
         Supports 3D ``(B, S, D)`` and 4D ``(B, H, W, D)`` inputs. For 4D inputs,
         spatial dimensions are flattened before attention and restored afterward.
+        RoPE and the QK-norms run BEFORE the grouping repeat, so K is normalized in
+        its native ``num_kv_heads`` shape.
 
         :param inputs: Input tensor of shape ``(B, S, D)`` or ``(B, H, W, D)``.
         :type inputs: keras.KerasTensor
         :param training: Boolean indicating training mode for dropout.
         :type training: Optional[bool]
-        :param attention_mask: Optional attention mask tensor.
+        :param attention_mask: Optional attention mask tensor, ``1 = keep``, of
+            rank 2, 3 or 4.
         :type attention_mask: Optional[keras.KerasTensor]
         :param return_attention_weights: If True, returns attention weights alongside output.
         :type return_attention_weights: bool
@@ -500,7 +617,7 @@ class GroupedQueryAttention(keras.layers.Layer):
             (output, attention_weights) if ``return_attention_weights=True``.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         rank = len(inputs.shape)
         batch_size = input_shape[0]
 
@@ -514,22 +631,22 @@ class GroupedQueryAttention(keras.layers.Layer):
         if rank == 4:
             height, width = input_shape[1], input_shape[2]
             seq_len = height * width
-            q = ops.reshape(q, (batch_size, seq_len, -1))
-            k = ops.reshape(k, (batch_size, seq_len, -1))
-            v = ops.reshape(v, (batch_size, seq_len, -1))
+            q = keras.ops.reshape(q, (batch_size, seq_len, -1))
+            k = keras.ops.reshape(k, (batch_size, seq_len, -1))
+            v = keras.ops.reshape(v, (batch_size, seq_len, -1))
         else:
             seq_len = input_shape[1]
 
         # 3. Reshape for Multi-Head Attention
         # Q: (B, S, H, D_h)
-        q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k = ops.reshape(k, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
-        v = ops.reshape(v, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
+        q = keras.ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k = keras.ops.reshape(k, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
+        v = keras.ops.reshape(v, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
 
         # Transpose to (B, H, S, D_h) for efficient attention
-        q = ops.transpose(q, (0, 2, 1, 3))
-        k = ops.transpose(k, (0, 2, 1, 3))
-        v = ops.transpose(v, (0, 2, 1, 3))
+        q = keras.ops.transpose(q, (0, 2, 1, 3))
+        k = keras.ops.transpose(k, (0, 2, 1, 3))
+        v = keras.ops.transpose(v, (0, 2, 1, 3))
 
         # 4. Apply RoPE (Optional)
         if self.rope is not None:
@@ -544,13 +661,13 @@ class GroupedQueryAttention(keras.layers.Layer):
 
         # 5. Grouping: Repeat K, V to match Q head count
         if self.num_groups > 1:
-            k = ops.repeat(k, self.num_groups, axis=1)
-            v = ops.repeat(v, self.num_groups, axis=1)
+            k = keras.ops.repeat(k, self.num_groups, axis=1)
+            v = keras.ops.repeat(v, self.num_groups, axis=1)
 
         # 6. Scaled Dot-Product Attention
         # (B, H, S, D_h) @ (B, H, D_h, S) -> (B, H, S, S)
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
-        scores = scores * ops.cast(self.scale, scores.dtype)  # D-001: precomputed
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
+        scores = scores * keras.ops.cast(self.scale, scores.dtype)  # D-001: precomputed
 
         if attention_mask is not None:
             scores = self._apply_mask(scores, attention_mask)
@@ -560,18 +677,18 @@ class GroupedQueryAttention(keras.layers.Layer):
 
         # 7. Apply weights to Values
         # (B, H, S, S) @ (B, H, S, D_h) -> (B, H, S, D_h)
-        out = ops.matmul(attention_weights, v)
+        out = keras.ops.matmul(attention_weights, v)
 
         # 8. Restore Output Shape
-        out = ops.transpose(out, (0, 2, 1, 3))  # (B, S, H, D_h)
-        out = ops.reshape(out, (batch_size, seq_len, self.dim))  # (B, S, D)
+        out = keras.ops.transpose(out, (0, 2, 1, 3))  # (B, S, H, D_h)
+        out = keras.ops.reshape(out, (batch_size, seq_len, self.dim))  # (B, S, D)
 
         # Final projection
         output = self.w_o(out, training=training)
 
         # 9. Reshape back to 4D if input was 4D
         if rank == 4:
-            output = ops.reshape(output, (batch_size, height, width, self.dim))
+            output = keras.ops.reshape(output, (batch_size, height, width, self.dim))
 
         if return_attention_weights:
             return output, attention_weights
@@ -582,13 +699,19 @@ class GroupedQueryAttention(keras.layers.Layer):
             scores: keras.KerasTensor,
             mask: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Broadcast and apply attention mask to scores.
+        """Broadcast and apply the attention mask to the scores.
+
+        Rank 2 is reshaped (not expanded) to ``(B, 1, 1, S)`` and rank 3 gains a
+        head axis; a size-1 head axis is then MATERIALIZED to ``num_heads`` by an
+        explicit repeat rather than left to broadcasting. Masking itself is
+        delegated to the shared helper, which also performs the fully-masked-row
+        rescue at the axis this layer's own ``probability_config`` declares.
 
         :param scores: Attention scores of shape ``(B, H, S, S)``.
         :type scores: keras.KerasTensor
-        :param mask: Attention mask tensor.
+        :param mask: Attention mask tensor, ``1 = keep``, of rank 2, 3 or 4.
         :type mask: keras.KerasTensor
-        :return: Masked scores tensor.
+        :return: Masked scores tensor, in the scores' own dtype.
         :rtype: keras.KerasTensor
         """
         # R13 cross-reference — this helper is deliberately NOT shared.
@@ -610,18 +733,18 @@ class GroupedQueryAttention(keras.layers.Layer):
         # cast order, one rank probe, and either broadcast or repeat — silently
         # rewriting the traced graph of the two layers it did not come from.
         #
-        mask_shape = ops.shape(mask)
+        mask_shape = keras.ops.shape(mask)
 
         # Handle 2D padding mask (B, S)
         if len(mask_shape) == 2:
-            mask = ops.reshape(mask, (mask_shape[0], 1, 1, mask_shape[1]))
+            mask = keras.ops.reshape(mask, (mask_shape[0], 1, 1, mask_shape[1]))
         # Handle 3D causal/combined mask (B, S, S)
         elif len(mask_shape) == 3:
-            mask = ops.expand_dims(mask, axis=1)
+            mask = keras.ops.expand_dims(mask, axis=1)
 
         # Broadcast head dim if necessary
-        if len(ops.shape(mask)) == 4 and ops.shape(mask)[1] == 1:
-            mask = ops.repeat(mask, self.num_heads, axis=1)
+        if len(ops.shape(mask)) == 4 and keras.ops.shape(mask)[1] == 1:
+            mask = keras.ops.repeat(mask, self.num_heads, axis=1)
 
         # THIS SITE'S MASK POLARITY, passed through verbatim: `mask` is a `1 = keep`
         # predicate, so it IS the keep predicate `apply_attention_mask` wants. Do NOT
@@ -688,7 +811,10 @@ class GroupedQueryAttention(keras.layers.Layer):
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape, same as input shape.
+        """Return the output shape, which equals the input shape.
+
+        Holds for both ranks: the output projection maps back to ``dim``, and 4D
+        spatial axes are restored after attention. Inherited by ``MobileMQA``.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -699,6 +825,9 @@ class GroupedQueryAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.
+
+        ``kernel_initializer`` is reported as the caller passed it — the per-site
+        clones in ``__init__`` do not replace it (D-068).
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]

@@ -68,8 +68,8 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 # Local imports
 # ---------------------------------------------------------------------
 
-from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -82,7 +82,8 @@ SparsityMode = Literal['none', 'top_k', 'threshold']
 
 @keras.saving.register_keras_serializable()
 class ProgressiveFocusedAttention(keras.layers.Layer):
-    """Windowed self-attention with progressive focusing from previous layers.
+    """
+    Windowed self-attention with progressive focusing from previous layers.
 
     Implements the PFA mechanism from PFT-SR which computes window-based multi-head
     self-attention (W-MSA or SW-MSA) with progressive refinement. The input is
@@ -542,12 +543,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
         # ============ Create Attention Mask for Shifted Windows ============
         # For SW-MSA, we need a mask to prevent attention across shifted regions.
-        # DECISION plan_2026-06-14_b9456f74/D-001: the SW-MSA mask is built for the
-        # ACTUAL static (H, W) so it is correct for general feature-map sizes (not
-        # only H=W=2*ws). This REQUIRES statically-known H and W. Do NOT attempt to
-        # build the mask from dynamic (None) spatial dims or fall back to a fixed
-        # 2x2-window grid -- that silently produces a wrong-geometry mask for the
-        # production callers (pft_sr, thera, swin). Fail loud instead. See D-001.
         if self._shift_size > 0:
             height = x_shape[1]
             width = x_shape[2]
@@ -627,13 +622,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         )
 
         # Create a mask image with region indices using numpy (for static computation)
-        #
-        # R10 note: this numpy usage is BUILD-TIME ONLY. It runs once inside
-        # `build()` to materialize a frozen `keras.Variable`; no numpy op is on the
-        # forward path, so the "keras.ops only in call()" rule is not violated. The
-        # import is function-local rather than module-level, which is unusual for this
-        # package but harmless — left as-is because moving it is churn with no
-        # behavioral effect.
         import numpy as np
 
         # Build the index mask at the ACTUAL feature-map size (general H, W),

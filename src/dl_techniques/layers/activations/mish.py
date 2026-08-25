@@ -57,7 +57,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -75,9 +74,9 @@ def mish(inputs: keras.KerasTensor) -> keras.KerasTensor:
     :rtype: keras.KerasTensor
     """
     # Calculate softplus: log(1 + exp(x))
-    softplus = ops.softplus(inputs)
+    softplus = keras.ops.softplus(inputs)
     # Calculate tanh of softplus
-    tanh_softplus = ops.tanh(softplus)
+    tanh_softplus = keras.ops.tanh(softplus)
     # Return x * tanh(softplus(x))
     return inputs * tanh_softplus
 
@@ -104,7 +103,7 @@ def saturated_mish(
     tmp_mish = mish(inputs)
 
     # Create a smooth sigmoid-based blending factor
-    blend_factor = ops.sigmoid((inputs - alpha) / beta)
+    blend_factor = keras.ops.sigmoid((inputs - alpha) / beta)
 
     # Combine both regions with smooth blending
     # For x <= alpha: mostly standard Mish

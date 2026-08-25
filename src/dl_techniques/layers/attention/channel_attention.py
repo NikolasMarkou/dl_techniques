@@ -64,8 +64,12 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
-from ..activations import resolve_activation_layer
-from ...initializers import clone_initializer
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.initializers import clone_initializer
+from dl_techniques.layers.activations import resolve_activation_layer
 
 # ---------------------------------------------------------------------
 

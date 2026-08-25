@@ -93,33 +93,6 @@ Foundational Mathematics:
     the approximation is never a *hole* — every base position always has at least
     one contributor, however coarse.
 
-# DECISION plan_2026-05-17_8babb636/D-001
-PORT COMPROMISES (vs. CUDA/Triton reference kernels):
-  1. Top-K: ``keras.ops.top_k`` over flat pyramid scores (NOT chunked-bitonic
-     stratified). Stratification is replaced by an explicit *mandatory* index
-     set, fixed at build time and additive to the ``top_k`` budget: all
-     coarsest-level entries (paper Eq. 8) plus level-0 entries
-     ``0 .. p^(L-1) - 2``, which are the only entries able to cover the sequence
-     prefix. Strictly weaker than stratified selection but hole-free.
-  2. Scatter-back: ``keras.ops.segment_sum`` (deterministic, slower) replaces
-     fp-atomic-add scatter. No non-determinism trade-off. Costs
-     ``O(S * p^(L-1) * d)`` intermediate memory, since segment_sum has no
-     broadcast form; ``build()`` warns when that exceeds ``4N``.
-  3. Single-device only: NO context parallelism (CP), NO ring attention,
-     NO ``enable_load_balance``.
-  4. Scorer: ``"norm"`` only — NO ``dilated`` / NO ``gla`` scorers.
-  5. Top-K shared across heads (single ``(B, K)`` index set) — NOT per-head. The
-     per-head scores are reduced by ``score_head_reduction`` (default ``"mean"``;
-     ``"max"`` lets a single outlier head dictate the gather for all heads).
-  6. No ``topk % 128`` / ``p`` power-of-2 asserts (CUDA-layout-tied).
-  7. Training-only by default; ``set_full_attention(True)`` enables the
-     Stage-2 SDPA-resume mode (plain causal MHA over the full sequence).
-  8. Selection combines the QK and KQ streams by per-entry ``max`` and takes
-     ``top_k`` *distinct entries*. The paper's Eq. 6 takes ``k`` scores from the
-     ``2 * S_pyr`` union of both streams, which yields between ``k/2`` and ``k``
-     distinct entries. ``top_k`` here is therefore a denser budget than the
-     paper's ``k``; throughput figures are not directly comparable.
-
 # DECISION plan_2026-07-26_c41d09b2/D-004
 REVISION of D-001 following a line-by-line audit against arXiv:2605.06554v1.
 Three defects were corrected and are called out because each failed silently —
@@ -160,9 +133,9 @@ from keras import ops, layers, initializers, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 # Module-level static pyramid helpers (pure Python / numpy).

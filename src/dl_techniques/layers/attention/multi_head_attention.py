@@ -1,60 +1,52 @@
 """
-Pairwise relationships between elements in a sequence.
+Multi-head self-attention: pairwise relationships between elements of one sequence.
 
-This layer implements the multi-head self-attention mechanism, a cornerstone
-of the Transformer architecture. Its fundamental purpose is to dynamically
-weigh the importance of all other elements in a sequence when producing a new
-representation for a given element. This allows the model to capture complex,
-long-range dependencies and contextual relationships within the input data,
-regardless of the distance between elements.
+The mechanism answers a question a convolution or recurrence cannot ask directly:
+for this element, which other elements matter, and how much? Each position emits
+three projections — a Query stating what it is looking for, a Key advertising what
+it offers, and a Value carrying what it would contribute. Compatibility is the dot
+product of a Query with every Key, normalized into a distribution, and the output
+is the correspondingly weighted sum of Values. Nothing in that computation refers
+to distance, which is why a dependency between positions 1 and 1000 costs the same
+as one between 1 and 2.
 
-Architecture:
-    The process is built upon the scaled dot-product attention mechanism. For
-    each element in the input sequence, three vectors are derived through
-    learned linear projections: a Query (Q), a Key (K), and a Value (V).
+The multi-head part is what keeps that flexibility from collapsing. A single
+attention distribution per position forces one notion of relevance, and the softmax
+makes it competitive: attending to a syntactic governor means not attending to a
+semantically similar word. Splitting the model dimension into ``h`` narrower
+subspaces and attending independently in each lets a position hold several
+relevance relations at once, and because the heads share the parameter budget
+rather than adding to it, the cost is the concatenation and one output projection
+that mixes what the heads found.
 
-    -   The **Query** vector represents the current element's request for
-        information.
-    -   The **Key** vector represents what information each element in the
-        sequence has to offer.
-    -   The **Value** vector represents the content of each element that will
-        be aggregated.
+The ``1/sqrt(d_k)`` factor is the detail that makes the whole thing trainable. A dot
+product of two ``d_k``-dimensional vectors has variance proportional to ``d_k``, so
+without rescaling the logits grow with head width, the softmax saturates, and its
+gradient vanishes exactly where the model is largest. Dividing by ``sqrt(d_k)``
+holds logit variance constant, making head width a free architectural choice rather
+than a stability constraint.
 
-    The "multi-head" aspect enhances this mechanism's power. Instead of a
-    single set of Q, K, V projections, the input is projected into multiple
-    (``h``) lower-dimensional subspaces. Scaled dot-product attention is then
-    performed in parallel within each of these "heads." This allows the model
-    to jointly attend to information from different representation subspaces
-    at different positions. For example, one head might learn to focus on
-    syntactic relationships, while another focuses on semantic similarity. The
-    outputs from all heads are then concatenated and passed through a final
-    linear projection to produce the final result. This parallel structure
-    enables the model to capture a richer and more diverse set of
-    relationships within the data.
+This module owns no attention math of its own. It is a thin, self-attention-shaped
+facade over `MultiHeadCrossAttention`, invoked with `kv_input=None` and
+`shared_qk_projections=True` so a single fused `Dense(3 * dim)` produces Q, K and V
+— possible precisely because all three read the same tensor. `build` validates the
+rank and forwards, `call` is one delegating expression, and
+`compute_output_shape` is the identity. The sibling facade over the same engine is
+`perceiver_attention.PerceiverAttention`, which presets the asymmetric
+cross-attention configuration instead.
 
-    **This module owns no attention math of its own.** It is a thin,
-    self-attention-shaped facade over ``MultiHeadCrossAttention``; see the
-    ``[REUSE]`` note on the class below.
+Foundational mathematics, with ``d_k = dim // num_heads``::
 
-Foundational Mathematics:
-    The core operation computes a compatibility score between the Query of one
-    element and the Key of every other element in the sequence via a dot
-    product. These scores are then scaled and passed through a softmax
-    function to create a set of attention weights --- a probability
-    distribution indicating how much attention the current element should pay
-    to every other element. The final output for the current element is a
-    weighted sum of all Value vectors in the sequence::
-
-        Attention(Q, K, V) = softmax( (Q K^T) / sqrt(d_k) ) V
-
-    with ``d_k = dim // num_heads``. The ``1/sqrt(d_k)`` factor keeps the
-    logit variance independent of head width, which is what stops the softmax
-    from saturating (and its gradient from vanishing) as ``d_k`` grows.
+    Attention(Q, K, V) = softmax( (Q K^T) / sqrt(d_k) ) V
 
 References:
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
-
+    - Bahdanau et al., 2014. Neural Machine Translation by Jointly Learning to
+      Align and Translate. (the additive attention this replaced)
+      (https://arxiv.org/abs/1409.0473)
+    - Michel et al., 2019. Are Sixteen Heads Really Better than One?. (what the
+      individual heads turn out to contribute) (https://arxiv.org/abs/1905.10650)
 """
 
 # ---------------------------------------------------------------------
@@ -74,12 +66,19 @@ from .multi_head_cross_attention import MultiHeadCrossAttention
 @keras.saving.register_keras_serializable()
 class MultiHeadAttention(keras.layers.Layer):
     """
-    Multi-Head Self-Attention mechanism with comprehensive masking support.
+    Multi-head self-attention, as a facade over the shared cross-attention engine.
 
-    This layer provides a clean interface for self-attention operations by wrapping
-    the more general ``MultiHeadCrossAttention`` layer. It demonstrates the wrapper
-    pattern for creating specialized interfaces while maintaining robust serialization
-    and leveraging existing, well-tested implementations.
+    Provides a clean self-attention interface by wrapping the more general
+    ``MultiHeadCrossAttention``, demonstrating the wrapper pattern for specialized
+    interfaces while keeping robust serialization and one well-tested
+    implementation. The computation is
+    ``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V`` with Q, K and V all
+    derived from the same input; ``num_heads`` parallel subspaces are attended
+    independently, concatenated, and mixed by a final projection.
+
+    ``shared_qk_projections=True`` is pinned rather than exposed: all three
+    projections read the same tensor, so one fused ``Dense(3 * dim)`` is both
+    correct and cheaper than three.
 
     **[REUSE] This class contains no attention arithmetic.** Every projection,
     score, mask application, probability normalization and output projection is
@@ -97,44 +96,44 @@ class MultiHeadAttention(keras.layers.Layer):
     ``cross_attention`` sub-layer's weights under that name — flattening the
     wrapper is a silent checkpoint break, not a refactor.
 
-    The self-attention computation follows: ``Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V``
-    where Q, K, and V are all derived from the same input via learned linear projections.
-    The "multi-head" mechanism projects input into ``num_heads`` parallel subspaces, performs
-    scaled dot-product attention independently in each, concatenates the results, and applies
-    a final linear projection.
-
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────────────────┐
-        │              MultiHeadAttention Wrapper               │
-        │                                                       │
-        │   Input [B, seq, dim]                                 │
-        │          │                                            │
-        │          ▼                                            │
-        │   ┌─────────────────────────────────────────────┐     │
-        │   │  MultiHeadCrossAttention                    │     │
-        │   │  (shared_qk_projections=True, self-attn)    │     │
-        │   │                                             │     │
-        │   │   Input ──► QKV_proj ──► Q, K, V            │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │        scores = Q @ K^T / sqrt(d_k)         │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │        [+ attention_mask]                   │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │        softmax ──► weights @ V              │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │           Output Projection                 │     │
-        │   └─────────────────────────────────────────────┘     │
-        │          │                                            │
-        │          ▼                                            │
-        │   Output [B, seq, dim]                                │
-        └───────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────┐
+        │  Input [B, seq, dim]                 │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  self.cross_attention : MultiHeadCrossAttention              │
+        │    constructed in __init__ with shared_qk_projections=True,  │
+        │    invoked with kv_input=None                                │
+        │                                                              │
+        │    ONE fused Dense(3·dim) → Q, K, V → heads                  │
+        │    QK-norm, scores · 1/sqrt(d_k), mask, probability,         │
+        │    dropout, · V, merge heads, output projection — ALL in     │
+        │    there; see that class's own diagram, do not re-derive it  │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output [B, seq, dim]                │
+        └──────────────────────────────────────┘
+
+        Do not flatten the sub-layer away: its nested name is baked into every
+        saved .keras checkpoint of this class.
+
+    **Why the heads are split rather than stacked:**
+
+    .. code-block:: text
+
+        one head of width dim      one notion of relevance; the softmax makes
+                                   it competitive, so a position must choose
+        h heads of width dim/h     h relations held simultaneously, same
+                                   parameter budget, mixed by the output
+                                   projection
+
+        d_k = dim // num_heads, and the 1/sqrt(d_k) factor holds logit variance
+        constant so head width does not saturate the softmax.
 
     :param dim: Integer, dimension of input embeddings. Must be positive
         and divisible by num_heads.
@@ -185,6 +184,42 @@ class MultiHeadAttention(keras.layers.Layer):
     :raises ValueError: If parameters are invalid (negative values, etc.).
     :raises ValueError: From ``build()``, if the input is not 3D or its trailing
         dimension does not equal ``dim``.
+
+    Input shape:
+        3D tensor with shape ``(batch_size, seq_len, dim)``. The optional
+        ``attention_mask`` is a ``1 = keep`` predicate of shape
+        ``(batch_size, seq_len)``, ``(batch_size, seq_len, seq_len)`` or
+        ``(batch_size, num_heads, seq_len, seq_len)``.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, seq_len, dim)`` — unchanged from the
+        input. One output mode only; attention weights are never returned.
+
+    Example:
+        >>> attn = MultiHeadAttention(dim=512, num_heads=8)
+        >>> x = keras.random.normal((2, 128, 512))
+        >>> y = attn(x, training=False)                   # (2, 128, 512)
+        >>>
+        >>> # Causal or padding mask, keep-predicate semantics
+        >>> mask = keras.ops.ones((2, 128, 128))
+        >>> y = attn(x, attention_mask=mask, training=False)
+        >>>
+        >>> # GPT-2's residual-path init rule on the output projection only
+        >>> attn = MultiHeadAttention(
+        ...     dim=768, num_heads=12,
+        ...     output_kernel_initializer=keras.initializers.RandomNormal(
+        ...         stddev=0.02 / (2 * 12) ** 0.5),
+        ... )
+
+    Note:
+        This layer is the self-attention preset of ``MultiHeadCrossAttention``, so
+        every masking, dtype and normalization subtlety documented there applies
+        here unchanged — including the fully-masked-row rescue. Read that class's
+        anchors, not this file, when reasoning about the numerics.
+
+    Attributes:
+        cross_attention: The single ``MultiHeadCrossAttention`` sub-layer, named
+            ``cross_attention``. That name is part of the checkpoint format.
     """
 
     def __init__(
@@ -202,6 +237,13 @@ class MultiHeadAttention(keras.layers.Layer):
         qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the cheap invariants and create the wrapped attention engine.
+
+        Every argument is stored and forwarded verbatim; the values this class
+        supplies itself are ``shared_qk_projections=True`` and
+        ``bias_initializer="zeros"``. Note the deliberate check ORDER anchored
+        below. See the class docstring for the parameter reference.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -258,16 +300,17 @@ class MultiHeadAttention(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> None:
-        """
-        Build the layer by creating weight variables and building sub-layers.
+        """Validate the input rank and build the wrapped engine.
 
-        Explicitly builds the wrapped ``MultiHeadCrossAttention`` for robust
-        serialization, ensuring all weight variables exist before weight
-        restoration during model loading.
+        A single shape is forwarded as-is: the engine reads it as self-attention
+        and uses it for both the query and key/value roles. Building explicitly is
+        what guarantees every weight variable exists before weight restoration.
 
         :param input_shape: Shape tuple of the input tensor, expected as
             ``(batch_size, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 3, or if its last
+            dimension does not equal ``dim``.
         """
         if self.built:
             return
@@ -293,11 +336,11 @@ class MultiHeadAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through self-attention mechanism.
+        """Forward pass by delegating to the wrapped engine in self-attention mode.
 
-        Delegates to the underlying ``MultiHeadCrossAttention`` layer in
-        self-attention mode (kv_input=None).
+        One expression, no arithmetic: ``kv_input=None`` selects the engine's
+        self-attention path, where the fused projection supplies all three of Q, K
+        and V.
 
         :param inputs: Input tensor of shape ``(batch_size, seq_len, dim)``.
         :type inputs: keras.KerasTensor
@@ -325,7 +368,10 @@ class MultiHeadAttention(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape, same as input shape for self-attention.
+        """Return the output shape, which equals the input shape.
+
+        For self-attention query and key/value lengths coincide, and the output
+        projection maps back to ``dim``, so this is the identity.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -336,6 +382,10 @@ class MultiHeadAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
+
+        The wrapped engine is reconstructed from these values in ``__init__``
+        rather than serialized as a nested layer, which is what keeps the
+        ``cross_attention`` sub-layer name stable across round trips.
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]

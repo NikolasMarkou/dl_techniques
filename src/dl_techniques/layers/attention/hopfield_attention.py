@@ -1,4 +1,5 @@
-"""Modern Hopfield Network Layer with Iterative Updates.
+"""
+Modern Hopfield Network Layer with Iterative Updates.
 
 This layer implements a Modern Hopfield Network, as described in the paper
 "Hopfield Networks is All You Need" [1]. It functions as a content-addressable
@@ -573,63 +574,6 @@ class HopfieldAttention(keras.layers.Layer):
             # raises nothing, changes no shape and stays finite; the layer would just
             # attend to the padding. `TestHopfieldAttentionMaskPolarity` is the only
             # guard that can see it.
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-            # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
-            # in the compute dtype (fp16 under `mixed_float16`), where
-            # `MASK_BIAS_VALUE` is `-inf` again. That is deliberate and is NOT the bug
-            # being fixed:
-            #   * The bug was the ARITHMETIC form this line replaces,
-            #     `attention_scores + (1.0 - mask_tensor) * -1e9`. In float16 `-1e9`
-            #     is `-inf` (np.float16(-1e9) == -inf) and `(1.0 - mask) == 0` at every
-            #     UNMASKED position, so the product is `0 * -inf = NaN` — the NaN
-            #     appears where nothing was masked. THIS WAS THE WORST SITE IN THE
-            #     PACKAGE: measured at (B=2, N=64, D=64, H=4, key_dim=16) under
-            #     `mixed_float16`, an ALL-ONES mask — one that masks NOTHING — gave
-            #     8192/8192 NaN, as did the padding and causal masks; float32 gave
-            #     0/8192 in every case. `ops.where` inside `mask_dtype(...)` cannot
-            #     form that product at all, so the failure mode is removed
-            #     structurally rather than numerically.
-            #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
-            #     also rescue a FULLY-MASKED query row. It cannot: the next consumer is
-            #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
-            #     float32 input inside its own `call()` as float16 — the promotion is
-            #     silently undone and all that remains is a wider, slower add. Pinned by
-            #     `TestHopfieldAttentionMaskHazardIsReal::
-            #     test_the_probability_sublayer_autocasts_a_float32_input`.
-            #   * A FULLY-MASKED query row is a SEPARATE hazard that no `out_dtype` choice can
-            #     touch. It is handled by the rescue below (D-009), not here.
-            # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-            # The fully-masked-row rescue IS applied here, and it supersedes the "not applied
-            # here" note above: a query row that keeps NOTHING is treated as keeping EVERYTHING,
-            # so the all-`-inf` row is never FORMED and no NaN gradient is created either. It
-            # arrives via `apply_attention_mask`'s DEFAULT `rescue_axis=-1` — step 4c flipped
-            # the step-4b opt-in default on the user's direction ("I care about correctness, not
-            # backwards compatibility").
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-            # The axis is DERIVED from this layer's own `probability_config` rather than
-            # left to the helper's `-1` default: `ProbabilityOutput` reads its softmax
-            # `axis` from `type_config` (`activations/probability_output.py:180`) and this
-            # layer forwards `probability_config` VERBATIM, so a caller can move the
-            # reduction axis and the pre-step-10 "checked, not assumed" claim held only for
-            # the DEFAULT config. MEASURED at the sibling `gated_attention` under
-            # `mixed_float16` with `probability_config={"axis": -2}` and a dead KEY COLUMN:
-            # 8192/8192 non-finite. WHAT NOT TO DO: do NOT restore a bare `-1` (correct only
-            # while the caller leaves the config alone) and do NOT read this as the
-            # rank/shape INFERENCE the D-009 anchor in `common.py` forbids — this reads the
-            # site's own declared config. The full argument lives at the D-017 anchors in
-            # `common.py` and `gated_attention.py`.
-            # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
-            #
-            # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" — the
-            # user ruled the finite-garbage semantics package-wide on 2026-07-28, and opting out
-            # also restores the NaN GRADIENT on that row; do NOT move the rescue after the
-            # softmax (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward
-            # pass). The full argument lives at the D-009 / D-008 anchors in `common.py`.
-            # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
             scores_dtype = keras.backend.standardize_dtype(attention_scores.dtype)
             attention_scores = apply_attention_mask(
                 attention_scores,

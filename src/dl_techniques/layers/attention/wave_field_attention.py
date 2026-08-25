@@ -1,81 +1,86 @@
 """
-Wave Field Attention - Keras 3 Implementation (V3.6)
-=====================================================
+Wave field attention: information propagated through a shared 1-D field by damped
+wave convolution, in place of a dot-product score matrix.
 
-Physics-inspired attention mechanism: damped wave field convolution
-replaces standard dot-product attention.
+Dot-product attention decides how much token ``i`` reads from token ``j`` by
+scoring the pair directly, which is why it costs ``O(N^2)`` — every pair must be
+formed. This layer replaces the pairwise question with a spatial one. Tokens are
+placed at absolute positions on a 1-D field grid, each deposits its value vector
+onto the field weighted by the magnitude of its key, a damped-wave kernel is
+convolved along the field, and each token reads back whatever has arrived at its
+own position. Interaction is then a consequence of propagation rather than of
+enumeration: two tokens influence each other to the extent that a wave launched at
+one reaches the other before it damps out. The convolution is done by FFT, so cost
+is ``O(N*D + G*log(G)*H*D_h)`` — linear in sequence length, with the ``G log G``
+term paid on the field rather than on the tokens.
 
-Changes from V3.5 Keras port:
+The kernel is what encodes the interaction structure, and it is learned per head:
+``k(t) = exp(-alpha*t) * cos(omega*t + phi)``. The damping ``alpha`` sets an
+effective range, so a head can specialize in local or long-range propagation; the
+frequency ``omega`` gives the kernel sign structure, so a head can subtract distant
+content rather than only accumulate it; and the phase ``phi`` shifts where the
+first lobe lands. Initializing the heads on a spread of frequencies and dampings is
+what gives the layer a bank of range scales rather than one. Kernels are
+L1-normalized so a head's total influence does not depend on how fast it damps.
+
+There is no softmax over tokens anywhere. The only softmax is over a learned
+``(H, H)`` coupling matrix, applied at each field position, which lets heads read
+each other's fields — the field analogue of head mixing. Selectivity instead comes
+from two multiplicative gates, and they are gates on different things: the query
+modulation ``act(Q / scale)`` decides which DIMENSIONS of the arrived field each
+token reads, while the content gate ``act(gate_proj(x))`` decides how much of the
+result survives at all, computed from the raw input rather than from a projection
+of the field.
+
+Causality is the part to read before using this layer autoregressively. The kernel
+is left-aligned, so convolution output at field position ``g`` depends only on
+positions ``<= g``, and the coupling mixes heads at the same position — the
+FIELD-GRID computation is causal. TOKEN-level causality does not follow and must
+not be relied on. Token indices map monotonically to field positions
+(``token i -> i * field_stride``), but the bilinear scatter and gather each span two
+adjacent cells, and measurement shows some configurations clean and others leaking
+badly. The mechanism is not characterised and no sufficient condition on
+``field_size`` / ``max_seq_len`` is offered.
+
+Measured leak, randomly initialized layer, one perturbed token of magnitude 100
+appended to an 8-token input; the value is the change induced on the OTHER tokens'
+outputs::
+
+    field_size=12, max_seq_len=11  ->  O(1e2)-O(1e3)
+    field_size=13, max_seq_len=11  ->  O(1e2)-O(1e3)
+    field_size=16, max_seq_len=11  ->  O(1e-4)   (float noise)
+    field_size=22, max_seq_len=11  ->  O(1e-4)   (float noise)
+    field_size=16, max_seq_len=16  ->  O(1e-4)   (float noise)
+
+Do NOT rely on this layer for autoregressive decoding.
+
+Changes from the V3.5 Keras port:
     - **Q is now used**: query-dependent gather modulation via
-      ``sigmoid(Q / sqrt(d_h))`` element-wise on gathered field output.
-      Q acts as a learned per-token feature selector on propagated
-      information, distinct from the input-based gate.
-    - **Padding mask support**: ``attention_mask`` argument ``(B, N)``
-      zeros out deposits from padded tokens and masks final output. The
-      left-aligned kernel is causal *on the field grid* (output at field
-      position g depends only on field positions <= g); see the Causality
-      section below for why that does NOT imply token-level causality.
-    - **coupling_noise_stddev fixed**: now actually used in
-      ``field_coupling`` initialisation (identity + Gaussian noise),
-      matching the PyTorch original.
-
-Architecture:
-    1. QKV projection
-    2. Absolute position mapping (token i -> field position i * stride)
-    3. Bilinear scatter: ``deposit = V * ||K||``, masked by padding
-    4. FFT damped-wave convolution (per-head causal kernels)
-    5. Static multi-field coupling (head mixing)
-    6. Bilinear gather from field
-    7. Query modulation: ``gathered *= sigmoid(Q / scale)``
-    8. Content-dependent gating: ``output *= sigmoid(gate_proj(x))``
-    9. Output projection + optional dropout
-
-Causality (NOT GUARANTEED — read this before using the layer autoregressively):
-    The left-aligned kernel ``k(t) = exp(-alpha*t) * cos(omega*t + phi)``
-    for ``t >= 0`` ensures convolution output at field position g depends
-    only on field positions <= g, and the coupling matrix mixes across
-    heads at the *same* spatial position, so the FIELD-GRID computation is
-    causal.
-
-    TOKEN-level causality is NOT guaranteed and must not be relied on.
-    Token indices map monotonically to field positions
-    (token i -> i * field_stride), and the bilinear scatter/gather spans
-    two cells (``idx_lo`` and ``idx_lo + 1``, see
-    ``_build_scatter_gather_matrices``).
-
-    Measured leak (randomly initialized layer, one perturbed token of
-    magnitude 100 appended to an 8-token input; the value is the change
-    induced on the OTHER tokens' outputs). Some configurations measure
-    clean and others leak badly::
-
-        field_size=12, max_seq_len=11  ->  O(1e2)-O(1e3)
-        field_size=13, max_seq_len=11  ->  O(1e2)-O(1e3)
-        field_size=16, max_seq_len=11  ->  O(1e-4)   (float noise)
-        field_size=22, max_seq_len=11  ->  O(1e-4)   (float noise)
-        field_size=16, max_seq_len=16  ->  O(1e-4)   (float noise)
-
-    The mechanism is not characterised: no sufficient condition on
-    ``field_size`` / ``max_seq_len`` is offered here.
-
-    Do NOT rely on this layer for autoregressive decoding.
-
-Complexity:
-    O(N*D + G*log(G)*H*D_h)
+      ``sigmoid(Q / sqrt(d_h))`` element-wise on the gathered field output. Q acts
+      as a learned per-token feature selector on propagated information, distinct
+      from the input-based gate.
+    - **Padding mask support**: an ``attention_mask`` of shape ``(B, N)`` zeros out
+      deposits from padded tokens and masks the final output.
+    - **coupling_noise_stddev fixed**: now actually used in ``field_coupling``
+      initialisation (identity + Gaussian noise), matching the PyTorch original.
 
 References:
-    - Vaswani et al., 2017. Attention Is All You Need.
-      (https://arxiv.org/abs/1706.03762)
-    - Cooley, J. W., & Tukey, J. W. (1965). "An Algorithm for the Machine
-      Calculation of Complex Fourier Series".
-    - Gu, A., Goel, K., & Re, C. (2022). "Efficiently Modeling Long Sequences
-      with Structured State Spaces". (https://arxiv.org/abs/2111.00396)
+    - Vaswani et al., 2017. Attention Is All You Need. (the dot-product mechanism
+      this replaces) (https://arxiv.org/abs/1706.03762)
+    - Gu et al., 2022. Efficiently Modeling Long Sequences with Structured State
+      Spaces. (long convolutions with learned decay as a sequence primitive)
+      (https://arxiv.org/abs/2111.00396)
+    - Poli et al., 2023. Hyena Hierarchy: Towards Larger Convolutional Language
+      Models. (FFT long convolution plus multiplicative gating)
+      (https://arxiv.org/abs/2302.10866)
+    - Cooley and Tukey, 1965. An Algorithm for the Machine Calculation of Complex
+      Fourier Series. Mathematics of Computation 19(90).
 """
 
 # ---------------------------------------------------------------------
 
 import math
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -83,9 +88,10 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.initializers.identity_plus_noise import IdentityPlusNoise
-from dl_techniques.layers.attention.common import validate_head_divisibility
-from ..activations import resolve_activation_layer
+
+from .common import validate_head_divisibility
 
 # ---------------------------------------------------------------------
 
@@ -117,47 +123,77 @@ class WaveFieldAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────┐
-        │  WaveFieldAttention — FFT wave field, no score softmax  │
-        │                                                         │
-        │   No Q Kᵀ score matrix, and no softmax over tokens.     │
-        │   Information travels through a shared 1-D field grid by│
-        │   damped-wave convolution, and TWO separate gates apply.│
-        │                                                         │
-        │                    Input  [B, N, D]                     │
-        │                            ▼                            │
-        │   qkv_proj ► split 3 ► heads  Q, K, V  [B, H, N, D_h]   │
-        │                            ▼                            │
-        │   deposit = V * ||K||   (the key MAGNITUDE replaces the │
-        │   score); an optional (B, N) mask zeroes whole deposits │
-        │                            ▼                            │
-        │   scatter onto the field grid   ►  [B, H, G, D_h]       │
-        │   (bilinear scatter_mat, einsum "gn,bhnd->bhgd")        │
-        │                            ▼                            │
-        │   FFT damped-wave convolution, one kernel per head:     │
-        │   k_h(t) = exp(-softplus(a_h)·t) · cos(w_h·t + p_h),    │
-        │   L1-normalised, LEFT-ALIGNED ► causal ON THE FIELD     │
-        │   GRID ONLY. TOKEN-level causality is NOT guaranteed    │
-        │   and must NOT be relied on: some configs measure       │
-        │   clean, others leak badly. Mechanism not               │
-        │   characterised, and no sufficient condition is         │
-        │   offered — see the module docstring's Causality        │
-        │   section.                                              │
-        │                            ▼                            │
-        │   cross-head coupling: einsum with softmax(field_       │
-        │   coupling) — a softmax over a LEARNED (H, H) matrix,   │
-        │   never over token scores                               │
-        │                            ▼                            │
-        │   gather back to tokens (gather_mat)  [B, H, N, D_h]    │
-        │                            ▼                            │
-        │      GATE 1 — query modulation:  * act(Q / scale)       │
-        │                            ▼                            │
-        │    GATE 2 — content gate:       * act(gate_proj(x))     │
-        │                            ▼                            │
-        │   merge heads ► output_proj ► re-apply mask ► dropout   │
-        │                            ▼                            │
-        │                    Output  [B, N, D]                    │
-        └─────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Input [B, N, D]                                             │
+        │    No Q Kᵀ score matrix, and no softmax over tokens.         │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  qkv_proj → split 3 → heads:  Q, K, V  [B, H, N, D_h]        │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  deposit = V · ‖K‖                                           │
+        │    the key MAGNITUDE replaces the score; an optional (B, N)  │
+        │    mask zeroes whole deposits                                │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  scatter onto the field grid  →  [B, H, G, D_h]              │
+        │    token i → field position i · field_stride, bilinear over  │
+        │    two adjacent cells (einsum "gn,bhnd->bhgd")               │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  FFT damped-wave convolution, ONE KERNEL PER HEAD:           │
+        │    k_h(t) = exp(−softplus(a_h)·t) · cos(w_h·t + p_h)         │
+        │    L1-normalised, LEFT-ALIGNED → causal ON THE FIELD GRID    │
+        │    ONLY. TOKEN-level causality is NOT guaranteed and must    │
+        │    NOT be relied on: some configs measure clean, others      │
+        │    leak badly. Mechanism not characterised, and no           │
+        │    sufficient condition is offered — see the module          │
+        │    docstring's Causality section.                            │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  cross-head coupling: einsum with softmax(field_coupling)    │
+        │    a softmax over a LEARNED (H, H) matrix, never over token  │
+        │    scores                                                    │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  gather back to tokens (gather_mat)  →  [B, H, N, D_h]       │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  GATE 1 — query modulation:  × act(Q / scale)                │
+        │    WHICH DIMENSIONS of the arrived field each token reads    │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  GATE 2 — content gate:      × act(gate_proj(x))             │
+        │    HOW MUCH survives; computed from the raw INPUT            │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  merge heads → output_proj → re-apply mask → dropout         │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output [B, N, D]                                            │
+        └──────────────────────────────────────────────────────────────┘
+
+    **Per-head kernel bank at initialization:**
+
+    .. code-block:: text
+
+        head           0            …           H−1
+        frequency    0.3    linear ramp        4.0     sign structure / range
+        damping     −3.0    linear ramp        0.5     softplus'd → decay rate
+        phase        0.0    linear ramp         π      first-lobe offset
+
+        Slow-damping heads propagate far; fast-damping heads stay local.
+        L1 normalisation keeps total influence independent of decay rate.
 
     :param dim: Model dimension (must be divisible by ``num_heads``).
     :type dim: int
@@ -211,6 +247,53 @@ class WaveFieldAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Regularizer for projection biases.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    :raises ValueError: If ``dim``, ``num_heads`` or ``max_seq_len`` is not
+        positive, if ``dim`` is not divisible by ``num_heads``, if ``field_size``
+        is not greater than 1, or if ``dropout_rate`` is outside ``[0, 1]``.
+    :raises ValueError: From ``build()``, if the input is not rank 3 or its last
+        dimension does not match ``dim``.
+
+    Input shape:
+        3D tensor with shape ``(batch_size, seq_len, dim)``. The optional
+        ``attention_mask`` is ``(batch_size, seq_len)`` with ``1.0`` = valid and
+        ``0.0`` = padding; bool and int masks are accepted and cast.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, seq_len, dim)`` — unchanged from the
+        input. One output mode only; the field is never returned.
+
+    Example:
+        >>> attn = WaveFieldAttention(dim=512, num_heads=8,
+        ...                           field_size=512, max_seq_len=128)
+        >>> x = keras.random.normal((2, 128, 512))
+        >>> y = attn(x, training=False)                  # (2, 128, 512)
+        >>>
+        >>> # With a padding mask: padded tokens deposit nothing and read nothing
+        >>> mask = keras.ops.ones((2, 128))
+        >>> y = attn(x, attention_mask=mask, training=False)
+        >>>
+        >>> # Deterministic coupling init without a global seed
+        >>> attn = WaveFieldAttention(dim=512, num_heads=8, coupling_seed=7)
+
+    Note:
+        A runtime sequence longer than ``max_seq_len`` is not an error: those
+        tokens alias onto the last field cells, and ``call`` logs a warning when
+        the length is statically known. Raise ``max_seq_len`` for full resolution.
+
+    Attributes:
+        qkv_proj: Fused Q/K/V projection, ``3 * dim`` wide.
+        output_proj: Output projection back to ``dim``.
+        gate_proj: Content-gate projection; zero kernel and ``gate_bias_init``
+            bias, so the gate starts open and input-independent.
+        query_modulation_activation: GATE 1's activation.
+        gate_activation: GATE 2's activation.
+        dropout_layer: Output dropout, or ``None`` at rate 0.
+        wave_frequency, wave_damping, wave_phase: Per-head kernel parameters.
+        field_coupling: The learned ``(H, H)`` head-mixing matrix.
+        scale: ``sqrt(head_dim)`` — the INVERSE of every sibling's convention;
+            ``call`` divides by it. See the D-015 anchor.
     """
 
     def __init__(
@@ -234,6 +317,13 @@ class WaveFieldAttention(keras.layers.Layer):
         gate_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Validate the configuration and create the projections and activations.
+
+        The wave-kernel parameters and the coupling matrix are weights and are
+        created in :meth:`build`. See the class docstring for the parameter
+        reference.
+        """
         super().__init__(**kwargs)
 
         if dim <= 0:
@@ -269,24 +359,6 @@ class WaveFieldAttention(keras.layers.Layer):
         self.query_modulation_activation_args = query_modulation_activation_args
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
-
-        # DECISION plan-2026-07-27T130643-38c5646a/D-015
-        # DELIBERATELY NOT `common.compute_attention_scale(self.head_dim)`. This is
-        # `sqrt(head_dim)`, NOT `1 / sqrt(head_dim)` — the inverse of every sibling layer's
-        # convention — and `call()` DIVIDES by it (`sigmoid(Q / self.scale)`), so the
-        # arithmetic is self-consistent as written. Whether that convention is intentional
-        # or a latent defect is an open question flagged for a separate investigation; this
-        # line is behavior-frozen until that is settled. Do NOT "unify" it with the shared
-        # helper: doing so would silently square the query-modulation temperature.
-        #
-        # HONESTY NOTE (added step 10): this anchor is a COMMENT, NOT A GUARD. No test
-        # fails if a future editor swaps in the shared helper — the value would change
-        # from sqrt(d) to 1/sqrt(d) and every wave_field test would still pass, because
-        # none of them pins the scale or an absolute output value. Per `plans/LESSONS.md`
-        # ("an anchor is a comment, not a guard, unless a test can fail"), the FIRST item
-        # of any follow-up work on this file is a test that pins
-        # `layer.scale == math.sqrt(head_dim)`, whichever way the open question is
-        # eventually settled.
         self.scale = math.sqrt(self.head_dim)
         self._field_stride = float((field_size - 1) / max(max_seq_len - 1, 1))
 
@@ -334,6 +406,19 @@ class WaveFieldAttention(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the sub-layers and create the kernel-bank and coupling weights.
+
+        The three wave-kernel parameter vectors are initialized as linear ramps
+        across heads, which is what gives the layer a bank of range scales rather
+        than ``H`` copies of one kernel. ``field_coupling`` starts at the identity
+        plus noise, so heads begin decoupled and can learn to mix.
+
+        :param input_shape: Shape of the input tensor, ``(batch, seq_len, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 3, or if its last
+            dimension is known and does not equal ``dim``.
+        """
         if self.built:
             return
 
@@ -384,10 +469,6 @@ class WaveFieldAttention(keras.layers.Layer):
         )
 
         # --- field coupling: identity + noise (Keras-seeded for reproducibility) ---
-        # DECISION plan_2026-05-07_47199c68/D-002 — replaces np.random.randn
-        # with a serializable Keras-seeded initializer so model rebuild from
-        # config alone is deterministic (under keras.utils.set_random_seed
-        # or an explicit coupling_seed).
         self.field_coupling = self.add_weight(
             name="field_coupling",
             shape=(H, H),
@@ -405,24 +486,29 @@ class WaveFieldAttention(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def _compute_field_positions(self, seq_len: int) -> keras.KerasTensor:
-        """Map token index to field position via ``i * stride``, clamped to ``[0, G-2]``.
+        """
+        Map token index to field position via ``i * stride``, clamped to ``[0, G-1]``.
+
+        The mapping is absolute and monotonic, which is what makes the field a
+        shared spatial medium rather than a permutation-invariant bag.
 
         :param seq_len: Current sequence length.
         :type seq_len: int
         :return: Float tensor of field positions with shape ``(seq_len,)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan_2026-05-07_47199c68/D-003 — clip to G-1 (not G-2) so the
-        # last field cell is reachable. _build_scatter_gather_matrices clips
-        # idx_lo to G-2, so idx_hi = idx_lo + 1 stays in-bounds; when
-        # field_pos == G-1 the bilinear weights collapse to (0, 1) on (G-2, G-1).
-        seq_idx = ops.cast(ops.arange(seq_len), "float32")
-        return ops.clip(seq_idx * self._field_stride, 0.0, float(self.field_size - 1))
+        seq_idx = keras.ops.cast(ops.arange(seq_len), "float32")
+        return keras.ops.clip(seq_idx * self._field_stride, 0.0, float(self.field_size - 1))
 
     def _build_scatter_gather_matrices(
         self, field_pos: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Build bilinear interpolation matrices for scatter ``(G, N)`` and gather ``(N, G)``.
+
+        Each token's mass is split between the two cells bracketing its
+        (fractional) field position. That two-cell span is one of the reasons
+        field-grid causality does not imply token-level causality; see the module
+        docstring's Causality section.
 
         :param field_pos: Float field positions of shape ``(N,)``.
         :type field_pos: keras.KerasTensor
@@ -431,23 +517,23 @@ class WaveFieldAttention(keras.layers.Layer):
         """
         G = self.field_size
 
-        idx_lo = ops.cast(ops.floor(field_pos), "int32")
-        idx_lo = ops.clip(idx_lo, 0, G - 2)
+        idx_lo = keras.ops.cast(ops.floor(field_pos), "int32")
+        idx_lo = keras.ops.clip(idx_lo, 0, G - 2)
         idx_hi = idx_lo + 1
 
-        frac = ops.clip(field_pos - ops.cast(idx_lo, "float32"), 0.0, 1.0)
+        frac = keras.ops.clip(field_pos - keras.ops.cast(idx_lo, "float32"), 0.0, 1.0)
         w_lo = 1.0 - frac
         w_hi = frac
 
-        lo_oh = ops.one_hot(idx_lo, G, dtype="float32")  # (N, G)
-        hi_oh = ops.one_hot(idx_hi, G, dtype="float32")  # (N, G)
+        lo_oh = keras.ops.one_hot(idx_lo, G, dtype="float32")  # (N, G)
+        hi_oh = keras.ops.one_hot(idx_hi, G, dtype="float32")  # (N, G)
 
         # Build gather first (one transpose total instead of three).
         gather_mat = (
-            lo_oh * ops.expand_dims(w_lo, -1)
-            + hi_oh * ops.expand_dims(w_hi, -1)
+            lo_oh * keras.ops.expand_dims(w_lo, -1)
+            + hi_oh * keras.ops.expand_dims(w_hi, -1)
         )  # (N, G)
-        scatter_mat = ops.transpose(gather_mat)  # (G, N)
+        scatter_mat = keras.ops.transpose(gather_mat)  # (G, N)
         return scatter_mat, gather_mat
 
     def _build_wave_kernels_fft(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
@@ -455,32 +541,34 @@ class WaveFieldAttention(keras.layers.Layer):
 
         Each head has a kernel
         ``k_h(t) = exp(-softplus(damping_h) * t) * cos(freq_h * t + phase_h)``.
-        Kernels are L1-normalised, zero-padded to ``2G``, and rfft'd.
+        Kernels are L1-normalised, zero-padded to ``2G``, and rfft'd. The L1
+        normalisation is what keeps a slow-damping head from dominating a
+        fast-damping one purely by having more mass.
 
         :return: ``(real, imag)`` each of shape ``(H, G+1)``.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         G = self.field_size
-        t = ops.cast(ops.arange(G), "float32")
+        t = keras.ops.cast(ops.arange(G), "float32")
 
         # Force fp32 for the kernel even under mixed-precision: wave params
         # are autocast to compute_dtype (e.g. fp16) when read here, but the
         # kernel feeds an FFT pipeline that runs in fp32.
-        alpha = ops.softplus(ops.cast(self.wave_damping, "float32"))
-        omega = ops.cast(self.wave_frequency, "float32")
-        phi = ops.cast(self.wave_phase, "float32")
+        alpha = keras.ops.softplus(ops.cast(self.wave_damping, "float32"))
+        omega = keras.ops.cast(self.wave_frequency, "float32")
+        phi = keras.ops.cast(self.wave_phase, "float32")
 
-        alpha = ops.expand_dims(alpha, 1)
-        omega = ops.expand_dims(omega, 1)
-        phi = ops.expand_dims(phi, 1)
-        t = ops.expand_dims(t, 0)
+        alpha = keras.ops.expand_dims(alpha, 1)
+        omega = keras.ops.expand_dims(omega, 1)
+        phi = keras.ops.expand_dims(phi, 1)
+        t = keras.ops.expand_dims(t, 0)
 
-        kernels = ops.exp(-alpha * t) * ops.cos(omega * t + phi)
+        kernels = keras.ops.exp(-alpha * t) * keras.ops.cos(omega * t + phi)
 
-        norm = ops.maximum(ops.sum(ops.abs(kernels), axis=1, keepdims=True), 1e-8)
+        norm = keras.ops.maximum(ops.sum(ops.abs(kernels), axis=1, keepdims=True), 1e-8)
         kernels = kernels / norm
 
-        kernels_padded = ops.pad(kernels, [[0, 0], [0, G]])
+        kernels_padded = keras.ops.pad(kernels, [[0, 0], [0, G]])
         return keras.ops.rfft(kernels_padded)
 
     def _wave_convolve(
@@ -488,13 +576,20 @@ class WaveFieldAttention(keras.layers.Layer):
         field: keras.KerasTensor,
         kernel_fft: Tuple[keras.KerasTensor, keras.KerasTensor],
     ) -> keras.KerasTensor:
-        """Per-head FFT convolution on the field grid.
+        """
+        Per-head FFT convolution on the field grid.
+
+        Both operands are zero-padded to ``2G`` so the circular FFT convolution
+        yields the LINEAR one; the result is then truncated back to ``G``, which is
+        what preserves the kernel's left-alignment (and hence field-grid
+        causality). The pipeline runs in float32 regardless of policy.
 
         :param field: Field tensor of shape ``(B, H, G, D_h)``.
         :type field: keras.KerasTensor
         :param kernel_fft: Tuple of ``(real, imag)`` kernel spectra.
         :type kernel_fft: Tuple[keras.KerasTensor, keras.KerasTensor]
-        :return: Convolved field of shape ``(B, H, G, D_h)``.
+        :return: Convolved field of shape ``(B, H, G, D_h)``, back in the input's
+            dtype.
         :rtype: keras.KerasTensor
         """
         G = self.field_size
@@ -502,40 +597,45 @@ class WaveFieldAttention(keras.layers.Layer):
         # Run FFT pipeline in float32 for stability under mixed-precision
         # (fp16 / bf16) training. Cast back to the input dtype at the end.
         in_dtype = field.dtype
-        field32 = ops.cast(field, "float32")
-        field_t = ops.transpose(field32, (0, 1, 3, 2))  # (B, H, D_h, G)
-        field_padded = ops.pad(field_t, [[0, 0], [0, 0], [0, 0], [0, G]])
+        field32 = keras.ops.cast(field, "float32")
+        field_t = keras.ops.transpose(field32, (0, 1, 3, 2))  # (B, H, D_h, G)
+        field_padded = keras.ops.pad(field_t, [[0, 0], [0, 0], [0, 0], [0, G]])
 
         field_re, field_im = keras.ops.rfft(field_padded)
 
         # kernel_fft components are already float32 (built from float32 t).
         kern_re, kern_im = kernel_fft
-        kern_re = ops.reshape(kern_re, (1, self.num_heads, 1, -1))
-        kern_im = ops.reshape(kern_im, (1, self.num_heads, 1, -1))
+        kern_re = keras.ops.reshape(kern_re, (1, self.num_heads, 1, -1))
+        kern_im = keras.ops.reshape(kern_im, (1, self.num_heads, 1, -1))
 
         conv_re = field_re * kern_re - field_im * kern_im
         conv_im = field_re * kern_im + field_im * kern_re
 
         convolved = keras.ops.irfft((conv_re, conv_im))
         convolved = convolved[..., :G]
-        convolved = ops.transpose(convolved, (0, 1, 3, 2))
+        convolved = keras.ops.transpose(convolved, (0, 1, 3, 2))
 
-        return ops.cast(convolved, in_dtype)
+        return keras.ops.cast(convolved, in_dtype)
 
     def _apply_field_coupling(self, field: keras.KerasTensor) -> keras.KerasTensor:
         """Apply row-softmax coupling across heads at each spatial position.
+
+        This is the layer's ONLY softmax, and it is over a learned ``(H, H)``
+        matrix — never over token scores. Mixing happens at the SAME field
+        position, so it cannot move information along the grid and does not
+        disturb field-grid causality.
 
         :param field: Field tensor of shape ``(B, H, G, D_h)``.
         :type field: keras.KerasTensor
         :return: Coupled field of shape ``(B, H, G, D_h)``.
         :rtype: keras.KerasTensor
         """
-        coupling = ops.softmax(self.field_coupling, axis=-1)
+        coupling = keras.ops.softmax(self.field_coupling, axis=-1)
         # Direct 4D einsum — avoids the flatten + 3D einsum + reshape cycle.
         # Cast coupling to field.dtype so this works under mixed-precision
         # (variables are stored as fp32 even under fp16 policy).
-        coupling = ops.cast(coupling, field.dtype)
-        return ops.einsum("hk,bkgd->bhgd", coupling, field)
+        coupling = keras.ops.cast(coupling, field.dtype)
+        return keras.ops.einsum("hk,bkgd->bhgd", coupling, field)
 
     # -----------------------------------------------------------------
     # call
@@ -549,6 +649,11 @@ class WaveFieldAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the wave-field attention mechanism.
 
+        Project, deposit onto the field weighted by key magnitude, convolve,
+        couple across heads, gather, then apply both gates and project out. The
+        mask is applied twice: once to the deposits, so padded tokens emit
+        nothing, and once to the output, so they read nothing.
+
         :param inputs: Input tensor of shape ``(B, N, D)``.
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional float mask ``(B, N)``. ``1.0`` = valid,
@@ -559,8 +664,8 @@ class WaveFieldAttention(keras.layers.Layer):
         :return: Output tensor of shape ``(B, N, D)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
         H = self.num_heads
         D_h = self.head_dim
 
@@ -577,36 +682,36 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # 1. QKV projection -> (B, H, N, D_h) each
         qkv = self.qkv_proj(inputs)
-        # DECISION plan_2026-05-07_47199c68/D-001 — use ops.split rather than
+        # DECISION plan_2026-05-07_47199c68/D-001 — use keras.ops.split rather than
         # 5-D reshape + transpose + tensor[0]/[1]/[2] indexing for backend
         # robustness across Keras 3 backends.
-        q, k, v = ops.split(qkv, 3, axis=-1)
-        q = ops.transpose(ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
-        k = ops.transpose(ops.reshape(k, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
-        v = ops.transpose(ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        q, k, v = keras.ops.split(qkv, 3, axis=-1)
+        q = keras.ops.transpose(ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        k = keras.ops.transpose(ops.reshape(k, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        v = keras.ops.transpose(ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
 
         # 2. Field positions + scatter/gather matrices
         # Built in float32 for index precision, then cast to compute_dtype
         # so the einsum below works under mixed-precision policies.
         field_pos = self._compute_field_positions(seq_len)
         scatter_mat, gather_mat = self._build_scatter_gather_matrices(field_pos)
-        scatter_mat = ops.cast(scatter_mat, self.compute_dtype)
-        gather_mat = ops.cast(gather_mat, self.compute_dtype)
+        scatter_mat = keras.ops.cast(scatter_mat, self.compute_dtype)
+        gather_mat = keras.ops.cast(gather_mat, self.compute_dtype)
 
         # 3. Deposit = V * ||K||
-        k_mag = ops.sqrt(ops.sum(ops.square(k), axis=-1, keepdims=True) + 1e-8)
+        k_mag = keras.ops.sqrt(ops.sum(ops.square(k), axis=-1, keepdims=True) + 1e-8)
         deposit = v * k_mag  # (B, H, N, D_h)
 
         # Apply padding mask to deposits
         if attention_mask is not None:
             # Cast to float compute dtype so bool / int masks are accepted.
-            attention_mask = ops.cast(attention_mask, self.compute_dtype)
+            attention_mask = keras.ops.cast(attention_mask, self.compute_dtype)
             # attention_mask: (B, N) -> (B, 1, N, 1)
-            mask_4d = ops.expand_dims(ops.expand_dims(attention_mask, 1), -1)
+            mask_4d = keras.ops.expand_dims(ops.expand_dims(attention_mask, 1), -1)
             deposit = deposit * mask_4d
 
         # Scatter onto field
-        field = ops.einsum("gn,bhnd->bhgd", scatter_mat, deposit)
+        field = keras.ops.einsum("gn,bhnd->bhgd", scatter_mat, deposit)
 
         # 4. FFT wave convolution
         kernel_fft = self._build_wave_kernels_fft()
@@ -616,7 +721,7 @@ class WaveFieldAttention(keras.layers.Layer):
         field = self._apply_field_coupling(field)
 
         # 6. Gather from field
-        gathered = ops.einsum("ng,bhgd->bhnd", gather_mat, field)
+        gathered = keras.ops.einsum("ng,bhgd->bhnd", gather_mat, field)
 
         # 7. Query-dependent gather modulation (NEW in V3.6)
         #    Q selects which dimensions of propagated info each token reads.
@@ -626,18 +731,18 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # 8. Content-dependent gating (input-based)
         gate = self.gate_activation(self.gate_proj(inputs), training=training)  # (B, N, D)
-        gate = ops.reshape(gate, (batch_size, seq_len, H, D_h))
-        gate = ops.transpose(gate, (0, 2, 1, 3))  # (B, H, N, D_h)
+        gate = keras.ops.reshape(gate, (batch_size, seq_len, H, D_h))
+        gate = keras.ops.transpose(gate, (0, 2, 1, 3))  # (B, H, N, D_h)
         output = gathered * gate
 
         # 9. Merge heads + project
-        output = ops.transpose(output, (0, 2, 1, 3))  # (B, N, H, D_h)
-        output = ops.reshape(output, (batch_size, seq_len, self.dim))
+        output = keras.ops.transpose(output, (0, 2, 1, 3))  # (B, N, H, D_h)
+        output = keras.ops.reshape(output, (batch_size, seq_len, self.dim))
         output = self.output_proj(output)
 
         # Apply padding mask to output
         if attention_mask is not None:
-            output = output * ops.expand_dims(attention_mask, -1)
+            output = output * keras.ops.expand_dims(attention_mask, -1)
 
         # 10. Dropout
         if self.dropout_layer is not None:
@@ -655,6 +760,9 @@ class WaveFieldAttention(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape from stored configuration only.
 
+        The field size never appears here: the grid is internal, and the output
+        projection returns to ``dim``.
+
         :param input_shape: Input shape ``(batch, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
 
@@ -666,6 +774,9 @@ class WaveFieldAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Return the full constructor configuration for serialization.
+
+        ``coupling_seed`` is included, which is what makes a rebuild-from-config
+        reproducible without a global seed.
 
         :return: Config dict covering every ``__init__`` argument.
         :rtype: Dict[str, Any]

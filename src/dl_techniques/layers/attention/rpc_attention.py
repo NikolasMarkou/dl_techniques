@@ -52,19 +52,19 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
-from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
-# Local imports
+# local imports
 # ---------------------------------------------------------------------
+
+from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.layers.norms.factory import create_normalization_layer
 
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
     validate_head_divisibility,
 )
-from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 

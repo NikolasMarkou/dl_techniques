@@ -48,7 +48,6 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops
 from typing import Tuple, Optional, Any, Dict, Union
 
 # ---------------------------------------------------------------------
@@ -109,7 +108,7 @@ class MobileMQA(GroupedQueryAttention):
         │                             ▼                                   │
         │  optional q_norm / k_norm  (inherited)                          │
         │                             ▼                                   │
-        │  ops.repeat(k, v, num_heads, axis=1) — the ONE kv head is       │
+        │  keras.ops.repeat(k, v, num_heads, axis=1) — the ONE kv head is       │
         │  broadcast to every query head; num_kv_heads is hardcoded to    │
         │  1 here, which is what makes this multi-QUERY attention         │
         │                             ▼                                   │
@@ -280,7 +279,7 @@ class MobileMQA(GroupedQueryAttention):
             ``return_attention_weights=True``.
         :rtype: keras.KerasTensor or tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         batch_size = input_shape[0]
         height, width = input_shape[1], input_shape[2]
 
@@ -296,7 +295,7 @@ class MobileMQA(GroupedQueryAttention):
             v = self.downsample(v, training=training)
 
             # Update shapes for flattening
-            kv_shape = ops.shape(k)
+            kv_shape = keras.ops.shape(k)
             kv_height, kv_width = kv_shape[1], kv_shape[2]
             kv_len = kv_height * kv_width
         else:
@@ -304,16 +303,16 @@ class MobileMQA(GroupedQueryAttention):
 
         # 3. Flatten Spatial Dimensions
         # Q: (B, H*W, num_heads * head_dim)
-        q = ops.reshape(q, (batch_size, height * width, self.num_heads, self.head_dim))
+        q = keras.ops.reshape(q, (batch_size, height * width, self.num_heads, self.head_dim))
 
         # K, V: (B, KV_Len, 1 * head_dim) -> MQA has 1 KV head
-        k = ops.reshape(k, (batch_size, kv_len, 1, self.head_dim))
-        v = ops.reshape(v, (batch_size, kv_len, 1, self.head_dim))
+        k = keras.ops.reshape(k, (batch_size, kv_len, 1, self.head_dim))
+        v = keras.ops.reshape(v, (batch_size, kv_len, 1, self.head_dim))
 
         # 4. Transpose to (B, Num_Heads, Seq_Len, Head_Dim)
-        q = ops.transpose(q, (0, 2, 1, 3))  # (B, H, S_q, D)
-        k = ops.transpose(k, (0, 2, 1, 3))  # (B, 1, S_kv, D)
-        v = ops.transpose(v, (0, 2, 1, 3))  # (B, 1, S_kv, D)
+        q = keras.ops.transpose(q, (0, 2, 1, 3))  # (B, H, S_q, D)
+        k = keras.ops.transpose(k, (0, 2, 1, 3))  # (B, 1, S_kv, D)
+        v = keras.ops.transpose(v, (0, 2, 1, 3))  # (B, 1, S_kv, D)
 
         # Optional q/k normalization (inherited from GroupedQueryAttention).
         if self.q_norm is not None:
@@ -323,13 +322,13 @@ class MobileMQA(GroupedQueryAttention):
 
         # 5. Broadcast K/V to match Q heads (Grouped Broadcast)
         # Since num_kv_heads=1, num_groups == num_heads
-        k = ops.repeat(k, self.num_heads, axis=1)
-        v = ops.repeat(v, self.num_heads, axis=1)
+        k = keras.ops.repeat(k, self.num_heads, axis=1)
+        v = keras.ops.repeat(v, self.num_heads, axis=1)
 
         # 6. Attention Mechanism
         # (B, H, S_q, D) @ (B, H, D, S_kv) -> (B, H, S_q, S_kv)
-        scale = ops.cast(self.scale, k.dtype)  # D-001: inherited precomputed float
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * scale
+        scale = keras.ops.cast(self.scale, k.dtype)  # D-001: inherited precomputed float
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2))) * scale
 
         # Note: Masking is typically not used in standard MobileMQA vision contexts,
         # but if passed, would need careful handling due to downsampling.
@@ -339,11 +338,11 @@ class MobileMQA(GroupedQueryAttention):
         attn_weights = self.dropout(attn_weights, training=training)
 
         # 7. Weighted Sum
-        out = ops.matmul(attn_weights, v)  # (B, H, S_q, D)
+        out = keras.ops.matmul(attn_weights, v)  # (B, H, S_q, D)
 
         # 8. Reshape Output
-        out = ops.transpose(out, (0, 2, 1, 3))  # (B, S_q, H, D)
-        out = ops.reshape(out, (batch_size, height, width, self.dim))
+        out = keras.ops.transpose(out, (0, 2, 1, 3))  # (B, S_q, H, D)
+        out = keras.ops.reshape(out, (batch_size, height, width, self.dim))
 
         # 9. Output Projection & Lambda Residual
         attention_output = self.w_o(out, training=training)

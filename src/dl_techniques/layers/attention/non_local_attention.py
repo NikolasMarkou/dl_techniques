@@ -93,16 +93,20 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
-from keras import ops
 from typing import Any, Dict, Tuple, Optional, Literal, Union
 
-from .common import compute_attention_scale
-from ..activations import ProbabilityOutput, resolve_activation_layer
-from ..norms.factory import create_normalization_layer
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+
+from .common import compute_attention_scale
 
 # ---------------------------------------------------------------------
 
@@ -593,12 +597,12 @@ class NonLocalAttention(keras.layers.Layer):
         value = self.value_conv(x, training=training)
 
         # Reshape for attention computation: (B, H, W, C) -> (B, H*W, C)
-        shape = ops.shape(query)
+        shape = keras.ops.shape(query)
         batch_size, height, width = shape[0], shape[1], shape[2]
 
-        q = ops.reshape(query, [batch_size, -1, self.key_value_channels])
-        k = ops.reshape(key, [batch_size, -1, self.key_value_channels])
-        v = ops.reshape(value, [batch_size, -1, self.key_value_channels])
+        q = keras.ops.reshape(query, [batch_size, -1, self.key_value_channels])
+        k = keras.ops.reshape(key, [batch_size, -1, self.key_value_channels])
+        v = keras.ops.reshape(value, [batch_size, -1, self.key_value_channels])
 
         # Optional QK-normalization
         if self.q_norm is not None:
@@ -606,7 +610,7 @@ class NonLocalAttention(keras.layers.Layer):
             k = self.k_norm(k, training=training)
 
         # Scaled dot-product attention scores: (B, N_q, N_k)
-        scores = ops.matmul(q, ops.transpose(k, axes=[0, 2, 1]))
+        scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 2, 1]))
         if self.attention_mode == 'dot_product':
             # Match previous behavior of keras.layers.Attention(use_scale=True)
             # DECISION plan_2026-06-14_33b77a7a/D-003: precompute 1/sqrt(key_value_channels) (D-002 pattern); dot_product mode only — gaussian stays unscaled. key_value_channels is final at __init__.
@@ -615,7 +619,7 @@ class NonLocalAttention(keras.layers.Layer):
 
         # Optional additive attention mask
         if attention_mask is not None:
-            scores = scores + ops.cast(attention_mask, scores.dtype)
+            scores = scores + keras.ops.cast(attention_mask, scores.dtype)
 
         # Convert scores to attention probabilities
         attn = self.attn_prob(scores, training=training)
@@ -625,10 +629,10 @@ class NonLocalAttention(keras.layers.Layer):
             attn = self.attn_dropout(attn, training=training)
 
         # Aggregate values: (B, N_q, N_k) @ (B, N_k, d_kv) -> (B, N_q, d_kv)
-        attention_output = ops.matmul(attn, v)
+        attention_output = keras.ops.matmul(attn, v)
 
         # Reshape back to spatial dimensions: (B, H*W, C) -> (B, H, W, C)
-        attention_output = ops.reshape(
+        attention_output = keras.ops.reshape(
             attention_output,
             [batch_size, height, width, self.key_value_channels]
         )

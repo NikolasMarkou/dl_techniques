@@ -63,7 +63,11 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
-from ..activations import resolve_activation_layer
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.activations import resolve_activation_layer
 
 # ---------------------------------------------------------------------
 

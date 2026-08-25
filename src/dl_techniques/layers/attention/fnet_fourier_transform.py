@@ -79,7 +79,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Optional, Tuple, Dict, Any, Literal
 
 # ---------------------------------------------------------------------

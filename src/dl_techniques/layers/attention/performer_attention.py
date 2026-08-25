@@ -1,54 +1,64 @@
 """
-Approximates softmax attention with linear complexity using random features.
+Linear-complexity attention by approximating the softmax kernel with random
+features (FAVOR+).
 
-This layer implements the Performer, a transformer architecture that can
-process long sequences with a memory and time complexity that scales
-linearly with sequence length, as opposed to the quadratic complexity of
-standard dot-product attention. This is achieved by approximating the
-softmax kernel using the FAVOR+ (Fast Attention Via positive Orthogonal
-Random features) algorithm.
+Standard attention is quadratic because the softmax sits between two matmuls:
+``softmax(Q K^T) V`` cannot be reassociated, since the nonlinearity must see the
+full ``N x N`` score matrix before anything is contracted with ``V``. Everything
+about attention's cost follows from that one blocking nonlinearity, not from the
+matmuls themselves.
 
-The core idea replaces the explicit ``(Q @ K^T) @ V`` computation with
-``phi(Q) @ (phi(K)^T @ V)`` via random feature maps, reducing complexity
-from ``O(N^2 * d)`` to ``O(N * r * d)`` where ``r`` is the number of
-random features.
+The Performer's move is to remove the blockage rather than approximate around it.
+If the exponential kernel can be written as an inner product of explicit feature
+maps, ``exp(q . k) ~ E[<phi(q), phi(k)>]``, then the numerator becomes
+``phi(Q) phi(K)^T V`` — a product of three matrices with no nonlinearity between
+them, so associativity applies. Contracting ``phi(K)^T V`` FIRST yields an
+``(r, d)`` summary of the whole sequence, and every query then reads from that
+summary. Cost falls from ``O(N^2 d)`` to ``O(N r d)``, and the ``N x N`` matrix is
+never formed at any point. The denominator is the same trick applied to a vector of
+ones: attention's normalizer is just the kernel summed over keys.
 
-Architecture:
-    A single ``Dense(3 * dim)`` produces Q, K and V, which are reshaped to
-    ``(batch, num_heads, seq_len, head_dim)``. A random Gaussian projection
-    matrix maps each head's Q and K into an ``nb_features``-dimensional
-    trigonometric feature space, after which matmul associativity is used to
-    contract ``phi(K)^T V`` first (non-causal path) or a prefix ``cumsum`` of the
-    same outer product (causal path). The ``N x N`` attention matrix is never
-    materialized. Heads are merged and projected back to ``dim``.
+Causal masking survives the reassociation, which is not obvious. A causal query
+must read a summary of the PREFIX rather than of the whole sequence, and because
+the summary is a sum of per-position outer products, the prefix summaries are its
+running `cumsum`. So causality costs a scan over positions instead of a triangular
+mask — still linear, though the rank-5 intermediate makes it substantially more
+memory-hungry than the non-causal path.
 
-    Two properties of this file are load-bearing and deliberately NOT normalized
-    away by the package-wide style pass:
+Two properties of this file are load-bearing and deliberately NOT normalized away
+by the package-wide style pass. `call()` takes **no** `attention_mask` argument;
+that absence is frozen and honest, because the factory dispatches on argument names
+and a silently-ignored mask parameter would be worse than none. And the softmax
+temperature is precomputed once in `__init__` as a Python float, never recomputed
+with `ops.sqrt` in `call()`.
 
-    -   ``call()`` takes **no** ``attention_mask`` argument. That is intentional
-        and frozen; see the ``[FROZEN SIGNATURE]`` note on the class below.
-    -   The softmax temperature is precomputed once in ``__init__`` as a Python
-        float (anchor ``plan_2026-06-14_33b77a7a/D-001`` at
-        ``_create_projection_matrix``), never recomputed with ``ops.sqrt`` in
-        ``call()``.
+One documented gap: `ortho_scaling` does not orthogonalize. The "O" in FAVOR+ is
+orthogonal random features, which reduce approximation variance; what this
+implementation does when `ortho_scaling > 0` is multiply the Gaussian projection by
+a scalar. The default is `0.0`, so at default settings even that multiply is
+skipped. The projection is also redrawn on every call, so two forward passes on the
+same input do not agree exactly.
 
-Foundational Mathematics:
-    FAVOR+ replaces the softmax kernel with an explicit feature map ``phi`` whose
-    inner product approximates the exponential kernel in expectation::
+Foundational mathematics::
 
-        exp(q . k) ~ E[ <phi(q), phi(k)> ]
+    exp(q . k) ~ E[ <phi(q), phi(k)> ]
 
-    Attention then becomes a ratio of two contractions that are both linear in
-    the sequence length::
+    O = phi(Q) (phi(K)^T V) / ( phi(Q) (phi(K)^T 1_N) )
 
-        O = phi(Q) (phi(K)^T V) / ( phi(Q) (phi(K)^T 1_N) )
-
-    Contracting ``phi(K)^T V`` first yields an ``(r, d)`` state, so the total cost
-    is ``O(N * r * d)`` rather than ``O(N^2 * d)``.
+with the trigonometric feature map
+``phi(x) = sqrt(2/r) [cos(w_i . x), sin(w_i . x)]``, additionally scaled by
+``exp(-||x||^2 / 2)`` on the query side.
 
 References:
-    - Choromanski, K., Likhosherstov, V., Dohan, D., et al. (2020).
-      "Rethinking Attention with Performers".
+    - Choromanski et al., 2020. Rethinking Attention with Performers. ICLR 2021.
+      (https://arxiv.org/abs/2009.14794)
+    - Rahimi and Recht, 2007. Random Features for Large-Scale Kernel Machines.
+      NIPS. (the trigonometric feature map this uses)
+    - Katharopoulos et al., 2020. Transformers are RNNs: Fast Autoregressive
+      Transformers with Linear Attention. (the causal prefix-state formulation)
+      (https://arxiv.org/abs/2006.16236)
+    - Vaswani et al., 2017. Attention Is All You Need. (the quadratic mechanism
+      being approximated) (https://arxiv.org/abs/1706.03762)
 """
 
 # ---------------------------------------------------------------------
@@ -56,30 +66,30 @@ References:
 import math
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
-from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import compute_attention_scale, validate_head_divisibility
+from .common import (
+    compute_attention_scale,
+    validate_head_divisibility
+)
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PerformerAttention(keras.layers.Layer):
-    """Performer attention with linear complexity via FAVOR+ kernel approximation.
+    """
+    Performer attention: linear complexity via FAVOR+ kernel approximation.
 
-    Implements the Performer attention mechanism using Fast Attention Via positive
-    Orthogonal Random features (FAVOR+) to approximate standard softmax attention
-    with linear time and memory complexity ``O(N)`` instead of ``O(N^2)``. The
-    standard attention ``softmax(Q K^T / sqrt(d_k)) V`` is approximated by
-    constructing positive random feature maps ``phi(Q)`` and ``phi(K)`` such that
-    ``exp(q . k) ~ <phi(q), phi(k)>``, then computing
-    ``phi(Q) (phi(K)^T V) / phi(Q) (phi(K)^T 1_N)`` which avoids materializing
-    the ``N x N`` attention matrix. The feature map uses trigonometric random
-    projections: ``phi(x) = (1/sqrt(r)) [cos(w_i . x), sin(w_i . x)]``
-    scaled by ``exp(-||x||^2 / 2)``.
+    Approximates standard softmax attention in ``O(N)`` time and memory instead of
+    ``O(N^2)``. Positive random feature maps ``phi(Q)`` and ``phi(K)`` are
+    constructed such that ``exp(q . k) ~ <phi(q), phi(k)>``, after which
+    ``phi(Q) (phi(K)^T V) / phi(Q) (phi(K)^T 1_N)`` gives the attention output
+    without ever materializing the ``N x N`` matrix. The feature map is
+    trigonometric — ``phi(x) = (1/sqrt(r)) [cos(w_i . x), sin(w_i . x)]``, scaled by
+    ``exp(-||x||^2 / 2)`` on the query side.
 
     **[FROZEN SIGNATURE — D-007 carve-out]** ``call()`` accepts
     ``(inputs, training, return_attention_scores)`` and deliberately has **no**
@@ -102,44 +112,73 @@ class PerformerAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────┐
-        │     PerformerAttention — FAVOR+ features, no (N x N) matrix     │
-        │                                                                 │
-        │  Input [B, N, dim]                                              │
-        │                             ▼                                   │
-        │  Dense(3*dim) ► split 3 ► heads    q, k, v [B, H, N, d_h]       │
-        │                             ▼                                   │
-        │  q = q * (1/sqrt(d_h))  — the scale is applied BEFORE the       │
-        │  feature map, not after a score matmul: there is no score       │
-        │                             ▼                                   │
-        │  projection matrix, REDRAWN ON EVERY CALL from                  │
-        │  keras.random.normal(seed=None)  [H, F/2, d_h],  then           │
-        │  * ortho_scaling ONLY IF ortho_scaling > 0 — and it DEFAULTS    │
-        │  to 0.0, so at default settings that multiply is SKIPPED        │
-        │  entirely; then * scale unconditionally. Even when applied,     │
-        │  * ortho_scaling is a plain scalar multiply: nothing here       │
-        │  orthogonalizes, despite the FAVOR+ name                        │
-        │                             ▼                                   │
-        │  phi(x) = max(0, [cos(xWᵀ), sin(xWᵀ)] * feature_scale)          │
-        │           [B, H, N, F];  phi(q) is additionally scaled by       │
-        │           exp(-||q||² / 2), phi(k) is not                       │
-        │                             ▼                                   │
-        │  fork on the causal flag.  The (N x N) matrix is NEVER formed   │
-        │  in either branch — associativity keeps this O(N · F · d_h):    │
-        │    causal=False   KV = phi(k)ᵀ · v            [B, H, F, d_h]    │
-        │                   z  = phi(q) · sum_n phi(k)  + 1e-6            │
-        │    causal=True    KV = cumsum_n(phi(k) ⊗ v)   prefix state      │
-        │                   z  = phi(q) · cumsum_n phi(k)  + 1e-6         │
-        │                             ▼                                   │
-        │  out = (phi(q) · KV) / z ► merge heads ► Dense(dim) ► dropout   │
-        │                             ▼                                   │
-        │  Output [B, N, dim]                                             │
-        │                                                                 │
-        │  call() has NO mask argument at all (frozen signature); the     │
-        │  only masking is the causal=True constructor flag above.        │
-        │  return_attention_scores=True returns (output, None).           │
-        └─────────────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Input [B, N, dim]                                           │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  qkv_projection: Dense(3·dim) → split 3 → heads              │
+        │    q, k, v  [B, H, N, d_h]                                   │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  q = q · (1/sqrt(d_h))                                       │
+        │    the scale is applied BEFORE the feature map, not after a  │
+        │    score matmul — there IS no score matmul                   │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  projection matrix, REDRAWN ON EVERY CALL from               │
+        │  keras.random.normal(seed=None)   [H, F/2, d_h]              │
+        │    · ortho_scaling ONLY IF ortho_scaling > 0 — and it        │
+        │      DEFAULTS to 0.0, so at default settings that multiply   │
+        │      is SKIPPED entirely                                     │
+        │    · scale, unconditionally                                  │
+        │  Even when applied, ortho_scaling is a plain scalar          │
+        │  multiply: nothing here orthogonalizes, despite the name     │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  phi(x) = max(0, [cos(xWᵀ), sin(xWᵀ)] · feature_scale)       │
+        │    [B, H, N, F];  phi(q) is additionally scaled by           │
+        │    exp(−‖q‖² / 2), phi(k) is not                             │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  fork on the causal flag. The (N × N) matrix is NEVER formed  │
+        │  in either branch — associativity keeps this O(N · F · d_h): │
+        │                                                              │
+        │    causal=False   KV = phi(k)ᵀ · v          [B, H, F, d_h]   │
+        │                   z  = phi(q) · Σ_n phi(k)  + 1e−6           │
+        │                   ONE summary of the whole sequence          │
+        │                                                              │
+        │    causal=True    KV = cumsum_n(phi(k) ⊗ v)  prefix state    │
+        │                   z  = phi(q) · cumsum_n phi(k) + 1e−6       │
+        │                   a PREFIX summary per position; rank-5      │
+        │                   intermediate, so far more memory-hungry    │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  out = (phi(q) · KV) / z → merge heads                       │
+        │  → output_projection: Dense(dim) → dropout                   │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output [B, N, dim]                                          │
+        │    call() has NO mask argument at all (frozen signature);    │
+        │    the only masking is the causal=True constructor flag.     │
+        │    return_attention_scores=True returns (output, None).      │
+        └──────────────────────────────────────────────────────────────┘
 
+    **Complexity:**
+
+    .. code-block:: text
+
+        standard attention   O(N² · d)     the (N × N) score matrix
+        Performer            O(N · F · d)  F = nb_features
+
+        F trades approximation quality against cost: higher F narrows the gap to
+        true softmax attention and costs proportionally more memory.
 
     :param dim: Model dimensionality. Must be positive and divisible by num_heads.
     :type dim: int
@@ -157,6 +196,8 @@ class PerformerAttention(keras.layers.Layer):
         the scaling.
     :type ortho_scaling: float
     :param causal: Whether to use causal (autoregressive) attention masking.
+        Selects the prefix-``cumsum`` path, which is still linear in ``N`` but
+        materially more memory-hungry than the non-causal one.
     :type causal: bool
     :param dropout_rate: Dropout rate for attention weights, between 0 and 1.
     :type dropout_rate: float
@@ -179,6 +220,40 @@ class PerformerAttention(keras.layers.Layer):
     :raises ValueError: If ``dropout_rate`` is outside ``[0, 1]``.
     :raises ValueError: From ``build()``, if the input is not 3D or its trailing
         dimension does not equal ``dim``.
+
+    Input shape:
+        3D tensor with shape ``(batch_size, seq_len, dim)``. There is no mask
+        argument; padding is not handled.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, seq_len, dim)`` — unchanged from the
+        input. With ``return_attention_scores=True`` the return is
+        ``(output, None)``: no attention matrix exists to return.
+
+    Example:
+        >>> # Long-sequence encoder attention
+        >>> attn = PerformerAttention(dim=512, num_heads=8, nb_features=256)
+        >>> x = keras.random.normal((2, 8192, 512))
+        >>> y = attn(x, training=False)                  # (2, 8192, 512)
+        >>>
+        >>> # Autoregressive: the only masking this layer offers
+        >>> attn = PerformerAttention(dim=512, num_heads=8, causal=True)
+        >>>
+        >>> # Interface compatibility; the second entry is always None
+        >>> y, scores = attn(x, return_attention_scores=True)
+
+    Note:
+        The projection matrix is redrawn on every call, so two forward passes over
+        the same input differ by the sampling noise of the kernel approximation.
+        This layer is an approximation of softmax attention, not an exact
+        reformulation of it — unlike, say, blockwise/online-softmax attention.
+
+    Attributes:
+        to_qkv: Fused Q/K/V projection, ``3 * dim`` wide.
+        to_out: Output projection back to ``dim``.
+        dropout: Output dropout, or ``None`` at rate 0.
+        head_dim: ``dim // num_heads``.
+        scale: The ``1 / sqrt(head_dim)`` temperature, a Python float.
     """
 
     def __init__(
@@ -190,12 +265,18 @@ class PerformerAttention(keras.layers.Layer):
             causal: bool = False,
             dropout_rate: float = 0.0,
             use_bias: bool = False,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the projections and dropout.
+
+        This layer owns no weights of its own: the random projection is resampled
+        per call rather than stored. See the class docstring for the parameter
+        reference.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -203,10 +284,6 @@ class PerformerAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # R13: adopts the shared validator. Its message is character-for-character
-        # what stood here (`dim (D) must be divisible by num_heads (H)`), so the
-        # regex pinned at test_performer_attention.py:80 still matches and the
-        # diagnostic is unchanged.
         validate_head_divisibility(dim, num_heads)
         if nb_features <= 0:
             raise ValueError(f"nb_features must be positive, got {nb_features}")
@@ -221,33 +298,21 @@ class PerformerAttention(keras.layers.Layer):
         self.causal = causal
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         # Normalize regularizers via regularizers.get() so str/dict/object/None
         # all round-trip uniformly through regularizers.serialize() in get_config.
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Computed attributes
         self.head_dim = dim // num_heads
-        # R13: was `1.0 / np.sqrt(self.head_dim)`. Adopting the shared helper was
-        # gated on an EXPLICIT equality probe rather than on the two expressions
-        # "looking the same": `float(1.0/np.sqrt(d)).hex()` was compared against
-        # `common.compute_attention_scale(d).hex()` for 27 realistic head dims
-        # (1..512) and matched on every one. (Step 2 of this plan proved the
-        # analogous `head_dim ** -0.5` form is NOT bit-identical, so this check is
-        # not a formality.) The only difference is the Python-level type —
-        # `np.float64` instead of `float` — and `np.float64` IS a subclass of
-        # `float`, is never serialized (`scale` is not a `get_config()` key), and is
-        # converted to the tensor dtype identically by every `keras.ops` call.
-        # The D-001 anchor at `_create_projection_matrix` still governs: a Python
-        # scalar computed ONCE in `__init__`, never `ops.sqrt` inside `call()`.
         self.scale = compute_attention_scale(self.head_dim)
         self._feature_scale = math.sqrt(2.0 / float(self.nb_features))
 
         # Create sub-layers in __init__
         # Q, K, V projection layer
-        self.to_qkv = layers.Dense(
+        self.to_qkv = keras.layers.Dense(
             3 * dim,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -258,7 +323,7 @@ class PerformerAttention(keras.layers.Layer):
         )
 
         # Output projection layer
-        self.to_out = layers.Dense(
+        self.to_out = keras.layers.Dense(
             dim,
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -270,15 +335,20 @@ class PerformerAttention(keras.layers.Layer):
 
         # Dropout layer
         if dropout_rate > 0.0:
-            self.dropout = layers.Dropout(dropout_rate)
+            self.dropout = keras.layers.Dropout(dropout_rate)
         else:
             self.dropout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and its sub-layers.
+        """Build the layer and its two projection sub-layers.
+
+        Both projections take the same input shape: ``to_out`` consumes
+        ``(B, N, dim)`` because heads are merged back before it runs.
 
         :param input_shape: Shape tuple of the input.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 3, or if its last
+            dimension does not equal ``dim``.
         """
         if self.built:
             return
@@ -298,7 +368,11 @@ class PerformerAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_projection_matrix(self, batch_size: int) -> keras.KerasTensor:
-        """Create random projection matrix for FAVOR+ approximation.
+        """Create the random projection matrix for the FAVOR+ feature map.
+
+        Resampled on EVERY call, from an unseeded ``keras.random.normal``, so it is
+        not a weight and does not round-trip through a checkpoint. Note that
+        ``ortho_scaling`` only rescales here — nothing orthogonalizes.
 
         :param batch_size: Batch size for broadcasting.
         :type batch_size: int
@@ -325,13 +399,12 @@ class PerformerAttention(keras.layers.Layer):
             projection = projection * self.ortho_scaling
 
         # Scale by sqrt(head_dim) for proper variance
-        # DECISION plan_2026-06-14_33b77a7a/D-001: precompute static attention scale as a Python float (D-002 pattern); projection*self.scale == projection/ops.sqrt(head_dim) in float32. Do NOT revert to ops.sqrt in call().
         projection = projection * self.scale
 
         # Broadcast to batch dimension
         # Shape: (batch, num_heads, nb_features//2, head_dim)
-        projection = ops.expand_dims(projection, axis=0)
-        projection = ops.repeat(projection, batch_size, axis=0)
+        projection = keras.ops.expand_dims(projection, axis=0)
+        projection = keras.ops.repeat(projection, batch_size, axis=0)
 
         return projection
 
@@ -341,7 +414,13 @@ class PerformerAttention(keras.layers.Layer):
             projection_matrix: keras.KerasTensor,
             is_query: bool = True
     ) -> keras.KerasTensor:
-        """Create positive random features for kernel approximation.
+        """Map inputs into the trigonometric random feature space.
+
+        ``cos`` and ``sin`` of the projection are concatenated to width
+        ``nb_features``, scaled so the inner product approximates the exponential
+        kernel in expectation, and clamped non-negative. The
+        ``exp(-||x||^2 / 2)`` factor is applied to QUERIES only — the asymmetry is
+        deliberate.
 
         :param x: Input tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
         :type x: keras.KerasTensor
@@ -357,16 +436,16 @@ class PerformerAttention(keras.layers.Layer):
         # x: (batch, num_heads, seq_len, head_dim)
         # projection_matrix: (batch, num_heads, nb_features//2, head_dim)
         # Result: (batch, num_heads, seq_len, nb_features//2)
-        x_projected = ops.einsum('bhnd,bhfd->bhnf', x, projection_matrix)
+        x_projected = keras.ops.einsum('bhnd,bhfd->bhnf', x, projection_matrix)
 
         # Apply trigonometric random features (FAVOR+)
         # This creates positive features that approximate exp(x·y)
-        features_cos = ops.cos(x_projected)
-        features_sin = ops.sin(x_projected)
+        features_cos = keras.ops.cos(x_projected)
+        features_sin = keras.ops.sin(x_projected)
 
         # Concatenate to get full feature dimension
         # Shape: (batch, num_heads, seq_len, nb_features)
-        features = ops.concatenate([features_cos, features_sin], axis=-1)
+        features = keras.ops.concatenate([features_cos, features_sin], axis=-1)
 
         # Apply proper scaling for kernel approximation
         # The scaling ensures E[φ(x)ᵀφ(y)] ≈ exp(xᵀy)
@@ -375,9 +454,16 @@ class PerformerAttention(keras.layers.Layer):
         # For numerical stability, apply exponential normalization
         if is_query:
             # Normalize queries to prevent numerical issues
-            features = features * ops.exp(-ops.square(ops.norm(x, axis=-1, keepdims=True)) / 2.0)
+            features = (
+                    features *
+                    keras.ops.exp(
+                        -keras.ops.square(
+                            keras.ops.norm(x, axis=-1, keepdims=True)
+                        ) / 2.0
+                    )
+            )
 
-        return ops.maximum(features, 0)  # Ensure positive features
+        return keras.ops.maximum(features, 0)  # Ensure positive features
 
     def _linear_attention(
             self,
@@ -385,7 +471,12 @@ class PerformerAttention(keras.layers.Layer):
             k: keras.KerasTensor,
             v: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Compute linear attention using FAVOR+ approximation.
+        """Contract the feature maps in the order that keeps the cost linear.
+
+        The non-causal branch builds ONE ``(F, d_h)`` summary of the whole
+        sequence; the causal branch builds a prefix summary per position via
+        ``cumsum`` over the per-position outer products. Neither branch forms the
+        ``N x N`` matrix. Both add ``1e-6`` to the normalizer.
 
         :param q: Query features of shape ``(batch, num_heads, seq_len, nb_features)``.
         :type q: keras.KerasTensor
@@ -397,7 +488,6 @@ class PerformerAttention(keras.layers.Layer):
         :return: Attention output of shape ``(batch, num_heads, seq_len, head_dim)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan_2026-06-14_077a2a35/D-002: branch causal vs non-causal so the non-causal block is not computed-then-discarded on the causal path. Both blocks are verbatim-unchanged; numerics byte-identical. Do NOT merge back into compute-all-then-overwrite.
         if self.causal:
             # For causal attention, we need cumulative sums
             # This is a simplified implementation - consider optimizing for production
@@ -408,36 +498,36 @@ class PerformerAttention(keras.layers.Layer):
             # prefix-summed KV state. No expand_dims on v: the einsum already
             # produces the rank-5 outer product (a stray expand_dims made v rank-5
             # and crashed the einsum with "rank 5 vs expected 4").
-            kv_cumsum = ops.cumsum(
-                ops.einsum('bhnf,bhnd->bhnfd', k, v),
+            kv_cumsum = keras.ops.cumsum(
+                keras.ops.einsum('bhnf,bhnd->bhnfd', k, v),
                 axis=2
             )
-            k_cumsum = ops.cumsum(k, axis=2)
+            k_cumsum = keras.ops.cumsum(k, axis=2)
 
             # Recompute with cumulative values. q:(B,h,N,F) contracts against
             # kv_cumsum:(B,h,N,F,D) -> out:(B,h,N,D) directly (rank-4, no squeeze).
-            z_causal = ops.einsum('bhnf,bhnf->bhn', q, k_cumsum) + 1e-6
-            out = ops.einsum('bhnf,bhnfd->bhnd', q, kv_cumsum)
-            out = out / ops.expand_dims(z_causal, axis=-1)
+            z_causal = keras.ops.einsum('bhnf,bhnf->bhn', q, k_cumsum) + 1e-6
+            out = keras.ops.einsum('bhnf,bhnfd->bhnd', q, kv_cumsum)
+            out = out / keras.ops.expand_dims(z_causal, axis=-1)
         else:
             # Compute KV: φ(K)ᵀV
             # k: (batch, num_heads, seq_len, nb_features)
             # v: (batch, num_heads, seq_len, head_dim)
             # kv: (batch, num_heads, nb_features, head_dim)
-            kv = ops.einsum('bhnf,bhnd->bhfd', k, v)
+            kv = keras.ops.einsum('bhnf,bhnd->bhfd', k, v)
 
             # Compute normalization: φ(Q) · sum(φ(K))
             # k_sum: (batch, num_heads, nb_features)
-            k_sum = ops.sum(k, axis=2)
+            k_sum = keras.ops.sum(k, axis=2)
 
             # z: (batch, num_heads, seq_len)
-            z = ops.einsum('bhnf,bhf->bhn', q, k_sum)
+            z = keras.ops.einsum('bhnf,bhf->bhn', q, k_sum)
             z = z + 1e-6  # Add small epsilon for numerical stability
 
             # Compute output: φ(Q) · KV / Z
             # out: (batch, num_heads, seq_len, head_dim)
-            out = ops.einsum('bhnf,bhfd->bhnd', q, kv)
-            out = out / ops.expand_dims(z, axis=-1)
+            out = keras.ops.einsum('bhnf,bhfd->bhnd', q, kv)
+            out = out / keras.ops.expand_dims(z, axis=-1)
 
         return out
 
@@ -448,6 +538,10 @@ class PerformerAttention(keras.layers.Layer):
             return_attention_scores: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, None]]:
         """Apply Performer attention to inputs.
+
+        Project, reshape to heads, scale the queries, draw a fresh projection
+        matrix, build both feature maps, contract linearly, then merge heads and
+        project out. Note the frozen signature: there is no mask argument.
 
         :param inputs: Input tensor of shape ``(batch_size, seq_len, dim)``.
         :type inputs: keras.KerasTensor
@@ -461,8 +555,8 @@ class PerformerAttention(keras.layers.Layer):
             If return_attention_scores is ``True``, returns ``(output, None)``.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, None]]
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # Project to Q, K, V
         # Shape: (batch, seq_len, 3*dim)
@@ -470,18 +564,18 @@ class PerformerAttention(keras.layers.Layer):
 
         # Split into Q, K, V
         # Each has shape: (batch, seq_len, dim)
-        q, k, v = ops.split(qkv, 3, axis=-1)
+        q, k, v = keras.ops.split(qkv, 3, axis=-1)
 
         # Reshape to multi-head format
         # Shape: (batch, num_heads, seq_len, head_dim)
-        q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
-        q = ops.transpose(q, (0, 2, 1, 3))
+        q = keras.ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
+        q = keras.ops.transpose(q, (0, 2, 1, 3))
 
-        k = ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k = ops.transpose(k, (0, 2, 1, 3))
+        k = keras.ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k = keras.ops.transpose(k, (0, 2, 1, 3))
 
-        v = ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
-        v = ops.transpose(v, (0, 2, 1, 3))
+        v = keras.ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
+        v = keras.ops.transpose(v, (0, 2, 1, 3))
 
         # Scale queries
         q = q * self.scale
@@ -497,8 +591,8 @@ class PerformerAttention(keras.layers.Layer):
         out = self._linear_attention(q_features, k_features, v)
 
         # Reshape back to (batch, seq_len, dim)
-        out = ops.transpose(out, (0, 2, 1, 3))
-        out = ops.reshape(out, (batch_size, seq_len, self.dim))
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.reshape(out, (batch_size, seq_len, self.dim))
 
         # Apply output projection
         out = self.to_out(out)
@@ -514,8 +608,14 @@ class PerformerAttention(keras.layers.Layer):
 
         return out
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Return the output shape, which equals the input shape.
+
+        The output projection maps ``dim`` back to ``dim``, so the layer is
+        shape-preserving.
 
         :param input_shape: Shape tuple of the input.
         :type input_shape: Tuple[Optional[int], ...]
@@ -540,10 +640,10 @@ class PerformerAttention(keras.layers.Layer):
             'causal': self.causal,
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 

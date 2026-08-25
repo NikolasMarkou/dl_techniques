@@ -43,7 +43,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
@@ -139,7 +138,7 @@ class BasisFunction(keras.layers.Layer):
         # Compute b(x) = x / (1 + e^(-x))
         # This is mathematically equivalent to x * sigmoid(x)
         # Using the division form can be more numerically stable
-        return inputs / (1.0 + ops.exp(-inputs))
+        return inputs / (1.0 + keras.ops.exp(-inputs))
 
     def compute_output_shape(
         self,

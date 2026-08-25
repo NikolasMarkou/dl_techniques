@@ -38,17 +38,13 @@ and deserializes back to the identical object, so ``.keras`` round-trips are
 bit-exact.
 """
 
-from typing import Any, Callable, Dict, Union
-
 import keras
-from keras import ops
+from typing import Any, Callable, Dict, Union
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(
-    package="dl_techniques.activations", name="gelu_tanh"
-)
+@keras.saving.register_keras_serializable()
 def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
     """Tanh-approximate GELU.
 
@@ -63,7 +59,7 @@ def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
     :return: Tensor of the same shape with the tanh-approximate GELU applied.
     :rtype: keras.KerasTensor
     """
-    return ops.gelu(x, approximate=True)
+    return keras.ops.gelu(x, approximate=True)
 
 
 # ---------------------------------------------------------------------
