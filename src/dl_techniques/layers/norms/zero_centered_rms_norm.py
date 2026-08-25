@@ -56,6 +56,9 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 # ---------------------------------------------------------------------
 
@@ -98,10 +101,15 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
     - float32 at minimum, float64 under a float64 policy - and cast back to the
     input dtype on return.
 
-    ``supports_masking`` is ``True``. With the default ``axis=-1`` a single
-    ``(sample, token)`` perturbation moves no other position by more than ``0.0``
-    (measured, both training regimes), so a Keras mask remains valid on the output.
-    Normalizing over a token axis couples positions and is not covered by the flag.
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At the default ``axis=-1`` a single ``(sample, token)``
+    perturbation of a ``(3, 5, 8)`` input moves no other position by more than
+    ``0.0`` (measured, both training regimes), so a Keras mask remains valid.
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``2.189`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -200,8 +208,11 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         # never leave the attribute undefined.
         self._scale_broadcast_shape = None
 
-        # Enable masking support
-        self.supports_masking = True
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(
             f"Initialized ZeroCenteredRMSNorm with "
@@ -246,6 +257,13 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         """
         if self.built:
             return
+
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
 
         if self.use_scale:
             # Determine the shape for the scale parameter

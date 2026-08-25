@@ -40,6 +40,9 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 # ---------------------------------------------------------------------
 
@@ -55,9 +58,15 @@ class LogitNorm(keras.layers.Layer):
     where τ is the (fixed) temperature. τ divides the unit-norm logits, so a
     LARGER τ compresses the output and a SMALLER τ expands it.
 
-    ``supports_masking`` is ``True``: with ``axis=-1`` each position is normalized
-    independently of the others (measured cross-position leak exactly ``0.0``), so a
-    Keras mask remains valid on the output.
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At ``axis=-1`` each position is normalized independently of
+    the others (measured cross-position leak exactly ``0.0`` on a ``(3, 5, 8)``
+    input).
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``23.068`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -147,8 +156,11 @@ class LogitNorm(keras.layers.Layer):
         self.axis = axis
         self.epsilon = epsilon
 
-        # Enable masking support
-        self.supports_masking = True
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(f"Initialized LogitNorm with temperature={temperature}, axis={axis}, epsilon={epsilon}")
 
@@ -166,6 +178,28 @@ class LogitNorm(keras.layers.Layer):
             raise ValueError(f"temperature must be positive, got {temperature}")
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Decide ``supports_masking`` against the now-known input rank.
+
+        The layer owns no weights, so this override exists solely to make the
+        masking promise exact: ``axis`` may be spelled non-negatively, and whether
+        it names the feature axis or the token axis depends on the rank.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
+        if self.built:
+            return
+
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
+
+        super().build(input_shape)
 
     def call(
             self,

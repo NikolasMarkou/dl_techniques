@@ -28,6 +28,9 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 
 # ---------------------------------------------------------------------
@@ -46,9 +49,15 @@ class BandLogitNorm(keras.layers.Layer):
     L2 norm. This layer does not compute an RMS (``sqrt(mean(x**2))``) despite
     sitting beside the RMS family in this package.
 
-    ``supports_masking`` is ``True``: with ``axis=-1`` the output at one position
-    is a function of that position only (measured cross-position leak exactly
-    ``0.0`` in both training regimes), so a Keras mask stays valid on the output.
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At ``axis=-1`` the output at one position is a function of
+    that position only (measured cross-position leak exactly ``0.0`` on a
+    ``(3, 5, 8)`` input, both training regimes).
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``0.914`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     .. note::
         **Degenerate adaptive component (known limitation).** The "learned scaling"
@@ -153,8 +162,11 @@ class BandLogitNorm(keras.layers.Layer):
             name=f"{self.name}_layer_norm",
         )
 
-        # Enable masking support
-        self.supports_masking = True
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(
             f"Initialized BandLogitNorm with "
@@ -188,6 +200,13 @@ class BandLogitNorm(keras.layers.Layer):
         """
         if self.built:
             return
+
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
 
         # The norm tensor fed to self.norm has shape [..., 1] (keepdims=True).
         norm_shape = list(input_shape)

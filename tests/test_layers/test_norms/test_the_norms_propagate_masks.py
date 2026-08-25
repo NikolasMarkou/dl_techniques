@@ -17,6 +17,13 @@ the promise:
 
 The exclusion assertions exist so that a future blanket "add ``supports_masking``
 to every norm" sweep fails loudly instead of shipping a false promise.
+
+The promise is also a property of the **axis**, not of the class. The same seven
+classes that are token-independent at ``axis=-1`` mix tokens at ``axis=1`` - the
+measured leak on a ``(3, 5, 8)`` input runs from ``0.914`` (``BandLogitNorm``) to
+``23.068`` (``LogitNorm``) - so the last three test groups here pin the flag per
+configuration: ``False`` on the token axis, ``True`` on the feature axis however it
+is spelled, and still ``True`` at the default after ``build()`` has refined it.
 """
 
 from typing import Any, Callable, Dict, List, Tuple
@@ -95,6 +102,36 @@ SHAPE_CHANGING_EXCLUSIONS: List[Tuple[str, LayerFactory]] = [
     ("DecoupledMaxLogit", DecoupledMaxLogit),
     ("DMLPlus", lambda: DMLPlus(model_type="focal")),
     ("PolarWeightNorm", lambda: PolarWeightNorm(units=4)),
+]
+
+#: The SAME seven layers, but constructed to normalize over the TOKEN axis.
+#: ``supports_masking`` is a promise about the AXIS, not about the class: when the
+#: normalized axis IS the token axis, one token's value enters every other token's
+#: statistics, so the flag must be False for these configurations even though it is
+#: True for the same classes at the default ``axis=-1``.
+#: ``DynamicTanh`` and ``EnergyLayerNorm`` are absent because neither takes an
+#: ``axis`` argument - they are elementwise / feature-axis by construction.
+TOKEN_AXIS_CONFIGURATIONS: List[Tuple[str, LayerFactory]] = [
+    ("RMSNorm", lambda: RMSNorm(axis=1)),
+    ("ZeroCenteredRMSNorm", lambda: ZeroCenteredRMSNorm(axis=1)),
+    ("BandRMS", lambda: BandRMS(axis=1)),
+    ("ZeroCenteredBandRMSNorm", lambda: ZeroCenteredBandRMSNorm(axis=1)),
+    ("LogitNorm", lambda: LogitNorm(axis=1)),
+    ("BandLogitNorm", lambda: BandLogitNorm(axis=1)),
+    ("MaxLogitNorm", lambda: MaxLogitNorm(axis=1)),
+]
+
+#: The same seven spelled with a NON-NEGATIVE index that still names the feature
+#: axis of a rank-3 input. The flag must be True here, which is what forces the
+#: rule to RESOLVE the axis against the rank instead of pattern-matching ``-1``.
+FEATURE_AXIS_CONFIGURATIONS: List[Tuple[str, LayerFactory]] = [
+    ("RMSNorm", lambda: RMSNorm(axis=2)),
+    ("ZeroCenteredRMSNorm", lambda: ZeroCenteredRMSNorm(axis=2)),
+    ("BandRMS", lambda: BandRMS(axis=2)),
+    ("ZeroCenteredBandRMSNorm", lambda: ZeroCenteredBandRMSNorm(axis=2)),
+    ("LogitNorm", lambda: LogitNorm(axis=2)),
+    ("BandLogitNorm", lambda: BandLogitNorm(axis=2)),
+    ("MaxLogitNorm", lambda: MaxLogitNorm(axis=2)),
 ]
 
 BATCH, TOKENS, FEATURES = 3, 5, 8
@@ -191,6 +228,24 @@ def _embedding_model(layer: keras.layers.Layer) -> Dict[str, Any]:
         "output_mask": getattr(outputs, "_keras_mask", None),
         "output": outputs,
     }
+
+
+def _flag_after_build(factory: LayerFactory) -> bool:
+    """Report ``supports_masking`` once the layer has seen its input rank.
+
+    The flag is only decidable against a rank: ``axis=2`` is the feature axis of a
+    rank-3 input and the token axis of a rank-4 one. Keras reads the attribute
+    inside ``__call__``, which runs ``build()`` first, so a build-time refinement is
+    the one that governs whether the mask actually survives.
+
+    :param factory: Zero-argument callable returning a fresh layer.
+    :type factory: LayerFactory
+    :return: The value of ``supports_masking`` after ``build``.
+    :rtype: bool
+    """
+    layer = factory()
+    layer.build((BATCH, TOKENS, FEATURES))
+    return layer.supports_masking
 
 
 # ---------------------------------------------------------------------------
@@ -307,3 +362,90 @@ def test_the_shape_changing_exclusions_are_not_shape_preserving() -> None:
 
     projected = PolarWeightNorm(units=4)(x)
     assert tuple(projected.shape) == (BATCH, TOKENS, 4)
+
+
+# ---------------------------------------------------------------------------
+# The flag is a property of the AXIS, not of the class
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,factory", TOKEN_AXIS_CONFIGURATIONS, ids=lambda v: v
+)
+def test_the_token_axis_configurations_really_leak(
+    name: str, factory: LayerFactory
+) -> None:
+    """Precondition for the next two tests: at ``axis=1`` the coupling is real."""
+    leak = max(
+        _cross_token_leak(factory, training=False),
+        _cross_token_leak(factory, training=True),
+    )
+    assert leak > 1e-3, (
+        f"{name}(axis=1) was expected to mix tokens, but the measured "
+        f"cross-position leak is only {leak:.3e} - this probe has gone blind"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,factory", TOKEN_AXIS_CONFIGURATIONS, ids=lambda v: v
+)
+def test_the_token_axis_configurations_do_not_claim_masking(
+    name: str, factory: LayerFactory
+) -> None:
+    """RED at HEAD: the flag was set unconditionally in ``__init__``."""
+    assert _flag_after_build(factory) is False, (
+        f"{name}(axis=1) advertises supports_masking, but it normalizes OVER the "
+        f"token axis and was measured to leak across tokens. The flag must be "
+        f"decided from the resolved axes, not set unconditionally"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,factory", TOKEN_AXIS_CONFIGURATIONS, ids=lambda v: v
+)
+def test_the_token_axis_configurations_drop_the_mask(
+    name: str, factory: LayerFactory
+) -> None:
+    """The behaviour behind the flag: a wrong mask must NOT reach the next layer.
+
+    Keras announces the drop with its own ``UserWarning``, which this suite turns
+    into an error (``pyproject.toml`` ``filterwarnings = ["error::UserWarning"]``).
+    Catching it here is the assertion: the warning firing IS Keras confirming it
+    read ``supports_masking`` as ``False``, and it is what a user who wires one of
+    these configurations behind an ``Embedding(mask_zero=True)`` will see.
+    """
+    with pytest.warns(UserWarning, match="does not support masking"):
+        result = _embedding_model(factory())
+    assert result["embedding_mask"] is not None, (
+        "precondition failed: Embedding(mask_zero=True) produced no mask"
+    )
+    assert result["output_mask"] is None, (
+        f"{name}(axis=1) propagated the Keras mask, but its output at an unmasked "
+        f"token already depends on the masked ones - downstream code would trust a "
+        f"padding-aware result that is not one"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,factory", FEATURE_AXIS_CONFIGURATIONS, ids=lambda v: v
+)
+def test_the_feature_axis_configurations_still_claim_masking(
+    name: str, factory: LayerFactory
+) -> None:
+    """``axis=2`` IS the feature axis of a rank-3 input; honesty is not timidity."""
+    assert _flag_after_build(factory) is True, (
+        f"{name}(axis=2) on a rank-3 input normalizes the FEATURE axis and was "
+        f"measured token-independent, so refusing the flag here would be "
+        f"conservative rather than honest - resolve the axis against the rank"
+    )
+
+
+@pytest.mark.parametrize("name,factory", MASK_PROPAGATING, ids=lambda v: v)
+def test_the_default_axis_still_claims_masking_after_build(
+    name: str, factory: LayerFactory
+) -> None:
+    """The refinement must not take the flag away from the default construction."""
+    assert _flag_after_build(factory) is True, (
+        f"{name} lost supports_masking during build() at the DEFAULT axis, which "
+        f"is the configuration the flag was measured honest for"
+    )

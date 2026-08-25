@@ -48,6 +48,9 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 # ---------------------------------------------------------------------
 
@@ -79,12 +82,16 @@ class RMSNorm(keras.layers.Layer):
     when the layer's own policy is float64 - and the result is cast back to the input
     dtype before it is returned.
 
-    ``supports_masking`` is ``True``. With the default ``axis=-1`` each position's
-    output depends only on that position: perturbing one ``(sample, token)`` slot
-    moves no other position by more than ``0.0`` (measured, in both ``training=False``
-    and ``training=True``), so a Keras mask stays valid on the output and is passed
-    through unchanged. Normalizing over a token axis instead couples positions, and
-    the flag does not describe that configuration.
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At the default ``axis=-1`` each position's output depends
+    only on that position: perturbing one ``(sample, token)`` slot of a ``(3, 5, 8)``
+    input moves no other position by more than ``0.0`` (measured, in both
+    ``training=False`` and ``training=True``), so a Keras mask stays valid.
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``2.063`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -175,8 +182,11 @@ class RMSNorm(keras.layers.Layer):
         # never leave the attribute undefined.
         self._scale_broadcast_shape = None
 
-        # Enable masking support
-        self.supports_masking = True
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(f"Initialized RMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
 
@@ -216,6 +226,13 @@ class RMSNorm(keras.layers.Layer):
         """
         if self.built:
             return
+
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
 
         if self.use_scale:
             # Determine the shape for the scale parameter

@@ -51,6 +51,9 @@ from typing import Any, Dict, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 # ---------------------------------------------------------------------
 
@@ -74,10 +77,16 @@ class BandRMS(keras.layers.Layer):
     allowing features to exist within a bounded range while maintaining dimension-
     independent behavior across different layer widths.
 
-    ``supports_masking`` is ``True``: with the default ``axis=-1`` the band scale is
-    a single global parameter and the RMS is per-position, so perturbing one
-    ``(sample, token)`` slot moves no other position by more than ``0.0`` (measured,
-    both training regimes) and a Keras mask stays valid on the output.
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At the default ``axis=-1`` the band scale is a single global
+    parameter and the RMS is per-position, so perturbing one ``(sample, token)``
+    slot of a ``(3, 5, 8)`` input moves no other position by more than ``0.0``
+    (measured, both training regimes).
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``1.960`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -181,8 +190,11 @@ class BandRMS(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.band_param = None
 
-        # Enable masking support
-        self.supports_masking = True
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(f"Initialized BandRMS with max_band_width={max_band_width}, axis={axis}, epsilon={epsilon}")
 
@@ -233,6 +245,13 @@ class BandRMS(keras.layers.Layer):
         """
         if self.built:
             return
+
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
 
         # Create a single scalar band parameter using add_weight()
         self.band_param = self.add_weight(

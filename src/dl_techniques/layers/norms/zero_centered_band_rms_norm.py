@@ -45,6 +45,9 @@ from typing import Any, Dict, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 
 # ---------------------------------------------------------------------
@@ -77,9 +80,15 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
     property, combining the benefits of LayerNorm stability, RMSNorm efficiency,
     and BandRMS representational flexibility.
 
-    ``supports_masking`` is ``True``: with the default ``axis=-1`` each position is
-    centered and scaled from its own statistics (measured cross-position leak exactly
-    ``0.0`` in both training regimes), so a Keras mask remains valid on the output.
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At the default ``axis=-1`` each position is centered and
+    scaled from its own statistics (measured cross-position leak exactly ``0.0`` on
+    a ``(3, 5, 8)`` input, both training regimes).
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``2.080`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -195,8 +204,11 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.band_param = None
 
-        # Enable masking support
-        self.supports_masking = True
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(
             f"Initialized ZeroCenteredBandRMSNorm with "
@@ -251,6 +263,13 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         """
         if self.built:
             return
+
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
 
         # Create a single scalar band parameter using add_weight()
         # This parameter controls the learned position within the [1-α, 1] band
