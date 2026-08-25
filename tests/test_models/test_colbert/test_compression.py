@@ -650,8 +650,9 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
     widths -- leaves the drift assertions GREEN. Measured relative MaxSim drift
     for that centroid-only decode, same geometry, 12 seeds: 0.033810, 0.028049,
     0.030800, 0.010378, 0.049580, 0.037165, 0.058220, 0.020338, 0.023961,
-    0.021655, 0.046885, 0.037876 -- worst 0.0582, under both bounds on 11 of 12
-    seeds and, at 1 bit, *below* the real decode's own drift on 6 of those 12.
+    0.021655, 0.046885, 0.037876 -- worst 0.0582, under both bounds on 12 of 12
+    seeds (the worst is below even the tighter 0.08 bound) and, at 1 bit,
+    *below* the real decode's own drift on 6 of those 12.
     The cause is H-3: on a randomly initialized encoder the token embeddings do
     not cluster, so a 1-bit residual quantizer adds noise to a MaxSim score as
     often as it removes it. **So the ordering "real decode drifts less than
@@ -685,6 +686,32 @@ def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> No
     (and the real decode beat centroid-only on **12 of 12** seeds at both bit
     widths). ``COMPOSE_RESIDUAL_GAIN_FLOOR`` asserts 1.3 / 2.0, ~20% under
     those minima, and a dead residual stage pins the ratio at exactly 1.0.
+
+    **WHAT THIS ARM CANNOT DETECT -- the blind band, stated as a number.** The
+    floors detect a **dead** residual stage, not a merely **attenuated** one.
+    Sweeping the residual scale (``centroids[codes] + residuals * s``, decoded
+    and renormalized exactly as ``decode()`` does) over seeds 0-3:
+
+    ======= ============ ============ ==============================
+    scale s gain @1bit   gain @2bit   vs floors 1.3 / 2.0
+    ======= ============ ============ ==============================
+    1.00    1.5857       2.5392       passes (healthy)
+    0.75    1.4494       2.0414       **passes both** (2-bit by ~2%)
+    0.50    1.2820       1.5400       fails both
+    0.25    1.1266       1.2072       fails both
+    0.00    1.0000       1.0000       fails both (the dead-stage injection)
+    ======= ============ ============ ==============================
+
+    So a residual stage attenuated by up to about **45%** slips past the 1-bit
+    floor, and up to about **26%** past the 2-bit floor. Read the "~20% margin"
+    above as protection against seed-to-seed swing, **not** as this guard's
+    detection power: what it buys is "the residual bits are being used at
+    roughly their designed strength or better", not "at exactly full strength".
+    Tightening the floors toward the measured minima (~1.50 / ~2.40) would
+    narrow the band and is recorded as available future work in decisions.md
+    D-011 -- deliberately NOT done here, because it trades a known, stated blind
+    band for an unquantified flake risk on hardware where these ratios have not
+    been measured.
 
     **TOP-1 IS DELIBERATELY NOT ASSERTED, AT EITHER BIT WIDTH.** The same 8
     seeds were checked for it and it does **not** hold: top-1 was preserved on
