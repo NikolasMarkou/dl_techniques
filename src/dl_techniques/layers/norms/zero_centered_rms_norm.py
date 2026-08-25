@@ -25,8 +25,14 @@ Key Differences from Standard Normalization:
     - RMSNorm: x / RMS(x) * gamma (only scales, no centering)
     - Zero-Centered RMSNorm: (x - mu) / RMS(x - mu) * gamma (centers and scales, no shift)
 
-This makes Zero-Centered RMSNorm conceptually similar to LayerNorm without the bias term,
-but framed as an enhancement to RMSNorm that prevents mean drift.
+This makes Zero-Centered RMSNorm arithmetically IDENTICAL to LayerNorm without the bias
+term, not merely similar to it. Because mean(x_centered) is zero by construction,
+mean(x_centered^2) is exactly var(x) over the same axes - the denominator LayerNorm
+computes - and epsilon sits in the same place (inside the sqrt, added to the second
+moment). What differs is framing and implementation, not arithmetic: this layer is
+presented as an enhancement to RMSNorm that prevents mean drift. If you want the same
+function and nothing else, prefer keras.layers.LayerNormalization(center=False), which
+may reach fused kernels this implementation cannot.
 
 Performance Benefits:
     - Prevents abnormal growth of layer normalization weights
@@ -76,8 +82,26 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
 
     This layer is particularly beneficial for transformer architectures and large
     language models, preventing abnormal growth of layer normalization weights while
-    maintaining computational efficiency. Conceptually similar to LayerNorm without
-    bias, but framed as enhanced RMSNorm.
+    maintaining computational efficiency.
+
+    .. note::
+        This is not merely *similar* to LayerNorm without a bias - it is the same
+        function. Centering forces ``mean(x_centered) = 0``, so
+        ``mean(x_centered**2)`` is exactly ``var(x)`` over the same axes, and the
+        epsilon is placed identically (inside the square root, added to the second
+        moment). ``keras.layers.LayerNormalization(center=False)`` computes the same
+        thing and may reach fused kernels this implementation cannot; this class
+        exists for the RMSNorm framing and for the band/zero-centered family it
+        belongs to.
+
+    Statistics are computed in ``keras.backend.result_type(input_dtype, "float32")``
+    - float32 at minimum, float64 under a float64 policy - and cast back to the
+    input dtype on return.
+
+    ``supports_masking`` is ``True``. With the default ``axis=-1`` a single
+    ``(sample, token)`` perturbation moves no other position by more than ``0.0``
+    (measured, both training regimes), so a Keras mask remains valid on the output.
+    Normalizing over a token axis couples positions and is not covered by the flag.
 
     **Architecture Overview:**
 
@@ -118,6 +142,17 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         The default (-1) computes statistics over the last dimension. For multi-axis
         normalization, pass a tuple (e.g., (-2, -1) for normalizing over last two
         dimensions).
+
+        Non-trailing axes are supported together with ``use_scale=True``: the
+        ``scale`` weight keeps its checkpoint-visible shape (one dimension per
+        normalized axis) and is reshaped for broadcasting at call time only when
+        the normalized axes are not the trailing ones, so ``axis=-1`` emits no
+        reshape op.
+
+        Deliberate carve-out: an axis tuple that is not strictly ascending (e.g.
+        ``(-1, -2)``) keeps the legacy broadcast, because ``build()`` orders the
+        scale's dimensions by the order the axes were WRITTEN. Use an ascending
+        tuple.
     :type axis: Union[int, Tuple[int, ...]]
     :param epsilon: Small constant added to denominator for numerical stability.
         Should be positive and typically in range [1e-8, 1e-5].

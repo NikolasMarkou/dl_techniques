@@ -77,7 +77,11 @@ class DynamicTanh(keras.layers.Layer):
     :param axis: Integer or list of integers specifying normalization axes.
         Typically -1 (features axis). Defaults to -1.
     :type axis: Union[int, List[int]]
-    :param alpha_init_value: Initial value for learnable alpha parameter.
+    :param alpha_init_value: Initial value for learnable alpha parameter. Must be a
+        strictly positive number: a non-positive alpha flips the transform's sign and
+        ``alpha == 0`` makes the layer the constant-zero map ``tanh(0 * x)``, so both
+        are rejected (matching ``validate_normalization_config``'s ``dynamic_tanh``
+        branch, which has always refused them).
         Paper suggests 0.6-0.8 for attention normalization, 0.1-0.2 for FFN
         and final decoder normalization. Defaults to 0.5.
     :type alpha_init_value: float
@@ -94,7 +98,8 @@ class DynamicTanh(keras.layers.Layer):
     :param bias_constraint: Optional constraint for bias parameters.
     :type bias_constraint: Optional[constraints.Constraint]
 
-    :raises ValueError: If alpha_init_value is not a positive number.
+    :raises ValueError: If alpha_init_value is not a number.
+    :raises ValueError: If alpha_init_value is not strictly positive.
     :raises ValueError: If axis is out of bounds for input tensor.
     """
 

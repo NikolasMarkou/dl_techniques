@@ -47,6 +47,12 @@ class MaxLogitNorm(keras.layers.Layer):
     ``output = inputs / ||inputs||_2``, where the L2 norm is taken along
     the specified axis with epsilon for numerical stability.
 
+    ``supports_masking`` is ``True``: with ``axis=-1`` the output at one position is
+    a function of that position only (measured cross-position leak exactly ``0.0``),
+    so a Keras mask stays valid on the output. Note that this holds for
+    ``MaxLogitNorm`` alone - ``DecoupledMaxLogit`` and ``DMLPlus`` reduce the axis
+    away and are not shape-preserving, so neither carries the flag.
+
     **Architecture Overview:**
 
     .. code-block:: text

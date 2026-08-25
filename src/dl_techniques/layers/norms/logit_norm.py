@@ -16,13 +16,16 @@ For input logits x with shape (..., d), LogitNorm computes:
 Where:
 - sum(x²) is computed over specified axes (typically the class dimension)
 - ε is a small epsilon floor (via ``max``) for numerical stability
-- τ is the temperature parameter (a fixed hyperparameter) that controls the spread
-  of normalized logits
+- τ is the temperature parameter (a fixed hyperparameter). It DIVIDES the
+  unit-norm logits, so a LARGER τ compresses the output toward zero and a SMALLER τ
+  expands it: measured on ``x = [1, 2, 3, 4]``, ``τ = 1.0`` gives an output range of
+  ``[0.183, 0.730]`` while ``τ = 0.01`` gives ``[18.26, 73.03]``
 
 Key Benefits:
 - **Improved Calibration**: Reduces model overconfidence
 - **Training Stability**: L2 normalization prevents logit explosion
-- **Temperature Scaling**: Fixed hyperparameter controlling calibration sharpness
+- **Temperature Scaling**: Fixed hyperparameter; the output is the unit-norm logit
+  vector divided by τ, so smaller τ means larger logits and a sharper softmax
 - **Gradient Flow**: Maintains good gradient properties during backpropagation
 
 References:
@@ -49,7 +52,12 @@ class LogitNorm(keras.layers.Layer):
     training and improving model calibration by reducing overconfidence. The
     normalization is computed as:
     ``norm = sqrt(max(sum(logits²), ε))``, ``output = logits / (norm × τ)``,
-    where τ is the (fixed) temperature controlling distribution sharpness.
+    where τ is the (fixed) temperature. τ divides the unit-norm logits, so a
+    LARGER τ compresses the output and a SMALLER τ expands it.
+
+    ``supports_masking`` is ``True``: with ``axis=-1`` each position is normalized
+    independently of the others (measured cross-position leak exactly ``0.0``), so a
+    Keras mask remains valid on the output.
 
     **Architecture Overview:**
 
@@ -87,9 +95,13 @@ class LogitNorm(keras.layers.Layer):
         │   shape: (..., C)       │
         └─────────────────────────┘
 
-    :param temperature: Temperature scaling parameter. Higher values produce more
-        spread-out logits, while lower values make the distribution sharper. Must
-        be positive. Defaults to 0.04 (optimal for CIFAR-10 from original paper).
+    :param temperature: Temperature scaling parameter. It is the DIVISOR applied to
+        the unit-norm logits (``output = logits / (norm × τ)``), so a HIGHER value
+        compresses the output toward zero and a LOWER value expands it - measured on
+        ``x = [1, 2, 3, 4]``: ``τ = 1.0`` gives an output range of ``[0.183, 0.730]``,
+        ``τ = 0.01`` gives ``[18.26, 73.03]``. The default 0.04 therefore multiplies
+        the unit-norm logits by 25, which sharpens the resulting softmax. Must be
+        positive. Defaults to 0.04 (optimal for CIFAR-10 from original paper).
     :type temperature: float
     :param axis: Axis along which to perform normalization. Typically -1 for the
         class dimension. Defaults to -1.
@@ -111,8 +123,9 @@ class LogitNorm(keras.layers.Layer):
     ) -> None:
         """Initialize the LogitNorm layer.
 
-        :param temperature: Temperature scaling parameter. Higher values produce more
-            spread-out logits. Must be positive.
+        :param temperature: Temperature scaling parameter; the divisor applied to
+            the unit-norm logits, so higher values compress the output and lower
+            values expand it. Must be positive.
         :type temperature: float
         :param axis: Axis along which to perform normalization.
         :type axis: int

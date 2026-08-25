@@ -99,6 +99,15 @@ class BiasFreeBatchNorm(keras.layers.Layer):
         which is architecturally unavoidable for the BatchNorm family. Probe the
         homogeneity property with ``training=False``.
 
+    .. note::
+        **No masking support, deliberately.** ``supports_masking`` is left ``False``
+        even though stock ``keras.layers.BatchNormalization`` sets it: in training
+        the batch variance is reduced over every non-channel axis, so perturbing one
+        ``(sample, token)`` slot moves other tokens by up to ``1.761e+00`` and other
+        SAMPLES by up to ``2.331e+00`` (measured on a ``(3, 5, 8)`` input; the
+        inference path leaks exactly ``0.0``). A mask propagated through this layer
+        would describe outputs that were computed from the padding it marks.
+
     Unlike stock ``keras.layers.BatchNormalization``, this layer creates neither a
     ``moving_mean`` nor a ``beta`` weight — mean-subtraction and additive offsets
     are exactly what would break homogeneity, so they are structurally absent. See

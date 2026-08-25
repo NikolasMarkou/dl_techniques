@@ -221,7 +221,9 @@ norm = create_normalization_layer(
 ```
 
 ### `global_response_norm`
-**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros'), `gamma_regularizer`, `beta_regularizer`, `activity_regularizer`
+**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros'), `gamma_regularizer`, `beta_regularizer`, `activity_regularizer`, `use_beta` (default: `True`)
+
+> **Note (`use_beta`):** `use_beta=False` creates no `beta` weight at all (`layer.beta is None`) and drops the additive term, giving `Y = X + γ * (X ⊙ norm')`. The default `True` keeps existing ConvNeXt V2 checkpoints byte-identical.
 
 > **Note (gamma init):** this layer defaults `gamma_initializer='ones'`. The ConvNeXt V2
 > paper initializes gamma=0 (and beta=0) so GRN is an identity at init. To reproduce the

@@ -74,6 +74,11 @@ class BandRMS(keras.layers.Layer):
     allowing features to exist within a bounded range while maintaining dimension-
     independent behavior across different layer widths.
 
+    ``supports_masking`` is ``True``: with the default ``axis=-1`` the band scale is
+    a single global parameter and the RMS is per-position, so perturbing one
+    ``(sample, token)`` slot moves no other position by more than ``0.0`` (measured,
+    both training regimes) and a Keras mask stays valid on the output.
+
     **Architecture Overview:**
 
     .. code-block:: text

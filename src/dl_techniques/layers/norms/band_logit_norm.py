@@ -1,9 +1,14 @@
 """
 BandLogitNorm Layer Implementation
 
-This module implements a custom Keras layer that applies constrained RMS normalization
-with adaptive scaling. The layer normalizes input tensors to unit L2 norm and then
-applies a learned scaling factor bounded within a specified band around 1.0.
+This module implements a custom Keras layer that applies constrained L2 normalization
+with a band-bounded scale. The layer normalizes input tensors to unit L2 norm and then
+applies a scaling factor bounded within a specified band around 1.0.
+
+Note on terminology: the norm used here is an L2 norm, ``sqrt(max(sum(x**2), eps))`` -
+a SUM over the axis, not a mean - so this layer does NOT perform RMS normalization
+(``sqrt(mean(x**2))``). Its output magnitude therefore depends on the size of the
+normalized axis, unlike the RMS-based layers in this package.
 
 Mathematical Operation:
 1. Normalize input to unit L2 norm: x_norm = x / ||x||_2
@@ -31,11 +36,19 @@ from dl_techniques.utils.logger import logger
 class BandLogitNorm(keras.layers.Layer):
     """Band-constrained logit normalization layer.
 
-    Applies RMS normalization to input tensors and constrains the resulting L2
+    Applies L2 normalization to input tensors and constrains the resulting L2
     norm to lie within a specified band around 1.0. First normalizes to unit L2
     norm, then applies a LayerNormalization-based learned scaling factor bounded
     via ``tanh`` to the range ``[1 - max_band_width, 1]``. This provides
     controlled normalization strength while preserving directional information.
+
+    The norm is ``sqrt(max(sum(x**2), epsilon))`` - a SUM over ``axis``, i.e. an
+    L2 norm. This layer does not compute an RMS (``sqrt(mean(x**2))``) despite
+    sitting beside the RMS family in this package.
+
+    ``supports_masking`` is ``True``: with ``axis=-1`` the output at one position
+    is a function of that position only (measured cross-position leak exactly
+    ``0.0`` in both training regimes), so a Keras mask stays valid on the output.
 
     .. note::
         **Degenerate adaptive component (known limitation).** The "learned scaling"
@@ -188,7 +201,7 @@ class BandLogitNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply constrained RMS normalization.
+        """Apply constrained L2 normalization.
 
         :param inputs: Input tensor to normalize.
         :type inputs: keras.KerasTensor

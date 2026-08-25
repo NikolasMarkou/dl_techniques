@@ -77,6 +77,10 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
     property, combining the benefits of LayerNorm stability, RMSNorm efficiency,
     and BandRMS representational flexibility.
 
+    ``supports_masking`` is ``True``: with the default ``axis=-1`` each position is
+    centered and scaled from its own statistics (measured cross-position leak exactly
+    ``0.0`` in both training regimes), so a Keras mask remains valid on the output.
+
     **Architecture Overview:**
 
     .. code-block:: text

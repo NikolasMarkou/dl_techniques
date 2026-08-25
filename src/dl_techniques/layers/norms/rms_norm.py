@@ -29,7 +29,10 @@ Performance Benefits:
     - Better gradient flow in some architectures
     - Maintains similar normalization benefits to LayerNorm
     - More stable in mixed precision training
-    - Approximately 10-15% faster than LayerNorm in practice
+
+    No throughput figure is quoted here. The only quantitative claim this module can
+    make from its own code is structural: one reduction over the normalization axes
+    instead of LayerNorm's two.
 
 References:
     - Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
@@ -67,10 +70,21 @@ class RMSNorm(keras.layers.Layer):
 
     Where scale is a learnable parameter when ``use_scale=True``.
 
-    RMSNorm is approximately 10-15% faster than LayerNorm due to avoiding mean
-    computation. It is particularly effective in transformer architectures and large
-    language models. The implementation automatically handles mixed precision training
-    with appropriate casting.
+    RMSNorm avoids LayerNorm's mean subtraction, so it performs one reduction over
+    the normalization axes where LayerNorm performs two. It is particularly effective
+    in transformer architectures and large language models.
+
+    Statistics are computed in ``keras.backend.result_type(input_dtype, "float32")``
+    - float32 at minimum for numerical stability under mixed precision, and float64
+    when the layer's own policy is float64 - and the result is cast back to the input
+    dtype before it is returned.
+
+    ``supports_masking`` is ``True``. With the default ``axis=-1`` each position's
+    output depends only on that position: perturbing one ``(sample, token)`` slot
+    moves no other position by more than ``0.0`` (measured, in both ``training=False``
+    and ``training=True``), so a Keras mask stays valid on the output and is passed
+    through unchanged. Normalizing over a token axis instead couples positions, and
+    the flag does not describe that configuration.
 
     **Architecture Overview:**
 
@@ -107,6 +121,17 @@ class RMSNorm(keras.layers.Layer):
         The default (-1) computes RMS over the last dimension. For multi-axis
         normalization, pass a tuple (e.g., (-2, -1) for normalizing over last
         two dimensions).
+
+        Non-trailing axes are supported together with ``use_scale=True``: the
+        ``scale`` weight is stored with one dimension per normalized axis (the
+        checkpoint-visible shape, deliberately unchanged) and is reshaped for
+        broadcasting at call time only when the normalized axes are not the
+        trailing ones, so the ``axis=-1`` path emits no reshape op.
+
+        One spelling is deliberately carved out: an axis tuple that is not
+        strictly ascending (e.g. ``(-1, -2)``) keeps the legacy broadcast rather
+        than a corrected one, because ``build()`` orders the scale's dimensions
+        by the order the axes were WRITTEN. Use an ascending tuple.
     :type axis: Union[int, Tuple[int, ...]]
     :param epsilon: Small constant added to denominator for numerical stability.
         Should be positive and typically in range [1e-8, 1e-5].

@@ -67,6 +67,15 @@ class AdaptiveBandRMS(keras.layers.Layer):
 
     Where scale(.) is in [1-alpha, 1] computed via dense projection and sigmoid activation.
 
+    .. note::
+        **No masking support, deliberately.** ``supports_masking`` is left ``False``
+        because ``_aggregate_rms_statistics`` means the RMS over every non-batch axis
+        before feeding the internal ``Dense``, so one sigmoid rescales all of a
+        sample's positions together: perturbing a single ``(sample, token)`` slot
+        moves the other positions of that sample by up to ``1.621e-01`` (measured on
+        a ``(3, 5, 8)`` input). Propagating a Keras mask would advertise
+        padding-independent outputs that were in fact computed from the padding.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -119,8 +128,15 @@ class AdaptiveBandRMS(keras.layers.Layer):
     :param epsilon: Small positive constant added to denominator for numerical
         stability.
     :type epsilon: float
-    :param band_initializer: Initializer for the dense layer computing scaling
-        parameters. Defaults to 'zeros' for stable initialization near unit scaling.
+    :param band_initializer: Initializer for the dense kernel computing the scaling
+        parameters. Defaults to ``'zeros'``, which does NOT start the layer near
+        unit scaling: a zero kernel and zero bias make the dense output zero, and
+        ``sigmoid(0) = 0.5``, so the initial scale is
+        ``(1 - max_band_width) + max_band_width * 0.5 = 1 - max_band_width / 2`` -
+        the MIDPOINT of the band, uniformly for every element. At the default
+        ``max_band_width=0.1`` that is a measured initial scale of exactly 0.95, not
+        1.0. Pass a large-positive-bias initializer if you want to start near the
+        band's upper edge.
     :type band_initializer: Union[str, keras.initializers.Initializer]
     :param band_regularizer: Optional regularizer for the dense layer weights.
         Can help prevent overfitting of adaptive scaling.
