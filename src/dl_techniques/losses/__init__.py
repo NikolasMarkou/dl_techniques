@@ -92,6 +92,11 @@ from .clustering_loss import (
     compute_clustering_metrics,
 )
 
+from .colbert_loss import (
+    ColBERTPairwiseSoftmaxLoss,
+    ColBERTDistillationLoss,
+)
+
 from .decoupled_information_loss import (
     DecoupledInformationLoss,
     analyze_decoupled_information_loss,
@@ -232,6 +237,9 @@ __all__ = [
     "ClusteringMetrics",
     "ClusteringMetricsCallback",
     "compute_clustering_metrics",
+    # colbert_loss
+    "ColBERTPairwiseSoftmaxLoss",
+    "ColBERTDistillationLoss",
     # decoupled_information_loss
     "DecoupledInformationLoss",
     "analyze_decoupled_information_loss",
