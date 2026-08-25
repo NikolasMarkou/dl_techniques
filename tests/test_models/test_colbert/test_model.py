@@ -740,7 +740,6 @@ def test_get_config_round_trip_reconstructs_an_equivalent_model():
             f"get_config lost constructor argument '{key}': expected {value}, "
             f"got {config.get(key)}"
         )
-    assert "mask_punctuation" in config
     assert "mask_value" in config
 
     rebuilt = ColBERT.from_config(config)
@@ -750,6 +749,38 @@ def test_get_config_round_trip_reconstructs_an_equivalent_model():
     assert weight_paths(rebuilt) == weight_paths(model)
     assert rebuilt.count_params() == model.count_params()
     assert rebuilt.get_config()["dim"] == config["dim"]
+
+
+def test_mask_punctuation_is_rejected_loudly_rather_than_silently_inert():
+    """``mask_punctuation=`` must RAISE, not serialize an intent nothing honors.
+
+    Until 2026-08-25 ``ColBERT`` took a ``mask_punctuation`` constructor
+    argument, stored it and emitted it from ``get_config()`` -- and nothing
+    anywhere read it. The model applies whatever ``doc_skiplist_mask`` it is
+    handed, so ``create_colbert_v2(..., mask_punctuation=False)`` returned a
+    model that still applied the punctuation mask in full while reporting the
+    opposite. The live flag is ``ColBERTTokenizer.mask_punctuation``, a
+    different class.
+
+    The field was deleted, so Keras' unknown-keyword check now fires. MEASURED:
+    the exception is ``ValueError`` with the message ``Unrecognized keyword
+    arguments passed to ColBERT: {'mask_punctuation': False}`` -- on the class
+    and through both factories. This test also pins that the key is gone from
+    ``get_config()``, so a re-added-but-still-inert field cannot pass it.
+    """
+    for construct in (
+        lambda: make_model(mask_punctuation=False),
+        lambda: ColBERT.from_variant("tiny", mask_punctuation=False),
+        lambda: create_colbert_v1("tiny", mask_punctuation=False),
+        lambda: create_colbert_v2("tiny", mask_punctuation=False),
+    ):
+        with pytest.raises(ValueError, match="mask_punctuation"):
+            construct()
+
+    assert "mask_punctuation" not in make_model().get_config(), (
+        "mask_punctuation reappeared in get_config(): the model has no reader "
+        "for it, so serializing it advertises an intent nothing honors"
+    )
 
 
 def test_a_structural_knob_changes_the_weight_signature():
