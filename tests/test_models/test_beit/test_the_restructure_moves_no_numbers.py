@@ -1,4 +1,4 @@
-"""The instrument that grades the ``models/beit/model.py`` restructure.
+"""The instrument that grades the ``models/vision/beit/model.py`` restructure.
 
 This file answers exactly one question, for every (class, variant) pair in a pinned
 matrix: **did the restructure move a single bit?** It is not a behaviour test. It has
@@ -10,7 +10,7 @@ compares the current code against itself passes against ANY breakage: this repo 
 measured instance of a bit-identity arm passing 7/7 against a deliberately broken
 model because both sides of the comparison went down the same branch
 (``test_resnet/test_stem_type.py``, whose method this file ports). So the reference
-side is obtained by ``git show``-ing ``models/beit/model.py`` out of a recorded
+side is obtained by ``git show``-ing ``models/vision/beit/model.py`` out of a recorded
 pre-restructure commit into a scratch file and loading THAT through ``importlib``.
 Two distinct module objects, two distinct source texts, one comparison.
 
@@ -20,7 +20,7 @@ Pre-restructure commit, recorded verbatim (``git rev-parse HEAD`` at capture tim
 
 Reproduce the reference side by hand with::
 
-    git show d61c1370736efe364114c6d5ebaaf15b675bac48:src/dl_techniques/models/beit/model.py > /tmp/beit_pre.py
+    git show d61c1370736efe364114c6d5ebaaf15b675bac48:src/dl_techniques/models/vision/beit/model.py > /tmp/beit_pre.py
 
 **Two arms, each with its own injection.** A weight-shape signature is blind to any
 change that moves no shapes, and an output digest alone cannot say WHERE a divergence
@@ -28,7 +28,7 @@ came from, so both are mandatory and neither is allowed to be the other's proxy:
 
 * **Signature arm** -- :func:`test_the_weight_shape_signature_is_unchanged`.
   RED-proven by injection (i): ``SCALE_CONFIGS['tiny']['num_heads']`` 3 -> 1 in the
-  CURRENT ``src/dl_techniques/models/beit/model.py`` (the relative-position-bias table
+  CURRENT ``src/dl_techniques/models/vision/beit/model.py`` (the relative-position-bias table
   is ``(num_relative_distance, num_heads)``, so heads move shapes). Observed, verbatim::
 
       E  AssertionError: the weight-shape signature of BeitModel/tiny no longer matches the pre-restructure model at d61c1370736efe364114c6d5ebaaf15b675bac48: 816527d14c5c21c26cfa41141361429f680b2ce8b0743e313dd27683bd89292a != 25444a4c771f7810cf661a83513812ac8f4b2cd6d4bda957cb2074b96485fbca
@@ -80,7 +80,7 @@ import pytest
 #: ``git rev-parse HEAD`` immediately before the first restructure edit.
 PRE_RESTRUCTURE_COMMIT = "d61c1370736efe364114c6d5ebaaf15b675bac48"
 
-MODEL_SOURCE_PATH = "src/dl_techniques/models/beit/model.py"
+MODEL_SOURCE_PATH = "src/dl_techniques/models/vision/beit/model.py"
 
 SEED = 1234
 INPUT_SHAPE = (32, 32, 3)
@@ -157,7 +157,7 @@ def _repo_root() -> str:
 
 @pytest.fixture(scope="module")
 def pre_restructure_module():
-    """``models/beit/model.py`` as of :data:`PRE_RESTRUCTURE_COMMIT`, importable.
+    """``models/vision/beit/model.py`` as of :data:`PRE_RESTRUCTURE_COMMIT`, importable.
 
     The extracted source goes to a process-local temporary directory, never into the
     repository tree: a second importable copy of this module sitting under ``src/``
@@ -219,8 +219,8 @@ def pre_restructure_module():
 
 @pytest.fixture(scope="module")
 def current_module():
-    """The live ``models/beit/model.py`` -- the side under test."""
-    from dl_techniques.models.beit import model as current
+    """The live ``models/vision/beit/model.py`` -- the side under test."""
+    from dl_techniques.models.vision.beit import model as current
 
     return current
 
@@ -343,7 +343,7 @@ def test_the_forward_output_is_bitwise_unchanged(
     identity -- so no per-block drop-path RATE can reach the digest at any value.
     MEASURED 2026-08-24, not reasoned about: injecting ``[::-1]`` on the
     ``linear_drop_path_rates(self.num_layers, self.drop_path_rate)`` call in
-    ``models/beit/model.py`` (i.e. reversing the ramp end for end) left this file at
+    ``models/vision/beit/model.py`` (i.e. reversing the ramp end for end) left this file at
     **13 passed / 13 collected, fully green -- both arms**. The same is true of any
     dropout rate and of any future train-only branch. Do NOT add such a parameter to
     this file's coverage story; it does not have one.

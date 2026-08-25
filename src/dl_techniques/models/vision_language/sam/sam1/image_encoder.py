@@ -36,7 +36,7 @@ Model Variants:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
+from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
 encoder = ImageEncoderViT(img_size=1024, patch_size=16, embed_dim=768,
                           depth=12, num_heads=12, out_chans=256,
                           window_size=14, global_attn_indexes=(2, 5, 8, 11))

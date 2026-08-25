@@ -20,11 +20,11 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
     get_ideogram4_config,
 )
-from dl_techniques.models.ideogram4.vae import (
+from dl_techniques.models.vision_language.ideogram4.vae import (
     ResnetBlock,
     AttnBlock,
     Downsample,

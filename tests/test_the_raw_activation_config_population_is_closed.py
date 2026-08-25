@@ -70,13 +70,13 @@ _PROVABLY_NOT_AN_ACTIVATION_OBJECT = {
         "self.activation = str(activation)",
     "dl_techniques/layers/transformers/energy_transformer.py::EnergyTransformer::hopfield_activation":
         "self.hopfield_activation = str(hopfield_activation)",
-    "dl_techniques/models/SAM/SAM3/decoder.py::Sam3DecoderLayer::activation":
+    "dl_techniques/models/vision_language/sam/sam3/decoder.py::Sam3DecoderLayer::activation":
         "self.activation = str(activation)",
-    "dl_techniques/models/SAM/SAM3/decoder.py::Sam3TransformerDecoder::activation":
+    "dl_techniques/models/vision_language/sam/sam3/decoder.py::Sam3TransformerDecoder::activation":
         "self.activation = str(activation)",
-    "dl_techniques/models/energy_transformer/model.py::EnergyTransformerBackbone::hopfield_activation":
+    "dl_techniques/models/vision/energy_transformer/model.py::EnergyTransformerBackbone::hopfield_activation":
         "self.hopfield_activation = str(hopfield_activation)",
-    "dl_techniques/models/graph_energy_transformer/model.py::GraphEnergyTransformerBackbone::hopfield_activation":
+    "dl_techniques/models/graph/graph_energy_transformer/model.py::GraphEnergyTransformerBackbone::hopfield_activation":
         "self.hopfield_activation = str(hopfield_activation)",
 }
 

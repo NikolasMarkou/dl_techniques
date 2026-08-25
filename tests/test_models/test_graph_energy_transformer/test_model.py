@@ -41,7 +41,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.transformers.energy_transformer import EnergyTransformer
-from dl_techniques.models.graph_energy_transformer.model import (
+from dl_techniques.models.graph.graph_energy_transformer.model import (
     GRAPH_BACKBONE_NAME,
     GraphAnomalyDetector,
     GraphClassifier,
@@ -799,7 +799,7 @@ class TestVariantBClassWeightBites:
 #
 # ONE fixture choice is load-bearing and is stated here rather than left
 # implicit: the input dict includes ``node_replace_mask``. That key is listed in
-# the backbone's own input contract (``models/graph_energy_transformer/model.py``,
+# the backbone's own input contract (``models/graph/graph_energy_transformer/model.py``,
 # "node_replace_mask": (B, N) bool # optional -- masked-node pretext) and is
 # applied by ``GraphEnergyTransformerBackbone.embed`` under a trace-time
 # ``if "node_replace_mask" in inputs``. MEASURED 2026-08-19: omit the key and

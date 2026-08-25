@@ -14,7 +14,7 @@ import tempfile
 import os
 from typing import Tuple, Dict, Any
 
-from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule, create_squeezenet_v1
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule, create_squeezenet_v1
 from tests.optimizer_state import build_optimizer_state
 
 

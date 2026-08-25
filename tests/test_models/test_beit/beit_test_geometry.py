@@ -30,7 +30,7 @@ the class token. Anything smaller stops being a grid.
 
 import numpy as np
 
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BeitForMaskedImageModeling,
     BeitModel,
     create_beit_classifier,

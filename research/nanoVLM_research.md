@@ -2,7 +2,7 @@
 
 > **STATUS (2026-08-22): this is an UNIMPLEMENTED PROPOSAL, and the shipped
 > model does not match it.** Read it as a design document, not as a description
-> of `src/dl_techniques/models/nano_vlm/`.
+> of `src/dl_techniques/models/vision_language/nano_vlm/`.
 >
 > - `create_nanovlm_222m()` (proposed at line 703, used in the examples at 1073,
 >   1210 and 1400) **does not exist anywhere in `src/`**. The implemented factory
@@ -1089,7 +1089,7 @@ def load_cauldron_sample() -> List[Dict]:
 from typing import Dict, Optional
 import keras
 from keras import ops
-from dl_techniques.models.nano_vlm import create_nanovlm_222m
+from dl_techniques.models.vision_language.nano_vlm import create_nanovlm_222m
 from dl_techniques.losses.nanovlm_loss import NanoVLMLoss
 from dl_techniques.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
@@ -1416,7 +1416,7 @@ if __name__ == '__main__':
 ```python
 def analyze_model_size():
     """Analyze nanoVLM model size and memory requirements."""
-    from dl_techniques.models.nano_vlm import create_nanovlm_222m
+    from dl_techniques.models.vision_language.nano_vlm import create_nanovlm_222m
 
     model = create_nanovlm_222m()
 

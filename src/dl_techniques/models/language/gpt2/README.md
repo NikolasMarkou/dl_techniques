@@ -76,7 +76,7 @@ onto downstream tasks without any architectural change.
 ### Why it matters here
 
 This package is the reference decoder-only LM of the repo. Its sibling
-`models/wave_field/` deliberately mirrors its public surface so that both slot
+`models/language/wave_field/` deliberately mirrors its public surface so that both slot
 into the same training pipeline, and `src/train/gpt2/` is the CLM pre-training
 scaffold that `src/train/wave_field/` reuses through the shared
 `ClmPretrainConfig`.
@@ -182,7 +182,7 @@ loss = MaskedCausalLMLoss(logits[:, :-1], input_ids[:, 1:])
 
 ### Differences from BERT
 
-| | BERT (`models/bert/`) | GPT-2 (here) |
+| | BERT (`models/language/bert/`) | GPT-2 (here) |
 |---|---|---|
 | Attention | bidirectional | causal |
 | Norm position | post-norm | pre-norm |
@@ -238,7 +238,7 @@ repo's own environment (`.venv`, Keras 3 / TensorFlow 2.18).
 
 ```python
 import numpy as np
-from dl_techniques.models.gpt2 import create_gpt2
+from dl_techniques.models.language.gpt2 import create_gpt2
 
 # A small, fast-to-build configuration. Swap "tiny" for "small"/"medium"/
 # "large"/"xl" once you have the compute for them.
@@ -262,7 +262,7 @@ The `keras.Model` subclass. Returns a **dict** with `logits` and
 `compile(loss={"logits": ...})` works unchanged.
 
 ```python
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 
 model = GPT2.from_variant("small")                       # named variant
 model = GPT2.from_variant("tiny", dropout_rate=0.1)      # variant + override
@@ -276,7 +276,7 @@ banner at the top).
 ### 6.2 `create_gpt2(...)` (module-level factory)
 
 ```python
-from dl_techniques.models.gpt2 import create_gpt2
+from dl_techniques.models.language.gpt2 import create_gpt2
 
 model = create_gpt2("small")                 # variant defaults to "small"
 model = create_gpt2("tiny", vocab_size=200)  # vocab override
@@ -288,7 +288,7 @@ A thin wrapper over `GPT2.from_variant` that mirrors `create_bert` /
 
 ### 6.3 Public API
 
-`dl_techniques.models.gpt2` exports exactly `GPT2` and `create_gpt2` via
+`dl_techniques.models.language.gpt2` exports exactly `GPT2` and `create_gpt2` via
 `__all__`. That surface is pinned by a test — see §13.
 
 ---
@@ -327,7 +327,7 @@ To enumerate the variants exactly as the code has them, read them from the
 class rather than trusting this table:
 
 ```python
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 for name, cfg in GPT2.MODEL_VARIANTS.items():
     print(name, cfg)
 ```
@@ -340,7 +340,7 @@ for name, cfg in GPT2.MODEL_VARIANTS.items():
 
 ```python
 import numpy as np
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 
 model = GPT2.from_variant("tiny", vocab_size=512, dropout_rate=0.1)
 
@@ -366,7 +366,7 @@ except ValueError as e:
 
 ```python
 import numpy as np
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 
 tied = GPT2(vocab_size=512, embed_dim=64, depth=2, num_heads=4, max_seq_len=32)
 untied = GPT2(
@@ -384,7 +384,7 @@ print(tied(ids)["logits"].shape, untied(ids)["logits"].shape)
 ### Example 3: the weights contract, in full
 
 ```python
-from dl_techniques.models.gpt2 import GPT2, create_gpt2
+from dl_techniques.models.language.gpt2 import GPT2, create_gpt2
 
 # pretrained=True is a hard error: this library distributes no GPT-2 weights.
 for call in (
@@ -429,7 +429,7 @@ does it for you.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 from dl_techniques.losses import MaskedCausalLMLoss
 
 model = GPT2(vocab_size=512, embed_dim=64, depth=2, num_heads=4, max_seq_len=32)
@@ -461,7 +461,7 @@ vocabulary — nothing needs to be disabled, the tied head costs no parameters.
 `GPT2` has **no** `generate()` method — sampling is not part of the model. The
 repo's sampling loop lives in `src/train/common/generation_probe.py`
 (`GenerationProbeCallback`), which the pre-training script wires in as a
-callback; `src/dl_techniques/models/power_sampling/` provides
+callback; `src/dl_techniques/models/common/power_sampling/` provides
 inference-time sampling for any causal LM.
 
 ---
@@ -473,7 +473,7 @@ inference-time sampling for any causal LM.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 
 keras.mixed_precision.set_global_policy("mixed_float16")
 model = GPT2.from_variant("tiny", vocab_size=512)
@@ -544,7 +544,7 @@ round trip needs no `custom_objects`:
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.gpt2 import GPT2
+from dl_techniques.models.language.gpt2 import GPT2
 
 model = GPT2(vocab_size=512, embed_dim=64, depth=2, num_heads=4, max_seq_len=32)
 ids = np.random.randint(0, 512, size=(1, 8)).astype("int32")
@@ -615,7 +615,7 @@ the one used at training, and that `vocab_size` matches it exactly.
 
 **Q: Why is there no `generate()` on the model?**
 A: Sampling is a decoding policy, not architecture. The repo keeps it in
-`train/common/generation_probe.py` and `models/power_sampling/` so that a
+`train/common/generation_probe.py` and `models/common/power_sampling/` so that a
 change of sampler does not touch the model class.
 
 **Q: Should I tie or untie the embeddings?**
@@ -644,7 +644,7 @@ have **zero adoptable sites**:
   vocabulary projection — it is not an attention, FFN, normalization,
   embedding or activation primitive — so there is nothing to adopt.
 
-So `grep -rn "create_.*_layer" src/dl_techniques/models/gpt2/ --include="*.py"`
+So `grep -rn "create_.*_layer" src/dl_techniques/models/language/gpt2/ --include="*.py"`
 returns 0 — and that is **not** evidence of a problem, it measures the wrong
 thing. The question is whether the model reaches the factories at some level,
 and it does, through `TextDecoder`. (Keep the `--include="*.py"`: without it

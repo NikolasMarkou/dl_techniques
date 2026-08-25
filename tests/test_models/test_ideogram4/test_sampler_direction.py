@@ -37,8 +37,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.ideogram4.pipeline import Ideogram4Pipeline
-from dl_techniques.models.ideogram4.scheduler import (
+from dl_techniques.models.vision_language.ideogram4.pipeline import Ideogram4Pipeline
+from dl_techniques.models.vision_language.ideogram4.scheduler import (
     LogitNormalSchedule,
     PRESETS,
     make_step_intervals,

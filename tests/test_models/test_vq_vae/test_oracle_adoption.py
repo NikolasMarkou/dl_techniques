@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/vq_vae`` -- Phase 5 batch C.
+Oracle adoption for ``models/vision/vq_vae`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -23,8 +23,7 @@ trains with** -- the output term PLUS ``model.losses`` -- which is what
 ``train_step`` builds. Under it, ``0 of 9`` are dead. Both halves are asserted
 (:class:`TestTheCodebookNeedsTheAddLossTerms`), so a change that put the
 codebook on the reconstruction path, or that dropped the ``add_loss`` calls,
-fails a test instead of quietly changing what this file means. This is the same
-shape batch B used for ``memory_bank``.
+fails a test instead of quietly changing what this file means.
 
 Measured 2026-08-21, one Adam step, on a 3-conv encoder / 3-conv decoder at
 ``(2, 8, 8, 3)``, ``num_embeddings=16``, ``embedding_dim=8``:
@@ -59,7 +58,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.vq_vae.model import VQVAEModel, create_vq_vae
+from dl_techniques.models.vision.vq_vae.model import VQVAEModel, create_vq_vae
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

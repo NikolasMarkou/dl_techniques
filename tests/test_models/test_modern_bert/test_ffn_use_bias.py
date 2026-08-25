@@ -22,7 +22,7 @@ sublayers' ``beta``/``gamma`` and any positional bias TABLE.
 
 import pytest
 
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 
 def _tiny_modern_bert(*, use_bias: bool) -> ModernBERT:

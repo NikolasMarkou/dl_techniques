@@ -88,7 +88,7 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.superpoint import create_superpoint
+from dl_techniques.models.vision.keypoints.superpoint import create_superpoint
 from dl_techniques.losses.superpoint_loss import (
     SuperPointDetectorLoss,
     SuperPointDescriptorLoss,

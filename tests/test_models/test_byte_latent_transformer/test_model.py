@@ -14,7 +14,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.byte_latent_transformer.model import (
+from dl_techniques.models.language.byte_latent_transformer.model import (
     ByteLatentTransformer,
     create_blt_model,
 )

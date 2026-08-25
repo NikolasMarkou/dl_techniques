@@ -30,8 +30,8 @@ import keras
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dl_techniques.models.nam import NAM, NAMConfig, NAM_VARIANTS
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam import NAM, NAMConfig, NAM_VARIANTS
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
 from train.common import setup_gpu

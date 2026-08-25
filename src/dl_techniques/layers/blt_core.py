@@ -258,7 +258,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         # DECISION plan-2026-08-14T183218-f4c612aa/D-018
         # No construction-time degeneracy warning -- see the sibling anchor in
-        # models/byte_latent_transformer/model.py. The check moved to
+        # models/language/byte_latent_transformer/model.py. The check moved to
         # `DynamicPatcher.warn_if_segmentation_is_degenerate(entropy)`, which
         # measures the OBSERVED boundary rate instead of doing arithmetic on
         # vocab_size. Do not reintroduce a constructor-side variant here.

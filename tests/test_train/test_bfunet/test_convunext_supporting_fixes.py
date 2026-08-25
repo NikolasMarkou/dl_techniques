@@ -25,7 +25,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
 )
 from train.bfunet.train_convunext_denoiser import (

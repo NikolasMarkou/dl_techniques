@@ -65,7 +65,7 @@ One consequence of the `call` signature is worth stating because it is easy to
 misread. With `return_dict=False` (the default) the model returns *logits*, and
 `create_qwen3_classification` pools that returned tensor — so the classifier head
 sits on top of the `vocab_size`-dimensional logits rather than the `hidden_size`
-hidden states. That differs from `models/gemma/gemma3.py`, whose classification
+hidden states. That differs from `models/language/gemma/gemma3.py`, whose classification
 factory re-traces the backbone's sublayers specifically to reach the hidden states.
 It works, but it is a much wider and differently-conditioned pooling input than the
 usual recipe, and a checkpoint's classifier is not portable between the two shapes.
@@ -567,7 +567,7 @@ class Qwen3(keras.Model):
         # `cls(**config, **kwargs)` raises `TypeError: got multiple values for
         # keyword argument` for ANY override of a variant key -- and every
         # overridable key is already in the variant dict, so that was every
-        # documented use of `**kwargs` here. Copied from `models/gpt2/gpt2.py:464`.
+        # documented use of `**kwargs` here. Copied from `models/language/gpt2/gpt2.py:464`.
         config.update(kwargs)
         return cls(**config)
 

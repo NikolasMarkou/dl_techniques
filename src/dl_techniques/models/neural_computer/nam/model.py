@@ -74,7 +74,7 @@ import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from dl_techniques.models.tree_transformer.model import (
+from dl_techniques.models.language.tree_transformer.model import (
     PositionalEncoding,
     TreeTransformerBlock,
 )

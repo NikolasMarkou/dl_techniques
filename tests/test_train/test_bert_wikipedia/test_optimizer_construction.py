@@ -193,8 +193,8 @@ class TestMlmCompilesAndTrains:
         ).batch(self.BATCH)
 
     def _model(self):
-        from dl_techniques.models.bert.model import BERT
-        from dl_techniques.models.masked_language_model.mlm import MaskedLanguageModel
+        from dl_techniques.models.language.bert.model import BERT
+        from dl_techniques.models.language.masked_language_model.mlm import MaskedLanguageModel
 
         keras.utils.set_random_seed(42)
         encoder = BERT.from_variant(

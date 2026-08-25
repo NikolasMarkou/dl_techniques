@@ -54,7 +54,7 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.accunet import (
+from dl_techniques.models.vision.accunet import (
     create_acc_unet_binary,
     create_acc_unet_multiclass,
 )

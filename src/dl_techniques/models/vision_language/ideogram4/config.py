@@ -27,7 +27,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.ideogram4.constants import QWEN3_VL_ACTIVATION_LAYERS
+from dl_techniques.models.vision_language.ideogram4.constants import QWEN3_VL_ACTIVATION_LAYERS
 
 # ---------------------------------------------------------------------
 # AutoEncoder parameters (Flux2 KL-VAE)

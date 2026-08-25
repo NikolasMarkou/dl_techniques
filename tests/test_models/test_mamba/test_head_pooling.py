@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.models.mamba.mamba_v1 import create_mamba_with_head
+from dl_techniques.models.language.mamba.mamba_v1 import create_mamba_with_head
 
 
 @pytest.fixture(scope="module")

@@ -261,7 +261,7 @@ mean_pooled_output = modern_encoder(keras.random.randint(0, 50000, shape=(2, 256
 | `use_cls_token`            | `bool`  | If `True`, prepends a learnable `[CLS]` token to the sequence.                             | `False`     |
 | `output_mode`              | `str`   | The pooling strategy for the final output: `'cls'`, `'mean'`, `'none'`, etc.               | `'none'`    |
 
-> **`embedding_type='shared'` raises `ValueError`.** It used to be accepted and built the *identical* embedding as `'learned'` — no tying mechanism, no accessor. Tying is structurally inapplicable here: `TextEncoder` has no output/vocabulary projection to tie the input embedding to. Use `'learned'` and tie in the model that owns the `Dense(vocab_size)` (see `models/masked_language_model/clm.py`'s `tie_weights`).
+> **`embedding_type='shared'` raises `ValueError`.** It used to be accepted and built the *identical* embedding as `'learned'` — no tying mechanism, no accessor. Tying is structurally inapplicable here: `TextEncoder` has no output/vocabulary projection to tie the input embedding to. Use `'learned'` and tie in the model that owns the `Dense(vocab_size)` (see `models/language/masked_language_model/clm.py`'s `tie_weights`).
 
 ## TextDecoder
 
@@ -331,7 +331,7 @@ output_features_modern = modern_decoder(keras.random.randint(0, 32000, shape=(2,
 | `embedding_type`| `str` | The word embedding strategy: `'learned'` or `'factorized'`. `'shared'` raises — see below. | `'learned'` |
 | `positional_type`| `str` | The positional encoding strategy: `'learned'` or `'sincos'`.                             | `'learned'` |
 
-> **`embedding_type='shared'` raises `ValueError`.** It used to be accepted and built the *identical* embedding as `'learned'` — no tying mechanism, no accessor. Tying is structurally inapplicable here: `TextDecoder` returns raw hidden states `(B, seq, embed_dim)` and has no output/vocabulary projection to tie the input embedding to. Use `'learned'` and tie in the model that owns the `Dense(vocab_size)` (see `models/masked_language_model/clm.py`'s `tie_weights`).
+> **`embedding_type='shared'` raises `ValueError`.** It used to be accepted and built the *identical* embedding as `'learned'` — no tying mechanism, no accessor. Tying is structurally inapplicable here: `TextDecoder` returns raw hidden states `(B, seq, embed_dim)` and has no output/vocabulary projection to tie the input embedding to. Use `'learned'` and tie in the model that owns the `Dense(vocab_size)` (see `models/language/masked_language_model/clm.py`'s `tie_weights`).
 
 ## Specialized and Hybrid Blocks
 
@@ -722,7 +722,7 @@ block = GatedLinearAttentionBlock(
 )
 ```
 
-Consumed 3x per block by Qwen3-Next (`models/qwen/components.py`).
+Consumed 3x per block by Qwen3-Next (`models/language/qwen/components.py`).
 
 ### Arguments
 

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.thera import (
+from dl_techniques.models.vision.thera import (
     Thera,
     EDSRBackbone,
     build_thera_tail,

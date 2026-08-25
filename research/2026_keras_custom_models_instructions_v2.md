@@ -215,7 +215,7 @@ depends on import order.
 |---|---|
 | Prefix a generic class name if one already exists (`FastVitRepMixerBlock`, not a second `RepMixerBlock`) | the registry is keyed by name |
 | Key a `custom_objects` dict by `keras.saving.get_registered_name(cls)`, **never** the bare class name | `_retrieve_class_or_fn` never uses a literal class name as a lookup key for classes — a dict keyed that way is decorative and every entry is ignored |
-| Never bind a name in a package `__init__.py` matching one of that package's own **subpackages** | re-exporting a class `SAM2` from a package containing a `SAM2/` subpackage shadows it, and `from ...SAM.SAM2.model import ...` stops resolving |
+| Never bind a name in a package `__init__.py` matching one of that package's own **subpackages** | the subpackage is shadowed and `from <pkg>.<sub>.<mod> import ...` stops resolving. **Historical exemplar, no longer reproducible in this tree**: re-exporting the class `SAM2` from the package that then contained a `SAM2/` subpackage broke `from ...SAM.SAM2.model import ...` at collection time. The 2026-08-24 restructure lowercased those subpackages to `sam1/ sam2/ sam3/`, and Python is case-sensitive, so class `SAM2` and package `sam2` now coexist (MEASURED 2026-08-25). The rule stands for any case-EXACT collision |
 
 The subpackage-shadowing break happens at **collection** time, so per-package test runs never see it.
 Run the tree-wide collection gate after any change to a package's public surface:

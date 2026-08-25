@@ -118,7 +118,7 @@ SAM2ImageEncoder ───── drop `scalp` levels; vision_features = last of 
 ## 3. Quick Start
 
 ```python
-from dl_techniques.models.SAM.SAM2 import SAM2, SAM2MemoryBank, create_sam2
+from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
 
 model = create_sam2("tiny")            # RANDOM weights — no checkpoint ships
 
@@ -181,11 +181,14 @@ location so a reader knows where to look, not restated:
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
 
-> **`SAM2MemoryBank` is not to be confused with
-> `src/dl_techniques/models/memory_bank/`.** That package is
+> **`SAM2MemoryBank` is not to be confused with the former
+> `src/dl_techniques/models/memory_bank/`.** That package was
 > `WaveFieldMemoryLLM`'s keyed read/write store for language modelling — a
 > different data structure with a colliding name. It was reviewed and REJECTED
-> as a reuse target here; nothing in this package derives from it.
+> as a reuse target here; nothing in this package derives from it. **The package
+> itself was DELETED by the 2026-08-24 family restructure** (`d0b599ff2` /
+> `452d663d2`), so the collision no longer exists; the note is kept because the
+> name `SAM2MemoryBank` still invites the confusion.
 
 ## 6. Variants
 
@@ -268,7 +271,7 @@ module <the pre-move dotted path>.training_model cannot be imported.
 survives nowhere under `src/`, and writing it in prose erodes that instrument
 exactly as effectively as a real reference would.)
 
-> **Importing the SAM 2 *package* is NOT sufficient.** `SAM2/__init__.py`
+> **Importing the SAM 2 *package* is NOT sufficient.** `sam2/__init__.py`
 > imports `memory_bank` and `model` only, never `training_model`, so
 > `Custom>SAM2TrainingModel` is never entered into the registry by a package
 > import and Keras falls straight through to the failing fallback. SAM 1's and
@@ -280,14 +283,14 @@ Executed, on this package's own smallest on-disk checkpoint:
 
 ```python
 import keras
-import dl_techniques.models.SAM.SAM2.training_model   # registrar-first: the MODULE
+import dl_techniques.models.vision_language.sam.sam2.training_model   # registrar-first: the MODULE
 
 model = keras.models.load_model(path, compile=False)
 print(type(model).__name__, len(model.weights))
 # SAM2TrainingModel 345
 ```
 
-Replacing that import with `import dl_techniques.models.SAM.SAM2` and changing
+Replacing that import with `import dl_techniques.models.vision_language.sam.sam2` and changing
 nothing else reproduces the `TypeError` above.
 
 One further caveat for anyone A/B-ing a checkpoint's outputs across a change:

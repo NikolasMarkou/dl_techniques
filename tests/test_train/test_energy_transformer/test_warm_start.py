@@ -36,7 +36,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.energy_transformer import (
+from dl_techniques.models.vision.energy_transformer import (
     BACKBONE_NAME,
     create_energy_transformer_classifier,
     create_energy_transformer_mim,

@@ -34,10 +34,9 @@ What the family found, rather than merely instrumented
   read a 3.56e+00 delta against a true 0.0.
 """
 
-import os
-
 import pytest
 
+from .model_package_discovery import package_names
 from .precision_arm_subjects import (
     NO_HEAD_SIBLINGS,
     ROUNDTRIP_NA,
@@ -76,7 +75,6 @@ RELOAD_PATH_DRIFT = {
     "mamba": 9,
     "nam": 16,
     "nano_vlm": 16,
-    "nano_vlm_world_model": 204,
     "qwen": 32,
     "tabm": 5,
     "tree_transformer": 14,
@@ -99,7 +97,6 @@ AUTONAME_STEMS = {
     "masked_language_model": ("bert",),
     "nam": ("group_attention", "layer_normalization", "tree_mha"),
     "nano_vlm": ("vision_encoder",),
-    "nano_vlm_world_model": ("dense", "vision_encoder"),
     "qwen": ("linear_gating", "swi_gluffn"),
     "tabm": ("n_linear", "scale_ensemble", "tab_m_backbone"),
     "tree_transformer": ("group_attention", "layer_normalization",
@@ -127,17 +124,17 @@ STOCHASTIC_OUTPUT = {
     "vae": "calibrate",
     "sd3_mmdit": "calibrate",
     "relgt": "calibrate",
-    "nano_vlm_world_model": "calibrate",
     # Not stochastic in the same sense: its own two calls agree to 9.31e-10, a
     # float32 reduction-order difference, so a fixed small bound is honest and
     # `calibrate` would be flaky at exactly 0.0.
     "vq_vae": 1e-8,
 }
 
-#: The measured round-trip/self-spread ratios are 1.54 (``vae``), 1.21
-#: (``nano_vlm_world_model``), 0.88 (``sd3_mmdit``) and 0.65 (``relgt``); 3.0 is
-#: ~2x the worst. The WEIGHT arm stays at ``atol=0.0`` for all four, so the
-#: strict guard against a lost weight is not the one being relaxed here.
+#: The measured round-trip/self-spread ratios are 1.54 (``vae``), 0.88
+#: (``sd3_mmdit``) and 0.65 (``relgt``); 3.0 is ~2x the worst. A fourth, 1.21
+#: (``nano_vlm_world_model``), went with that package's deletion on 2026-08-24.
+#: The WEIGHT arm stays at ``atol=0.0`` for all three, so the strict guard
+#: against a lost weight is not the one being relaxed here.
 CALIBRATION_FACTOR = 3.0
 
 #: Packages whose ``.build(shape)`` half of the parity arm is skipped, and why.
@@ -198,25 +195,97 @@ def _input_shape(make_inputs):
 # Coverage -- R-135
 # ===========================================================================
 
+#: Subject keys in :mod:`precision_arm_subjects` that name a package GROUP
+#: rather than a leaf package, mapped to the leaf their builder ACTUALLY builds.
+#: Verified by reading the builders, not by name similarity:
+#: ``_b_sam`` -> ``test_sam.test_correctness.build_reduced_sam``, which imports
+#: ``dl_techniques.models.vision_language.sam.sam1.model.SAM``; ``_b_time_series``
+#: -> ``create_nbeats_model``.
+#:
+#: The keys are deliberately NOT renamed here. They are the parametrized ids of
+#: the precision, XLA and float64 arms across several other modules, and
+#: re-keying them would churn node ids repo-wide for a label change. The mapping
+#: is what makes this coverage test comparable against a LEAF population.
+SUBJECT_KEY_IS_A_GROUP = {
+    "SAM": "sam1",
+    "time_series": "nbeats",
+}
+
+#: Leaf packages with NO round-trip subject and no impossibility ruling -- the
+#: population grew and the instrument did not follow. Distinct from
+#: :data:`ROUNDTRIP_NA`, which is a ruling that no round trip EXISTS to make;
+#: every entry here is work that is owed.
+#:
+#: All eight were invisible before 2026-08-25: the pre-restructure coverage walk
+#: was one level deep, so the pre-restructure ``SAM`` directory and the
+#: ``time_series`` directory each counted as ONE package and their children were
+#: never population members. Building
+#: eight subjects is a models-conformance job, not the path-and-prose repair
+#: that exposed them (plan-2026-08-24-8fd4f20d, pre-mortem trigger 1), so they
+#: are recorded rather than absorbed. Pinned exactly by
+#: ``test_the_unsubjected_set_does_not_grow`` -- a NEW package landing here is a
+#: package that never got instrumented, which is the decay this table exists to
+#: make loud.
+ROUNDTRIP_NO_SUBJECT_YET = {
+    "sam2": "no subject; the SAM subject builds sam1 (see SUBJECT_KEY_IS_A_GROUP)",
+    "sam3": "no subject; the SAM subject builds sam1 (see SUBJECT_KEY_IS_A_GROUP)",
+    "adaptive_ema": "no subject; the time_series subject builds nbeats",
+    "deepar": "no subject; the time_series subject builds nbeats",
+    "mdn": "no subject; the time_series subject builds nbeats",
+    "prism": "no subject; the time_series subject builds nbeats",
+    "tirex": "no subject; the time_series subject builds nbeats",
+    "xlstm": "no subject; the time_series subject builds nbeats",
+}
+
+
+def test_the_unsubjected_set_does_not_grow():
+    """The owed-work table is a CEILING, and its members must be real packages.
+
+    A floor would let the family quietly stop instrumenting new packages; an
+    unchecked table would let it name packages that no longer exist.
+    """
+    on_disk = set(package_names())
+    unknown = sorted(set(ROUNDTRIP_NO_SUBJECT_YET) - on_disk)
+    assert not unknown, f"ROUNDTRIP_NO_SUBJECT_YET names non-packages: {unknown}"
+    assert len(ROUNDTRIP_NO_SUBJECT_YET) == 8, (
+        "eight packages were owed a round-trip subject on 2026-08-25; found "
+        f"{len(ROUNDTRIP_NO_SUBJECT_YET)}. Growing this set means a package "
+        "joined models/ without an instrument; shrinking it means one was "
+        "written -- update the count in the same commit either way."
+    )
+
+
 def test_every_model_package_has_a_roundtrip_subject():
     """R-135 is a COVERAGE row: all three instruments, per package.
 
     The subject registry is asserted set-equal to the packages on disk, so a
     new ``models/`` package joins the family the day it lands and an existing
     one cannot leave it by having its ``_sub`` line deleted.
+
+    ``on_disk`` used to be a one-level ``os.listdir`` of ``models/``. After the
+    family restructure that listing returns the eleven *family* directories, so
+    it now comes from the shared leaf walk in ``model_package_discovery``.
     """
-    root = os.path.join(os.path.dirname(__file__), "..", "..",
-                        "src", "dl_techniques", "models")
-    on_disk = {entry for entry in os.listdir(root)
-               if os.path.isfile(os.path.join(root, entry, "__init__.py"))}
-    covered = set(roundtrip_charged()) | set(ROUNDTRIP_NA)
+    on_disk = set(package_names())
+    covered = (
+        {SUBJECT_KEY_IS_A_GROUP.get(key, key) for key in roundtrip_charged()}
+        | set(ROUNDTRIP_NA)
+        | set(ROUNDTRIP_NO_SUBJECT_YET)
+    )
     assert sorted(on_disk - covered) == [], (
         f"models/ packages with no round-trip subject and no stated reason: "
         f"{sorted(on_disk - covered)}")
     assert sorted(covered - on_disk) == [], (
         f"subjects naming a package that does not exist: "
         f"{sorted(covered - on_disk)}")
-    assert len(on_disk) == 73, f"expected 73 packages, found {len(on_disk)}"
+    # Re-derive with:
+    #   .venv/bin/python -c "from tests.test_models.model_package_discovery \
+    #       import package_names; print(len(package_names()))"
+    # 79 leaf packages (was 73 pre-restructure; the count rose because the
+    # second-level nestings -- sam1/2/3, darkir, pw_fnet, scunet, pft_sr,
+    # superpoint, power_sampling -- are now reached, while the 11 family
+    # containers are excluded).
+    assert len(on_disk) == 79, f"expected 79 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():

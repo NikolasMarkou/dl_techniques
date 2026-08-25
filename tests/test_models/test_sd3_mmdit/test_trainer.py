@@ -26,7 +26,7 @@ from train.sd3_mmdit.train_sd3_mmdit import (
     build_trainer,
     make_synthetic_dataset,
 )
-from dl_techniques.models.sd3_mmdit.config import get_sd3_config
+from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
 
 
 # ---------------------------------------------------------------------

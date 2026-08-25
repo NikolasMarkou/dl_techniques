@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy.special import ndtri, expit
 
-from dl_techniques.models.ideogram4.scheduler import (
+from dl_techniques.models.vision_language.ideogram4.scheduler import (
     LogitNormalSchedule,
     get_schedule_for_resolution,
     make_step_intervals,

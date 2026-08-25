@@ -10,7 +10,7 @@ The two module-level helpers are exported as well because they are the
 differentiable GMM/Procrustes primitives the model is built from and are
 useful (and separately tested) on their own.
 """
-from dl_techniques.models.latent_gmm_registration.model import (
+from dl_techniques.models.point_cloud.latent_gmm_registration.model import (
     LatentGMMRegistration,
     create_latent_gmm_registration,
     compute_gmm_params,

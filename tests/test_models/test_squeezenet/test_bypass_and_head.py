@@ -28,12 +28,12 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.squeezenet.squeezenet_v1 import (
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import (
     SqueezeNetV1,
     create_squeezenet_v1,
 )
-from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
-from dl_techniques.models.squeezenet.spatial_guard import minimum_spatial_extent
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+from dl_techniques.models.vision.squeezenet.spatial_guard import minimum_spatial_extent
 
 
 def _add_layers(model):

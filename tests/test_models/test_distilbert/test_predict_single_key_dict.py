@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.distilbert.model import DistilBERT
+from dl_techniques.models.language.distilbert.model import DistilBERT
 
 
 VOCAB = 100

@@ -391,10 +391,10 @@ feature_extractor = ViT(
 
 **Purpose**: A high-level factory function for convenient and safe `ViT` model creation. Resnet-template parity: the first positional argument is the variant key (`"vit_pico".."vit_huge"`).
 
-**Location**: `dl_techniques.models.vit.create_vit`
+**Location**: `dl_techniques.models.vision.vit.create_vit`
 
 ```python
-from dl_techniques.models.vit import create_vit
+from dl_techniques.models.vision.vit import create_vit
 
 # CIFAR-10 ViT-pico
 model = create_vit("vit_pico", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
@@ -415,7 +415,7 @@ The `ViT` class exposes a `from_variant` classmethod and a `MODEL_VARIANTS`
 registry that mirrors `ResNet.from_variant`:
 
 ```python
-from dl_techniques.models.vit import ViT
+from dl_techniques.models.vision.vit import ViT
 
 # Variant registry: maps user-facing variant keys to internal scale configs.
 print(sorted(ViT.MODEL_VARIANTS.keys()))

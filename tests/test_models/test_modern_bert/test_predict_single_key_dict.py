@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 
 VOCAB = 100

@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/thera`` -- Phase 5 batch C.
+Oracle adoption for ``models/vision/thera`` -- Phase 5 batch C.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored and no ``src/`` file is added.
@@ -71,9 +71,9 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
-from dl_techniques.models.thera.model import Thera, build_thera
-from dl_techniques.models.thera.tails import TheraTailAir
+from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
+from dl_techniques.models.vision.thera.model import Thera, build_thera
+from dl_techniques.models.vision.thera.tails import TheraTailAir
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

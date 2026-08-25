@@ -8,7 +8,7 @@ per-layer hidden-dimension list chosen for the dataset at hand, and the paper
 publishes no named scale family, so the factories construct the classes
 directly rather than delegating to a ``from_variant``.
 """
-from dl_techniques.models.shgcn.model import (
+from dl_techniques.models.graph.shgcn.model import (
     SHGCNModel,
     SHGCNNodeClassifier,
     SHGCNLinkPredictor,

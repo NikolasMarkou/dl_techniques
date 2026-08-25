@@ -38,7 +38,7 @@ def resolve_denoiser_normalization(normalization_type: str) -> str:
     """Resolve a bias-free *denoiser model's* normalization name to a layer name.
 
     This is the MODEL-level policy for the bias-free denoiser family
-    (``models/bias_free_denoisers/``): inside a model whose entire reason to exist
+    (``models/vision/bias_free_denoisers/``): inside a model whose entire reason to exist
     is degree-1 homogeneity ``f(a*x) = a*f(x)``, the name ``'batchnorm'`` means the
     homogeneous variance-only :class:`~dl_techniques.layers.norms.bias_free_batch_norm.BiasFreeBatchNorm`,
     never stock ``keras.layers.BatchNormalization``. Every other name passes through

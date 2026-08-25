@@ -29,7 +29,7 @@ import tensorflow as tf  # noqa: F401  # GradientTape (HRM precedent)
 
 from dl_techniques.losses.hrm_loss import create_hrm_loss
 from dl_techniques.metrics.hrm_metrics import HRMMetrics
-from dl_techniques.models.tiny_recursive_model import TRM, create_trm
+from dl_techniques.models.language.tiny_recursive_model import TRM, create_trm
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,

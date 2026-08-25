@@ -1,4 +1,4 @@
-"""Three guards for the four public bias-free builders in `models/bias_free_denoisers/`.
+"""Three guards for the four public bias-free builders in `models/vision/bias_free_denoisers/`.
 
 `create_bfunet_denoiser`, `create_bfunet_variant`, `create_bfcnn_denoiser` and
 `create_bfcnn_variant` are bias-free *by construction*: `use_bias` is not a declared parameter of
@@ -53,11 +53,11 @@ import inspect
 import keras
 import pytest
 
-from dl_techniques.models.bias_free_denoisers.bfunet import (
+from dl_techniques.models.vision.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     create_bfunet_variant,
 )
-from dl_techniques.models.bias_free_denoisers.bfcnn import (
+from dl_techniques.models.vision.bias_free_denoisers.bfcnn import (
     create_bfcnn_denoiser,
     create_bfcnn_variant,
 )

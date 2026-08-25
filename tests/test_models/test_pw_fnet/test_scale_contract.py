@@ -17,7 +17,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.pw_fnet.model import PW_FNet, _NUM_SCALES
+from dl_techniques.models.vision.image_restoration.pw_fnet.model import PW_FNet, _NUM_SCALES
 
 
 def _tiny(**kwargs) -> PW_FNet:

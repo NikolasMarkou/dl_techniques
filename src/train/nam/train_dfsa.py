@@ -35,14 +35,14 @@ from keras import ops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
-from dl_techniques.models.nam.cell import (
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam.cell import (
     _fixed_add,
     _fixed_subtract,
     _fixed_multiply,
     _fixed_divide,
 )
-from dl_techniques.models.tree_transformer.model import (
+from dl_techniques.models.language.tree_transformer.model import (
     TreeTransformerBlock,
     PositionalEncoding,
 )

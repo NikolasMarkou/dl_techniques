@@ -34,7 +34,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.necks import Sam3DualViTDetNeck
+from dl_techniques.models.vision_language.sam.sam3.necks import Sam3DualViTDetNeck
 neck = Sam3DualViTDetNeck(dim=1024, d_model=256,
                           scale_factors=(4.0, 2.0, 1.0, 0.5))
 ```

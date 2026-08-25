@@ -630,7 +630,7 @@ class RELGTTransformerBlock(keras.layers.Layer):
         what lets a caller STACK blocks: chaining the ``(B, E)`` summary instead
         would hand the next block a single-token sequence. Defaults to ``False``,
         which keeps the historical single-tensor return. See
-        ``models/relgt/model.py``. Defaults to ``False``.
+        ``models/graph/relgt/model.py``. Defaults to ``False``.
     :type return_tokens: bool
     :param kwargs: Additional arguments for the ``Layer`` base class.
     """

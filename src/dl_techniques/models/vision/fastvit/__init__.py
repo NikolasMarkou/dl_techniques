@@ -6,7 +6,7 @@ in ``layers/fastvit/``. Architecture only: no pretrained weights are ported and
 this package makes no accuracy claim.
 
 The tower stands alone as an image encoder, and is *also* the vision branch of
-MobileCLIP2 — :mod:`dl_techniques.models.mobile_clip.mobile_clip_v2` imports
+MobileCLIP2 — :mod:`dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2` imports
 :class:`FastVitImageEncoder` from here.
 
 Three facts that are easy to get wrong:
@@ -22,7 +22,7 @@ Three facts that are easy to get wrong:
   model.
 * **``FastVitRepMixerBlock`` (in ``layers/fastvit/``) is NOT the pre-existing
   ``layers/repmixer_block.py::RepMixerBlock``.** They are different
-  architectures sharing a name; the latter is consumed by ``models/fastvlm/``
+  architectures sharing a name; the latter is consumed by ``models/vision_language/fastvlm/``
   and is untouched by this package.
 
 See ``README.md`` for the variant table and the recorded deviations from the

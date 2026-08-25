@@ -7,7 +7,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.thera.rdn_backbone import RDNBackbone, RDB, RDBConv
+from dl_techniques.models.vision.thera.rdn_backbone import RDNBackbone, RDB, RDBConv
 
 
 class TestRDNBackbone:

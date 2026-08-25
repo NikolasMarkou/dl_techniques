@@ -119,7 +119,7 @@ pip install keras>=3.0 tensorflow>=2.16 numpy
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.latent_gmm import LatentGMMRegistration
+from dl_techniques.models.point_cloud.latent_gmm_registration import LatentGMMRegistration
 
 # 1. Initialize the model
 # num_gaussians=32 is a good starting point for moderate complexity
@@ -206,7 +206,7 @@ inputs = (source_pc, target_pc)
 gamma_x = model.correspondence_net((local_x, global_x))
 
 # Compute the centers of the Gaussian components
-from dl_techniques.models.latent_gmm_registration import compute_gmm_params
+from dl_techniques.models.point_cloud.latent_gmm_registration import compute_gmm_params
 weights, means = compute_gmm_params(source_pc, gamma_x)
 
 # 'means' shape is (B, num_gaussians, 3)

@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple, Any
 from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.nano_vlm_loss import NanoVLMLoss
-from dl_techniques.models.nano_vlm.model import create_nanovlm
+from dl_techniques.models.vision_language.nano_vlm.model import create_nanovlm
 from dl_techniques.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample, create_vqa_dataset
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 

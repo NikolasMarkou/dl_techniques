@@ -121,8 +121,8 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.scalar_sinusoidal_embedding import (
     ScalarSinusoidalEmbedding,
 )
-from dl_techniques.models.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
-from dl_techniques.models.sd3_mmdit.config import (
+from dl_techniques.models.vision_language.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
+from dl_techniques.models.vision_language.sd3_mmdit.config import (
     SD3MMDiTConfig,
     get_sd3_config,
 )

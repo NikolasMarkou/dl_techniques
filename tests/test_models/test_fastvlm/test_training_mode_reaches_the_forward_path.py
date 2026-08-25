@@ -35,7 +35,7 @@ stalled indices.
 import numpy as np
 import keras
 
-from dl_techniques.models.fastvlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm.model import FastVLM
 
 GEOMETRY = dict(input_shape=(32, 32, 3), embed_dims=[16, 32, 64], depths=[1, 1, 1])
 

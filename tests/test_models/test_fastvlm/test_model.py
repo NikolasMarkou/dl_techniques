@@ -6,7 +6,7 @@ import keras
 import tensorflow as tf
 from typing import Dict, Any, Optional
 
-from dl_techniques.models.fastvlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm.model import FastVLM
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
 
@@ -863,7 +863,7 @@ class TestAttentionBlockVLMSignalPath:
         all be VACUOUS -- every one of those held at 1e-24, which is why the
         three existing drop-path tests sit beside this defect without seeing it.
         """
-        from dl_techniques.models.fastvlm.components import AttentionBlockVLM
+        from dl_techniques.models.vision_language.fastvlm.components import AttentionBlockVLM
 
         rng = np.random.default_rng(0)
         x = rng.normal(size=(2, 4, 4, 32)).astype("float32")
@@ -890,7 +890,7 @@ class TestAttentionBlockVLMSignalPath:
         residual, gamma -> 0 means ``out -> x``; applied to the output, it means
         ``out -> 0``.
         """
-        from dl_techniques.models.fastvlm.components import AttentionBlockVLM
+        from dl_techniques.models.vision_language.fastvlm.components import AttentionBlockVLM
 
         rng = np.random.default_rng(1)
         x = rng.normal(size=(2, 4, 4, 32)).astype("float32")

@@ -5,10 +5,10 @@ Rule ``R-091``, plan ``plan-2026-08-19T163559-499b6f0e``, step 17.1.
 Both packages divided by ``<reduction> + <literal>`` where the literal is
 **exactly 0.0 in float16**:
 
-* ``models/nam/model.py`` (masked mean) and ``models/nam/cell.py`` (halt input):
+* ``models/neural_computer/nam/model.py`` (masked mean) and ``models/neural_computer/nam/cell.py`` (halt input):
   ``+ 1e-9``. An all-padding row makes the numerator and the denominator both
   zero, so the division is ``0/0``.
-* ``models/superpoint/model.py`` (descriptor L2 normalisation): ``+ 1e-12``. A
+* ``models/vision/keypoints/superpoint/model.py`` (descriptor L2 normalisation): ``+ 1e-12``. A
   zero descriptor vector is the same ``0/0``.
 
 MEASURED at HEAD on the REAL models (CPU, not a synthetic expression):
@@ -37,10 +37,10 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.nam.model import NAM
-from dl_techniques.models.nam.config import NAMConfig
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
-from dl_techniques.models.superpoint.model import SuperPoint
+from dl_techniques.models.neural_computer.nam.model import NAM
+from dl_techniques.models.neural_computer.nam.config import NAMConfig
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint
 
 
 NAM_OUTPUT_KEYS = ("result", "valid", "q_halt_logits", "q_continue_logits")

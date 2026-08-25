@@ -15,7 +15,7 @@ This document captures the per-chunk command sequences, cell tally, wall-clock b
 | C | E6 — 4-layer causal-LM × Wikipedia 10k | `experiments/e6_clm_wiki.py` (4L, d=192, 4 heads, tiktoken cl100k_base, packed CLM) | `results.csv:final_val_perplexity` |
 | D | Stress regimes (lr_extreme, wd_zero, bs_4, mp_fp16_lowloss) | `_REGIME_MAP` on E1/E3/E4/E5/E6; `sweep.EXPERIMENT_REGIMES` advertises each | per-cell `regime` column |
 | E | Pure-function `stats.py` (mean_std / bootstrap_ci / paired_permutation) | `stats.py` (replaces 22-line shim) | All headline aggregation now NaN-tolerant + deterministic-RNG |
-| G | ViT + ResNet `normalization_kwargs` plumbing | `models/vit/model.py`, `models/resnet/model.py`, `standard_blocks.py` (additive, default-off bit-exact) | E1/E2 PM mode now legitimately param-matched |
+| G | ViT + ResNet `normalization_kwargs` plumbing | `models/vision/vit/model.py`, `models/vision/resnet/model.py`, `standard_blocks.py` (additive, default-off bit-exact) | E1/E2 PM mode now legitimately param-matched |
 | F | (DEFERRED) Standalone power-analysis script | follow-up plan | n/a |
 | H | (DEFERRED) E1b off-label-boundary experiment (BandLogitNorm in head slot, DyT in feature-map slot) | follow-up plan | n/a |
 | I | Decision anchors uplifted to plan-id-prefixed `# DECISION plan_2026-05-18_6776f8ba/D-NNN` | norm_overhead_bench.py:D-001, report.py:D-002, vit/resnet/standard_blocks:D-003, e6_clm_wiki.py:D-004 | grep audit at CLOSE |

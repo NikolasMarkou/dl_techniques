@@ -31,7 +31,7 @@ make docs       # generate documentation
 │   ├── applications/    # Deployable ready-made applications built on dl_techniques
 │   └── train/           # Production-grade training scripts for models in dl_techniques/models/
 ├── results/             # Training results and outputs (repo-root)
-├── tests/               # Mirrors src/dl_techniques/ structure
+├── tests/               # Mirrors src/dl_techniques/ — except tests/test_models/, which is FLAT
 ├── research/            # Research notes and references
 └── imgs/                # Images and assets
 ```
@@ -44,17 +44,21 @@ There is no committed documentation directory. `make docs` runs `generate_docs.p
 
 The main codebase. The package names are exactly: `src/dl_techniques/layers/`, `src/dl_techniques/models/`, `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/` (not "optimizers"), `src/dl_techniques/analyzer/` (not "analyzers"), `src/dl_techniques/visualization/`, `src/dl_techniques/datasets/`, `src/dl_techniques/utils/`, `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/`, `src/dl_techniques/regularizers/`. Has its own `CLAUDE.md` with detailed documentation, and each subpackage has one as well.
 
+`src/dl_techniques/models/` is **not flat**: since 2026-08-24 its 79 leaf model packages are grouped into 11 family directories (`common`, `general_purpose`, `graph`, `language`, `memory`, `neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`, `vision_language`), two of which nest one level further (`vision/{image_restoration,keypoints,super_resolution}/`, `vision_language/sam/`). A family is a grouping, **not** a namespace: every family `__init__.py` holds a docstring and nothing else, so always import from the leaf package (`dl_techniques.models.vision.resnet.model`, never `dl_techniques.models.vision`). `time_series/` is the single exception and does re-export its 7 children. The catalogue is `src/dl_techniques/models/README.md`; the authoring rules are `src/dl_techniques/models/CLAUDE.md`.
+
 ### src/applications/
 
 Ready-made applications that package models from `dl_techniques` for deployment. These are end-to-end solutions, not research code.
 
 ### src/train/
 
-Production-grade training pipelines — one directory per runnable pipeline. Most correspond to a model architecture in `dl_techniques/models/` (e.g., `train/cliffordnet/`, `train/vit/`, `train/resnet/`), but two do not: `src/train/logic/` is a boolean-circuit / rule-learning research harness and `src/train/rms_variants_train/` is a normalization-layer ablation sweep, neither of which has a matching model package. Several trainer directories are also renamed relative to the model package they train — `src/dl_techniques/models/bias_free_denoisers/` is trained by `src/train/bfunet/`, `src/dl_techniques/models/byte_latent_transformer/` by `src/train/blt/`, and `src/dl_techniques/models/hierarchical_reasoning_model/` by `src/train/hrm/` — so the absence of a same-named directory does not mean the model is untrained.
+Production-grade training pipelines — one directory per runnable pipeline. Most correspond to a model architecture in `dl_techniques/models/` (e.g., `train/cliffordnet/`, `train/vit/`, `train/resnet/`), but two do not: `src/train/logic/` is a boolean-circuit / rule-learning research harness and `src/train/rms_variants_train/` is a normalization-layer ablation sweep, neither of which has a matching model package. Several trainer directories are also renamed relative to the model package they train — `src/dl_techniques/models/vision/bias_free_denoisers/` is trained by `src/train/bfunet/`, `src/dl_techniques/models/language/byte_latent_transformer/` by `src/train/blt/`, and `src/dl_techniques/models/language/hierarchical_reasoning_model/` by `src/train/hrm/` — so the absence of a same-named directory does not mean the model is untrained.
 
 ### tests/
 
 Pytest test suite mirroring the `src/dl_techniques/` structure — with named exceptions (an untested package, a vestigial shadow directory, a loose test module) catalogued in `REPO_MAP.md` § Tests. See `src/dl_techniques/CLAUDE.md` for testing conventions.
+
+**`tests/test_models/` deliberately does NOT mirror the model family nesting.** It stays flat: leaf package `x` is tested by `tests/test_models/test_<x>/`, with no `test_vision/` or `test_language/` level in between. This is a recorded decision, not an unfinished migration — 215 relative imports (`grep -rn "from \.\." tests/test_models --include=*.py | wc -l`, 2026-08-25; 200 of them name one of the five shared oracles) reach modules that live at `tests/test_models/*.py`, and adding a family level would change what `..` resolves to across all of them for zero behavioural gain. Do not "finish the job" by nesting them.
 
 ## Dependencies
 
@@ -84,7 +88,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
   |---|---|
   | `layers/` | predominantly Sphinx/reST |
   | `models/` | measurably mixed — no package-wide rule in either direction |
-  | New `models/` package | follow `models/bert/model.py`, which is entirely Sphinx/reST |
+  | New `models/` package | follow `models/language/bert/model.py`, which is entirely Sphinx/reST |
 
   **Match the file you are editing; never convert a file wholesale.** The measured per-package
   counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md`

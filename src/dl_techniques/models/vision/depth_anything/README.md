@@ -4,14 +4,14 @@ Keras 3 reference implementation of the *Depth Anything* monocular depth
 estimation architecture (`encoder + DPT-style decoder`). Source files:
 
 ```
-src/dl_techniques/models/depth_anything/
+src/dl_techniques/models/vision/depth_anything/
 ├── __init__.py        # public API: DepthAnything, create_depth_anything, DPTDecoder
 ├── components.py      # DPTDecoder layer (linear default + upsample_factor)
 └── model.py           # DepthAnything keras.Model + create_depth_anything factory
 ```
 
 > **Status (post-`plan_2026-05-10_54e6e303`).** The model uses the in-tree
-> `dl_techniques.models.vit.ViT` as its real encoder (`encoder_kind='real'`,
+> `dl_techniques.models.vision.vit.ViT` as its real encoder (`encoder_kind='real'`,
 > default); the DPT decoder defaults to `linear` output;  `train_step`
 > dispatches to a clean labeled-only path or a clearly-delimited
 > semi-supervised path that adds FAL on pooled features **and** an L1
@@ -145,7 +145,7 @@ custom on-step callback when training semi-supervised. Default decay is
 Convenience factory that returns a *built* `DepthAnything`:
 
 ```python
-from dl_techniques.models.depth_anything import create_depth_anything
+from dl_techniques.models.vision.depth_anything import create_depth_anything
 
 model = create_depth_anything(
     encoder_kind='real',
@@ -210,7 +210,7 @@ from `call`.
 
 ```python
 import keras
-from dl_techniques.models.depth_anything import create_depth_anything
+from dl_techniques.models.vision.depth_anything import create_depth_anything
 
 model = create_depth_anything(encoder_kind='real', encoder_type='vit_l',
                               image_shape=(384, 384, 3),
@@ -234,7 +234,7 @@ model.compile(
 
 ```python
 import keras
-from dl_techniques.models.depth_anything import (
+from dl_techniques.models.vision.depth_anything import (
     create_depth_anything, TeacherEMACallback, cosine_ema_schedule,
 )
 from train.common.megadepth import (
@@ -357,7 +357,7 @@ folded into the work below. Item numbers are kept stable for traceability.
 **FIXED in `plan_2026-05-10_54e6e303`** (this plan):
 
 * **#2-deeper** — On-step EMA decay schedule + integration. New module
-  `dl_techniques/models/depth_anything/teacher_ema.py` provides
+  `dl_techniques/models/vision/depth_anything/teacher_ema.py` provides
   `cosine_ema_schedule(start, end, total_steps)`,
   `linear_ema_schedule(...)`, and `TeacherEMACallback(schedule, warmup_steps)`.
   `DepthAnything.from_pretrained_encoder(weights_path)` loads encoder
@@ -446,9 +446,9 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`
 - Oquab, Maxime et al. **"DINOv2: Learning Robust Visual Features without
   Supervision."** 2023.
 - In-tree canonical Keras-3 `train_step` pattern:
-  `src/dl_techniques/models/masked_language_model/mlm.py:309-343`.
+  `src/dl_techniques/models/language/masked_language_model/mlm.py:309-343`.
 - D-004 save/load override:
-  `src/dl_techniques/models/depth_anything/model.py` (search for
+  `src/dl_techniques/models/vision/depth_anything/model.py` (search for
   `# DECISION plan_2026-05-10_bd098beb/D-004`).
 
 ---
@@ -461,6 +461,6 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`
   this trainer implements. (Its original exemplar,
   `src/train/cliffordnet/train_depth_estimation.py`, was deleted on 2026-08-10;
   `train_depth_anything.py` is now the only surviving Pattern-5 trainer.)
-- `src/dl_techniques/models/depth_anything/components.py` — `DPTDecoder` source.
-- `src/dl_techniques/models/depth_anything/model.py` — `DepthAnything` source.
+- `src/dl_techniques/models/vision/depth_anything/components.py` — `DPTDecoder` source.
+- `src/dl_techniques/models/vision/depth_anything/model.py` — `DepthAnything` source.
 - `tests/test_models/test_depth_anything/` — pytest coverage.

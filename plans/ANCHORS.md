@@ -700,3 +700,19 @@ plan-2026-08-24T120026-64ffd751/D-008 | 2026-08-24 | Leave D-001/D-002/D-006 byt
 plan-2026-08-24T120026-64ffd751/D-010 | 2026-08-24 | Replace `bfconvunext.py`'s `locals()` capture with `**kwargs` delegation into `create_convunext`, treating D-011 (plan-2026-08-14T092357-0e3d792d) as achieved by a simpler mechanism rather than overridden; its anchor body stays verbatim with a dated supersede note appended.
 plan-2026-08-24T120026-64ffd751/D-013 | 2026-08-24 | Fix `create_convunext_variant`'s silent `use_bias` setdefault (it let a caller get a biased model from the bias-free builder) by promoting `use_bias=False` to an explicit pinned argument, giving up SC-8's byte-identity guarantee in favor of correctness.
 plan-2026-08-24T174647-07af0659/D-002 | 2026-08-24 | Pin the helper-extraction contract (no layer rename, no creation reorder, no initializer re-instantiation) with a `# DECISION` anchor above the helper block in both `bfunet.py` and `bfcnn.py`, backed by a bit-identity harness's name/sequence/value arms rather than a comment alone.
+
+## Retired anchors
+
+*Appended, not edited — this manifest is append-only. An entry listed here had its in-code
+`# DECISION` comment deliberately removed; the manifest line above is kept so the decision
+stays readable, but no source comment resolves to it any more.*
+
+plan-2026-08-24T120026-64ffd751/D-002 | RETIRED 2026-08-25 | Its `<!-- DECISION -->` comment lived in `src/dl_techniques/models/CLAUDE.md` and was removed when that file was cut to the authoring contract. The RULE it guarded survives there as a plain bullet ("Never re-export the deep-supervision helpers from a `models/` package", including the registrar-import carve-out); only the anchor comment is gone.
+plan-2026-08-24T120026-64ffd751/D-006 | RETIRED 2026-08-25 | Same file, same removal. The RULE survives as a plain bullet ("A module rename must carry every referencing site in the same commit"). The inversion note it carried — that this bullet reversed an earlier absolute prohibition on renaming a module to `model.py`, so `bert/model.py` must not be renamed back — is recorded here instead of in source.
+
+*NOT retired, still live in source and must not be swept:*
+*`plan-2026-08-24T120026-64ffd751/D-010` and `/D-013` are anchored in
+`src/dl_techniques/models/vision/bias_free_denoisers/bfconvunext.py`, and D-010 is also cited
+by `tests/test_models/test_bias_free_denoisers/test_the_bfconvunext_delegation_contract.py`.
+`bootstrap.mjs retire <plan-id>` was NOT used precisely because it would have stamped these
+two `[STALE]` as well and dropped the plan directory.*

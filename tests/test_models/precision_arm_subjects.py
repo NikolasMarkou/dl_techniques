@@ -58,8 +58,7 @@ CHARGED_PACKAGES: Tuple[str, ...] = (
     "byte_latent_transformer", "capsnet", "cbam", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
     "gpt2", "hierarchical_reasoning_model", "ideogram4", "lewm",
-    "masked_autoencoder", "masked_language_model", "memory_bank",
-    "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
+    "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
     "pft_sr", "power_mlp", "qwen", "relgt", "resnet", "scunet", "sd3_mmdit",
     "shgcn", "som", "squeezenet", "superpoint", "swin_transformer", "tabm",
     "time_series", "tiny_recursive_model", "vae", "video_jepa", "vit",
@@ -98,7 +97,7 @@ def _b_convnext():
     # The CLASS, not ``create_convnext_v1``: the factory resolves ``depths`` /
     # ``dims`` from the variant table and then forwards ``**kwargs``, so an
     # override of either raises "got multiple values for keyword argument".
-    from dl_techniques.models.convnext import ConvNeXtV1
+    from dl_techniques.models.vision.convnext import ConvNeXtV1
     return ConvNeXtV1(num_classes=4, depths=[1, 1], dims=[8, 16])
 
 
@@ -107,7 +106,7 @@ _sub("convnext", _b_convnext, lambda: _f32(1, 32, 32, 3))
 
 def _b_resnet():
     # The CLASS, for the same variant-table reason as ``convnext`` above.
-    from dl_techniques.models.resnet import ResNet
+    from dl_techniques.models.vision.resnet import ResNet
     return ResNet(num_classes=4, blocks_per_stage=[1, 1],
                   filters_per_stage=[8, 16], block_type="basic")
 
@@ -116,7 +115,7 @@ _sub("resnet", _b_resnet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_vit():
-    from dl_techniques.models.vit import create_vit
+    from dl_techniques.models.vision.vit import create_vit
     return create_vit(variant="vit_tiny", num_classes=4,
                       input_shape=(32, 32, 3), patch_size=16)
 
@@ -125,7 +124,7 @@ _sub("vit", _b_vit, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_vit_hmlp():
-    from dl_techniques.models.vit_hmlp import create_vit_hmlp
+    from dl_techniques.models.vision.vit_hmlp import create_vit_hmlp
     return create_vit_hmlp(input_shape=(32, 32, 3), num_classes=4,
                            scale="tiny", patch_size=16)
 
@@ -134,7 +133,7 @@ _sub("vit_hmlp", _b_vit_hmlp, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_vit_siglip():
-    from dl_techniques.models.vit_siglip import create_siglip_vision_transformer
+    from dl_techniques.models.vision.vit_siglip import create_siglip_vision_transformer
     return create_siglip_vision_transformer(
         input_shape=(32, 32, 3), num_classes=4, scale="tiny", patch_size=16)
 
@@ -143,7 +142,7 @@ _sub("vit_siglip", _b_vit_siglip, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_beit():
-    from dl_techniques.models.beit import create_beit_classifier
+    from dl_techniques.models.vision.beit import create_beit_classifier
     return create_beit_classifier("tiny", (32, 32, 3), 16, num_classes=4)
 
 
@@ -153,7 +152,7 @@ _sub("beit", _b_beit, lambda: _f32(1, 32, 32, 3), allowed_none_grads=1)
 
 
 def _b_fastvit():
-    from dl_techniques.models.fastvit import create_fastvit_image_encoder
+    from dl_techniques.models.vision.fastvit import create_fastvit_image_encoder
     return create_fastvit_image_encoder("mci0", input_shape=(64, 64, 3),
                                         projection_dim=32)
 
@@ -162,7 +161,7 @@ _sub("fastvit", _b_fastvit, lambda: _f32(1, 64, 64, 3))
 
 
 def _b_mobilenet():
-    from dl_techniques.models.mobilenet import create_mobilenetv2
+    from dl_techniques.models.vision.mobilenet import create_mobilenetv2
     return create_mobilenetv2(variant="small", num_classes=4,
                               input_shape=(32, 32, 3))
 
@@ -171,7 +170,7 @@ _sub("mobilenet", _b_mobilenet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_swin():
-    from dl_techniques.models.swin_transformer import create_swin_transformer
+    from dl_techniques.models.vision.swin_transformer import create_swin_transformer
     return create_swin_transformer("tiny", 4, input_shape=(32, 32, 3))
 
 
@@ -179,7 +178,7 @@ _sub("swin_transformer", _b_swin, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_squeezenet():
-    from dl_techniques.models.squeezenet import create_squeezenet_v1
+    from dl_techniques.models.vision.squeezenet import create_squeezenet_v1
     return create_squeezenet_v1("1.0", num_classes=4, input_shape=(64, 64, 3))
 
 
@@ -187,7 +186,7 @@ _sub("squeezenet", _b_squeezenet, lambda: _f32(1, 64, 64, 3))
 
 
 def _b_cbam():
-    from dl_techniques.models.cbam import create_cbam_net
+    from dl_techniques.models.vision.cbam import create_cbam_net
     return create_cbam_net("tiny", num_classes=4, input_shape=(32, 32, 3))
 
 
@@ -195,7 +194,7 @@ _sub("cbam", _b_cbam, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_fractalnet():
-    from dl_techniques.models.fractalnet import create_fractal_net
+    from dl_techniques.models.vision.fractalnet import create_fractal_net
     return create_fractal_net(variant="micro", num_classes=4,
                               input_shape=(32, 32, 3))
 
@@ -204,7 +203,7 @@ _sub("fractalnet", _b_fractalnet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_capsnet():
-    from dl_techniques.models.capsnet import create_capsnet
+    from dl_techniques.models.vision.capsnet import create_capsnet
     return create_capsnet(num_classes=4, input_shape=(28, 28, 1))
 
 
@@ -212,7 +211,7 @@ _sub("capsnet", _b_capsnet, lambda: _f32(1, 28, 28, 1))
 
 
 def _b_cliffordnet():
-    from dl_techniques.models.cliffordnet import create_cliffordnet
+    from dl_techniques.models.vision.cliffordnet import create_cliffordnet
     return create_cliffordnet(variant="nano", num_classes=4)
 
 
@@ -220,7 +219,7 @@ _sub("cliffordnet", _b_cliffordnet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_superpoint():
-    from dl_techniques.models.superpoint import create_superpoint
+    from dl_techniques.models.vision.keypoints.superpoint import create_superpoint
     return create_superpoint("tiny", input_shape=(64, 64, 1))
 
 
@@ -228,7 +227,7 @@ _sub("superpoint", _b_superpoint, lambda: _f32(1, 64, 64, 1))
 
 
 def _b_yolo12():
-    from dl_techniques.models.yolo12 import create_yolov12_multitask
+    from dl_techniques.models.vision.yolo12 import create_yolov12_multitask
     return create_yolov12_multitask(num_detection_classes=4, tasks=["detection"],
                                     input_shape=(64, 64, 3), scale="n")
 
@@ -248,7 +247,7 @@ _sub("yolo12", _b_yolo12, lambda: _f32(1, 64, 64, 3), forward_training=True)
 # ---------------------------------------------------------------------------
 
 def _b_bias_free_denoisers():
-    from dl_techniques.models.bias_free_denoisers import create_convunext_variant
+    from dl_techniques.models.vision.bias_free_denoisers import create_convunext_variant
     return create_convunext_variant("tiny", (32, 32, 1),
                                     enable_deep_supervision=False)
 
@@ -257,7 +256,7 @@ _sub("bias_free_denoisers", _b_bias_free_denoisers, lambda: _f32(1, 32, 32, 1))
 
 
 def _b_convunext():
-    from dl_techniques.models.convunext import create_convunext_variant
+    from dl_techniques.models.vision.convunext import create_convunext_variant
     return create_convunext_variant("tiny", input_shape=(32, 32, 3))
 
 
@@ -265,7 +264,7 @@ _sub("convunext", _b_convunext, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_scunet():
-    from dl_techniques.models.scunet import SCUNet
+    from dl_techniques.models.vision.image_restoration.scunet import SCUNet
     return SCUNet(in_nc=3, config=[1, 1, 1, 1, 1, 1, 1], dim=8, head_dim=4,
                   window_size=4, input_resolution=64)
 
@@ -274,7 +273,7 @@ _sub("scunet", _b_scunet, lambda: _f32(1, 64, 64, 3))
 
 
 def _b_accunet():
-    from dl_techniques.models.accunet import create_acc_unet
+    from dl_techniques.models.vision.accunet import create_acc_unet
     return create_acc_unet(input_channels=3, num_classes=1, base_filters=8,
                            input_shape=(32, 32))
 
@@ -283,7 +282,7 @@ _sub("accunet", _b_accunet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_pft_sr():
-    from dl_techniques.models.pft_sr import create_pft_sr
+    from dl_techniques.models.vision.super_resolution.pft_sr import create_pft_sr
     return create_pft_sr(scale=2, variant="light")
 
 
@@ -291,7 +290,7 @@ _sub("pft_sr", _b_pft_sr, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_depth_anything():
-    from dl_techniques.models.depth_anything import create_depth_anything
+    from dl_techniques.models.vision.depth_anything import create_depth_anything
     return create_depth_anything(encoder_type="vit_s", image_shape=(64, 64, 3),
                                  encoder_kind="placeholder",
                                  decoder_dims=[16, 16, 16, 16])
@@ -305,7 +304,7 @@ _sub("depth_anything", _b_depth_anything, lambda: _f32(1, 64, 64, 3))
 # ---------------------------------------------------------------------------
 
 def _b_bert():
-    from dl_techniques.models.bert import create_bert
+    from dl_techniques.models.language.bert import create_bert
     return create_bert("tiny", vocab_size=64, max_position_embeddings=32,
                        hidden_size=32, num_layers=1, num_heads=2,
                        intermediate_size=64)
@@ -315,7 +314,7 @@ _sub("bert", _b_bert, lambda: _ids(64, 2, 16))
 
 
 def _b_fnet():
-    from dl_techniques.models.fnet import FNet
+    from dl_techniques.models.language.fnet import FNet
     return FNet(vocab_size=64, hidden_size=32, num_layers=1,
                 intermediate_size=64, max_position_embeddings=32)
 
@@ -324,7 +323,7 @@ _sub("fnet", _b_fnet, lambda: _ids(64, 2, 16))
 
 
 def _b_modern_bert():
-    from dl_techniques.models.modern_bert import ModernBERT
+    from dl_techniques.models.language.modern_bert import ModernBERT
     return ModernBERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                       intermediate_size=64, max_position_embeddings=32,
                       local_attention_window_size=8)
@@ -334,7 +333,7 @@ _sub("modern_bert", _b_modern_bert, lambda: _ids(64, 2, 16))
 
 
 def _b_gpt2():
-    from dl_techniques.models.gpt2 import GPT2
+    from dl_techniques.models.language.gpt2 import GPT2
     return GPT2(vocab_size=64, embed_dim=32, depth=1, num_heads=2,
                 max_seq_len=32)
 
@@ -345,7 +344,7 @@ _sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16))
 def _b_gemma():
     # ``create_gemma3`` returns a FUNCTIONAL wrapper that expects two input
     # tensors; the subject here is the ``Gemma3`` backbone itself.
-    from dl_techniques.models.gemma import Gemma3
+    from dl_techniques.models.language.gemma import Gemma3
     return Gemma3(vocab_size=64, hidden_size=32, num_layers=1,
                   num_attention_heads=2, num_key_value_heads=1,
                   ffn_hidden_size=64, max_seq_len=32, sliding_window_size=8)
@@ -366,7 +365,7 @@ _sub("gemma", _b_gemma, lambda: _ids(64, 2, 16))
 
 
 def _b_qwen():
-    from dl_techniques.models.qwen import Qwen3Next
+    from dl_techniques.models.language.qwen import Qwen3Next
     return Qwen3Next(vocab_size=64, hidden_size=32, num_layers=1,
                      num_attention_heads=2, num_key_value_heads=1,
                      max_seq_len=32, num_experts=2, num_experts_per_tok=1,
@@ -381,7 +380,7 @@ _sub("qwen", _b_qwen, lambda: _ids(64, 2, 16))
 
 
 def _b_blt():
-    from dl_techniques.models.byte_latent_transformer import create_blt_model
+    from dl_techniques.models.language.byte_latent_transformer import create_blt_model
     return create_blt_model("micro", vocab_size=260, max_sequence_length=32)
 
 
@@ -393,31 +392,16 @@ _sub("byte_latent_transformer", _b_blt, lambda: _ids(256, 2, 32),
 
 
 def _b_wave_field():
-    from dl_techniques.models.wave_field import create_wave_field_llm
+    from dl_techniques.models.language.wave_field import create_wave_field_llm
     return create_wave_field_llm("small", vocab_size=64)
 
 
 _sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16))
 
 
-def _b_memory_bank():
-    from dl_techniques.models.memory_bank import WaveFieldMemoryLLM
-    return WaveFieldMemoryLLM(
-        vocab_size=64, embed_dim=32, depth=4, num_heads=2, max_seq_len=16,
-        d_k=8, d_v=16, s_lt=64, top_k=4, infonce_negatives=8,
-        diversity_subsample=16,
-    )
-
-
-# ``allowed_none_grads=1``: MEASURED IDENTICAL under float32 -- 1 of 92 in
-# BOTH arms (fp16 ``grad_norm_sum`` 5.537149e-01, float32 5.536436e-01).
-_sub("memory_bank", _b_memory_bank, lambda: _ids(64, 2, 16),
-     allowed_none_grads=1)
-
-
 def _b_masked_language_model():
-    from dl_techniques.models.bert import BERT
-    from dl_techniques.models.masked_language_model import MaskedLanguageModel
+    from dl_techniques.models.language.bert import BERT
+    from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
     encoder = BERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                    intermediate_size=64, max_position_embeddings=32,
                    hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0)
@@ -428,7 +412,7 @@ _sub("masked_language_model", _b_masked_language_model, lambda: _ids(64, 2, 16))
 
 
 def _b_hrm():
-    from dl_techniques.models.hierarchical_reasoning_model import (
+    from dl_techniques.models.language.hierarchical_reasoning_model import (
         create_hierarchical_reasoning_model,
     )
     return create_hierarchical_reasoning_model(
@@ -441,7 +425,7 @@ _sub("hierarchical_reasoning_model", _b_hrm,
 
 
 def _b_trm():
-    from dl_techniques.models.tiny_recursive_model import create_trm
+    from dl_techniques.models.language.tiny_recursive_model import create_trm
     return create_trm(vocab_size=64, hidden_size=32, num_heads=2,
                       expansion=2.0, seq_len=16, puzzle_emb_len=4,
                       h_layers=1, l_layers=1, halt_max_steps=2)
@@ -472,7 +456,7 @@ _sub("tiny_recursive_model", _b_trm, _trm_batch, call_fn=_trm_call)
 # ---------------------------------------------------------------------------
 
 def _b_vae():
-    from dl_techniques.models.vae import create_vae
+    from dl_techniques.models.vision.vae import create_vae
     return create_vae(input_shape=(32, 32, 1), latent_dim=8, variant="small")
 
 
@@ -500,7 +484,7 @@ def _tiny_conv_codec(latent: int = 8):
 
 
 def _b_vq_vae():
-    from dl_techniques.models.vq_vae import VQVAEModel
+    from dl_techniques.models.vision.vq_vae import VQVAEModel
     encoder, decoder = _tiny_conv_codec()
     return VQVAEModel(encoder=encoder, decoder=decoder, num_embeddings=8,
                       embedding_dim=8)
@@ -513,7 +497,7 @@ _sub("vq_vae", _b_vq_vae, lambda: _f32(1, 32, 32, 1), allowed_none_grads=1)
 
 
 def _b_vq_vae_rotation():
-    from dl_techniques.models.vq_vae_rotation import VQVAERotationTrick
+    from dl_techniques.models.vision.vq_vae_rotation import VQVAERotationTrick
     encoder, decoder = _tiny_conv_codec()
     return VQVAERotationTrick(num_embeddings=8, embedding_dim=8,
                               encoder=encoder, decoder=decoder)
@@ -527,7 +511,7 @@ _sub("vq_vae_rotation", _b_vq_vae_rotation, lambda: _f32(1, 32, 32, 1),
 
 def _b_masked_autoencoder():
     import keras
-    from dl_techniques.models.masked_autoencoder import create_mae_model
+    from dl_techniques.models.vision.masked_autoencoder import create_mae_model
     # The encoder must downsample by exactly the decoder's upsample factor;
     # two stride-2 convs against two ``decoder_dims`` entries is the smallest
     # pair the factory's own scale check accepts.
@@ -552,7 +536,7 @@ _sub("masked_autoencoder", _b_masked_autoencoder, lambda: _f32(1, 32, 32, 3),
 
 
 def _b_sd3_mmdit():
-    from dl_techniques.models.sd3_mmdit import create_sd3_vae
+    from dl_techniques.models.vision_language.sd3_mmdit import create_sd3_vae
     return create_sd3_vae("tiny")
 
 
@@ -563,14 +547,14 @@ _IDEOGRAM4_BATCH, _IDEOGRAM4_SEQ, _IDEOGRAM4_TEXT = 2, 8, 4
 
 
 def _b_ideogram4():
-    from dl_techniques.models.ideogram4 import create_ideogram4_transformer
+    from dl_techniques.models.vision_language.ideogram4 import create_ideogram4_transformer
     return create_ideogram4_transformer("tiny")
 
 
 def _ideogram4_inputs():
     """A packed text-then-image batch, the only shape ``call`` accepts."""
-    from dl_techniques.models.ideogram4.config import get_ideogram4_config
-    from dl_techniques.models.ideogram4.transformer import (
+    from dl_techniques.models.vision_language.ideogram4.config import get_ideogram4_config
+    from dl_techniques.models.vision_language.ideogram4.transformer import (
         LLM_TOKEN_INDICATOR, OUTPUT_IMAGE_INDICATOR,
     )
     cfg, _ae = get_ideogram4_config("tiny")
@@ -610,7 +594,7 @@ _sub("ideogram4", _b_ideogram4, _ideogram4_inputs,
 # ---------------------------------------------------------------------------
 
 def _b_nano_vlm():
-    from dl_techniques.models.nano_vlm import NanoVLM
+    from dl_techniques.models.vision_language.nano_vlm import NanoVLM
     return NanoVLM(
         vision_config={"img_size": 32, "patch_size": 16, "embed_dim": 32,
                        "depth": 1, "num_heads": 2, "output_mode": "none"},
@@ -635,7 +619,7 @@ _sub("nano_vlm", _b_nano_vlm,
 
 
 def _b_video_jepa():
-    from dl_techniques.models.video_jepa import create_video_jepa
+    from dl_techniques.models.vision.video_jepa import create_video_jepa
     return create_video_jepa(img_size=32, patch_size=16, num_frames=2,
                              embed_dim=32)
 
@@ -647,7 +631,7 @@ _sub("video_jepa", _b_video_jepa, lambda: {"pixels": _f32(1, 2, 32, 32, 3)},
 
 
 def _b_lewm():
-    from dl_techniques.models.lewm import create_lewm
+    from dl_techniques.models.vision.lewm import create_lewm
     return create_lewm(img_size=56, patch_size=14, encoder_scale="tiny",
                        embed_dim=192, projector_hidden_dim=192,
                        history_size=2, num_preds=1, depth=1, heads=2,
@@ -683,7 +667,7 @@ _sub("SAM", _b_sam, _sam_inputs, allowed_none_grads=12)
 # ---------------------------------------------------------------------------
 
 def _b_tabm():
-    from dl_techniques.models.tabm import create_tabm_mini
+    from dl_techniques.models.tabular.tabm import create_tabm_mini
     return create_tabm_mini(n_num_features=8, cat_cardinalities=[], n_classes=3,
                             k=4, hidden_dims=[16])
 
@@ -692,7 +676,7 @@ _sub("tabm", _b_tabm, lambda: _f32(4, 8))
 
 
 def _b_power_mlp():
-    from dl_techniques.models.power_mlp import create_power_mlp
+    from dl_techniques.models.general_purpose.power_mlp import create_power_mlp
     return create_power_mlp(hidden_units=[8, 8, 3])
 
 
@@ -700,7 +684,7 @@ _sub("power_mlp", _b_power_mlp, lambda: _f32(4, 6))
 
 
 def _b_mothnet():
-    from dl_techniques.models.mothnet import MothNet
+    from dl_techniques.models.general_purpose.mothnet import MothNet
     return MothNet(num_classes=4, al_units=16, mb_units=32)
 
 
@@ -708,7 +692,7 @@ _sub("mothnet", _b_mothnet, lambda: _f32(4, 16))
 
 
 def _b_som():
-    from dl_techniques.models.som import create_som
+    from dl_techniques.models.memory.som import create_som
     return create_som(map_size=(4, 4), input_dim=8)
 
 
@@ -722,7 +706,7 @@ _sub("som", _b_som, lambda: _f32(4, 8), check_backward=False)
 
 
 def _b_mini_vec2vec():
-    from dl_techniques.models.mini_vec2vec import create_mini_vec2vec_aligner
+    from dl_techniques.models.language.mini_vec2vec import create_mini_vec2vec_aligner
     return create_mini_vec2vec_aligner(embedding_dim=8)
 
 
@@ -730,7 +714,7 @@ _sub("mini_vec2vec", _b_mini_vec2vec, lambda: _f32(4, 8))
 
 
 def _b_ntm():
-    from dl_techniques.models.ntm import create_ntm_variant
+    from dl_techniques.models.neural_computer.ntm import create_ntm_variant
     return create_ntm_variant(variant="tiny", input_shape=(10, 8), output_dim=4)
 
 
@@ -738,7 +722,7 @@ _sub("ntm", _b_ntm, lambda: _f32(2, 10, 8))
 
 
 def _b_relgt():
-    from dl_techniques.models.relgt import create_relgt_model
+    from dl_techniques.models.graph.relgt import create_relgt_model
     return create_relgt_model(output_dim=2, model_size="small")
 
 
@@ -758,7 +742,7 @@ _sub("relgt", _b_relgt, _relgt_inputs)
 
 
 def _b_shgcn():
-    from dl_techniques.models.shgcn import SHGCNNodeClassifier
+    from dl_techniques.models.graph.shgcn import SHGCNNodeClassifier
     return SHGCNNodeClassifier(num_classes=3, hidden_dims=[8], embedding_dim=8,
                                dropout_rate=0.0)
 
@@ -815,7 +799,7 @@ def _b_sam_training_model():
     4.140615e-03 against ``absmax`` 1.475909e+00.
     """
     from .test_sam.test_correctness import build_reduced_sam
-    from dl_techniques.models.SAM.SAM1.training_model import SAMTrainingModel
+    from dl_techniques.models.vision_language.sam.sam1.training_model import SAMTrainingModel
     return SAMTrainingModel(build_reduced_sam(), multimask_output=False)
 
 
@@ -944,7 +928,7 @@ FLOAT64_OVERRIDES: Dict[str, Dict[str, Any]] = {
     # ``expected_output_dtype="float32"``: NOT an exemption -- the assertion
     # still runs, against the value the package DOCUMENTS. ``ideogram4``'s
     # velocity head casts to float32 unconditionally, stated three times in
-    # `models/ideogram4/transformer.py` (module notes line 86, class docstring
+    # `models/vision_language/ideogram4/transformer.py` (module notes line 86, class docstring
     # line 160, call site line 325) as mirroring the reference implementation's
     # `.float()` return. D-058 ruled the same way for its mixed-precision arm.
     # MEASURED here: under a real float64 scope the model returns float32, so a
@@ -1001,7 +985,7 @@ def _extra(name: str, build, make_inputs, **kwargs: Any) -> None:
 
 
 def _b_coshnet():
-    from dl_techniques.models.coshnet.model import create_coshnet
+    from dl_techniques.models.vision.coshnet.model import create_coshnet
     return create_coshnet("tiny", num_classes=4, input_shape=(32, 32, 3))
 
 
@@ -1009,7 +993,7 @@ _extra("coshnet", _b_coshnet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_darkir():
-    from dl_techniques.models.darkir.model import create_darkir_model
+    from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
     return create_darkir_model(
         width=8, middle_blk_num_enc=1, middle_blk_num_dec=1,
         enc_blk_nums=[1, 1], dec_blk_nums=[1, 1], dilations=[1, 2],
@@ -1020,7 +1004,7 @@ _extra("darkir", _b_darkir, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_fftnet():
-    from dl_techniques.models.fftnet.model import create_fftnet
+    from dl_techniques.models.language.fftnet.model import create_fftnet
     return create_fftnet("tiny", image_size=32, patch_size=16)
 
 
@@ -1028,7 +1012,7 @@ _extra("fftnet", _b_fftnet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_pw_fnet():
-    from dl_techniques.models.pw_fnet.model import create_pw_fnet
+    from dl_techniques.models.vision.image_restoration.pw_fnet.model import create_pw_fnet
     return create_pw_fnet(width=8, middle_blk_num=1,
                           enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
 
@@ -1037,7 +1021,7 @@ _extra("pw_fnet", _b_pw_fnet, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_clip():
-    from dl_techniques.models.clip.model import CLIP
+    from dl_techniques.models.vision_language.clip.model import CLIP
     return CLIP(image_size=32, patch_size=16, vision_layers=1, vision_width=32,
                 vision_heads=2, vision_kv_heads=1, vocab_size=64,
                 context_length=8, text_layers=1, text_width=32, text_heads=2,
@@ -1053,7 +1037,7 @@ _extra("clip", _b_clip, _clip_inputs)
 
 def _b_detr():
     import keras
-    from dl_techniques.models.detr.model import DETR, DetrTransformer
+    from dl_techniques.models.vision.detr.model import DETR, DetrTransformer
     backbone = keras.Sequential([
         keras.layers.Conv2D(32, 3, strides=2, padding="same",
                             activation="relu", name="stub_conv_1"),
@@ -1076,7 +1060,7 @@ _extra("detr", _b_detr, _detr_inputs)
 
 
 def _b_dino():
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
     return create_dino_v2("tiny", image_size=28, patch_size=14, num_classes=4,
                           num_register_tokens=2)
 
@@ -1089,7 +1073,7 @@ _extra("dino", _b_dino,
 
 
 def _b_distilbert():
-    from dl_techniques.models.distilbert.model import DistilBERT
+    from dl_techniques.models.language.distilbert.model import DistilBERT
     return DistilBERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                       intermediate_size=64, max_position_embeddings=16)
 
@@ -1098,7 +1082,7 @@ _extra("distilbert", _b_distilbert, lambda: {"input_ids": _ids(64, 1, 8)})
 
 
 def _b_energy_transformer():
-    from dl_techniques.models.energy_transformer.model import (
+    from dl_techniques.models.vision.energy_transformer.model import (
         create_energy_transformer_classifier,
     )
     return create_energy_transformer_classifier(
@@ -1109,7 +1093,7 @@ _extra("energy_transformer", _b_energy_transformer, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_fastvlm():
-    from dl_techniques.models.fastvlm.model import FastVLM
+    from dl_techniques.models.vision_language.fastvlm.model import FastVLM
     # Three stages: ``embed_dims must have 3 elements`` (measured, its own
     # constructor guard).
     return FastVLM(num_classes=4, embed_dims=[16, 32, 64], depths=[1, 1, 1],
@@ -1122,7 +1106,7 @@ _extra("fastvlm", _b_fastvlm, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_graph_energy_transformer():
-    from dl_techniques.models.graph_energy_transformer.model import (
+    from dl_techniques.models.graph.graph_energy_transformer.model import (
         create_graph_classifier,
     )
     return create_graph_classifier(node_feature_dim=8, num_classes=4,
@@ -1146,7 +1130,7 @@ _extra("graph_energy_transformer", _b_graph_energy_transformer, _get_inputs)
 
 
 def _b_kan():
-    from dl_techniques.models.kan.model import KAN
+    from dl_techniques.models.general_purpose.kan.model import KAN
     return KAN(layer_configs=[{"features": 8, "grid_size": 5,
                                "activation": "swish"},
                               {"features": 4, "grid_size": 4,
@@ -1158,7 +1142,7 @@ _extra("kan", _b_kan, lambda: _f32(2, 6))
 
 
 def _b_latent_gmm():
-    from dl_techniques.models.latent_gmm_registration.model import (
+    from dl_techniques.models.point_cloud.latent_gmm_registration.model import (
         LatentGMMRegistration,
     )
     return LatentGMMRegistration(num_gaussians=4, k_neighbors=8)
@@ -1169,7 +1153,7 @@ _extra("latent_gmm_registration", _b_latent_gmm,
 
 
 def _b_mamba():
-    from dl_techniques.models.mamba.mamba_v1 import Mamba
+    from dl_techniques.models.language.mamba.mamba_v1 import Mamba
     return Mamba(vocab_size=64, d_model=32, num_layers=1, d_state=8, d_conv=4,
                  expand=2)
 
@@ -1178,7 +1162,7 @@ _extra("mamba", _b_mamba, lambda: _ids(64, 1, 8))
 
 
 def _b_mobile_clip():
-    from dl_techniques.models.mobile_clip.mobile_clip_v2 import (
+    from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 import (
         create_mobile_clip_v2,
     )
     return create_mobile_clip_v2("mobileclip2_s0")
@@ -1192,7 +1176,7 @@ _extra("mobile_clip", _b_mobile_clip, _mobile_clip_inputs)
 
 
 def _b_nam():
-    from dl_techniques.models.nam.model import NAM, NAMConfig
+    from dl_techniques.models.neural_computer.nam.model import NAM, NAMConfig
     return NAM(config=NAMConfig(hidden_size=32, num_heads=4,
                                 num_tree_layers=1, intermediate_size=64,
                                 memory_size=8, num_read_heads=2,
@@ -1217,24 +1201,10 @@ _extra("nam", _b_nam, lambda: {"input_ids": _ids(16, 2, 16)},
        call_fn=_nam_call)
 
 
-def _b_nano_vlm_world_model():
-    from dl_techniques.models.nano_vlm_world_model.model import (
-        create_score_based_nanovlm,
-    )
-    return create_score_based_nanovlm(variant="mini", vocab_size=256)
-
-
-def _nvwm_inputs():
-    return {"images": _f32(1, 224, 224, 3), "text": _ids(256, 1, 8)}
-
-
-_extra("nano_vlm_world_model", _b_nano_vlm_world_model, _nvwm_inputs)
-
-
 def _b_thera():
-    from dl_techniques.models.thera.model import Thera
-    from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
-    from dl_techniques.models.thera.tails import build_thera_tail
+    from dl_techniques.models.vision.thera.model import Thera
+    from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
+    from dl_techniques.models.vision.thera.tails import build_thera_tail
     backbone = EDSRBackbone(num_feats=16, num_blocks=1,
                             name="edsr_backbone_subject")
     feat_ch = backbone.compute_output_shape((None, None, None, 3))[-1]
@@ -1255,7 +1225,7 @@ _extra("thera", _b_thera, _thera_inputs)
 
 
 def _b_tree_transformer():
-    from dl_techniques.models.tree_transformer.model import TreeTransformer
+    from dl_techniques.models.language.tree_transformer.model import TreeTransformer
     # ``max_len``, not ``max_position_embeddings``: the constructor rejects the
     # BERT spelling outright rather than ignoring it.
     return TreeTransformer(vocab_size=64, hidden_size=32, num_layers=1,
@@ -1341,35 +1311,35 @@ def _no_head(name: str):
 
 @_no_head("cbam")
 def _b_cbam_no_head():
-    from dl_techniques.models.cbam import create_cbam_net
+    from dl_techniques.models.vision.cbam import create_cbam_net
     return create_cbam_net("tiny", num_classes=4, input_shape=(32, 32, 3),
                            include_top=False)
 
 
 @_no_head("convnext")
 def _b_convnext_no_head():
-    from dl_techniques.models.convnext import ConvNeXtV1
+    from dl_techniques.models.vision.convnext import ConvNeXtV1
     return ConvNeXtV1(num_classes=4, depths=[1, 1], dims=[8, 16],
                       include_top=False)
 
 
 @_no_head("coshnet")
 def _b_coshnet_no_head():
-    from dl_techniques.models.coshnet.model import create_coshnet
+    from dl_techniques.models.vision.coshnet.model import create_coshnet
     return create_coshnet("tiny", num_classes=4, input_shape=(32, 32, 3),
                           include_top=False)
 
 
 @_no_head("dino")
 def _b_dino_no_head():
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
     return create_dino_v2("tiny", image_size=28, patch_size=14, num_classes=4,
                           num_register_tokens=2, include_top=False)
 
 
 @_no_head("fastvlm")
 def _b_fastvlm_no_head():
-    from dl_techniques.models.fastvlm.model import FastVLM
+    from dl_techniques.models.vision_language.fastvlm.model import FastVLM
     return FastVLM(num_classes=4, embed_dims=[16, 32, 64], depths=[1, 1, 1],
                    num_heads=[1, 2, 4], mlp_ratio=2.0, dropout_rate=0.0,
                    drop_path_rate=0.0, include_top=False,
@@ -1378,21 +1348,21 @@ def _b_fastvlm_no_head():
 
 @_no_head("fractalnet")
 def _b_fractalnet_no_head():
-    from dl_techniques.models.fractalnet import create_fractal_net
+    from dl_techniques.models.vision.fractalnet import create_fractal_net
     return create_fractal_net(variant="micro", num_classes=4,
                               input_shape=(32, 32, 3), include_top=False)
 
 
 @_no_head("mobilenet")
 def _b_mobilenet_no_head():
-    from dl_techniques.models.mobilenet import create_mobilenetv2
+    from dl_techniques.models.vision.mobilenet import create_mobilenetv2
     return create_mobilenetv2(variant="small", num_classes=4,
                               input_shape=(32, 32, 3), include_top=False)
 
 
 @_no_head("resnet")
 def _b_resnet_no_head():
-    from dl_techniques.models.resnet import ResNet
+    from dl_techniques.models.vision.resnet import ResNet
     return ResNet(num_classes=4, blocks_per_stage=[1, 1],
                   filters_per_stage=[8, 16], block_type="basic",
                   include_top=False)
@@ -1400,21 +1370,21 @@ def _b_resnet_no_head():
 
 @_no_head("squeezenet")
 def _b_squeezenet_no_head():
-    from dl_techniques.models.squeezenet import create_squeezenet_v1
+    from dl_techniques.models.vision.squeezenet import create_squeezenet_v1
     return create_squeezenet_v1("1.0", num_classes=4, input_shape=(64, 64, 3),
                                 include_top=False)
 
 
 @_no_head("swin_transformer")
 def _b_swin_no_head():
-    from dl_techniques.models.swin_transformer import create_swin_transformer
+    from dl_techniques.models.vision.swin_transformer import create_swin_transformer
     return create_swin_transformer("tiny", 4, input_shape=(32, 32, 3),
                                    include_top=False)
 
 
 @_no_head("vit")
 def _b_vit_no_head():
-    from dl_techniques.models.vit import create_vit
+    from dl_techniques.models.vision.vit import create_vit
     return create_vit(variant="vit_tiny", num_classes=4,
                       input_shape=(32, 32, 3), patch_size=16,
                       include_top=False)
@@ -1422,14 +1392,14 @@ def _b_vit_no_head():
 
 @_no_head("vit_hmlp")
 def _b_vit_hmlp_no_head():
-    from dl_techniques.models.vit_hmlp import create_vit_hmlp
+    from dl_techniques.models.vision.vit_hmlp import create_vit_hmlp
     return create_vit_hmlp(input_shape=(32, 32, 3), num_classes=4,
                            scale="tiny", patch_size=16, include_top=False)
 
 
 @_no_head("vit_siglip")
 def _b_vit_siglip_no_head():
-    from dl_techniques.models.vit_siglip import create_siglip_vision_transformer
+    from dl_techniques.models.vision.vit_siglip import create_siglip_vision_transformer
     return create_siglip_vision_transformer(
         input_shape=(32, 32, 3), num_classes=4, scale="tiny", patch_size=16,
         include_top=False)

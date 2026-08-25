@@ -24,7 +24,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import keras
 
-from dl_techniques.models.depth_anything.components import (
+from dl_techniques.models.vision.depth_anything.components import (
     DPTDecoder,
     REFERENCE_BN_EPSILON,
 )
@@ -66,7 +66,7 @@ class TestPlaceholderEncoderAgreesWithTheHead:
     """Consistency, not fidelity — the encoder has no reference to be faithful to."""
 
     def test_placeholder_encoder_batch_norms_use_the_same_value(self):
-        from dl_techniques.models.depth_anything.model import DepthAnything
+        from dl_techniques.models.vision.depth_anything.model import DepthAnything
 
         model = DepthAnything(
             input_shape=(64, 64, 3),

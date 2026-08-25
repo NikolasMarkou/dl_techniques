@@ -34,8 +34,8 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
-from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
+from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
 decoder = MaskDecoder(transformer_dim=256, num_multimask_outputs=3,
                       transformer=TwoWayTransformer(depth=2, embedding_dim=256,
                                                     num_heads=8, mlp_dim=2048))

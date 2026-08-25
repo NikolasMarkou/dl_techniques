@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/ntm`` -- Phase 5 batch B.
+Oracle adoption for ``models/neural_computer/ntm`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.ntm.model import NTMConfig, NTMModel
+from dl_techniques.models.neural_computer.ntm.model import NTMConfig, NTMModel
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

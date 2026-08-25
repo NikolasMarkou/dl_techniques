@@ -23,11 +23,11 @@ import pytest
 import keras
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
-from dl_techniques.models.video_jepa.config import VideoJEPAConfig
-from dl_techniques.models.video_jepa.masking import TubeMaskGenerator
-from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
-from dl_techniques.models.video_jepa.predictor import VideoJEPAPredictor
-from dl_techniques.models.video_jepa.model import VideoJEPA
+from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.vision.video_jepa.masking import TubeMaskGenerator
+from dl_techniques.models.vision.video_jepa.encoder import VideoJEPACliffordEncoder
+from dl_techniques.models.vision.video_jepa.predictor import VideoJEPAPredictor
+from dl_techniques.models.vision.video_jepa.model import VideoJEPA
 from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 
@@ -892,7 +892,7 @@ class TestVideoJEPAIter2:
         multi-horizon (len(predict_horizons) >= 2) AND weak EMA
         (ema_momentum < 0.5) must emit a `logger.warning` containing the
         stable substring 'head-collapse'."""
-        from dl_techniques.models.video_jepa import model as model_mod
+        from dl_techniques.models.vision.video_jepa import model as model_mod
         captured: list = []
 
         def fake_warning(msg, *args, **kwargs):
@@ -917,7 +917,7 @@ class TestVideoJEPAIter2:
     def test_multi_horizon_with_strong_ema_no_advisory(self, monkeypatch) -> None:
         """Symmetric negative case: with default strong EMA
         (ema_momentum=0.996), the advisory must NOT fire."""
-        from dl_techniques.models.video_jepa import model as model_mod
+        from dl_techniques.models.vision.video_jepa import model as model_mod
         captured: list = []
 
         def fake_warning(msg, *args, **kwargs):

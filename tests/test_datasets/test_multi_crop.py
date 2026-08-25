@@ -150,7 +150,7 @@ class TestElementContract:
 
     def test_n_global_views_agrees_with_the_training_model(self):
         """The two constants are declared in two modules; pin them together."""
-        from dl_techniques.models.dino.training import (
+        from dl_techniques.models.vision.dino.training import (
             N_GLOBAL_VIEWS as MODEL_N_GLOBAL_VIEWS,
         )
 
@@ -351,7 +351,7 @@ class TestLocalCropSizeIsRefused:
     def test_the_message_names_the_backlog_document(self):
         with pytest.raises(
             Exception,
-            match=r"src/dl_techniques/models/dino/README\.md",
+            match=r"src/dl_techniques/models/vision/dino/README\.md",
         ):
             make_multi_crop_map_fn(CROP_SIZE, local_crop_size=CROP_SIZE * 2)
 
@@ -679,7 +679,7 @@ class TestEndToEndWithTheTrainingModel:
     """The seam most likely to be off by one axis, checked here not at step 12."""
 
     def test_a_batched_element_forward_passes_through_DINOTrainingModel(self):
-        from dl_techniques.models.dino.training import (
+        from dl_techniques.models.vision.dino.training import (
             create_dino_training_model,
         )
 

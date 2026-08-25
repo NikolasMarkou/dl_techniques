@@ -322,8 +322,8 @@ class TextEncoder(keras.layers.Layer):
         # projection to tie the embedding TO (the only Dense here is the
         # factorized path's embed_projection, factorized_dim -> embed_dim). Weight
         # tying belongs in the MODEL that owns the vocabulary projection -- see
-        # models/masked_language_model/clm.py (tie_weights), models/gpt2/gpt2.py
-        # and models/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
+        # models/language/masked_language_model/clm.py (tie_weights), models/language/gpt2/gpt2.py
+        # and models/vision_language/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
         # they build themselves.
         #
         # The second check is not redundant: _create_embedding_layers routes
@@ -336,7 +336,7 @@ class TextEncoder(keras.layers.Layer):
                 "output/vocabulary projection to tie the word embedding to, so "
                 "there is nothing to share with. Use 'learned' here and perform "
                 "the tying in the model that owns the output projection (see "
-                "models/masked_language_model/clm.py's tie_weights). "
+                "models/language/masked_language_model/clm.py's tie_weights). "
                 "Legal values: 'learned', 'factorized'."
             )
         if embedding_type not in ('learned', 'factorized'):
@@ -508,7 +508,7 @@ class TextEncoder(keras.layers.Layer):
         # diff 0.0, at True vs False. So `mask_zero=True` advertised a masking
         # mechanism this stack does not implement and whose only observable
         # effect was Keras' "will destroy the mask information" UserWarning.
-        # Same finding, same repair, as `models/distilbert/model.py` (D-018).
+        # Same finding, same repair, as `models/language/distilbert/model.py` (D-018).
         # Callers who want the flag can still pass `embedding_args`.
         base_args = {
             'embeddings_initializer': initializers.TruncatedNormal(stddev=self.initializer_range),

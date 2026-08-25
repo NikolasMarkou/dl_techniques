@@ -41,7 +41,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.vit_siglip.model import SigLIPVisionTransformer
+from dl_techniques.models.vision.vit_siglip.model import SigLIPVisionTransformer
 
 
 @keras.saving.register_keras_serializable(package="dl_techniques_test")

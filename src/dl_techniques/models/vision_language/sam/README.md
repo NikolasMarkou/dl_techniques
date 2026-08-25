@@ -10,9 +10,9 @@ package's own README states its scope up front — start there.
 
 | Package | Prompt | What it adds | README |
 |---|---|---|---|
-| [`SAM1/`](SAM1/) | point / box / mask | ViT encoder run once per image, cheap per-click decoder | [SAM1/README.md](SAM1/README.md) |
-| [`SAM2/`](SAM2/) | point / box / mask, over video | Hiera trunk, FPN neck, streaming memory bank and memory attention | [SAM2/README.md](SAM2/README.md) |
-| [`SAM3/`](SAM3/) | **text** | open-vocabulary DETR-style detection plus a MaskFormer head | [SAM3/README.md](SAM3/README.md) |
+| [`sam1/`](sam1/) | point / box / mask | ViT encoder run once per image, cheap per-click decoder | [sam1/README.md](sam1/README.md) |
+| [`sam2/`](sam2/) | point / box / mask, over video | Hiera trunk, FPN neck, streaming memory bank and memory attention | [sam2/README.md](sam2/README.md) |
+| [`sam3/`](sam3/) | **text** | open-vocabulary DETR-style detection plus a MaskFormer head | [sam3/README.md](sam3/README.md) |
 
 ## Licensing
 
@@ -22,7 +22,7 @@ under the SAM License, which is not compatible with GPL-3.0** — so both
 packages were reimplemented from published numbers and a re-read reference,
 never transliterated. No upstream source file was copied, adapted or
 line-by-line ported, and no upstream weights ship here. **That constraint binds
-any future extension of SAM2/ or SAM3/**: work from the paper and from
+any future extension of sam2/ or sam3/**: work from the paper and from
 published configuration numbers, not from the reference source.
 
 The original models were developed by Meta AI Research.

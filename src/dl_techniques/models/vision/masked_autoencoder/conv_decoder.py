@@ -98,7 +98,7 @@ class ConvDecoder(keras.layers.Layer):
         # or more levels deep to `model.weights.h5` when its owner is a
         # `keras.layers.Layer`. It DOES write the identical container when the
         # owner is a `keras.Model`, which is why the same shape is harmless in
-        # `models/accunet/model.py:304` and `models/cliffordnet/model.py:352`.
+        # `models/vision/accunet/model.py:304` and `models/vision/cliffordnet/model.py:352`.
         # MEASURED on this exact class: the list-of-dicts form put 11 of 51
         # tensors and 98,403 of 329,827 parameters into the archive -- every
         # decoder conv kernel and all 32 BatchNorm tensors silently absent, and

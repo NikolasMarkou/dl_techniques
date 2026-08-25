@@ -1,7 +1,7 @@
 """DistilBERT's three defining structural claims, each pinned by an assertion.
 
-The module docstring of ``models/distilbert/model.py`` makes exactly three
-structural claims that distinguish this package from ``models/bert/``:
+The module docstring of ``models/language/distilbert/model.py`` makes exactly three
+structural claims that distinguish this package from ``models/language/bert/``:
 
 1. **The compression is entirely in the DEPTH.** ``base`` is 6 layers where
    BERT-base is 12, while ``hidden_size`` / ``num_heads`` / ``intermediate_size``
@@ -41,7 +41,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.distilbert.model import DistilBERT
+from dl_techniques.models.language.distilbert.model import DistilBERT
 
 # BERT-base's own geometry, the reference DistilBERT compresses against.
 BERT_BASE = {"hidden_size": 768, "num_layers": 12, "num_heads": 12,

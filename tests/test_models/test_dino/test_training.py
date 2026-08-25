@@ -1,4 +1,4 @@
-"""Tests for `src/dl_techniques/models/dino/training.py` (DINOTrainingModel).
+"""Tests for `src/dl_techniques/models/vision/dino/training.py` (DINOTrainingModel).
 
 Written for plan-2026-08-01T105809-dc0c402e step 8. Three things here are load
 bearing and must not be "simplified":
@@ -53,12 +53,12 @@ import numpy as np
 import pytest
 
 from dl_techniques.losses.dino_loss import DINOLoss, pack_student_teacher
-from dl_techniques.models.depth_anything.teacher_ema import (
+from dl_techniques.models.vision.depth_anything.teacher_ema import (
     TeacherEMACallback,
     cosine_ema_schedule,
 )
-from dl_techniques.models.dino import DINOv1
-from dl_techniques.models.dino.training import (
+from dl_techniques.models.vision.dino import DINOv1
+from dl_techniques.models.vision.dino.training import (
     N_GLOBAL_VIEWS,
     DINOTrainingModel,
     create_dino_training_model,
@@ -604,7 +604,7 @@ class TestTeacherStartsFromTheStudent:
         It must return a synchronized pair on its own, not only when its output
         is handed to `DINOTrainingModel`.
         """
-        from dl_techniques.models.dino.dino_v1 import (
+        from dl_techniques.models.vision.dino.dino_v1 import (
             create_dino_teacher_student_pair,
         )
 
@@ -638,7 +638,7 @@ class TestTeacherStartsFromTheStudent:
 
     def test_the_sync_helper_refuses_an_unbuilt_model(self, dtype_policy):
         """A copy that silently no-ops is the defect wearing a fix's clothes."""
-        from dl_techniques.models.dino.common import sync_teacher_to_student
+        from dl_techniques.models.vision.dino.common import sync_teacher_to_student
 
         assert keras.mixed_precision.dtype_policy().name == dtype_policy
 
@@ -666,7 +666,7 @@ class TestTeacherStartsFromTheStudent:
         The fixture must have IDENTICAL shapes and count in both models, or
         this test passes for the wrong reason.
         """
-        from dl_techniques.models.dino.common import sync_teacher_to_student
+        from dl_techniques.models.vision.dino.common import sync_teacher_to_student
 
         assert keras.mixed_precision.dtype_policy().name == dtype_policy
 
@@ -725,8 +725,8 @@ class TestTeacherStartsFromTheStudent:
         about the other two. MEASURED here: variable dtypes float32 /
         float32 / float64 and post-sync max|delta| exactly 0.0 at all three.
         """
-        from dl_techniques.models.dino.common import sync_teacher_to_student
-        from dl_techniques.models.dino.dino_v1 import (
+        from dl_techniques.models.vision.dino.common import sync_teacher_to_student
+        from dl_techniques.models.vision.dino.dino_v1 import (
             create_dino_teacher_student_pair,
         )
 

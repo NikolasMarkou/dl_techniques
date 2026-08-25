@@ -7,7 +7,7 @@ This package had **no README** until 2026-08-18.
 A model for *evaluating* arithmetic expressions, assembled from three architectures
 already in this tree:
 
-1.  **Tree Transformer** (`models/tree_transformer/`, `GroupAttention`) — induces the
+1.  **Tree Transformer** (`models/language/tree_transformer/`, `GroupAttention`) — induces the
     expression's parse structure.
 2.  **Neural Turing Machine** (`layers/memory/baseline_ntm.py`) — a recurrent context
     vector for the controller. It does **not** supply the operands.
@@ -50,7 +50,7 @@ argument: 'batch'`. Drive it yourself:
 
 ```python
 import numpy as np
-from dl_techniques.models.nam import create_nam, ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam import create_nam, ArithmeticTokenizer
 
 tok = ArithmeticTokenizer(max_len=32)
 ids = np.array([tok.encode("1 + 2 * 3")], dtype="int32")

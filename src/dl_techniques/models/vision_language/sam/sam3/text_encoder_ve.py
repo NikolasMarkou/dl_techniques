@@ -33,7 +33,7 @@ Settled configuration: ``width=1024``, ``depth=24``, ``num_heads=16``,
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.text_encoder_ve import Sam3TextEncoder
+from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
 encoder = Sam3TextEncoder(d_model=256, width=1024, depth=24, num_heads=16)
 prompt = encoder(token_ids)          # (batch, seq, 256)
 ```

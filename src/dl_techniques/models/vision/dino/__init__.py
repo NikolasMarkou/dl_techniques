@@ -2,7 +2,7 @@
 
 Three independently-authored ViT backbones from the DINO paper line, sharing one
 converged factory surface but NOT a common trunk (that unification is a deliberate
-non-goal; see ``src/dl_techniques/models/dino/README.md`` § "Why there is no shared
+non-goal; see ``src/dl_techniques/models/vision/dino/README.md`` § "Why there is no shared
 base class"):
 
 - ``dino_v1`` — Caron et al. 2021, "Emerging Properties in Self-Supervised Vision

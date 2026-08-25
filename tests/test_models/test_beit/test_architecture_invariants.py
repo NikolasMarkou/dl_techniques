@@ -19,7 +19,7 @@ from dl_techniques.layers.attention.beit_attention import BeitAttention
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
     BeitModel,
     create_beit_backbone,

@@ -14,7 +14,7 @@ import tempfile
 import os
 from typing import Tuple, Dict, Any
 
-from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2, SimplifiedFireModule, create_squeezenodule_net_v2
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2, SimplifiedFireModule, create_squeezenodule_net_v2
 
 
 class TestSqueezeNoduleNetV2:

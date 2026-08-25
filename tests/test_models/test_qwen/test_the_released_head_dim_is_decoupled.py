@@ -16,7 +16,7 @@ against a table that never sets it.
 import keras
 import pytest
 
-from dl_techniques.models.qwen.qwen3_next import Qwen3Next
+from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 
 #: Released config, fetched 2026-08-23 from
 #: https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct/raw/main/config.json

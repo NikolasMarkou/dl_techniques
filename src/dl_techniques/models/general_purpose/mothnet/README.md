@@ -186,7 +186,7 @@ import numpy as np
 from sklearn.svm import SVC
 
 # Local imports from your project structure
-from dl_techniques.models.mothnet.model import MothNet, create_cyborg_features
+from dl_techniques.models.general_purpose.mothnet.model import MothNet, create_cyborg_features
 
 # --- Dummy Data ---
 # Imagine a 10-class problem with only 50 training samples and 784 features
@@ -345,7 +345,7 @@ import numpy as np
 import keras
 import tempfile
 import os
-from dl_techniques.models.mothnet.model import MothNet
+from dl_techniques.models.general_purpose.mothnet.model import MothNet
 
 def test_mothnet_serialization_cycle():
     """CRITICAL TEST: Ensures a model can be saved and loaded."""

@@ -32,7 +32,7 @@ EXPECTED_SHAPES = {
 
 
 def _build():
-    from dl_techniques.models.latent_gmm_registration.model import (
+    from dl_techniques.models.point_cloud.latent_gmm_registration.model import (
         LatentGMMRegistration,
     )
 

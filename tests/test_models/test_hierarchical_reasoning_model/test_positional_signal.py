@@ -36,7 +36,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hierarchical_reasoning_model.model import (
     HierarchicalReasoningModel,
 )
 

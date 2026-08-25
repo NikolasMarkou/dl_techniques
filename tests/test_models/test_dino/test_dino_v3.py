@@ -32,7 +32,7 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    from dl_techniques.models.dino.dino_v3 import create_dino_v3
+    from dl_techniques.models.vision.dino.dino_v3 import create_dino_v3
 
     # v3 forwards cleanly (plan_2026-06-15_2a23a001) -- no xfail safety net, so
     # any future regression in build/forward fails loudly.
@@ -61,7 +61,7 @@ def test_smoke_build_and_forward():
 # plan-2026-08-01T105809-dc0c402e / step 5
 # =====================================================================
 
-from dl_techniques.models.dino.dino_v3 import DINOv3  # noqa: E402
+from dl_techniques.models.vision.dino.dino_v3 import DINOv3  # noqa: E402
 from dl_techniques.layers.attention.group_query_attention import (  # noqa: E402
     GroupedQueryAttention,
 )

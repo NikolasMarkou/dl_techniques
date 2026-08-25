@@ -183,7 +183,7 @@ class SHGCNLayer(keras.layers.Layer):
             # inside `build()` belongs to whatever graph is active at build time,
             # and Keras builds a layer in a THROWAWAY scratch `FuncGraph`. The
             # constant is then dead by the time `call()` runs, and every one of
-            # the three shipped `models/shgcn` classes raised
+            # the three shipped `models/graph/shgcn` classes raised
             # `TypeError: <tf.Tensor 'shgcn_hidden_0/Const:0'> is out of scope`
             # for `use_curvature=False` -- i.e. the public knob had NO working
             # forward path in any class, while the default `True` was green.

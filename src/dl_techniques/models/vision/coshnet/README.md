@@ -140,7 +140,7 @@ pip install keras>=3.0 tensorflow>=2.16
 
 ```python
 import keras
-from dl_techniques.models.coshnet import create_coshnet
+from dl_techniques.models.vision.coshnet import create_coshnet
 
 # 1. Create a Base CoShNet model for CIFAR-10 (10 classes)
 # The input shape is flexible, but (32, 32, 3) is standard for this variant
@@ -170,7 +170,7 @@ model.summary()
 If the presets don't fit your needs, you can instantiate the `CoShNet` class directly with custom hyperparameters.
 
 ```python
-from dl_techniques.models.coshnet import CoShNet
+from dl_techniques.models.vision.coshnet import CoShNet
 
 model = CoShNet(
     num_classes=100,

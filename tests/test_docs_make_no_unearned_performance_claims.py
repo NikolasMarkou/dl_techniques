@@ -83,8 +83,14 @@ PUFFERY_RE = re.compile(
 # list self-liquidates: fix the file and this test tells you to delete the entry.
 # It is NOT a general-purpose allowlist -- do not add to it to silence a failure.
 PENDING_PUFFERY = (
-    "swin_transformer/model.py",
-    "vit/model.py",
+    # `vision/vit/model.py` left this set on 2026-08-25. It was NOT cleaned up
+    # here: its puffery was removed earlier by whoever rewrote its docstring,
+    # and this table could not tell, because the restructure had left the key
+    # spelled `vit/model.py` -- so `MODELS_DIR / rel` raised FileNotFoundError
+    # and the self-liquidation arm errored instead of firing. Repointing the key
+    # made the arm run and it immediately demanded the deletion it was built to
+    # demand. `vision/swin_transformer/model.py` still matches and stays.
+    "vision/swin_transformer/model.py",
 )
 
 # A period only ends a sentence when the next token starts one. Without the
@@ -170,7 +176,7 @@ def test_no_doc_uses_unverifiable_maturity_puffery():
 # --- rule 3: a README may not advertise a weight-loading path that raises -----
 
 # DECISION plan-2026-08-23T091307-9a110062/D-603
-# `resnet/README.md` section 9 quoted "70-80% accuracy from scratch" against
+# `vision/resnet/README.md` section 9 quoted "70-80% accuracy from scratch" against
 # "85-95% pretrained" and showed 14 runnable `pretrained=True` examples -- while
 # `ResNet._download_weights` raises `NotImplementedError` by design (the
 # fake-weight-URL family). It advertised the payoff of a path that cannot run.

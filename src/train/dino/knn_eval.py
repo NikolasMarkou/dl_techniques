@@ -10,7 +10,7 @@ This docstring is the OPERATING MANUAL for reading that probe: the STOP threshol
 to do when one fires, and how big a difference has to be before it means anything. It
 does NOT carry the evidence -- the measurement record behind every number below is
 ``research/2026_dino_ssl_measurements.md`` (cited as "the record"), and the per-flag
-reference is ``src/dl_techniques/models/dino/README.md`` § 6.2.
+reference is ``src/dl_techniques/models/vision/dino/README.md`` § 6.2.
 
 -------------------------------------------------------------------------------
 Collapse: A DECREASING LOSS DOES NOT RULE IT OUT (read this before reading a run)
@@ -97,7 +97,7 @@ Reading rules that follow from that measurement:
 * **That band belongs to ONE estimator: bank 64 / query 32 (2048 images).** Pass
   ``--knn-bank-batches 64 --knn-query-batches 32`` on any run whose number you intend to
   read against a historical figure; ``train_dino.py --smoke`` does NOT (see the paragraph
-  above, and `dl_techniques.models.dino`'s README § 6.3 trap 2).
+  above, and `dl_techniques.models.vision.dino`'s README § 6.3 trap 2).
 * **The BANK is seeded unconditionally.** `train_dino.build_knn_datasets` always passes
   ``shuffle_files_seed=config.seed``, down to the TFDS file interleave, so two runs at
   the same ``--seed`` share the same MEASURING INSTRUMENT. That buys reproducibility of

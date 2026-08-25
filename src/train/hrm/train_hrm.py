@@ -13,7 +13,7 @@ import keras
 import tensorflow as tf
 from keras import optimizers
 
-from dl_techniques.models.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hierarchical_reasoning_model.model import (
     create_hierarchical_reasoning_model,
     HierarchicalReasoningModel
 )

@@ -8,13 +8,13 @@
 
 This is the git-tracked home for the DINO self-supervised-pretraining measurements produced by two
 planning sessions in this repository: `plan-2026-08-01T105809-dc0c402e` (which built
-`src/dl_techniques/models/dino/`, `src/dl_techniques/losses/dino_loss.py` and
+`src/dl_techniques/models/vision/dino/`, `src/dl_techniques/losses/dino_loss.py` and
 `src/train/dino/`) and `plan-2026-08-01T195746-12a1f2db` (which produced the measurements below).
 
 Both of those plans' working directories live under `plans/`, and every training run they produced
 lives under `results/`. **Both directories are gitignored.** A fresh checkout of this repository
 therefore contains the code but none of the evidence for how the code's defaults were chosen. This
-file is that evidence. If a number in `src/dl_techniques/models/dino/README.md`, in
+file is that evidence. If a number in `src/dl_techniques/models/vision/dino/README.md`, in
 `src/train/dino/train_dino.py`'s docstring, or in `src/train/dino/knn_eval.py`'s docstring needs a
 provenance, it is here.
 
@@ -473,7 +473,7 @@ measurement has separated the two. A freeze-without-re-basing option on `Teacher
 separate them.
 
 That option is **deliberately not shipped**. `TeacherEMACallback`
-(`src/dl_techniques/models/depth_anything/teacher_ema.py`) is shared with
+(`src/dl_techniques/models/vision/depth_anything/teacher_ema.py`) is shared with
 `src/train/depth_anything/`, and adding an unmeasured knob to shared code for an experiment nobody
 has scheduled is speculative surface. The question is recorded here so the option survives without
 the code existing. Before any claim of the form "freezing the teacher early helps" is made, this
@@ -524,7 +524,7 @@ noise data are the two-seed spread and the single 0.0020 cross-process datum in 
 
 | item | value |
 |---|---|
-| plan that built `models/dino/`, `losses/dino_loss.py`, `src/train/dino/` | `plan-2026-08-01T105809-dc0c402e` |
+| plan that built `models/vision/dino/`, `losses/dino_loss.py`, `src/train/dino/` | `plan-2026-08-01T105809-dc0c402e` |
 | plan that produced every measurement in this file | `plan-2026-08-01T195746-12a1f2db` |
 | commit range of the measurement plan | `355c70d5..3bca113d` (10 commits) |
 | plan that promoted these numbers into this git-tracked file | `plan-2026-08-02T132301-93deeae2` |

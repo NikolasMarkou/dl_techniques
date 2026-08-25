@@ -38,7 +38,7 @@ class TestPretrainedContractAsDocumented:
     asserted the exact opposite of both halves until 2026-08-18."""
 
     def test_bfunet_true_raises_and_path_restores_by_value(self, tmp_path):
-        from dl_techniques.models.bias_free_denoisers.bfunet import (
+        from dl_techniques.models.vision.bias_free_denoisers.bfunet import (
             create_bfunet_variant,
         )
 
@@ -58,13 +58,13 @@ class TestPretrainedContractAsDocumented:
             create_bfunet_variant("tiny", input_shape=(64, 64, 3), pretrained=True)
 
     def test_distilbert_true_raises(self):
-        from dl_techniques.models.distilbert.model import DistilBERT
+        from dl_techniques.models.language.distilbert.model import DistilBERT
 
         with pytest.raises(NotImplementedError):
             DistilBERT.from_variant("base", pretrained=True)
 
     def test_modern_bert_true_raises(self):
-        from dl_techniques.models.modern_bert.model import ModernBERT
+        from dl_techniques.models.language.modern_bert.model import ModernBERT
 
         with pytest.raises(NotImplementedError):
             ModernBERT.from_variant("tiny", pretrained=True)
@@ -80,7 +80,7 @@ class TestPretrainedContractAsDocumented:
             subclassed build), and the transfer then finds no overlapping layer.
         The control arm is what distinguishes a real transfer from a no-op.
         """
-        from dl_techniques.models.modern_bert.model import (
+        from dl_techniques.models.language.modern_bert.model import (
             ModernBERT,
             create_modern_bert_with_head,
         )
@@ -144,7 +144,7 @@ class TestMaskedAutoencoderReadmeContract:
         Neither is a parameter; `encoder` is, and it must be a `keras.Model`."""
         import inspect
 
-        from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+        from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 
         params = inspect.signature(MaskedAutoencoder.__init__).parameters
         assert "encoder" in params
@@ -152,7 +152,7 @@ class TestMaskedAutoencoderReadmeContract:
         assert "encoder_output_shape" not in params
 
     def test_the_readme_custom_encoder_builds_and_reconstructs(self):
-        from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+        from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 
         mae = MaskedAutoencoder(
             encoder=_mae_encoder(),
@@ -170,7 +170,7 @@ class TestMaskedAutoencoderReadmeContract:
         """The README's `Custom Encoder Architecture` example was a single
         `Conv2D(64, 7, strides=4)`. Under the default `decoder_depth=4` its decoder
         emits 4x the input resolution, and the constructor now says so."""
-        from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+        from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 
         inputs = keras.Input(shape=(64, 64, 3))
         bad = keras.Model(
@@ -187,7 +187,7 @@ class TestMaskedAutoencoderReadmeContract:
 class TestMobileNetV4VariantNames:
 
     def test_the_documented_key_set_is_the_real_one(self):
-        from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
+        from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 
         assert set(MobileNetV4.MODEL_VARIANTS) == {
             "small", "medium", "large", "hybrid_medium", "hybrid_large",
@@ -199,13 +199,13 @@ class TestMobileNetV4VariantNames:
         lines below a module docstring saying it does not exist; the README carried
         six more, including a copy-pasteable `create_mobilenetv4("conv_medium", ...)`
         and an invented `"conv_large"`."""
-        from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
+        from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 
         with pytest.raises(ValueError):
             MobileNetV4.from_variant(absent, num_classes=10, input_shape=(32, 32, 3))
 
     def test_the_readme_quick_start_runs(self):
-        from dl_techniques.models.mobilenet.mobilenet_v4 import create_mobilenetv4
+        from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
         model = create_mobilenetv4(
             variant="small", num_classes=10, input_shape=(32, 32, 3)
@@ -258,7 +258,7 @@ class TestSHGCNWholeGraphInvocation:
         return x, adj, y
 
     def _model(self, c=3):
-        from dl_techniques.models.shgcn.model import SHGCNNodeClassifier
+        from dl_techniques.models.graph.shgcn.model import SHGCNNodeClassifier
 
         model = SHGCNNodeClassifier(num_classes=c, hidden_dims=[8], embedding_dim=8)
         model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
@@ -323,7 +323,7 @@ def test_fastvit_exposes_the_canonical_model_variants_alias():
     the pattern `vit`, `vit_hmlp` and `distilbert` all support -- raised
     `AttributeError`. The alias must be the SAME dict, not a copy.
     """
-    from dl_techniques.models.fastvit.model import (
+    from dl_techniques.models.vision.fastvit.model import (
         MCI_VARIANTS,
         FastVitImageEncoder,
     )

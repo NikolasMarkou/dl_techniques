@@ -614,7 +614,7 @@ class TestSwinBlockInternalPadding:
 
     @pytest.mark.parametrize("shift_size", [0, 2])
     def test_symbolic_non_divisible_input_round_trips(self, shift_size):
-        """The dynamic-shape path (``models/thera``'s path) must run too.
+        """The dynamic-shape path (``models/vision/thera``'s path) must run too.
 
         Traced against an explicit ``TensorSpec([None, None, None, C])`` rather
         than compared eagerly: an eager-vs-eager comparison takes the SAME

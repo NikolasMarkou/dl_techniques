@@ -27,7 +27,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM2.neck import SAM2ImageEncoder
+from dl_techniques.models.vision_language.sam.sam2.neck import SAM2ImageEncoder
 encoder = SAM2ImageEncoder(trunk=trunk, neck=neck, scalp=1)
 out = encoder(images)                 # vision_features, backbone_fpn, pos_enc
 ```
@@ -61,7 +61,7 @@ from dl_techniques.layers.upsample import upsample
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
-from dl_techniques.models.SAM.SAM2.hiera import Hiera
+from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
 
 # ---------------------------------------------------------------------
 

@@ -7,7 +7,7 @@ plan_2026-06-15_39a31d4a (D-001): the CLS token is now owned by the
 assertion, no longer an xfail.
 
 Since plan-2026-08-01T105809-dc0c402e step 6 the package DOES export its public
-surface, so ``from dl_techniques.models.dino import create_dino_v1`` works; these
+surface, so ``from dl_techniques.models.vision.dino import create_dino_v1`` works; these
 tests keep importing from the submodule so a package-level export regression is
 not the thing that makes them fail. The converged signature is
 ``create_dino_v1(variant, *, image_size, patch_size, num_classes, include_top, ...)``
@@ -57,7 +57,7 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    from dl_techniques.models.dino.dino_v1 import create_dino_v1
+    from dl_techniques.models.vision.dino.dino_v1 import create_dino_v1
 
     model = create_dino_v1(
         "small",
@@ -99,7 +99,7 @@ def test_smoke_build_and_forward():
 
 def _small_dino(**kwargs):
     """A 2-block DINOv1 on a 2x2 patch grid — cheap enough for weight probes."""
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     defaults = dict(
         embed_dim=32,
@@ -175,7 +175,7 @@ def test_qkv_bias_true_creates_live_attention_bias_weights():
 
 
 def test_non_divisible_image_size_raises_from_dino_not_from_patch_embed():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     with pytest.raises(Exception, match=r"image_size \(30, 30\) must be "
                                         r"divisible by patch_size"):
@@ -192,7 +192,7 @@ def test_non_divisible_image_size_raises_from_dino_not_from_patch_embed():
 
 def test_non_divisible_image_size_raises_at_construction_not_at_forward():
     """The case no downstream layer catches: input_shape != image_size."""
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     with pytest.raises(Exception, match=r"image_size \(30, 30\) must be "
                                         r"divisible by patch_size"):
@@ -225,7 +225,7 @@ def _head_column_norms(head):
 
 
 def _built_head(**kwargs):
-    from dl_techniques.models.dino.dino_v1 import DINOHead
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
     defaults = dict(in_dim=16, out_dim=8, nlayers=2, hidden_dim=32,
                     bottleneck_dim=16)
@@ -258,7 +258,7 @@ def test_norm_last_layer_false_leaves_kernel_unconstrained():
 
 
 def test_norm_last_layer_true_survives_optimizer_steps():
-    from dl_techniques.models.dino.dino_v1 import DINOHead
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
     keras.utils.set_random_seed(7)
     head = DINOHead(in_dim=16, out_dim=8, nlayers=2, hidden_dim=32,
@@ -277,7 +277,7 @@ def test_norm_last_layer_true_survives_optimizer_steps():
 
 
 def test_norm_last_layer_survives_keras_round_trip(tmp_path):
-    from dl_techniques.models.dino.dino_v1 import DINOHead
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
     head = DINOHead(in_dim=16, out_dim=8, nlayers=2, hidden_dim=32,
                     bottleneck_dim=16, norm_last_layer=True)
@@ -316,7 +316,7 @@ def test_get_last_selfattention_raises_naming_the_missing_capability():
 
 
 def test_normalization_type_is_configurable_and_round_trips():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     model = _small_dino(normalization_type="rms_norm")
     config = model.get_config()
@@ -327,9 +327,9 @@ def test_normalization_type_is_configurable_and_round_trips():
 
 
 def test_variant_key_sets_match_across_the_dino_family():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
-    from dl_techniques.models.dino.dino_v2 import DINOv2VisionTransformer
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2VisionTransformer
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
 
     v1_keys = set(DINOv1.MODEL_VARIANTS)
     assert v1_keys == {"tiny", "small", "base", "large", "giant"}
@@ -338,9 +338,9 @@ def test_variant_key_sets_match_across_the_dino_family():
 
 
 def test_giant_variant_shares_the_family_dimensions():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
-    from dl_techniques.models.dino.dino_v2 import DINOv2VisionTransformer
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2VisionTransformer
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
 
     shared = ("embed_dim", "depth", "num_heads", "mlp_ratio")
     v1 = DINOv1.MODEL_VARIANTS["giant"]
@@ -363,7 +363,7 @@ def test_giant_variant_shares_the_family_dimensions():
 class TestDINOHead:
 
     def test_forward_shape(self):
-        from dl_techniques.models.dino.dino_v1 import DINOHead
+        from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
         head = DINOHead(in_dim=64, out_dim=128, nlayers=3,
                         hidden_dim=256, bottleneck_dim=64)
@@ -380,7 +380,7 @@ class TestDINOHead:
         matters too — a head whose output were ~0 everywhere would satisfy
         `assert_allclose` against any other ~0 output.
         """
-        from dl_techniques.models.dino.dino_v1 import DINOHead
+        from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
         head = DINOHead(in_dim=64, out_dim=128, nlayers=3,
                         hidden_dim=256, bottleneck_dim=64)
@@ -405,7 +405,7 @@ class TestDINOHead:
 class TestDINOv1:
 
     def _model(self):
-        from dl_techniques.models.dino.dino_v1 import create_dino_v1
+        from dl_techniques.models.vision.dino.dino_v1 import create_dino_v1
 
         return create_dino_v1("small", image_size=32, patch_size=16,
                               num_classes=10)
@@ -475,7 +475,7 @@ def _assert_policy_is_active(expected):
 class TestDINOHeadMixedPrecision:
 
     def test_forward_survives_every_dtype_policy(self, dtype_policy):
-        from dl_techniques.models.dino.dino_v1 import DINOHead
+        from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
         policy = _assert_policy_is_active(dtype_policy)
 
@@ -498,7 +498,7 @@ class TestDINOHeadMixedPrecision:
 class TestDINOv1MixedPrecision:
 
     def test_forward_survives_every_dtype_policy(self, dtype_policy):
-        from dl_techniques.models.dino.dino_v1 import DINOv1
+        from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
         policy = _assert_policy_is_active(dtype_policy)
 
@@ -535,7 +535,7 @@ class TestDINOv1MixedPrecision:
 
 
 def _head_at_dino_scale(seed):
-    from dl_techniques.models.dino.dino_v1 import DINOHead
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
     head = DINOHead(in_dim=384, out_dim=512, nlayers=3, hidden_dim=2048,
                     bottleneck_dim=256, norm_last_layer=False)
@@ -622,7 +622,7 @@ class TestDINOHeadFp16NormalizationOverflow:
 # ---------------------------------------------------------------------
 #
 # The audit greps the test BODIES (not the filenames) for every name in
-# `dl_techniques.models.dino.__all__`. Two names had zero body hits anywhere
+# `dl_techniques.models.vision.dino.__all__`. Two names had zero body hits anywhere
 # under `tests/`: `create_dino_teacher_student_pair` (an exported public factory,
 # named in the README, never constructed by any test) and `ModelVariant`. Both
 # are closed here; the remaining audit result is reported in the step's status.
@@ -632,7 +632,7 @@ class TestCreateDINOTeacherStudentPair:
     """`create_dino_teacher_student_pair` had ZERO test references before step 7."""
 
     def _pair(self, **kwargs):
-        from dl_techniques.models.dino.dino_v1 import (
+        from dl_techniques.models.vision.dino.dino_v1 import (
             create_dino_teacher_student_pair,
         )
 
@@ -697,7 +697,7 @@ class TestCreateDINOTeacherStudentPair:
         np.testing.assert_allclose(before, after, atol=1e-6)
 
     def test_input_shape_is_refused(self):
-        from dl_techniques.models.dino.dino_v1 import (
+        from dl_techniques.models.vision.dino.dino_v1 import (
             create_dino_teacher_student_pair,
         )
 
@@ -717,8 +717,8 @@ def test_model_variant_literal_lists_exactly_the_shipped_variants():
     """
     import typing
 
-    from dl_techniques.models.dino import ModelVariant
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino import ModelVariant
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     assert set(typing.get_args(ModelVariant)) == set(DINOv1.MODEL_VARIANTS)
     assert set(typing.get_args(ModelVariant)) == {
@@ -741,7 +741,7 @@ _OVERRIDE = dict(embed_dim=32, depth=1, num_heads=2)
 
 
 def test_from_variant_honours_an_explicit_architecture_override():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     model = DINOv1.from_variant(
         "tiny", image_size=32, patch_size=16, **_OVERRIDE
@@ -760,7 +760,7 @@ def test_from_variant_honours_an_explicit_architecture_override():
 
 def test_from_variant_without_an_override_still_uses_the_variant_table():
     """Control: the merge must not have broken the default path."""
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     model = DINOv1.from_variant("tiny", image_size=32, patch_size=16)
     table = DINOv1.MODEL_VARIANTS["tiny"]
@@ -772,7 +772,7 @@ def test_from_variant_without_an_override_still_uses_the_variant_table():
 
 def test_teacher_student_pair_honours_an_architecture_override():
     """The call site the defect was actually hit from (steps 8 and 9)."""
-    from dl_techniques.models.dino.dino_v1 import (
+    from dl_techniques.models.vision.dino.dino_v1 import (
         create_dino_teacher_student_pair,
     )
 
@@ -787,9 +787,9 @@ def test_teacher_student_pair_honours_an_architecture_override():
 
 def test_all_three_from_variant_agree_on_override_precedence():
     """Convergence guard: v1 was the outlier; keep all three merged."""
-    from dl_techniques.models.dino.dino_v1 import DINOv1
-    from dl_techniques.models.dino.dino_v2 import DINOv2
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
 
     v1 = DINOv1.from_variant("tiny", image_size=32, patch_size=16, **_OVERRIDE)
     v2 = DINOv2.from_variant("tiny", image_size=32, patch_size=16, **_OVERRIDE)

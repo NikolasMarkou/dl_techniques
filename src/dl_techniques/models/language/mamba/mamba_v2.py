@@ -68,7 +68,7 @@ series ships `130m/370m/780m/1.3b/2.7b`, where Mamba-1 ships
 `130m/370m/790m/1.4b/2.8b`, so this table's former `1.4b`/`2.8b` keys named models
 that do not exist in this series. They still resolve, as aliases onto `1.3b`/`2.7b`,
 whose shapes are identical. Note that `780m` here versus `790m` in
-:mod:`~dl_techniques.models.mamba.mamba_v1` is correct in both files, not a typo in
+:mod:`~dl_techniques.models.language.mamba.mamba_v1` is correct in both files, not a typo in
 either.
 
 Residual handling matches v1: blocks return `(output, running_residual)` and the
@@ -120,7 +120,7 @@ class Mamba2(keras.Model):
     :param rmsnorm: If True, use RMSNorm instead of LayerNormalization.
     :param d_ssm: Dimensionality of the SSM. Defaults to `d_model * expand`.
     :param norm_before_gate: Forwarded to every
-        :class:`~dl_techniques.models.mamba.components_v2.Mamba2Layer` in the
+        :class:`~dl_techniques.models.language.mamba.components_v2.Mamba2Layer` in the
         stack; see that class for the semantics. Exposed here because its
         docstring names ``norm_before_gate=True`` as the remedy for a checkpoint
         trained under the pre-2026-08-15 default, and nothing between this model

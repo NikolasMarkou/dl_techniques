@@ -27,7 +27,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.convnext import ConvNeXtV1, ConvNeXtV2
+from dl_techniques.models.vision.convnext import ConvNeXtV1, ConvNeXtV2
 
 _INPUT = (1, 32, 32, 3)
 

@@ -156,7 +156,7 @@ For f*(x) = g(U^T x) with U a low-dimensional subspace embedded in d-dim space, 
 
 Depth provides exponential expressivity gains. Functions a depth-(L+1) network can approximate with poly width require exp(L) width for a depth-2 network. Any fixed kernel is depth-1 in feature space; consequently, any fixed kernel is exponentially weaker than a deep network on hierarchically composed targets.
 
-The dl_techniques codebase's residual and hierarchical architectures (`models/resnet/`, `models/swin_transformer/`, `layers/hierarchical_mlp_stem.py`) are direct implementations of this principle.
+The dl_techniques codebase's residual and hierarchical architectures (`models/vision/resnet/`, `models/vision/swin_transformer/`, `layers/hierarchical_mlp_stem.py`) are direct implementations of this principle.
 
 ### The disconfirming case
 
@@ -529,7 +529,7 @@ Axis B is task-structure-dependent and lives outside the analyzer (it requires s
 
 ### 13.3 Connection to existing components
 
-- **`models/cliffordnet/`, `models/kan/`, `models/squeezenet/`** — spectral analysis applies layer-by-layer; geometric/algebraic layers may have non-standard ESDs worth characterizing.
+- **`models/vision/cliffordnet/`, `models/general_purpose/kan/`, `models/vision/squeezenet/`** — spectral analysis applies layer-by-layer; geometric/algebraic layers may have non-standard ESDs worth characterizing.
 - **`losses/calibration.py`, `metrics/`** — calibration quality should correlate with α convergence to the critical strip; worth empirical study.
 - **`callbacks/`** — a regime-classifier callback that runs the per-axis analysis every N epochs would expose regime trajectories during training, not just at the end.
 - **`optimization/deep_supervision.py`** — deep supervision is a mechanism that drives early layers toward critical α faster; the framework here predicts that.
@@ -560,7 +560,7 @@ The 3 × 3 × 3 grid presumes axes are independent. Empirically there are coupli
 
 ### 14.5 Architecture coverage
 
-The bulk of the cited evidence comes from MLPs, CNNs, ResNets, and vanilla Transformers. Mixture-of-Experts (`models/qwen/`), state-space models (Mamba), diffusion architectures, geometric algebra networks (`models/cliffordnet/`), and KANs (`models/kan/`) may have additional regime-determining factors not captured by this framework.
+The bulk of the cited evidence comes from MLPs, CNNs, ResNets, and vanilla Transformers. Mixture-of-Experts (`models/language/qwen/`), state-space models (Mamba), diffusion architectures, geometric algebra networks (`models/vision/cliffordnet/`), and KANs (`models/general_purpose/kan/`) may have additional regime-determining factors not captured by this framework.
 
 ### 14.6 The "intelligence" definition
 

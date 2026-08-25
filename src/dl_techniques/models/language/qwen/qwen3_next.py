@@ -400,7 +400,7 @@ class Qwen3Next(keras.Model):
                     # Do NOT unwrap: `FFNExpert` forwards this dict to
                     # `create_ffn_from_config` verbatim and the factory RAISES on
                     # a key the type does not accept. Full reasoning at the twin
-                    # anchor in `models/qwen/qwen3.py`.
+                    # anchor in `models/language/qwen/qwen3.py`.
                     ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,

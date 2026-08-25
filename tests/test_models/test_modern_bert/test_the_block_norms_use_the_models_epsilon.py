@@ -12,7 +12,7 @@ module in this directory. See the ``WINDOW`` constant below for why.
 import numpy as np
 import pytest
 
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 from tests.norm_epsilon_oracle import (
     assert_epsilon_tracks_the_knob,
     assert_every_block_norm_uses,
@@ -41,7 +41,7 @@ NUM_LAYERS = 2
 #     WINDOW=4, in two injections, because the defect was a SPLIT and no single
 #     injection can redden both halves:
 #       (1) deleting the `attention_norm_args`/`ffn_norm_args` wiring at
-#           `models/modern_bert/model.py:574-575` (the literal pre-fix state)
+#           `models/language/modern_bert/model.py:574-575` (the literal pre-fix state)
 #           reddens `test_every_encoder_block_norm_uses_the_models_epsilon` and
 #           `test_the_epsilon_tracks_the_knob` -- "4 of 4 in-block norms do not
 #           use the model's own epsilon 1e-12", all four reading 1e-06.

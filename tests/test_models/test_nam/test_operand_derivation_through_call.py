@@ -45,9 +45,9 @@ F-36: zeroing the derived digit masks makes 7 of 9 go RED.
 import numpy as np
 import pytest
 
-from dl_techniques.models.nam.model import NAM
-from dl_techniques.models.nam.config import NAMConfig
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam.model import NAM
+from dl_techniques.models.neural_computer.nam.config import NAMConfig
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 
 MAX_LEN = 16
 

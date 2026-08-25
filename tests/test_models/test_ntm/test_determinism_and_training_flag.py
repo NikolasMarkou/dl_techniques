@@ -19,7 +19,7 @@ import keras
 import pytest
 
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
-from dl_techniques.models.ntm.model_multitask import NTMMultiTask
+from dl_techniques.models.neural_computer.ntm.model_multitask import NTMMultiTask
 
 
 def _config(**overrides) -> NTMConfig:

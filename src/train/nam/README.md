@@ -1135,8 +1135,8 @@ With the op_classifier hardcoded, the entire arithmetic pipeline is deterministi
 
 | File | Changes |
 |------|---------|
-| `src/dl_techniques/models/nam/cell.py` | Deterministic `_assemble_number_from_tokens()`; removed learned number heads; cell accepts `token_ids` for assembly |
-| `src/dl_techniques/models/nam/model.py` | Passes `token_ids` through to cell for deterministic assembly |
+| `src/dl_techniques/models/neural_computer/nam/cell.py` | Deterministic `_assemble_number_from_tokens()`; removed learned number heads; cell accepts `token_ids` for assembly |
+| `src/dl_techniques/models/neural_computer/nam/model.py` | Passes `token_ids` through to cell for deterministic assembly |
 | `src/train/nam/data_generator.py` | `_parse_multi_op()` paren-aware PEMDAS parser; `_generate_multi_op_expr()`; `_generate_paren_expr()`; `prepare_per_step_labels()` with paren support; 13 difficulty levels (8 single-op + 3 multi-op + 2 paren); int32 overflow fix for 10-digit operands |
 | `src/train/nam/train_dfsa.py` | `DifferentiableFSA` with hardcoded op_classifier (`token_id - 14`), paren-aware PEMDAS (`paren_depth * 100`), paren clearing in `_retokenize`, recursive `multi_reduce()`, adjacent `_adjacent_masks()` via op_cumsum, `_assemble_with_bypass()` for value buffer reads; pass-through for fully-reduced expressions |
 | `src/train/nam/train_nam.py` | Updated with `--number-loss-type` toggle, per-step labels, validity mask; legacy training script for original NAM |

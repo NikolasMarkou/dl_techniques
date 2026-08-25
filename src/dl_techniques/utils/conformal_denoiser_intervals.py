@@ -37,7 +37,7 @@ reductions** inline, NOT via a Keras metric. Importing
 would couple this post-hoc utility to an unrelated stateful metric. The math
 (a boolean mean and a width mean) is trivial, so we keep it stateless and
 dependency-free. (This note previously cited a second, colliding
-``CoverageMetric`` in ``models/cliffordnet/confidence_denoiser.py``; that module
+``CoverageMetric`` in ``models/vision/cliffordnet/confidence_denoiser.py``; that module
 was deleted by plan-2026-08-10-3649c19e, so the collision no longer exists — the
 decoupling argument above stands on its own.)
 

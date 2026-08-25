@@ -963,7 +963,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         # fails on every graph path (`tf.function`, `Model.predict`, `.keras`
         # save/load, `jit_compile=True`), for both static and symbolic sequence
         # lengths. The same trap is documented at
-        # `models/sd3_mmdit/text_encoders.py`. Note that Keras downgrades such a
+        # `models/vision_language/sd3_mmdit/text_encoders.py`. Note that Keras downgrades such a
         # `call()` crash during build-tracing to a UserWarning, so this was
         # invisible in a green test suite.
         #
@@ -972,7 +972,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         # a float, hence `logical_not` + cast.
         #
         # This block->keep adapter is now duplicated at TWO sites -- here and
-        # `models/mobile_clip/components.py`. Two is not yet enough to earn a
+        # `models/vision_language/mobile_clip/components.py`. Two is not yet enough to earn a
         # shared helper, but a THIRD consumer should promote it into a
         # keep-polarity variant in `utils/masking/factory.py` rather than copying
         # this again. Deferred deliberately: promoting it touches two shipped,

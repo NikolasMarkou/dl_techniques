@@ -47,7 +47,7 @@ class PowerSamplingConfig:
         >= 2`` on the wrapped-model path: MCMC proposals are re-generated from
         random cut points, so the proposal batch holds prefixes of unequal
         length and must be right-padded to the batch maximum. Both cases are
-        refused eagerly by :class:`~dl_techniques.models.power_sampling.sampler.PowerSampler`
+        refused eagerly by :class:`~dl_techniques.models.common.power_sampling.sampler.PowerSampler`
         at construction. Unused only for single-proposal or injected-closure
         sampling.
     :param ctx_len: Context window length for fixed-shape forward passes. If

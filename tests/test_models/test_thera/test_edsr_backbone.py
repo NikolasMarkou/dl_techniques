@@ -7,7 +7,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.thera.edsr_backbone import EDSRBackbone, EDSRResidualBlock
+from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone, EDSRResidualBlock
 
 
 # ---------------------------------------------------------------------
@@ -174,7 +174,7 @@ def test_baseline_param_count_reasonable(baseline_kwargs):
 
 
 def test_import_smoke():
-    from dl_techniques.models.thera.edsr_backbone import EDSRBackbone as _E  # noqa: F401
+    from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone as _E  # noqa: F401
 
 
 # ---------------------------------------------------------------------

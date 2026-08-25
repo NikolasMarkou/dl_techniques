@@ -1,19 +1,18 @@
-"""Guard: the six `mixed_float16`-unreachable packages run forward AND backward.
+"""Guard: the `mixed_float16`-unreachable packages run forward AND backward.
 
 Subject set (plan ``plan-2026-08-19T163559-499b6f0e``, step 17.1, rule ``R-088``).
-Each of these six raised a dtype error on a *plain forward pass* under
-``mixed_float16`` at HEAD, each at a named site:
+Each of these raised a dtype error on a *plain forward pass* under
+``mixed_float16`` at HEAD, each at a named site. Two further subjects,
+``memory_bank`` and ``nano_vlm_world_model``, were dropped on 2026-08-24 when
+their model packages were deleted from the tree.
 
 ===================== ====================================================
 package               measured failure site at HEAD
 ===================== ====================================================
-``detr``              ``models/detr/model.py:292`` — ``ops.zeros`` no dtype
+``detr``              ``models/vision/detr/model.py:292`` — ``ops.zeros`` no dtype
 ``kan``               ``layers/ffn/kan_linear.py:389`` — float32 knot grid
-``mamba``             ``models/mamba/components.py:472`` — float32 scan state
-``mamba`` (v2)        ``models/mamba/components_v2.py:292`` — idem
-``memory_bank``       ``models/memory_bank/read_controller.py:378`` —
-                      ``dtype="float32"`` additive mask
-``nano_vlm_world_..`` ``models/nano_vlm_world_model/scheduler.py:195``
+``mamba``             ``models/language/mamba/components.py:472`` — float32 scan state
+``mamba`` (v2)        ``models/language/mamba/components_v2.py:292`` — idem
 ``thera``             ``layers/grid_sample.py:134`` — ``convert_to_tensor``
                       with ``dtype=tf.float32`` on a float16 tensor
 ===================== ====================================================
@@ -47,7 +46,7 @@ import tensorflow as tf
 # ---------------------------------------------------------------------------
 
 def _detr():
-    from dl_techniques.models.detr import DETR, DetrTransformer
+    from dl_techniques.models.vision.detr import DETR, DetrTransformer
     backbone = keras.Sequential(
         [
             keras.layers.Conv2D(32, 3, strides=2, padding="same", activation="relu"),
@@ -72,7 +71,7 @@ def _detr():
 
 
 def _kan():
-    from dl_techniques.models.kan import KAN
+    from dl_techniques.models.general_purpose.kan import KAN
     configs = [
         {"features": 8, "grid_size": 5, "activation": "swish"},
         {"features": 4, "grid_size": 4, "activation": "gelu"},
@@ -82,7 +81,7 @@ def _kan():
 
 
 def _mamba():
-    from dl_techniques.models.mamba import Mamba
+    from dl_techniques.models.language.mamba import Mamba
     model = Mamba(vocab_size=100, d_model=32, num_layers=2,
                   d_state=8, d_conv=4, expand=2)
     tokens = np.random.RandomState(0).randint(0, 100, (2, 12)).astype("int32")
@@ -90,58 +89,17 @@ def _mamba():
 
 
 def _mamba2():
-    from dl_techniques.models.mamba.mamba_v2 import Mamba2
+    from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
     model = Mamba2(vocab_size=100, d_model=64, num_layers=2, d_state=16,
                    d_conv=4, expand=2, headdim=16)
     tokens = np.random.RandomState(0).randint(0, 100, (2, 12)).astype("int32")
     return model, {"input_ids": tokens}
 
 
-def _memory_bank():
-    from dl_techniques.models.memory_bank.wave_field_memory_llm import (
-        WaveFieldMemoryLLM,
-    )
-    model = WaveFieldMemoryLLM(
-        vocab_size=64, embed_dim=32, depth=4, num_heads=2, max_seq_len=16,
-        d_k=8, d_v=16, s_lt=64, top_k=4, infonce_negatives=8,
-        diversity_subsample=16,
-    )
-    tokens = np.random.RandomState(0).randint(0, 64, (2, 16)).astype("int32")
-    return model, tokens
-
-
-def _nano_vlm_world_model():
-    # The full `ScoreBasedNanoVLM` at its smallest declared variant is 144M
-    # parameters; the two fix sites (`TimestepEmbedding`'s float32 return and
-    # `DiffusionScheduler._extract`'s float32 coefficient) are both exercised by
-    # `JointDenoiser`, which is where the raise actually landed once the
-    # scheduler was repaired.
-    from dl_techniques.models.nano_vlm_world_model.denoisers import JointDenoiser
-
-    class _Host(keras.Model):
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self.denoiser = JointDenoiser(
-                vision_dim=16, text_dim=8, hidden_dim=16, num_layers=1,
-            )
-
-        def call(self, inputs, training=None):
-            v, t, ts = inputs
-            return self.denoiser(v, t, ts, training=training)
-
-    rs = np.random.RandomState(0)
-    inputs = [
-        rs.randn(2, 5, 16).astype("float32"),
-        rs.randn(2, 4, 8).astype("float32"),
-        rs.randint(0, 1000, (2,)).astype("int32"),
-    ]
-    return _Host(), inputs
-
-
 def _thera():
-    from dl_techniques.models.thera.model import Thera
-    from dl_techniques.models.thera.edsr_backbone import EDSRBackbone
-    from dl_techniques.models.thera.tails import build_thera_tail
+    from dl_techniques.models.vision.thera.model import Thera
+    from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
+    from dl_techniques.models.vision.thera.tails import build_thera_tail
     model = Thera(
         hidden_dim=16, out_dim=3,
         backbone=EDSRBackbone(num_feats=16, num_blocks=1),
@@ -161,8 +119,6 @@ SUBJECTS = {
     "kan": _kan,
     "mamba": _mamba,
     "mamba2": _mamba2,
-    "memory_bank": _memory_bank,
-    "nano_vlm_world_model": _nano_vlm_world_model,
     "thera": _thera,
 }
 
@@ -317,20 +273,6 @@ def test_the_epsilons_this_family_relied_on_are_degenerate_in_float16():
     assert float(np.finfo("float16").tiny) > 0.0
     # in float32 the dtype-aware spelling is INERT — it returns the literal
     assert max(1e-9, float(np.finfo("float32").tiny)) == 1e-9
-
-
-def test_the_memory_bank_mask_sentinel_is_representable_in_the_compute_dtype():
-    """`-1.0e9` overflows float16 to `-inf`; the clamped sentinel does not."""
-    from dl_techniques.models.memory_bank.read_controller import _NEG_INF
-
-    assert np.isinf(np.float16(_NEG_INF)), (
-        "the raw sentinel is expected to overflow float16 — that is the defect"
-    )
-    clamped16 = max(_NEG_INF, float(np.finfo("float16").min) / 2.0)
-    assert np.isfinite(np.float16(clamped16))
-    # float32 inertness: the clamp returns the original literal unchanged.
-    clamped32 = max(_NEG_INF, float(np.finfo("float32").min) / 2.0)
-    assert clamped32 == _NEG_INF
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
-"""Contract tests for the two THIN WRAPPERS in `models/bias_free_denoisers/bfconvunext.py`.
+"""Contract tests for the two THIN WRAPPERS in `models/vision/bias_free_denoisers/bfconvunext.py`.
 
 After the ConvUNext merge, `bfconvunext.py` is two things and nothing else: a pair of
-`use_bias=False` wrappers over `models/convunext/model.create_convunext`, and the Keras
+`use_bias=False` wrappers over `models/vision/convunext/model.create_convunext`, and the Keras
 REGISTRAR that `applications/bias_free_denoiser/denoiser_prior.py` and the two bfunet eval
 tools import for its side effect. This file pins exactly those two contracts.
 
@@ -30,11 +30,11 @@ import sys
 import keras
 import pytest
 
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
     create_convunext_variant as bf_create_convunext_variant,
 )
-from dl_techniques.models.convunext.model import (
+from dl_techniques.models.vision.convunext.model import (
     create_convunext_variant as std_create_convunext_variant,
 )
 
@@ -190,7 +190,7 @@ class TestVariantBlockNormalization:
 _REGISTRAR_PROBE = r'''
 import json
 import keras
-import dl_techniques.models.bias_free_denoisers.bfconvunext as m  # the ONLY import
+import dl_techniques.models.vision.bias_free_denoisers.bfconvunext as m  # the ONLY import
 
 resolved = {}
 for key, obj in keras.saving.get_custom_objects().items():
@@ -319,6 +319,6 @@ class TestRegistrarContract:
         keys = registrar_probe_result['resolved'].get(class_name, [])
         assert keys, (
             f"{class_name} is NOT in the Keras registry after importing only "
-            "dl_techniques.models.bias_free_denoisers.bfconvunext; "
+            "dl_techniques.models.vision.bias_free_denoisers.bfconvunext; "
             "keras.models.load_model would fail on a saved bias-free ConvUNext"
         )

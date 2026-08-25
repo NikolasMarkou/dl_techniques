@@ -6,8 +6,8 @@ and the tiny-VAE GroupNorm divisibility.
 
 import pytest
 
-from dl_techniques.models.ideogram4.config import AutoEncoderParams
-from dl_techniques.models.sd3_mmdit.config import (
+from dl_techniques.models.vision_language.ideogram4.config import AutoEncoderParams
+from dl_techniques.models.vision_language.sd3_mmdit.config import (
     SD3MMDiTConfig,
     PRESETS,
     get_sd3_config,

@@ -23,8 +23,11 @@ Variants
 - **V5_2stage_aggressive_stem** -- patch-stem stride 4, 2 stages 128-256,
   depthwise-separable strided downsampler.
 
-The accompanying report lives at
-``src/dl_techniques/models/cliffordnet/DOWNSAMPLING.md``.
+The accompanying report, ``src/train/cliffordnet/DOWNSAMPLING.md``, no longer
+exists -- it was deleted in ``46bf5cdf0`` along with the dead cliffordnet
+denoiser/routing/unet models. Recover it from git history
+(``git show d4a8b9c63:src/train/cliffordnet/DOWNSAMPLING.md``) if you need the
+11-variant CIFAR-100 numbers; nothing in the tree reproduces them.
 
 Usage
 -----
@@ -60,7 +63,7 @@ import tensorflow as tf
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.models.cliffordnet import CliffordNet
+from dl_techniques.models.vision.cliffordnet import CliffordNet
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,

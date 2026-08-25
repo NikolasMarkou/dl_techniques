@@ -440,7 +440,7 @@ class VisionEncoder(keras.layers.Layer):
                 # on a seeded depth-4 encoder: 12 of 24 same-shape kernel pairs at
                 # `max|delta| = 0.0` (all 4 `.../cross_attention/qkv/kernel`
                 # pairwise identical, likewise all 4 `.../proj/kernel`). This is a
-                # SHARED layer: `nano_vlm`, `nano_vlm_world_model` and `clip` all
+                # SHARED layer: `nano_vlm` and `clip` both
                 # build their vision tower from it, so the defect was theirs too.
                 # `seed=` is not the discriminator; instance identity is.
                 # See decisions.md D-560 (and D-540 for the first three ports).
@@ -512,7 +512,7 @@ class VisionEncoder(keras.layers.Layer):
         elif self.patch_embed_type == 'siglip':
             # Two-stage patch embedding. NOT a SigLIP feature -- SigLIP is a sigmoid
             # contrastive LOSS and its tower uses a single-conv stem; see
-            # models/vit_siglip/model.py's module docstring.
+            # models/vision/vit_siglip/model.py's module docstring.
             return keras.Sequential([
                 # Stage 1: Coarse-grained patching
                 layers.Conv2D(

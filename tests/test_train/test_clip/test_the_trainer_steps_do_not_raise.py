@@ -39,7 +39,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
-from dl_techniques.models.clip.model import create_clip_model
+from dl_techniques.models.vision_language.clip.model import create_clip_model
 from train.clip.train_clip import CLIPTrainer
 
 # ---------------------------------------------------------------------

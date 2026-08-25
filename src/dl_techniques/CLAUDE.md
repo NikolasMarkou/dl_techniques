@@ -24,7 +24,7 @@ make docs       # generate documentation
 
 ```
 src/dl_techniques/
-├── models/          # Architectures (vision, NLP, VLM, time series, graphs, etc.)
+├── models/          # 79 leaf model packages in 11 family dirs — catalogue in models/README.md
 ├── layers/          # Custom layers (attention, FFN, norms, embeddings, MoE, transformers, geometric, etc.)
 ├── losses/          # Loss functions (contrastive, focal, calibration, segmentation, GAN, etc.)
 ├── metrics/         # Custom metrics (capsule, CLIP, perplexity, PSNR, time series)
@@ -40,6 +40,18 @@ src/dl_techniques/
 ```
 
 Each package has its own `CLAUDE.md` with detailed documentation.
+
+`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 79 leaf
+packages sit under 11 family directories (`common`, `general_purpose`, `graph`, `language`,
+`memory`, `neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`,
+`vision_language`), four of which nest one level further
+(`vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`,
+`vision_language/sam/`). **A family is a grouping, not a namespace** — every family
+`__init__.py` holds a docstring and nothing else, so import from the leaf package
+(`dl_techniques.models.vision.resnet.model`), never from the family. `time_series/` is the sole
+exception and does re-export its 7 children. `models/README.md` is the catalogue and
+`models/CLAUDE.md` the authoring rules; both were re-derived against the live tree on
+2026-08-25.
 
 ## Core Conventions
 
@@ -59,14 +71,14 @@ Each package has its own `CLAUDE.md` with detailed documentation.
 **Docstring style: two are in use. Match the package you are editing; never convert a file
 wholesale.** Docstrings carry mathematical formulations where relevant.
 
-| Package | Convention | Measured 2026-08-19 |
+| Package | Convention | Measured 2026-08-25 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 256 of 296 modules |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 258 of 298 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
-| `models/` | **NO package-wide style — measurably MIXED** | 98 Google-only, 68 Sphinx-only, 9 both, 92 neither, over 267 `.py` files |
-| `losses/` | Google (`Args:`) majority | 32 of 42 carry `Args:`, 7 carry `:param ` |
+| `models/` | **NO package-wide style — measurably MIXED** | 82 Google-only, 75 Sphinx-only, 8 both, 105 neither, over 270 `.py` files |
+| `losses/` | Google (`Args:`) majority | 32 of 42 carry `Args:`, 8 carry `:param `, 1 both |
 | `metrics/` | Google majority | 12 of 15 / 2 |
-| `utils/` | Google majority | 22 of 39 / 9, 3 both |
+| `utils/` | Google majority | 22 of 41 / 11, 3 both |
 | `optimization/` | Google majority | 9 of 14 / 2 |
 | `analyzer/` | Google majority | 10 of 24 / 0 |
 | `visualization/` | Google majority | 6 of 7 / 0 |
@@ -75,9 +87,11 @@ Majority, not rule: every Google-majority package except `analyzer/` and `visual
 contains Sphinx files. The `models/` "neither" bucket is mostly `__init__.py` and modules with no
 parameter docs at all.
 
-**For a NEW `models/` package follow `models/bert/model.py`** — the normative exemplar, and entirely
-Sphinx/reST (0 `Args:` / 78 `:param `). That is why the recently added `models/gpt2/gpt2.py`
-(0 / 26) and `models/wave_field/model.py` (31 `:param `, plus 1 stray `Args:` at :232) are Sphinx.
+**For a NEW `models/` package follow `models/language/bert/model.py`** — the normative exemplar, and entirely
+Sphinx/reST (0 `Args:` / **81** `:param `). That is why `models/language/gpt2/gpt2.py`
+(0 / **27**) and `models/language/wave_field/model.py` (31 `:param `, plus 1 stray `Args:` at **:273**) are Sphinx.
+All three paths gained a family segment in the 2026-08-24 `models/` restructure — they were
+`models/bert/`, `models/gpt2/`, `models/wave_field/` before it.
 
 > **Do not convert existing Google-style `models/` files toward Sphinx, or Sphinx toward Google.**
 > `plans/LESSONS.md:294` records an earlier agent nearly "fixing" `bert.py` toward Google on the
@@ -88,19 +102,31 @@ Re-derive (`--include=*.py` is **load-bearing** — without it the greps match t
 and the numbers invalidate themselves):
 
 ```bash
-find src/dl_techniques/models -name '*.py' | wc -l                                   # 267
-grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   # 107 = Google-only + both
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  77 = Sphinx-only + both
-# comm -12 of those two sorted file lists -> 9 (both);  neither = 267 - 98 - 68 - 9 = 92
+find src/dl_techniques/models -name '*.py' | wc -l                                   # 270
+grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   #  90 = Google-only + both
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  83 = Sphinx-only + both
+# comm -12 of those two sorted file lists -> 8 (both)
+# Google-only = 90 - 8 = 82;  Sphinx-only = 83 - 8 = 75;  neither = 270 - 82 - 75 - 8 = 105
 ```
+
+> **The `Args:` anchor is load-bearing, and the numbers are not comparable without it.** An
+> unanchored `grep -rl "Args:"` over the same tree returns **91**, not 90 — it also matches `Args:`
+> mid-line, inside prose and inside code. Re-running the commands exactly as printed above is
+> what produced 82/75/8/105; a hand-rolled regex over the same tree on the same day produced
+> 81/73/14/102. Do not mix a number from one instrument into a table derived by another.
 
 **This table rots.** It said "248 of 285" for `layers/` until 2026-08-14 (correct on 2026-08-11,
 falsified by the `layers/fastvit/` package landing), and on 2026-08-19 six more figures had drifted:
 `layers/` 255/294 -> 256/296, `models/` Google-only 102 -> 99, Sphinx-only 67 -> 68, both 5 -> 8,
-neither 93 -> 92, and `bert.py` 81 -> 78 `:param `. Re-derived again on 2026-08-21 (step
-19.1): Google-only 99 -> 98, both 8 -> 9, the `:param ` total 76 -> 77 — a drift that predates that
-step's own two new module docstrings, both of which moved neither count. **Re-run the block above before quoting any of
-it** — a derived number is a perishable good.
+neither 93 -> 92. Re-derived again on 2026-08-21 (step 19.1): Google-only 99 -> 98, both 8 -> 9, the
+`:param ` total 76 -> 77 — a drift that predates that step's own two new module docstrings, both of
+which moved neither count. Re-derived on **2026-08-25** by re-running the printed commands after the
+`models/` family restructure: `layers/` 256/296 -> 258/298, `models/` 267 -> 270 files, Google-only
+98 -> **82**, Sphinx-only 68 -> **75**, both 9 -> **8**, neither 92 -> **105**, `losses/` `:param `
+7 -> 8, `utils/` 22 of 39/9 -> 22 of 41/11, and `bert.py` back to **81** `:param ` (the "78" recorded
+on 2026-08-19 does not reproduce under the printed command). The restructure was a pure `git mv` and
+moved no docstring, so the `models/` swing is the instrument, not the tree — see the anchor note
+above. **Re-run the block above before quoting any of it** — a derived number is a perishable good.
 
 ### Factory Pattern
 
@@ -161,13 +187,24 @@ hence scoping pytest to the modules you changed rather than running `make test` 
 
 Mirrors `src/` — `tests/test_models/test_mobilenet/`, `tests/test_layers/test_attention/`. Under
 `tests/test_models/` a directory is the norm; under `tests/test_layers/` a loose `test_<name>.py` is
-(84 loose modules against 20 subdirectories, 2026-08-23), so a missing directory there means nothing.
+(84 loose modules against 20 subdirectories, 2026-08-25), so a missing directory there means nothing.
 `REPO_MAP.md` § Tests lists the named exceptions.
+
+> **`tests/test_models/` is FLAT and deliberately does not mirror the `models/` family nesting**
+> (plan `plan-2026-08-24T205033-8fd4f20d` D-001). There is no `test_vision/` or `test_language/`
+> level. The rule that holds is the one that always mattered: **leaf package `x` is tested by
+> `tests/test_models/test_<x>/`** — measured 2026-08-25, 79 test directories against 79 leaf
+> packages, agreeing on 77 names; the two that differ are `sam1` (covered by `test_sam/`, which
+> also owns the shared `dead_component_oracle.py`) and `lewm` (untested), against the grouping
+> directories `test_sam/` and `test_time_series/`. Nesting them was evaluated and rejected: 215
+> relative imports (`from ..gradient_flow_oracle` and friends) reach shared oracles at
+> `tests/test_models/*.py`, and a family level changes what `..` resolves to in every one of
+> them, in a suite that cannot be verified in a single process. Do not "finish the job".
 
 | File kind | Convention |
 |---|---|
 | Comprehensive suite | `class TestModelName`, pytest fixtures for configs and sample data |
-| **Single-claim guard** | sentence-named after the claim: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py` (15 such files, 2026-08-19) |
+| **Single-claim guard** | sentence-named after the claim: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py`. **62** carry the `test_the_` form (`find tests -name 'test_the_*.py' -not -path '*__pycache__*' | wc -l`, 2026-08-25: 47 under `test_models/`, 6 under `test_layers/`, 3 under `test_train/`, 6 loose at `tests/`); the earlier "15 such files, 2026-08-19" quoted no command and does not reproduce |
 | **Meta-test** | prefixed `test_the_guard_…` / `test_the_probe_…` / `test_the_contract_…` |
 | **Shared instrument** | **no `test_` prefix**, so pytest does not collect it; each has a mirrored `test_<name>.py` RED proof |
 
@@ -214,7 +251,7 @@ In `tests/conftest.py` and `tests/test_layers/conftest.py`:
 ### Gate discipline
 
 - **A known-open defect is pinned with `@pytest.mark.xfail(strict=True, reason="<measured>: ...")`**
-  (20 sites, 2026-08-19), so it XPASSes loudly when someone fixes it. A plain `skip` is inert; a deleted test
+  (**27** sites across 17 files — `grep -rn "xfail(strict=True" tests --include=*.py | wc -l`, 2026-08-25), so it XPASSes loudly when someone fixes it. A plain `skip` is inert; a deleted test
   leaves the gap unguarded.
 - **Never gate on `--collect-only`.** An all-skip module reads as a pass, and a suite whose
   collection errored can "pass" by running almost nothing — this once hid 12 real failures across 8
@@ -237,7 +274,10 @@ In `tests/conftest.py` and `tests/test_layers/conftest.py`:
 5. Add tests in `tests/test_layers/`
 
 ### New Model
-1. Create subdirectory under `models/` with `__init__.py` and model module(s)
+1. Create a subdirectory under the appropriate **family** in `models/` (e.g.
+   `models/vision/<name>/`, `models/language/<name>/`) with `__init__.py` and model module(s) —
+   never directly under `models/`, which is a family layer only. Add the package to
+   `models/README.md` and to the family's `__init__.py` docstring
 2. Inherit from `keras.Model`, decorate with `@keras.saving.register_keras_serializable()`
 3. Support variant configs (tiny/small/base/large) via factory methods where appropriate
 4. Add tests in `tests/test_models/`

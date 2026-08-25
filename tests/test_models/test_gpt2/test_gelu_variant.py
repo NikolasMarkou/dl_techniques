@@ -35,7 +35,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.gpt2.gpt2 import GPT2, gpt2_gelu
+from dl_techniques.models.language.gpt2.gpt2 import GPT2, gpt2_gelu
 
 _PROBE = np.linspace(-6.0, 6.0, 25).astype("float32")
 

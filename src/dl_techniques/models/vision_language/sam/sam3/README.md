@@ -118,7 +118,7 @@ Two structural notes that are easy to get backwards:
 ## 3. Quick Start
 
 ```python
-from dl_techniques.models.SAM.SAM3 import Sam3Image
+from dl_techniques.models.vision_language.sam.sam3 import Sam3Image
 
 model = Sam3Image.from_variant("tiny")     # RANDOM weights — no checkpoint ships
 
@@ -217,7 +217,7 @@ change moves one file. The data pipeline and CLI live in
 [`src/train/sam3/`](../../../../train/sam3/).
 
 ```python
-from dl_techniques.models.SAM.SAM3 import (
+from dl_techniques.models.vision_language.sam.sam3 import (
     Sam3Image, Sam3TrainingModel, compile_sam3_trainer)
 
 trainer = Sam3TrainingModel(Sam3Image.from_variant("tiny"), include_masks=True)
@@ -374,7 +374,7 @@ never reached. Executed, on this package's own smallest on-disk checkpoint:
 
 ```python
 import keras
-import dl_techniques.models.SAM.SAM3.training_model   # registrar-first: the MODULE
+import dl_techniques.models.vision_language.sam.sam3.training_model   # registrar-first: the MODULE
 
 model = keras.models.load_model(path, compile=False)
 print(type(model).__name__, len(model.weights))
@@ -382,7 +382,7 @@ print(type(model).__name__, len(model.weights))
 ```
 
 Import the **module**, not the package. For SAM 3 the package import happens to
-be sufficient too, because `SAM3/__init__.py` imports `training_model` — but
+be sufficient too, because `sam3/__init__.py` imports `training_model` — but
 that is not true of every sibling (SAM 2's `__init__` does not, and fails), so
 naming the defining module is the rule that holds for all three.
 

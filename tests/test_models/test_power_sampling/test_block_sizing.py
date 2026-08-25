@@ -24,7 +24,7 @@ import random
 import numpy as np
 import pytest
 
-from dl_techniques.models.power_sampling import PowerSampler, PowerSamplingConfig
+from dl_techniques.models.common.power_sampling import PowerSampler, PowerSamplingConfig
 
 from .test_power_sampling import CharTokenizer, DictMockLM
 

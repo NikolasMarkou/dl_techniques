@@ -25,8 +25,8 @@ from train.common.nlp import (
     create_nlp_callbacks,
 )
 
-from dl_techniques.models.tree_transformer import TreeTransformer
-from dl_techniques.models.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.language.tree_transformer import TreeTransformer
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------

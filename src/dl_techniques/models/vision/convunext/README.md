@@ -14,7 +14,7 @@ scale-invariant across noise levels. Both arms are the same graph.
 
 > **History, because it changes how you read the rest of the repo.** Until 2026-08-14
 > this package shipped a subclassed `ConvUNextModel`, and
-> `models/bias_free_denoisers/bfconvunext.py` shipped a separate functional builder for
+> `models/vision/bias_free_denoisers/bfconvunext.py` shipped a separate functional builder for
 > the bias-free arm. They were two implementations of one architecture. They are now
 > merged onto the **functional** graph, here. `ConvUNextModel`, its own `ConvUNextStem`,
 > its bespoke `create_inference_model_from_training_model`, `PRETRAINED_WEIGHTS` and
@@ -44,7 +44,7 @@ Every code block below was executed against this tree before it was written down
 ## 1. Quick start
 
 ```python
-from dl_techniques.models.convunext import create_convunext
+from dl_techniques.models.vision.convunext import create_convunext
 
 model = create_convunext(input_shape=(64, 64, 3), depth=3, initial_filters=16)
 print(model.name, model.output_shape, model.count_params())
@@ -56,7 +56,7 @@ Named variants (`tiny`, `small`, `base`, `large`, `xlarge`) fill in
 `drop_path_rate`:
 
 ```python
-from dl_techniques.models.convunext import create_convunext_variant, CONVUNEXT_CONFIGS
+from dl_techniques.models.vision.convunext import create_convunext_variant, CONVUNEXT_CONFIGS
 
 print(sorted(CONVUNEXT_CONFIGS))
 # ['base', 'large', 'small', 'tiny', 'xlarge']
@@ -141,7 +141,7 @@ Under `use_bias=False` only, `create_convunext` validates three arguments agains
 denylist silently admits every activation nobody thought of).
 
 ```python
-from dl_techniques.models.convunext import model as convunext_model
+from dl_techniques.models.vision.convunext import model as convunext_model
 print(sorted(a for a in convunext_model.POSITIVELY_HOMOGENEOUS_ACTIVATIONS if a))
 # ['leaky_relu', 'linear', 'relu']       (plus None)
 
@@ -324,7 +324,7 @@ produces round-trip deltas that look like reinitialized weights.
 
 ## 8. Relationship to `bfconvunext`
 
-`src/dl_techniques/models/bias_free_denoisers/bfconvunext.py` is now 289 lines
+`src/dl_techniques/models/vision/bias_free_denoisers/bfconvunext.py` is now 289 lines
 (`wc -l`, 2026-08-24) and does exactly two jobs:
 
 1. **Thin `use_bias=False` wrappers.** `create_convunext_denoiser(input_shape, *,
@@ -350,7 +350,7 @@ produces round-trip deltas that look like reinitialized weights.
 The two builders produce the same network:
 
 ```python
-from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_denoiser
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_convunext_denoiser
 
 bf  = create_convunext(input_shape=(64, 64, 1), use_bias=False, depth=3, initial_filters=16)
 bf2 = create_convunext_denoiser(input_shape=(64, 64, 1), depth=3, initial_filters=16)
@@ -358,7 +358,7 @@ print(bf.count_params(), bf2.count_params(), bf.count_params() == bf2.count_para
 # 503424 503424 True
 ```
 
-`ConvUNextStem` lives HERE (`models/convunext/model.py`) but keeps the decorator
+`ConvUNextStem` lives HERE (`models/vision/convunext/model.py`) but keeps the decorator
 `@keras.saving.register_keras_serializable(package="dl_techniques.bias_free_denoisers")`.
 That package string no longer matches its module path and **that mismatch is
 deliberate and load-bearing**: it is the registry key
@@ -369,7 +369,7 @@ the code.
 ## 9. Package surface
 
 ```python
-from dl_techniques.models.convunext import (
+from dl_techniques.models.vision.convunext import (
     ConvUNextStem,                            # the merged stem layer
     SpatialLinearAttention,                   # bias-free bottleneck attention block
     CONVUNEXT_CONFIGS,                        # the one variant dict
@@ -379,7 +379,7 @@ from dl_techniques.models.convunext import (
 ```
 
 `POSITIVELY_HOMOGENEOUS_ACTIVATIONS` and `_validate_bias_free_arguments` live in
-`dl_techniques.models.convunext.model`; the first is public, the second is private.
+`dl_techniques.models.vision.convunext.model`; the first is public, the second is private.
 
 ## 10. Tests
 

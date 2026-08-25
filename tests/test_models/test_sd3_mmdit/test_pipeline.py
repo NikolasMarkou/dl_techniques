@@ -11,13 +11,13 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.sd3_mmdit.config import get_sd3_config
-from dl_techniques.models.sd3_mmdit.pipeline import (
+from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
+from dl_techniques.models.vision_language.sd3_mmdit.pipeline import (
     SD3Pipeline,
     assemble_prompt_features,
     create_sd3_pipeline,
 )
-from dl_techniques.models.sd3_mmdit.text_encoders import (
+from dl_techniques.models.vision_language.sd3_mmdit.text_encoders import (
     CLIPTextEncoder,
     OpenCLIPTextEncoder,
     T5Encoder,
@@ -60,9 +60,9 @@ class TestPipelineBuild:
     def test_dim_mismatch_raises(self) -> None:
         """A T5 whose embed_dim != joint_attention_dim must fail loud."""
         config, _ = get_sd3_config("tiny")
-        from dl_techniques.models.sd3_mmdit.transformer import create_sd3_mmdit
-        from dl_techniques.models.sd3_mmdit.vae import create_sd3_vae
-        from dl_techniques.models.sd3_mmdit.scheduler import (
+        from dl_techniques.models.vision_language.sd3_mmdit.transformer import create_sd3_mmdit
+        from dl_techniques.models.vision_language.sd3_mmdit.vae import create_sd3_vae
+        from dl_techniques.models.vision_language.sd3_mmdit.scheduler import (
             FlowMatchEulerScheduler,
         )
 
@@ -88,9 +88,9 @@ class TestPipelineBuild:
 
     def test_pooled_mismatch_raises(self) -> None:
         """CLIP+OpenCLIP pooled width != pooled_projection_dim must fail loud."""
-        from dl_techniques.models.sd3_mmdit.transformer import create_sd3_mmdit
-        from dl_techniques.models.sd3_mmdit.vae import create_sd3_vae
-        from dl_techniques.models.sd3_mmdit.scheduler import (
+        from dl_techniques.models.vision_language.sd3_mmdit.transformer import create_sd3_mmdit
+        from dl_techniques.models.vision_language.sd3_mmdit.vae import create_sd3_vae
+        from dl_techniques.models.vision_language.sd3_mmdit.scheduler import (
             FlowMatchEulerScheduler,
         )
 

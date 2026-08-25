@@ -67,7 +67,7 @@ import train.bert.wikipedia.finetune as finetune
 import train.bert.wikipedia.pretrain as pretrain
 import train.bert.wikipedia.pretrain_english as pretrain_english
 
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 
 SRC = Path(__file__).resolve().parents[3] / "src"
 WIKIPEDIA = SRC / "train" / "bert" / "wikipedia"

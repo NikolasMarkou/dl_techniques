@@ -1,7 +1,7 @@
 """Executable enforcement of the factual claims in two hand-written READMEs.
 
-`src/dl_techniques/models/qwen/README.md` and
-`src/dl_techniques/models/superpoint/README.md` were written from scratch by
+`src/dl_techniques/models/language/qwen/README.md` and
+`src/dl_techniques/models/vision/keypoints/superpoint/README.md` were written from scratch by
 plan-2026-08-10-3649c19e/iter-1/step-8 (decisions.md D-019). Every path, symbol,
 class attribute and variant-key set they name was verified once, mechanically —
 by a script in a scratch directory that was then thrown away. `REPO_MAP.md`
@@ -45,20 +45,20 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Repo-relative paths named by either README.
 PATHS = [
     # qwen README
-    "src/dl_techniques/models/qwen/qwen3.py",
-    "src/dl_techniques/models/qwen/qwen3_next.py",
-    "src/dl_techniques/models/qwen/components.py",
-    "src/dl_techniques/models/qwen/qwen3_embeddings.py",
-    "src/dl_techniques/models/qwen/QWEN3.md",
-    "src/dl_techniques/models/qwen/QWEN3_next.md",
-    "src/dl_techniques/models/qwen/__init__.py",
+    "src/dl_techniques/models/language/qwen/qwen3.py",
+    "src/dl_techniques/models/language/qwen/qwen3_next.py",
+    "src/dl_techniques/models/language/qwen/components.py",
+    "src/dl_techniques/models/language/qwen/qwen3_embeddings.py",
+    "src/dl_techniques/models/language/qwen/QWEN3.md",
+    "src/dl_techniques/models/language/qwen/QWEN3_next.md",
+    "src/dl_techniques/models/language/qwen/__init__.py",
     "tests/test_models/test_qwen/test_qwen3.py",
     "tests/test_models/test_qwen/test_qwen3_next.py",
     "tests/test_models/test_qwen/test_components.py",
     "tests/test_models/test_qwen/test_qwen3_embeddings.py",
     # superpoint README
-    "src/dl_techniques/models/superpoint/model.py",
-    "src/dl_techniques/models/superpoint/__init__.py",
+    "src/dl_techniques/models/vision/keypoints/superpoint/model.py",
+    "src/dl_techniques/models/vision/keypoints/superpoint/__init__.py",
     "src/dl_techniques/losses/superpoint_loss.py",
     "src/dl_techniques/datasets/synthetic_shapes.py",
     "src/dl_techniques/utils/homography.py",
@@ -72,23 +72,23 @@ PATHS = [
 
 # (module, module-level symbol) named by either README.
 SYMBOLS = [
-    ("dl_techniques.models.qwen.qwen3", "Qwen3"),
-    ("dl_techniques.models.qwen.qwen3", "create_qwen3"),
-    ("dl_techniques.models.qwen.qwen3", "create_qwen3_generation"),
-    ("dl_techniques.models.qwen.qwen3", "create_qwen3_classification"),
-    ("dl_techniques.models.qwen.qwen3_next", "Qwen3Next"),
-    ("dl_techniques.models.qwen.qwen3_next", "create_qwen3_next"),
-    ("dl_techniques.models.qwen.qwen3_next", "create_qwen3_next_generation"),
-    ("dl_techniques.models.qwen.qwen3_next", "create_qwen3_next_classification"),
-    ("dl_techniques.models.qwen.components", "Qwen3NextBlock"),
-    ("dl_techniques.models.qwen.qwen3_embeddings", "Qwen3EmbeddingLayer"),
-    ("dl_techniques.models.qwen.qwen3_embeddings", "Qwen3RerankerLayer"),
-    ("dl_techniques.models.qwen.qwen3_embeddings", "Qwen3EmbeddingModel"),
-    ("dl_techniques.models.qwen.qwen3_embeddings", "Qwen3RerankerModel"),
-    ("dl_techniques.models.superpoint", "SuperPoint"),
-    ("dl_techniques.models.superpoint", "create_superpoint"),
-    ("dl_techniques.models.superpoint.model", "SuperPoint"),
-    ("dl_techniques.models.superpoint.model", "create_superpoint"),
+    ("dl_techniques.models.language.qwen.qwen3", "Qwen3"),
+    ("dl_techniques.models.language.qwen.qwen3", "create_qwen3"),
+    ("dl_techniques.models.language.qwen.qwen3", "create_qwen3_generation"),
+    ("dl_techniques.models.language.qwen.qwen3", "create_qwen3_classification"),
+    ("dl_techniques.models.language.qwen.qwen3_next", "Qwen3Next"),
+    ("dl_techniques.models.language.qwen.qwen3_next", "create_qwen3_next"),
+    ("dl_techniques.models.language.qwen.qwen3_next", "create_qwen3_next_generation"),
+    ("dl_techniques.models.language.qwen.qwen3_next", "create_qwen3_next_classification"),
+    ("dl_techniques.models.language.qwen.components", "Qwen3NextBlock"),
+    ("dl_techniques.models.language.qwen.qwen3_embeddings", "Qwen3EmbeddingLayer"),
+    ("dl_techniques.models.language.qwen.qwen3_embeddings", "Qwen3RerankerLayer"),
+    ("dl_techniques.models.language.qwen.qwen3_embeddings", "Qwen3EmbeddingModel"),
+    ("dl_techniques.models.language.qwen.qwen3_embeddings", "Qwen3RerankerModel"),
+    ("dl_techniques.models.vision.keypoints.superpoint", "SuperPoint"),
+    ("dl_techniques.models.vision.keypoints.superpoint", "create_superpoint"),
+    ("dl_techniques.models.vision.keypoints.superpoint.model", "SuperPoint"),
+    ("dl_techniques.models.vision.keypoints.superpoint.model", "create_superpoint"),
     ("dl_techniques.losses.superpoint_loss", "SuperPointDetectorLoss"),
     ("dl_techniques.losses.superpoint_loss", "SuperPointDescriptorLoss"),
     ("dl_techniques.layers.sequence_pooling", "SequencePooling"),
@@ -99,16 +99,16 @@ SYMBOLS = [
 
 # (module, class, attribute-or-method) named by either README.
 ATTRS = [
-    ("dl_techniques.models.qwen.qwen3", "Qwen3", "MODEL_VARIANTS"),
-    ("dl_techniques.models.qwen.qwen3", "Qwen3", "from_variant"),
-    ("dl_techniques.models.qwen.qwen3_next", "Qwen3Next", "MODEL_VARIANTS"),
-    ("dl_techniques.models.qwen.qwen3_next", "Qwen3Next", "from_variant"),
-    ("dl_techniques.models.superpoint.model", "SuperPoint", "MODEL_VARIANTS"),
-    ("dl_techniques.models.superpoint.model", "SuperPoint", "from_variant"),
-    ("dl_techniques.models.superpoint.model", "SuperPoint", "from_config"),
-    ("dl_techniques.models.superpoint.model", "SuperPoint", "get_config"),
+    ("dl_techniques.models.language.qwen.qwen3", "Qwen3", "MODEL_VARIANTS"),
+    ("dl_techniques.models.language.qwen.qwen3", "Qwen3", "from_variant"),
+    ("dl_techniques.models.language.qwen.qwen3_next", "Qwen3Next", "MODEL_VARIANTS"),
+    ("dl_techniques.models.language.qwen.qwen3_next", "Qwen3Next", "from_variant"),
+    ("dl_techniques.models.vision.keypoints.superpoint.model", "SuperPoint", "MODEL_VARIANTS"),
+    ("dl_techniques.models.vision.keypoints.superpoint.model", "SuperPoint", "from_variant"),
+    ("dl_techniques.models.vision.keypoints.superpoint.model", "SuperPoint", "from_config"),
+    ("dl_techniques.models.vision.keypoints.superpoint.model", "SuperPoint", "get_config"),
     (
-        "dl_techniques.models.superpoint.model",
+        "dl_techniques.models.vision.keypoints.superpoint.model",
         "SuperPoint",
         "compute_output_shape",
     ),
@@ -120,17 +120,17 @@ ATTRS = [
 # variant that does not exist, an extra one means it under-documents.
 VARIANTS = [
     (
-        "dl_techniques.models.qwen.qwen3",
+        "dl_techniques.models.language.qwen.qwen3",
         "Qwen3",
         {"tiny", "small", "medium", "30b-coder"},
     ),
     (
-        "dl_techniques.models.qwen.qwen3_next",
+        "dl_techniques.models.language.qwen.qwen3_next",
         "Qwen3Next",
         {"tiny", "small", "80b", "80b_a3b"},
     ),
     (
-        "dl_techniques.models.superpoint.model",
+        "dl_techniques.models.vision.keypoints.superpoint.model",
         "SuperPoint",
         {"tiny", "base", "large"},
     ),
@@ -191,9 +191,9 @@ def test_qwen_package_init_exports_a_curated_api():
     """
     import importlib
 
-    module = importlib.import_module("dl_techniques.models.qwen")
+    module = importlib.import_module("dl_techniques.models.language.qwen")
     assert hasattr(module, "__all__") and module.__all__, (
-        "models/qwen/__init__.py declares no non-empty __all__; its README "
+        "models/language/qwen/__init__.py declares no non-empty __all__; its README "
         "describes a curated package API"
     )
     for name in ("Qwen3", "Qwen3Next", "create_qwen3"):
@@ -206,7 +206,7 @@ def test_qwen_package_init_exports_a_curated_api():
 def test_superpoint_detector_channels_is_65():
     """65 = 8x8 cells + 1 dustbin — the README's /8-stride detector claim."""
     sp = importlib.import_module(
-        "dl_techniques.models.superpoint.model"
+        "dl_techniques.models.vision.keypoints.superpoint.model"
     ).SuperPoint
     assert sp.DETECTOR_CHANNELS == 65, (
         f"SuperPoint.DETECTOR_CHANNELS is {sp.DETECTOR_CHANNELS}; the README "

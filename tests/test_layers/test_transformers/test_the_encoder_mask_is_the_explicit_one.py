@@ -28,7 +28,7 @@ none of which support masking either. The auto-mask was therefore consumed by
 NOTHING, was numerically inert (forward output bit-identical, max abs diff
 ``0.0``, at ``mask_zero`` True vs False), and its only observable effect was the
 warning. D-055 sets ``mask_zero=False`` by default -- the same finding and the
-same repair as ``models/distilbert/model.py`` (D-018).
+same repair as ``models/language/distilbert/model.py`` (D-018).
 
 These tests pin BOTH halves: the working mask, and the documented limitation.
 A test that only pinned the working mask would let someone "restore"

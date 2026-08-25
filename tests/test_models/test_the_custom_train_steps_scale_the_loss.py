@@ -99,11 +99,7 @@ MODELS_ROOT = (
 # Nothing here is "routed to" a step any more; the three that remain are
 # ruled, not owed.
 KNOWN_UNSCALED = {
-    "latent_gmm_registration/model.py": "fp16-unreachable by design (D-004 arm b)",
-    "memory_bank/wave_field_memory_llm.py": "scale_loss is an unconditional "
-                                            "no-op here; see that file's own anchor",
-    "nano_vlm_world_model/train.py": "never probed; not a `keras.Model.train_step` "
-                                     "on the shipped forward path",
+    "point_cloud/latent_gmm_registration/model.py": "fp16-unreachable by design (D-004 arm b)",
 }
 
 
@@ -131,7 +127,7 @@ def _calls_scale_loss(node: ast.FunctionDef, module_defs=None) -> bool:
     """True if `node` -- or a same-module helper it calls -- uses `scale_loss`.
 
     The one-level callee closure is NOT optional. A purely lexical predicate
-    reports `depth_anything/model.py:975` as an offender, and it is the one
+    reports `vision/depth_anything/model.py:975` as an offender, and it is the one
     COMPLIANT site in the tree: its `train_step` dispatches to
     `_train_step_supervised` / `_train_step_semi_supervised`, and those hold the
     `scale_loss` call. A guard that cannot see one level of indirection would
@@ -254,7 +250,7 @@ def _literal_clip_of_scaled_gradients(node: ast.FunctionDef) -> list:
     Adding `scale_loss` is only half the repair. `tape.gradient(scaled_loss)`
     returns gradients in the SCALED domain, and anything that compares them
     against a fixed threshold before `apply()` unscales them is now comparing
-    against a threshold 2**15 times too small. MEASURED in `models/vae`: with
+    against a threshold 2**15 times too small. MEASURED in `models/vision/vae`: with
     the `scale_loss` call correctly in place, a surviving
     `ops.clip(grad, -1.0, 1.0)` saturated every component and the per-element
     |dW| came out at exactly 3.051758e-06 == 0.1 * 2**-15, for an fp16/float32
@@ -301,7 +297,7 @@ def test_a_scaling_train_step_does_not_clip_against_a_constant(
 
 
 def test_the_clip_predicate_fires_on_the_pre_fix_vae_body():
-    """RED proof, taken from the real pre-fix `models/vae` source."""
+    """RED proof, taken from the real pre-fix `models/vision/vae` source."""
     pre_fix = ast.parse(
         "def train_step(self, data):\n"
         "    with tf.GradientTape() as tape:\n"

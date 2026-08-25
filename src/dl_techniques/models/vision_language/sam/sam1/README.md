@@ -109,7 +109,7 @@ mechanisms, lives in the module docstrings:
 
 ```python
 import keras
-from dl_techniques.models.SAM.SAM1 import SAM, resize_longest_side
+from dl_techniques.models.vision_language.sam.sam1 import SAM, resize_longest_side
 
 model = SAM.from_variant('vit_b')          # RANDOM weights — no checkpoint ships
 
@@ -256,7 +256,7 @@ Two readings of it are worth stating in prose:
 **Inference latency and per-variant memory footprint are NOT measured anywhere
 in this package.** No inference benchmark ships here and none was ever run, so
 no latency or GB-per-variant figure for `vit_b` / `vit_l` / `vit_h` appears
-under `models/SAM/`. Treat any such number you find elsewhere for these variants
+under `models/vision_language/sam/`. Treat any such number you find elsewhere for these variants
 as unrelated to this implementation. (The two memory figures that DO appear —
 the 6,754.5 MiB `vit_h` forward peak in `test_correctness.py` and the COCO
 wall-clock in §10 — are a test-cost measurement and a data-pipeline
@@ -311,7 +311,7 @@ never reached. Executed, on this package's own smallest on-disk checkpoint:
 
 ```python
 import keras
-import dl_techniques.models.SAM.SAM1.training_model   # registrar-first
+import dl_techniques.models.vision_language.sam.sam1.training_model   # registrar-first
 
 model = keras.models.load_model(path, compile=False)
 print(type(model).__name__, len(model.weights))
@@ -319,9 +319,9 @@ print(type(model).__name__, len(model.weights))
 ```
 
 Note the import names the **module**, not the package. For SAM 1 the package
-import happens to be sufficient (`SAM1/__init__.py` imports `training_model`),
+import happens to be sufficient (`sam1/__init__.py` imports `training_model`),
 but that is not true of every sibling — SAM 2's `__init__` does not, so
-`import ...SAM.SAM2` alone still fails. Importing the defining module is the
+`import ...sam.sam2` alone still fails. Importing the defining module is the
 rule that holds for all three.
 
 ### TensorFlow Serving
@@ -329,7 +329,7 @@ rule that holds for all three.
 ```bash
 python -c "
 import keras
-from dl_techniques.models.SAM.SAM1 import SAM
+from dl_techniques.models.vision_language.sam.sam1 import SAM
 
 model = SAM.from_variant('vit_b')
 # Build model...
@@ -440,8 +440,8 @@ Its two siblings carry a **stricter constraint that binds any future work on
 them**: SAM 2's and SAM 3's released code is under the SAM License, which is
 incompatible with this repository's GPL-3.0. Both packages were therefore
 reimplemented from published numbers and a re-read reference, never
-transliterated — see [`../SAM2/README.md`](../SAM2/README.md) and
-[`../SAM3/README.md`](../SAM3/README.md) before extending either.
+transliterated — see [`../sam2/README.md`](../sam2/README.md) and
+[`../sam3/README.md`](../sam3/README.md) before extending either.
 
 ## 12. Citation
 

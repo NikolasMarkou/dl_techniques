@@ -29,8 +29,8 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
-from dl_techniques.models.SAM.SAM2.mask_decoder import SAM2MaskDecoder
+from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
+from dl_techniques.models.vision_language.sam.sam2.mask_decoder import SAM2MaskDecoder
 
 # A-5: the oracle is IMPORTED from SAM 1's test package, never moved or copied.
 # Moving it would touch SAM 1's test tree and put the 357-test regression gate
@@ -869,7 +869,7 @@ def _sam1_decoder_with_deterministic_weights():
       hashes differently depending on how many layers earlier tests built.
       Index-plus-shape is stable under that.
     """
-    from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+    from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
 
     with tf.device("/CPU:0"):
         decoder = MaskDecoder(
@@ -988,7 +988,7 @@ class TestSam1Untouched:
 
     def test_sam1_decoder_still_produces_its_own_two_tuple(self):
         """Importing SAM 1's module here did not change its own behaviour."""
-        from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
+        from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
 
         sam1 = MaskDecoder(transformer_dim=DIM, transformer=make_transformer())
         sam1.build(None)

@@ -67,7 +67,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet import create_resnet
+from dl_techniques.models.vision.resnet import create_resnet
 from dl_techniques.utils.deep_supervision import get_model_output_info
 
 # Import the module, not just the names: every arm must exercise the SOURCE's

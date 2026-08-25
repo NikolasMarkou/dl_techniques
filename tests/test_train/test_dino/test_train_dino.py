@@ -912,7 +912,7 @@ class TestConstruction:
         assert loss.teacher_temp == pytest.approx(config.teacher_temp)
 
     def test_create_callbacks_wires_the_ema_and_the_temperature(self, tmp_path) -> None:
-        from dl_techniques.models.depth_anything.teacher_ema import TeacherEMACallback
+        from dl_techniques.models.vision.depth_anything.teacher_ema import TeacherEMACallback
 
         config = _tiny_config(tmp_path)
         _model, loss = trainer.build_model_and_loss(config)

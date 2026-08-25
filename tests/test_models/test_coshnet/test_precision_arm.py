@@ -20,7 +20,7 @@ from ..precision_arm_oracle import assert_precision_arm
 
 
 def _build():
-    from dl_techniques.models.coshnet.model import create_coshnet
+    from dl_techniques.models.vision.coshnet.model import create_coshnet
     return create_coshnet("tiny", num_classes=4, input_shape=(32, 32, 3))
 
 

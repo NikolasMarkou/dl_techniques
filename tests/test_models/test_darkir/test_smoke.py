@@ -26,7 +26,7 @@ BATCH, HEIGHT, WIDTH, CHANNELS = 2, 32, 32, 3
 
 
 def _build():
-    from dl_techniques.models.darkir.model import create_darkir_model
+    from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
 
     return create_darkir_model(img_channels=CHANNELS, width=16)
 

@@ -24,7 +24,7 @@ import tensorflow as tf
 from typing import Dict, Any, Tuple
 
 
-from dl_techniques.models.som.model import SOMModel, SOM2dLayer
+from dl_techniques.models.memory.som.model import SOMModel, SOM2dLayer
 from dl_techniques.layers.memory.som_nd_layer import SOMLayer
 
 # =============================================================================

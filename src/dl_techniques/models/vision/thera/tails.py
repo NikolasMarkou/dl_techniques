@@ -560,7 +560,7 @@ class TheraTailPro(keras.layers.Layer):
         #     reflected border is real data to `rstb_convs` / `conv_after_body`
         #     (this stack has no padding mask), so a fallback silently invents
         #     content for a geometry that today fails loudly.
-        #   * Do NOT share this with `models/scunet/model.py`, which carries the
+        #   * Do NOT share this with `models/vision/image_restoration/scunet/model.py`, which carries the
         #     identical constraint. Two sites duplicate; a THIRD triggers
         #     promotion. See decisions.md D-004.
         #   * Do NOT make it a runtime (`ops`) check. `pad_h`/`pad_w` below are

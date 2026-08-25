@@ -12,7 +12,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.mothnet.model import MothNet
+from dl_techniques.models.general_purpose.mothnet.model import MothNet
 
 NUM_FEATURES = 64
 NUM_CLASSES = 10

@@ -28,7 +28,7 @@ transcription, not a fast one.
 
 The tower is a standalone :class:`keras.Model` and is usable on its own. It is
 also the vision branch of MobileCLIP2 specifically —
-``models/mobile_clip/mobile_clip_v2.py`` imports :class:`FastVitImageEncoder`
+``models/vision_language/mobile_clip/mobile_clip_v2.py`` imports :class:`FastVitImageEncoder`
 from here, while the deliberately non-faithful ``mobile_clip_v1.py`` does not.
 The one place that dual role shows through is the head ``Dense``.
 

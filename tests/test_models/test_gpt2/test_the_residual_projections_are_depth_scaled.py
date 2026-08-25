@@ -8,7 +8,7 @@ each of them alone is satisfiable by a wrong implementation:
    projection) shrink relative to ``initializer_range``.
 2. Q/K/V and the FFN EXPANSION do **not** shrink. The tempting one-line
    "fix" -- scaling the block's single ``kernel_initializer`` -- passes (1) and
-   fails here, and it is the reason ``models/gpt2/gpt2.py`` carried this as a
+   fails here, and it is the reason ``models/language/gpt2/gpt2.py`` carried this as a
    disclosed departure rather than shipping that shortcut.
 3. The shrink factor TRACKS DEPTH as ``1/sqrt(2 * depth)``. A constant factor
    passes (1) and (2) and fails here.
@@ -44,7 +44,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
-from dl_techniques.models.gpt2.gpt2 import GPT2
+from dl_techniques.models.language.gpt2.gpt2 import GPT2
 
 # Empirical std of ``TruncatedNormal(stddev=1.0)``: 2-sigma truncation.
 TRUNCATION_FACTOR = 0.87964

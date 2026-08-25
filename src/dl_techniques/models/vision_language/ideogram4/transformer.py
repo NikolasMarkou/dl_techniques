@@ -73,7 +73,7 @@ Deliberate choices and divergences:
   monotonically toward the data end. Because `LogitNormalSchedule` is strictly
   DECREASING in its uniform argument, the loop reads its step grid in reverse to obtain
   that descent -- see the D-002 derivation at the loop itself. This is the same
-  convention as `models/sd3_mmdit/`, which implements the identical rectified flow, so
+  convention as `models/vision_language/sd3_mmdit/`, which implements the identical rectified flow, so
   the two packages' schedulers and samplers can be read against each other. The module's
   `[0, 1]` range alone still implies nothing; the endpoints are fixed by the trainer.
 - Conditioning is a PRECOMPUTED `llm_features` call input (D1). The reference
@@ -127,11 +127,11 @@ from dl_techniques.layers.transformers.ideogram4_block import (
     Ideogram4TransformerBlock,
     Ideogram4FinalLayer,
 )
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     Ideogram4Config,
     get_ideogram4_config,
 )
-from dl_techniques.models.ideogram4.constants import (
+from dl_techniques.models.vision_language.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )

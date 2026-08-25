@@ -153,7 +153,7 @@ Create a "base" variant model for a vocabulary of 32k.
 
 ```python
 import keras
-from dl_techniques.models.hierarchical_reasoning_model.model import create_hierarchical_reasoning_model
+from dl_techniques.models.language.hierarchical_reasoning_model.model import create_hierarchical_reasoning_model
 
 # 1. Create Model
 # "base" variant matches the configuration from research papers
@@ -198,7 +198,7 @@ print(f"Halting Confidence: {outputs['q_halt_logits']}")
 **Purpose**: The main user-facing Keras Model.
 
 ```python
-from dl_techniques.models.hierarchical_reasoning_model import HierarchicalReasoningModel
+from dl_techniques.models.language.hierarchical_reasoning_model import HierarchicalReasoningModel
 
 model = HierarchicalReasoningModel(
     vocab_size=32000,
@@ -254,7 +254,7 @@ HRM allows manual control over the reasoning steps, useful for debugging or comp
 
 ```python
 import keras
-from dl_techniques.models.hierarchical_reasoning_model import (
+from dl_techniques.models.language.hierarchical_reasoning_model import (
     HierarchicalReasoningModel, create_hierarchical_reasoning_model
 )
 

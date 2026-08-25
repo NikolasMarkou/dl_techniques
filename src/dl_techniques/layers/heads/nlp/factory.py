@@ -163,7 +163,7 @@ class BaseNLPHead(keras.layers.Layer):
         # The class DEFAULT stays 'cls' -- it is correct for the bidirectional
         # encoders that dominate this head's consumers (bert, distilbert, fnet,
         # modern_bert, tree_transformer). A CAUSAL backbone must pass
-        # `pooling_type='last'` explicitly, as `models/mamba/mamba_v1.py::
+        # `pooling_type='last'` explicitly, as `models/language/mamba/mamba_v1.py::
         # create_mamba_with_head` now does: under 'cls' the classifier reads
         # position 0, which in a causal model has attended to nothing but
         # itself, so the whole classifier is a function of the first token id.

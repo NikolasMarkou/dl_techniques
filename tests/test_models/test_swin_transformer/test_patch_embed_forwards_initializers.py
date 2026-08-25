@@ -18,7 +18,7 @@ broken tree. See ``tests/test_models/knob_sensitivity_oracle.py``.
 import keras
 import numpy as np
 
-from dl_techniques.models.swin_transformer.model import SwinTransformer
+from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
 
 from ..knob_sensitivity_oracle import (
     assert_scoped_value_knob_changes_weights,

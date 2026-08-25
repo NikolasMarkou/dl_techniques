@@ -7,7 +7,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.sampling import Sampling, HypersphereSampling, VMFSampling
-from dl_techniques.models.vae.model import VAE, create_vae, create_vae_from_config
+from dl_techniques.models.vision.vae.model import VAE, create_vae, create_vae_from_config
 
 SAMPLING_MODES = [
     "gaussian",

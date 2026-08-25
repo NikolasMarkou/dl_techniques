@@ -100,7 +100,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

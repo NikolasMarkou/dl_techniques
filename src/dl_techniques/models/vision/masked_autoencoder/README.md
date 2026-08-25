@@ -85,11 +85,11 @@ Here's a minimal example to get started:
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.masked_autoencoder import (
+from dl_techniques.models.vision.masked_autoencoder import (
     MaskedAutoencoder,
     visualize_reconstruction,
 )
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
 # 1. Create MAE model. MAE takes an ENCODER MODEL, not a dimension list.
 #    `strides=2` is required: ConvNeXtV2 applies `strides` at the stem AND at
@@ -159,8 +159,8 @@ print(f"Loaded {len(train_images)} images with shape {train_images.shape}")
 The key is specifying your encoder architecture dimensions:
 
 ```python
-from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
 def convnext_encoder(variant, input_shape=(224, 224, 3)):
     """A /16 ConvNeXtV2 feature extractor -- see the Encoder contract above."""
@@ -360,8 +360,8 @@ mae.compile(optimizer=keras.optimizers.AdamW(learning_rate=lr_schedule))
 ### Method 1: Training MAE with ConvNeXt Configuration
 
 ```python
-from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
 # Create MAE with a ConvNeXt-Tiny encoder
 mae = MaskedAutoencoder(
@@ -430,7 +430,7 @@ After MAE pretraining, use the encoder for supervised tasks:
 ### Classification Task
 
 ```python
-from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 import keras
 
 # Load trained MAE
@@ -520,7 +520,7 @@ segmentation_model = keras.Model(inputs, outputs)
 ### Visualizing Reconstructions
 
 ```python
-from dl_techniques.models.masked_autoencoder import visualize_reconstruction
+from dl_techniques.models.vision.masked_autoencoder import visualize_reconstruction
 import matplotlib.pyplot as plt
 
 # Single image visualization
@@ -872,11 +872,11 @@ import keras
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from dl_techniques.models.masked_autoencoder import (
+from dl_techniques.models.vision.masked_autoencoder import (
     MaskedAutoencoder,
     visualize_reconstruction,
 )
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
 # ============================================
 # 1. DATA PREPARATION

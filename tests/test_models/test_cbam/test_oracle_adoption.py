@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/cbam`` -- Phase 5 batch A.
+Oracle adoption for ``models/vision/cbam`` -- Phase 5 batch A.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -21,7 +21,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.cbam.model import CBAMNet
+from dl_techniques.models.vision.cbam.model import CBAMNet
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

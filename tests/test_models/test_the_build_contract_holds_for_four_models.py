@@ -41,10 +41,10 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.bert.model import BERT
-from dl_techniques.models.masked_autoencoder.mae import MaskedAutoencoder
-from dl_techniques.models.masked_language_model.clm import CausalLanguageModel
-from dl_techniques.models.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.bert.model import BERT
+from dl_techniques.models.vision.masked_autoencoder.mae import MaskedAutoencoder
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.language.hierarchical_reasoning_model.model import (
     create_hierarchical_reasoning_model,
 )
 

@@ -7,7 +7,7 @@ and an inference pipeline.
 The top-level models, text encoders and builders are re-exported here. The block
 and scheduler internals stay behind their submodules, e.g.::
 
-    from dl_techniques.models.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
+    from dl_techniques.models.vision_language.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
 """
 from .pipeline import create_sd3_pipeline
 from .text_encoders import CLIPTextEncoder, T5Encoder

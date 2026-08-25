@@ -69,7 +69,7 @@ not carried by the two arms above:
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet.model import ResNet
+from dl_techniques.models.vision.resnet.model import ResNet
 from tests.test_models.gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
 )

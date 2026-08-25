@@ -32,7 +32,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
     BeitForMaskedImageModeling,
     BeitModel,

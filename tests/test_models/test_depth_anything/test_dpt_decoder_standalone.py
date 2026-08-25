@@ -38,7 +38,7 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.depth_anything.components import DPTDecoder
+from dl_techniques.models.vision.depth_anything.components import DPTDecoder
 
 SHAPE = (None, 8, 8, 16)
 X = np.random.RandomState(0).randn(2, 8, 8, 16).astype("float32")

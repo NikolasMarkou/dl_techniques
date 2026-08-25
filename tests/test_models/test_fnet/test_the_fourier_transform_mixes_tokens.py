@@ -35,7 +35,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.attention.fnet_fourier_transform import FNetFourierTransform
-from dl_techniques.models.fnet.model import FNet
+from dl_techniques.models.language.fnet.model import FNet
 
 from ..test_sam.dead_component_oracle import layer_returns_its_input
 

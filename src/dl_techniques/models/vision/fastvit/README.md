@@ -22,8 +22,8 @@ before quoting it against any published number.
 | | |
 |---|---|
 | The eight block primitives | [`layers/fastvit/`](../../layers/fastvit/README.md) |
-| The assembled tower (here) | `models/fastvit/` |
-| The CLIP model that consumes it | [`models/mobile_clip/`](../mobile_clip/README.md) |
+| The assembled tower (here) | `models/vision/fastvit/` |
+| The CLIP model that consumes it | [`models/vision_language/mobile_clip/`](../mobile_clip/README.md) |
 
 ---
 
@@ -51,7 +51,7 @@ either a projected embedding or pooled backbone features. It has two audiences:
 
 * **As a CLIP image tower** — this is what MobileCLIP2 uses it for. In that role
   its terminal `Dense(projection_dim)` **is** the CLIP image projection (see
-  §3), and `models/mobile_clip/mobile_clip_v2.py` imports it from here.
+  §3), and `models/vision_language/mobile_clip/mobile_clip_v2.py` imports it from here.
 * **As a general image backbone** — build it with `projection_dim=None` to get
   pooled features for classification, transfer, or dense heads.
 
@@ -140,7 +140,7 @@ reference settings.
 
 ```python
 import numpy as np
-from dl_techniques.models.fastvit import FastVitImageEncoder
+from dl_techniques.models.vision.fastvit import FastVitImageEncoder
 
 tower = FastVitImageEncoder.from_variant('mci0', projection_dim=512)
 
@@ -159,7 +159,7 @@ out.shape                     # (2, 512)
 
 ## 5. Component reference
 
-Public surface (`from dl_techniques.models.fastvit import ...`):
+Public surface (`from dl_techniques.models.vision.fastvit import ...`):
 
 | Symbol | Kind | What it is |
 |---|---|---|
@@ -204,7 +204,7 @@ written here:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -c "
-from dl_techniques.models.fastvit import FastVitImageEncoder
+from dl_techniques.models.vision.fastvit import FastVitImageEncoder
 m = FastVitImageEncoder.from_variant('mci0')
 m.build((None, 256, 256, 3))
 print(m.count_params())
@@ -216,7 +216,7 @@ print(m.count_params())
 ### Projection vs. pooled features
 
 ```python
-from dl_techniques.models.fastvit import create_fastvit_image_encoder
+from dl_techniques.models.vision.fastvit import create_fastvit_image_encoder
 
 # CLIP embedding — the terminal Dense IS the projection
 tower = create_fastvit_image_encoder('mci0', projection_dim=512)
@@ -354,7 +354,7 @@ construction, and no conversion script exists here.
 `src/dl_techniques/layers/repmixer_block.py::RepMixerBlock` is **not** FastViT's
 RepMixer block. It has no LayerScale, no stochastic depth, a different token
 mixer, and a 1x1 ConvFFN instead of a depthwise 7x7 ConvMlp. It is consumed by
-`models/fastvlm/` and was deliberately left untouched — substituting the FastViT
+`models/vision_language/fastvlm/` and was deliberately left untouched — substituting the FastViT
 block would change a shipped model's semantics and its checkpoint layout.
 
 **Which one do you want?**
@@ -362,7 +362,7 @@ block would change a shipped model's semantics and its checkpoint layout.
 * Building a faithful FastViT / MobileCLIP2 tower, or anything that must
   correspond block-for-block to timm's `fastvit.py` — use
   `dl_techniques.layers.fastvit.FastVitRepMixerBlock`.
-* Touching `models/fastvlm/` or loading one of its checkpoints — that model
+* Touching `models/vision_language/fastvlm/` or loading one of its checkpoints — that model
   consumes `layers/repmixer_block.py::RepMixerBlock`. Leave it alone.
 
 The same disambiguation applies to `layers/repmixer_block.py::ConvolutionalStem`,
@@ -387,7 +387,7 @@ vs 5-stage mixup. `mci0`/`mci1`/`mci2` need 4 entries in every per-stage tuple;
 **Why does `FastVitRepMixerBlock` not match `RepMixerBlock`?** They are different
 architectures that share a name. See deviation **X-5**.
 
-**Where is the CLIP model?** [`models/mobile_clip/`](../mobile_clip/README.md).
+**Where is the CLIP model?** [`models/vision_language/mobile_clip/`](../mobile_clip/README.md).
 This package is the image branch only.
 
 ## 11. Technical details

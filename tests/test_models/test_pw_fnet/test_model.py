@@ -25,7 +25,7 @@ from keras import ops
 from typing import Dict, Any
 import tensorflow as tf
 
-from dl_techniques.models.pw_fnet.model import (
+from dl_techniques.models.vision.image_restoration.pw_fnet.model import (
     FFTLayer,
     IFFTLayer,
     PW_FNet_Block,

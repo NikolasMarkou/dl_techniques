@@ -27,7 +27,7 @@ import tensorflow as tf
 from typing import Dict, Any
 
 
-from dl_techniques.models.vq_vae.model import VQVAEModel
+from dl_techniques.models.vision.vq_vae.model import VQVAEModel
 
 
 # ============================================================================

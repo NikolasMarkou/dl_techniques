@@ -25,7 +25,7 @@ with "use_bias_in_modrelu is a no-op: ... identical weight-shape signature".
 import numpy as np
 import pytest
 
-from dl_techniques.models.fftnet.model import FFTNet, FFTNetBlock, create_fftnet
+from dl_techniques.models.language.fftnet.model import FFTNet, FFTNetBlock, create_fftnet
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,

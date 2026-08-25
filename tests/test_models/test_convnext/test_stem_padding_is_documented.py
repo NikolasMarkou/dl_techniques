@@ -17,8 +17,8 @@ stem has to argue with a test rather than with a paragraph.
 import numpy as np
 import pytest
 
-from dl_techniques.models.convnext.convnext_v1 import ConvNeXtV1
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
 TINY = dict(depths=[1, 1], dims=[8, 16], num_classes=4, include_top=False)
 

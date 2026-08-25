@@ -15,8 +15,8 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.masked_autoencoder import create_mae_model
-from dl_techniques.models.masked_autoencoder.mae import MaskedAutoencoder
+from dl_techniques.models.vision.masked_autoencoder import create_mae_model
+from dl_techniques.models.vision.masked_autoencoder.mae import MaskedAutoencoder
 
 INPUT_SHAPE = (32, 32, 3)
 

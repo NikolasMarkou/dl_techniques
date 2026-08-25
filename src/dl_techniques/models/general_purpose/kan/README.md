@@ -211,7 +211,7 @@ Let's build a KAN to learn a simple non-linear function: `y = sin(π*x1) + x2^2`
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.kan.model import create_kan_model
+from dl_techniques.models.general_purpose.kan.model import create_kan_model
 
 # 1. Generate synthetic data
 def generate_data(num_samples):
@@ -260,7 +260,7 @@ history = model.fit(
 **Purpose**: The main Keras `Model` subclass that assembles the KAN architecture.
 
 ```python
-from dl_techniques.models.kan.model import KAN
+from dl_techniques.models.general_purpose.kan.model import KAN
 
 # Create a custom KAN model
 layer_configs = [
@@ -318,7 +318,7 @@ model = create_kan_model(
 
 ```python
 import keras
-from dl_techniques.models.kan.model import create_kan_model
+from dl_techniques.models.general_purpose.kan.model import create_kan_model
 
 # 1. Load data
 (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
@@ -350,7 +350,7 @@ model.fit(x_train, y_train, validation_data=(x_test, y_test), epochs=5)
 Define every layer's configuration manually for full control.
 
 ```python
-from dl_techniques.models.kan.model import KAN
+from dl_techniques.models.general_purpose.kan.model import KAN
 
 layer_configs = [
     {"features": 64, "grid_size": 8, "spline_order": 3, "base_activation": "gelu"},
@@ -513,7 +513,7 @@ loaded_model = keras.models.load_model('my_kan_model.keras')
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.kan.model import create_kan_model
+from dl_techniques.models.general_purpose.kan.model import create_kan_model
 
 def test_forward_pass_shape():
     """Test the output shape of a forward pass."""

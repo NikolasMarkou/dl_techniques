@@ -53,7 +53,7 @@ from train.common.datasets import (  # noqa: F401  (re-exported)
 )
 from train.common.optimizer import build_optimizer  # noqa: F401  (re-exported)
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vq_vae_rotation.model import VQVAERotationTrick
+from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 __all__ = [
     "DATASET_NUM_CLASSES",

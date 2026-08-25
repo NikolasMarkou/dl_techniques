@@ -40,7 +40,7 @@ classifier-free guidance, then the VAE decoder maps the final latent to pixels.
 trainer's `x_t = (1 - tau)*x0 + tau*x1`, target `v = x1 - x0`). Sampling starts
 from noise at the top of the grid and integrates **down**, so the Euler step
 `s - t` is negative and the `t` fed to the transformer descends monotonically —
-the same convention as `models/sd3_mmdit/`.
+the same convention as `models/vision_language/sd3_mmdit/`.
 
 ---
 
@@ -71,7 +71,7 @@ returns `.float()`, replicated even under mixed precision).
 Build via the factory:
 
 ```python
-from dl_techniques.models.ideogram4.transformer import create_ideogram4_transformer
+from dl_techniques.models.vision_language.ideogram4.transformer import create_ideogram4_transformer
 model = create_ideogram4_transformer("tiny")          # or "full"
 model = create_ideogram4_transformer("tiny", num_layers=4)   # field overrides
 ```
@@ -180,7 +180,7 @@ patch_size²`, and `config.z_channels == ae.z_channels`).
 Build a tiny transformer:
 
 ```python
-from dl_techniques.models.ideogram4.transformer import create_ideogram4_transformer
+from dl_techniques.models.vision_language.ideogram4.transformer import create_ideogram4_transformer
 model = create_ideogram4_transformer("tiny")
 ```
 

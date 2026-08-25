@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 from train.nam.train_dfsa import DifferentiableFSA
 from train.nam.data_generator import _safe_eval
 

@@ -30,7 +30,7 @@ Caffe's ``weight_filler { type: "xavier" }`` normalizes by ``fan_in`` by default
 ``U(+-sqrt(3/fan_in))``. Keras' ``glorot_uniform`` normalizes by
 ``(fan_in + fan_out)/2``. The Keras name that reproduces Caffe's default xavier is
 ``lecun_uniform``. The full measured derivation lives at
-``models/squeezenet/caffe_reference_init.py``; this file asserts the outcome.
+``models/vision/squeezenet/caffe_reference_init.py``; this file asserts the outcome.
 
 THE BARE-STRING-INITIALIZER TRAP
 --------------------------------
@@ -141,7 +141,7 @@ _HF_VIT = (
 )
 _MSFT_SWIN = (
     "https://github.com/microsoft/Swin-Transformer/blob/main/"
-    "models/swin_transformer.py"
+    "models/vision/swin_transformer.py"
 )
 _FAIR_DINO = (
     "https://github.com/facebookresearch/dino/blob/main/vision_transformer.py"
@@ -170,7 +170,7 @@ _KERAS_EXACT_GELU_STRING = "gelu"
 
 
 def _resnet_default_momentum() -> float:
-    from dl_techniques.models.resnet.model import ResNet
+    from dl_techniques.models.vision.resnet.model import ResNet
 
     model = ResNet(
         num_classes=2,
@@ -184,49 +184,49 @@ def _resnet_default_momentum() -> float:
 
 
 def _cliffordnet_stem_momentum() -> float:
-    from dl_techniques.models.cliffordnet.model import _STEM_BN_MOMENTUM
+    from dl_techniques.models.vision.cliffordnet.model import _STEM_BN_MOMENTUM
 
     return _STEM_BN_MOMENTUM
 
 
 def _clifford_clip_stem_momentum() -> float:
-    from dl_techniques.models.clip.clifford_clip import _VISION_STEM_BN_MOMENTUM
+    from dl_techniques.models.vision_language.clip.clifford_clip import _VISION_STEM_BN_MOMENTUM
 
     return _VISION_STEM_BN_MOMENTUM
 
 
 def _squeezenet_v1_stem_initializer() -> str:
-    from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1
+    from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 
     return SqueezeNetV1.STEM_INITIALIZER
 
 
 def _squeezenet_v1_head_stddev() -> float:
-    from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1
+    from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 
     return SqueezeNetV1.HEAD_INITIALIZER["config"]["stddev"]
 
 
 def _squeezenet_v2_stem_initializer() -> str:
-    from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+    from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 
     return SqueezeNoduleNetV2.STEM_INITIALIZER
 
 
 def _squeezenet_v2_head_stddev() -> float:
-    from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
+    from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 
     return SqueezeNoduleNetV2.HEAD_INITIALIZER["config"]["stddev"]
 
 
 def _vit_initializer_stddev() -> float:
-    from dl_techniques.models.vit.model import REFERENCE_KERNEL_INITIALIZER
+    from dl_techniques.models.vision.vit.model import REFERENCE_KERNEL_INITIALIZER
 
     return REFERENCE_KERNEL_INITIALIZER["config"]["stddev"]
 
 
 def _swin_initializer_stddev() -> float:
-    from dl_techniques.models.swin_transformer.model import (
+    from dl_techniques.models.vision.swin_transformer.model import (
         REFERENCE_KERNEL_INITIALIZER,
     )
 
@@ -234,13 +234,13 @@ def _swin_initializer_stddev() -> float:
 
 
 def _dino_initializer_stddev() -> float:
-    from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
+    from dl_techniques.models.vision.dino.reference_init import DINO_KERNEL_INITIALIZER
 
     return DINO_KERNEL_INITIALIZER["config"]["stddev"]
 
 
 def _bert_default_hidden_act() -> str:
-    from dl_techniques.models.bert.model import BERT
+    from dl_techniques.models.language.bert.model import BERT
 
     return BERT.DEFAULT_HIDDEN_ACT
 
@@ -401,7 +401,7 @@ def _grid():
 
 
 def _built_bert_ffn_activations():
-    from dl_techniques.models.bert.model import BERT
+    from dl_techniques.models.language.bert.model import BERT
 
     ids = np.random.RandomState(0).randint(0, 64, size=(2, 8))
     inputs = {
@@ -467,7 +467,7 @@ def test_the_gelu_form_in_use_is_the_tanh_approximation(package, reader, url):
 
 
 def _built_vit():
-    from dl_techniques.models.vit.model import ViT
+    from dl_techniques.models.vision.vit.model import ViT
 
     keras.utils.set_random_seed(3)
     model = ViT(input_shape=(32, 32, 3), num_classes=4, scale="pico", patch_size=8)
@@ -476,7 +476,7 @@ def _built_vit():
 
 
 def _built_swin():
-    from dl_techniques.models.swin_transformer.model import SwinTransformer
+    from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
 
     keras.utils.set_random_seed(3)
     model = SwinTransformer(
@@ -488,7 +488,7 @@ def _built_swin():
 
 
 def _built_dino_v3():
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
 
     keras.utils.set_random_seed(3)
     model = DINOv3(
@@ -500,7 +500,7 @@ def _built_dino_v3():
 
 
 def _built_dino_v1_head():
-    from dl_techniques.models.dino.dino_v1 import DINOHead
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
     keras.utils.set_random_seed(3)
     head = DINOHead(in_dim=64, out_dim=32, hidden_dim=256, bottleneck_dim=64)
@@ -519,7 +519,7 @@ def _built_beit():
     at realized std **0.125238** (glorot at dim=64) beside 0.017609 for every
     other kernel in the SAME model. That within-model split is why a whole-model
     probe would have missed it -- ``other`` alone passes."""
-    from dl_techniques.models.beit.model import BeitModel
+    from dl_techniques.models.vision.beit.model import BeitModel
 
     keras.utils.set_random_seed(3)
     model = BeitModel(
@@ -547,7 +547,7 @@ class _AttentionSubtree:
 
 
 def _built_dino_v1_classifier():
-    from dl_techniques.models.dino.dino_v1 import DINOv1
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
 
     keras.utils.set_random_seed(3)
     model = DINOv1(
@@ -692,7 +692,7 @@ def test_the_blocks_kernel_initializer_reaches_its_attention_layer(attention_typ
 def test_the_forwarded_initializer_is_cloned_not_shared():
     """The trade this fix must not make. Forwarding ONE seedless instance to N
     blocks would replay one draw -- the D-540/D-560 defect. Callers really do
-    hand a single instance to every block (``models/beit/model.py:409``)."""
+    hand a single instance to every block (``models/vision/beit/model.py:409``)."""
     from dl_techniques.layers.transformers.transformer import TransformerLayer
 
     shared = keras.initializers.TruncatedNormal(stddev=_PROBE_STDDEV)
@@ -746,11 +746,11 @@ def test_the_reference_initializers_are_inert_dicts_not_shared_instances():
     """A seedless instance bakes its seed at construction and REPLAYS its draw,
     so one shared as a default argument would hand every model in the process
     identical weights. Both halves are measured here, not assumed."""
-    from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
-    from dl_techniques.models.swin_transformer.model import (
+    from dl_techniques.models.vision.dino.reference_init import DINO_KERNEL_INITIALIZER
+    from dl_techniques.models.vision.swin_transformer.model import (
         REFERENCE_KERNEL_INITIALIZER as SWIN_INIT,
     )
-    from dl_techniques.models.vit.model import (
+    from dl_techniques.models.vision.vit.model import (
         REFERENCE_KERNEL_INITIALIZER as VIT_INIT,
     )
 
@@ -770,7 +770,7 @@ def test_a_loaded_checkpoint_ignores_the_initializer(tmp_path):
     """Why every initializer row here is TRAINING-ONLY and the two GELU rows are
     not. An artifact written under the OLD initializer is reproduced exactly by a
     model built with the NEW one, because loading overwrites what was drawn."""
-    from dl_techniques.models.vit.model import ViT
+    from dl_techniques.models.vision.vit.model import ViT
 
     x = np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
     keras.utils.set_random_seed(11)

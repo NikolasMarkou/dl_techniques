@@ -34,7 +34,7 @@ import pytest
 
 
 def _hrm_variants() -> Dict[str, Dict[str, Any]]:
-    from dl_techniques.models.hierarchical_reasoning_model.model import (
+    from dl_techniques.models.language.hierarchical_reasoning_model.model import (
         HierarchicalReasoningModel,
     )
 
@@ -42,25 +42,25 @@ def _hrm_variants() -> Dict[str, Dict[str, Any]]:
 
 
 def _sd3_variants() -> Dict[str, Dict[str, Any]]:
-    from dl_techniques.models.sd3_mmdit.config import PRESETS
+    from dl_techniques.models.vision_language.sd3_mmdit.config import PRESETS
 
     return {k: v["config"] for k, v in PRESETS.items()}
 
 
 def _ntm_variants() -> Dict[str, Dict[str, Any]]:
-    from dl_techniques.models.ntm.model import NTMModel
+    from dl_techniques.models.neural_computer.ntm.model import NTMModel
 
     return NTMModel.NTM_VARIANTS
 
 
 def _pft_sr_variants() -> Dict[str, Dict[str, Any]]:
-    from dl_techniques.models.pft_sr.model import PFTSR
+    from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
 
     return PFTSR.MODEL_VARIANTS
 
 
 def _relgt_variants() -> Dict[str, Dict[str, Any]]:
-    from dl_techniques.models.relgt.model import RELGT
+    from dl_techniques.models.graph.relgt.model import RELGT
 
     return RELGT.MODEL_VARIANTS
 

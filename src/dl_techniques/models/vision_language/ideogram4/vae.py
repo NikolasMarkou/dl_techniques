@@ -55,7 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import Sampling
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
     get_ideogram4_config,
 )

@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 VOCAB = 64
 PERM = np.array([3, 0, 7, 2, 5, 1, 6, 4])

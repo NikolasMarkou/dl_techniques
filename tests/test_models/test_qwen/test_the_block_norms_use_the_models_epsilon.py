@@ -12,7 +12,7 @@ therefore uses a non-default value. See decisions.md D-007
 import numpy as np
 import pytest
 
-from dl_techniques.models.qwen.qwen3 import Qwen3
+from dl_techniques.models.language.qwen.qwen3 import Qwen3
 from tests.norm_epsilon_oracle import (
     assert_epsilon_tracks_the_knob,
     assert_every_block_norm_uses,

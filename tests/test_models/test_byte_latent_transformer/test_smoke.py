@@ -28,7 +28,7 @@ BATCH, SEQ_LEN, VOCAB_SIZE = 2, 16, 256
 
 
 def _build():
-    from dl_techniques.models.byte_latent_transformer.model import create_blt_model
+    from dl_techniques.models.language.byte_latent_transformer.model import create_blt_model
 
     return create_blt_model(
         variant="micro",

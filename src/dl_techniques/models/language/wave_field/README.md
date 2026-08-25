@@ -9,7 +9,7 @@ dot-product self-attention is replaced by **`WaveFieldAttention`** — an
 FFT-based token mixer that scatters token content onto a 1-D field, convolves
 it with a per-head damped wave kernel, and gathers it back. Everything else
 (token + learned positional embeddings, pre-norm blocks, weight-tied LM head,
-dict output) mirrors `models/gpt2/` so the two share a training pipeline.
+dict output) mirrors `models/language/gpt2/` so the two share a training pipeline.
 
 > ⚠️ **No public pretrained weights are distributed by this library.** Calls
 > like `WaveFieldLLM.from_variant("small", pretrained=True)` raise
@@ -188,7 +188,7 @@ EARLIER position move. A strictly causal model moves them by 0.
 """
 import keras
 import numpy as np
-from dl_techniques.models.wave_field import WaveFieldLLM
+from dl_techniques.models.language.wave_field import WaveFieldLLM
 
 MAX_SEQ_LEN, VOCAB = 32, 256
 
@@ -302,7 +302,7 @@ outside `[0, 1]` — all at construction time.
 
 ```python
 import numpy as np
-from dl_techniques.models.wave_field import create_wave_field_llm
+from dl_techniques.models.language.wave_field import create_wave_field_llm
 
 model = create_wave_field_llm("tiny", vocab_size=512)
 outputs = model(np.random.randint(0, 512, size=(2, 64)).astype("int32"))
@@ -339,7 +339,7 @@ A thin wrapper over `WaveFieldLLM.from_variant`, mirroring `create_bert` /
 
 ### 6.4 Public API
 
-`dl_techniques.models.wave_field` exports exactly `WaveFieldLLM`,
+`dl_techniques.models.language.wave_field` exports exactly `WaveFieldLLM`,
 `WaveFieldDecoderBlock` and `create_wave_field_llm` via `__all__`.
 
 ---
@@ -375,7 +375,7 @@ Other constructor arguments:
 Read the variants from the class rather than trusting this table:
 
 ```python
-from dl_techniques.models.wave_field import WaveFieldLLM
+from dl_techniques.models.language.wave_field import WaveFieldLLM
 for name, cfg in WaveFieldLLM.MODEL_VARIANTS.items():
     print(name, cfg)
 ```
@@ -388,7 +388,7 @@ for name, cfg in WaveFieldLLM.MODEL_VARIANTS.items():
 
 ```python
 import numpy as np
-from dl_techniques.models.wave_field import WaveFieldLLM, WaveFieldDecoderBlock
+from dl_techniques.models.language.wave_field import WaveFieldLLM, WaveFieldDecoderBlock
 
 model = WaveFieldLLM(
     vocab_size=256, embed_dim=64, depth=2, num_heads=4, max_seq_len=32,
@@ -421,7 +421,7 @@ except ValueError as e:
 ### Example 2: the weights contract
 
 ```python
-from dl_techniques.models.wave_field import WaveFieldLLM, create_wave_field_llm
+from dl_techniques.models.language.wave_field import WaveFieldLLM, create_wave_field_llm
 
 for call in (
     lambda: WaveFieldLLM.from_variant("tiny", pretrained=True),
@@ -454,7 +454,7 @@ partial restore is possible. Check the logged restored-variable count.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.wave_field import WaveFieldLLM
+from dl_techniques.models.language.wave_field import WaveFieldLLM
 from dl_techniques.losses import MaskedCausalLMLoss
 
 model = WaveFieldLLM(
@@ -482,13 +482,14 @@ propagates on. Sweep it — but pair every sweep with the leak probe from §3, a
 record both numbers. A configuration that trains better while leaking the
 future is not a better language model.
 
-### Pattern 3: memory-augmented variant
+### Pattern 3: memory-augmented variant (REMOVED)
 
-`src/dl_techniques/models/memory_bank/` layers a dual-tap long-term / working
-memory bank on top of `WaveFieldLLM` (`wave_field_memory_llm.py`). It is a
-separate package with its own tests, and it currently ships **no trainer** —
-`src/train/wave_field/train_memory.py` was deleted on 2026-08-13. The model
-package itself was not deleted.
+A `memory_bank` package once layered a dual-tap long-term / working memory bank
+on top of `WaveFieldLLM` (`wave_field_memory_llm.py`). Its trainer,
+`src/train/wave_field/train_memory.py`, was deleted on 2026-08-13, and the model
+package itself was deleted from the tree on 2026-08-24 along with its tests.
+Nothing under `models/` implements this pattern today; recover it from git
+history (`git log -- src/dl_techniques/models/memory_bank`) if you want it back.
 
 ---
 
@@ -510,7 +511,7 @@ Measured to run under `mixed_float16` on this repo's GPUs, both forward and a
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.wave_field import WaveFieldLLM
+from dl_techniques.models.language.wave_field import WaveFieldLLM
 
 keras.mixed_precision.set_global_policy("mixed_float16")
 model = WaveFieldLLM(vocab_size=256, embed_dim=64, depth=2, num_heads=4, max_seq_len=32)
@@ -561,7 +562,7 @@ Practical notes:
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.wave_field import WaveFieldLLM
+from dl_techniques.models.language.wave_field import WaveFieldLLM
 
 model = WaveFieldLLM(
     vocab_size=256, embed_dim=64, depth=2, num_heads=4, max_seq_len=32,

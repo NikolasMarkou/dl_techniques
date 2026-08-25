@@ -89,7 +89,7 @@ The initial `W` is refined through two complementary bootstrapping strategies.
 ```python
 import numpy as np
 import keras
-from dl_techniques.models.mini_vec2vec import MiniVec2VecAligner
+from dl_techniques.models.language.mini_vec2vec import MiniVec2VecAligner
 
 # Assume you have your embedding matrices loaded
 # Shape: (n_samples, embedding_dim)

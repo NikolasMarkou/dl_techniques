@@ -179,7 +179,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
 # --- Dummy Data ---
 # A batch of 4 noisy images, 256x256 pixels, 3 channels (RGB)
@@ -244,7 +244,7 @@ The `SCUNet` model is configured via its constructor. Key parameters include:
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
 # 1. Configure the model for a grayscale (1 channel) denoising task
 scunet_denoiser = SCUNet(
@@ -299,7 +299,7 @@ The `SCUNet` model and all its custom layers are fully serializable using Keras 
 ```python
 # Create and train the model as shown previously
 import keras
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
 model = SCUNet(in_nc=3, dim=64)
 # model.fit(...)
@@ -324,7 +324,7 @@ import numpy as np
 import keras
 import tempfile
 import os
-from dl_techniques.models.scunet.model import SCUNet
+from dl_techniques.models.vision.image_restoration.scunet.model import SCUNet
 
 def test_scunet_serialization_cycle():
     """CRITICAL TEST: Ensures a model can be saved and reloaded without error."""

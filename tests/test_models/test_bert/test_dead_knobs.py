@@ -32,7 +32,7 @@ import pytest
 from dl_techniques.layers.embedding.bert_embeddings import (
     VALID_POSITION_EMBEDDING_TYPES,
 )
-from dl_techniques.models.bert import BERT
+from dl_techniques.models.language.bert import BERT
 
 SMALL = dict(
     vocab_size=32, hidden_size=16, num_layers=1, num_heads=2,

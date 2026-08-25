@@ -18,8 +18,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.ideogram4.vae import AutoEncoder
-from dl_techniques.models.sd3_mmdit.vae import (
+from dl_techniques.models.vision_language.ideogram4.vae import AutoEncoder
+from dl_techniques.models.vision_language.sd3_mmdit.vae import (
     SD3_SCALING_FACTOR,
     SD3_SHIFT_FACTOR,
     create_sd3_vae,
@@ -53,7 +53,7 @@ def test_create_sd3_vae_builds_autoencoder():
 
 
 def test_create_sd3_vae_explicit_params_overrides_variant():
-    from dl_techniques.models.sd3_mmdit.config import get_sd3_config
+    from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
 
     _, params = get_sd3_config("tiny")
     vae = create_sd3_vae(params=params)

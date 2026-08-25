@@ -32,7 +32,7 @@ from train.ideogram4.train_ideogram4 import (  # noqa: E402
     make_synthetic_dataset,
     sample_flow_batch,
 )
-from dl_techniques.models.ideogram4.constants import (  # noqa: E402
+from dl_techniques.models.vision_language.ideogram4.constants import (  # noqa: E402
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )

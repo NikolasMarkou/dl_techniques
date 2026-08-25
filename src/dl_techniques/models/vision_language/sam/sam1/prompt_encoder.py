@@ -35,7 +35,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
+from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
 encoder = PromptEncoder(embed_dim=256, image_embedding_size=(64, 64),
                         input_image_size=(1024, 1024), mask_in_chans=16)
 sparse, dense = encoder(points=(coords, labels))   # (B, N, 256), (B, 64, 64, 256)

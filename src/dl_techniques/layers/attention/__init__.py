@@ -96,7 +96,7 @@ from .wave_field_attention import WaveFieldAttention                    # key 'w
 from .ideogram4_attention import Ideogram4Attention                     # direct only
 from .mmdit_joint_attention import MMDiTJointAttention                  # direct only
 # AttentionRoutingCapsule + CapsuleBlockV2: direct only (CapsuleBlockV2 is a composite
-# block, not a bare attention layer; consumed by models/capsnet/model_v2.py).
+# block, not a bare attention layer; consumed by models/vision/capsnet/model_v2.py).
 from .attention_routing_capsule import AttentionRoutingCapsule, CapsuleBlockV2
 
 __all__ = [

@@ -7,7 +7,7 @@ import tensorflow as tf
 from typing import Any, Dict
 
 
-from dl_techniques.models.mobile_clip.components import (
+from dl_techniques.models.vision_language.mobile_clip.components import (
     ImageProjectionHead,
     MobileClipImageEncoder,
     MobileClipTextEncoder

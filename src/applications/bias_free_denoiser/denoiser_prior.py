@@ -9,7 +9,7 @@ domain-normalization helpers every caller needs. It imports NO GUI framework
 Loading contract (F1 H2 / INV-2)
 --------------------------------
 ``keras.models.load_model`` on the saved ``.keras`` file FAILS unless the
-registrar module ``dl_techniques.models.bias_free_denoisers.bfconvunext`` has
+registrar module ``dl_techniques.models.vision.bias_free_denoisers.bfconvunext`` has
 been *imported* (executed) first, so that ``ConvUNextStem``, ``ConvNextV1Block``,
 ``GlobalResponseNormalization``, ``MatchChannels`` and ``GaborFiltersInitializer``
 are present in the Keras serialization registry. A bare ``import dl_techniques`` is
@@ -33,7 +33,7 @@ patch size) and raises on any other spatial size. Two loader paths are provided:
 
 ConvUNext is the only architecture with a ``dynamic`` loader. The CliffordUNet
 ``dynamic`` branch (a factory-rebuild + weight-transfer path over
-``dl_techniques.models.bias_free_denoisers.bfcliffordunet``) was removed together
+``dl_techniques.models.vision.bias_free_denoisers.bfcliffordunet``) was removed together
 with its model module, so :meth:`from_pretrained` refuses ``resolution="dynamic"``
 for such a checkpoint by name, instead of dying on a ``ModuleNotFoundError``.
 
@@ -168,7 +168,7 @@ class DenoiserPrior:
         """
         # Registrar-first import (INV-2). This MUST precede any load_model call —
         # bare `import dl_techniques` does not register the custom objects.
-        import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401
+        import dl_techniques.models.vision.bias_free_denoisers.bfconvunext  # noqa: F401
 
         if resolution not in ("dynamic", "fixed256"):
             raise ValueError(
@@ -199,7 +199,7 @@ class DenoiserPrior:
                 f"resolution='dynamic' is not available for a "
                 f"{architecture!r} checkpoint ({keras_path}). The non-ConvUNext "
                 f"dynamic loader was a factory rebuild over "
-                f"dl_techniques.models.bias_free_denoisers.bfcliffordunet, and "
+                f"dl_techniques.models.vision.bias_free_denoisers.bfcliffordunet, and "
                 f"that model module has been REMOVED; the surviving dynamic "
                 f"path is the ConvUNext graph-relax loader, which is validated "
                 f"for ConvUNext only. The checkpoint ITSELF is still loadable: "

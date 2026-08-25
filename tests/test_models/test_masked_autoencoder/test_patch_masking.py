@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.masked_autoencoder import PatchMasking
+from dl_techniques.models.vision.masked_autoencoder import PatchMasking
 
 IMAGE_SIZE, PATCH_SIZE, CHANNELS = 32, 8, 3
 GRID = IMAGE_SIZE // PATCH_SIZE          # 4

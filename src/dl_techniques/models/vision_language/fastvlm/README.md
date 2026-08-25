@@ -273,7 +273,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.vision.fast_vlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm.model import FastVLM
 
 # 1. Create a tiny FastVLM model for CIFAR-10 (32x32 images, 10 classes)
 # We use the "nano" variant for a very small and fast model
@@ -314,10 +314,10 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 
 **Purpose**: The main Keras `Model` subclass that assembles the complete FastVLM architecture.
 
-**Location**: `dl_techniques.models.vision.fast_vlm.model.FastVLM`
+**Location**: `dl_techniques.models.vision_language.fastvlm.model.FastVLM`
 
 ```python
-from dl_techniques.models.vision.fast_vlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm.model import FastVLM
 
 # Create from a standard variant
 model = FastVLM.from_variant(
@@ -488,7 +488,7 @@ print("✅ Model loaded successfully!")
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision.fast_vlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm.model import FastVLM
 
 def test_creation_all_variants():
     """Test model creation for all variants."""

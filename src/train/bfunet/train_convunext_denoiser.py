@@ -112,7 +112,7 @@ from typing import Optional
 from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
     CONVUNEXT_CONFIGS,
 )

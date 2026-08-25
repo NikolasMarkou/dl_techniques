@@ -153,7 +153,16 @@ SCALING BENEFITS:
 CORE COMPONENTS:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                                 │
-│  dl_techniques.models.eomt.EoMT:                                                                │
+│  NOT IMPLEMENTED as a model package. What EXISTS today (verified 2026-08-24):                   │
+│                                                                                                 │
+│  dl_techniques.layers.transformers.eomt_transformer.EomtTransformer                             │
+│  dl_techniques.layers.eomt_mask.EomtMask                                                        │
+│                                                                                                 │
+│  There is no EoMT package under models/ at all, no create_eomt_model(),                         │
+│  no EoMTTrainer and no MaskAnnealingCallback anywhere in the tree. The names                    │
+│  below describe the DESIGN this document proposes, not shipped code.                            │
+│                                                                                                 │
+│  PROPOSED (none of these exist):                                                                │
 │  ├─ create_eomt_model()           # Factory function for different sizes                        │
 │  ├─ EoMTLayer()                   # Core transformer layer with masking                         │
 │  ├─ MaskModule()                  # Simple prediction head                                      │

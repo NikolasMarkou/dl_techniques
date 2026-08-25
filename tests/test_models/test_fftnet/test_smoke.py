@@ -35,7 +35,7 @@ EXPECTED_SHAPES = {
 
 
 def _build():
-    from dl_techniques.models.fftnet.model import create_fftnet
+    from dl_techniques.models.language.fftnet.model import create_fftnet
 
     # Smallest variant; tiny image so num_patches stays small.
     return create_fftnet(variant="tiny", image_size=IMAGE_SIZE, patch_size=PATCH_SIZE)

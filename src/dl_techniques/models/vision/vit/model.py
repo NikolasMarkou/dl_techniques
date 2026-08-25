@@ -555,7 +555,7 @@ class ViT(keras.Model):
         # factory call is byte-identical to the pre-plumbing version, preserving
         # bit-exactness for ALL existing serialized ViT checkpoints. This is the
         # multi-flag-plumbing pattern from LESSONS L72; the ViT path here mirrors
-        # the ResNet path in `dl_techniques/models/resnet/model.py` for the
+        # the ResNet path in `dl_techniques/models/vision/resnet/model.py` for the
         # rms_variants_train Phase 3 `param_matched` mode (use_scale=False).
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         # DECISION plan-2026-08-18T140459-7991552f/D-047

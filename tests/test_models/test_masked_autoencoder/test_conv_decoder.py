@@ -40,7 +40,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.masked_autoencoder import ConvDecoder
+from dl_techniques.models.vision.masked_autoencoder import ConvDecoder
 
 LATENT = (4, 4, 32)
 SEED = 20260823

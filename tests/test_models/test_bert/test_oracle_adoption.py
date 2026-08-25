@@ -1,9 +1,9 @@
 """
-Oracle adoption for ``models/bert`` -- the lazy-build contract, by consequence.
+Oracle adoption for ``models/language/bert`` -- the lazy-build contract, by consequence.
 
 ``lazy_build_contract_oracle`` had **no** adopter in this package before this
 file (only ``test_cliffordnet``, ``test_depth_anything`` and ``test_video_jepa``
-adopt it at all), and ``models/bert`` is one of only TWO packages in this tree
+adopt it at all), and ``models/language/bert`` is one of only TWO packages in this tree
 where a lazy build was ever measured to COST something: D-049 of
 ``plan-2026-08-19T163559-499b6f0e`` records that ``BERT``'s missing ``build()``
 silently disabled weight tying, made ``CausalLanguageModel.embedding_weights``
@@ -50,7 +50,7 @@ from typing import Any, Dict
 import numpy as np
 import keras
 
-from dl_techniques.models.bert import create_bert, create_bert_with_head
+from dl_techniques.models.language.bert import create_bert, create_bert_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing

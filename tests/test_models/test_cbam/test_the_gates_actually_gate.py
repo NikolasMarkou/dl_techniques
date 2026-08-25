@@ -37,7 +37,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
-from dl_techniques.models.cbam.model import CBAMNet
+from dl_techniques.models.vision.cbam.model import CBAMNet
 
 from ..test_sam.dead_component_oracle import (
     component_response,

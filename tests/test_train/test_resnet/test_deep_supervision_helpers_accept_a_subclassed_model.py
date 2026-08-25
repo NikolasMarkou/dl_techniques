@@ -22,7 +22,7 @@ the Functional branch off the first trace's residue and leave the fallback
 branch dead (measured: an injected wrong-output-index in a
 separately-traced fallback was invisible to every arm here).
 ``create_inference_model_from_training_model`` -- which
-``models/resnet/__init__.py`` re-exports publicly -- had the same defect on
+``models/vision/resnet/__init__.py`` re-exports publicly -- had the same defect on
 both ``.output`` and ``.input``.
 
 Why each arm is not satisfied by construction:
@@ -53,7 +53,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet import create_resnet
+from dl_techniques.models.vision.resnet import create_resnet
 from dl_techniques.utils.deep_supervision import (
     get_model_output_info,
     create_inference_model_from_training_model,

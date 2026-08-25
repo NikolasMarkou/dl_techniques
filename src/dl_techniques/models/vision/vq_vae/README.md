@@ -274,7 +274,7 @@ from keras.api.datasets import mnist
 import numpy as np
 import matplotlib.pyplot as plt
 
-from dl_techniques.models.vq_vae.model import VQVAEModel, VectorQuantizer
+from dl_techniques.models.vision.vq_vae.model import VQVAEModel, VectorQuantizer
 
 # 1. Load and preprocess data
 (X_train, _), (X_test, _) = mnist.load_data()
@@ -554,7 +554,7 @@ print(f"Reconstructed image shape: {reconstruction.shape}")
 import keras
 import numpy as np
 import keras
-from dl_techniques.models.vq_vae.model import VQVAEModel, VectorQuantizer
+from dl_techniques.models.vision.vq_vae.model import VQVAEModel, VectorQuantizer
 
 
 def test_model_creation():

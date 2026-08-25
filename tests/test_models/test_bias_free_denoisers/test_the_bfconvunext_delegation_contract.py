@@ -1,7 +1,7 @@
-"""Delegation-contract tests for `models/bias_free_denoisers/bfconvunext.py`.
+"""Delegation-contract tests for `models/vision/bias_free_denoisers/bfconvunext.py`.
 
 `create_convunext_denoiser` is a THIN WRAPPER over
-`models/convunext/model.create_convunext`. What this file pins is the *delegation*
+`models/vision/convunext/model.create_convunext`. What this file pins is the *delegation*
 itself -- the half that had no coverage at all before it existed:
 
 (A) An unknown keyword is LOUD at both wrappers. `create_convunext` declares 42
@@ -35,7 +35,7 @@ needs (decisions.md D-011).
 Message-matching policy, measured rather than assumed: CPython produces the two
 TypeErrors through different call-machinery paths and formats them differently --
 `create_convunext() got an unexpected keyword argument 'dpeth'` (BARE name) versus
-`dl_techniques.models.convunext.model.create_convunext() got multiple values for
+`dl_techniques.models.vision.convunext.model.create_convunext() got multiple values for
 keyword argument 'use_bias'` (fully DOTTED name). Every assertion below therefore
 matches a SUBSTRING plus the offending parameter name. Pinning a function-name
 prefix or a full message would pin a CPython implementation detail.
@@ -48,11 +48,11 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
     create_convunext_variant as bf_create_convunext_variant,
 )
-from dl_techniques.models.convunext.model import create_convunext
+from dl_techniques.models.vision.convunext.model import create_convunext
 
 # Small everywhere: these tests measure WIRING, not capacity.
 INPUT_SHAPE: Tuple[int, int, int] = (32, 32, 1)

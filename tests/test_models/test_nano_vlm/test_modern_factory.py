@@ -41,7 +41,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.nano_vlm.model import create_modern_nanovlm, NanoVLM
+from dl_techniques.models.vision_language.nano_vlm.model import create_modern_nanovlm, NanoVLM
 
 VOCAB = 64
 EMBED_DIM = 64  # -> num_heads = EMBED_DIM // 64 = 1

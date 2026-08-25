@@ -75,7 +75,7 @@ def _assert_contract(out):
 
 def test_smoke_build_and_forward():
     try:
-        from dl_techniques.models.masked_autoencoder import create_mae_model
+        from dl_techniques.models.vision.masked_autoencoder import create_mae_model
     except ImportError as exc:
         pytest.xfail(f"masked_autoencoder is not importable: {exc}")
 

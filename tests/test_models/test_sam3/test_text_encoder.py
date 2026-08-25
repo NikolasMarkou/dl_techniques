@@ -1,4 +1,4 @@
-"""Tests for SAM 3's CLIP text tower wrapper (`models/SAM/SAM3/text_encoder_ve.py`).
+"""Tests for SAM 3's CLIP text tower wrapper (`models/vision_language/sam/sam3/text_encoder_ve.py`).
 
 The load-bearing guard here is CAUSALITY, and it is asserted as an **exact zero**
 rather than against a tolerance. The wrapped encoder is bidirectional by default,
@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.SAM.SAM3.text_encoder_ve import Sam3TextEncoder
+from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
 
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
@@ -371,9 +371,9 @@ def _forward_with_embed_norm_replaced(encoder, ids, replacement=None):
 #
 # The pins were STALE SAMPLES, not a regression, and the discriminator is
 # measured, not argued:
-#   * `src/dl_techniques/models/SAM/SAM3/text_encoder_ve.py` has no behavioural
+#   * `src/dl_techniques/models/vision_language/sam/sam3/text_encoder_ve.py` has no behavioural
 #     commit since the pinning commit `7eea17297` -- only a docstring pass
-#     (`4f238a2fe`) and the `models/SAM/` move (`96c6a460b`).
+#     (`4f238a2fe`) and the `models/vision_language/sam/` move (`96c6a460b`).
 #   * Every other test in this file passes, INCLUDING the reference-derived
 #     parameter oracle (`count_params() == _params(SHIPPED) == 353_202_432`),
 #     so the port's structure still agrees with the upstream term by term.

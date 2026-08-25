@@ -25,7 +25,7 @@ from train.common import setup_gpu, create_base_argument_parser, create_callback
 from dl_techniques.utils.logger import logger
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
-from dl_techniques.models.darkir.model import create_darkir_model
+from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
 from dl_techniques.losses.image_restoration_loss import DarkIRCompositeLoss
 from dl_techniques.visualization import (
     VisualizationManager,

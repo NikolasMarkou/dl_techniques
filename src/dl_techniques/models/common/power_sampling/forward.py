@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from dl_techniques.models.power_sampling.protocols import LogitsFn
+from dl_techniques.models.common.power_sampling.protocols import LogitsFn
 
 
 # ---------------------------------------------------------------------------

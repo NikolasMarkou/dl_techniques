@@ -32,7 +32,7 @@ BATCH, SEQ_LEN, HIDDEN_SIZE, VOCAB_SIZE = 2, 16, 64, 256
 
 
 def _build():
-    from dl_techniques.models.distilbert.model import DistilBERT
+    from dl_techniques.models.language.distilbert.model import DistilBERT
 
     return DistilBERT(
         vocab_size=VOCAB_SIZE,

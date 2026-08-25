@@ -127,7 +127,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 The Gabor weights are deterministic (`GaborFiltersInitializer`) and the layer is `trainable=False`, so the stem contributes **zero trainable parameters** and is preserved (still frozen) across `.keras` round-trips. The mandatory 1x1 projection is bias-free, keeping the whole front-end strictly bias-free.
 
 ```python
-from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_denoiser
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_convunext_denoiser
 
 model = create_convunext_denoiser(
     input_shape=(256, 256, 3),
@@ -198,8 +198,8 @@ pip install keras>=3.0 tensorflow>=2.16
 
 ```python
 import keras
-from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
-from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_variant
+from dl_techniques.models.vision.bias_free_denoisers.bfunet import create_bfunet_variant
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_convunext_variant
 
 # 1. Create a Base ConvUNext model for RGB images
 # Note: Deep supervision is enabled by default for variants
@@ -254,7 +254,7 @@ When training with deep supervision, your data generator must provide multiple g
 
 ```python
 import numpy as np
-from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_variant
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_convunext_variant
 
 # Create model
 model = create_convunext_variant('small', (64, 64, 3), enable_deep_supervision=True)
@@ -278,7 +278,7 @@ model.fit(X, targets, epochs=5)
 For deployment, you typically don't want the overhead of calculating the auxiliary outputs.
 
 ```python
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_variant,
 )
 from dl_techniques.utils.deep_supervision import (
@@ -305,7 +305,7 @@ inert. The supported route is a local `.keras` file you produced yourself, passe
 `pretrained="<path>"`:
 
 ```python
-from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_variant
+from dl_techniques.models.vision.bias_free_denoisers.bfunet import create_bfunet_variant
 
 # A model you trained and saved earlier.
 model = create_bfunet_variant('tiny', input_shape=(64, 64, 3))

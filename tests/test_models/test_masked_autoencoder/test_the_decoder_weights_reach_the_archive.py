@@ -10,7 +10,7 @@ dicts of Layers -- a layer container nested two levels deep, owned by a
 convolution kernel and all 32 BatchNorm tensors silently absent -- and only
 **27 of 51** tensors surviving a perturb / save / reload comparison. The same
 container owned by a ``keras.Model`` is written correctly, which is why the
-identical shape in ``models/accunet`` and ``models/cliffordnet`` is harmless.
+identical shape in ``models/vision/accunet`` and ``models/vision/cliffordnet`` is harmless.
 
 Why two arms and not one
 ------------------------
@@ -40,7 +40,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.masked_autoencoder import MaskedAutoencoder
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 
 from .conftest import tiny_encoder
 

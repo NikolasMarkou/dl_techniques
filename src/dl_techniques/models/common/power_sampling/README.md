@@ -203,7 +203,7 @@ Power sampling ships as part of `dl_techniques` — no separate install. It depe
 Build a sampler over any callable model + any tokenizer and call `generate_text`.
 
 ```python
-from dl_techniques.models.power_sampling import (
+from dl_techniques.models.common.power_sampling import (
     PowerSampler, PowerSamplingConfig,
 )
 
@@ -352,7 +352,7 @@ A GPT-2-like model returning `{"logits": float32[B, T, V]}`, driven by the `tikt
 
 ```python
 import tiktoken
-from dl_techniques.models.power_sampling import PowerSampler, PowerSamplingConfig
+from dl_techniques.models.common.power_sampling import PowerSampler, PowerSamplingConfig
 
 enc = tiktoken.get_encoding("gpt2")     # satisfies TokenizerProtocol (encode/decode)
 model = load_gpt2_like_model()          # callable returning {"logits": float32[B,T,V]}
@@ -377,7 +377,7 @@ Any object exposing `encode`/`decode` works — here a thin wrapper around a Hug
 
 ```python
 from transformers import AutoTokenizer
-from dl_techniques.models.power_sampling import PowerSampler, PowerSamplingConfig
+from dl_techniques.models.common.power_sampling import PowerSampler, PowerSamplingConfig
 
 class HFTokenizerAdapter:
     """Wrap an HF tokenizer to satisfy TokenizerProtocol."""
@@ -406,7 +406,7 @@ For a dict-input vision-language model, bind a fixed image and the vision-token 
 
 ```python
 import numpy as np
-from dl_techniques.models.power_sampling import (
+from dl_techniques.models.common.power_sampling import (
     PowerSampler, PowerSamplingConfig, VLMForwardAdapter,
 )
 
@@ -439,8 +439,8 @@ CliffordNetLM is a fixed-shape model with GPT-2-style special tokens. Behavior i
 
 ```python
 import tiktoken
-from dl_techniques.models.cliffordnet.lm import CliffordNetLM
-from dl_techniques.models.power_sampling import PowerSampler, PowerSamplingConfig
+from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
+from dl_techniques.models.common.power_sampling import PowerSampler, PowerSamplingConfig
 
 model = CliffordNetLM.from_variant("base")     # or keras.models.load_model(...)
 enc = tiktoken.get_encoding("gpt2")
@@ -471,7 +471,7 @@ for method in ["standard", "power", "max_swap"]:
 If your model returns a bare logits tensor instead of a dict, build the closure with `logits_key=None` and inject it explicitly:
 
 ```python
-from dl_techniques.models.power_sampling import (
+from dl_techniques.models.common.power_sampling import (
     PowerSampler, PowerSamplingConfig, make_logits_fn,
 )
 

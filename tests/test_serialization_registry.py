@@ -29,7 +29,7 @@ in two modules, which is confusing to read but harmless to load. That is also wh
 row lists a `package=`-qualified pair while its three neighbours list bare `Custom>`
 keys. It is moot now regardless: the two classes were MERGED into one on 2026-08-14,
 the `models.convunext.model` twin was deleted, and the survivor lives in
-`models/convunext/model.py` while deliberately keeping
+`models/vision/convunext/model.py` while deliberately keeping
 ``package="dl_techniques.bias_free_denoisers"`` so its key stays byte-stable. Do not
 "fix" that package/module mismatch.
 

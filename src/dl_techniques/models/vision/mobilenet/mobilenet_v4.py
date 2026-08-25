@@ -104,7 +104,7 @@ from typing import List, Tuple, Optional, Dict, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.mobile_mqa import MobileMQA
 from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
-from dl_techniques.models.mobilenet.common import (
+from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,
     materialize_for_summary,

@@ -18,7 +18,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.latent_gmm_registration.model import (
+from dl_techniques.models.point_cloud.latent_gmm_registration.model import (
     compute_gmm_params,
     compute_rigid_transform,
 )

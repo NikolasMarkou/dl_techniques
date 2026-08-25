@@ -52,7 +52,7 @@ from dl_techniques.utils.weight_transfer import (
     TransferReport,
     load_weights_from_checkpoint,
 )
-from dl_techniques.models.energy_transformer import (
+from dl_techniques.models.vision.energy_transformer import (
     BACKBONE_NAME,
     create_energy_transformer_classifier,
 )

@@ -12,11 +12,11 @@ See decisions.md D-007 (``plan-2026-08-19-a616f581``).
 import numpy as np
 import pytest
 
-from dl_techniques.models.tree_transformer.components import (
+from dl_techniques.models.language.tree_transformer.components import (
     GroupAttention,
     TreeTransformerBlock,
 )
-from dl_techniques.models.tree_transformer.model import TreeTransformer
+from dl_techniques.models.language.tree_transformer.model import TreeTransformer
 from tests.norm_epsilon_oracle import (
     assert_epsilon_tracks_the_knob,
     assert_every_block_norm_uses,

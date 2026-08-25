@@ -1,16 +1,16 @@
-"""Package-surface tests for ``src/dl_techniques/models/dino/``.
+"""Package-surface tests for ``src/dl_techniques/models/vision/dino/``.
 
 These pin the normalization done in plan-2026-08-01T105809-dc0c402e step 6 (F-06),
 which is about the PACKAGE rather than any one model version:
 
-1. ``src/dl_techniques/models/dino/__init__.py`` exports a non-empty ``__all__``
+1. ``src/dl_techniques/models/vision/dino/__init__.py`` exports a non-empty ``__all__``
    whose every name resolves, and does not silently omit a public name.
 2. ``create_dino_v1`` / ``create_dino_v2`` / ``create_dino_v3`` agree on their
    SHARED parameter names and kinds.
 3. The ``patch_size``-vs-variant precedence rule (``None`` defers to the variant,
    an explicit value always wins) actually holds.
 4. ``input_shape`` is refused by all three factories.
-5. Every path and every import ``src/dl_techniques/models/dino/README.md`` names
+5. Every path and every import ``src/dl_techniques/models/vision/dino/README.md`` names
    resolves on disk / imports cleanly.
 6. No headline measurement endpoint from ``research/2026_dino_ssl_measurements.md``
    is restated anywhere in the DINO subtree (added by
@@ -29,7 +29,7 @@ import pytest
 
 # Repo root: tests/test_models/test_dino/<this file> -> up 3.
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DINO_PKG = REPO_ROOT / "src" / "dl_techniques" / "models" / "dino"
+DINO_PKG = REPO_ROOT / "src" / "dl_techniques" / "models" / "vision" / "dino"
 README = DINO_PKG / "README.md"
 
 
@@ -38,9 +38,9 @@ README = DINO_PKG / "README.md"
 # ---------------------------------------------------------------------
 
 def test_all_is_non_empty_and_every_name_resolves():
-    import dl_techniques.models.dino as m
+    import dl_techniques.models.vision.dino as m
 
-    assert m.__all__, "models/dino/__init__.py must export a non-empty __all__"
+    assert m.__all__, "models/vision/dino/__init__.py must export a non-empty __all__"
     missing = [n for n in m.__all__ if not hasattr(m, n)]
     assert not missing, (
         f"__all__ lists names the package does not bind: {missing}. "
@@ -50,7 +50,7 @@ def test_all_is_non_empty_and_every_name_resolves():
 
 
 def test_all_has_no_duplicates():
-    import dl_techniques.models.dino as m
+    import dl_techniques.models.vision.dino as m
 
     assert len(m.__all__) == len(set(m.__all__)), (
         f"__all__ contains duplicates: {m.__all__}"
@@ -85,12 +85,12 @@ def test_every_public_submodule_name_is_exported_or_explicitly_excluded():
     """The CONVERSE of the __all__ check: nothing public is silently omitted."""
     import importlib
 
-    import dl_techniques.models.dino as pkg
+    import dl_techniques.models.vision.dino as pkg
 
     exported = set(pkg.__all__)
     unaccounted = {}
     for sub in ("dino_v1", "dino_v2", "dino_v3", "common", "reference_init"):
-        mod = importlib.import_module(f"dl_techniques.models.dino.{sub}")
+        mod = importlib.import_module(f"dl_techniques.models.vision.dino.{sub}")
         for name, value in vars(mod).items():
             if name.startswith("_"):
                 continue
@@ -116,7 +116,7 @@ def test_no_module_level_model_variants_alias_was_invented():
     """MODEL_VARIANTS is a per-CLASS attribute on three classes with genuinely
     different contents. A single module-level alias would have to pick one and
     misdescribe the other two, so the package deliberately binds none."""
-    import dl_techniques.models.dino as m
+    import dl_techniques.models.vision.dino as m
 
     assert not hasattr(m, "MODEL_VARIANTS")
     # ...and the three real tables are reachable through the exported classes,
@@ -149,7 +149,7 @@ SHARED_PARAMETERS = {
 
 
 def _factories():
-    from dl_techniques.models.dino import (
+    from dl_techniques.models.vision.dino import (
         create_dino_v1,
         create_dino_v2,
         create_dino_v3,
@@ -198,7 +198,7 @@ def test_patch_size_default_is_the_none_sentinel_on_all_three():
 
 def test_image_size_accepts_an_int_on_all_three():
     """v3 used to be typed (and behave as) tuple-only."""
-    from dl_techniques.models.dino import (
+    from dl_techniques.models.vision.dino import (
         create_dino_v1,
         create_dino_v2,
         create_dino_v3,
@@ -221,7 +221,7 @@ def test_none_patch_size_defers_to_the_v3_giant_variants_own_value():
     variant defines its own patch size, so it is the only place the precedence
     rule is observable — which is exactly why it is tested here and not on a
     variant where both branches happen to agree."""
-    from dl_techniques.models.dino import DINOv3, create_dino_v3
+    from dl_techniques.models.vision.dino import DINOv3, create_dino_v3
 
     # Non-vacuity control: the two variants must genuinely disagree, or this
     # test would pass under either precedence rule.
@@ -247,7 +247,7 @@ def test_none_patch_size_defers_to_the_v3_giant_variants_own_value():
 
 
 def test_an_explicit_patch_size_wins_over_the_variants_own_value():
-    from dl_techniques.models.dino import create_dino_v3
+    from dl_techniques.models.vision.dino import create_dino_v3
 
     # image_size=112 is divisible by BOTH 14 and 16 on purpose: under an inverted
     # precedence the model still BUILDS (with the variant's 14), so the assertion
@@ -271,7 +271,7 @@ def test_none_ffn_type_defers_to_the_v2_giant_variant_but_explicit_mlp_wins():
     always-promote behaviour.
     """
     from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
-    from dl_techniques.models.dino import create_dino_v2
+    from dl_techniques.models.vision.dino import create_dino_v2
 
     common = dict(
         image_size=32, patch_size=16, num_classes=3,
@@ -294,7 +294,7 @@ def test_none_ffn_type_defers_to_the_v2_giant_variant_but_explicit_mlp_wins():
 
 def test_none_num_register_tokens_defers_but_explicit_zero_wins():
     """Third instance of the same rule."""
-    from dl_techniques.models.dino import create_dino_v2
+    from dl_techniques.models.vision.dino import create_dino_v2
 
     common = dict(
         image_size=32, patch_size=16, num_classes=3,
@@ -399,7 +399,7 @@ def test_every_import_the_readme_names_is_importable():
     dl_modules = sorted(m for m in modules if m.startswith("dl_techniques"))
     # Non-vacuity: name the modules the README is REQUIRED to import, so an
     # extractor that silently stops matching cannot leave this test green.
-    assert "dl_techniques.models.dino" in dl_modules
+    assert "dl_techniques.models.vision.dino" in dl_modules
     assert "dl_techniques.losses" in dl_modules
 
     for name in dl_modules:
@@ -525,7 +525,7 @@ MEASUREMENT_RECORD = REPO_ROOT / "research" / "2026_dino_ssl_measurements.md"
 # `research/dino_ssl_measurements_evidence/` (the raw per-epoch records, which
 # are the source data rather than a citation of it) are deliberately outside it.
 RESTATEMENT_SCAN_DIRS = (
-    REPO_ROOT / "src" / "dl_techniques" / "models" / "dino",
+    REPO_ROOT / "src" / "dl_techniques" / "models" / "vision" / "dino",
     REPO_ROOT / "src" / "train" / "dino",
     REPO_ROOT / "tests" / "test_train" / "test_dino",
     REPO_ROOT / "tests" / "test_models" / "test_dino",

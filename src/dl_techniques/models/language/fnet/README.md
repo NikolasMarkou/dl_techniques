@@ -255,7 +255,7 @@ import keras
 import numpy as np
 
 # Local imports
-from dl_techniques.models.fnet.model import create_fnet_with_head, FNet
+from dl_techniques.models.language.fnet.model import create_fnet_with_head, FNet
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration
@@ -301,12 +301,12 @@ print(f"✅ Training Step - Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
 ### 6.1 `FNet` (Model Class)
 
-**Location**: `dl_techniques.models.fnet.model.FNet`
+**Location**: `dl_techniques.models.language.fnet.model.FNet`
 
 The foundation encoder. It outputs raw hidden states.
 
 ```python
-from dl_techniques.models.fnet.model import FNet
+from dl_techniques.models.language.fnet.model import FNet
 
 encoder = FNet.from_variant(
     "base",
@@ -334,7 +334,7 @@ block = FNetEncoderBlock(
 
 ### 6.3 `create_fnet_with_head`
 
-**Location**: `dl_techniques.models.fnet.model.create_fnet_with_head`
+**Location**: `dl_techniques.models.language.fnet.model.create_fnet_with_head`
 
 A high-level factory to attach NLP heads (Classification, NER, etc.) to the encoder.
 
@@ -361,7 +361,7 @@ Use FNet to generate embeddings for clustering or downstream non-neural models.
 
 ```python
 import keras
-from dl_techniques.models.fnet.model import FNet
+from dl_techniques.models.language.fnet.model import FNet
 
 # Load encoder
 fnet_encoder = FNet.from_variant("base", pretrained=False)
@@ -383,7 +383,7 @@ extractor = keras.Model(inputs, cls_embedding)
 ### Example 2: Named Entity Recognition (NER)
 
 ```python
-from dl_techniques.models.fnet.model import create_fnet_with_head
+from dl_techniques.models.language.fnet.model import create_fnet_with_head
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # Configuration for 9 NER classes (e.g., CoNLL-2003)
@@ -413,7 +413,7 @@ ner_model = create_fnet_with_head(
 You are not stuck with the 2021 architecture. This implementation allows you to inject modern components like **RMSNorm** (for stability) and **SwiGLU** (for performance).
 
 ```python
-from dl_techniques.models.fnet.model import FNet
+from dl_techniques.models.language.fnet.model import FNet
 
 modern_fnet = FNet.from_variant(
     "base",

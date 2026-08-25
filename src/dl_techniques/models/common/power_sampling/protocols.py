@@ -8,7 +8,7 @@ structural contracts defined here:
   the sampler. The sampler only ever calls those two methods (source call sites:
   ``power_sampling.py:375/482/568/625``). ``vocab_size`` and ``special_token_ids``
   are **optional**: they are not required on the tokenizer object and are instead
-  supplied through :class:`~dl_techniques.models.power_sampling.config.PowerSamplingConfig`.
+  supplied through :class:`~dl_techniques.models.common.power_sampling.config.PowerSamplingConfig`.
 - :data:`LogitsFn` — a callable mapping a token-id array to a single logit vector
   for the target position, letting any causal LM/VLM be injected as a closure.
 
@@ -31,7 +31,7 @@ class TokenizerProtocol(Protocol):
     tokenizer methods the sampler calls. Token-vocabulary metadata such as
     ``vocab_size`` and ``special_token_ids`` is intentionally **not** part of
     this contract; it is provided via
-    :class:`~dl_techniques.models.power_sampling.config.PowerSamplingConfig`
+    :class:`~dl_techniques.models.common.power_sampling.config.PowerSamplingConfig`
     so that tokenizers lacking those attributes still satisfy the protocol.
     """
 

@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.lewm.config import LeWMConfig
-from dl_techniques.models.lewm.model import LeWM
+from dl_techniques.models.vision.lewm.config import LeWMConfig
+from dl_techniques.models.vision.lewm.model import LeWM
 
 
 def _small_cfg() -> LeWMConfig:

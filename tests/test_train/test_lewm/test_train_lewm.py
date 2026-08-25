@@ -25,8 +25,8 @@ import keras  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 from train.lewm.train_lewm import _build_model  # noqa: E402
-from dl_techniques.models.lewm.model import LeWM  # noqa: E402
-from dl_techniques.models.lewm.config import LeWMConfig  # noqa: E402
+from dl_techniques.models.vision.lewm.model import LeWM  # noqa: E402
+from dl_techniques.models.vision.lewm.config import LeWMConfig  # noqa: E402
 from dl_techniques.datasets.pusht_hdf5 import synthetic_lewm_dataset  # noqa: E402
 
 

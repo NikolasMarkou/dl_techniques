@@ -40,7 +40,7 @@ def _seeded() -> None:
 
 
 def _sam1_mask_downscaling():
-    from dl_techniques.models.SAM.SAM1.prompt_encoder import PromptEncoder
+    from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
 
     _seeded()
     encoder = PromptEncoder(
@@ -53,8 +53,8 @@ def _sam1_mask_downscaling():
 
 
 def _sam1_output_upscaling():
-    from dl_techniques.models.SAM.SAM1.mask_decoder import MaskDecoder
-    from dl_techniques.models.SAM.SAM1.transformer import TwoWayTransformer
+    from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
+    from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
 
     _seeded()
     decoder = MaskDecoder(
@@ -67,7 +67,7 @@ def _sam1_output_upscaling():
 
 
 def _sam2_mask_downsampler():
-    from dl_techniques.models.SAM.SAM2.memory_encoder import SAM2MaskDownSampler
+    from dl_techniques.models.vision_language.sam.sam2.memory_encoder import SAM2MaskDownSampler
 
     _seeded()
     layer = SAM2MaskDownSampler(embed_dim=16, total_stride=4, mask_in_chans=1)
@@ -75,7 +75,7 @@ def _sam2_mask_downsampler():
 
 
 def _sam2_hiera():
-    from dl_techniques.models.SAM.SAM2.hiera import Hiera
+    from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
 
     _seeded()
     trunk = Hiera(
@@ -213,8 +213,8 @@ class TestSamStridePaths:
           embedding is stored square. That is a latent guard gap, recorded here
           rather than silently absorbed into an R-140 "N/A".
         """
-        from dl_techniques.models.SAM.SAM1.image_encoder import ImageEncoderViT
-        from dl_techniques.models.SAM.SAM3.vitdet import Sam3ViTDetBackbone
+        from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
+        from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
 
         _seeded()
         vitdet = Sam3ViTDetBackbone(
@@ -254,11 +254,11 @@ class TestSamStridePaths:
 
 
 def _bfd_builders():
-    from dl_techniques.models.bias_free_denoisers.bfcnn import create_bfcnn_denoiser
-    from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+    from dl_techniques.models.vision.bias_free_denoisers.bfcnn import create_bfcnn_denoiser
+    from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
         create_convunext_denoiser,
     )
-    from dl_techniques.models.bias_free_denoisers.bfunet import create_bfunet_denoiser
+    from dl_techniques.models.vision.bias_free_denoisers.bfunet import create_bfunet_denoiser
 
     shape = (64, 40, 1)
     return {
@@ -320,14 +320,14 @@ class TestBiasFreeDenoiserStridePaths:
 
 
 def _sd3_vae():
-    from dl_techniques.models.sd3_mmdit.vae import create_sd3_vae
+    from dl_techniques.models.vision_language.sd3_mmdit.vae import create_sd3_vae
 
     _seeded()
     return create_sd3_vae("tiny")
 
 
 def _sd3_latent_channels() -> int:
-    from dl_techniques.models.sd3_mmdit.config import get_sd3_config
+    from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
 
     return int(get_sd3_config("tiny")[1].z_channels)
 

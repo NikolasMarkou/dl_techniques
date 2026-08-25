@@ -34,7 +34,7 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.vit import ViT, create_vit
+from dl_techniques.models.vision.vit import ViT, create_vit
 
 
 # =============================================================================

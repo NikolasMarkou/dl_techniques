@@ -70,7 +70,7 @@ def super_resolve(
     source, and clip.
 
     Args:
-        thera_model: A built / loaded :class:`~dl_techniques.models.thera.model.Thera`
+        thera_model: A built / loaded :class:`~dl_techniques.models.vision.thera.model.Thera`
             (raw residual-field predictor).
         lr_image_01: Low-resolution image ``(H, W, 3)``, ``float`` in ``[0, 1]``.
         target_hw: Target output size ``(target_h, target_w)``.

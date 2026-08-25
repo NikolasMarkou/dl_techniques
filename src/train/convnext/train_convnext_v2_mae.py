@@ -9,8 +9,8 @@ import tensorflow as tf
 from typing import Tuple, List
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
-from dl_techniques.models.masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from train.common import (
     setup_gpu, load_dataset, get_class_names,

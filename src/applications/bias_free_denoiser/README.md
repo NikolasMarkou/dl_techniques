@@ -12,7 +12,7 @@ strictly bias-free so it is input-scale equivariant / degree-1 homogeneous, trai
 blind on additive Gaussian noise with an MSE objective). ConvUNext is the only
 architecture with a `resolution="dynamic"` loader: the app previously also rebuilt a
 bias-free CliffordUNet through a factory over
-`dl_techniques.models.bias_free_denoisers.bfcliffordunet`, and that model module was
+`dl_techniques.models.vision.bias_free_denoisers.bfcliffordunet`, and that model module was
 removed from the library, so `from_pretrained` refuses `resolution="dynamic"` for such
 a checkpoint with an error naming the removed factory. A CliffordUNet checkpoint is
 **still loadable** via `resolution="fixed256"`, which reads the saved graph and needs no

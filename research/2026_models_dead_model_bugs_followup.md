@@ -15,7 +15,7 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 **Status:** B3/B4/B5 (audit appendix #3/#4/#5) are authored and **known-good** (py_compile clean; `HashNGramEmbedding` standalone forward passes; the HRM-convention fix makes the model build and forward ~200 lines deep). Reverted, NOT committed, because a forward smoke / `.keras` round-trip (the success criterion) cannot pass until the two bugs below are fixed.
 
 ### 1a. `ReasoningByteCore` ↔ `HierarchicalReasoningModule` call/build convention (models/, FIXABLE — fix is known-good)
-- File: `src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py`, class `ReasoningByteCore`.
+- File: `src/dl_techniques/models/language/modern_bert/modern_bert_blt_hrm.py`, class `ReasoningByteCore`.
 - `HierarchicalReasoningModule.build` asserts `isinstance(input_shape, list) and len==2`; `.call` asserts `inputs` is a 2-element list `[hidden_states, input_injection]`. (Ground truth: `layers/reasoning/hrm_reasoning_core.py:393-394,528-540`.)
 - Current (wrong): build (~685-686) passes a bare shape tuple; 4 call sites (~778/782/785/786) pass two positional tensors, e.g. `self.l_reasoning(z_l, z_h + patch_representations, training=...)`.
 - Fix (6 sites, semantics-preserving — HRM adds the injection internally):
@@ -36,11 +36,11 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 
 ---
 
-## 2. nano_vlm_world_model — full-model forward dead (one bug remaining)
+## 2. nano_vlm_world_model [package deleted 2026-08-24] — full-model forward dead (one bug remaining)
 
 **Status:** import-path + scheduler-dtype bugs FIXED and committed (`1d15636e`); B7 (scheduler→plain class) committed (`29367bc3`) and verified at the scheduler level. Full-model forward / `.keras` round-trip still blocked by the bug below.
 
-- File: `src/dl_techniques/models/nano_vlm_world_model/model.py` (+ `create_vision_encoder` defaults).
+- File: `src/dl_techniques/models/nano_vlm_world_model/model.py` [package deleted 2026-08-24] (+ `create_vision_encoder` defaults).
 - Symptom: `InvalidArgumentError: Ranks of all input tensors should match: [2,8,384] vs [2,384]` at `ConditionalDenoiser.call` (`denoisers.py:221`, `ops.concatenate([x, c], axis=1)`).
 - Root cause: `create_vision_encoder` defaults to `output_mode='cls'` → returns rank-2 pooled `[B, embed_dim]`; the model's `vision_config` never overrides it (unlike `text_config`, which yields rank-3). `ConditionalDenoiser` expects a rank-3 condition `[B, cond_seq_len, dim]`.
 - Fix options: set `output_mode` to a sequence-returning mode in the model's `vision_config`, OR make `ConditionalDenoiser` handle a rank-2 condition. >10 lines, untested; pick based on intended world-model semantics.
@@ -50,7 +50,7 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 
 ## 3. Repo-wide: 31 pre-existing orphan `# DECISION` anchors (housekeeping)
 
-`validate-plan.mjs` reports 31 orphan / unknown-plan anchor ERRORs across the repo (e.g. `layers/activations/routing_probabilities.py`, `layers/attention/lighthouse_attention.py`, `layers/geometric/clifford_block.py`, `losses/*`, `models/cliffordnet/lmunet.py`, `models/depth_anything/model.py`, `models/lewm/*`, many `src/train/*`). These are `# DECISION plan_xxxx/D-NNN` anchors from old plans whose `decisions.md` sections were sliding-window-trimmed — none introduced by this plan; none in files this plan touched.
+`validate-plan.mjs` reports 31 orphan / unknown-plan anchor ERRORs across the repo (e.g. `layers/activations/routing_probabilities.py`, `layers/attention/lighthouse_attention.py`, `layers/geometric/clifford_block.py`, `losses/*`, `models/vision/cliffordnet/lmunet.py`, `models/vision/depth_anything/model.py`, `models/vision/lewm/*`, many `src/train/*`). These are `# DECISION plan_xxxx/D-NNN` anchors from old plans whose `decisions.md` sections were sliding-window-trimmed — none introduced by this plan; none in files this plan touched.
 
 - Remedy per the iterative-planner protocol: `node <skill>/scripts/bootstrap.mjs retire <plan-id>` for each obsolete plan-id (marks anchors `[STALE]`, downgrades ERROR→WARN), OR remove the stale anchors from source.
 - This is cross-plan debt; address in a dedicated housekeeping pass, not mixed into feature work.

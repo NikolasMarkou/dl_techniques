@@ -177,7 +177,7 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 # with its semantics: omitting `momentum` hands the layer Keras' `0.99`, while
 # the shared reference (Ji 2026, https://arxiv.org/abs/2601.06793) specifies
 # `0.9`. Do NOT drop this kwarg; the two modules are ONE root cause and must
-# stay in step -- see `models/cliffordnet/model.py:_STEM_BN_MOMENTUM`.
+# stay in step -- see `models/vision/cliffordnet/model.py:_STEM_BN_MOMENTUM`.
 #
 # THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY -- do not "correct" 0.9 to 0.1.
 #   Keras: moving = momentum * moving + (1 - momentum) * batch

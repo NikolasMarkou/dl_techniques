@@ -21,7 +21,7 @@ Key Features:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM1.preprocessing import resize_longest_side
+from dl_techniques.models.vision_language.sam.sam1.preprocessing import resize_longest_side
 image = resize_longest_side(raw_image, target_length=1024)
 padded = sam.preprocess(image)
 ```

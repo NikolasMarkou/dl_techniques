@@ -14,7 +14,7 @@ If you want abstract codes, the objective must be abstract. Decode predicate-arg
 
 ## 3. The repo's `tree_transformer` is not what the proposal calls a "tree transformer"
 
-`src/dl_techniques/models/tree_transformer/` implements Wang et al.'s **unsupervised soft constituency** (Group Attention). The proposal specifies **supervised biaffine dependency parsing** (Dozat & Manning). Different architecture, different training data, different outputs. Reusing the name will mislead the implementer.
+`src/dl_techniques/models/language/tree_transformer/` implements Wang et al.'s **unsupervised soft constituency** (Group Attention). The proposal specifies **supervised biaffine dependency parsing** (Dozat & Manning). Different architecture, different training data, different outputs. Reusing the name will mislead the implementer.
 
 ## 4. The structural probe is hand-waved
 
@@ -46,4 +46,4 @@ If you can hit those three, you have a paper. If not, you have eight weeks of tr
 - [RETRO (DeepMind 2021)](https://arxiv.org/abs/2112.04426)
 - [Rotation-trick VQ (Fifty et al. 2024)](https://arxiv.org/abs/2410.06424)
 - [ROME](https://arxiv.org/abs/2202.05262), [MEMIT](https://memit.baulab.info/)
-- Repo Tree Transformer: `src/dl_techniques/models/tree_transformer/` (Wang-soft-constituency, NOT biaffine).
+- Repo Tree Transformer: `src/dl_techniques/models/language/tree_transformer/` (Wang-soft-constituency, NOT biaffine).

@@ -26,7 +26,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.SAM.SAM2.memory_attention import (
+from dl_techniques.models.vision_language.sam.sam2.memory_attention import (
     SAM2MemoryAttention,
     SAM2MemoryAttentionLayer,
 )

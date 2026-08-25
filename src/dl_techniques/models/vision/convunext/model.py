@@ -3,7 +3,7 @@ ConvUNext: Modern U-Net with ConvNeXt-Inspired Architecture
 
 The single home for BOTH ConvUNext arms. ``create_convunext(..., use_bias=True)``
 builds a bias-carrying network; ``use_bias=False`` builds the bias-free denoiser
-that ``models/bias_free_denoisers/bfconvunext.py`` wraps. The model is a Keras
+that ``models/vision/bias_free_denoisers/bfconvunext.py`` wraps. The model is a Keras
 FUNCTIONAL graph — the subclassed ``ConvUNextModel`` that used to live here (with
 its own ``ConvUNextStem``, its own variant dict, a bespoke inference-model helper
 and pretrained-weight placeholders) has been deleted in favour of it.
@@ -116,7 +116,7 @@ from dl_techniques.utils.activation_serialization import (
 
 # DECISION plan-2026-08-14T092357-0e3d792d/D-010: the `package=` string below says
 # `dl_techniques.bias_free_denoisers`, NOT `dl_techniques.convunext`, even though this
-# class now lives in `dl_techniques/models/convunext/model.py`. The mismatch is
+# class now lives in `dl_techniques/models/vision/convunext/model.py`. The mismatch is
 # DELIBERATE and load-bearing. Keras keys a registered serializable on
 # `package` + class name and NEVER on the defining module (measured on Keras 3.8.0,
 # D-008), so keeping this string byte-unchanged keeps the registry key
@@ -483,7 +483,7 @@ def _apply_residual_convnext_block(
     ``ConvNextV1Block`` / ``ConvNextV2Block`` implement only the residual
     *branch* — they do NOT add the skip connection or apply drop-path (their
     ``dropout_rate`` is regular MLP dropout, not stochastic depth). The canonical
-    ConvNeXt wiring (matching ``models/convnext/convnext_v1.py``) is::
+    ConvNeXt wiring (matching ``models/vision/convnext/convnext_v1.py``) is::
 
         x = x + StochasticDepth(drop_path_rate)(block(x))
 

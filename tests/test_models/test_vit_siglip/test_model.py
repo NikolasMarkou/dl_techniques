@@ -13,7 +13,7 @@ import tempfile
 import numpy as np
 from typing import Tuple, Dict, Any, List
 
-from dl_techniques.models.vit_siglip.model import (
+from dl_techniques.models.vision.vit_siglip.model import (
     SigLIPVisionTransformer,
     create_siglip_vision_transformer
 )

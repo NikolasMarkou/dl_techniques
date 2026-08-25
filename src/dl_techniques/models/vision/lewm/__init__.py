@@ -7,11 +7,11 @@ knob, the vision encoder size, lives in ``LeWMConfig.encoder_scale`` and is
 forwarded to ``ViT``. ``create_lewm`` therefore builds a config and constructs
 the class rather than delegating to a ``from_variant``.
 """
-from dl_techniques.models.lewm.config import LeWMConfig
-from dl_techniques.models.lewm.embedder import ActionEmbedder
-from dl_techniques.models.lewm.projector import MLPProjector
-from dl_techniques.models.lewm.predictor import ARPredictor
-from dl_techniques.models.lewm.model import LeWM, create_lewm
+from dl_techniques.models.vision.lewm.config import LeWMConfig
+from dl_techniques.models.vision.lewm.embedder import ActionEmbedder
+from dl_techniques.models.vision.lewm.projector import MLPProjector
+from dl_techniques.models.vision.lewm.predictor import ARPredictor
+from dl_techniques.models.vision.lewm.model import LeWM, create_lewm
 
 __all__ = [
     "LeWM",

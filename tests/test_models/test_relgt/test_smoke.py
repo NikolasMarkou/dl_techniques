@@ -26,7 +26,7 @@ OUTPUT_DIM = 2
 
 
 def _build():
-    from dl_techniques.models.relgt.model import create_relgt_model
+    from dl_techniques.models.graph.relgt.model import create_relgt_model
 
     # 'small' preset; defaults: num_node_types=10, max_hops=2, feature_dim free.
     return create_relgt_model(output_dim=OUTPUT_DIM, model_size="small")

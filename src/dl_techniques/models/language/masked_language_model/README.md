@@ -89,8 +89,8 @@ This forces the model to learn rich, contextual representations by predicting ma
 import keras
 import tensorflow as tf
 from transformers import BertTokenizer
-from dl_techniques.models.bert import BERT
-from dl_techniques.models.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.language.bert import BERT
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
 
 # 1. Create encoder
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -210,8 +210,8 @@ train_dataset = create_mlm_dataset(
 ### Step 2: Create the MLM Model
 
 ```python
-from dl_techniques.models.bert import BERT
-from dl_techniques.models.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.language.bert import BERT
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
 
 # Create BERT encoder
 encoder = BERT.from_variant(

@@ -15,7 +15,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.latent_gmm_registration import (
+from dl_techniques.models.point_cloud.latent_gmm_registration import (
     LatentGMMRegistration,
     create_latent_gmm_registration,
 )

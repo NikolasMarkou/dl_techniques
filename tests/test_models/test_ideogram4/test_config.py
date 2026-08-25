@@ -14,13 +14,13 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.ideogram4 import constants
-from dl_techniques.models.ideogram4.latent_norm import (
+from dl_techniques.models.vision_language.ideogram4 import constants
+from dl_techniques.models.vision_language.ideogram4.latent_norm import (
     LATENT_SCALE,
     LATENT_SHIFT,
     get_latent_norm,
 )
-from dl_techniques.models.ideogram4.config import (
+from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
     Ideogram4Config,
     PRESETS,
@@ -132,7 +132,7 @@ class TestConfigInvariants:
     def test_vae_channel_not_div_32_raises(self):
         # Build a config whose paired AE has a bad ch; go through get_ideogram4_config
         # is preset-only, so test the validator directly via a crafted AE.
-        from dl_techniques.models.ideogram4.config import _validate_vae_groupnorm
+        from dl_techniques.models.vision_language.ideogram4.config import _validate_vae_groupnorm
 
         # base ch not divisible by 32 -> caught on the base-ch guard.
         ae_bad_ch = AutoEncoderParams(ch=48, ch_mult=(1, 2), z_channels=8)

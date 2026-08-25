@@ -1,4 +1,4 @@
-"""``models/beit/`` -- the BEiT trunk itself: construction, build, forward, round trip.
+"""``models/vision/beit/`` -- the BEiT trunk itself: construction, build, forward, round trip.
 
 Once the 1173-line original was decomposed into one behaviour-named file per concern
 (plan-2026-08-24T074054-247151fd, step 8), this file keeps the irreducible core -- the
@@ -47,7 +47,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.models.beit import (
+from dl_techniques.models.vision.beit import (
     BACKBONE_NAME,
     SCALE_CONFIGS,
     BeitModel,

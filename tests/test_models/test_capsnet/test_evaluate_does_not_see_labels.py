@@ -26,7 +26,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.capsnet.model import CapsNet
+from dl_techniques.models.vision.capsnet.model import CapsNet
 
 
 NUM_CLASSES = 3

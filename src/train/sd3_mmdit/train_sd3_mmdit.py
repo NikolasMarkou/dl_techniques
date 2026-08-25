@@ -1,6 +1,6 @@
 """Synthetic flow-matching smoke-trainer for the SD3 MMDiT transformer (tiny).
 
-This script trains the :class:`~dl_techniques.models.sd3_mmdit.transformer.SD3MMDiT`
+This script trains the :class:`~dl_techniques.models.vision_language.sd3_mmdit.transformer.SD3MMDiT`
 velocity head on a SYNTHETIC rectified-flow task so the architecture's training
 path can be exercised end to end on a single GPU. It is a smoke oracle, NOT a
 convergence run: the latents / conditioning are random Gaussians with no
@@ -45,9 +45,9 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.sd3_mmdit.config import get_sd3_config
-from dl_techniques.models.sd3_mmdit.scheduler import FlowMatchEulerScheduler
-from dl_techniques.models.sd3_mmdit.transformer import (
+from dl_techniques.models.vision_language.sd3_mmdit.config import get_sd3_config
+from dl_techniques.models.vision_language.sd3_mmdit.scheduler import FlowMatchEulerScheduler
+from dl_techniques.models.vision_language.sd3_mmdit.transformer import (
     SD3MMDiT,
     create_sd3_mmdit,
 )

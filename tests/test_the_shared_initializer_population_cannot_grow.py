@@ -76,7 +76,7 @@ SRC_ROOT = os.path.join(
 #: MEASURED at HEAD 2026-08-23 after this plan's step 10: **151** groups / 521
 #: participating call sites / 97 files, down from 157/533/99 after step 9 (itself
 #: down from 159/539/100, and from 175/609/108 before step 19.1's eight fixes).
-#: Step 9 cloned ``models/vit/model.py``'s two ``__init__`` groups away; step 10
+#: Step 9 cloned ``models/vision/vit/model.py``'s two ``__init__`` groups away; step 10
 #: cloned ``vit_hmlp``, ``vit_siglip``, ``vision_encoder`` and ``beit_attention``.
 #: ``swin_transformer``, ``dino_v3`` and ``hrm_reasoning_module`` were fixed in
 #: those same two steps but never appeared here at all -- see the loop blind spot
@@ -123,8 +123,8 @@ _FIXED_MODULES = (
 #: subjects below re-measure them on every run, and this text check additionally
 #: catches an unwrap in a code path the runtime subjects do not reach.
 _STEP_10_FIXED_MODULES = (
-    "models/vit_hmlp/model.py",
-    "models/vit_siglip/model.py",
+    "models/vision/vit_hmlp/model.py",
+    "models/vision/vit_siglip/model.py",
     "layers/transformers/vision_encoder.py",
     "layers/reasoning/hrm_reasoning_module.py",
     "layers/attention/beit_attention.py",
@@ -296,8 +296,8 @@ def _loop_carried_sites() -> List[Tuple[str, int, str, str, str]]:
 #: A site in this list is a *candidate*, not a verdict: it collides only if the
 #: instance actually reaches two weights of the SAME shape. Two of the six sites
 #: step 10 probed measured ZERO collisions and were correctly left alone --
-#: ``models/dino/dino_v1.py`` (the initializer is stored as an inert dict, so
-#: every consumer resolves its own instance) and ``models/beit/model.py`` (the
+#: ``models/vision/dino/dino_v1.py`` (the initializer is stored as an inert dict, so
+#: every consumer resolves its own instance) and ``models/vision/beit/model.py`` (the
 #: ``'beit'`` attention branch of ``TransformerLayer`` does not forward
 #: ``kernel_initializer`` at all). Both are still counted here, because the
 #: census must not encode a per-site verdict it cannot re-derive.
@@ -414,7 +414,7 @@ import numpy as np
 def _tiny_vit():
     import keras
 
-    from dl_techniques.models.vit.model import ViT
+    from dl_techniques.models.vision.vit.model import ViT
 
     keras.utils.set_random_seed(1234)
     model = ViT(
@@ -428,7 +428,7 @@ def _tiny_vit():
 def _tiny_swin():
     import keras
 
-    from dl_techniques.models.swin_transformer.model import SwinTransformer
+    from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
 
     keras.utils.set_random_seed(1234)
     return SwinTransformer(
@@ -441,7 +441,7 @@ def _tiny_swin():
 def _tiny_dino_v3():
     import keras
 
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
 
     keras.utils.set_random_seed(1234)
     model = DINOv3(
@@ -455,7 +455,7 @@ def _tiny_dino_v3():
 def _tiny_beit():
     import keras
 
-    from dl_techniques.models.beit.model import BeitModel
+    from dl_techniques.models.vision.beit.model import BeitModel
 
     keras.utils.set_random_seed(1234)
     model = BeitModel(
@@ -470,7 +470,7 @@ def _tiny_beit():
 def _tiny_vit_hmlp():
     import keras
 
-    from dl_techniques.models.vit_hmlp.model import ViTHMLP
+    from dl_techniques.models.vision.vit_hmlp.model import ViTHMLP
 
     keras.utils.set_random_seed(1234)
     model = ViTHMLP(
@@ -484,7 +484,7 @@ def _tiny_vit_hmlp():
 def _tiny_vit_siglip():
     import keras
 
-    from dl_techniques.models.vit_siglip.model import SigLIPVisionTransformer
+    from dl_techniques.models.vision.vit_siglip.model import SigLIPVisionTransformer
 
     keras.utils.set_random_seed(1234)
     model = SigLIPVisionTransformer(
@@ -503,14 +503,14 @@ def _tiny_dino_head():
     around it, and it MEASURED **0 of 15** identical pairs at HEAD. The reason is
     that ``DINOHead`` stores the argument RAW -- ``DINO_KERNEL_INITIALIZER`` is an
     inert ``{"class_name": ..., "config": ...}`` dict (see
-    ``models/dino/reference_init.py``) -- so ``keras.initializers.get`` resolves a
+    ``models/vision/dino/reference_init.py``) -- so ``keras.initializers.get`` resolves a
     FRESH instance inside every ``Dense``. It is guarded anyway: adding the
     apparently harmless ``self.kernel_initializer = keras.initializers.get(...)``
     normalization to ``__init__`` would turn all 15 pairs identical in one line.
     """
     import keras
 
-    from dl_techniques.models.dino.dino_v1 import DINOHead
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
 
     keras.utils.set_random_seed(1234)
     model = DINOHead(

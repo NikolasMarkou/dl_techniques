@@ -67,7 +67,7 @@ their own; treat them as indicative of scale, not as counts for your feature wid
 
 ```python
 import numpy as np
-from dl_techniques.models.tabm import TabMModel, ensemble_predict
+from dl_techniques.models.tabular.tabm import TabMModel, ensemble_predict
 
 model = TabMModel.from_variant(
     "small", n_num_features=10, cat_cardinalities=[3, 5], n_classes=2

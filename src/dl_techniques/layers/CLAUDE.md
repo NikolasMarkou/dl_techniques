@@ -22,7 +22,7 @@ in § Naming traps below.
 | `mixtures/` | ✅ | `RBFLayer` (`radial_basis_function.py`), `KMeansLayer` (`kmeans.py`, differentiable K-means), `GMMLayer` (`gmm.py`, differentiable GMM with isometric-kernel regularization). `factory.py` exposes `MixtureType` + `create_mixture_layer` / `create_mixture_from_config`. Import via `from dl_techniques.layers.mixtures import RBFLayer, KMeansLayer, GMMLayer, create_mixture_layer` |
 | `sequence_pooling/` | ✅ | Pool a `(B, T, D)` sequence to `(B, D)`: `SequencePooling` (`sequence_pooling.py` — `cls`/`mean`/`max`/positional, reused by `heads/nlp/`), `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
 | `transformers/` | — | Standard transformer, Swin block, Swin conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork` (`energy_transformer.py`), `GatedLinearAttentionBlock` (`gated_linear_attention_block.py`) |
-| `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/fastvit/` (which assembles them into the MCi tower): `FastVitConvMlp`, `RepConditionalPosEnc`, `FastVitRepMixer`, `FastVitRepMixerBlock`, `ReparamLargeKernelConv`, `FastVitPatchEmbed`, `FastVitAttentionBlock`, `FastVitStage`. Curated `__init__` re-export, no factory. Train-time multi-branch form only — no reparameterization / fusion path. See `fastvit/README.md` |
+| `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/` (which assembles them into the MCi tower): `FastVitConvMlp`, `RepConditionalPosEnc`, `FastVitRepMixer`, `FastVitRepMixerBlock`, `ReparamLargeKernelConv`, `FastVitPatchEmbed`, `FastVitAttentionBlock`, `FastVitStage`. Curated `__init__` re-export, no factory. Train-time multi-branch form only — no reparameterization / fusion path. See `fastvit/README.md` |
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
 | `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
 | `geometric/` | — | Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/`: connection layer, field embedding, gauge-invariant attention, holonomic transformer, holonomy layer, manifold stress, parallel transport |
@@ -104,7 +104,7 @@ samplers plus an inline factory; `vmf` adds `VMFSampling` and the closed-form `v
 
 | Trap | Detail |
 |---|---|
-| **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (a different architecture sharing the name, consumed by `models/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
+| **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (a different architecture sharing the name, consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
 
 ## Conventions
 
@@ -134,7 +134,7 @@ subpackage with an `__all__`, prefer the package-level import.
 
 > **This does not put `layers/` in opposition to a Google-style `models/`.** `models/` has no
 > package-wide style at all — it is measurably mixed, and its normative exemplar for new packages
-> (`models/bert/model.py`) is itself entirely Sphinx/reST. The earlier phrasing here, "this differs
+> (`models/language/bert/model.py`) is itself entirely Sphinx/reST. The earlier phrasing here, "this differs
 > from `models/`", rested on a blanket claim that measurement refuted. Where `layers/` genuinely
 > differs is from the Google-majority `losses/`, `metrics/`, `utils/`, `optimization/`, `analyzer/`
 > and `visualization/`.
@@ -196,7 +196,7 @@ directly."** 9 files pass an `ffn_args=` dict to a wrapper rather than calling `
 themselves. Such a site is invisible to an AST call inventory of the factory, and invisible to a suite
 sweep run at site defaults (the break needs a non-empty caller dict to appear). A `**kwargs`-splat
 site has the identical blind spot. Use `assemble_ffn_config()` / `assemble_attention_config()` so
-those dicts go through the same validation — `models/qwen/qwen3.py:416` is the repaired exemplar and
+those dicts go through the same validation — `models/language/qwen/qwen3.py:416` is the repaired exemplar and
 carries a comment explaining why it must not be simplified back to a bare dict literal.
 
 **5. Normalization epsilon.** The factory sets `1e-6`; Keras' `LayerNormalization` /

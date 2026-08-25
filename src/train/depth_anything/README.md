@@ -1,10 +1,10 @@
 # Depth Anything Training
 
 Pattern-5 (depth-estimation) training scaffold for
-`dl_techniques.models.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
+`dl_techniques.models.vision.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
 
 > **Status (post-`plan_2026-05-10_54e6e303`)**: in-tree
-> `dl_techniques.models.vit.ViT` as the default encoder
+> `dl_techniques.models.vision.vit.ViT` as the default encoder
 > (`--encoder-kind real`). DPT decoder default is `linear`. `train_step`
 > dispatches to a clean labeled path or a semi-sup path that adds FAL +
 > stop-gradient pseudo-label L1 consistency. Semi-supervised data feed

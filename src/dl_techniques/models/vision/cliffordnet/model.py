@@ -845,8 +845,8 @@ def create_cliffordnet(
 ) -> "CliffordNet":
     """Convenience function to create CliffordNet models.
 
-    Mirrors :func:`dl_techniques.models.resnet.model.create_resnet` and
-    :func:`dl_techniques.models.tree_transformer.model.create_tree_transformer`
+    Mirrors :func:`dl_techniques.models.vision.resnet.model.create_resnet` and
+    :func:`dl_techniques.models.language.tree_transformer.model.create_tree_transformer`
     for consistency across the model zoo: a thin module-level factory that
     delegates to :meth:`CliffordNet.from_variant`.
 

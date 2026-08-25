@@ -248,7 +248,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.squeezenet.squeezenet_v1 import create_squeezenet_v1
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
 
 # 1. Create a SqueezeNetV1 model for CIFAR-10 (32x32 images, 10 classes)
 # We use variant "1.1" which is better suited for small images.
@@ -331,7 +331,7 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 You can use a headless SqueezeNet as a lightweight backbone for other tasks.
 
 ```python
-from dl_techniques.models.squeezenet.squeezenet_v1 import create_squeezenet_v1
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
 import numpy as np
 
 # 1. Create the feature extractor by setting include_top=False
@@ -355,7 +355,7 @@ print(f"Output shape: {features.shape}") # (2, 13, 13, 512)
 SqueezeNodule-Net V2 is designed to work with 3D data like CT scans.
 
 ```python
-from dl_techniques.models.squeezenet.squeezenet_v2 import create_squeezenodule_net_v2
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import create_squeezenodule_net_v2
 
 # Create a 3D model for a binary classification task on 64x64x64 volumes
 model_3d = create_squeezenodule_net_v2(
@@ -377,7 +377,7 @@ model_3d.summary()
 The `1.0_bypass` variant of SqueezeNetV1 incorporates residual connections, similar to ResNet. This can improve gradient flow and make it easier to train deeper or more complex models based on the SqueezeNet architecture.
 
 ```python
-from dl_techniques.models.squeezenet.squeezenet_v1 import create_squeezenet_v1
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
 
 # Create the bypass variant
 # This is useful for tasks where training might be unstable
@@ -439,7 +439,7 @@ All SqueezeNet models and their custom `FireModule` layers are fully serializabl
 
 ```python
 import keras
-from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule
 
 # Create and train model
 model = SqueezeNetV1.from_variant("1.1", num_classes=10, input_shape=(32,32,3))
@@ -467,8 +467,8 @@ You can validate the implementation with simple tests to ensure all variants can
 
 ```python
 import numpy as np
-from dl_techniques.models.squeezenet.squeezenet_v1 import create_squeezenet_v1
-from dl_techniques.models.squeezenet.squeezenet_v2 import create_squeezenodule_net_v2
+from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
+from dl_techniques.models.vision.squeezenet.squeezenet_v2 import create_squeezenodule_net_v2
 
 def test_v1_variants():
     create_squeezenet_v1("1.0", num_classes=10, input_shape=(64, 64, 3))

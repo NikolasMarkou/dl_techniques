@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.tabm.model import TabMModel, create_tabm_mini
+from dl_techniques.models.tabular.tabm.model import TabMModel, create_tabm_mini
 
 
 def _features(b=4, n=8):

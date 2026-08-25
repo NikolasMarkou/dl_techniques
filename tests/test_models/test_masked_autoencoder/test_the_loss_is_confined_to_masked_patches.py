@@ -36,7 +36,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.masked_autoencoder.mae import MaskedAutoencoder
+from dl_techniques.models.vision.masked_autoencoder.mae import MaskedAutoencoder
 
 from .conftest import tiny_encoder
 

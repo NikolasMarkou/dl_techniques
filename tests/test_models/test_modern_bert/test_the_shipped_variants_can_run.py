@@ -55,7 +55,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.modern_bert.model import ModernBERT
+from dl_techniques.models.language.modern_bert.model import ModernBERT
 
 SEQ_LEN = 8
 

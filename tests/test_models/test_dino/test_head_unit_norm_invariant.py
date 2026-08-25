@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.dino.dino_v1 import DINOv1, DINOHead
+from dl_techniques.models.vision.dino.dino_v1 import DINOv1, DINOHead
 
 
 def _column_norms(head):

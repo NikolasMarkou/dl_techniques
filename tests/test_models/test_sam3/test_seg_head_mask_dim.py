@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.SAM.SAM3.maskformer_segmentation import (
+from dl_techniques.models.vision_language.sam.sam3.maskformer_segmentation import (
     Sam3SegmentationHead,
 )
 

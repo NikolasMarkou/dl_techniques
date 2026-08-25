@@ -67,7 +67,7 @@ from train.common.clm_pretrain import (
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
 )
-from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 

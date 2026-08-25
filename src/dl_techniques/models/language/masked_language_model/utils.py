@@ -9,7 +9,7 @@ top-k predictions at each masked position for a batch, which is how a
 checkpoint is eyeballed.
 
 The model itself, its masking strategy and its loss live in
-``dl_techniques.models.masked_language_model.mlm``, which carries the full
+``dl_techniques.models.language.masked_language_model.mlm``, which carries the full
 architectural description. This module is deliberately thin: anything that
 decides what the model IS belongs there, not here.
 

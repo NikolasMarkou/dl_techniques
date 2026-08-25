@@ -15,7 +15,7 @@ import tempfile
 import os
 from typing import Tuple, Dict, Any
 
-from dl_techniques.models.cbam.model import CBAMNet, create_cbam_net
+from dl_techniques.models.vision.cbam.model import CBAMNet, create_cbam_net
 from dl_techniques.layers.attention.channel_attention import ChannelAttention
 from dl_techniques.layers.attention.spatial_attention import SpatialAttention
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM

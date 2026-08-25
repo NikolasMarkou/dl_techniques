@@ -7,7 +7,7 @@ three-stage pipeline rather than the usual pretrain/finetune pair:
 * ``train_tokenizer.py``      — stage 0: train the discrete visual tokenizer that produces
   the MIM targets. **Deviation X-1**: it is a VQ-VAE (``VQVAERotationTrick``), not BEiT
   v1's Gumbel-softmax DALL-E dVAE, so comparison to published BEiT numbers is invalid by
-  construction. See ``models/beit/README.md`` section 15.
+  construction. See ``models/vision/beit/README.md`` section 15.
 * ``train_mim.py``            — stage 1: self-supervised masked image modeling against the
   FROZEN stage-0 tokenizer's code ids.
 * ``train_classification.py`` — stage 2: supervised classifier, warm-started from a

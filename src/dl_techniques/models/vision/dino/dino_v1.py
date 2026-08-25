@@ -18,7 +18,7 @@ dimension — and the balance between them is what keeps training alive.
 **None of that machinery is in this file.** Centering, sharpening and the teacher
 temperature schedule live in `dl_techniques.losses.dino_loss.DINOLoss`; the EMA
 update of the teacher's weights lives in
-`dl_techniques.models.dino.training.DINOTrainingModel.update_teacher_ema`. This
+`dl_techniques.models.vision.dino.training.DINOTrainingModel.update_teacher_ema`. This
 module supplies only the pieces those need: the ViT trunk, the projection head,
 and a factory that returns a correctly-initialized teacher/student pair.
 
@@ -109,8 +109,8 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
-from dl_techniques.models.dino.common import (
+from dl_techniques.models.vision.dino.reference_init import DINO_KERNEL_INITIALIZER
+from dl_techniques.models.vision.dino.common import (
     reject_input_shape,
     sync_teacher_to_student,
 )

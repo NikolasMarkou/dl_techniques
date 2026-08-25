@@ -34,8 +34,8 @@ import tensorflow as tf
 
 from train.common import setup_gpu, create_base_argument_parser, set_seeds
 from train.common.args import explicitly_set_flags
-from dl_techniques.models.lewm.config import LeWMConfig
-from dl_techniques.models.lewm.model import LeWM
+from dl_techniques.models.vision.lewm.config import LeWMConfig
+from dl_techniques.models.vision.lewm.model import LeWM
 from dl_techniques.datasets.pusht_hdf5 import (
     synthetic_lewm_dataset,
     PushTHDF5Dataset,
@@ -47,7 +47,7 @@ def _build_model(args: argparse.Namespace) -> LeWM:
     # Fail-fast validation: img/patch divisibility and embed_dim vs encoder
     # scale. Without this a wrong combo crashes deep inside ViT/projector with
     # an opaque shape error far from the CLI.
-    from dl_techniques.models.vit.model import ViT
+    from dl_techniques.models.vision.vit.model import ViT
     if args.img_size % args.patch_size != 0:
         raise ValueError(
             f"img_size ({args.img_size}) must be divisible by patch_size "

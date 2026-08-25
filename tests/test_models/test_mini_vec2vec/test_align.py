@@ -29,7 +29,7 @@ import pytest
 from scipy.optimize import quadratic_assignment
 from scipy.stats import ortho_group
 
-from dl_techniques.models.mini_vec2vec.model import MiniVec2VecAligner
+from dl_techniques.models.language.mini_vec2vec.model import MiniVec2VecAligner
 
 
 def _clustered_pair(n=1500, d=16, k=8, seed=0):

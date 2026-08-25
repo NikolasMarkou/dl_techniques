@@ -24,8 +24,8 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import inspect
 
-import dl_techniques.models.vit.model as vit_model
-import dl_techniques.models.vit_hmlp.model as vit_hmlp_model
+import dl_techniques.models.vision.vit.model as vit_model
+import dl_techniques.models.vision.vit_hmlp.model as vit_hmlp_model
 
 
 def _default(fn, name):

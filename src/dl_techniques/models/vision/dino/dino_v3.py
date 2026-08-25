@@ -105,8 +105,8 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.models.dino.common import reject_input_shape
-from dl_techniques.models.dino.reference_init import DINO_KERNEL_INITIALIZER
+from dl_techniques.models.vision.dino.common import reject_input_shape
+from dl_techniques.models.vision.dino.reference_init import DINO_KERNEL_INITIALIZER
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

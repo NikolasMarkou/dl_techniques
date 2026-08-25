@@ -331,7 +331,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Local imports from your project structure
-from dl_techniques.models.generative.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 # 1. Load and preprocess data
 (X_train, _), (X_test, _) = mnist.load_data()
@@ -381,10 +381,10 @@ plt.show()
 
 **Purpose**: The main Keras `Model` subclass that assembles the encoder, sampler, and decoder, and includes the custom `train_step`.
 
-**Location**: `dl_techniques.models.generative.vae.model.VAE`
+**Location**: `dl_techniques.models.vision.vae.model.VAE`
 
 ```python
-from dl_techniques.models.generative.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 model = VAE.from_variant(
     "medium",
@@ -592,7 +592,7 @@ print(f"Generated image shape: {generated_image.shape}")
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.generative.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 def test_model_creation_from_variant():
     """Test model creation from variants."""
@@ -693,7 +693,7 @@ Gaussian KL is replaced by a **radius-variance KL**. The direction carries an im
 uniform-on-sphere prior.
 
 ```python
-from dl_techniques.models.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 # Baseline diagonal-Gaussian latent
 gauss = VAE.from_variant("small", input_shape=(28, 28, 1),
@@ -792,7 +792,7 @@ Mises–Fisher Spherical VAE** (Davidson et al. 2018) closes that gap with a dir
 posterior toward the uniform prior.
 
 ```python
-from dl_techniques.models.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 
 # True vMF Spherical VAE: directional posterior + vMF->uniform KL
 vmf = VAE.from_variant("small", input_shape=(28, 28, 1),

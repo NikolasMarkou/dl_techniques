@@ -26,7 +26,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM2.memory_encoder import SAM2MemoryEncoder
+from dl_techniques.models.vision_language.sam.sam2.memory_encoder import SAM2MemoryEncoder
 encoder = SAM2MemoryEncoder(out_dim=64, in_dim=256)
 memory, memory_pos = encoder(pixel_features, masks, training=False)
 ```

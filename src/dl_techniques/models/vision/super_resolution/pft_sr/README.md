@@ -194,7 +194,7 @@ Super-resolve a low-resolution image by 4x.
 
 ```python
 import keras
-from dl_techniques.models.pft_sr.model import create_pft_sr
+from dl_techniques.models.vision.super_resolution.pft_sr.model import create_pft_sr
 
 # 1. Create the model (Base variant)
 model = create_pft_sr(scale=4, variant='base')
@@ -220,7 +220,7 @@ print(f"SR Shape: {sr_image.shape}")
 **Purpose**: The main Keras `Model` class.
 
 ```python
-from dl_techniques.models.pft_sr.model import PFTSR
+from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
 
 model = PFTSR(
     scale=4,
@@ -274,7 +274,7 @@ model capacity.
 
 ```python
 import keras
-from dl_techniques.models.pft_sr.model import create_pft_sr
+from dl_techniques.models.vision.super_resolution.pft_sr.model import create_pft_sr
 
 # 1. Setup Model
 model = create_pft_sr(scale=4, variant='base')
@@ -416,7 +416,7 @@ Run a quick shape check to ensure the upsampling logic is correct for your confi
 
 ```python
 import keras
-from dl_techniques.models.pft_sr.model import PFTSR
+from dl_techniques.models.vision.super_resolution.pft_sr.model import PFTSR
 
 def test_pft_sr_shapes():
     scale = 4

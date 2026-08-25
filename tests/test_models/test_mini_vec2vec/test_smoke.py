@@ -30,7 +30,7 @@ BATCH, EMBEDDING_DIM = 2, 128
 
 
 def _build():
-    from dl_techniques.models.mini_vec2vec.model import create_mini_vec2vec_aligner
+    from dl_techniques.models.language.mini_vec2vec.model import create_mini_vec2vec_aligner
 
     return create_mini_vec2vec_aligner(embedding_dim=EMBEDDING_DIM)
 

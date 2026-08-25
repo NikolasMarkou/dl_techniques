@@ -17,7 +17,7 @@ patch tokens and show up as high-norm artifacts in attention maps.
 **What lives where.** This file is architecture only. The DINO, iBOT and KoLeo
 losses are `DINOLoss`, `iBOTPatchLoss` and `KoLeoLoss` in
 `dl_techniques.losses.dino_loss`; the teacher EMA is in
-`dl_techniques.models.dino.training`. Sinkhorn-Knopp centering is **not
+`dl_techniques.models.vision.dino.training`. Sinkhorn-Knopp centering is **not
 implemented anywhere in this repository** — `DINOLoss` offers EMA centering only.
 Variable-resolution positional-embedding interpolation is **not implemented
 either**: `interpolate_antialias` and `interpolate_offset` are accepted, stored
@@ -103,7 +103,7 @@ from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.layer_scale import LearnableMultiplier
-from dl_techniques.models.dino.common import reject_input_shape
+from dl_techniques.models.vision.dino.common import reject_input_shape
 
 # ---------------------------------------------------------------------
 # Module constants

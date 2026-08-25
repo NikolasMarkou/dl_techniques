@@ -35,7 +35,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.models.fastvit.model import (
+from dl_techniques.models.vision.fastvit.model import (
     MCI_VARIANTS,
     FastVitImageEncoder,
     _resolve_mci_variant,

@@ -1,7 +1,7 @@
 """Fair, mode-agnostic evaluation of VAE latent samplers on MNIST.
 
 This script answers the question "does the hypersphere sampling contribution in
-``models/vae/`` actually work?" by comparing trained VAE arms whose only
+``models/vision/vae/`` actually work?" by comparing trained VAE arms whose only
 difference is the latent ``sampling_type`` in ``{gaussian, hypersphere}``.
 
 Fairness rationale
@@ -80,7 +80,7 @@ from typing import Dict, List, Optional, Tuple
 from sklearn.decomposition import PCA
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE
 from dl_techniques.layers.sampling import Sampling, HypersphereSampling
 
 from train.common import set_seeds

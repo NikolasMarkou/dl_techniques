@@ -12,7 +12,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.qwen.qwen3_embeddings import (
+from dl_techniques.models.language.qwen.qwen3_embeddings import (
     Qwen3EmbeddingModel, Qwen3RerankerModel,
 )
 
@@ -126,7 +126,7 @@ class TestQwen3Causality:
     PERTURB_AT = 6
 
     def _reranker(self):
-        from dl_techniques.models.qwen.qwen3_embeddings import Qwen3RerankerLayer
+        from dl_techniques.models.language.qwen.qwen3_embeddings import Qwen3RerankerLayer
         return Qwen3RerankerLayer(
             vocab_size=VOCAB, hidden_size=32, num_layers=2, num_heads=4,
             intermediate_size=64, max_seq_len=12, yes_token_id=5,
@@ -134,7 +134,7 @@ class TestQwen3Causality:
         )
 
     def _embedder(self):
-        from dl_techniques.models.qwen.qwen3_embeddings import Qwen3EmbeddingLayer
+        from dl_techniques.models.language.qwen.qwen3_embeddings import Qwen3EmbeddingLayer
         return Qwen3EmbeddingLayer(
             vocab_size=VOCAB, hidden_size=32, num_layers=2, num_heads=4,
             intermediate_size=64, max_seq_len=12, normalize=False,

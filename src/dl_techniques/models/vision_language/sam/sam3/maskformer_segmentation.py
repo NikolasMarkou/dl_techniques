@@ -35,7 +35,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.maskformer_segmentation import (
+from dl_techniques.models.vision_language.sam.sam3.maskformer_segmentation import (
     Sam3SegmentationHead)
 head = Sam3SegmentationHead(d_model=256, upsampling_stages=3, num_heads=8)
 ```

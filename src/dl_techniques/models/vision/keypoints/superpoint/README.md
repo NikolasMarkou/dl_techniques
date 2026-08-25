@@ -52,12 +52,12 @@ detector_head Conv2D 1x1        descriptor_head Conv2D 1x1
 
 ## 2. What this package contains
 
-`src/dl_techniques/models/superpoint/` is a single module:
+`src/dl_techniques/models/vision/keypoints/superpoint/` is a single module:
 
 | File | Contents |
 | :--- | :--- |
 | `model.py` | `SuperPoint` (the `keras.Model`) and `create_superpoint` (factory). |
-| `__init__.py` | Re-exports both under `__all__`, so `from dl_techniques.models.superpoint import SuperPoint` works. |
+| `__init__.py` | Re-exports both under `__all__`, so `from dl_techniques.models.vision.keypoints.superpoint import SuperPoint` works. |
 
 The rest of the SuperPoint surface lives in the packages that own each concern:
 
@@ -109,7 +109,7 @@ The rest of the SuperPoint surface lives in the packages that own each concern:
 
 ```python
 import keras
-from dl_techniques.models.superpoint import create_superpoint
+from dl_techniques.models.vision.keypoints.superpoint import create_superpoint
 
 model = create_superpoint(variant="tiny", input_shape=(256, 256, 1))
 

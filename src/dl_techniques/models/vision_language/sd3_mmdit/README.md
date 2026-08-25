@@ -20,7 +20,7 @@ by design, not by omission.
 ## Public API
 
 ```python
-from dl_techniques.models.sd3_mmdit import (
+from dl_techniques.models.vision_language.sd3_mmdit import (
     SD3MMDiT, create_sd3_mmdit,      # the diffusion transformer
     create_sd3_vae,                  # 16-channel VAE wrapper
     CLIPTextEncoder, T5Encoder,      # from-scratch text towers
@@ -31,7 +31,7 @@ from dl_techniques.models.sd3_mmdit import (
 Block and scheduler internals stay behind their submodules:
 
 ```python
-from dl_techniques.models.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
+from dl_techniques.models.vision_language.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
 ```
 
 ## Presets

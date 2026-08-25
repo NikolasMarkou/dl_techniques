@@ -33,8 +33,8 @@ import keras
 import numpy as np
 import pytest
 
-import dl_techniques.models.bias_free_denoisers as bf_pkg
-from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+import dl_techniques.models.vision.bias_free_denoisers as bf_pkg
+from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
 )
 

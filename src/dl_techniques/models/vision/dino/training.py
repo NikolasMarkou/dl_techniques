@@ -46,7 +46,7 @@ several hundred steps.
 
 The teacher is NOT trained by backpropagation. It is an EMA of the student,
 advanced once per training batch by
-`dl_techniques.models.depth_anything.teacher_ema.TeacherEMACallback`, which calls
+`dl_techniques.models.vision.depth_anything.teacher_ema.TeacherEMACallback`, which calls
 `update_teacher_ema(decay=...)` on this model. That module's
 `cosine_ema_schedule` / `linear_ema_schedule` / `TeacherEMACallback` are reused
 UNCHANGED — do not copy them here.
@@ -54,9 +54,9 @@ UNCHANGED — do not copy them here.
 Example
 -------
 ```python
-from dl_techniques.models.dino import create_dino_training_model
+from dl_techniques.models.vision.dino import create_dino_training_model
 from dl_techniques.losses.dino_loss import DINOLoss
-from dl_techniques.models.depth_anything.teacher_ema import (
+from dl_techniques.models.vision.depth_anything.teacher_ema import (
     TeacherEMACallback, cosine_ema_schedule,
 )
 
@@ -81,11 +81,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.losses.dino_loss import pack_student_teacher
-from dl_techniques.models.dino.common import (
+from dl_techniques.models.vision.dino.common import (
     reject_input_shape,
     sync_teacher_to_student,
 )
-from dl_techniques.models.dino.dino_v1 import (
+from dl_techniques.models.vision.dino.dino_v1 import (
     ModelVariant,
     create_dino_teacher_student_pair,
 )
@@ -160,7 +160,7 @@ class DINOTrainingModel(keras.Model):
 
     Example:
         ```python
-        from dl_techniques.models.dino import (
+        from dl_techniques.models.vision.dino import (
             create_dino_teacher_student_pair, DINOTrainingModel,
         )
 
@@ -377,7 +377,7 @@ class DINOTrainingModel(keras.Model):
                 ``ValueError`` when ``decay`` is outside `[0, 1]`.
 
         **This method name is a hard contract with
-        `dl_techniques.models.depth_anything.teacher_ema.TeacherEMACallback`,
+        `dl_techniques.models.vision.depth_anything.teacher_ema.TeacherEMACallback`,
         which calls `self.model.update_teacher_ema(decay=...)` by name.** If
         it is renamed or removed, that callback logs ONE warning and
         SELF-DISABLES: the run completes, the loss curve looks fine, and the

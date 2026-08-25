@@ -37,7 +37,7 @@ import keras
 from keras import ops
 import pytest
 
-from dl_techniques.models.video_jepa.model import create_video_jepa
+from dl_techniques.models.vision.video_jepa.model import create_video_jepa
 
 
 IMG, PATCH, DIM = 16, 8, 16

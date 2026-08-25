@@ -135,7 +135,7 @@ class TestDictKeyedCompile:
 
         from train.common.nlp import prepare_dict_keyed_compile
 
-        from dl_techniques.models.gpt2.gpt2 import GPT2
+        from dl_techniques.models.language.gpt2.gpt2 import GPT2
 
         m = GPT2.from_variant("tiny", vocab_size=64, max_seq_len=8)
         # Build the model so internal state is populated.
@@ -187,7 +187,7 @@ class TestDictKeyedCompile:
             prepare_dict_keyed_compile,
             build_clm_metrics,
         )
-        from dl_techniques.models.gpt2.gpt2 import GPT2
+        from dl_techniques.models.language.gpt2.gpt2 import GPT2
         from dl_techniques.losses import MaskedCausalLMLoss
 
         vocab_size = 64
@@ -218,7 +218,7 @@ class TestDictKeyedCompile:
             prepare_dict_keyed_compile,
             build_clm_metrics,
         )
-        from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+        from dl_techniques.models.vision.cliffordnet.lm import CliffordNetLM
         from dl_techniques.losses import MaskedCausalLMLoss
 
         vocab_size = 64

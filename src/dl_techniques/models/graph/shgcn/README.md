@@ -151,7 +151,7 @@ Classify nodes in a graph (e.g., Cora/Citeseer).
 
 ```python
 import keras
-from dl_techniques.models.shgcn.model import SHGCNNodeClassifier
+from dl_techniques.models.graph.shgcn.model import SHGCNNodeClassifier
 
 # 1. Create Model
 model = SHGCNNodeClassifier(
@@ -214,7 +214,7 @@ logits = model.predict_on_batch([features, adj])
 **Purpose**: Flexible backbone for custom tasks.
 
 ```python
-from dl_techniques.models.shgcn.model import SHGCNModel
+from dl_techniques.models.graph.shgcn.model import SHGCNModel
 
 model = SHGCNModel(
     hidden_dims=[64, 64],
@@ -257,7 +257,7 @@ You can tune the model behavior via the constructor:
 Training a model to predict missing edges.
 
 ```python
-from dl_techniques.models.shgcn.model import SHGCNLinkPredictor
+from dl_techniques.models.graph.shgcn.model import SHGCNLinkPredictor
 
 # 1. Setup
 model = SHGCNLinkPredictor(hidden_dims=[32], embedding_dim=16)

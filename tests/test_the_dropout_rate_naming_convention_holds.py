@@ -122,10 +122,11 @@ NON_RATE_PARAMS: Set[Tuple[str, str, str]] = {
 }
 
 #: Surviving keyword-call sites, pinned as ``(file, callee, keyword)``.
-#: 17 target stock Keras 3 (`MultiHeadAttention`, `LSTM`, `LSTMCell`) across 16
-#: distinct CALLS — the two LSTM/LSTMCell calls each pass two exempt keywords.
-#: 2 are deliberate negative tests of the embedding factory's strict-kwarg
-#: rejection.
+#: 12 target stock Keras 3 (`MultiHeadAttention`, `LSTM`, `LSTMCell`) across 10
+#: distinct CALLS — the LSTMCell and LSTM calls each pass two exempt keywords.
+#: 1 is a deliberate negative test of the embedding factory's strict-kwarg
+#: rejection. Re-derived 2026-08-24 after the `nano_vlm_world_model` package
+#: was deleted from the tree.
 EXEMPT_KEYWORD_CALLS: Set[Tuple[str, str, str]] = {
     # --- stock keras.layers.MultiHeadAttention -----------------------------
     ("src/dl_techniques/layers/blt_blocks.py", "MultiHeadAttention", "dropout"),
@@ -133,9 +134,8 @@ EXEMPT_KEYWORD_CALLS: Set[Tuple[str, str, str]] = {
     ("src/dl_techniques/layers/graphs/entity_graph_refinement.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/layers/graphs/graph_neural_network.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py", "MultiHeadAttention", "dropout"),
-    ("src/dl_techniques/models/nano_vlm_world_model/denoisers.py", "MultiHeadAttention", "dropout"),
-    ("src/dl_techniques/models/SAM/SAM1/transformer.py", "MultiHeadAttention", "dropout"),
-    ("src/dl_techniques/models/video_jepa/predictor.py", "MultiHeadAttention", "dropout"),
+    ("src/dl_techniques/models/vision_language/sam/sam1/transformer.py", "MultiHeadAttention", "dropout"),
+    ("src/dl_techniques/models/vision/video_jepa/predictor.py", "MultiHeadAttention", "dropout"),
     ("tests/test_layers/test_attention/test_shared_weights_cross_attention.py", "MultiHeadAttention", "dropout"),
     # --- stock keras.layers.LSTM / LSTMCell --------------------------------
     ("src/dl_techniques/layers/time_series/deepar_blocks.py", "LSTMCell", "dropout"),

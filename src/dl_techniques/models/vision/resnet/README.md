@@ -544,7 +544,7 @@ pip install keras>=3.8.0 tensorflow>=2.18.0 numpy
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Create a ResNet-50 model
 model = ResNet.from_variant('resnet50', num_classes=1000)
@@ -586,7 +586,7 @@ for i, idx in enumerate(top5_indices, 1):
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # Load ResNet-50 with ImageNet pretrained weights
 model = ResNet.from_variant(
@@ -833,7 +833,7 @@ Historical note:
 ### Creating Different Variants
 
 ```python
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # Create any variant easily
 resnet18 = ResNet.from_variant('resnet18', num_classes=1000)
@@ -1007,7 +1007,7 @@ Inference: Use only Output 0 (primary)
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 from dl_techniques.utils.deep_supervision import get_model_output_info
 
 # 1. Create model with deep supervision
@@ -1169,7 +1169,7 @@ leaves a `(4, 4, 512)` map for the head.
 ```python
 import keras
 import tensorflow as tf
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Load and prepare data
 (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
@@ -1224,7 +1224,7 @@ Use pretrained ResNet as a fixed feature extractor.
 
 ```python
 import keras
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Load pretrained model without top
 base_model = ResNet.from_variant(
@@ -1282,7 +1282,7 @@ Unfreeze and fine-tune the pretrained model.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Start from the pretrained backbone WITHOUT its classification head.
 base_model = ResNet.from_variant(
@@ -1351,7 +1351,7 @@ replicated labels -- the dict-keyed form raises, see the note in section 7.
 
 ```python
 import keras
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 from dl_techniques.utils.deep_supervision import get_model_output_info
 
 # 1. Create model with deep supervision
@@ -1416,7 +1416,7 @@ Create a custom ResNet variant for your specific needs.
 
 ```python
 import keras
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # Custom architecture for specific use case
 # Example: Deeper network for medical imaging with high resolution
@@ -1454,7 +1454,7 @@ Train with progressively larger image sizes for better performance.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 def train_progressive_resize(initial_size=128, final_size=224, num_stages=3):
     """Train with progressive image size increase."""
@@ -1506,7 +1506,7 @@ Use a larger ResNet to train a smaller one.
 ```python
 import keras
 import tensorflow as tf
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Load large teacher model
 teacher = ResNet.from_variant(
@@ -1602,7 +1602,7 @@ Train faster with mixed precision.
 
 ```python
 import keras
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Enable mixed precision
 keras.mixed_precision.set_global_policy('mixed_float16')
@@ -1681,7 +1681,7 @@ the trouble -- once you have a checkpoint.
 ### Loading Pretrained Models
 
 ```python
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # Method 1: from a local checkpoint -- THE ONLY WORKING FORM.
 model = ResNet.from_variant(
@@ -1945,7 +1945,7 @@ Training ResNet from scratch requires careful setup and hyperparameters.
 
 ```python
 import keras
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 # 1. Create model
 model = ResNet.from_variant(
@@ -2120,7 +2120,7 @@ callbacks = [
 Group by NAME, never by index -- the names are stable and the counts are not:
 
 ```python
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 
 def create_layer_groups(model):
@@ -2556,7 +2556,7 @@ Re-derive the parameter columns:
 
 ```python
 import numpy as np
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 for variant in ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]:
     model = ResNet.from_variant(variant, num_classes=1000, input_shape=(224, 224, 3))
@@ -2573,7 +2573,7 @@ import tensorflow as tf
 from tensorflow.python.framework.convert_to_constants import (
     convert_variables_to_constants_v2,
 )
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 
 def profile_flops(model, input_shape):

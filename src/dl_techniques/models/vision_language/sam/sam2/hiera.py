@@ -36,7 +36,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM2.hiera import Hiera, hiera_block_specs
+from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera, hiera_block_specs
 trunk = Hiera(embed_dim=96, num_heads=1, stages=(1, 2, 7, 2))
 levels = trunk(images)               # four maps, finest first
 ```

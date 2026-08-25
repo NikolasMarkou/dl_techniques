@@ -93,7 +93,7 @@ from tensorflow.python.framework.convert_to_constants import (
     convert_variables_to_constants_v2,
 )
 
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 
 INPUT_SHAPE = (224, 224, 3)
 

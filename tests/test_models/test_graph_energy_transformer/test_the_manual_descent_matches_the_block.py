@@ -45,7 +45,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.graph_energy_transformer.model import (
+from dl_techniques.models.graph.graph_energy_transformer.model import (
     GraphEnergyTransformerBackbone,
 )
 

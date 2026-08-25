@@ -38,7 +38,7 @@ Architecture Overview:
 Usage Examples:
 --------------
 ```python
-from dl_techniques.models.SAM.SAM3.query_selection import (
+from dl_techniques.models.vision_language.sam.sam3.query_selection import (
     Sam3EncoderQuerySelection)
 head = Sam3EncoderQuerySelection(d_model=256, num_queries=200,
                                  feat_size=(72, 72))

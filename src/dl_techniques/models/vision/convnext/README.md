@@ -270,7 +270,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.convnext.convnext_v2 import create_convnext_v2
+from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
 # 1. Create a tiny ConvNeXtV2 model for CIFAR-10 (32x32 images, 10 classes)
 # The implementation automatically handles the smaller input size.
@@ -361,7 +361,7 @@ This implementation provides several pre-configured variants for both V1 and V2.
 You can use a headless ConvNeXt as a powerful backbone for downstream tasks like object detection or semantic segmentation.
 
 ```python
-from dl_techniques.models.convnext.convnext_v1 import create_convnext_v1
+from dl_techniques.models.vision.convnext.convnext_v1 import create_convnext_v1
 import numpy as np
 
 # 1. Create the feature extractor by setting include_top=False
@@ -386,7 +386,7 @@ backbone.summary()
 ConvNeXt V2 introduced several smaller variants that are highly efficient for mobile or resource-constrained applications.
 
 ```python
-from dl_techniques.models.convnext.convnext_v2 import create_convnext_v2
+from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
 # Create a ConvNeXtV2-Pico model for a 100-class problem
 pico_model = create_convnext_v2(
@@ -408,7 +408,7 @@ pico_model.summary()
 This implementation supports loading pre-trained weights, even when your new task has a different number of classes or a different input image size.
 
 ```python
-from dl_techniques.models.convnext.convnext_v2 import create_convnext_v2
+from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
 # Assume you have downloaded pre-trained ImageNet weights for ConvNeXtV2-Base
 # and saved them to "convnext_v2_base_imagenet.keras"
@@ -509,8 +509,8 @@ You can validate the implementation with simple tests to ensure all variants can
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.convnext.convnext_v1 import ConvNeXtV1
-from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2
+from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
+from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
 def test_creation_all_variants():
     """Test model creation for all V1 and V2 variants."""

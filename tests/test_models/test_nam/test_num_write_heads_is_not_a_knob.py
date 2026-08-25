@@ -26,8 +26,8 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import keras
 import pytest
 
-from dl_techniques.models.nam.cell import NAMCell
-from dl_techniques.models.nam.config import NAMConfig, NAM_VARIANTS
+from dl_techniques.models.neural_computer.nam.cell import NAMCell
+from dl_techniques.models.neural_computer.nam.config import NAMConfig, NAM_VARIANTS
 
 
 def _tiny(**overrides) -> NAMConfig:

@@ -153,7 +153,7 @@ from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.strong_augmentation import StrongAugmentation
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
-from dl_techniques.models.vit.model import ViT
+from dl_techniques.models.vision.vit.model import ViT
 
 from .components import DPTDecoder, REFERENCE_BN_EPSILON
 
@@ -889,7 +889,7 @@ class DepthAnything(keras.Model):
             y_pred = self(x, training=True)
             # Keras-3 canonical train_step — replaces deprecated
             # compiled-loss / compiled-metrics calls.
-            # See dl_techniques/models/masked_language_model/mlm.py:309-343.
+            # See dl_techniques/models/language/masked_language_model/mlm.py:309-343.
             loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
             loss = loss * self.loss_weights.get('labeled', 1.0)
             scaled_loss = self.optimizer.scale_loss(loss)

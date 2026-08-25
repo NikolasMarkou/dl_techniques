@@ -169,7 +169,7 @@ import keras
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.mobilenet.mobilenet_v4 import create_mobilenetv4
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
 # 1. Create a small MobileNetV4 model for CIFAR-10 (32x32 images, 10 classes)
 model = create_mobilenetv4(
@@ -252,7 +252,7 @@ these ladders are hand-written depth/width tables, not the NAS-found specificati
 Adapt a MobileNetV3 model for a dataset with 100 classes and 32x32 images.
 
 ```python
-from dl_techniques.models.mobilenet.mobilenet_v3 import create_mobilenetv3
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import create_mobilenetv3
 
 cifar100_model = create_mobilenetv3(
     variant="small",
@@ -267,7 +267,7 @@ cifar100_model.summary()
 The `width_multiplier` (α) scales the number of channels in every layer, providing a simple way to trade accuracy for size and latency.
 
 ```python
-from dl_techniques.models.mobilenet.mobilenet_v2 import create_mobilenetv2
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import create_mobilenetv2
 
 # Default MobileNetV2 1.0 has ~3.5M params
 default_v2 = create_mobilenetv2(variant="1.0")
@@ -288,7 +288,7 @@ print(f"Small V2 (multiplier) params: {custom_small_v2.count_params():,}")
 For downstream tasks like object detection or segmentation, create a "headless" model by setting `include_top=False`.
 
 ```python
-from dl_techniques.models.mobilenet.mobilenet_v4 import create_mobilenetv4
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
 # Create a headless V4 backbone for feature extraction
 backbone = create_mobilenetv4(
@@ -409,10 +409,10 @@ You can validate the implementations with simple tests to ensure all variants ca
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.mobilenet.mobilenet_v1 import MobileNetV1
-from dl_techniques.models.mobilenet.mobilenet_v2 import MobileNetV2
-from dl_techniques.models.mobilenet.mobilenet_v3 import MobileNetV3
-from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 
 def test_creation_all_variants():
     """Test model creation for all variants of all versions."""

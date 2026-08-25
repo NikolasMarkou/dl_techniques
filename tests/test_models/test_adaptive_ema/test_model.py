@@ -1,4 +1,4 @@
-"""Tests for ``dl_techniques.models.adaptive_ema``.
+"""Tests for ``dl_techniques.models.time_series.adaptive_ema``.
 
 Coverage floor for the adaptive EMA slope-filter model: initialization,
 ctor validation, forward pass (2D and 3D inputs), quantile head shape,

@@ -24,7 +24,7 @@ forward-and-keep-both fix -- which is the failure mode it exists to catch.
 
 import pytest
 
-from dl_techniques.models.qwen.qwen3_embeddings import (
+from dl_techniques.models.language.qwen.qwen3_embeddings import (
     Qwen3EmbeddingLayer,
     Qwen3RerankerLayer,
 )

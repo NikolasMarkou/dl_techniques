@@ -16,15 +16,15 @@ renormalized nucleus, which is the density the token was drawn from and the one
 the MH acceptance ratio needs; the caller cannot recover it from a
 full-vocabulary log-softmax.
 """
-from dl_techniques.models.power_sampling.config import PowerSamplingConfig
-from dl_techniques.models.power_sampling.protocols import TokenizerProtocol, LogitsFn
-from dl_techniques.models.power_sampling.ops import _log_softmax, _nucleus_sample
-from dl_techniques.models.power_sampling.forward import (
+from dl_techniques.models.common.power_sampling.config import PowerSamplingConfig
+from dl_techniques.models.common.power_sampling.protocols import TokenizerProtocol, LogitsFn
+from dl_techniques.models.common.power_sampling.ops import _log_softmax, _nucleus_sample
+from dl_techniques.models.common.power_sampling.forward import (
     make_logits_fn,
     make_batch_logits_fn,
     VLMForwardAdapter,
 )
-from dl_techniques.models.power_sampling.sampler import PowerSampler
+from dl_techniques.models.common.power_sampling.sampler import PowerSampler
 
 __all__ = [
     "PowerSampler",

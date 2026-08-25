@@ -21,7 +21,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import keras
 
 from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
-from dl_techniques.models.mobile_clip.components import MobileClipTextEncoder
+from dl_techniques.models.vision_language.mobile_clip.components import MobileClipTextEncoder
 
 KERAS_DEFAULT_EPSILON = 1e-3
 
@@ -59,7 +59,7 @@ class TestTextTowerFinalNormEpsilon:
         ``layers/fastvit/reference.py``'s own module docstring states this as an
         interface contract for consumers, and this package is now one.
         """
-        import dl_techniques.models.mobile_clip.components as components
+        import dl_techniques.models.vision_language.mobile_clip.components as components
 
         assert components.REFERENCE_NORM_EPSILON is REFERENCE_NORM_EPSILON
 

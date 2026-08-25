@@ -191,7 +191,7 @@ class TextDecoder(keras.layers.Layer):
         so that the residual stream's variance does not grow with depth. Q/K/V
         and the FFN expansion are UNAFFECTED. Default: False, which is the
         behaviour of every consumer written before 2026-08-22. This is GPT-2's
-        published rule; see ``models/gpt2/gpt2.py`` and
+        published rule; see ``models/language/gpt2/gpt2.py`` and
         ``huggingface/transformers`` ``modeling_gpt2.py::_init_weights``.
         Requires ``attention_type='multi_head'`` and ``ffn_type='mlp'`` -- any
         other choice RAISES from the respective layer factory rather than
@@ -269,8 +269,8 @@ class TextDecoder(keras.layers.Layer):
         # (B, seq, embed_dim); the only Dense here is the factorized path's
         # embed_projection, factorized_dim -> embed_dim). Weight tying belongs in
         # the MODEL that owns the vocabulary projection -- see
-        # models/masked_language_model/clm.py (tie_weights), models/gpt2/gpt2.py
-        # and models/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
+        # models/language/masked_language_model/clm.py (tie_weights), models/language/gpt2/gpt2.py
+        # and models/vision_language/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
         # they build themselves.
         if embedding_type == 'shared':
             raise ValueError(
@@ -278,7 +278,7 @@ class TextDecoder(keras.layers.Layer):
                 "output/vocabulary projection to tie the word embedding to, so "
                 "there is nothing to share with. Use 'learned' here and perform "
                 "the tying in the model that owns the output projection (see "
-                "models/masked_language_model/clm.py's tie_weights). "
+                "models/language/masked_language_model/clm.py's tie_weights). "
                 "Legal values: 'learned', 'factorized'."
             )
         if embedding_type not in ('learned', 'factorized'):
@@ -327,7 +327,7 @@ class TextDecoder(keras.layers.Layer):
         # a 25x change in `initializer_range` moved the block-kernel std by a
         # factor of 1.00 (0.12245 in both arms). This is a four-line edit with a
         # wide blast radius -- it changes the initial weight distribution of every
-        # block in `gpt2`, `qwen`, `nano_vlm` and `nano_vlm_world_model`. Post-fix
+        # block in `gpt2`, `qwen` and `nano_vlm`. Post-fix
         # the GPT-2 blocks' weights are ~1.8x smaller, which attenuated the
         # two-block cross-position signal ~50x and required
         # `test_gpt2.py::test_without_the_mask_the_same_tokens_do_leak` to be

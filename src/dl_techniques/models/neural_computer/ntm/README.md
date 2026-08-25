@@ -1,4 +1,4 @@
-# `dl_techniques.models.ntm`
+# `dl_techniques.models.neural_computer.ntm`
 
 Model-level wrappers around the Neural Turing Machine layers in
 `dl_techniques.layers.memory`. Where the layer package gives you cells and
@@ -21,12 +21,12 @@ through `get_config()` / `from_config()`.
 
 ## Import form
 
-`src/dl_techniques/models/ntm/__init__.py` is intentionally empty, so import the
+`src/dl_techniques/models/neural_computer/ntm/__init__.py` is intentionally empty, so import the
 submodule directly:
 
 ```python
-from dl_techniques.models.ntm.model import NTMModel, create_ntm_variant
-from dl_techniques.models.ntm.model_multitask import NTMMultiTask
+from dl_techniques.models.neural_computer.ntm.model import NTMModel, create_ntm_variant
+from dl_techniques.models.neural_computer.ntm.model_multitask import NTMMultiTask
 ```
 
 The empty init is a deliberate call, not an oversight: a curated export list here
@@ -102,7 +102,7 @@ output.
 ```python
 import numpy as np
 
-from dl_techniques.models.ntm.model import create_ntm_variant
+from dl_techniques.models.neural_computer.ntm.model import create_ntm_variant
 
 model = create_ntm_variant(
     variant="tiny",                 # 'tiny' | 'base' | 'large'
@@ -117,7 +117,7 @@ y = model.predict(x, verbose=0)
 print(y.shape)                      # (4, 12, 8)
 
 from dl_techniques.layers.memory import NTMConfig
-from dl_techniques.models.ntm.model_multitask import NTMMultiTask
+from dl_techniques.models.neural_computer.ntm.model_multitask import NTMMultiTask
 
 multitask = NTMMultiTask(
     ntm_config=NTMConfig(memory_size=32, memory_dim=16, controller_dim=64),

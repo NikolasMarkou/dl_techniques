@@ -14,7 +14,7 @@ import tensorflow as tf
 import pytest
 
 from dl_techniques.layers.grid_sample import make_grid
-from dl_techniques.models.thera.hypernetwork import TheraHypernetwork
+from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
 
 
 def _finite(t) -> bool:

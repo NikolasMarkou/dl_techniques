@@ -37,7 +37,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.datasets.vision.masked_patches import make_masked_patch_map_fn
-from dl_techniques.models.energy_transformer import (
+from dl_techniques.models.vision.energy_transformer import (
     EnergyTransformerBackbone,
     EnergyTransformerClassifier,
     EnergyTransformerMIM,
@@ -813,7 +813,7 @@ from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 # DECISION plan-2026-08-19T070627-a616f581/D-013
 # `mask_token/mask_token` is waived HERE (classifier only) BY DESIGN, and the
 # product code says so in as many words. `EnergyTransformerBackbone.build`
-# (`models/energy_transformer/model.py`) carries the literal comment
+# (`models/vision/energy_transformer/model.py`) carries the literal comment
 # `# ALWAYS built - even in the classifier, which never calls it.` directly
 # above `self.mask_token.build([token_shape, mask_shape])`, and the build
 # docstring gives the reason: "The shapes come from the CONFIG, never from

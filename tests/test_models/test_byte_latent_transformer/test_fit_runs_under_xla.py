@@ -31,7 +31,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.byte_latent_transformer.model import create_blt_model
+from dl_techniques.models.language.byte_latent_transformer.model import create_blt_model
 
 # ---------------------------------------------------------------------
 

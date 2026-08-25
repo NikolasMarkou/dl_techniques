@@ -17,7 +17,7 @@ This sweep gave the 20 model families that had **zero forward-pass coverage** (1
 | Disposition | Count | Families |
 |---|---|---|
 | **PASS** (build + forward OK) | **9** | masked_autoencoder, relgt, byte_latent_transformer, distilbert, fftnet (vision path only), coshnet, yolo12, mini_vec2vec, tabm |
-| **XFAIL** (real breakage, captured) | **10** | latent_gmm_registration, shgcn, hierarchical_reasoning_model, nano_vlm, darkir, dino_v1, pft_sr, swin_transformer, mothnet, nano_vlm_world_model |
+| **XFAIL** (real breakage, captured) | **10** | latent_gmm_registration, shgcn, hierarchical_reasoning_model, nano_vlm, darkir, dino_v1, pft_sr, swin_transformer, mothnet, nano_vlm_world_model [package deleted 2026-08-24] |
 | **SKIP** (no top-level model) | **1** | jepa |
 
 Risk-cluster regression spot-check (transformer sub-package was heavily refactored 2026-06-14/15): the existing suites for `clip`, `mobile_clip`, `fastvlm`, `video_jepa` were **re-run** this plan — **162 passed, 4 skipped, 0 failed** (314s, GPU1). No regression from the transformer refactor. `nano_vlm` was the only refactor consumer that broke, and it is in the gap list (XFAIL).
@@ -65,7 +65,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 31 | mamba | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_mamba/` |
 | 32 | masked_autoencoder | PASS | PASS | new smoke test (this plan) | `create_mae_model(encoder, 16, 0.75, (32,32,3))` w/ tiny in-test encoder |
 | 33 | masked_language_model | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_masked_language_model/` |
-| 34 | memory_bank | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_memory_bank/` |
+| 34 | memory_bank | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_memory_bank/` [package deleted 2026-08-24] |
 | 35 | mini_vec2vec | PASS | PASS | new smoke test (this plan) | `create_mini_vec2vec_aligner(128)` |
 | 36 | mobile_clip | PASS (re-run) | PASS (re-run) | existing test suite (re-run step 5) | `tests/test_models/test_mobile_clip/`; risk-cluster — re-run, no regression. `mobile_clip_v2.py` is 0 bytes (v1 only) |
 | 37 | mobilenet | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_mobilenet/` |
@@ -73,7 +73,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 39 | mothnet | PASS | PASS | smoke test (FIXED plan_2026-06-15_00924f53) | was: `keras.ops` has no `scatter_nd_update`. FIXED: `scatter_nd_update` -> `scatter_update` (one-token). |
 | 40 | nam | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_nam/` |
 | 41 | nano_vlm | PASS | PASS | smoke test (FIXED plan_2026-06-15_39a31d4a) | was MultiModalFusion kwarg drift. FIXED: renamed ghost kwargs (`embed_dim`->`dim`, `num_heads`->`attention_config`) at 5 fusion_config sources + dropped a broken weight-tie in `build()` (CAVEAT: embedding/output weight-sharing removed to make forward; re-add via a tied-Dense if desired). Smoke PASS (2,213,256). |
-| 42 | nano_vlm_world_model | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling in `ScoreBasedNanoVLM.call`); GHOST still broken despite commit 1b61a381 |
+| 42 | nano_vlm_world_model [package deleted 2026-08-24] | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling in `ScoreBasedNanoVLM.call`); GHOST still broken despite commit 1b61a381 |
 | 43 | ntm | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_ntm/` |
 | 44 | pft_sr | PASS | PASS | smoke test (FIXED plan_2026-06-15_39a31d4a) | was PFTBlock `drop_path` kwarg. FIXED: `drop_path`->`drop_path_rate`; 4x `keras.ops.nn.depth_to_space` Lambda -> `PixelShuffle2D`; + 2 call-loop cascade fixes (None-input, tuple->list to PFTBlock.build). Smoke PASS (2,64,64,3). Latent: PFTBlock tuple/list build asymmetry. |
 | 45 | power_mlp | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_powermlp/` — **STALE** (2026-08-14): the real dir is `tests/test_models/test_power_mlp/` (underscore). Verdict unaffected. |
@@ -131,16 +131,16 @@ Each item is a candidate for a future dedicated fix plan. Grouped by likely root
 6. ~~**dino_v1 (also v2/v3)** — ctor-order crash.~~ **RESOLVED (v1, v3)**: `ClassTokenPrepend` layer (v1+v3); v3 `.item()`->`float()` fixed + v3 forward smoke authored (plan_2026-06-15_2a23a001). ClassTokenPrepend now has a dedicated unit test. **REMAINING**: dino **v2** forward (LARGE — 3+ structural bugs: cond dict-vs-tensor, Dense-in-Lambda, projection-hack CLS, masked 3-input forward) → its own plan; DINOHead `.keras` round-trip still broken (separate).
 
 ### Class C — Input-contract bug (model wiring feeds the wrong tensor shape/type to a block)
-7. **shgcn** — `SHGCNLayer.call` requires a SparseTensor adjacency; a dense float32 adjacency is rejected (TypeError). *`models/shgcn/model.py` → `SHGCNLayer.call`.* Fix hint: accept/convert dense adjacency, or document the sparse-input contract and have the smoke test build a SparseTensor.
-8. **swin_transformer** — `SwinTransformerBlock expects 4D input (batch,h,w,c), got (None,64,96)`; the model flattens patches to 3D before a 4D-expecting block. *`models/swin_transformer/model.py` patch-embed → block wiring.* Fix hint: keep/restore the (B,H,W,C) layout into the block, or reshape 3D→4D at the block boundary.
-9. **hierarchical_reasoning_model** — `ValueError: Attempt to convert a value (None)...`; a `None` propagates into a tensor conversion. *`models/hierarchical_reasoning_model/model.py` → `HierarchicalReasoningModel.call`.* Fix hint: trace the optional input/state that is `None` at inference (likely `puzzle_ids` or a carried hidden state) and supply a default.
-10. **nano_vlm_world_model** — `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling). *`models/nano_vlm_world_model/model.py` → `ScoreBasedNanoVLM.call`.* Fix hint: sample timesteps with a float dtype then cast to int, or use `keras.random.randint`. GHOST: still broken despite commit 1b61a381.
+7. **shgcn** — `SHGCNLayer.call` requires a SparseTensor adjacency; a dense float32 adjacency is rejected (TypeError). *`models/graph/shgcn/model.py` → `SHGCNLayer.call`.* Fix hint: accept/convert dense adjacency, or document the sparse-input contract and have the smoke test build a SparseTensor.
+8. **swin_transformer** — `SwinTransformerBlock expects 4D input (batch,h,w,c), got (None,64,96)`; the model flattens patches to 3D before a 4D-expecting block. *`models/vision/swin_transformer/model.py` patch-embed → block wiring.* Fix hint: keep/restore the (B,H,W,C) layout into the block, or reshape 3D→4D at the block boundary.
+9. **hierarchical_reasoning_model** — `ValueError: Attempt to convert a value (None)...`; a `None` propagates into a tensor conversion. *`models/language/hierarchical_reasoning_model/model.py` → `HierarchicalReasoningModel.call`.* Fix hint: trace the optional input/state that is `None` at inference (likely `puzzle_ids` or a carried hidden state) and supply a default.
+10. **nano_vlm_world_model** — `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling). *`models/nano_vlm_world_model/model.py` → `ScoreBasedNanoVLM.call`.* [package deleted 2026-08-24] Fix hint: sample timesteps with a float dtype then cast to int, or use `keras.random.randint`. GHOST: still broken despite commit 1b61a381.
 
 ### Class D — No top-level model (cannot forward without bespoke assembly)
-11. **jepa** — no top-level `keras.Model`; only `JEPAEncoder` / `JEPAPredictor` layers. *`models/jepa/encoder.py`.* — **STALE** (2026-08-14): there is no `models/jepa/` package; the correct path is `src/dl_techniques/models/video_jepa/encoder.py`. Disposition and verdict unaffected. Fix hint: add a thin `keras.Model` wrapper / factory that assembles encoder+predictor (or document it as a sub-package of `video_jepa` and remove the smoke-test expectation). Disposition: `skip`, not `xfail`.
+11. **jepa** — no top-level `keras.Model`; only `JEPAEncoder` / `JEPAPredictor` layers. *`models/jepa/encoder.py`.* — **STALE** (2026-08-14): there is no `models/jepa/` package; the correct path is `src/dl_techniques/models/vision/video_jepa/encoder.py`. Disposition and verdict unaffected. Fix hint: add a thin `keras.Model` wrapper / factory that assembles encoder+predictor (or document it as a sub-package of `video_jepa` and remove the smoke-test expectation). Disposition: `skip`, not `xfail`.
 
 ### Out-of-scope / separately-tracked (not counted in the 11 above)
-- **fftnet/SpectreHead** — triple-dead: `tf.signal.rfft(axis=)` TypeError + absent `ops.complex` (`models/fftnet/components.py:746,754,775`). Dedicated plan; NOT exercised this sweep. fftnet vision path is healthy.
+- **fftnet/SpectreHead** — triple-dead: `tf.signal.rfft(axis=)` TypeError + absent `ops.complex` (`models/language/fftnet/components.py:746,754,775`). Dedicated plan; NOT exercised this sweep. fftnet vision path is healthy.
 
 ---
 

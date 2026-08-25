@@ -91,7 +91,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet.model import ResNet
+from dl_techniques.models.vision.resnet.model import ResNet
 
 # ---------------------------------------------------------------------
 
@@ -99,12 +99,12 @@ INPUT_SHAPE = (32, 32, 3)
 SEED = 1234
 
 # Golden reference for arm (a), captured by EXECUTING
-# `models/resnet/model.py` as of commit 1ffc1ff8e -- the commit before
+# `models/vision/resnet/model.py` as of commit 1ffc1ff8e -- the commit before
 # `stem_type` existed -- on the golden reference device at seed 1234, with
 # `ResNet.from_variant("resnet18", num_classes=10, input_shape=(32, 32, 3))`
 # and `np.random.default_rng(0).random((1, 32, 32, 3))` as input.
 # Reproduce with:
-#   git show 1ffc1ff8e:src/dl_techniques/models/resnet/model.py > /tmp/pre.py
+#   git show 1ffc1ff8e:src/dl_techniques/models/vision/resnet/model.py > /tmp/pre.py
 #   # then importlib-load /tmp/pre.py and hash as below.
 PRE_KNOB_WEIGHT_COUNT = 102
 PRE_KNOB_WEIGHT_SIGNATURE_SHA256 = (
@@ -170,7 +170,7 @@ def test_the_imagenet_stem_reproduces_the_pre_knob_model_exactly(
     injection rather than by reasoning about it.
 
     The reference is therefore EXTERNAL: both digests below were captured by
-    executing ``models/resnet/model.py`` **as of commit 1ffc1ff8e** -- the
+    executing ``models/vision/resnet/model.py`` **as of commit 1ffc1ff8e** -- the
     commit before ``stem_type`` existed -- loaded from `git show` through
     ``importlib``, on the golden reference device, at seed 1234. The post-knob
     code reproduces both, and the capture is stable across repeated runs.

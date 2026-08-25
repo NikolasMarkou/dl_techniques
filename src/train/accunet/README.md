@@ -1,6 +1,6 @@
 # ACC-UNet Training
 
-Production training pipeline for `dl_techniques.models.accunet.AccUNet`
+Production training pipeline for `dl_techniques.models.vision.accunet.AccUNet`
 (Pattern-4 segmentation trainer). Single-stage supervised training with
 two built-in data modes, AdamW + cosine LR schedule, and the standard
 `train.common.create_callbacks` callback stack.
@@ -31,7 +31,7 @@ dependency and is the recommended smoke path.
 ## Input-size contract
 
 AccUNet requires `H, W` divisible by 16 — see
-`src/dl_techniques/models/accunet/README.md` §7. The trainer enforces
+`src/dl_techniques/models/vision/accunet/README.md` §7. The trainer enforces
 this for both data modes and raises a clear `ValueError` if you pass a
 non-conforming `--image-size`.
 

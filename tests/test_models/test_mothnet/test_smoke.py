@@ -25,7 +25,7 @@ BATCH, NUM_FEATURES, NUM_CLASSES = 2, 64, 10
 
 
 def _build():
-    from dl_techniques.models.mothnet.model import MothNet
+    from dl_techniques.models.general_purpose.mothnet.model import MothNet
 
     return MothNet(num_classes=NUM_CLASSES)
 

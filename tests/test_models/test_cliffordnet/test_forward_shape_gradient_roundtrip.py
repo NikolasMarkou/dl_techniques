@@ -45,7 +45,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.cliffordnet.model import CliffordNet
+from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 
 IMG = (16, 16, 3)
 NUM_CLASSES = 4

@@ -3,9 +3,9 @@
 
 The narrow raw-TF migration inherited by step 27 named nine sites in this
 package. Re-derived at HEAD, `mlm.py`'s `cast`/`maximum`/`reduce_sum`/
-`reduce_mean` and `memory_bank/wave_field_memory_llm.py`'s stray `tf.constant`
-were ALREADY gone (a comment at `wave_field_memory_llm.py:756` records the
-removal). Four were live, all in this function: `tf.cast`, `tf.shape`,
+`reduce_mean` were ALREADY gone, as was a stray `tf.constant` in the
+since-deleted `memory_bank` package. Four were live, all in this function:
+`tf.cast`, `tf.shape`,
 `tf.minimum`, `tf.where`.
 
 The function is called from `src/train/common/nlp.py:636` and nothing tested it,
@@ -23,7 +23,7 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.masked_language_model import (
+from dl_techniques.models.language.masked_language_model import (
     MaskedLanguageModel,
     visualize_mlm_predictions,
 )

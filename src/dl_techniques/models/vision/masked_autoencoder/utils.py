@@ -8,7 +8,7 @@ the convolutional decoder and returns a built :class:`MAE` -- and
 reconstruction side by side for eyeballing a checkpoint.
 
 The model itself, its masking policy and its loss live in
-``dl_techniques.models.masked_autoencoder.mae``, which carries the full
+``dl_techniques.models.vision.masked_autoencoder.mae``, which carries the full
 architectural description. This module is deliberately thin: anything that
 decides what the model IS belongs there, not here.
 

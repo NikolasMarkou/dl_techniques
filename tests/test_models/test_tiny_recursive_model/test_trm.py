@@ -1,4 +1,4 @@
-"""Tests for `dl_techniques.models.tiny_recursive_model`.
+"""Tests for `dl_techniques.models.language.tiny_recursive_model`.
 
 Locks the iter-1 fixes:
 - B-3 (`model.py`): Q-learn lookahead runs with `training=False` and the
@@ -20,8 +20,8 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.models.tiny_recursive_model import TRM, create_trm
-from dl_techniques.models.tiny_recursive_model.model import create_trm as _create_trm  # smoke alt path
+from dl_techniques.models.language.tiny_recursive_model import TRM, create_trm
+from dl_techniques.models.language.tiny_recursive_model.model import create_trm as _create_trm  # smoke alt path
 
 
 def _toy_config() -> Dict:

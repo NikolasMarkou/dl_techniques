@@ -29,8 +29,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.SAM.SAM2.memory_attention import DEFAULT_DROPOUT_RATE
-from dl_techniques.models.SAM.SAM2.model import SAM2, create_sam2
+from dl_techniques.models.vision_language.sam.sam2.memory_attention import DEFAULT_DROPOUT_RATE
+from dl_techniques.models.vision_language.sam.sam2.model import SAM2, create_sam2
 
 #: MEASURED 2026-08-22 on CPU: live ``keras.layers.Dropout`` instances reachable
 #: from ``SAM2._flatten_layers()``, per variant. Every one of them lives inside

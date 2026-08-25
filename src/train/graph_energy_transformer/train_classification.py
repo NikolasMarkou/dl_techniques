@@ -59,7 +59,7 @@ from train.common.run_io import default_experiment_name, prepare_run_dir, save_t
 from train.graph_energy_transformer.common import build_optimizer
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.graphs import build_tudataset_graph_dataset
-from dl_techniques.models.graph_energy_transformer import create_graph_classifier
+from dl_techniques.models.graph.graph_energy_transformer import create_graph_classifier
 
 # TUDataset graph-classification benchmarks. The loader parses any TUDataset whose ZIP follows
 # the standard `<NAME>_A.txt` / `_graph_indicator.txt` / `_graph_labels.txt` layout; these are the

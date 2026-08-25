@@ -11,7 +11,7 @@ from sklearn.datasets import make_classification, make_regression, load_breast_c
 from typing import List, Optional, Tuple, Union, Any, Dict
 
 from dl_techniques.losses.tabm_loss import TabMLoss
-from dl_techniques.models.tabm import (
+from dl_techniques.models.tabular.tabm import (
     create_tabm_model, create_tabm_ensemble, TabMModel
 )
 from dl_techniques.datasets.tabular import TabularDataProcessor
@@ -255,7 +255,7 @@ def create_and_train_tabm(
     Returns:
         Tuple of (trained_model, trainer, results).
     """
-    from dl_techniques.models.tabm import create_tabm_for_dataset
+    from dl_techniques.models.tabular.tabm import create_tabm_for_dataset
 
     if test_split > 0:
         X_train, X_test, y_train, y_test = train_test_split(

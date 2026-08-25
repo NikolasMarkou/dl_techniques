@@ -1,6 +1,6 @@
 """The README's deep-supervision and fine-tuning recipes are EXECUTED here.
 
-F-06 / F-07. Three snippets in ``models/resnet/README.md`` taught idioms that
+F-06 / F-07. Three snippets in ``models/vision/resnet/README.md`` taught idioms that
 cannot run against this model, because ``ResNet`` is a **subclassed**
 ``keras.Model``:
 
@@ -86,7 +86,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.resnet import ResNet
+from dl_techniques.models.vision.resnet import ResNet
 from dl_techniques.utils.deep_supervision import (
     create_inference_model_from_training_model,
     get_model_output_info,

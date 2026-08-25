@@ -197,7 +197,7 @@ The paper reports the model **fails to train at learning rates above `1e-4` with
 ### Model construction
 
 ```python
-from dl_techniques.models.energy_transformer import (
+from dl_techniques.models.vision.energy_transformer import (
     create_energy_transformer_mim,
     create_energy_transformer_classifier,
 )
@@ -290,9 +290,9 @@ Worse, the layer's docstring currently tells the next reader **not to look**: it
 
 ### 8.5 Graph variants — binary-adjacency B + C-lite, plus opt-in eq.-25 weighted adjacency
 
-The paper's graph models now have a home: **`models/graph_energy_transformer/`** ships variant B (node anomaly detection, `GraphAnomalyDetector`) and a variant C-lite (graph classification, `GraphClassifier`), both riding the existing **binary 0/1 keep-mask** as a rank-3 `(B, N, N)` `attention_mask` by default — that default path adds **no new hand-derived gradient**. They reuse this package's consumer-side fp16/XLA fix (the block runs in `variable_dtype`) verbatim.
+The paper's graph models now have a home: **`models/graph/graph_energy_transformer/`** ships variant B (node anomaly detection, `GraphAnomalyDetector`) and a variant C-lite (graph classification, `GraphClassifier`), both riding the existing **binary 0/1 keep-mask** as a rank-3 `(B, N, N)` `attention_mask` by default — that default path adds **no new hand-derived gradient**. They reuse this package's consumer-side fp16/XLA fix (the block runs in `variable_dtype`) verbatim.
 
-The paper's **eq.-25 WEIGHTED learned adjacency** (`Ŵ = Conv2D(X ⊗ X) ⊙ A′`) is now **implemented, opt-in** via `use_weighted_adjacency=True` (**Branch A**). Because the paper computes `Ŵ` **once per block** (eq.-27 iterates tokens, never re-derives `Ŵ`), it is a per-call constant hoisted out of the descent loop like the keep-mask, entering the energy multiplicatively (`logit = β·A·Ŵ + M`). This required a real edit to `EnergyAttention`'s closed-form gradient (`omega_eff = softmax·keep·Ŵ` in `term_q`/`term_k`), oracle-verified at N=64/1024 and proven RED. It is a faithful interpretation of eq.-25's multiplicative form; end-to-end accuracy vs the paper's variant-C baselines is a separate, un-run campaign. Default-off keeps every existing consumer byte-identical. See `models/graph_energy_transformer/README.md` §3.2.
+The paper's **eq.-25 WEIGHTED learned adjacency** (`Ŵ = Conv2D(X ⊗ X) ⊙ A′`) is now **implemented, opt-in** via `use_weighted_adjacency=True` (**Branch A**). Because the paper computes `Ŵ` **once per block** (eq.-27 iterates tokens, never re-derives `Ŵ`), it is a per-call constant hoisted out of the descent loop like the keep-mask, entering the energy multiplicatively (`logit = β·A·Ŵ + M`). This required a real edit to `EnergyAttention`'s closed-form gradient (`omega_eff = softmax·keep·Ŵ` in `term_q`/`term_k`), oracle-verified at N=64/1024 and proven RED. It is a faithful interpretation of eq.-25's multiplicative form; end-to-end accuracy vs the paper's variant-C baselines is a separate, un-run campaign. Default-off keeps every existing consumer byte-identical. See `models/graph/graph_energy_transformer/README.md` §3.2.
 
 ---
 

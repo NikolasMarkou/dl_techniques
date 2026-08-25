@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.darkir.model import create_darkir_model
+from dl_techniques.models.vision.image_restoration.darkir.model import create_darkir_model
 from dl_techniques.losses.image_restoration_loss import DarkIRCompositeLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 

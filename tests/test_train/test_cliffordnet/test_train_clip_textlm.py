@@ -16,7 +16,7 @@ import numpy as np
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.models.clip.clifford_clip import CliffordCLIP
+from dl_techniques.models.vision_language.clip.clifford_clip import CliffordCLIP
 from train.cliffordnet.train_clip import _TextLMWrapper
 
 VOCAB = 64

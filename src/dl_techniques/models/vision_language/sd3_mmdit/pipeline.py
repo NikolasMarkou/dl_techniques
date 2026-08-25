@@ -1,9 +1,9 @@
 """SD3 end-to-end text-to-image inference pipeline (Keras 3 port).
 
 Integrates the four already-built, separately-tested pieces -- the dual-stream
-:class:`~dl_techniques.models.sd3_mmdit.transformer.SD3MMDiT`, the rectified-flow
-:class:`~dl_techniques.models.sd3_mmdit.scheduler.FlowMatchEulerScheduler`, the
-16-channel :class:`~dl_techniques.models.ideogram4.vae.AutoEncoder` (SD3 wrapper),
+:class:`~dl_techniques.models.vision_language.sd3_mmdit.transformer.SD3MMDiT`, the rectified-flow
+:class:`~dl_techniques.models.vision_language.sd3_mmdit.scheduler.FlowMatchEulerScheduler`, the
+16-channel :class:`~dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder` (SD3 wrapper),
 and the three from-scratch text encoders (CLIP / OpenCLIP / T5) -- into a single
 plain-Python (NOT ``keras.Model``) inference object that runs prompt-conditioned
 generation.
@@ -63,11 +63,11 @@ import keras
 from keras import ops
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.sd3_mmdit.config import SD3MMDiTConfig, get_sd3_config
-from dl_techniques.models.sd3_mmdit.scheduler import FlowMatchEulerScheduler
-from dl_techniques.models.sd3_mmdit.vae import denormalize_latent, create_sd3_vae
-from dl_techniques.models.sd3_mmdit.transformer import SD3MMDiT, create_sd3_mmdit
-from dl_techniques.models.sd3_mmdit.text_encoders import (
+from dl_techniques.models.vision_language.sd3_mmdit.config import SD3MMDiTConfig, get_sd3_config
+from dl_techniques.models.vision_language.sd3_mmdit.scheduler import FlowMatchEulerScheduler
+from dl_techniques.models.vision_language.sd3_mmdit.vae import denormalize_latent, create_sd3_vae
+from dl_techniques.models.vision_language.sd3_mmdit.transformer import SD3MMDiT, create_sd3_mmdit
+from dl_techniques.models.vision_language.sd3_mmdit.text_encoders import (
     CLIPTextEncoder,
     OpenCLIPTextEncoder,
     T5Encoder,

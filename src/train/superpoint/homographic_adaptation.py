@@ -68,7 +68,7 @@ from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.homography import sample_homography, warp_image
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.models.superpoint import create_superpoint
+from dl_techniques.models.vision.keypoints.superpoint import create_superpoint
 from dl_techniques.datasets.synthetic_shapes import (
     generate_synthetic_sample,
     keypoints_to_grid_labels,

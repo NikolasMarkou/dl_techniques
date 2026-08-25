@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.fnet.model import FNet
+from dl_techniques.models.language.fnet.model import FNet
 
 
 VOCAB = 100

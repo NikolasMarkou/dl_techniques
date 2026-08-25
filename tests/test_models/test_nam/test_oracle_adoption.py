@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/nam`` -- Phase 5 batch B.
+Oracle adoption for ``models/neural_computer/nam`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -40,9 +40,9 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.nam.config import NAMConfig
-from dl_techniques.models.nam.model import NAM
-from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+from dl_techniques.models.neural_computer.nam.config import NAMConfig
+from dl_techniques.models.neural_computer.nam.model import NAM
+from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,

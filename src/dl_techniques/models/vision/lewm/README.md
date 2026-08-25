@@ -170,7 +170,7 @@ A history of frames is encoded; actions are embedded; the AdaLN-zero predictor c
 
 ### 4.1 Vision encoder (`ViT`)
 
-A `dl_techniques.models.vit.ViT` backbone, by default `scale="tiny"` (192-dim, 3 heads, 12 layers, patch=14, img=224), `pooling="cls"`, `include_top=False`. The encoder is **shared** between context (`emb[:, :-1]`) and target (`emb[:, 1:]`); both paths receive gradient (`DECISION D-001` — no EMA, no stop-gradient, matching upstream).
+A `dl_techniques.models.vision.vit.ViT` backbone, by default `scale="tiny"` (192-dim, 3 heads, 12 layers, patch=14, img=224), `pooling="cls"`, `include_top=False`. The encoder is **shared** between context (`emb[:, :-1]`) and target (`emb[:, 1:]`); both paths receive gradient (`DECISION D-001` — no EMA, no stop-gradient, matching upstream).
 
 ### 4.2 `MLPProjector` (projector and pred_proj)
 
@@ -237,8 +237,8 @@ pip install keras>=3.8.0 tensorflow>=2.18.0
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.lewm.config import LeWMConfig
-from dl_techniques.models.lewm.model import LeWM
+from dl_techniques.models.vision.lewm.config import LeWMConfig
+from dl_techniques.models.vision.lewm.model import LeWM
 
 # 1. Default config: ViT-tiny, history=3, predict=1, embed_dim=192.
 cfg = LeWMConfig()
@@ -293,7 +293,7 @@ Dataclass with `to_dict()` / `from_dict()` round-trip. Fields:
 | Field | Default | Meaning |
 |:------|:-------:|:--------|
 | `img_size`, `patch_size`, `img_channels` | 224, 14, 3 | ViT input |
-| `encoder_scale` | `"tiny"` | ViT scale (`dl_techniques.models.vit`) |
+| `encoder_scale` | `"tiny"` | ViT scale (`dl_techniques.models.vision.vit`) |
 | `embed_dim` | 192 | model width `D` |
 | `history_size` | 3 | observed frames per sample |
 | `num_preds` | 1 | predicted frames per sample |
@@ -340,8 +340,8 @@ There are no "tiny/small/base/large" named factory variants — the `tiny` ViT I
 
 ```python
 import keras, numpy as np
-from dl_techniques.models.lewm.config import LeWMConfig
-from dl_techniques.models.lewm.model import LeWM
+from dl_techniques.models.vision.lewm.config import LeWMConfig
+from dl_techniques.models.vision.lewm.model import LeWM
 
 cfg = LeWMConfig()
 model = LeWM(config=cfg)

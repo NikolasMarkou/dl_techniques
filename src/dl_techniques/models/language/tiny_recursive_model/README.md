@@ -254,7 +254,7 @@ import tensorflow as tf
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.tiny_recursive_model.model import TRM
 
 # 1. Create a TRM model
 model = TRM(
@@ -337,7 +337,7 @@ TRM does not have named variants like "base" or "large." Instead, its architectu
 ### Example: LLaMA-Style Variant (Pre-Norm, RMSNorm, SwiGLU)
 
 ```python
-from dl_techniques.models.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.tiny_recursive_model.model import TRM
 
 # This configuration mimics modern LLM architectures
 llama_style_trm = TRM(
@@ -355,7 +355,7 @@ llama_style_trm = TRM(
 ### Example: Classic Transformer Variant (Post-Norm, LayerNorm, ReLU/GELU)
 
 ```python
-from dl_techniques.models.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.tiny_recursive_model.model import TRM
 
 # This configuration is closer to the original "Attention Is All You Need" paper
 classic_trm = TRM(
@@ -536,7 +536,7 @@ You can validate the implementation with simple tests to ensure model creation a
 ```python
 import keras
 import tensorflow as tf
-from dl_techniques.models.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.tiny_recursive_model.model import TRM
 
 
 def test_model_creation():

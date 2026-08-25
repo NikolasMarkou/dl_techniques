@@ -18,11 +18,11 @@ horizons) rather than by selecting a named scale, and no scale family is
 published for it. ``create_video_jepa`` therefore builds a config and
 constructs the class rather than delegating to a ``from_variant``.
 """
-from dl_techniques.models.video_jepa.config import VideoJEPAConfig
-from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
-from dl_techniques.models.video_jepa.predictor import VideoJEPAPredictor
-from dl_techniques.models.video_jepa.masking import TubeMaskGenerator
-from dl_techniques.models.video_jepa.model import VideoJEPA, create_video_jepa
+from dl_techniques.models.vision.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.vision.video_jepa.encoder import VideoJEPACliffordEncoder
+from dl_techniques.models.vision.video_jepa.predictor import VideoJEPAPredictor
+from dl_techniques.models.vision.video_jepa.masking import TubeMaskGenerator
+from dl_techniques.models.vision.video_jepa.model import VideoJEPA, create_video_jepa
 
 __all__ = [
     "VideoJEPA",

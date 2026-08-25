@@ -43,11 +43,11 @@ We bridge the chasm between theoretical innovation and practical application, pr
 This library is a comprehensive suite of tools organized into five key pillars, developed through rigorous research and validated in real-world enterprise applications:
 
 <details>
-<summary><b>1. State-of-the-Art Architectures & Models (70+ Architectures)</b></summary>
+<summary><b>1. State-of-the-Art Architectures & Models (79 Model Packages)</b></summary>
 <p>
 
 - **Next-Generation Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`**, **`Mamba`**, **`ModernBERT`**, **`DistilBERT`** and **`GPT-2`**, alongside the **`Byte Latent Transformer`** (BLT) and the **`Hierarchical Reasoning Model`** (HRM).
-- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`MobileCLIP`** and **`MobileCLIP2`** (on a faithful **`FastViT`** image tower), **`FastVLM`**, **`NanoVLM`** (including a score-based World Model), **`DINOv1/v2/v3`**, **`SigLIP-ViT`**, **`BEiT`**, **`Swin Transformer`**, **`Video-JEPA`**, object detection with **`DETR`** and **`YOLOv12`**, keypoints with **`SuperPoint`**, and **`Segment Anything`** (SAM 1, 2 and 3).
+- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`MobileCLIP`** and **`MobileCLIP2`** (on a faithful **`FastViT`** image tower), **`FastVLM`** (vision-only despite the name), **`NanoVLM`**, **`DINOv1/v2/v3`**, **`ViT-SigLIP`** (a ViT with a two-stage conv patch stem, not SigLIP's sigmoid contrastive objective), **`BEiT`**, **`Swin Transformer`**, **`Video-JEPA`**, object detection with **`DETR`** and **`YOLOv12`**, keypoints with **`SuperPoint`**, and **`Segment Anything`** (SAM 1, 2 and 3). Four packages are named for something they are not; each is listed with its measured correction in [`src/dl_techniques/models/CLAUDE.md`](./src/dl_techniques/models/CLAUDE.md) § *Names that misattribute*.
 - **Advanced CNNs**: A rich collection of advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`ConvUNeXt`**, **`MobileNetV1-V4`**, **`ResNet`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, and the ultra-efficient **`SqueezeNet`** family.
 - **Time Series & Forecasting**: State-of-the-art forecasting models including the probabilistic **`TiRex`** with quantile prediction, an enhanced implementation of **`N-BEATS`**, autoregressive **`DeepAR`**, **`PRISM`**, and the novel **`xLSTM`**.
 - **Generative Modeling & Image Restoration**: Diffusion and flow-matching transformers (**`SD3 MMDiT`**, **`Ideogram4`**), a complete **`Variational Autoencoder (VAE)`** framework with **`VQ-VAE`** variants, arbitrary-scale super-resolution (**`THERA`**, **`PFT-SR`**), and restoration/denoising backbones (**`DarkIR`**, **`SCUNet`**, **`ACC-UNet`**, and a family of bias-free denoisers).
@@ -95,7 +95,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>5. Enterprise-Grade Training & Deployment Infrastructure</b></summary>
 <p>
 
-- **Accelerated Development with Training Pipelines**: **70 ready-to-use `train_*.py` entry points across 48 pipeline directories** (`src/train/`), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
+- **Accelerated Development with Training Pipelines**: **68 ready-to-use `train_*.py` entry points across 46 trainer directories** (`src/train/`, plus the shared `src/train/common/` library), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
 - **Assured Reliability**: An extensive **600+ module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions.
 - **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/fastvit/reference.py`) rather than asserting parity in prose.
@@ -215,7 +215,7 @@ Map images and text into a single shared embedding space with a CLIP dual encode
 
 ```python
 import keras
-from dl_techniques.models.clip.model import create_clip_variant
+from dl_techniques.models.vision_language.clip.model import create_clip_variant
 
 # CLIP ViT-B/32: a dual encoder mapping images and text into one space
 model = create_clip_variant("ViT-B/32")
@@ -352,12 +352,23 @@ The repository is organized for clarity, maintainability, and ease of contributi
 ```
 dl_techniques/
 ├── src/dl_techniques/         # THE LIBRARY — 13 subpackages
-│   ├── models/                # 70+ complete, ready-to-train model implementations
-│   │   ├── qwen/              # Qwen3 (Base, Next, Embeddings)
-│   │   ├── dino/              # DINO v1, v2, v3
-│   │   ├── SAM/               # Segment Anything v1, v2, v3
-│   │   ├── time_series/       # 7 nested forecasting models (TiRex, N-BEATS, xLSTM, ...)
-│   │   └── ...
+│   ├── models/                # 79 leaf model packages in 11 FAMILY directories
+│   │   │                      # full catalogue: src/dl_techniques/models/README.md
+│   │   ├── vision/            # 35 — resnet, convnext, vit, dino, swin_transformer, beit,
+│   │   │                      #      yolo12, detr, vae, vq_vae, depth_anything, and the
+│   │   │                      #      nested image_restoration/, super_resolution/, keypoints/
+│   │   ├── language/          # 16 — bert, gemma, qwen, mamba, modern_bert, gpt2,
+│   │   │                      #      byte_latent_transformer, hierarchical_reasoning_model, ...
+│   │   ├── vision_language/   #  9 — clip, mobile_clip, fastvlm, nano_vlm, sd3_mmdit,
+│   │   │                      #      ideogram4, and the nested sam/{sam1,sam2,sam3}
+│   │   ├── time_series/       #  7 — tirex, nbeats, xlstm, deepar, prism, mdn, adaptive_ema
+│   │   ├── general_purpose/   #  3 — kan, mothnet, power_mlp
+│   │   ├── graph/             #  3 — relgt, graph_energy_transformer, shgcn
+│   │   ├── neural_computer/   #  2 — ntm, nam
+│   │   ├── common/            #  1 — power_sampling (model-agnostic inference machinery)
+│   │   ├── memory/            #  1 — som
+│   │   ├── point_cloud/       #  1 — latent_gmm_registration
+│   │   └── tabular/           #  1 — tabm
 │   ├── layers/                # 290+ modules across 21 themed subpackages
 │   │   ├── attention/         # 32 modern attention mechanisms with factory
 │   │   ├── norms/             # 18 advanced normalization layers with factory
@@ -379,12 +390,21 @@ dl_techniques/
 │   ├── initializers/          # Structured initializers (Gabor, Haar, orthonormal, KAN)
 │   ├── constraints/           # Weight constraints
 │   └── utils/                 # Core utilities, loggers, masking, and data handlers
-├── src/train/                 # 70 training entry points across 48 pipeline directories
+├── src/train/                 # 68 train_*.py entry points across 46 trainer directories
 ├── src/applications/          # Deployable applications built on the library
 ├── research/                  # 120+ in-depth articles, guides, and LaTeX papers
 ├── tests/                     # 600+ test modules ensuring component reliability
 └── REPO_MAP.md                # Path-verified router — read this first
 ```
+
+> **`models/` is grouped into families, and a family is a grouping — not a namespace you
+> import from.** Every family `__init__.py` carries a docstring and nothing else, so
+> `import dl_techniques.models.vision` gives you no models: always import from the *leaf*
+> package (`from dl_techniques.models.vision.resnet.model import create_resnet`). The one
+> exception is `time_series/`, which re-exports its 7 children. The full catalogue — all 11
+> families, all 79 leaf packages, one line each — is
+> [`src/dl_techniques/models/README.md`](./src/dl_techniques/models/README.md), and the
+> authoring rules are in [`src/dl_techniques/models/CLAUDE.md`](./src/dl_techniques/models/CLAUDE.md).
 
 ---
 
@@ -401,7 +421,7 @@ We welcome contributions from the research community. Whether you are implementi
 ### Development Standards
 -   **Code Quality**: Follow PEP 8, use type hints, and rely on centralized logging via `dl_techniques.utils.logger` (no `print`).
 -   **Testing**: Develop in the `.venv` environment and write comprehensive tests using `pytest`, scoped to the modules you change (`make test` runs the full ~1.5h suite). Set `MPLBACKEND=Agg` when running training scripts on headless machines.
--   **Documentation**: Document every public symbol, and update relevant guides in the `research/` directory. Docstring style is **not** uniform across this repo — `layers/` is predominantly Sphinx/reST (`:param:`), `models/` is measurably mixed with the Sphinx exemplar `models/bert/model.py` as the model for new packages, and `losses/`/`metrics/`/`utils/`/`optimization/`/`analyzer/`/`visualization/` are Google-`Args:`-majority. Match the package you are editing and never convert a file wholesale; the measured counts and the greps that re-derive them are in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style.
+-   **Documentation**: Document every public symbol, and update relevant guides in the `research/` directory. Docstring style is **not** uniform across this repo — `layers/` is predominantly Sphinx/reST (`:param:`), `models/` is measurably mixed with the Sphinx exemplar `models/language/bert/model.py` as the model for new packages, and `losses/`/`metrics/`/`utils/`/`optimization/`/`analyzer/`/`visualization/` are Google-`Args:`-majority. Match the package you are editing and never convert a file wholesale; the measured counts and the greps that re-derive them are in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style.
 -   **Validation**: Include benchmarks or comparisons against reference implementations where applicable.
 
 ### Contribution Types

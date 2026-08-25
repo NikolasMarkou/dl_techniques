@@ -11,7 +11,7 @@ no Qwen3-VL in Keras — which is the port's main deliberate divergence. See
 The transformer and autoencoder plus their builders are re-exported here.
 Configuration, constants and latent normalization stay behind their submodules::
 
-    from dl_techniques.models.ideogram4.config import get_ideogram4_config
+    from dl_techniques.models.vision_language.ideogram4.config import get_ideogram4_config
 """
 from .transformer import Ideogram4Transformer, create_ideogram4_transformer
 from .vae import AutoEncoder, create_ideogram4_autoencoder

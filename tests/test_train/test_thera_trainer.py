@@ -22,8 +22,8 @@ import keras
 # Build a genuinely tiny inner Thera directly (the 'air' factory size already
 # uses hidden_dim=32; we construct it by hand with a 32-feat / 2-block EDSR
 # backbone for speed -- 'pro'/'plus' Swin/ConvNeXt tails are heavy).
-from dl_techniques.models.thera import EDSRBackbone, build_thera_tail
-from dl_techniques.models.thera.model import Thera, DEFAULT_K_INIT
+from dl_techniques.models.vision.thera import EDSRBackbone, build_thera_tail
+from dl_techniques.models.vision.thera.model import Thera, DEFAULT_K_INIT
 from dl_techniques.layers.grid_sample import make_grid
 
 from train.thera.train_thera import TheraTrainingModel, TheraConfig, main  # noqa: F401

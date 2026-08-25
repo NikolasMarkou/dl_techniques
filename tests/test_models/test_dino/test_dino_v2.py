@@ -3,7 +3,7 @@
 Part of the 2026-06-15 model build/forward sweep (plan_2026-06-15_e2759fbc).
 dino v2 (`DINOv2VisionTransformer` backbone + `DINOv2` classifier wrapper) had
 NEVER been run end-to-end. This plan fixed a 13-bug chain in
-`src/dl_techniques/models/dino/dino_v2.py`:
+`src/dl_techniques/models/vision/dino/dino_v2.py`:
   - 7 source-verified bugs (Dense-in-Lambda x3, projection-hack CLS, wrong
     pos-embed attr, ops.cond dict-vs-tensor mismatch, nested-Lambda +
     symbolic-tensor assert), and
@@ -46,7 +46,7 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
     # v2 forwards cleanly (plan_2026-06-15_e2759fbc, 13 bugs fixed) -- no xfail
     # safety net, so any future regression in build/forward fails loudly.
@@ -71,7 +71,7 @@ def test_masked_forward_path():
     """All-True masks exercise the mask-token application path (cheap extra
     coverage that the hoisted ``mask_token_projection`` / ``ops.where`` masking
     branch forwards finite, not just the all-False no-op path)."""
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
     model = create_dino_v2(
         "tiny",
@@ -102,7 +102,7 @@ def test_mixed_mask_per_position():
     truncated-normal weight (nonzero at init), so masked positions genuinely
     change the patch embeddings even with untrained weights.
     """
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
     model = create_dino_v2(
         "tiny",
@@ -143,7 +143,7 @@ def test_dino_v2_keras_roundtrip():
     """
     import keras
 
-    from dl_techniques.models.dino.dino_v2 import (
+    from dl_techniques.models.vision.dino.dino_v2 import (
         create_dino_v2,
         DINOv2,
         DINOv2VisionTransformer,
@@ -201,7 +201,7 @@ def test_register_tokens_forward():
     images must yield distinct logits) so a constant-output regression fails
     loudly. See dino_v2.py D-009 + decisions.md D-009.
     """
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
     model = create_dino_v2(
         "tiny",
@@ -241,7 +241,7 @@ import keras  # noqa: E402
 
 
 def test_dtype_policy_forward(dtype_policy):
-    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+    from dl_techniques.models.vision.dino.dino_v2 import create_dino_v2
 
     active = keras.mixed_precision.dtype_policy().name
     assert active == dtype_policy, (
@@ -293,7 +293,7 @@ _ODD_CHANNEL_KW = dict(
 @pytest.mark.parametrize("cls_name", ["DINOv2VisionTransformer", "DINOv2"])
 def test_a_non_default_input_shape_survives_the_config_round_trip(cls_name):
     """Pre-fix BOTH classes reloaded as (None, 32, 32, 3) with NO exception."""
-    from dl_techniques.models.dino import dino_v2 as _v2
+    from dl_techniques.models.vision.dino import dino_v2 as _v2
 
     cls = getattr(_v2, cls_name)
     model = cls(input_shape=(32, 32, 1), **_ODD_CHANNEL_KW)
@@ -309,7 +309,7 @@ def test_a_non_default_input_shape_survives_the_config_round_trip(cls_name):
 @pytest.mark.parametrize("cls_name", ["DINOv2VisionTransformer", "DINOv2"])
 def test_the_default_input_shape_arm_is_unchanged(cls_name):
     """The control: `input_shape=None` must still follow image_size/in_chans."""
-    from dl_techniques.models.dino import dino_v2 as _v2
+    from dl_techniques.models.vision.dino import dino_v2 as _v2
 
     cls = getattr(_v2, cls_name)
     model = cls(**_ODD_CHANNEL_KW)
@@ -325,8 +325,8 @@ def test_the_default_input_shape_arm_is_unchanged(cls_name):
 # in one process, so this is the shape that would notice a regression.
 # ---------------------------------------------------------------------------
 def test_a_teacher_and_a_student_can_be_named_in_one_process():
-    from dl_techniques.models.dino.dino_v2 import DINOv2, DINOv2VisionTransformer
-    from dl_techniques.models.dino.dino_v3 import DINOv3
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2, DINOv2VisionTransformer
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
 
     for cls in (DINOv2VisionTransformer, DINOv2, DINOv3):
         teacher = cls(name="dino_teacher", **_ODD_CHANNEL_KW)

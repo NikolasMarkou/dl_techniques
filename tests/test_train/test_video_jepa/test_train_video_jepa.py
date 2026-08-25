@@ -33,7 +33,7 @@ from train.video_jepa.train_video_jepa import (  # noqa: E402
     _SMOKE_OVERRIDES,
     parse_args,
 )
-from dl_techniques.models.video_jepa.model import VideoJEPA  # noqa: E402
+from dl_techniques.models.vision.video_jepa.model import VideoJEPA  # noqa: E402
 from dl_techniques.datasets.synthetic_drone_video import (  # noqa: E402
     synthetic_drone_video_dataset,
 )

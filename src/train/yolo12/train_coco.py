@@ -18,7 +18,7 @@ from train.common import setup_gpu, create_callbacks as create_common_callbacks,
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import learning_rate_schedule_builder
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
-from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
+from dl_techniques.models.vision.yolo12.multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder, COCO_CLASSES as COCO_CLASSES_ORIGINAL
 

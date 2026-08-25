@@ -10,7 +10,7 @@ side. They are not interchangeable and neither deprecates the other:
   that way on purpose.
 * :class:`MobileClipV2Model` (:mod:`.mobile_clip_v2`) — MobileCLIP2
   (arXiv:2508.20691). **The faithful port**: a real FastViT MCi tower from
-  :mod:`dl_techniques.models.fastvit`, transcribed from timm. Architecture only
+  :mod:`dl_techniques.models.vision.fastvit`, transcribed from timm. Architecture only
   — no pretrained weights are ported and it makes no accuracy claim. See
   ``README.md`` §15 before quoting it against any published number.
 

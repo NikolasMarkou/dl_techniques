@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.vq_vae_rotation.model import VQVAERotationTrick
+from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 
 
 @pytest.fixture
@@ -149,7 +149,7 @@ class TestFactoryIntegration:
     def test_norm_factory_in_source(self):
         """SC8: create_normalization_layer must be referenced in the model module."""
         import inspect
-        from dl_techniques.models.vq_vae_rotation import model as model_module
+        from dl_techniques.models.vision.vq_vae_rotation import model as model_module
         src = inspect.getsource(model_module)
         assert "create_normalization_layer" in src
 

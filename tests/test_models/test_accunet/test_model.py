@@ -23,7 +23,7 @@ from keras import ops
 import tempfile
 import os
 
-from dl_techniques.models.accunet.model import (
+from dl_techniques.models.vision.accunet.model import (
     AccUNet,
     create_acc_unet,
     create_acc_unet_binary,
@@ -657,7 +657,7 @@ class TestAccUNetPublicSurface:
 
     def test_init_exports(self):
         """All four public symbols must be importable from the package root."""
-        from dl_techniques.models.accunet import (
+        from dl_techniques.models.vision.accunet import (
             AccUNet as PkgAccUNet,
             create_acc_unet,
             create_acc_unet_binary,
@@ -700,7 +700,7 @@ class TestDocumentedParameterCounts:
     `tests/test_repo_map_numbers.py`.
     """
 
-    # The exact figures printed in `models/accunet/model.py`'s module docstring.
+    # The exact figures printed in `models/vision/accunet/model.py`'s module docstring.
     DOCUMENTED = {
         16: (3_406_008, 3_376_782),
         32: (13_426_216, 13_367_806),
@@ -747,7 +747,7 @@ class TestDocumentedParameterCounts:
 
         readme = (
             pathlib.Path(__file__).resolve().parents[3]
-            / "src" / "dl_techniques" / "models" / "accunet" / "README.md"
+            / "src" / "dl_techniques" / "models" / "vision" / "accunet" / "README.md"
         ).read_text()
         assert "Parameter counts are not quoted here" in readme
         assert "module docstring of\n`model.py`" in readme

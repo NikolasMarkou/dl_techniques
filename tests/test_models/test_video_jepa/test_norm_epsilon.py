@@ -24,7 +24,7 @@ import zipfile
 import keras
 import numpy as np
 
-from dl_techniques.models.video_jepa.predictor import (
+from dl_techniques.models.vision.video_jepa.predictor import (
     CausalSelfAttnMLPBlock,
     _NORM_EPSILON,
 )

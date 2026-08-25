@@ -17,10 +17,10 @@ import tensorflow as tf
 from typing import Dict, Any
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.mobilenet.mobilenet_v1 import MobileNetV1, create_mobilenetv1
-from dl_techniques.models.mobilenet.mobilenet_v2 import MobileNetV2, create_mobilenetv2
-from dl_techniques.models.mobilenet.mobilenet_v3 import MobileNetV3, create_mobilenetv3
-from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4, create_mobilenetv4
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1, create_mobilenetv1
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2, create_mobilenetv2
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3, create_mobilenetv3
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4, create_mobilenetv4
 from train.common import (
     setup_gpu,
     create_base_argument_parser,

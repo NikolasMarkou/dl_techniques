@@ -20,13 +20,13 @@ import numpy as np
 import keras
 import pytest
 
-from dl_techniques.models.ideogram4.config import get_ideogram4_config
-from dl_techniques.models.ideogram4.constants import (
+from dl_techniques.models.vision_language.ideogram4.config import get_ideogram4_config
+from dl_techniques.models.vision_language.ideogram4.constants import (
     IMAGE_POSITION_OFFSET,
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
 )
-from dl_techniques.models.ideogram4.pipeline import (
+from dl_techniques.models.vision_language.ideogram4.pipeline import (
     Ideogram4Pipeline,
     apply_cfg_blend,
 )

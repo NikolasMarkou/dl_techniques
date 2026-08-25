@@ -10,8 +10,8 @@ import numpy as np
 import keras
 from keras import ops
 
-from dl_techniques.models.nam import NAM, NAMCell, NAMConfig, NAM_VARIANTS
-from dl_techniques.models.nam.tokenizer import (
+from dl_techniques.models.neural_computer.nam import NAM, NAMCell, NAMConfig, NAM_VARIANTS
+from dl_techniques.models.neural_computer.nam.tokenizer import (
     ArithmeticTokenizer,
     VOCAB_SIZE,
     PAD_ID,
@@ -20,7 +20,7 @@ from dl_techniques.models.nam.tokenizer import (
     DIGIT_IDS,
     OPERATOR_IDS,
 )
-from dl_techniques.models.nam.cell import (
+from dl_techniques.models.neural_computer.nam.cell import (
     _fixed_add,
     _fixed_subtract,
     _fixed_multiply,
@@ -424,7 +424,7 @@ class TestNAM:
 
     def test_deterministic_number_assembly(self, tiny_model, sample_batch):
         """Number extraction must be exact when reduction points to operator."""
-        from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+        from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
         tokenizer = ArithmeticTokenizer(max_len=tiny_model.config.max_expression_len)
 
         # Test expressions with known answers
@@ -490,7 +490,7 @@ class TestNAM:
 
     def test_deterministic_assembly_exact(self):
         """Verify _assemble_number_from_tokens gives exact values."""
-        from dl_techniques.models.nam.cell import _assemble_number_from_tokens
+        from dl_techniques.models.neural_computer.nam.cell import _assemble_number_from_tokens
 
         # Simulate "123 + 45": digits 1,2,3 on left, 4,5 on right
         # token_ids where digit '1'=5, '2'=6, '3'=7, '4'=8, '5'=9
@@ -509,7 +509,7 @@ class TestNAM:
 
     def test_deterministic_assembly_large_numbers(self):
         """Verify assembly works up to 10-digit numbers."""
-        from dl_techniques.models.nam.cell import _assemble_number_from_tokens
+        from dl_techniques.models.neural_computer.nam.cell import _assemble_number_from_tokens
 
         # "1234567890 + 1"
         digits = [5, 6, 7, 8, 9, 10, 11, 12, 13, 4]  # 1,2,3,4,5,6,7,8,9,0

@@ -123,8 +123,8 @@ class ConvNextV2Block(keras.layers.Layer):
         the inverted-bottleneck MLP — they are NOT drop-path on the residual.
 
         The CALLER is responsible for the residual + drop-path wiring. The
-        canonical pattern (see ``models/convnext/convnext_v2.py`` and
-        ``models/bias_free_denoisers/bfconvunext.py``) is::
+        canonical pattern (see ``models/vision/convnext/convnext_v2.py`` and
+        ``models/vision/bias_free_denoisers/bfconvunext.py``) is::
 
             from dl_techniques.layers.stochastic_depth import StochasticDepth
             residual = x

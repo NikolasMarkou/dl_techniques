@@ -116,7 +116,7 @@ from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoi
 # (Gabor-stem initializer + bfconvunext ConvNeXt blocks / Laplacian pyramid /
 # LayerScale) so ``keras.models.load_model`` resolves them from the registry.
 import dl_techniques.initializers.gabor_filters_initializer  # noqa: F401,E402
-import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401,E402
+import dl_techniques.models.vision.bias_free_denoisers.bfconvunext  # noqa: F401,E402
 
 # Reuse the bfunet trainer's val-batch loader, PSNR convention, and the sibling
 # eval script's additive-noise helper (single source of truth for each) rather

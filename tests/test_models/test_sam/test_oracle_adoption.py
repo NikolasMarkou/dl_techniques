@@ -1,5 +1,5 @@
 """
-Oracle adoption for ``models/SAM/SAM1`` -- Phase 5 batch B.
+Oracle adoption for ``models/vision_language/sam/sam1`` -- Phase 5 batch B.
 
 Zero adoption of the three shared instruments before this file. All three are
 adopted; no new oracle is authored.
@@ -49,8 +49,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.models.SAM.SAM1 import SAMTrainingModel
-from dl_techniques.models.SAM.SAM1.training_model import (
+from dl_techniques.models.vision_language.sam.sam1 import SAMTrainingModel
+from dl_techniques.models.vision_language.sam.sam1.training_model import (
     INPUT_BOXES,
     INPUT_GT_MASK,
     INPUT_IMAGE,

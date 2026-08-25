@@ -55,7 +55,7 @@ import keras
 import numpy as np
 
 from dl_techniques.layers.capsules import RoutingCapsule
-from dl_techniques.models.capsnet.model import CapsNet
+from dl_techniques.models.vision.capsnet.model import CapsNet
 
 
 D = 4
