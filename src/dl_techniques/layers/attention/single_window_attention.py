@@ -555,6 +555,7 @@ class SingleWindowAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
             window_slots: Optional[np.ndarray] = None,
+            pad_to_window: bool = True,
     ) -> keras.KerasTensor:
         """
         Forward pass for the unified single-window attention.
@@ -592,17 +593,80 @@ class SingleWindowAttention(keras.layers.Layer):
             slots' coordinates. Leave it ``None`` for the original
             pad-to-``window_size ** 2`` behaviour.
         :type window_slots: Optional[np.ndarray]
+        :param pad_to_window: If ``True`` (the default, and the only behaviour
+            any pre-2026-08-25 caller had) the input is padded up to
+            ``window_size ** 2`` slots, which is what a *tile* partition
+            requires. Pass ``False`` to attend the ``N_actual`` real tokens with
+            NO internal padding and no tile at all -- the mode
+            ``WindowAttention(partition_mode='band')`` uses, where
+            ``window_size`` is a 1-D half-width in tokens and
+            ``window_size ** 2`` has no meaning. ``pad_to_window=False``
+            requires ``use_relative_position_bias=False`` (the bias is indexed
+            by 2-D tile coordinates that do not exist without a tile) and is
+            mutually exclusive with ``window_slots``, which is the *tile-aware*
+            spelling of the same "do not pad" instruction.
+        :type pad_to_window: bool
         :return: Attended output of shape ``(B, N_actual, dim)``.
         :rtype: keras.KerasTensor
         :raises ValueError: If ``window_slots`` is supplied and its length does
             not match a statically-known sequence length, or any slot is outside
-            ``[0, window_size ** 2)``.
+            ``[0, window_size ** 2)``; or if ``pad_to_window=False`` is combined
+            with ``window_slots`` or with ``use_relative_position_bias=True``.
         """
         input_shape = keras.ops.shape(inputs)
         B_actual, N_actual = input_shape[0], input_shape[1]
         if window_slots is None:
-            N_target = self.window_size * self.window_size
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-009
+            # `pad_to_window=False` is the ONLY way to run this layer without a
+            # `window_size x window_size` tile, and it exists for
+            # `WindowAttention(partition_mode='band')`, where `window_size` is a
+            # 1-D half-width in TOKENS and `window_size ** 2` is not a length.
+            #
+            # WHAT NOT TO DO, and why:
+            #   * Do NOT express band mode as `window_slots=np.arange(N)`
+            #     instead. It looks equivalent and is not: `window_slots` values
+            #     are validated into `[0, window_size ** 2)` because they index a
+            #     TILE, so at `window_size=64` (ModernBERT's `local_attention=128
+            #     // 2`) any sequence longer than 4096 tokens raises -- for a
+            #     layout that has no tile and no such bound. It would also keep
+            #     the relative-position gather alive on a path where the bias
+            #     means nothing.
+            #   * Do NOT let `pad_to_window=False` coexist with a relative
+            #     position bias. The bias is gathered through
+            #     `_relative_position_index`, which maps a slot to
+            #     `(slot // window_size, slot % window_size)` -- a 2-D grid
+            #     coordinate. Without a grid those rows are arbitrary, and an
+            #     arbitrary learnable bias is indistinguishable from a correct one
+            #     at every shape, dtype and finiteness check. It is REFUSED here
+            #     rather than forced off, so a caller can receive neither a bias
+            #     that means nothing nor silence.
+            #   * Do NOT add a second boolean meaning the same thing. This flag
+            #     and `window_slots` are mutually exclusive by explicit check;
+            #     two spellings of "do not pad" is the failure mode D-005 exists
+            #     to avoid.
+            # See decisions.md D-009 (plan-2026-08-25T053412-0f1fa04f).
+            if pad_to_window:
+                N_target = self.window_size * self.window_size
+            else:
+                if self.use_relative_position_bias:
+                    raise ValueError(
+                        "SingleWindowAttention(pad_to_window=False) requires "
+                        "use_relative_position_bias=False: the relative-position "
+                        "bias is indexed by 2-D coordinates inside a "
+                        "window_size x window_size tile, and pad_to_window=False "
+                        "means there is no tile. Construct the layer with "
+                        "use_relative_position_bias=False."
+                    )
+                N_target = N_actual
         else:
+            if not pad_to_window:
+                raise ValueError(
+                    "SingleWindowAttention received both window_slots and "
+                    "pad_to_window=False. Both mean 'do not pad internally'; "
+                    "window_slots is the tile-aware spelling (it also selects "
+                    "the relative-position rows), pad_to_window=False is the "
+                    "layout-free one. Pass exactly one."
+                )
             window_slots = np.asarray(window_slots, dtype=np.int32)
             static_n = inputs.shape[1]
             if static_n is not None and int(static_n) != int(

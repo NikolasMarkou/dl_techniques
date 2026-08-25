@@ -17,11 +17,13 @@ reachable through `create_attention_layer(type=...)` and 6 are **direct-import o
     AttentionRoutingCapsule, CapsuleBlockV2, WindowAttention
 
 `WindowAttention` is the subtle one. It has **no factory key of its own**. The keys
-`'window'` and `'window_zigzag'` are registered against the module-level wrapper
-FUNCTIONS `create_grid_window_attention` / `create_zigzag_window_attention`
-(`window_attention.py`), each of which constructs a `WindowAttention` locked to one
-`partition_mode` ('grid' / 'zigzag') with that mode's `use_relative_position_bias`
-default. The general class — the one whose `partition_mode` you choose yourself — is
+`'window'`, `'window_zigzag'` and `'window_band'` are registered against the module-level
+wrapper FUNCTIONS `create_grid_window_attention` / `create_zigzag_window_attention` /
+`create_band_window_attention` (`window_attention.py`), each of which constructs a
+`WindowAttention` locked to one `partition_mode` ('grid' / 'zigzag' / 'band') with that
+mode's `use_relative_position_bias` default. `'band'` is the 1-D one: `window_size` is a
+HALF-WIDTH IN TOKENS and query `i` attends key `j` iff `abs(i - j) <= window_size`, with
+no grid folding and no square padding. The general class — the one whose `partition_mode` you choose yourself — is
 NOT factory-constructible; import it directly from this package, as done below.
 
 The remaining two window helpers, `create_kan_key_window_attention` and
@@ -57,8 +59,9 @@ from .multi_head_latent_attention import MultiHeadLatentAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # Vision and Spatial Attention
-# All factory-registered except WindowAttention: keys 'window'/'window_zigzag' point at
-# the create_grid_window_attention / create_zigzag_window_attention wrappers, not at the
+# All factory-registered except WindowAttention: keys 'window'/'window_zigzag'/
+# 'window_band' point at the create_grid_window_attention /
+# create_zigzag_window_attention / create_band_window_attention wrappers, not at the
 # class. The general partition_mode-selectable class is direct-import only.
 from .convolutional_block_attention import CBAM
 from .channel_attention import ChannelAttention
@@ -124,7 +127,7 @@ __all__ = [
     "NonLocalAttention",
     "MobileMQA",
     "BeitAttention",  # factory key 'beit'
-    "WindowAttention",  # no factory key; 'window'/'window_zigzag' use the wrappers
+    "WindowAttention",  # no factory key; 'window'/'window_zigzag'/'window_band' wrappers
     "TripSE1",
     "TripSE2",
     "TripSE3",

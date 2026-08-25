@@ -31,14 +31,16 @@ improved freely; the data above may not.
 
 Registry entries whose 'class' is NOT a class
 ---------------------------------------------
-Two of the 32 entries map to module-level FUNCTIONS rather than layer classes:
+Three of the 33 entries map to module-level FUNCTIONS rather than layer classes:
 
     'window'         -> create_grid_window_attention    (window_attention.py)
     'window_zigzag'  -> create_zigzag_window_attention  (window_attention.py)
+    'window_band'    -> create_band_window_attention    (window_attention.py)
 
-Both wrappers construct a `WindowAttention` locked to one `partition_mode` ('grid' /
-'zigzag') carrying that mode's `use_relative_position_bias` default — a distinction the
-class itself does not encode, which is exactly why the keys point at the wrappers.
+All three wrappers construct a `WindowAttention` locked to one `partition_mode` ('grid' /
+'zigzag' / 'band') carrying that mode's `use_relative_position_bias` default — a
+distinction the class itself does not encode, which is exactly why the keys point at the
+wrappers.
 Consequence: the general `WindowAttention` class, the one whose `partition_mode` the
 caller chooses, has **no factory key of its own** and must be imported directly
 (`from dl_techniques.layers.attention import WindowAttention`).
@@ -104,7 +106,8 @@ from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
 from .wave_field_attention import WaveFieldAttention
 from .window_attention import (
     create_zigzag_window_attention,
-    create_grid_window_attention
+    create_grid_window_attention,
+    create_band_window_attention
 )
 
 # ---------------------------------------------------------------------
@@ -143,7 +146,8 @@ AttentionType = Literal[
     'tripse4',
     'wave_field',
     'window',
-    'window_zigzag'
+    'window_zigzag',
+    'window_band'
 ]
 """
 Type alias for supported attention mechanisms.
@@ -559,7 +563,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
             # DECISION plan-2026-08-22T035419-a11304c8/D-160
-            # Declared on 'multi_head' and 'multi_head_cross' ONLY, of the 32
+            # Declared on 'multi_head' and 'multi_head_cross' ONLY, of the 33
             # registered types: these two are the ones whose output projection
             # is the transformer block's residual-path projection (GPT-2's
             # `attn.c_proj`). Leaving it undeclared everywhere else is
@@ -1057,6 +1061,68 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'paper': "Extends 'Swin Transformer' with zigzag partitioning and advanced normalization"
     },
+    # NOTE: also a FUNCTION, pinning partition_mode='band' (and defaulting
+    # use_relative_position_bias to False, which 'band' in fact REFUSES if set True).
+    'window_band': {
+        'class': create_band_window_attention,
+        'description': (
+            'One-dimensional SYMMETRIC sliding-band self-attention over the token sequence: '
+            'query i attends key j iff abs(i - j) <= window_size. Here window_size is a '
+            'HALF-WIDTH IN TOKENS, not a 2-D edge length — there is no grid folding and no '
+            'square padding, unlike the "window" and "window_zigzag" keys above. This is the '
+            'layout text encoders specify (Longformer / Mistral / ModernBERT); upstream '
+            "ModernBERT's local_attention is a FULL span, so pass local_attention // 2. "
+            'Non-causal, so it is an ENCODER band, not a decoder one. '
+            'READ THE COMPLEXITY FIELD BEFORE PICKING THIS FOR EFFICIENCY: the band is a '
+            'dense N x N mask over standard attention, which is O(N^2) — the SAME '
+            'asymptotics as plain multi_head attention, NOT the O(N*W) the name suggests. '
+            'The relative position bias is unavailable (it indexes a 2-D tile this layout '
+            'does not have) and defaults to False here.'
+        ),
+        'required_params': ['dim', 'window_size', 'num_heads'],
+        'optional_params': {
+            'qkv_bias': True,
+            'qk_scale': None,
+            'dropout_rate': 0.0,
+            'proj_bias': True,
+            'attention_mode': 'linear',
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None,
+            'use_relative_position_bias': False,
+            'kan_grid_size': 5,
+            'kan_spline_order': 3,
+            'kan_activation': 'swish',
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'Text encoders whose local layers must see a 1-D token neighbourhood — the '
+            'ModernBERT / Longformer local-attention pattern, interleaved with global '
+            'layers. Use it wherever a sequence has no meaningful 2-D layout, i.e. wherever '
+            'folding it into a ceil(sqrt(N)) square would invent an adjacency the data does '
+            'not have.'
+        ),
+        'complexity': (
+            'O(N^2) — a dense N x N banded mask over standard attention, the SAME order as '
+            'full multi_head attention, and deliberately NOT advertised as O(N*W): a true '
+            'banded kernel is not reachable from keras.ops. What it does remove is the '
+            "'window' key's O(W**4) floor — N real tokens are never inflated to "
+            'window_size**2 slots. Measure both, do not trust this field: '
+            '.venv/bin/python -c "import resource, numpy as np; from '
+            'dl_techniques.layers.attention import create_attention_layer as c; '
+            "x = np.zeros((1, 512, 64), 'float32'); "
+            "c('window_band', dim=64, window_size=64, num_heads=4)(x); "
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)"'
+        ),
+        'paper': (
+            'Longformer / Mistral / ModernBERT 1-D sliding-window attention '
+            '(ModernBERT: local_attention, half-width local_attention // 2)'
+        )
+    },
 
     # DECISION plan_2026-06-14_0c5d4a21/D-007: gated/performer/ring/rpc registered
     # (construction-only); performer/rpc call-mask quirks documented not renamed
@@ -1319,7 +1385,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         )
 
     # NOTE (documented shape, not fixed here): everything below is a FLAT ALLOWLIST OF
-    # PARAMETER NAMES applied uniformly to all 32 attention types — there are no per-type
+    # PARAMETER NAMES applied uniformly to all 33 attention types — there are no per-type
     # schemas. A parameter is range-checked because of its NAME, wherever it appears, and
     # a type-specific bound cannot be expressed. Per-type schemas would be the right
     # shape; the conversion is out of scope for a behavior-preserving pass because it

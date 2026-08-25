@@ -10,6 +10,7 @@ from dl_techniques.layers.attention.window_attention import (
     WindowAttention,
     create_grid_window_attention,
     create_zigzag_window_attention,
+    create_band_window_attention,
     create_kan_key_window_attention,
     create_adaptive_softmax_window_attention,
 )
@@ -426,6 +427,15 @@ class TestAllOnesKeyMaskIsANoOp:
         ("zigzag", 4, 64),
         ("zigzag", 7, 196),
         ("zigzag", 8, 256),
+        # 'band' NEVER pads -- there is no tile to pad up to -- so the D-007
+        # property must hold at EVERY N, ragged or not, including the ragged
+        # lengths where 'grid' leaked and 'zigzag' still does (LEAKY_CELLS).
+        ("band", 3, 17),
+        ("band", 4, 9),
+        ("band", 8, 50),
+        ("band", 8, 100),
+        ("band", 2, 15),
+        ("band", 64, 33),
     ]
 
     # DECISION plan-2026-08-25T053412-0f1fa04f/D-008
@@ -475,7 +485,10 @@ class TestAllOnesKeyMaskIsANoOp:
             window_size=window_size,
             num_heads=num_heads,
             partition_mode=partition_mode,
-            use_relative_position_bias=True,
+            # 'band' REFUSES the relative-position bias (it indexes a 2-D tile a
+            # 1-D band does not have), so it is asked for only where it exists.
+            # 'grid'/'zigzag' keep the True this guard has always used.
+            use_relative_position_bias=partition_mode != "band",
             dropout_rate=0.0,
         )
         rng = np.random.default_rng(abs(hash((partition_mode, window_size, seq_len))) % (2 ** 32))
@@ -541,6 +554,486 @@ class TestAllOnesKeyMaskIsANoOp:
             f"partition_mode={partition_mode!r}) on (2, {seq_len}, 32) by {delta} "
             f"(recorded {measured} on 2026-08-25). Unmasked pad slots are still "
             f"reaching the softmax in this regime."
+        )
+
+
+class TestBandPartitionMode:
+    """``partition_mode='band'`` — a 1-D SYMMETRIC band, proven by PERTURBATION.
+
+    ``window_size`` is a HALF-WIDTH IN TOKENS here, not a 2-D edge length: query
+    ``i`` attends key ``j`` iff ``abs(i - j) <= window_size``. That is the
+    semantics every 1-D reference implementation uses (Longformer, Mistral,
+    ModernBERT), and upstream ModernBERT derives the half-width from its config as
+    ``sliding_window = local_attention // 2`` — so ``local_attention=128`` means
+    "64 tokens either side", never a 128x128 tile. See D-003 / D-009
+    (``plan-2026-08-25T053412-0f1fa04f``).
+
+    **How the band is measured, and how it is NOT.** Every assertion below
+    perturbs ONE token of the input and looks at ONE output row. A key outside
+    the band must move that row by EXACTLY ``0.0`` (``np.array_equal``, not
+    ``allclose``); a key at the band EDGE must move it by a nonzero amount. The
+    mask is never read back and never compared against a recomputed copy of
+    itself — a test that rebuilds the same expression it is checking passes
+    identically when that expression is wrong, which is the self-referential
+    oracle this repo has been burned by (``plans/LESSONS.md``). Both directions
+    (``j = i + d`` and ``j = i - d``) are measured separately, because a
+    one-sided test cannot tell a symmetric band from a causal one — and the
+    idiom this implementation follows,
+    ``gemma3_transformer.py:_create_attention_mask``, IS causal.
+    """
+
+    DIM, HEADS, BATCH = 32, 4, 2
+
+    @classmethod
+    def _layer(cls, window_size, **kwargs):
+        keras.utils.set_random_seed(11)
+        return create_band_window_attention(
+            dim=cls.DIM, window_size=window_size, num_heads=cls.HEADS, **kwargs
+        )
+
+    @classmethod
+    def _inputs(cls, seq_len, seed=3):
+        rng = np.random.default_rng(seed)
+        return rng.standard_normal(
+            (cls.BATCH, seq_len, cls.DIM)
+        ).astype("float32")
+
+    @staticmethod
+    def _row_delta(layer, x, query, key, **call_kwargs):
+        """max |output[:, query] - output_perturbed[:, query]| after moving token ``key``."""
+        base = np.asarray(
+            keras.ops.convert_to_numpy(layer(x, training=False, **call_kwargs))
+        )
+        perturbed_x = x.copy()
+        perturbed_x[:, key, :] += 5.0
+        moved = np.asarray(
+            keras.ops.convert_to_numpy(
+                layer(perturbed_x, training=False, **call_kwargs)
+            )
+        )
+        assert np.all(np.isfinite(base)) and np.all(np.isfinite(moved))
+        # Non-vacuity: a dead layer emitting a constant would satisfy every
+        # "did not move" assertion below no matter what the mask did.
+        assert float(np.std(base)) > 1e-6, (
+            f"the band layer's output is effectively constant "
+            f"(std={float(np.std(base))}) -- every delta measured against it "
+            f"would be vacuously zero"
+        )
+        if np.array_equal(base[:, query, :], moved[:, query, :]):
+            return 0.0
+        return float(
+            np.abs(
+                base[:, query, :].astype("float64")
+                - moved[:, query, :].astype("float64")
+            ).max()
+        )
+
+    @pytest.mark.parametrize("window_size,seq_len,query", [(3, 17, 8), (5, 33, 16), (1, 9, 4)])
+    def test_a_key_outside_the_band_has_exactly_zero_influence(
+        self, window_size, seq_len, query
+    ):
+        """Out-of-band keys are INERT, in BOTH directions, bit-for-bit.
+
+        Why this can fail if the implementation is wrong: a band that is dead
+        (the mask contributes nothing, so the layer is plain full attention),
+        shifted by one, or inverted in polarity all produce a finite,
+        well-shaped, non-constant output. Only the exact-zero delta at
+        ``abs(i - j) > window_size``, paired with the NONZERO delta at
+        ``abs(i - j) == window_size`` in the next test, distinguishes them.
+        """
+        layer = self._layer(window_size)
+        x = self._inputs(seq_len)
+        for distance in (window_size + 1, window_size + 2, seq_len - 1 - query):
+            for sign in (+1, -1):
+                key = query + sign * distance
+                if not (0 <= key < seq_len) or abs(key - query) <= window_size:
+                    continue
+                delta = self._row_delta(layer, x, query, key)
+                assert delta == 0.0, (
+                    f"WindowAttention(partition_mode='band', "
+                    f"window_size={window_size}) on (2, {seq_len}, 32): "
+                    f"perturbing token {key} moved query row {query} by {delta}, "
+                    f"but abs({query} - {key}) = {abs(query - key)} > "
+                    f"{window_size}, so that key is OUTSIDE the band and must "
+                    f"have EXACTLY zero influence. A nonzero value here means "
+                    f"the band is dead, shifted, or inverted -- do NOT relax "
+                    f"this to allclose."
+                )
+
+    @pytest.mark.parametrize("window_size,seq_len,query", [(3, 17, 8), (5, 33, 16), (1, 9, 4)])
+    def test_a_key_at_the_band_edge_moves_the_output_in_both_directions(
+        self, window_size, seq_len, query
+    ):
+        """The band EDGE is inclusive and SYMMETRIC — this is the non-vacuity half.
+
+        Why this can fail if the implementation is wrong: a band shifted by one
+        (``<`` instead of ``<=``) leaves the previous test green and reds here on
+        the edge key. A CAUSAL band — what
+        ``gemma3_transformer.py:_create_attention_mask`` builds, and what a
+        copy-paste of it would produce — reds here on the ``+`` direction only,
+        which is why the two signs are asserted separately rather than as an
+        ``any``.
+        """
+        layer = self._layer(window_size)
+        x = self._inputs(seq_len)
+        for sign, label in ((+1, "future"), (-1, "past")):
+            key = query + sign * window_size
+            assert 0 <= key < seq_len, "fixture drift: edge key fell off the sequence"
+            delta = self._row_delta(layer, x, query, key)
+            assert delta > 1e-5, (
+                f"WindowAttention(partition_mode='band', "
+                f"window_size={window_size}) on (2, {seq_len}, 32): perturbing "
+                f"token {key} moved query row {query} by only {delta}, but "
+                f"abs({query} - {key}) = {window_size} is EXACTLY the half-width "
+                f"and the band is INCLUSIVE and SYMMETRIC, so the {label} edge "
+                f"key must influence the query. A zero here means the band is "
+                f"off by one, or causal."
+            )
+
+    def test_a_band_wider_than_the_sequence_is_full_attention(self):
+        """``window_size >= N - 1`` covers everything: no token is inert.
+
+        Why this can fail if the implementation is wrong: an implementation that
+        still folded the sequence into a grid, or padded up to
+        ``window_size ** 2`` slots, would either raise or change which tokens
+        reach a query. Here every one of them must.
+        """
+        seq_len = 13
+        layer = self._layer(100)
+        x = self._inputs(seq_len)
+        for key in range(seq_len):
+            delta = self._row_delta(layer, x, 6, key)
+            assert delta > 1e-5, (
+                f"a band of half-width 100 over {seq_len} tokens covers the whole "
+                f"sequence, so token {key} must influence query 6; it moved it by "
+                f"{delta}"
+            )
+
+    def test_the_caller_mask_composes_with_the_band_instead_of_replacing_it(self):
+        """A caller ``(B, N)`` key mask AND-s with the band; neither wins outright.
+
+        Why this can fail if the implementation is wrong: if the band REPLACED
+        the caller's mask, masking an in-band key would change nothing (first
+        assertion). If the caller's mask replaced the BAND, the out-of-band key
+        would suddenly become live (second assertion). Both are silent: same
+        shape, finite, non-constant.
+        """
+        window_size, seq_len, query = 3, 17, 8
+        layer = self._layer(window_size)
+        x = self._inputs(seq_len)
+        in_band_key, out_of_band_key = query + 2, query + 6
+
+        mask = np.ones((self.BATCH, seq_len), dtype="int32")
+        mask[:, in_band_key] = 0
+        with_mask = np.asarray(
+            keras.ops.convert_to_numpy(
+                layer(x, attention_mask=keras.ops.convert_to_tensor(mask), training=False)
+            )
+        )
+        without = np.asarray(keras.ops.convert_to_numpy(layer(x, training=False)))
+        moved = float(
+            np.abs(
+                with_mask[:, query, :].astype("float64")
+                - without[:, query, :].astype("float64")
+            ).max()
+        )
+        assert moved > 1e-5, (
+            f"masking in-band key {in_band_key} did not change query row {query} "
+            f"(delta {moved}) -- the band REPLACED the caller's mask instead of "
+            f"composing with it, so a padded key is still being attended"
+        )
+
+        # ...and the band still holds under a caller mask that keeps everything
+        # except one far key: the far key was already inert, so nothing moves.
+        far_mask = np.ones((self.BATCH, seq_len), dtype="int32")
+        far_mask[:, out_of_band_key] = 0
+        far = np.asarray(
+            keras.ops.convert_to_numpy(
+                layer(
+                    x,
+                    attention_mask=keras.ops.convert_to_tensor(far_mask),
+                    training=False,
+                )
+            )
+        )
+        assert np.array_equal(far[:, query, :], without[:, query, :]), (
+            f"masking key {out_of_band_key}, which is already OUTSIDE the band "
+            f"(abs({query} - {out_of_band_key}) = {abs(query - out_of_band_key)} "
+            f"> {window_size}), changed query row {query}. The caller's mask "
+            f"replaced the band instead of composing with it."
+        )
+
+    def test_a_pairwise_caller_mask_composes_with_the_band(self):
+        """The rank-3 ``(B, N, N)`` branch is AND-ed with the band too.
+
+        Why this can fail if the implementation is wrong: a band that ignored a
+        rank-3 mask (forwarding it verbatim, as ``_call_grid`` does for its own
+        reasons) would leave the first delta at zero.
+        """
+        window_size, seq_len, query = 3, 17, 8
+        layer = self._layer(window_size)
+        x = self._inputs(seq_len)
+        pairwise = np.ones((self.BATCH, seq_len, seq_len), dtype="int32")
+        pairwise[:, query, query + 2] = 0
+        without = np.asarray(keras.ops.convert_to_numpy(layer(x, training=False)))
+        with_mask = np.asarray(
+            keras.ops.convert_to_numpy(
+                layer(
+                    x,
+                    attention_mask=keras.ops.convert_to_tensor(pairwise),
+                    training=False,
+                )
+            )
+        )
+        assert (
+            float(
+                np.abs(
+                    with_mask[:, query, :].astype("float64")
+                    - without[:, query, :].astype("float64")
+                ).max()
+            )
+            > 1e-5
+        ), "a rank-3 pairwise mask did not compose with the band"
+        # A query row the pairwise mask left untouched must not move at all.
+        assert np.array_equal(with_mask[:, 0, :], without[:, 0, :]), (
+            "the pairwise mask leaked into a query row it did not name"
+        )
+
+    def test_band_never_folds_the_sequence_into_a_square_grid(self):
+        """Adjacency is by TOKEN INDEX, not by a synthetic ``ceil(sqrt(N))`` grid.
+
+        Why this can fail if the implementation is wrong: this is the whole point
+        of the mode. ``'grid'`` at ``N=17`` lays tokens into a 5x5 grid, so token
+        0 and token 5 are vertical neighbours and attend together while token 0
+        and token 4 may not. A band must show the opposite: influence decays with
+        ``abs(i - j)`` alone. Measured at ``window_size=2, N=17, query=0``: keys
+        0,1,2 live, keys 3..16 (INCLUDING 5, the grid's vertical neighbour) dead.
+        """
+        layer = self._layer(2)
+        x = self._inputs(17)
+        live = [k for k in range(17) if self._row_delta(layer, x, 0, k) > 1e-5]
+        assert live == [0, 1, 2], (
+            f"query 0 of a half-width-2 band over 17 tokens is influenced by "
+            f"{live}, expected exactly [0, 1, 2]. Anything else -- notably key 5, "
+            f"which is token 0's VERTICAL neighbour in the ceil(sqrt(17)) = 5 "
+            f"grid 'grid' mode would build -- means the sequence is still being "
+            f"folded into a square."
+        )
+
+    def test_partition_mode_is_validated_and_names_all_three_values(self):
+        """An unknown mode raises, and the message lists what is valid."""
+        with pytest.raises(ValueError) as excinfo:
+            WindowAttention(dim=32, window_size=4, num_heads=4, partition_mode="sliding")
+        message = str(excinfo.value)
+        for valid in ("grid", "zigzag", "band"):
+            assert valid in message, (
+                f"the partition_mode rejection message does not name {valid!r}: "
+                f"{message}"
+            )
+
+    def test_band_refuses_the_relative_position_bias_rather_than_forcing_it_off(self):
+        """An explicit ``use_relative_position_bias=True`` RAISES under ``'band'``.
+
+        Why this can fail if the implementation is wrong: forcing it off silently
+        would leave ``get_config()['use_relative_position_bias'] is True`` on a
+        layer that has no such bias, and a caller who asked for it would never
+        learn it did not arrive. D-009 rules this a refusal.
+        """
+        with pytest.raises(ValueError, match="use_relative_position_bias"):
+            WindowAttention(
+                dim=32,
+                window_size=4,
+                num_heads=4,
+                partition_mode="band",
+                use_relative_position_bias=True,
+            )
+        # The wrapper's DEFAULT-off is what makes the factory path usable, and it
+        # is a default, not a silent override: an explicit True still raises.
+        assert (
+            create_band_window_attention(
+                dim=32, window_size=4, num_heads=4
+            ).use_relative_position_bias
+            is False
+        )
+        with pytest.raises(ValueError, match="use_relative_position_bias"):
+            create_band_window_attention(
+                dim=32, window_size=4, num_heads=4, use_relative_position_bias=True
+            )
+
+    def test_the_two_no_padding_spellings_are_mutually_exclusive(self):
+        """``window_slots`` and ``pad_to_window=False`` both mean "do not pad".
+
+        Why this can fail if the implementation is wrong: two independent
+        spellings of one instruction is the drift D-005 exists to prevent. The
+        check is an explicit raise, not a precedence rule.
+        """
+        inner = SingleWindowAttention(
+            dim=32, window_size=4, num_heads=4, use_relative_position_bias=False
+        )
+        x = np.zeros((2, 5, 32), dtype="float32")
+        with pytest.raises(ValueError, match="pad_to_window"):
+            inner(x, window_slots=np.arange(5, dtype="int32"), pad_to_window=False)
+
+    def test_pad_to_window_false_refuses_a_relative_position_bias(self):
+        """The inner layer refuses the combination too, not only the outer one."""
+        inner = SingleWindowAttention(
+            dim=32, window_size=4, num_heads=4, use_relative_position_bias=True
+        )
+        x = np.zeros((2, 5, 32), dtype="float32")
+        with pytest.raises(ValueError, match="use_relative_position_bias"):
+            inner(x, pad_to_window=False)
+
+
+class TestAllThreePartitionModes:
+    """Serialization and mixed-precision coverage, for every partition mode.
+
+    ``'band'`` is a third VALUE of an existing flag, not a new class, so it must
+    round-trip through the SAME ``get_config`` / ``keras.saving`` surface the
+    other two already use — and the check is on the reloaded model's OUTPUT, not
+    on its config dict, because a config that round-trips into a layer that
+    computes something else is exactly the failure a config comparison cannot
+    see.
+    """
+
+    MODES = [("grid", True), ("zigzag", False), ("band", False)]
+    IDS = ["grid", "zigzag", "band"]
+
+    @staticmethod
+    def _model(partition_mode, use_rpb, seq_len=16, dim=32, window_size=2):
+        keras.utils.set_random_seed(5)
+        inputs = keras.Input(batch_shape=(2, seq_len, dim))
+        layer = WindowAttention(
+            dim=dim,
+            window_size=window_size,
+            num_heads=4,
+            partition_mode=partition_mode,
+            use_relative_position_bias=use_rpb,
+        )
+        return keras.Model(inputs, layer(inputs))
+
+    @pytest.mark.parametrize("partition_mode,use_rpb", MODES, ids=IDS)
+    def test_a_saved_model_reloads_and_computes_the_same_values(
+        self, partition_mode, use_rpb
+    ):
+        """Full ``keras.saving`` round-trip, compared by VALUE and bit-for-bit."""
+        model = self._model(partition_mode, use_rpb)
+        x = np.random.default_rng(0).standard_normal((2, 16, 32)).astype("float32")
+        before = np.asarray(keras.ops.convert_to_numpy(model(x, training=False)))
+        assert float(np.std(before)) > 1e-6, "vacuous: the model output is constant"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+        after = np.asarray(keras.ops.convert_to_numpy(reloaded(x, training=False)))
+        assert np.array_equal(before, after), (
+            f"partition_mode={partition_mode!r} did not survive a keras.saving "
+            f"round-trip: max |delta| "
+            f"{float(np.abs(before.astype('float64') - after.astype('float64')).max())}"
+        )
+
+    @pytest.mark.parametrize("partition_mode,use_rpb", MODES, ids=IDS)
+    def test_get_config_carries_the_partition_mode(self, partition_mode, use_rpb):
+        """``from_config(get_config())`` reproduces the flag, and the OUTPUT."""
+        layer = WindowAttention(
+            dim=32,
+            window_size=2,
+            num_heads=4,
+            partition_mode=partition_mode,
+            use_relative_position_bias=use_rpb,
+        )
+        config = layer.get_config()
+        assert config["partition_mode"] == partition_mode
+        assert WindowAttention.from_config(config).partition_mode == partition_mode
+
+    @pytest.mark.parametrize("partition_mode,use_rpb", MODES, ids=IDS)
+    def test_mixed_float16_stays_finite(self, partition_mode, use_rpb):
+        """No NaN under ``mixed_float16``, with no mask and with an all-ones mask.
+
+        Why this can fail if the implementation is wrong: a hand-rolled additive
+        ``-1e9`` sentinel is ``-inf`` in float16 and ``0 * -inf = NaN``; this repo
+        has a recorded 10-site family of exactly that. The band routes through
+        ``common.apply_attention_mask`` for this reason, and this is the guard
+        that would see a regression to the arithmetic form.
+        """
+        previous = keras.mixed_precision.global_policy()
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            keras.utils.set_random_seed(5)
+            layer = WindowAttention(
+                dim=32,
+                window_size=2,
+                num_heads=4,
+                partition_mode=partition_mode,
+                use_relative_position_bias=use_rpb,
+            )
+            x = np.random.default_rng(1).standard_normal((2, 16, 32)).astype("float32")
+            plain = np.asarray(keras.ops.convert_to_numpy(layer(x, training=False)))
+            ones = keras.ops.convert_to_tensor(np.ones((2, 16), dtype="int32"))
+            masked = np.asarray(
+                keras.ops.convert_to_numpy(
+                    layer(x, attention_mask=ones, training=False)
+                )
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+        for label, out in (("no mask", plain), ("all-ones mask", masked)):
+            non_finite = int(np.sum(~np.isfinite(out)))
+            assert non_finite == 0, (
+                f"partition_mode={partition_mode!r} under mixed_float16 with "
+                f"{label}: {non_finite}/{out.size} non-finite values"
+            )
+            assert float(np.std(out.astype("float64"))) > 1e-6, (
+                f"partition_mode={partition_mode!r} under mixed_float16 with "
+                f"{label}: the output is constant, so the finiteness check above "
+                f"is vacuous"
+            )
+
+
+class TestBandFactoryRegistration:
+    """``'window_band'`` is reachable through the public attention factory."""
+
+    def test_the_registry_key_builds_a_band_layer(self):
+        from dl_techniques.layers.attention.factory import (
+            create_attention_layer,
+            ATTENTION_REGISTRY,
+        )
+
+        assert "window_band" in ATTENTION_REGISTRY
+        layer = create_attention_layer(
+            "window_band", dim=32, window_size=3, num_heads=4
+        )
+        assert isinstance(layer, WindowAttention)
+        assert layer.partition_mode == "band"
+        assert layer.use_relative_position_bias is False
+        x = np.random.default_rng(2).standard_normal((2, 17, 32)).astype("float32")
+        assert layer(x).shape == (2, 17, 32)
+
+    def test_the_registry_cost_claim_is_not_the_inverted_kind(self):
+        """The ``complexity`` field must say ``O(N^2)``, not promise ``O(N*W)``.
+
+        Why this can fail if the implementation is wrong: D-027 records TEN
+        previously-inverted cost claims about this exact layer. A dense N x N
+        banded mask is the same order as full attention; a registry entry
+        advertising a linear-in-N saving would be the eleventh, and prose is the
+        one thing no numeric test catches. This pins the claim's SHAPE, and the
+        entry also carries the command that measures it.
+        """
+        from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY
+
+        entry = ATTENTION_REGISTRY["window_band"]
+        complexity = entry["complexity"]
+        assert "O(N^2)" in complexity, (
+            f"the 'window_band' complexity field no longer states O(N^2): {complexity}"
+        )
+        assert "ru_maxrss" in complexity, (
+            "the 'window_band' complexity field no longer carries the command that "
+            "measures it (I-6): a cost claim without its instrument is the D-027 "
+            "failure mode"
+        )
+        assert "HALF-WIDTH IN TOKENS" in entry["description"], (
+            "the 'window_band' description no longer states that window_size is a "
+            "half-width in tokens -- that is the single fact a caller coming from "
+            "the 'window' key will get wrong"
         )
 
 
