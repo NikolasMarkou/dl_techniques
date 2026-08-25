@@ -616,7 +616,7 @@ class SingleWindowAttention(keras.layers.Layer):
         input_shape = keras.ops.shape(inputs)
         B_actual, N_actual = input_shape[0], input_shape[1]
         if window_slots is None:
-            # DECISION plan-2026-08-25T053412-0f1fa04f/D-009
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-010
             # `pad_to_window=False` is the ONLY way to run this layer without a
             # `window_size x window_size` tile, and it exists for
             # `WindowAttention(partition_mode='band')`, where `window_size` is a

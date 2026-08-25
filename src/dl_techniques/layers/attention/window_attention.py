@@ -424,7 +424,7 @@ class WindowAttention(keras.layers.Layer):
                 f"{list(_VALID_PARTITION_MODES)}; got {partition_mode!r}."
             )
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-009
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010
         # The relative-position bias is REFUSED under `partition_mode='band'`,
         # not quietly turned off.
         #
@@ -897,7 +897,7 @@ class WindowAttention(keras.layers.Layer):
         :return: Output tensor ``(B, N, dim)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-009
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010
         # The band is built as a KEEP predicate (`1 = attend`) and handed to
         # `SingleWindowAttention` on its rank-3 PAIRWISE branch, which routes it
         # through `common.apply_attention_mask`.
