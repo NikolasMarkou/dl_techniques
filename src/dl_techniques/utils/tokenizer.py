@@ -63,11 +63,20 @@ def get_special_token_ids(
 
     # Use the highest valid token IDs for special tokens
     # cl100k_base vocab size is 100277, so we use IDs near the end
+    # Do NOT "correct" pad to <|endoftext|>. 100256 is the unassigned gap id
+    # between the last merge (100255) and the special block, and it is the ONLY
+    # id here that collides with nothing. `cls` below is vocab_size - 20 ==
+    # 100257, which IS <|endoftext|>; moving pad onto it would make pad and cls
+    # the same token. `sep` (100258) and `mask` (100259) are likewise the real
+    # <|fim_prefix|> / <|fim_middle|>. Those four collisions are pre-existing
+    # and load-bearing for every caller of this helper (ColBERT's tokenizer
+    # takes cls/sep/pad/mask/unk straight from it), so changing any VALUE here
+    # is a behavioural change to a shared util, not a comment fix.
     special_tokens = {
-        'pad': 100256,    # unassigned gap id between the last merge (100255) and the special block (<|endoftext|> is 100257)
-        'cls': vocab_size - 20,  # High but valid
-        'sep': vocab_size - 19,  # High but valid
-        'mask': vocab_size - 18,  # High but valid
+        'pad': 100256,           # unassigned gap id -- the only non-colliding one
+        'cls': vocab_size - 20,  # High but valid; == 100257 == <|endoftext|>
+        'sep': vocab_size - 19,  # High but valid; == 100258 == <|fim_prefix|>
+        'mask': vocab_size - 18,  # High but valid; == 100259 == <|fim_middle|>
         'unk': vocab_size - 17,  # High but valid (unknown token)
     }
 
