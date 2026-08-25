@@ -179,6 +179,11 @@ class ModernBERT(keras.Model):
         cause, so the paper's interval of 3 is restored; the restore
         is pinned by measurement in the D-135 anchors below.
 
+        The hybrid schedule is ARCHITECTURAL FIDELITY, not a memory
+        optimization -- see the trade-off note on the
+        `global_attention_interval` parameter below before quoting it
+        as one.
+
     :param vocab_size: Size of the vocabulary. Defaults to 50368.
     :type vocab_size: int
     :param hidden_size: Dimensionality of encoder layers. Defaults to 768.
@@ -226,6 +231,43 @@ class ModernBERT(keras.Model):
         three shipped presets now use a hybrid schedule (``tiny`` 2,
         ``base``/``large`` 3); see the D-135 anchors in ``MODEL_VARIANTS`` for
         the measurement that restored 3.
+
+        **The hybrid schedule is architectural fidelity, NOT a memory
+        optimization in this implementation, and past L ~ 2048 it costs
+        slightly MORE than all-global.** The local band is a dense ``N x N``
+        masked attention -- the same ``O(N^2)`` order as global, plus the mask
+        -- so a "local" layer saves nothing asymptotically and pays for the
+        band mask. MEASURED (this repo, CPU, host peak RSS via ``ru_maxrss``,
+        ``from_variant("base", global_attention_interval=i)`` constructed AND
+        forwarded once, **n = 3 draws per cell**, min-max):
+
+        =====  ==========================  ==========================
+        L      interval=1 (all global)     interval=3 (hybrid)
+        =====  ==========================  ==========================
+        1024   1.820 - 1.830 GB            **1.689 - 1.739 GB**
+        2048   2.323 - 2.529 GB            2.303 - 2.489 GB (a tie)
+        4096   **4.758 - 4.952 GB**        5.122 - 5.135 GB
+        =====  ==========================  ==========================
+
+        The hybrid wins at L=1024, is INDISTINGUISHABLE at L=2048 (the two
+        ranges overlap; a single draw at that length can show either sign --
+        do not quote one), and loses by about 4% at L=4096. The crossover is
+        therefore below ``DEFAULT_MAX_POSITION_EMBEDDINGS = 8192``, so at most
+        of this model's advertised context the paper's schedule is the more
+        expensive one. It is kept anyway: matching the published architecture
+        outranks a ~4% memory delta, and D-135's only reason for forcing 1 was
+        that the local layer was BROKEN, which it no longer is. Re-measure with::
+
+            CUDA_VISIBLE_DEVICES='' .venv/bin/python -c "
+            import sys, resource, numpy as np; sys.path.insert(0, 'src')
+            from dl_techniques.models.language.modern_bert.model import ModernBERT
+            i, L = int(sys.argv[1]), int(sys.argv[2])
+            m = ModernBERT.from_variant('base', global_attention_interval=i)
+            m({'input_ids': np.zeros((1, L), 'int32'),
+               'attention_mask': np.ones((1, L), 'int32')}, training=False)
+            print(i, L, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2)
+            " <interval> <L>
+
     :type global_attention_interval: int
     :param local_attention_window_size: The local band's **full span in
         tokens**, exactly as upstream's ``local_attention``: a token attends
@@ -337,6 +379,27 @@ class ModernBERT(keras.Model):
             # -- STILL STANDS and is not touched here: the value is still 128.
             # See the D-012 anchor in `_build_architecture` for why its `// 2`
             # is a unit conversion and not that shrink.
+            #
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-016
+            # TRADE-OFF, recorded 2026-08-25. `3` is here for
+            # ARCHITECTURAL FIDELITY only. Do NOT justify it as a memory
+            # optimization, and do NOT "revert to 1" on the strength of the
+            # numbers below. The band is a dense `N x N` masked attention --
+            # the SAME O(N^2) order as global, plus the mask -- so past
+            # L ~ 2048 the hybrid schedule costs slightly MORE than all-global.
+            # MEASURED (CPU, host peak RSS via `ru_maxrss`, construct + one
+            # forward, n=3 draws per cell, min-max):
+            #   L=1024  interval=1 1.820-1.830 GB  interval=3 1.689-1.739 GB
+            #   L=2048  interval=1 2.323-2.529 GB  interval=3 2.303-2.489 GB
+            #   L=4096  interval=1 4.758-4.952 GB  interval=3 5.122-5.135 GB
+            # i.e. the hybrid wins at 1024, TIES at 2048 (overlapping ranges --
+            # a single draw there shows either sign) and loses ~4% at 4096,
+            # which is below `DEFAULT_MAX_POSITION_EMBEDDINGS = 8192`. The
+            # measuring command is in the `global_attention_interval` parameter
+            # docstring. Fidelity to the published architecture outranks a ~4%
+            # delta; D-135's only reason for forcing 1 was that the local layer
+            # was BROKEN, and that reason has lapsed.
+            # See decisions.md D-016 (plan-2026-08-25T053412-0f1fa04f).
             "global_attention_interval": 3,
             "local_attention_window_size": 128,
             "description": (
@@ -361,6 +424,10 @@ class ModernBERT(keras.Model):
             #     L=8    -> ran, 1.707 GB GPU peak, host RSS 1.445 GB
             #     L=512  -> ran, host RSS 1.447 GB
             #     L=2048 -> ran, 2.929 GB GPU peak, host RSS 1.749 GB
+            # The D-016 TRADE-OFF recorded on `base` above applies verbatim
+            # here: `3` is architectural fidelity, NOT a memory optimization,
+            # and past L ~ 2048 it costs slightly more than all-global. Do not
+            # revert it on cost grounds.
             # `local_attention_window_size` is UNCHANGED at 128; the shrink
             # D-135/D-019/D-027/D-139 forbid has not been performed.
             "global_attention_interval": 3,

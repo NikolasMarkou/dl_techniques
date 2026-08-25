@@ -400,6 +400,70 @@ class SingleWindowAttention(keras.layers.Layer):
         self.relative_position_index = None
         self._relative_position_index_cache: Dict[bytes, np.ndarray] = {}
 
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-015
+        # The window-slot map lives HERE, on the instance, and is set by
+        # `set_window_slots()` immediately before a call. It is NOT a `call()`
+        # keyword argument.
+        #
+        # WHY: it is a static LAYOUT CONSTANT -- fully determined by
+        # `(partition_mode, window_size, N)` -- and it selects ROWS of the
+        # relative-position bias table by numpy indexing at trace time. Keras 3's
+        # `Layer.__call__` maps `dtype_policy.convert_input` over every argument,
+        # so an ndarray passed as a call kwarg becomes a backend tensor; inside a
+        # `tf.function` trace that is a SYMBOLIC tensor, and the `np.asarray`
+        # below then raises `NotImplementedError: Cannot convert a symbolic
+        # tf.Tensor ... to a numpy array`.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT put `window_slots` back in the `call()` signature. MEASURED
+        #     on b380c6f79 for `1 < N < window_size ** 2` in BOTH 'grid' and
+        #     'zigzag': `layer(x)` and `model(x)` eager PASS while
+        #     `model.predict(x)`, `model.fit(...)` and any `@tf.function` wrapper
+        #     raise `NotImplementedError` -- i.e. every functional Keras consumer
+        #     was broken in exactly the regime the short-circuit exists to fix
+        #     (`TiRexCore(attention_type='window', attention_window_size=8)` on 8
+        #     patch tokens was the shipped casualty). Pinned by
+        #     `test_window_attention_graph_mode.py`.
+        #   * Do NOT "fix" it by catching `NotImplementedError` or by testing
+        #     `isinstance(x, np.ndarray)` inside `call()`. That leaves the layout
+        #     riding the traced-tensor channel and silently SKIPS the range and
+        #     length validation below on exactly the path that has no other guard.
+        #   * Do NOT make the callee tensor-agnostic (`keras.ops.take` on a
+        #     symbolic slot vector) instead. The slot vector indexes a numpy-built
+        #     `(n, n)` index that is CACHED by `slots.tobytes()`; a symbolic
+        #     vector has no bytes, so the cache key, the O(n^2) sub-index and the
+        #     `[0, window_size ** 2)` validation would all have to grow a
+        #     second, trace-time-only spelling.
+        #   * Do NOT skip the `finally`-reset in the caller's `_attend()` wrapper.
+        #     A stale slot map is invisible: it has the right dtype and a
+        #     plausible length, and it moves only the relative-position bias.
+        # See decisions.md D-015 (plan-2026-08-25T053412-0f1fa04f).
+        self._window_slots: Optional[np.ndarray] = None
+
+    def set_window_slots(
+            self, window_slots: Optional[np.ndarray]
+    ) -> None:
+        """Set (or clear) the window-slot map used by the NEXT call.
+
+        Contract: the caller sets this immediately before invoking the layer and
+        clears it (``None``) immediately after, in a ``finally``; see
+        :meth:`WindowAttention._attend`, which is the only supported caller.
+        Off the ``call()`` argument channel on purpose -- see the D-015 anchor in
+        ``__init__``.
+
+        :param window_slots: ``(N_actual,)`` int32-coercible array naming, for
+            each input token, its row-major slot inside the ``window_size x
+            window_size`` tile, or ``None`` for the pad-to-``window_size ** 2``
+            behaviour. Validated on use, not here.
+        :type window_slots: Optional[np.ndarray]
+        :return: ``None``.
+        :rtype: None
+        """
+        self._window_slots = (
+            None if window_slots is None
+            else np.asarray(window_slots, dtype=np.int32)
+        )
+
     def _relative_position_index(
             self, window_slots: Optional[np.ndarray] = None
     ) -> np.ndarray:
@@ -554,7 +618,6 @@ class SingleWindowAttention(keras.layers.Layer):
             inputs: keras.KerasTensor,
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
-            window_slots: Optional[np.ndarray] = None,
             pad_to_window: bool = True,
     ) -> keras.KerasTensor:
         """
@@ -585,14 +648,14 @@ class SingleWindowAttention(keras.layers.Layer):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating whether in training mode.
         :type training: Optional[bool]
-        :param window_slots: Optional ``(N_actual,)`` int32 array naming, for each
-            input token, its row-major slot inside the ``window_size x
-            window_size`` tile. Supplying it asserts *these are all the tokens
-            there are*: the layer then attends the ``N_actual`` real tokens with
-            no internal padding, and gathers the relative-position bias at these
-            slots' coordinates. Leave it ``None`` for the original
-            pad-to-``window_size ** 2`` behaviour.
-        :type window_slots: Optional[np.ndarray]
+        The window-slot map is NOT an argument here: it is set on the instance by
+        :meth:`set_window_slots` immediately before the call (see the D-015 anchor
+        in ``__init__`` for why it must stay off the traced argument channel).
+        When it is set, it asserts *these are all the tokens there are*: the layer
+        attends the ``N_actual`` real tokens with no internal padding and gathers
+        the relative-position bias at those slots' coordinates. When it is
+        ``None`` the original pad-to-``window_size ** 2`` behaviour runs.
+
         :param pad_to_window: If ``True`` (the default, and the only behaviour
             any pre-2026-08-25 caller had) the input is padded up to
             ``window_size ** 2`` slots, which is what a *tile* partition
@@ -608,11 +671,14 @@ class SingleWindowAttention(keras.layers.Layer):
         :type pad_to_window: bool
         :return: Attended output of shape ``(B, N_actual, dim)``.
         :rtype: keras.KerasTensor
-        :raises ValueError: If ``window_slots`` is supplied and its length does
-            not match a statically-known sequence length, or any slot is outside
+        :raises ValueError: If a window-slot map is set and its length does not
+            match a statically-known sequence length, or any slot is outside
             ``[0, window_size ** 2)``; or if ``pad_to_window=False`` is combined
-            with ``window_slots`` or with ``use_relative_position_bias=True``.
+            with a slot map or with ``use_relative_position_bias=True``.
         """
+        # Read once: the slot map is instance state set by `set_window_slots()`
+        # right before this call, NOT a traced argument. See D-015 in __init__.
+        window_slots = self._window_slots
         input_shape = keras.ops.shape(inputs)
         B_actual, N_actual = input_shape[0], input_shape[1]
         if window_slots is None:
@@ -661,13 +727,12 @@ class SingleWindowAttention(keras.layers.Layer):
         else:
             if not pad_to_window:
                 raise ValueError(
-                    "SingleWindowAttention received both window_slots and "
-                    "pad_to_window=False. Both mean 'do not pad internally'; "
-                    "window_slots is the tile-aware spelling (it also selects "
-                    "the relative-position rows), pad_to_window=False is the "
-                    "layout-free one. Pass exactly one."
+                    "SingleWindowAttention received both a window-slot map "
+                    "(set_window_slots) and pad_to_window=False. Both mean 'do "
+                    "not pad internally'; the slot map is the tile-aware "
+                    "spelling (it also selects the relative-position rows), "
+                    "pad_to_window=False is the layout-free one. Use exactly one."
                 )
-            window_slots = np.asarray(window_slots, dtype=np.int32)
             static_n = inputs.shape[1]
             if static_n is not None and int(static_n) != int(
                     window_slots.shape[0]

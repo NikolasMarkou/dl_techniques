@@ -619,9 +619,10 @@ class WindowAttention(keras.layers.Layer):
     #     trace and unusable from any other one -- the same trap D-006 records
     #     for the relative-position index. Worse for step 7.1: the degenerate
     #     short-circuit needs the INVERSE permutation as a Python-visible
-    #     numpy array (``SingleWindowAttention``'s ``window_slots`` contract is
-    #     numpy by construction, because it selects bias-table ROWS at trace
-    #     time), and ``convert_to_numpy`` on a graph tensor raises.
+    #     numpy array (``SingleWindowAttention.set_window_slots`` takes numpy by
+    #     construction, because the map selects bias-table ROWS at trace time --
+    #     and since 2026-08-25 it is deliberately NOT a call keyword either; see
+    #     D-015), and ``convert_to_numpy`` on a graph tensor raises.
     #   * Do NOT compute a SECOND, hand-written zigzag permutation next to the
     #     short-circuit instead of reusing this one. Two copies of a layout is
     #     the "kept in lockstep" shape this repo treats as a defect, and a
@@ -663,6 +664,57 @@ class WindowAttention(keras.layers.Layer):
         combined_key = s * H + secondary_key
 
         return np.argsort(combined_key).astype(np.int32)
+
+    def _attend(
+        self,
+        inputs: keras.KerasTensor,
+        *,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
+        window_slots: Optional[np.ndarray] = None,
+        pad_to_window: bool = True,
+    ) -> keras.KerasTensor:
+        """Invoke the inner :class:`SingleWindowAttention` with a slot map.
+
+        Interface contract -- this is the ONLY place in this class that calls
+        ``self.attention``, and every partition path goes through it:
+
+        * ``window_slots`` is a concrete numpy array (the static layout) or
+          ``None``. It is handed over by ``set_window_slots()``, NOT as a call
+          keyword, and is cleared in a ``finally`` so it can never survive into
+          the next call. See the D-015 anchor in
+          ``SingleWindowAttention.__init__`` for why the keyword channel is
+          unusable.
+        * ``attention_mask`` / ``training`` / ``pad_to_window`` are forwarded
+          verbatim; ``attention_mask`` is a tensor and belongs on the traced
+          channel, ``pad_to_window`` is a Python bool that Keras leaves alone.
+        * Failure mode: any exception from the inner layer propagates unchanged,
+          with the slot map already cleared.
+
+        :param inputs: Tokens to attend, ``(B', N', dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Mask forwarded to the inner layer, or ``None``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training-mode flag.
+        :type training: Optional[bool]
+        :param window_slots: Static ``(N',)`` slot map, or ``None`` for the
+            pad-to-``window_size ** 2`` behaviour.
+        :type window_slots: Optional[np.ndarray]
+        :param pad_to_window: ``False`` only for ``partition_mode='band'``.
+        :type pad_to_window: bool
+        :return: Attended tokens, ``(B', N', dim)``.
+        :rtype: keras.KerasTensor
+        """
+        self.attention.set_window_slots(window_slots)
+        try:
+            return self.attention(
+                inputs,
+                attention_mask=attention_mask,
+                training=training,
+                pad_to_window=pad_to_window,
+            )
+        finally:
+            self.attention.set_window_slots(None)
 
     @staticmethod
     def _single_window_slots(seq_len: int, window_size: int) -> np.ndarray:
@@ -899,7 +951,7 @@ class WindowAttention(keras.layers.Layer):
             and (attention_mask is None or len(attention_mask.shape) == 2)
         )
         if degenerate:
-            return self.attention(
+            return self._attend(
                 inputs,
                 attention_mask=attention_mask,
                 training=training,
@@ -1019,7 +1071,7 @@ class WindowAttention(keras.layers.Layer):
             mask_windows = self._window_partition(mask)
             window_mask = keras.ops.reshape(mask_windows, (-1, ws * ws))
 
-        attn_windows = self.attention(
+        attn_windows = self._attend(
             windows, attention_mask=window_mask, training=training
         )
         attn_windows = keras.ops.reshape(attn_windows, (-1, ws, ws, C))
@@ -1130,7 +1182,7 @@ class WindowAttention(keras.layers.Layer):
                 f"{tuple(attention_mask.shape)}."
             )
 
-        return self.attention(
+        return self._attend(
             inputs,
             attention_mask=keep,
             training=training,
@@ -1206,7 +1258,7 @@ class WindowAttention(keras.layers.Layer):
             and (attention_mask is None or len(attention_mask.shape) == 2)
         )
         if degenerate:
-            return self.attention(
+            return self._attend(
                 inputs,
                 attention_mask=attention_mask,
                 training=training,
@@ -1285,7 +1337,7 @@ class WindowAttention(keras.layers.Layer):
                 padded_zigzag_mask, (B * num_windows, win_len)
             )
 
-        attn_windows = self.attention(
+        attn_windows = self._attend(
             windows, attention_mask=attn_mask_for_windows, training=training
         )
 

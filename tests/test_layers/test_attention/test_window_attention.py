@@ -702,7 +702,12 @@ class TestTheDegenerateWindowIsShortCircuited:
         original = SingleWindowAttention.call
 
         def spy(self, inputs, attention_mask=None, training=None,
-                window_slots=None, pad_to_window=True):
+                pad_to_window=True):
+            # The slot map is INSTANCE state (`set_window_slots`), not a call
+            # argument -- it must not ride the traced-kwarg channel, or
+            # `predict()`/`fit()` raise NotImplementedError (D-015). Read it
+            # here exactly where the layer itself reads it.
+            window_slots = self._window_slots
             seen.append(
                 {
                     "slots_in": int(inputs.shape[1]),
@@ -716,7 +721,6 @@ class TestTheDegenerateWindowIsShortCircuited:
                 inputs,
                 attention_mask=attention_mask,
                 training=training,
-                window_slots=window_slots,
                 pad_to_window=pad_to_window,
             )
 
@@ -1168,7 +1172,7 @@ class TestBandPartitionMode:
             )
 
     def test_the_two_no_padding_spellings_are_mutually_exclusive(self):
-        """``window_slots`` and ``pad_to_window=False`` both mean "do not pad".
+        """A slot map and ``pad_to_window=False`` both mean "do not pad".
 
         Why this can fail if the implementation is wrong: two independent
         spellings of one instruction is the drift D-005 exists to prevent. The
@@ -1178,8 +1182,10 @@ class TestBandPartitionMode:
             dim=32, window_size=4, num_heads=4, use_relative_position_bias=False
         )
         x = np.zeros((2, 5, 32), dtype="float32")
+        inner.set_window_slots(np.arange(5, dtype="int32"))
         with pytest.raises(ValueError, match="pad_to_window"):
-            inner(x, window_slots=np.arange(5, dtype="int32"), pad_to_window=False)
+            inner(x, pad_to_window=False)
+        inner.set_window_slots(None)
 
     def test_pad_to_window_false_refuses_a_relative_position_bias(self):
         """The inner layer refuses the combination too, not only the outer one."""
