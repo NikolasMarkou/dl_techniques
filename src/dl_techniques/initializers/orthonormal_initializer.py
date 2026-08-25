@@ -185,10 +185,10 @@ class OrthonormalInitializer(keras.initializers.Initializer):
 
         # Extract diagonal elements one by one and stack them
         diagonal_elements = []
-        for i in range(int(ops.convert_to_numpy(min_dim))):
+        for i in range(int(keras.ops.convert_to_numpy(min_dim))):
             diagonal_elements.append(matrix[i, i])
 
-        return ops.stack(diagonal_elements)
+        return keras.ops.stack(diagonal_elements)
 
     def __call__(
         self,
@@ -253,7 +253,7 @@ class OrthonormalInitializer(keras.initializers.Initializer):
             random_matrix = rng.randn(feature_dims, feature_dims).astype(np_dtype)
 
             # Convert to tensor for keras.ops compatibility
-            random_tensor = ops.convert_to_tensor(random_matrix, dtype=dtype)
+            random_tensor = keras.ops.convert_to_tensor(random_matrix, dtype=dtype)
 
             # Compute QR decomposition using keras.ops
             q, r = keras.ops.linalg.qr(random_tensor, mode="reduced")
@@ -267,13 +267,13 @@ class OrthonormalInitializer(keras.initializers.Initializer):
 
             # Create sign corrections based on the first row
             signs = keras.ops.where(
-                keras.ops.numpy.greater_equal(first_row, ops.cast(0.0, dtype)),
+                keras.ops.numpy.greater_equal(first_row, keras.ops.cast(0.0, dtype)),
                 keras.ops.ones_like(first_row),
-                keras.ops.cast(-1.0, dtype) * ops.ones_like(first_row)
+                keras.ops.cast(-1.0, dtype) * keras.ops.ones_like(first_row)
             )
 
             # Apply sign corrections to each column
-            q_corrected = q * ops.expand_dims(signs, axis=0)
+            q_corrected = q * keras.ops.expand_dims(signs, axis=0)
 
             # Extract the first n_clusters rows to get desired number of vectors
             orthonormal_vectors = q_corrected[:n_clusters, :]
@@ -281,7 +281,7 @@ class OrthonormalInitializer(keras.initializers.Initializer):
             # Ensure the result has the correct dtype
             result = keras.ops.cast(orthonormal_vectors, dtype)
 
-            logger.debug(f"Successfully generated orthonormal vectors with shape {ops.shape(result)}")
+            logger.debug(f"Successfully generated orthonormal vectors with shape {keras.ops.shape(result)}")
             return result
 
         except Exception as e:
