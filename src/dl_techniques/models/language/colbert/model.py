@@ -512,14 +512,25 @@ class ColBERT(keras.Model):
         # hides punctuation from every other token's self-attention; the
         # reference keeps punctuation fully visible as context and removes it
         # only from the MaxSim candidate set, by multiplying the skiplist onto
-        # the projected pre-normalization embeddings. MEASURED on a random-init
-        # 2-layer `tiny` (10 doc positions, skiplist zeroing 3 and 7): under the
-        # collapsed ordering the KEPT positions' embeddings moved by
-        # max|delta| = 0.0010412931 purely because two OTHER positions were
-        # skiplisted; under this split ordering the same delta is exactly 0.0.
-        # Both pre-existing skiplist guards pass under EITHER ordering, which is
-        # why the collapse shipped -- `test_a_kept_position_is_untouched_by_a
-        # _skiplist_elsewhere` is the guard that pins it. See decisions.md D-029.
+        # the projected pre-normalization embeddings. MEASURED over 40 SEEDED
+        # random inits (`keras.utils.set_random_seed(0..39)`, 2-layer `tiny`, 10
+        # doc positions, skiplist zeroing 3 and 7): under the collapsed ordering
+        # the KEPT positions' embeddings moved purely because two OTHER
+        # positions were skiplisted, by max|delta| min 0.00035694 / median
+        # 0.00094578 / max 0.00241351 -- NEVER zero; under this split ordering
+        # the same delta is exactly 0.0 at ALL 40 seeds. The magnitude is a
+        # property of one random init, so the reproducible claim is "nonzero
+        # before, exactly 0.0 after" -- not any single draw.
+        #
+        # The converse is equally load-bearing and equally easy to break: the
+        # PADDING mask must reach `self.encoder`. Passing
+        # `keras.ops.ones_like(attention_mask)` below makes the backbone attend
+        # to padding as if it were content and, before 2026-08-25, reddened
+        # NOTHING in the suite. Both directions are pinned now --
+        # `test_a_kept_position_is_untouched_by_a_skiplist_elsewhere` and
+        # `test_a_padded_document_position_cannot_influence_a_real_one`. Both
+        # pre-existing skiplist guards pass under EITHER ordering, which is why
+        # the collapse shipped. See decisions.md D-029 and D-030.
         if participation_mask is None:
             participation_mask = attention_mask
         encoded = self.encoder(

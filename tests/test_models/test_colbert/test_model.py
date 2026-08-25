@@ -20,6 +20,13 @@ Injection                                               Named assertion that fir
 (d) re-collapse the two document masks into one          ``test_a_kept_position_is_untouched_by_a_skiplist_elsewhere``
     (``_encode`` passes ``participation_mask`` to        -- "a kept document position moved because a DIFFERENT
     ``self.encoder`` as its ``attention_mask``)             position was skiplisted"
+(e) neuter the backbone's padding mask                   ``test_a_padded_document_position_cannot_influence_a_real_one``
+    (``_encode`` passes                                  -- "a real document position was UNCHANGED when the
+    ``keras.ops.ones_like(attention_mask)`` to              trailing positions were marked as padding"
+    ``self.encoder``)
+(f) build the backbone with ``hidden_act="gelu"``        ``test_the_backbone_runs_the_tanh_gelu_approximation``
+    (the exact erf form, not the tanh                    -- "the ColBERT backbone's activation drifted away from
+    approximation README §9.4 documents)                    the tanh GELU approximation documented in README §9.4"
 ======================================================  ========================================================
 
 Each injection was verified to redden its OWN named assertion -- the message
@@ -30,7 +37,13 @@ with zero materialized weights fails every claim that needs weights. Injections
 (b) and (c) are narrow: (b) reddens two tests, (c) exactly one. Injection (d),
 added with the D-029 mask split, reddens exactly one -- and, crucially, reddens
 NEITHER of the two pre-existing skiplist guards, which is the whole reason it
-had to be written.
+had to be written. Injection (e) is D-029's OTHER half: before
+``test_a_padded_document_position_cannot_influence_a_real_one`` existed it
+reddened NOTHING at all in this directory, so a refactor dropping the padding
+mask on the way to the backbone would have shipped green. Injections (e) and
+(f) each reddened EXACTLY ONE test (1 failed / 90 passed for the directory), at
+the assertion quoted above, and both were restored from the ``cp`` backup and
+re-verified byte-identical with ``diff -q``.
 """
 
 import os
@@ -474,10 +487,15 @@ def test_a_kept_position_is_untouched_by_a_skiplist_elsewhere():
     positions 3 and 7 hides them from every other token's self-attention and
     therefore MOVES the contextual embedding of positions 0-2, 4-6, 8-9.
 
-    MEASURED 2026-08-25 on this geometry with ``num_layers=2``: collapsed
-    ordering gives ``max |delta| = 0.0010412931`` at the kept positions; the
-    split ordering gives exactly ``0.0``. The delta grows with depth and with a
-    trained backbone.
+    Property, not sample. MEASURED 2026-08-25 on this geometry with
+    ``num_layers=2`` over 40 seeded inits (``keras.utils.set_random_seed(0..39)``):
+    the collapsed ordering gives a kept-position ``max |delta|`` of min
+    0.0003569424 / median 0.0009457758 / max 0.0024135113 -- never zero -- while
+    the split ordering gives exactly ``0.0`` at all 40. This test sets no seed
+    on purpose: its assertion is exact equality against a bit-identical
+    baseline, which no initialization can perturb. Do not loosen it to
+    ``atol > 0``; that would make it seed-sensitive over a ~7x magnitude spread.
+    The delta grows with depth and with a trained backbone.
     """
     model = make_model(num_layers=2)
     inputs = make_inputs()
@@ -542,6 +560,96 @@ def test_a_kept_position_is_untouched_by_a_skiplist_elsewhere():
             "the skiplist stopped reaching the projection's mask multiply: a "
             "skiplisted position must still project to exactly zero"
         ),
+    )
+
+
+def test_a_padded_document_position_cannot_influence_a_real_one():
+    """The OTHER half of D-029: the padding mask MUST reach the backbone.
+
+    ``test_a_kept_position_is_untouched_by_a_skiplist_elsewhere`` pins one
+    direction (the skiplist must NOT reach ``self.encoder``) and is blind to
+    the other: it passes unchanged on a model whose backbone receives
+    ``ones_like(attention_mask)``, i.e. one that attends to padding as if it
+    were content. MEASURED as the RED-proof for this test -- with that
+    injection at the ``self.encoder`` call the whole colbert directory stayed
+    green. This test is the missing control: zeroing the TRAILING positions of
+    the padding mask must MOVE the contextual embedding of the real prefix
+    positions, because they can no longer attend to the padding.
+
+    Property, not sample: the assertion is strict non-equality. The magnitude
+    is a property of one random initialization -- MEASURED over 40 seeded
+    inits on this geometry (``keras.utils.set_random_seed``, ``num_layers=2``,
+    8 real positions of 10, trailing 2 padded): min 0.0003021657, median
+    0.0009489805, max 0.0022316426, and never once exactly 0.0.
+    """
+    model = make_model(num_layers=2)
+    input_ids = make_inputs()[DOC_INPUT_IDS_KEY]
+
+    real = list(range(DOC_LEN - 2))
+    full = np.ones((BATCH, DOC_LEN), dtype="int32")
+    trimmed = full.copy()
+    trimmed[:, DOC_LEN - 2:] = 0
+
+    def encode(attention_mask):
+        return np.asarray(
+            keras.ops.convert_to_numpy(
+                model.encode_document(
+                    {"input_ids": input_ids, "attention_mask": attention_mask},
+                    training=False,
+                )
+            )
+        )
+
+    attended = encode(full)
+    masked = encode(trimmed)
+
+    # Control 1: the compared positions are alive under BOTH masks, so a
+    # non-equality between them is not a comparison of two zero blocks.
+    assert np.max(np.abs(attended[:, real, :])) > 0.0, (
+        "control failed: the real positions are all zero with an all-ones "
+        "mask, so this test would pass on a dead model"
+    )
+    assert np.max(np.abs(masked[:, real, :])) > 0.0, (
+        "control failed: the real positions are all zero once the trailing "
+        "positions are padded, so the forward pass died rather than changed"
+    )
+    # Control 2: the padded positions themselves ARE zeroed, i.e. the padding
+    # mask reached the projection's mask multiply as well.
+    assert np.max(np.abs(masked[:, DOC_LEN - 2:, :])) == 0.0, (
+        "a padded position did not project to exactly zero: the padding mask "
+        "is not reaching the projection's mask multiply"
+    )
+
+    delta = float(np.max(np.abs(masked[:, real, :] - attended[:, real, :])))
+    assert delta > 0.0, (
+        "a real document position was UNCHANGED when the trailing positions "
+        "were marked as padding: the padding attention_mask is not reaching "
+        "the BERT backbone, so the model attends to padding as if it were "
+        "content. This is the second half of the D-029 mask split -- the "
+        "skiplist must not reach self.encoder, and the padding mask must. "
+        f"max |delta| over the {len(real)} real positions was {delta}."
+    )
+
+
+def test_the_backbone_runs_the_tanh_gelu_approximation():
+    """Pins README §9.4, which was previously a documentation-only deviation.
+
+    This library's ``BERT`` defaults to ``gelu_tanh`` (the tanh approximation)
+    rather than the exact ``erf`` form, and ``ColBERT`` keeps that default.
+    Nothing in the suite could see a silent flip to ``"gelu"``; §9's claim
+    about its own deviation list is only worth what this assertion is worth.
+    """
+    model = make_model()
+
+    assert model.encoder.hidden_act == "gelu_tanh", (
+        "the ColBERT backbone's activation drifted away from the tanh GELU "
+        f"approximation documented in README §9.4: got "
+        f"{model.encoder.hidden_act!r}"
+    )
+    assert model.encoder.get_config()["hidden_act"] == "gelu_tanh", (
+        "the backbone's serialized config disagrees with its live attribute "
+        "about the activation, so a reloaded ColBERT would run a different "
+        f"non-linearity: {model.encoder.get_config()['hidden_act']!r}"
     )
 
 

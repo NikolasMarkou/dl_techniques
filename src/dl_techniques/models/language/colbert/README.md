@@ -546,7 +546,26 @@ one the test pins, is `err(nbits=2) < err(nbits=1)`.
 
 Every item here is a place where this implementation knowingly differs from
 `stanford-futuredata/ColBERT`. None of them is an accident, and none is hidden in a code
-comment only. Each is pinned by at least one test, so a silent drift back would be caught.
+comment only.
+
+**How much of each is test-pinned, verified 2026-08-25 by running every node id below:**
+
+| § | The guard that would go red | Pinned? |
+|---|---|---|
+| 9.1 | `test_tokenization.py::test_markers_are_derived_from_the_live_vocabulary`, `::test_a_marker_colliding_with_a_special_id_raises` | yes |
+| 9.2 | `test_tokenization.py::test_the_skiplist_covers_every_punctuation_symbol_in_both_spacings` | yes |
+| 9.3 | `test_tokenization.py::test_the_default_attends_to_mask_tokens`, `::test_the_attend_to_mask_tokens_policy_is_pinned`, `::test_the_flag_decides_whether_augmented_slots_reach_maxsim` | yes |
+| 9.4 | `test_model.py::test_the_backbone_runs_the_tanh_gelu_approximation` | yes, **since 2026-08-25** |
+| 9.5 | `test_components.py::test_both_layers_run_under_mixed_float16_with_finite_outputs` (the `float32` return-dtype assertion) | yes, **since 2026-08-25** |
+| 9.6 | `test_components.py::test_a_fully_masked_projection_row_is_exactly_zero` plus the `mixed_float16` finiteness arm above | yes |
+| 9.7 | `test_compression.py::test_two_bits_reconstruct_strictly_better_than_one_bit` pins the only claim §9.7 makes (`err(nbits=2) < err(nbits=1)`). Its **provenance** half — "derived here, not transcribed from the reference" — is a statement about how the code was written and **no test can pin it** | **half** |
+| 9.8 | `test_model.py::test_every_variant_row_carries_the_reference_colbert_defaults` | yes |
+| 9.9 | `test_model.py::test_from_variant_refuses_pretrained_true` | yes |
+
+So: eight of the nine would be caught by a named assertion if they silently drifted back, and
+§9.7's provenance sentence is documentation-only by construction. §9.4 and §9.5 were
+documentation-only until 2026-08-25 — an adversarial review found that the preamble here
+claimed a completeness it did not have, which is why the table exists instead of a sentence.
 
 This list has been wrong once. Iteration 1 shipped a **tenth**, unlisted divergence — the
 document punctuation skiplist was being fed to the BERT backbone as its attention mask,
@@ -640,13 +659,17 @@ norms (`test_the_flag_decides_whether_augmented_slots_reach_maxsim`).
 
 This library's `BERT` defaults to the tanh approximation of GELU rather than the exact `erf`
 form. The default is kept rather than overridden, since bit-for-bit reproduction of published
-ColBERT numbers is already impossible for the reasons above.
+ColBERT numbers is already impossible for the reasons above. Pinned at
+`ColBERT(...).encoder.hidden_act` **and** at the backbone's serialized config, so a reloaded
+model running a different non-linearity is caught too.
 
 ### 9.5 `MaxSimScorer` returns `float32` under `mixed_float16`
 
 Under a `mixed_float16` policy the scorer promotes its masking and both reductions to `float32`
 and returns `float32`, giving it an output-dtype asymmetry with the projection beside it. This
 is a **measured** fix, not a precaution — see [§14.3](#143-two-measured-half-precision-defects).
+The *finiteness* half was pinned from the start; the *return dtype* — the deviation itself —
+was not asserted anywhere until 2026-08-25, since a `float16` return is finite too.
 
 ### 9.6 The projection normalizes through a float32 reduction
 
@@ -771,6 +794,8 @@ serialization, it pins:
 | `test_model.py::test_a_skiplisted_document_position_is_zeroed` | a skiplisted document position projects to exactly zero and moves the score |
 | `test_model.py::test_a_skiplisted_position_cannot_win_the_max_even_when_it_is_the_best_match` | the adversarial arm: a perfect match planted at a skiplisted position still cannot win |
 | `test_model.py::test_a_kept_position_is_untouched_by_a_skiplist_elsewhere` | the skiplist does **not** reach the backbone's attention mask — a kept position's embedding is bit-identical whether or not another position is skiplisted (the reference ordering — see §14.5) |
+| `test_model.py::test_a_padded_document_position_cannot_influence_a_real_one` | the other half of the same split: the padding mask **does** reach the backbone — marking trailing positions as padding moves the real positions' embeddings (see §14.5) |
+| `test_model.py::test_the_backbone_runs_the_tanh_gelu_approximation` | the backbone's activation is `gelu_tanh` at the live attribute and in its serialized config (§9.4) |
 | `test_compression.py::test_two_bits_reconstruct_strictly_better_than_one_bit` | `err(nbits=2) < err(nbits=1)` |
 | `test_compression.py::test_decoded_vectors_are_unit_norm` | decode returns unit-norm vectors |
 | `test_compression.py::test_no_codec_symbol_is_reachable_from_the_model_or_the_losses` | no codec symbol is reachable from `ColBERT.call` or either loss — the codec is index-time only |
@@ -869,20 +894,39 @@ This is the reference's ordering: `doc()` passes the plain padding mask to `self
 multiplies the skiplist onto the *projected, pre-normalization* embeddings.
 
 Iteration 1 originally collapsed the two into one tensor and passed it to both, which fed the
-skiplist to the backbone. MEASURED on a random-init 2-layer `tiny` (10 document positions,
-skiplist zeroing positions 3 and 7), comparing the **kept**, non-punctuation positions'
-embeddings with and without the skiplist:
+skiplist to the backbone. The reproducible fact is a **property, not a sample**: under the
+collapsed ordering a kept position's embedding moves when a *different* position is
+skiplisted; under the split ordering it does not move at all. MEASURED over **40 seeded random
+inits** (`keras.utils.set_random_seed(0..39)`, 2-layer `tiny`, 10 document positions, skiplist
+zeroing positions 3 and 7), comparing the **kept**, non-punctuation positions' embeddings with
+and without the skiplist:
 
-| Ordering | kept-position `max abs(delta)` |
+| Ordering | kept-position `max abs(delta)`, 40 seeds |
 |---|---|
-| collapsed (one mask for both roles) | `0.0010412931` |
-| split (current, matches the reference) | `0.0` exactly |
+| collapsed (one mask for both roles) | min `0.00035694`, median `0.00094578`, max `0.00241351` — **never zero** |
+| split (current, matches the reference) | `0.0` exactly at **all 40 seeds** |
 
-The effect grows with depth and with a trained backbone. Neither of the two skiplist guards
-that existed at the time could see it — both assert only that the *filtered* position is zero,
-and both pass under either ordering, which is exactly why the collapse shipped.
-`test_model.py::test_a_kept_position_is_untouched_by_a_skiplist_elsewhere` pins the axis they
-are blind to. Do not re-collapse the masks; the anchor at the split site says the same thing.
+The magnitude is a property of one initialization, not of the code — quoting a single draw
+(iteration 1 quoted `0.0010412931`, an adversarial reviewer measured `0.0026180223` and then a
+40-seed range of `0.00033`–`0.00329` on its own protocol) tells a reader nothing reproducible,
+which is why the range and the exact `0.0` carry the claim here. The figures above are this
+package's own re-derivation and differ slightly from the reviewer's; the seeding protocol, not
+the quantity, is what differs. The effect grows with depth and with a trained backbone.
+
+Neither of the two skiplist guards that existed at the time could see it — both assert only
+that the *filtered* position is zero, and both pass under either ordering, which is exactly why
+the collapse shipped. `test_model.py::test_a_kept_position_is_untouched_by_a_skiplist_elsewhere`
+pins the axis they are blind to. Do not re-collapse the masks; the anchor at the split site says
+the same thing.
+
+**The other direction is now guarded too.** Until 2026-08-25 nothing asserted that the padding
+`attention_mask` reached the backbone *at all*: replacing it with `ones_like(attention_mask)`
+— a model attending to padding as if it were content — left the whole colbert directory green.
+`test_model.py::test_a_padded_document_position_cannot_influence_a_real_one` closes that half:
+marking the trailing positions as padding must MOVE the real prefix positions' contextual
+embeddings. Measured over the same 40 seeds, that delta is min `0.00030217`, median
+`0.00094898`, max `0.00223164` and never once exactly `0.0`; under the `ones_like` injection it
+is exactly `0.0`, which is what the assertion reads.
 
 Note that the *query* path still uses one tensor for both roles — that is §9.3's residual
 divergence, and it is a property of the tokenizer emitting a single mask, not of `_encode`.

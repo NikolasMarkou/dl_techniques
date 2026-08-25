@@ -39,6 +39,17 @@ never ``git stash`` / ``git checkout --``):
         unchanged
         -> RED: test_projection_rows_are_unit_norm_at_unmasked_positions
            (assertion "projection did not return the requested dim")
+    (e) drop the low-precision promotion in ``_reduction_dtype`` (return the
+        compute dtype unchanged), added 2026-08-25 with the §9.5 return-dtype
+        assertion
+        -> RED: test_both_layers_run_under_mixed_float16_with_finite_outputs
+           (assertion "MaxSimScorer did not return float32 under
+           mixed_float16: float16"), plus the two pre-existing
+           ``test_the_sentinel_sum_stays_finite_under_mixed_float16`` arms --
+           3 failed / 88 passed. Before that assertion existed, the RETURN
+           DTYPE README §9.5 documents was pinned by nothing: both fp16 arms
+           cast to ``float64`` before asserting finiteness, and a ``float16``
+           return is finite too.
 
 MEASURED CAVEAT for (c): with a strictly BINARY mask the two orderings are
 mathematically identical -- ``normalize(x * m) == normalize(x) * m`` for
@@ -478,10 +489,22 @@ def test_both_layers_run_under_mixed_float16_with_finite_outputs():
             f"{doc.dtype}"
         )
 
-        scores = np.asarray(
-            MaxSimScorer()(query, doc, doc_mask=doc_mask, query_mask=query_mask),
-            dtype=np.float64,
+        raw_scores = MaxSimScorer()(
+            query, doc, doc_mask=doc_mask, query_mask=query_mask
         )
+        # README §9.4 -> §9.5: the scorer's OUTPUT DTYPE is the deviation, and
+        # until 2026-08-25 nothing asserted it -- the finiteness checks below
+        # pass just as well on a float16 return. This is the dtype asymmetry
+        # with the projection beside it (float16 above), asserted as such.
+        returned_dtype = np.asarray(raw_scores).dtype
+        assert returned_dtype == np.float32, (
+            f"MaxSimScorer did not return float32 under mixed_float16: "
+            f"{returned_dtype}. Its masking and both reductions are promoted "
+            f"to float32 on purpose (README §9.5); a float16 return means that "
+            f"promotion was lost"
+        )
+
+        scores = np.asarray(raw_scores, dtype=np.float64)
         assert np.all(np.isfinite(scores)), (
             f"MaxSim produced a non-finite score under mixed_float16: {scores}"
         )
