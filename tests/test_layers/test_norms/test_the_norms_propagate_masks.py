@@ -95,13 +95,17 @@ TOKEN_COUPLED_EXCLUSIONS: List[Tuple[str, LayerFactory]] = [
     ("BiasFreeBatchNorm", BiasFreeBatchNorm),
 ]
 
-#: Not shape-preserving at all: the first two reduce ``axis`` and return tuples,
-#: the third is a Dense weight reparameterization that changes the feature dim.
-#: A propagated mask would not even have a valid shape against the output.
+#: Not shape-preserving at all: the first two reduce the feature ``axis`` away,
+#: turning ``(B, T, F)`` into ``(B, T)``; the third is a Dense weight
+#: reparameterization that changes the feature dim. A propagated mask would not even
+#: have a valid shape against the output. Their ARITY differs too and is pinned by
+#: ``test_the_shape_changing_exclusions_are_not_shape_preserving``: three tensors from
+#: ``DecoupledMaxLogit``, two from ``DMLPlus(model_type="center")``, and a bare tensor
+#: (NOT a tuple) from ``DMLPlus(model_type="focal")``.
 SHAPE_CHANGING_EXCLUSIONS: List[Tuple[str, LayerFactory]] = [
     ("DecoupledMaxLogit", DecoupledMaxLogit),
     ("DMLPlus", lambda: DMLPlus(model_type="focal")),
-    ("PolarWeightNorm", lambda: PolarWeightNorm(units=4)),
+    ("PolarWeightNorm", lambda: PolarWeightNorm(units=6)),
 ]
 
 #: The SAME seven layers, but constructed to normalize over the TOKEN axis.
@@ -134,7 +138,12 @@ FEATURE_AXIS_CONFIGURATIONS: List[Tuple[str, LayerFactory]] = [
     ("MaxLogitNorm", lambda: MaxLogitNorm(axis=2)),
 ]
 
-BATCH, TOKENS, FEATURES = 3, 5, 8
+# All three deliberately DIFFER. A shape assertion written against a tensor whose
+# axes happen to be equal cannot tell which axis it read: with BATCH == 3 the line
+# ``combined, _, _ = DMLPlus(model_type="focal")(x)`` unpacked the BATCH axis of a
+# single ``(3, 5)`` tensor and "passed", asserting a batch collapse that does not
+# exist. It raises ``ValueError: too many values to unpack`` at any other batch size.
+BATCH, TOKENS, FEATURES = 4, 5, 8
 VOCAB = 11
 
 
@@ -348,20 +357,31 @@ def test_the_shape_changing_exclusions_are_not_shape_preserving() -> None:
     """Pin the structural reason the last three are excluded."""
     x = keras.ops.convert_to_tensor(_sample_inputs()[0])
 
-    combined, max_cosine, max_norm = DecoupledMaxLogit()(x)
+    decoupled = DecoupledMaxLogit()(x)
+    assert isinstance(decoupled, (tuple, list)) and len(decoupled) == 3
+    combined, max_cosine, max_norm = decoupled
     assert tuple(combined.shape) == (BATCH, TOKENS)
     assert tuple(max_cosine.shape) == (BATCH, TOKENS)
     assert tuple(max_norm.shape) == (BATCH, TOKENS)
 
-    # DMLPlus goes further still: on a rank-3 input it collapses the BATCH axis
-    # too (measured ``(TOKENS,)``, not ``(BATCH, TOKENS)``), because its focal
-    # branch reduces over axis 0. Pinned as observed - it is out of B13's scope,
-    # but it makes the "never propagate a mask through this" case overwhelming.
-    combined, _, _ = DMLPlus(model_type="focal")(x)
-    assert tuple(combined.shape) == (TOKENS,)
+    # DMLPlus returns a DIFFERENT arity per model_type, and "focal" returns a bare
+    # tensor rather than a tuple. Assert that before unpacking anything: a 3-way
+    # unpack of a single (BATCH, TOKENS) tensor iterates the BATCH axis and reads as
+    # a pass whenever BATCH happens to be 3.
+    focal = DMLPlus(model_type="focal")(x)
+    assert not isinstance(focal, (tuple, list))
+    assert tuple(focal.shape) == (BATCH, TOKENS)
 
-    projected = PolarWeightNorm(units=4)(x)
-    assert tuple(projected.shape) == (BATCH, TOKENS, 4)
+    center = DMLPlus(model_type="center")(x)
+    assert isinstance(center, (tuple, list)) and len(center) == 2
+    assert tuple(center[0].shape) == (BATCH, TOKENS)
+    assert tuple(center[1].shape) == (BATCH, TOKENS, 1)
+
+    # units=6 is deliberately none of BATCH/TOKENS/FEATURES, so the trailing axis
+    # here is identified by its value and not by a coincidence. units=4 would now
+    # equal BATCH and make (4, 5, 6) indistinguishable from its own transpose.
+    projected = PolarWeightNorm(units=6)(x)
+    assert tuple(projected.shape) == (BATCH, TOKENS, 6)
 
 
 # ---------------------------------------------------------------------------
