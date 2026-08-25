@@ -217,7 +217,7 @@ class MixtureOfExperts(keras.layers.Layer):
         # Apply jitter noise if training
         if training and self.jitter_noise > 0:
             noise = keras.random.uniform(
-                shape=ops.shape(gating_input),
+                shape=keras.ops.shape(gating_input),
                 minval=-self.jitter_noise,
                 maxval=self.jitter_noise,
                 dtype=gating_input.dtype
@@ -338,7 +338,7 @@ class MixtureOfExperts(keras.layers.Layer):
             expert_outputs.append(weighted_output)
 
         # Sum outputs from all experts
-        outputs = keras.ops.sum(ops.stack(expert_outputs, axis=0), axis=0)
+        outputs = keras.ops.sum(keras.ops.stack(expert_outputs, axis=0), axis=0)
 
         # NOTE: residual-for-dropped-tokens is intentionally not applied. The
         # current kernel is dense (all experts process all tokens) so no

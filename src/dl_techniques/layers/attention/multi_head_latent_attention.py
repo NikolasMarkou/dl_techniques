@@ -315,7 +315,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             )
         else:
             # Direct projection if no compression (DeepSeek-V2 Lite style)
-            self.query_proj = layers.Dense(
+            self.query_proj = keras.layers.Dense(
                 num_heads * (qk_nope_head_dim + qk_rope_head_dim),
                 use_bias=use_bias,
                 kernel_initializer=self.kernel_initializer,
@@ -503,9 +503,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             kv_input = query_input
 
         # Get dynamic shapes
-        batch_size = ops.shape(query_input)[0]
-        seq_len_q = ops.shape(query_input)[1]
-        seq_len_kv = ops.shape(kv_input)[1]
+        batch_size = keras.ops.shape(query_input)[0]
+        seq_len_q = keras.ops.shape(query_input)[1]
+        seq_len_kv = keras.ops.shape(kv_input)[1]
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 1: QUERY GENERATION
@@ -520,7 +520,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             q = self.query_proj(query_input)
 
         # Reshape Q -> (B, S_q, H, nope_dim + rope_dim)
-        q = ops.reshape(
+        q = keras.ops.reshape(
             q,
             (batch_size, seq_len_q, self.num_heads,
              self.qk_nope_head_dim + self.qk_rope_head_dim)
@@ -540,7 +540,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # b. Up-Projection for K_nope and V
         kv_up = self.kv_up_proj(c_kv)
-        kv_up = ops.reshape(
+        kv_up = keras.ops.reshape(
             kv_up,
             (batch_size, seq_len_kv, self.num_heads,
              self.qk_nope_head_dim + self.v_head_dim)
@@ -554,7 +554,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # K_pe is generated from original input, NOT latent vector
         k_pe = self.k_rope_proj(kv_input)  # (B, S_kv, rope_dim)
         # Expand dims for heads to broadcast: (B, S_kv, 1, rope_dim)
-        k_pe = ops.expand_dims(k_pe, axis=2)
+        k_pe = keras.ops.expand_dims(k_pe, axis=2)
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 3: ROPE APPLICATION
@@ -575,8 +575,8 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # relative-position signal existed. Measured 2026-08-17, CPU: permuting
         # two input tokens moved the layer output by 4.47e-08, float32 noise.
         # See decisions.md D-083.
-        q_pe = self.rope(ops.transpose(q_pe, (0, 2, 1, 3)))
-        k_pe = self.rope(ops.transpose(k_pe, (0, 2, 1, 3)))
+        q_pe = self.rope(keras.ops.transpose(q_pe, (0, 2, 1, 3)))
+        k_pe = self.rope(keras.ops.transpose(k_pe, (0, 2, 1, 3)))
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 4: ATTENTION SCORE CALCULATION
@@ -586,15 +586,15 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # `q_pe` / `k_pe` are ALREADY in this frame -- they were transposed
         # before RoPE in STEP 3 (see the D-083 anchor there), so transposing
         # them again here would undo it.
-        q_nope = ops.transpose(q_nope, (0, 2, 1, 3))
-        k_nope = ops.transpose(k_nope, (0, 2, 1, 3))  # k_pe is (B, 1, S_kv, rope_dim)
+        q_nope = keras.ops.transpose(q_nope, (0, 2, 1, 3))
+        k_nope = keras.ops.transpose(k_nope, (0, 2, 1, 3))  # k_pe is (B, 1, S_kv, rope_dim)
 
         # Content Score: (B, H, S_q, S_kv)
-        score_content = ops.matmul(q_nope, ops.transpose(k_nope, (0, 1, 3, 2)))
+        score_content = keras.ops.matmul(q_nope, keras.ops.transpose(k_nope, (0, 1, 3, 2)))
 
         # Positional Score: (B, H, S_q, S_kv)
         # K_pe broadcasts along Head dimension because shape is (B, 1, S_kv, D)
-        score_pos = ops.matmul(q_pe, ops.transpose(k_pe, (0, 1, 3, 2)))
+        score_pos = keras.ops.matmul(q_pe, keras.ops.transpose(k_pe, (0, 1, 3, 2)))
 
         # Combine and Scale
         scores = (score_content + score_pos) * self._scale
@@ -615,15 +615,15 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # ═══════════════════════════════════════════════════════════════════
 
         # V shape: (B, S_kv, H, v_dim) -> (B, H, S_kv, v_dim)
-        v = ops.transpose(v, (0, 2, 1, 3))
+        v = keras.ops.transpose(v, (0, 2, 1, 3))
 
         # (B, H, S_q, S_kv) @ (B, H, S_kv, v_dim) -> (B, H, S_q, v_dim)
-        out = ops.matmul(attn_weights, v)
+        out = keras.ops.matmul(attn_weights, v)
 
         # Reshape for output projection
         # (B, H, S_q, v_dim) -> (B, S_q, H, v_dim) -> (B, S_q, H*v_dim)
-        out = ops.transpose(out, (0, 2, 1, 3))
-        out = ops.reshape(
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.reshape(
             out, (batch_size, seq_len_q, self.num_heads * self.v_head_dim)
         )
 
@@ -666,20 +666,20 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # broadcast/cast-order lines are exactly as they were.
 
         # Get mask dimensions
-        mask_ndim = len(ops.shape(attention_mask))
+        mask_ndim = len(keras.ops.shape(attention_mask))
 
         # Expand mask for broadcasting if needed
         if mask_ndim == 2:
             # (B, S_kv) -> (B, 1, 1, S_kv)
-            attention_mask = ops.expand_dims(
-                ops.expand_dims(attention_mask, axis=1), axis=1
+            attention_mask = keras.ops.expand_dims(
+                keras.ops.expand_dims(attention_mask, axis=1), axis=1
             )
         elif mask_ndim == 3:
             # (B, S_q, S_kv) -> (B, 1, S_q, S_kv)
-            attention_mask = ops.expand_dims(attention_mask, axis=1)
+            attention_mask = keras.ops.expand_dims(attention_mask, axis=1)
 
         # Cast and apply additive mask
-        attention_mask = ops.cast(attention_mask, scores.dtype)
+        attention_mask = keras.ops.cast(attention_mask, scores.dtype)
         # THIS SITE'S MASK POLARITY, passed through verbatim: `attention_mask` is a
         # `1 = keep` predicate (already cast to the scores dtype on its own
         # untouched line above), so it IS the keep predicate
@@ -796,8 +796,8 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             "qk_norm_kwargs": self.qk_norm_kwargs,
             "probability_type": self.probability_type,
             "probability_config": self.probability_config,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 

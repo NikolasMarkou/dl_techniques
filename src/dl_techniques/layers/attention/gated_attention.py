@@ -254,10 +254,10 @@ class GatedAttention(keras.layers.Layer):
             rope_percentage: float = 0.5,
             dropout_rate: float = 0.0,
             use_bias: bool = False,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             probability_type: str = "softmax",
             probability_config: Optional[Dict[str, Any]] = None,
             qk_norm_type: str = "zero_centered_rms_norm",
@@ -328,10 +328,10 @@ class GatedAttention(keras.layers.Layer):
         self.rope_percentage = rope_percentage
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -369,7 +369,7 @@ class GatedAttention(keras.layers.Layer):
         # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
         # key projections started life equal and the attention logits started
         # symmetric. `seed=` is NOT the discriminator -- instance identity is.
-        self.input_linear = layers.Dense(
+        self.input_linear = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -380,7 +380,7 @@ class GatedAttention(keras.layers.Layer):
         )
 
         # QKV projections - project to attention_dim, not dim
-        self.q_linear = layers.Dense(
+        self.q_linear = keras.layers.Dense(
             self.attention_dim,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -396,7 +396,7 @@ class GatedAttention(keras.layers.Layer):
         # K/V `attention_dim` again -- the whole KV-cache saving IS the narrower
         # width, and it is what makes GQA a checkpoint break. See decisions.md
         # D-071.
-        self.k_linear = layers.Dense(
+        self.k_linear = keras.layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -405,7 +405,7 @@ class GatedAttention(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer,
             name="k_linear"
         )
-        self.v_linear = layers.Dense(
+        self.v_linear = keras.layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -445,14 +445,14 @@ class GatedAttention(keras.layers.Layer):
 
         # Dropout for attention weights (conditional creation)
         if dropout_rate > 0.0:
-            self.dropout = layers.Dropout(dropout_rate, name="attention_dropout")
+            self.dropout = keras.layers.Dropout(dropout_rate, name="attention_dropout")
         else:
             self.dropout = None
 
         # TRICKY POINT: Output projection needed when attention_dim != dim
         # This happens when using custom head_dim that doesn't divide evenly into dim
         if self.attention_dim != self.dim:
-            self.output_proj = layers.Dense(
+            self.output_proj = keras.layers.Dense(
                 self.dim,
                 use_bias=self.use_bias,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -465,7 +465,7 @@ class GatedAttention(keras.layers.Layer):
             self.output_proj = None
 
         # Output gate - always projects to dim
-        self.output_gate_linear = layers.Dense(
+        self.output_gate_linear = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -667,7 +667,7 @@ class GatedAttention(keras.layers.Layer):
             mask_ndim = keras.ops.ndim(attention_mask)
             if mask_ndim == 2:
                 # Padding mask: (batch, seq_len) -> (batch, 1, 1, seq_len)
-                mask = keras.ops.expand_dims(ops.expand_dims(attention_mask, 1), 1)
+                mask = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), 1)
             elif mask_ndim == 3:
                 # Causal/Combined mask: (batch, seq_len, seq_len) -> (batch, 1, seq_len, seq_len)
                 mask = keras.ops.expand_dims(attention_mask, 1)
@@ -776,11 +776,11 @@ class GatedAttention(keras.layers.Layer):
         # `group_query_attention.py` has always transposed first; this is now
         # the single convention. See decisions.md D-083.
         q_rope = keras.ops.transpose(
-            self.rope(ops.transpose(q_reshaped, (0, 2, 1, 3)), training=training),
+            self.rope(keras.ops.transpose(q_reshaped, (0, 2, 1, 3)), training=training),
             (0, 2, 1, 3),
         )
         k_rope = keras.ops.transpose(
-            self.rope(ops.transpose(k_reshaped, (0, 2, 1, 3)), training=training),
+            self.rope(keras.ops.transpose(k_reshaped, (0, 2, 1, 3)), training=training),
             (0, 2, 1, 3),
         )
 
@@ -848,10 +848,10 @@ class GatedAttention(keras.layers.Layer):
             'rope_percentage': self.rope_percentage,
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'probability_type': self.probability_type,
             'probability_config': self.probability_config,
             'qk_norm_type': self.qk_norm_type,

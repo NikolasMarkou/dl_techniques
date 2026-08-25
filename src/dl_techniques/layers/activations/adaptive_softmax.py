@@ -260,7 +260,7 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
 
         # Compute entropy: H = -Σ p * log(p)
         log_probs = keras.ops.log(safe_probs)
-        entropy = -ops.sum(safe_probs * log_probs, axis=-1, keepdims=True)
+        entropy = -keras.ops.sum(safe_probs * log_probs, axis=-1, keepdims=True)
 
         return entropy
 

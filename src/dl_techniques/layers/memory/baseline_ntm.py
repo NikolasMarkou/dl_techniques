@@ -1265,7 +1265,7 @@ class NTMCell(keras.layers.Layer):
                 keras.ops.zeros((batch_size, self.config.controller_dim)),
             ])
         elif self.config.controller_type == "gru":
-            states.append(ops.zeros((batch_size, self.config.controller_dim)))
+            states.append(keras.ops.zeros((batch_size, self.config.controller_dim)))
 
         # Memory — use learnable initial memory if available, else random
         if self._initial_memory is not None:
@@ -1294,16 +1294,16 @@ class NTMCell(keras.layers.Layer):
 
         # Read Vectors
         for _ in range(self.config.num_read_heads):
-            states.append(ops.zeros((batch_size, self.config.memory_dim)))
+            states.append(keras.ops.zeros((batch_size, self.config.memory_dim)))
 
         # Read Weights (uniform)
         uniform_weight = keras.ops.ones((1, self.config.memory_size)) / self.config.memory_size
         for _ in range(self.config.num_read_heads):
-            states.append(ops.broadcast_to(uniform_weight, (batch_size, self.config.memory_size)))
+            states.append(keras.ops.broadcast_to(uniform_weight, (batch_size, self.config.memory_size)))
 
         # Write Weights (uniform)
         for _ in range(self.config.num_write_heads):
-            states.append(ops.broadcast_to(uniform_weight, (batch_size, self.config.memory_size)))
+            states.append(keras.ops.broadcast_to(uniform_weight, (batch_size, self.config.memory_size)))
 
         return states
 
@@ -1332,8 +1332,8 @@ class NTMCell(keras.layers.Layer):
         config.update(
             {
                 "config": self.config.to_dict(),
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
@@ -1402,8 +1402,8 @@ class NeuralTuringMachine(BaseNTM):
 
         self.return_sequences = return_sequences
         self.return_state = return_state
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self.ntm_cell = NTMCell(
@@ -1414,14 +1414,14 @@ class NeuralTuringMachine(BaseNTM):
             name="ntm_cell",
         )
 
-        self.rnn = layers.RNN(
+        self.rnn = keras.layers.RNN(
             self.ntm_cell,
             return_sequences=return_sequences,
             return_state=return_state,
             name="ntm_rnn",
         )
 
-        self.output_projection = layers.Dense(
+        self.output_projection = keras.layers.Dense(
             output_dim,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
@@ -1580,8 +1580,8 @@ class NeuralTuringMachine(BaseNTM):
             {
                 "return_sequences": self.return_sequences,
                 "return_state": self.return_state,
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),

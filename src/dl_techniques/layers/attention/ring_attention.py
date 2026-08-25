@@ -692,7 +692,7 @@ class RingAttention(keras.layers.Layer):
                 # Compute attention scores for this block pair
                 # (batch, num_heads, q_block_size, head_dim) @ (batch, num_heads, head_dim, kv_block_size)
                 # -> (batch, num_heads, q_block_size, kv_block_size)
-                scores = ops.matmul(q_block, ops.transpose(k_block, (0, 1, 3, 2)))
+                scores = keras.ops.matmul(q_block, keras.ops.transpose(k_block, (0, 1, 3, 2)))
 
                 # Apply attention mask if provided
                 #
@@ -720,7 +720,7 @@ class RingAttention(keras.layers.Layer):
                 # other adoption in the package.
                 if attention_mask is not None:
                     # Extract relevant portion of mask for these blocks
-                    if len(ops.shape(attention_mask)) == 2:
+                    if len(keras.ops.shape(attention_mask)) == 2:
                         # (batch, seq_len) key-padding -> slice the KEY axis only
                         # and expand to (batch, 1, 1, kv_block_size). The two size-1
                         # axes broadcast over heads and over the query block inside

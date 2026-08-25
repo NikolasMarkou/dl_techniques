@@ -240,10 +240,10 @@ class RPCAttention(keras.layers.Layer):
             svd_threshold: float = 1.0,
             qkv_bias: bool = False,
             dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             probability_type: str = "softmax",
             probability_config: Optional[Dict[str, Any]] = None,
             qk_norm_type: Optional[str] = None,
@@ -289,12 +289,12 @@ class RPCAttention(keras.layers.Layer):
         self.svd_threshold = svd_threshold
         self.qkv_bias = qkv_bias
         self.dropout_rate = dropout_rate
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         # Normalize regularizers via regularizers.get() so str/dict/object/None
         # all round-trip uniformly through regularizers.serialize() in get_config.
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -319,7 +319,7 @@ class RPCAttention(keras.layers.Layer):
 
         # Create sub-layers in __init__
         # Q, K, V projection layer
-        self.to_qkv = layers.Dense(
+        self.to_qkv = keras.layers.Dense(
             3 * dim,
             use_bias=qkv_bias,
             kernel_initializer=self.kernel_initializer,
@@ -330,7 +330,7 @@ class RPCAttention(keras.layers.Layer):
         )
 
         # Output projection layer
-        self.to_out = layers.Dense(
+        self.to_out = keras.layers.Dense(
             dim,
             use_bias=qkv_bias,
             kernel_initializer=self.kernel_initializer,
@@ -342,7 +342,7 @@ class RPCAttention(keras.layers.Layer):
 
         # Dropout layer
         if dropout_rate > 0.0:
-            self.dropout = layers.Dropout(dropout_rate)
+            self.dropout = keras.layers.Dropout(dropout_rate)
         else:
             self.dropout = None
 
@@ -416,7 +416,7 @@ class RPCAttention(keras.layers.Layer):
         :return: Soft-thresholded tensor.
         :rtype: keras.KerasTensor
         """
-        return ops.sign(x) * ops.maximum(ops.abs(x) - threshold, 0.0)
+        return keras.ops.sign(x) * keras.ops.maximum(keras.ops.abs(x) - threshold, 0.0)
 
     def _nuclear_norm_minimization(
             self,
@@ -436,25 +436,25 @@ class RPCAttention(keras.layers.Layer):
         # Perform SVD
         # Note: keras.ops.svd returns (u, s, v)
         # For TF backend, v corresponds to V^H (adjoint of right singular vectors)
-        u, s, v = ops.svd(matrix, full_matrices=False)
+        u, s, v = keras.ops.svd(matrix, full_matrices=False)
 
         # Apply soft thresholding to singular values
-        s_thresholded = ops.maximum(s - threshold, 0.0)
+        s_thresholded = keras.ops.maximum(s - threshold, 0.0)
 
         # Reconstruct low-rank matrix
         # Need to construct a batch of diagonal matrices from s_thresholded
         # s_thresholded is (B, K)
         # We need s_diag to be (B, K, K)
 
-        k = ops.shape(s)[-1]
-        eye = ops.eye(k, dtype=s.dtype)
+        k = keras.ops.shape(s)[-1]
+        eye = keras.ops.eye(k, dtype=s.dtype)
 
         # Broadcasting: (B, K, 1) * (1, K, K) -> (B, K, K)
-        s_diag = ops.expand_dims(s_thresholded, axis=-1) * ops.expand_dims(eye, axis=0)
+        s_diag = keras.ops.expand_dims(s_thresholded, axis=-1) * keras.ops.expand_dims(eye, axis=0)
 
         # Reconstruct: U @ S @ V^H
         # Since v is already V^H in Keras/TF, we use it directly
-        low_rank = ops.matmul(ops.matmul(u, s_diag), v)
+        low_rank = keras.ops.matmul(keras.ops.matmul(u, s_diag), v)
 
         return low_rank
 
@@ -473,16 +473,16 @@ class RPCAttention(keras.layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Get shape info
-        shape = ops.shape(attention_matrix)
+        shape = keras.ops.shape(attention_matrix)
         seq_len = shape[2]
 
         # Reshape to (Batch * Heads, Seq, Seq) for vectorized SVD
         # We use -1 for the batch dimension to handle symbolic shapes
-        flat_matrix = ops.reshape(attention_matrix, (-1, seq_len, seq_len))
+        flat_matrix = keras.ops.reshape(attention_matrix, (-1, seq_len, seq_len))
 
         # Initialize components
-        L_flat = ops.zeros_like(flat_matrix)
-        S_flat = ops.zeros_like(flat_matrix)
+        L_flat = keras.ops.zeros_like(flat_matrix)
+        S_flat = keras.ops.zeros_like(flat_matrix)
 
         # Alternating minimization
         for _ in range(self.max_pcp_iter):
@@ -502,8 +502,8 @@ class RPCAttention(keras.layers.Layer):
             # Note: Early stopping removed for Graph mode compatibility
 
         # Reshape back to (Batch, Num_Heads, Seq, Seq)
-        L = ops.reshape(L_flat, shape)
-        S = ops.reshape(S_flat, shape)
+        L = keras.ops.reshape(L_flat, shape)
+        S = keras.ops.reshape(S_flat, shape)
 
         return L, S
 
@@ -530,7 +530,7 @@ class RPCAttention(keras.layers.Layer):
         """
         # Compute attention scores
         # Shape: (batch, num_heads, seq_len, seq_len)
-        attention_scores = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
+        attention_scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 1, 3, 2]))
         attention_scores = attention_scores * self.attention_scale
 
         # The dtype the scores arrive in, captured BEFORE any mask-driven promotion.
@@ -547,11 +547,11 @@ class RPCAttention(keras.layers.Layer):
 
             # Case 1: Mask is (batch, seq_len) -> Expand to (batch, 1, 1, seq_len)
             if len(mask.shape) == 2:
-                mask = ops.expand_dims(mask, axis=1)
-                mask = ops.expand_dims(mask, axis=1)
+                mask = keras.ops.expand_dims(mask, axis=1)
+                mask = keras.ops.expand_dims(mask, axis=1)
             # Case 2: Mask is (batch, seq_len, seq_len) -> Expand to (batch, 1, seq_len, seq_len)
             elif len(mask.shape) == 3:
-                mask = ops.expand_dims(mask, axis=1)
+                mask = keras.ops.expand_dims(mask, axis=1)
 
             # The keep predicate is spelled `mask != 0` because THIS site spells
             # masking `mask == 0` (every multiply-form sibling instead treats a
@@ -605,7 +605,7 @@ class RPCAttention(keras.layers.Layer):
             # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
             attention_scores = apply_attention_mask(
                 attention_scores,
-                ops.not_equal(mask, 0),
+                keras.ops.not_equal(mask, 0),
                 rescue_axis=(self.probability_config or {}).get("axis", -1),
             )
 
@@ -648,14 +648,14 @@ class RPCAttention(keras.layers.Layer):
         # unchanged: an fp16 forward with NO mask hits the missing `Svd[T=DT_HALF]`
         # kernel, because nothing promotes it.
         # See decisions.md D-005 (plan-2026-07-27T183600-b4ef45f0).
-        robust_attention_scores = ops.cast(L + S, scores_dtype)
+        robust_attention_scores = keras.ops.cast(L + S, scores_dtype)
 
         # Apply probability activation to get attention weights
         attention_weights = self.attn_prob(robust_attention_scores)
 
         # Apply attention weights to values
         # Shape: (batch, num_heads, seq_len, head_dim)
-        attention_output = ops.matmul(attention_weights, v)
+        attention_output = keras.ops.matmul(attention_weights, v)
 
         return attention_output
 
@@ -683,8 +683,8 @@ class RPCAttention(keras.layers.Layer):
             ``(output, attention_weights)``.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # Project to Q, K, V
         # Shape: (batch, seq_len, 3*dim)
@@ -692,19 +692,19 @@ class RPCAttention(keras.layers.Layer):
 
         # Split into Q, K, V
         # Each has shape: (batch, seq_len, dim)
-        q, k, v = ops.split(qkv, 3, axis=-1)
+        q, k, v = keras.ops.split(qkv, 3, axis=-1)
 
         # Reshape to multi-head format
         # Shape: (batch, num_heads, seq_len, head_dim)
         # Shape: (B, N, dim) -> (B, N, H, head_dim) -> (B, H, N, head_dim)  [q, k, v]
-        q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
-        q = ops.transpose(q, (0, 2, 1, 3))
+        q = keras.ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
+        q = keras.ops.transpose(q, (0, 2, 1, 3))
 
-        k = ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k = ops.transpose(k, (0, 2, 1, 3))
+        k = keras.ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k = keras.ops.transpose(k, (0, 2, 1, 3))
 
-        v = ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
-        v = ops.transpose(v, (0, 2, 1, 3))
+        v = keras.ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
+        v = keras.ops.transpose(v, (0, 2, 1, 3))
 
         # Optional Q/K normalization (applied BEFORE the robust scoring loop).
         if self.q_norm is not None:
@@ -727,15 +727,15 @@ class RPCAttention(keras.layers.Layer):
             # whenever a mask is supplied. Reported, not fixed, in this plan.
             # Recompute attention scores for output
             # Shape: (B, H, N, head_dim) @ (B, H, head_dim, N) -> (B, H, N, N)
-            attention_scores = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
+            attention_scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 1, 3, 2]))
             attention_scores = attention_scores * self.attention_scale
             L, S = self._pcp_decomposition(attention_scores)
             attention_weights = self.attn_prob(L + S)
 
         # Reshape back to (batch, seq_len, dim)
         # Shape: (B, H, N, head_dim) -> (B, N, H, head_dim) -> (B, N, dim)
-        attention_output = ops.transpose(attention_output, (0, 2, 1, 3))
-        attention_output = ops.reshape(attention_output, (batch_size, seq_len, self.dim))
+        attention_output = keras.ops.transpose(attention_output, (0, 2, 1, 3))
+        attention_output = keras.ops.reshape(attention_output, (batch_size, seq_len, self.dim))
 
         # Apply output projection
         # Shape: (B, N, dim) -> (B, N, dim)
@@ -776,10 +776,10 @@ class RPCAttention(keras.layers.Layer):
             'svd_threshold': self.svd_threshold,
             'qkv_bias': self.qkv_bias,
             'dropout_rate': self.dropout_rate,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'probability_type': self.probability_type,
             'probability_config': self.probability_config,
             'qk_norm_type': self.qk_norm_type,

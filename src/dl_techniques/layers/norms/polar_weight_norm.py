@@ -305,7 +305,7 @@ class PolarWeightNorm(keras.layers.Layer):
 
         # Sample a seed kernel and encode it -> initial (radius, angles), so the
         # layer starts equivalent to a Dense with the same kernel_initializer.
-        seed_kernel = ops.convert_to_numpy(
+        seed_kernel = keras.ops.convert_to_numpy(
             self.kernel_initializer((fan_in, self.units), dtype="float32")
         )  # (fan_in, units)
         cols = seed_kernel.T.astype("float32")  # (units, fan_in)
@@ -314,14 +314,14 @@ class PolarWeightNorm(keras.layers.Layer):
         dirs = cols / safe[:, None]  # unit directions
         if d > fan_in:
             dirs = np.pad(dirs, ((0, 0), (0, d - fan_in)))
-        _, angles0 = polar_encode(ops.convert_to_tensor(dirs.astype("float32")))
-        angles0 = ops.convert_to_numpy(angles0)  # (units, d-1)
+        _, angles0 = polar_encode(keras.ops.convert_to_tensor(dirs.astype("float32")))
+        angles0 = keras.ops.convert_to_numpy(angles0)  # (units, d-1)
         radius0 = norms.astype("float32")  # (units,)
 
         self.radius = self.add_weight(
             name="radius",
             shape=(self.units,),
-            initializer=lambda shape, dtype=None: ops.convert_to_tensor(
+            initializer=lambda shape, dtype=None: keras.ops.convert_to_tensor(
                 radius0, dtype=dtype or "float32"
             ),
             trainable=True,
@@ -330,7 +330,7 @@ class PolarWeightNorm(keras.layers.Layer):
         self.angles = self.add_weight(
             name="angles",
             shape=(self.units, d - 1),
-            initializer=lambda shape, dtype=None: ops.convert_to_tensor(
+            initializer=lambda shape, dtype=None: keras.ops.convert_to_tensor(
                 angles0, dtype=dtype or "float32"
             ),
             trainable=True,
@@ -375,7 +375,7 @@ class PolarWeightNorm(keras.layers.Layer):
         kernel = self._reconstruct_kernel()
         outputs = keras.ops.matmul(inputs_fp32, kernel)
         if self.use_bias:
-            outputs = keras.ops.add(outputs, ops.cast(self.bias, "float32"))
+            outputs = keras.ops.add(outputs, keras.ops.cast(self.bias, "float32"))
         if self.activation is not None:
             outputs = self.activation(outputs)
         return keras.ops.cast(outputs, inputs.dtype)
