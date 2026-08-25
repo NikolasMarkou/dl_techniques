@@ -481,24 +481,49 @@ class ColBERT(keras.Model):
     def _encode(
         self,
         input_ids: Any,
-        participation_mask: Any,
+        attention_mask: Any,
+        participation_mask: Optional[Any] = None,
         training: Optional[bool] = None,
     ) -> Any:
         """Run the shared encoder and the shared projection.
 
+        The two masks are deliberately DISTINCT tensors, see the anchor below.
+
         :param input_ids: ``(batch, seq_len)`` integer token ids.
         :type input_ids: keras tensor
-        :param participation_mask: ``(batch, seq_len)`` mask, **1 = keep**, used
-            both as the backbone's attention mask and as the projection's
-            mask multiply.
-        :type participation_mask: keras tensor
+        :param attention_mask: ``(batch, seq_len)`` **padding** mask,
+            **1 = visible**, and nothing else. This is what the backbone sees.
+        :type attention_mask: keras tensor
+        :param participation_mask: ``(batch, seq_len)`` mask, **1 = keep**,
+            multiplied onto the projected pre-normalization embeddings and used
+            as the MaxSim candidate set. Defaults to ``attention_mask`` when the
+            caller has no extra filter to apply (the query path).
+        :type participation_mask: Optional[keras tensor]
         :param training: Keras training flag.
         :type training: Optional[bool]
         :return: ``(batch, seq_len, dim)`` L2-normalized embeddings, exactly
-            zero at masked positions.
+            zero at positions ``participation_mask`` zeroes.
         """
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-029
+        # These two masks must stay SEPARATE. Do NOT collapse them back into one
+        # tensor and pass it to both `self.encoder` and `self.projection` -- that
+        # is the exact defect this signature exists to fix. Collapsing them feeds
+        # the punctuation skiplist to the backbone as its ATTENTION mask, which
+        # hides punctuation from every other token's self-attention; the
+        # reference keeps punctuation fully visible as context and removes it
+        # only from the MaxSim candidate set, by multiplying the skiplist onto
+        # the projected pre-normalization embeddings. MEASURED on a random-init
+        # 2-layer `tiny` (10 doc positions, skiplist zeroing 3 and 7): under the
+        # collapsed ordering the KEPT positions' embeddings moved by
+        # max|delta| = 0.0010412931 purely because two OTHER positions were
+        # skiplisted; under this split ordering the same delta is exactly 0.0.
+        # Both pre-existing skiplist guards pass under EITHER ordering, which is
+        # why the collapse shipped -- `test_a_kept_position_is_untouched_by_a
+        # _skiplist_elsewhere` is the guard that pins it. See decisions.md D-029.
+        if participation_mask is None:
+            participation_mask = attention_mask
         encoded = self.encoder(
-            {"input_ids": input_ids, "attention_mask": participation_mask},
+            {"input_ids": input_ids, "attention_mask": attention_mask},
             training=training,
         )
         return self.projection(
@@ -540,7 +565,9 @@ class ColBERT(keras.Model):
         -- both 1 = keep -- so a punctuation position is zeroed exactly like a
         padding position, before the projection normalizes. A zeroed position
         has an all-zero embedding and therefore an inner product of exactly 0
-        with every query term.
+        with every query term. The backbone, however, still receives the plain
+        ``attention_mask``: a skiplisted punctuation token stays fully visible
+        as attention CONTEXT to its neighbours, as in the reference. See D-029.
 
         :param inputs: Either a ``(batch, doc_len)`` id tensor, or a mapping
             with ``input_ids`` and optional ``attention_mask`` /
@@ -556,7 +583,12 @@ class ColBERT(keras.Model):
             inputs.get("skiplist_mask") if isinstance(inputs, dict) else None
         )
         participation = self._participation(attention_mask, skiplist_mask)
-        return self._encode(input_ids, participation, training=training)
+        return self._encode(
+            input_ids,
+            attention_mask,
+            participation_mask=participation,
+            training=training,
+        )
 
     @staticmethod
     def _participation(attention_mask: Any, skiplist_mask: Optional[Any]) -> Any:
@@ -684,7 +716,12 @@ class ColBERT(keras.Model):
         )
 
         query_embeddings = self._encode(query_ids, query_mask, training=training)
-        doc_embeddings = self._encode(doc_ids, doc_participation, training=training)
+        doc_embeddings = self._encode(
+            doc_ids,
+            doc_mask,
+            participation_mask=doc_participation,
+            training=training,
+        )
 
         # DECISION plan-2026-08-25T121346-c71fc3ad/D-012
         # The output STRUCTURE is fixed here and resolved ONCE, at the return.

@@ -17,6 +17,9 @@ Injection                                               Named assertion that fir
     ``ColBERTProjection`` instead of the shared one      -- "the document path must reuse the query projection"
 (c) drop the skiplist mask on the document path          ``test_a_skiplisted_document_position_is_zeroed``
     (``_participation`` returns ``attention_mask``)      -- "a skiplisted position must project to exactly zero"
+(d) re-collapse the two document masks into one          ``test_a_kept_position_is_untouched_by_a_skiplist_elsewhere``
+    (``_encode`` passes ``participation_mask`` to        -- "a kept document position moved because a DIFFERENT
+    ``self.encoder`` as its ``attention_mask``)             position was skiplisted"
 ======================================================  ========================================================
 
 Each injection was verified to redden its OWN named assertion -- the message
@@ -24,7 +27,10 @@ quoted above is the one pytest printed, not a paraphrase -- and each was
 restored and re-verified green (66 passed / 66 collected for the directory).
 Injection (a) additionally reddens six further tests, which is expected: a model
 with zero materialized weights fails every claim that needs weights. Injections
-(b) and (c) are narrow: (b) reddens two tests, (c) exactly one.
+(b) and (c) are narrow: (b) reddens two tests, (c) exactly one. Injection (d),
+added with the D-029 mask split, reddens exactly one -- and, crucially, reddens
+NEITHER of the two pre-existing skiplist guards, which is the whole reason it
+had to be written.
 """
 
 import os
@@ -453,6 +459,89 @@ def test_a_skiplisted_position_cannot_win_the_max_even_when_it_is_the_best_match
     assert score_masked < score_unmasked, (
         "the masked position won the max anyway: masked score "
         f"{score_masked} is not below the unmasked {score_unmasked}"
+    )
+
+
+def test_a_kept_position_is_untouched_by_a_skiplist_elsewhere():
+    """The skiplist must NOT reach the backbone's attention mask (D-029).
+
+    This is the ordering guard the two tests above cannot be. Both of them
+    assert only that the FILTERED position is zero, and both pass identically
+    whether the skiplist is fed to ``self.encoder`` as its attention mask (the
+    collapsed ordering this port shipped at step 3) or applied only after
+    encoding (the reference ordering). The axis that separates the two is a
+    KEPT, non-punctuation position: under the collapsed ordering, skiplisting
+    positions 3 and 7 hides them from every other token's self-attention and
+    therefore MOVES the contextual embedding of positions 0-2, 4-6, 8-9.
+
+    MEASURED 2026-08-25 on this geometry with ``num_layers=2``: collapsed
+    ordering gives ``max |delta| = 0.0010412931`` at the kept positions; the
+    split ordering gives exactly ``0.0``. The delta grows with depth and with a
+    trained backbone.
+    """
+    model = make_model(num_layers=2)
+    inputs = make_inputs()
+
+    doc_inputs = {
+        "input_ids": inputs[DOC_INPUT_IDS_KEY],
+        "attention_mask": inputs[DOC_ATTENTION_MASK_KEY],
+    }
+
+    skiplist = np.ones((BATCH, DOC_LEN), dtype="int32")
+    skiplist[:, 3] = 0
+    skiplist[:, 7] = 0
+    skiplisted_inputs = dict(doc_inputs)
+    skiplisted_inputs["skiplist_mask"] = skiplist
+
+    without = np.asarray(
+        keras.ops.convert_to_numpy(
+            model.encode_document(doc_inputs, training=False)
+        )
+    )
+    with_skiplist = np.asarray(
+        keras.ops.convert_to_numpy(
+            model.encode_document(skiplisted_inputs, training=False)
+        )
+    )
+
+    kept = [i for i in range(DOC_LEN) if i not in (3, 7)]
+
+    # Control: without the skiplist those positions are alive, so the zero
+    # below is a consequence of the mask and not of a dead forward pass.
+    assert np.max(np.abs(without[:, [3, 7], :])) > 0.0, (
+        "control failed: positions 3 and 7 are already zero WITHOUT the "
+        "skiplist, so this test would pass on a dead model"
+    )
+    assert np.max(np.abs(without[:, kept, :])) > 0.0, (
+        "control failed: the kept positions are all zero, so an equality "
+        "against them proves nothing"
+    )
+
+    np.testing.assert_allclose(
+        with_skiplist[:, kept, :],
+        without[:, kept, :],
+        atol=0.0,
+        rtol=0,
+        err_msg=(
+            "a kept document position moved because a DIFFERENT position was "
+            "skiplisted: the punctuation skiplist is reaching the backbone's "
+            "attention mask, which the reference never does -- it passes the "
+            "plain padding mask to BERT and applies the skiplist only to the "
+            "projected embeddings. See D-029."
+        ),
+    )
+
+    # And the filtered positions are still exactly zero, i.e. the split did not
+    # silently disable the skiplist it was meant to relocate.
+    np.testing.assert_allclose(
+        with_skiplist[:, [3, 7], :],
+        np.zeros((BATCH, 2, TINY["dim"])),
+        atol=0.0,
+        rtol=0,
+        err_msg=(
+            "the skiplist stopped reaching the projection's mask multiply: a "
+            "skiplisted position must still project to exactly zero"
+        ),
     )
 
 
