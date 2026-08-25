@@ -138,12 +138,24 @@ class TestGlobalLayersArePositionAware:
                        num_heads=4, intermediate_size=48, **{field: value})
 
     def test_config_round_trip_carries_the_rope_fields(self):
+        # `local_attention_window_size=2` is not incidental. With the default
+        # `global_attention_interval=3` and `num_layers=1`, layer 0 is a LOCAL
+        # layer, so it builds `window` attention at the shipped default of 128.
+        # That layer's relative-position machinery is O(window_size**4) -- a
+        # 128-square window costs ~5 GB at CONSTRUCTION time, and this test
+        # builds two models (the original and the `from_config` clone), so it
+        # peaked at 6.7 GB before this argument was added. Nothing here asserts
+        # anything about the window, so the shipped size buys no coverage:
+        # `test_shipped_window_size.py` is the module that pins it, and it pays
+        # the cost deliberately. Keep this small.
         model = ModernBERT(vocab_size=VOCAB, hidden_size=32, num_layers=1,
                            num_heads=4, intermediate_size=48,
+                           local_attention_window_size=2,
                            max_position_embeddings=256, global_rope_theta=5000.0)
         clone = ModernBERT.from_config(model.get_config())
         assert clone.max_position_embeddings == 256
         assert clone.global_rope_theta == pytest.approx(5000.0)
+        assert clone.local_attention_window_size == 2
 
 
 class TestLocalWindowAdjacencyIsSynthetic:
