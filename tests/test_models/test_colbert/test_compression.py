@@ -554,3 +554,202 @@ def test_the_codec_is_not_a_keras_layer() -> None:
         "numpy-only index-time component"
     )
     assert compression_module.__name__ in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# 6. End-to-end composition: encoder -> codec -> MaxSim
+# ---------------------------------------------------------------------------
+
+# Geometry of the compose guard below. Stated here, and named in the docstring,
+# because every number in that docstring was measured at exactly this geometry
+# and is meaningless without it.
+COMPOSE_SEEDS = (0, 1, 2, 3, 4, 5, 6, 7)
+COMPOSE_NUM_DOCS = 8
+COMPOSE_DOC_LEN = 48
+COMPOSE_NUM_CENTROIDS = 16
+
+# Bound on the RELATIVE MaxSim drift, per bit width, derived from the measured
+# population in the docstring below with a ~2x margin. Relative rather than
+# absolute because a MaxSim score is a sum over ``query_maxlen`` terms and so
+# scales with the query length the test happens to use.
+COMPOSE_RELATIVE_DRIFT_BOUND = {1: 0.10, 2: 0.08}
+
+
+def test_maxsim_scores_survive_a_round_trip_through_the_index_time_codec() -> None:
+    """The codec's reason to exist, composed end to end, on real embeddings.
+
+    Every other test in this module drives the codec with **synthetic** vectors
+    and never touches MaxSim. This one runs the whole index-time path that the
+    codec exists for::
+
+        ColBERT.from_variant("tiny").encode_document(...)
+            -> ResidualCompressionCodec.fit / encode / decode
+            -> MaxSimScorer, against an UNCOMPRESSED query
+
+    and compares the MaxSim score of each document computed against its decoded
+    embeddings with the score computed against its original ones, at both
+    supported bit widths.
+
+    **What this measures, and what it does not (H-3).** No pretrained ColBERT
+    weights exist anywhere in this repository, so the encoder here is randomly
+    initialized. Every number below is therefore a **score-stability under
+    compression** number -- how far a lossy index moves a score relative to an
+    exact one -- and is **not**, and must never be read as, a retrieval-quality
+    number. Nothing here says the ranking it produces is good; it says the codec
+    perturbs whatever ranking the encoder produces by a bounded amount.
+
+    **MEASURED POPULATION.** 8 seeds (``COMPOSE_SEEDS`` = 0..7), one
+    independently initialized ``tiny`` encoder each, ``COMPOSE_NUM_DOCS`` = 8
+    documents of ``COMPOSE_DOC_LEN`` = 48 tokens against one 32-token query,
+    ``COMPOSE_NUM_CENTROIDS`` = 16. Produced 2026-08-25 on GPU 1 by
+    ``plans/plan-2026-08-25T165753-704a9bcb/`` step 2 with the standalone
+    script form of this test body, invoked as::
+
+        CUDA_VISIBLE_DEVICES=1 .venv/bin/python measure_codec_compose.py
+
+    Max over the 8 documents of ``|score(decoded) - score(original)|``, then per
+    seed, absolute and as a fraction of the original score:
+
+    ==== ================== ================== ================== ==================
+    seed nbits=1 abs        nbits=1 rel        nbits=2 abs        nbits=2 rel
+    ==== ================== ================== ================== ==================
+    0    0.459528           0.022214           0.287338           0.013486
+    1    0.793819           0.038107           0.657005           0.030867
+    2    0.739096           0.033299           0.600113           0.027757
+    3    0.524366           0.024562           0.420313           0.019688
+    4    0.829851           0.039862           0.574581           0.026862
+    5    0.415518           0.020305           0.412127           0.019818
+    6    1.092064           0.050728           0.803324           0.037316
+    7    0.510862           0.024132           0.374838           0.017707
+    ==== ================== ================== ================== ==================
+
+    Population maxima: **nbits=1 -> 1.092064 absolute / 0.050728 relative**;
+    **nbits=2 -> 0.803324 absolute / 0.037316 relative**. The asserted bounds
+    are ``COMPOSE_RELATIVE_DRIFT_BOUND`` = 0.10 at 1 bit and 0.08 at 2 bits --
+    each roughly **2x** its measured maximum, so an ordinary seed-to-seed swing
+    cannot redden this guard while a broken decode moves the score by an order
+    of magnitude and does.
+
+    **TOP-1 IS DELIBERATELY NOT ASSERTED, AT EITHER BIT WIDTH.** The same 8
+    seeds were checked for it and it does **not** hold: top-1 was preserved on
+    3 of 8 seeds at ``nbits=1`` and 4 of 8 at ``nbits=2``, and the full
+    8-document ordering was preserved on **0 of 8** seeds at both. That is the
+    expected consequence of H-3 rather than a codec defect: with a randomly
+    initialized encoder the 8 documents carry no ranking signal, so their scores
+    are near-ties -- the whole inter-document score spread was about 0.84 at
+    seed 0 (``[20.6865, 21.5226]``), which is **smaller than the 1.092
+    compression drift measured at seed 6**. A guard asserting top-1 preservation
+    here would be asserting something measurably false and would ship flaky. The
+    honest guard is asymmetric: the score delta is bounded and is asserted; the
+    ranking is not preserved and is not asserted.
+
+    Also recorded, not asserted: the 2-bit drift was below the 1-bit drift on
+    all 8 seeds, but at seed 5 by only 0.0034 absolute -- too thin a margin to
+    make a load-bearing assertion out of. The strict bit-width property is
+    already guarded, on reconstruction error rather than on MaxSim, by
+    ``test_two_bits_reconstruct_strictly_better_than_one_bit``.
+
+    RED-PROOF (injection (d), 2026-08-25). ``ResidualCompressionCodec.decode``
+    was replaced in place in ``src/`` -- never a scratch copy, because
+    ``pyproject.toml``'s ``pythonpath = ["src"]`` overrides ``PYTHONPATH`` and a
+    copy reads a false green -- with a stub returning
+    ``np.zeros((len(codes), self.dim))``. RED: this test, at the named
+    assertion "compression moved a MaxSim score by ... of its uncompressed
+    value at nbits=1", observed relative drift 1.000000 against the 0.10 bound.
+    Restored from a ``cp`` backup and verified byte-identical with ``diff -q``.
+
+    This test does not weaken
+    ``test_no_codec_symbol_is_reachable_from_the_model_or_the_losses``: that
+    guard AST-parses ``model.py`` and ``colbert_loss.py``, so its subject is the
+    production source's call graph, not any test module's imports. Composition
+    at index time, in a caller, is exactly what the boundary licenses.
+    """
+    import keras
+
+    from dl_techniques.models.language.colbert.components import MaxSimScorer
+    from dl_techniques.models.language.colbert.model import ColBERT
+
+    for seed in COMPOSE_SEEDS:
+        keras.utils.set_random_seed(seed)
+        model = ColBERT.from_variant("tiny")
+        rng = np.random.default_rng(seed)
+
+        # Fully unmasked documents: a padded position is zeroed by the
+        # participation mask, and an all-zero row has no direction for a
+        # nearest-centroid rule to find. Padding behaviour is guarded
+        # elsewhere; this test is about the codec round trip.
+        doc_ids = rng.integers(
+            0, model.vocab_size, (COMPOSE_NUM_DOCS, COMPOSE_DOC_LEN)
+        ).astype("int32")
+        query_ids = rng.integers(
+            0, model.vocab_size, (1, model.query_maxlen)
+        ).astype("int32")
+
+        documents = np.asarray(
+            keras.ops.convert_to_numpy(
+                model.encode_document(
+                    {
+                        "input_ids": doc_ids,
+                        "attention_mask": np.ones(
+                            (COMPOSE_NUM_DOCS, COMPOSE_DOC_LEN), dtype="int32"
+                        ),
+                    },
+                    training=False,
+                )
+            ),
+            dtype=np.float64,
+        )
+        query = np.asarray(
+            keras.ops.convert_to_numpy(
+                model.encode_query(
+                    {
+                        "input_ids": query_ids,
+                        "attention_mask": np.ones(
+                            (1, model.query_maxlen), dtype="int32"
+                        ),
+                    },
+                    training=False,
+                )
+            ),
+            dtype=np.float64,
+        )
+
+        scorer = MaxSimScorer(mask_value=model.mask_value)
+        queries = np.repeat(query, COMPOSE_NUM_DOCS, axis=0)
+        uncompressed = np.asarray(
+            keras.ops.convert_to_numpy(scorer(queries, documents)), dtype=np.float64
+        )
+        assert np.all(np.abs(uncompressed) > 0.0), (
+            f"seed {seed}: an uncompressed MaxSim score is exactly zero, so the "
+            "relative drift below would be undefined and the guard vacuous"
+        )
+
+        flat = documents.reshape(-1, model.dim)
+        for nbits in SUPPORTED_NBITS:
+            codec = ResidualCompressionCodec(
+                dim=model.dim,
+                nbits=nbits,
+                num_centroids=COMPOSE_NUM_CENTROIDS,
+                seed=seed,
+            ).fit(flat)
+            decoded = codec.decode(*codec.encode(flat)).reshape(documents.shape)
+
+            compressed = np.asarray(
+                keras.ops.convert_to_numpy(scorer(queries, decoded)),
+                dtype=np.float64,
+            )
+            assert np.all(np.isfinite(compressed)), (
+                f"seed {seed}, nbits={nbits}: scoring against decoded "
+                f"embeddings produced a non-finite MaxSim score: {compressed}"
+            )
+
+            relative = float(
+                np.max(np.abs(compressed - uncompressed) / np.abs(uncompressed))
+            )
+            bound = COMPOSE_RELATIVE_DRIFT_BOUND[nbits]
+            assert relative <= bound, (
+                f"compression moved a MaxSim score by {relative:.6f} of its "
+                f"uncompressed value at nbits={nbits} (seed {seed}), above the "
+                f"{bound} bound derived from an 8-seed population whose maximum "
+                f"was 0.050728 at nbits=1 and 0.037316 at nbits=2"
+            )
