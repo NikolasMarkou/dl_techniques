@@ -997,3 +997,82 @@ def test_a_fully_masked_document_scores_the_exact_sentinel_under_xla():
         )
     finally:
         keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# 11. base/large variant geometry
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", ("base", "large"))
+def test_the_base_and_large_rows_keep_their_reference_backbone_geometry(variant):
+    """Structural regression guard over the two full-size ``MODEL_VARIANTS`` rows.
+
+    Both rows are internally consistent today -- ``intermediate_size /
+    hidden_size`` is exactly 4.0x and ``hidden_size % num_heads == 0`` for
+    every row in the table -- so this test finds nothing at the commit that
+    adds it. Its subject is a FUTURE edit to those rows: ``base`` is
+    BERT-Base's backbone and ``large`` is BERT-Large's, and a hand-tweaked
+    number that breaks the head divisor or the 4x feed-forward ratio would
+    otherwise only surface as a construction error in somebody's training run.
+
+    The build shape is fixed and stated: ``{query_input_ids: (None, 32),
+    doc_input_ids: (None, 64)}``. It is written here rather than taken from
+    the row's ``doc_maxlen`` because these are the two largest variants and
+    construction alone is what is being guarded -- there is no forward pass.
+
+    No exact ``count_params()`` is asserted, deliberately. That figure tracks
+    the build shapes the caller happens to pass, not the variant row: the same
+    ``base`` model measures 108,989,952 parameters at document length 64 and
+    162,561,792 at a longer one, because the backbone's position-embedding
+    table is sized by the build. Pinning either number would pin whatever the
+    implementation produced on the day this was written. The geometry
+    invariants below are build-shape independent, and they are what a bad row
+    edit actually violates.
+    """
+    row = ColBERT.MODEL_VARIANTS[variant]
+
+    # Asserted from the row BEFORE construction, so a bad row is reported as a
+    # geometry violation naming the offending numbers rather than as whatever
+    # the backbone happens to raise first.
+    assert row["hidden_size"] % row["num_heads"] == 0, (
+        f"the '{variant}' row cannot split its hidden size across its heads: "
+        f"hidden_size={row['hidden_size']} is not divisible by "
+        f"num_heads={row['num_heads']}"
+    )
+    assert row["intermediate_size"] == 4 * row["hidden_size"], (
+        f"the '{variant}' row broke the 4x feed-forward ratio every BERT-family "
+        f"backbone in this table uses: intermediate_size="
+        f"{row['intermediate_size']}, hidden_size={row['hidden_size']}"
+    )
+
+    model = ColBERT.from_variant(variant)
+    try:
+        model.build(
+            {
+                QUERY_INPUT_IDS_KEY: (None, 32),
+                DOC_INPUT_IDS_KEY: (None, 64),
+            }
+        )
+
+        assert len(model.encoder.encoder_layers) == row["num_layers"], (
+            f"the '{variant}' backbone materialized "
+            f"{len(model.encoder.encoder_layers)} transformer layers, but the "
+            f"row declares num_layers={row['num_layers']}"
+        )
+        assert model.projection.dense.units == row["dim"], (
+            f"the '{variant}' projection emits "
+            f"{model.projection.dense.units} dimensions, not the row's "
+            f"dim={row['dim']}"
+        )
+        assert tuple(model.projection.dense.kernel.shape) == (
+            row["hidden_size"],
+            row["dim"],
+        ), (
+            "the projection kernel does not map the backbone's hidden size to "
+            f"the retrieval dimension: got "
+            f"{tuple(model.projection.dense.kernel.shape)}, expected "
+            f"({row['hidden_size']}, {row['dim']})"
+        )
+    finally:
+        del model
