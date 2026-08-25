@@ -21,12 +21,20 @@ awkward to train.
 
 Hybrid local/global attention is the paper's cost change, and it is where the
 design does something non-obvious. Rather than making every layer cheap, the
-stack alternates: most layers use windowed local attention over
-`local_attention_window_size` tokens, and every `global_attention_interval`-th
-layer uses full global attention. In the paper the local layers do the bulk of
-the work at linear cost, while the periodic global layers stitch the windows
-together so information still crosses the whole sequence -- a token pair `L`
-apart is connected after one global layer, not after `L / window` local ones.
+stack alternates: most layers use a 1-D sliding band spanning
+`local_attention_window_size` tokens (`local_attention_window_size // 2` either
+side of each query), and every `global_attention_interval`-th layer uses full
+global attention. In the paper the local layers do the bulk of the work at
+linear cost, while the periodic global layers stitch the windows together so
+information still crosses the whole sequence -- a token pair `L` apart is
+connected after one global layer, not after `L / window` local ones.
+
+One honest caveat about the cost half of that claim, as implemented here: the
+band is applied as a dense `N x N` mask over standard attention, so a local
+layer is `O(N^2)`, the same order as a global one. It removes the wrong
+ADJACENCY (see the `window_band` history in the class docstring), not the
+quadratic term; a genuinely linear banded kernel is not reachable from
+`keras.ops`. The modelling behaviour is the paper's; the speedup is not.
 
 References:
     - Warner et al., 2024. Smarter, Better, Faster, Longer: A Modern
@@ -69,7 +77,7 @@ class ModernBERT(keras.Model):
 
     This model refactors the original BERT architecture to include modern
     techniques such as Pre-Layer Normalization, GeGLU activations, and a
-    hybrid attention mechanism combining efficient windowed attention with
+    hybrid attention mechanism combining 1-D banded local attention with
     periodic global attention. It is designed for high performance and
     configurability.
 
@@ -81,19 +89,22 @@ class ModernBERT(keras.Model):
     none -- it sums word and token-type embeddings only. Global layers get
     theirs from RoPE, applied to queries and keys inside the attention layer
     (``group_query`` with ``num_kv_heads == num_heads``, i.e. plain multi-head
-    attention plus RoPE). Local layers get theirs from a learnable relative
-    position bias over a **synthetic 2-D grid**: ``window`` attention reshapes
-    the ``(B, L, D)`` sequence into a ``ceil(sqrt(L))`` square grid and attends
-    within ``local_attention_window_size``-square blocks of it, so a local
-    layer's neighbourhood is a set of strided runs of tokens rather than a
-    contiguous 1-D window, and for every ``L <= local_attention_window_size**2``
-    (16384 at the default) it degenerates to attention over the whole padded
-    grid. Per variant, measured: ``base`` and ``large`` (window 128) never
-    partition at any admissible length, while ``tiny`` (window 64) partitions
-    into four windows for ``4097 <= L <= 8192`` and only there.
-    That is a real deviation from the paper's 1-D sliding window; it is
-    documented rather than fixed because no 1-D sliding-window attention layer
-    exists in ``layers/attention/``.
+    attention plus RoPE). Local layers carry **no positional term of their own**:
+    they use ``window_band`` attention, a 1-D symmetric sliding band in which
+    query ``i`` attends key ``j`` iff ``abs(i - j) <= local_attention_window_size // 2``.
+    That is the paper's local layer, and it matches upstream exactly --
+    ``transformers/modular_modernbert.py`` sets
+    ``sliding_window = local_attention // 2``, so ``local_attention_window_size=128``
+    means "64 tokens either side", a 128-token span. There is no grid folding,
+    no square padding and no relative position bias (a 2-D tile concept the band
+    layout refuses); position reaches the local layers only through the residual
+    stream from the global layers' RoPE.
+
+    Until 2026-08-25 the local layers used ``window`` attention instead, which
+    folds the ``(B, L, D)`` sequence into a ``ceil(sqrt(L))`` square grid and
+    attends within ``local_attention_window_size``-SQUARE blocks -- a synthetic
+    adjacency text does not have, degenerate to whole-sequence attention for
+    every ``L <= local_attention_window_size**2``. Do not restore it.
 
     **Architecture Overview:**
 
@@ -116,7 +127,7 @@ class ModernBERT(keras.Model):
                         ▼
         ┌──────────────────────────────────────┐
         │  TransformerLayer₁  (Pre-LN)         │
-        │    window attention → GeGLU FFN      │
+        │    band attention → GeGLU FFN        │
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
@@ -156,15 +167,17 @@ class ModernBERT(keras.Model):
 
         variant   hidden  layers  heads  interm.  interval  window
         tiny        256      4      4      384       2        64
-        base        768     22     12     1152       1       128
-        large      1024     28     16     2624       1       128
+        base        768     22     12     1152       3       128
+        large      1024     28     16     2624       3       128
 
         base 160.6M / large 409.5M parameters (measured).
-        interval == 1 at base and large is a REPAIR, not a tuning
-        choice: at the inherited 3 both raised ResourceExhaustedError
-        at a sequence length of EIGHT. See the D-135 anchor.
-        `tiny` keeps the hybrid schedule and a real 4x saving above
-        L = 4096.
+        `window` is the local band's FULL span in tokens; the layer
+        receives half of it as the half-width.
+        interval == 1 at base/large was a REPAIR for the old square-
+        block local layer, which raised ResourceExhaustedError at a
+        sequence length of EIGHT (D-135). The 1-D band removed that
+        cause, so the paper's interval of 3 is restored; the restore
+        is pinned by measurement in the D-135 anchors below.
 
     :param vocab_size: Size of the vocabulary. Defaults to 50368.
     :type vocab_size: int
@@ -209,14 +222,16 @@ class ModernBERT(keras.Model):
         Defaults to False.
     :type use_bias: bool
     :param global_attention_interval: Interval for inserting a global attention
-        layer. E.g., 3 means every 3rd layer is global. Defaults to 3. Note the
-        shipped ``base`` and ``large`` presets override this to 1; see the
-        D-135 anchor in ``_build_architecture``.
+        layer. E.g., 3 means every 3rd layer is global. Defaults to 3, and all
+        three shipped presets now use a hybrid schedule (``tiny`` 2,
+        ``base``/``large`` 3); see the D-135 anchors in ``MODEL_VARIANTS`` for
+        the measurement that restored 3.
     :type global_attention_interval: int
-    :param local_attention_window_size: Window size for local (windowed)
-        attention layers. This is the edge length of a **square spatial**
-        window over the synthetic grid described above, not a 1-D token
-        window. Defaults to 128.
+    :param local_attention_window_size: The local band's **full span in
+        tokens**, exactly as upstream's ``local_attention``: a token attends
+        ``local_attention_window_size // 2`` tokens either side. The
+        ``window_band`` layer takes that half-width, so this value is halved on
+        the way in. It is NOT a square spatial edge length. Defaults to 128.
     :type local_attention_window_size: int
     :param max_position_embeddings: Longest sequence the global layers' RoPE
         tables are precomputed for; a longer input raises. Defaults to 8192.
@@ -301,9 +316,33 @@ class ModernBERT(keras.Model):
             # `local_attention_window_size` is retained and stays reachable via
             # `from_variant("base", global_attention_interval=3)`.
             # See decisions.md D-135.
-            "global_attention_interval": 1,
+            #
+            # SUPERSEDED 2026-08-25 by plan-2026-08-25T053412-0f1fa04f/D-012.
+            # D-135's prohibition was explicitly CONDITIONAL -- "the real fix is
+            # a 1-D sliding-window layer in `layers/attention/`, which does not
+            # exist". It exists now: `WindowAttention(partition_mode='band')`,
+            # reachable as the `'window_band'` registry key, and the local
+            # branch in `_build_architecture` selects it. The condition is gone,
+            # so `global_attention_interval` returns to the paper's `3`.
+            # PINNED BY MEASUREMENT, the way D-135 pinned its own claim
+            # (CUDA_VISIBLE_DEVICES=1, the same 12 GB RTX 4070, memory growth on,
+            # `tf.config.experimental.get_memory_info('GPU:0')['peak']`):
+            #   from_variant("base", global_attention_interval=3)
+            #     L=8    -> ran, 0.692 GB GPU peak, host RSS 1.430 GB
+            #     L=512  -> ran, host RSS 1.429 GB
+            #     L=2048 -> ran, 1.640 GB GPU peak, host RSS 1.661 GB
+            # (L=8 is the exact length at which D-135 measured
+            # `ResourceExhaustedError`.) The prohibition D-135 shares with
+            # D-019/D-027/D-139 -- do NOT shrink `local_attention_window_size`
+            # -- STILL STANDS and is not touched here: the value is still 128.
+            # See the D-012 anchor in `_build_architecture` for why its `// 2`
+            # is a unit conversion and not that shrink.
+            "global_attention_interval": 3,
             "local_attention_window_size": 128,
-            "description": "ModernBERT-Base: 160.6M parameters (measured), all-global attention",
+            "description": (
+                "ModernBERT-Base: 160.6M parameters (measured), hybrid 1-D "
+                "local band / global attention"
+            ),
         },
         "large": {
             "hidden_size": 1024,
@@ -315,9 +354,21 @@ class ModernBERT(keras.Model):
             # Same repair, same reason, same measurement as `base` above:
             # `from_variant("large")` raised `ResourceExhaustedError` at L=8.
             # See decisions.md D-135.
-            "global_attention_interval": 1,
+            #
+            # SUPERSEDED 2026-08-25 by plan-2026-08-25T053412-0f1fa04f/D-012,
+            # same reason and same shape as `base` above. Re-measured on the
+            # same 12 GB RTX 4070: `from_variant("large", global_attention_interval=3)`
+            #     L=8    -> ran, 1.707 GB GPU peak, host RSS 1.445 GB
+            #     L=512  -> ran, host RSS 1.447 GB
+            #     L=2048 -> ran, 2.929 GB GPU peak, host RSS 1.749 GB
+            # `local_attention_window_size` is UNCHANGED at 128; the shrink
+            # D-135/D-019/D-027/D-139 forbid has not been performed.
+            "global_attention_interval": 3,
             "local_attention_window_size": 128,
-            "description": "ModernBERT-Large: 409.5M parameters (measured), all-global attention",
+            "description": (
+                "ModernBERT-Large: 409.5M parameters (measured), hybrid 1-D "
+                "local band / global attention"
+            ),
         },
     }
 
@@ -507,9 +558,31 @@ class ModernBERT(keras.Model):
 
         self.encoder_layers: List[TransformerLayer] = []
         for i in range(self.num_layers):
-            # Every k-th layer uses global attention, others use windowed.
+            # Every k-th layer uses global attention, others use the 1-D band.
             is_global = (i + 1) % self.global_attention_interval == 0
-            attention_type = "group_query" if is_global else "window"
+            attention_type = "group_query" if is_global else "window_band"
+
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-012
+            # THIS IS NOT THE FORBIDDEN SHRINK. D-019/D-027/D-139 forbid
+            # "fixing" ModernBERT by making `local_attention_window_size`
+            # SMALLER. The value here is UNCHANGED (128 at `base`/`large`, 64 at
+            # `tiny`); what changed is its UNIT. It used to be a 2-D edge length
+            # consumed by `'window'` (partition_mode='grid'), which folds the
+            # 1-D token sequence into a ceil(sqrt(L)) square and attends within
+            # `window_size`-square blocks -- a synthetic adjacency the text does
+            # not have. It is now a 1-D FULL SPAN in tokens, matching upstream:
+            # `transformers/modular_modernbert.py` sets
+            # `sliding_window = local_attention // 2` and documents
+            # `local_attention=128` as "64 tokens either side". `'window_band'`
+            # takes the HALF-WIDTH, so the `// 2` below is a span -> half-width
+            # UNIT CONVERSION, not a reduction of the window. The diff will read
+            # like `128` arriving at the layer as `64`; it is the same
+            # neighbourhood expressed in the layer's own units, and it is
+            # STRICTLY LARGER along the sequence than what `'grid'` gave (a
+            # 128-wide grid block is a set of strided runs, not a contiguous
+            # span). Do NOT "restore" `window_size=self.local_attention_window_size`
+            # here: that would silently double the span to 256 tokens.
+            # See decisions.md D-012.
             attention_args = (
                 {
                     "num_kv_heads": self.num_heads,
@@ -517,7 +590,7 @@ class ModernBERT(keras.Model):
                     "rope_theta": self.global_rope_theta,
                 }
                 if is_global
-                else {"window_size": self.local_attention_window_size}
+                else {"window_size": self.local_attention_window_size // 2}
             )
 
             # DECISION plan-2026-08-19T070627-a616f581/D-007

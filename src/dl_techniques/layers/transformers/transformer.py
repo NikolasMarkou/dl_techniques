@@ -341,12 +341,14 @@ def build_transformer_attention_required_params(
     :return: The type-specific required params; possibly empty.
     :rtype: Dict[str, Any]
     """
-    if attention_type in ('window', 'beit'):
-        # Both require a 'window_size', and this is the SAME table entry on
-        # purpose (D-015) — but the two types read the value differently:
-        # 'window' takes a scalar spatial edge length W and attends within
-        # W*W-token windows, while 'beit' takes the PATCH GRID and expects a
-        # sequence of exactly Wh*Ww + 1 tokens (the +1 being the cls token).
+    if attention_type in ('window', 'window_zigzag', 'window_band', 'beit'):
+        # All four require a 'window_size', and this is the SAME table entry on
+        # purpose (D-015) — but they read the value differently:
+        # 'window'/'window_zigzag' take a scalar spatial edge length W and attend
+        # within W*W-token windows; 'window_band' takes a 1-D HALF-WIDTH IN
+        # TOKENS (query i attends key j iff abs(i - j) <= window_size, no grid,
+        # no square padding); 'beit' takes the PATCH GRID and expects a sequence
+        # of exactly Wh*Ww + 1 tokens (the +1 being the cls token).
         # A scalar reaching 'beit' is normalized to the square grid (W, W).
         return {'window_size': window_size}
     if attention_type == 'group_query':
@@ -764,7 +766,14 @@ class TransformerLayer(keras.layers.Layer):
                 'kernel_initializer': self.kernel_initializer,
                 'name': name
             }
-        elif self.attention_type == 'window':
+        elif self.attention_type in ('window', 'window_zigzag', 'window_band'):
+            # All three keys are wrappers around the SAME class,
+            # `WindowAttention`, differing only in the `partition_mode` they pin
+            # ('grid' / 'zigzag' / 'band'), so they share one branch by
+            # construction rather than by three copies. Only `window_size`'s
+            # MEANING differs, and that is resolved in
+            # `_required_attention_params` above, not here.
+            #
             # DECISION plan-2026-08-19T070627-a616f581/D-005: the block's `use_bias`
             # MUST be forwarded here, and it is spelled `qkv_bias`/`proj_bias`
             # -- NOT `use_bias`. The 'window' registry entry
