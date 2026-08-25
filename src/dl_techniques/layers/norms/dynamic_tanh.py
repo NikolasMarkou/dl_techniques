@@ -99,7 +99,20 @@ class DynamicTanh(keras.layers.Layer):
     :type bias_constraint: Optional[constraints.Constraint]
 
     :raises ValueError: If alpha_init_value is not a number.
-    :raises ValueError: If alpha_init_value is not strictly positive.
+    :raises ValueError: If alpha_init_value is not strictly positive. **This check is
+        checkpoint-visible**: ``get_config()`` writes ``alpha_init_value``, so a ``.keras``
+        model serialized by a version that accepted a non-positive value no longer
+        deserializes. Measured - a functional model containing
+        ``DynamicTanh(alpha_init_value=-0.5)``, saved at commit ``a8a042f53``, now fails
+        with ``TypeError: <class 'keras.src.models.functional.Functional'> could not be
+        deserialized properly``, whose root cause is this very
+        ``ValueError: alpha_init_value must be a positive number``. The exposure is narrow
+        and was accepted deliberately (see ``decisions.md`` D-014 of
+        ``plan-2026-08-25T195813-d5a035ab``): the repo-wide grep found zero call sites
+        passing a non-positive value, the same model saved with the default ``0.5`` reloads
+        fine, and - measured - a checkpoint whose LEARNED ``alpha`` weight is negative also
+        still loads and reproduces its outputs exactly, because only the config's INIT
+        value is validated, never the restored weight.
     :raises ValueError: If axis is out of bounds for input tensor.
     """
 
@@ -124,6 +137,21 @@ class DynamicTanh(keras.layers.Layer):
         # branch in factory.py (same message). A non-positive alpha flips the
         # transform's sign, and alpha == 0 makes the layer the constant-zero map
         # tanh(0 * x); the factory has always refused both.
+        #
+        # DECISION plan-2026-08-25T195813-d5a035ab/D-014
+        # This guard is CHECKPOINT-VISIBLE and the break was accepted knowingly.
+        # `get_config()` writes `alpha_init_value`, so a `.keras` archive written by a
+        # version that accepted a non-positive value can no longer be loaded (MEASURED:
+        # `DynamicTanh(alpha_init_value=-0.5)` saved at a8a042f53 -> TypeError at HEAD,
+        # root cause this ValueError). Do NOT "fix" a failing load by loosening this
+        # check back to construction-only or by special-casing `from_config`: the same
+        # plan DROPPED review-finding B14 precisely because it broke checkpoints, and
+        # the asymmetry only holds while the exposure stays this narrow (zero call sites
+        # repo-wide; only the INIT value is validated, never the restored `alpha`
+        # weight, so a trained-negative alpha still loads - measured). If a real
+        # checkpoint ever turns up, delete this guard, do not weaken it silently.
+        # See decisions.md D-014 and
+        # tests/test_layers/test_norms/test_the_negative_alpha_init_is_checkpoint_visible.py
         if alpha_init_value <= 0:
             raise ValueError("alpha_init_value must be a positive number")
 

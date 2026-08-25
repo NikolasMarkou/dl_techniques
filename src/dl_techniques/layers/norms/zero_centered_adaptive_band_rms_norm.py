@@ -71,11 +71,31 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
 
     .. note::
         **No masking support, deliberately.** ``supports_masking`` is left ``False``
-        because the aggregate RMS driving the ``Dense`` is reduced over every
-        non-batch axis, so one sigmoid rescales all of a sample's positions
-        together: perturbing a single ``(sample, token)`` slot moves the other
-        positions of that sample by up to ``1.840e-01`` (measured on a ``(3, 5, 8)``
-        input). A propagated Keras mask would be invalid on the output.
+        because the aggregate RMS driving the ``Dense`` is reduced over every non-batch
+        axis, so ONE sigmoid rescales all of a sample's positions together. Any position's
+        value therefore reaches every other position's output as soon as the ``Dense``
+        kernel is non-zero - which is the trained regime. A propagated Keras mask would be
+        invalid on the output.
+
+        **The figure is conditional and the default hides it.** The default
+        ``band_initializer="zeros"`` pins the ``Dense`` output to a constant, so a probe on
+        a default-constructed layer measures a cross-position leak of exactly ``0.0`` and
+        the flag looks safe for the wrong reason. Measured on a ``(4, 5, 8)`` input,
+        perturbing one ``(sample, token)`` slot, with the ``Dense`` kernel assigned from
+        ``numpy.random.default_rng(1).normal`` (the ``_make_nontrivial`` helper in
+        ``tests/test_layers/test_norms/test_the_norms_propagate_masks.py``): other
+        positions move by up to ``1.864e-01``. With the untouched default kernel: exactly
+        ``0.0``.
+
+    .. warning::
+        **Resolution lock**, identical to :class:`AdaptiveBandRMS` (shared
+        ``_compute_param_shape_and_axes`` logic). ``build()`` sizes the internal ``Dense``
+        from the PRODUCT of the sizes at the normalized axes, so ``axis=(1, 2)`` built on
+        ``(None, 8, 8, 3)`` gives ``Dense(units=64)`` and calling that built layer on
+        ``(2, 16, 16, 3)`` raises ``InvalidArgumentError: Incompatible shapes`` at the
+        scale multiply (measured). The default ``axis=-1`` and the global spelling
+        ``axis=(1, 2, 3)`` (which yields ``units=1``) are NOT locked and accept any
+        resolution.
 
     **Architecture Overview:**
 
