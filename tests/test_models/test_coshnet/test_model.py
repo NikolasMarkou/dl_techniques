@@ -152,7 +152,7 @@ class TestDocumentedParameterCounts:
         """
         readme = (
             pathlib.Path(__file__).resolve().parents[3]
-            / "src" / "dl_techniques" / "models" / "coshnet" / "README.md"
+            / "src" / "dl_techniques" / "models" / "vision" / "coshnet" / "README.md"
         )
         assert readme.is_file(), readme
         text = readme.read_text(encoding="utf-8")

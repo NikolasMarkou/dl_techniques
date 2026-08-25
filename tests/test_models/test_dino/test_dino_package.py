@@ -29,7 +29,7 @@ import pytest
 
 # Repo root: tests/test_models/test_dino/<this file> -> up 3.
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DINO_PKG = REPO_ROOT / "src" / "dl_techniques" / "models" / "dino"
+DINO_PKG = REPO_ROOT / "src" / "dl_techniques" / "models" / "vision" / "dino"
 README = DINO_PKG / "README.md"
 
 
@@ -525,7 +525,7 @@ MEASUREMENT_RECORD = REPO_ROOT / "research" / "2026_dino_ssl_measurements.md"
 # `research/dino_ssl_measurements_evidence/` (the raw per-epoch records, which
 # are the source data rather than a citation of it) are deliberately outside it.
 RESTATEMENT_SCAN_DIRS = (
-    REPO_ROOT / "src" / "dl_techniques" / "models" / "dino",
+    REPO_ROOT / "src" / "dl_techniques" / "models" / "vision" / "dino",
     REPO_ROOT / "src" / "train" / "dino",
     REPO_ROOT / "tests" / "test_train" / "test_dino",
     REPO_ROOT / "tests" / "test_models" / "test_dino",

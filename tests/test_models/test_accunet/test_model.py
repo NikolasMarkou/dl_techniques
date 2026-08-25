@@ -747,7 +747,7 @@ class TestDocumentedParameterCounts:
 
         readme = (
             pathlib.Path(__file__).resolve().parents[3]
-            / "src" / "dl_techniques" / "models" / "accunet" / "README.md"
+            / "src" / "dl_techniques" / "models" / "vision" / "accunet" / "README.md"
         ).read_text()
         assert "Parameter counts are not quoted here" in readme
         assert "module docstring of\n`model.py`" in readme

@@ -106,7 +106,7 @@ from dl_techniques.layers.transformers.swin_transformer_block import SwinTransfo
 #: Kernel initializer for every Dense/projection in the model, matching the
 #: official implementation's ``_init_weights``, which applies
 #: ``trunc_normal_(m.weight, std=.02)`` to every ``nn.Linear``:
-#:   https://github.com/microsoft/Swin-Transformer/blob/main/models/vision/swin_transformer.py
+#:   https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
 #: Do NOT revert to ``"glorot_uniform"`` (Keras' Dense default, and what this
 #: parameter used to be): that is a DIFFERENT distribution AND a different
 #: scale, fan-dependent rather than fixed. TRAINING-ONLY -- an initializer is
@@ -207,7 +207,7 @@ class SwinTransformer(keras.Model):
         kernel_initializer: String, config dict or Initializer, weight
             initialization strategy. Defaults to ``TruncatedNormal(stddev=0.02)``,
             the official implementation's ``_init_weights`` convention
-            (https://github.com/microsoft/Swin-Transformer/blob/main/models/vision/swin_transformer.py).
+            (https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py).
             Controls model parameter initialization. Defaults to "glorot_uniform".
         bias_initializer: String or Initializer, bias initialization strategy.
             Only used when use_bias=True. Defaults to "zeros".

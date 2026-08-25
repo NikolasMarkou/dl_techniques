@@ -1126,7 +1126,7 @@ a citation error, both were fetched verbatim:
 | Source | base | large |
 |:---|:---:|:---:|
 | HF `microsoft/beit-{base,large}-patch16-224/config.json` | **0.1** | **0.1** |
-| timm `timm/models/vision/beit.py` model entrypoints | **0.1** | **1e-5** |
+| timm `timm/models/beit.py` model entrypoints | **0.1** | **1e-5** |
 
 This package adopts **timm's split**: `0.1` for `tiny`/`small`/`base`, `1e-5` for `large`.
 Consequently `SCALE_CONFIGS['large']` does **not** match HF's shipped `config.json`
@@ -1288,7 +1288,7 @@ The architecture facts in this README (the relative-position index construction,
 no-k-bias QKV asymmetry, `layer_norm_eps=1e-12`, `vocab_size=8192`, the masking algorithm,
 the `use_mean_pooling` semantics, and both variant tables) come from directly-fetched
 primary sources: `microsoft/unilm/beit/{modeling_finetune,masking_generator,run_beit_pretraining}.py`,
-`timm/models/vision/beit.py`, and the raw HF `config.json` files. They are high confidence.
+`timm/models/beit.py`, and the raw HF `config.json` files. They are high confidence.
 
 The pre-training/fine-tuning **hyperparameter table in §11.1** is a summary of an
 ar5iv-rendered read of the paper's appendix, not a verbatim table transcription. It is

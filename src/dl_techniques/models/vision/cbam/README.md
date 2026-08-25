@@ -254,7 +254,7 @@ import numpy as np
 
 # Local imports from your project structure
 # Ensure cbam_net.py and the attention layers are in the correct path
-from dl_techniques.models.vision.cbam_net import CBAMNet
+from dl_techniques.models.vision.cbam import CBAMNet
 
 # 1. Create a tiny CBAMNet model for CIFAR-10 (32x32 images, 10 classes)
 model = CBAMNet.from_variant(
@@ -294,10 +294,10 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 
 **Purpose**: The main Keras `Model` subclass that assembles the complete CBAMNet architecture.
 
-**Location**: `dl_techniques.models.vision.cbam_net.CBAMNet`
+**Location**: `dl_techniques.models.vision.cbam.CBAMNet`
 
 ```python
-from dl_techniques.models.vision.cbam_net import CBAMNet
+from dl_techniques.models.vision.cbam import CBAMNet
 
 # Create from a standard variant
 model = CBAMNet.from_variant(

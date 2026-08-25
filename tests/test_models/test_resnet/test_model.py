@@ -266,7 +266,7 @@ class TestReadmeQuotesNoAccuracy:
 
         return (
             pathlib.Path(__file__).resolve().parents[3]
-            / "src" / "dl_techniques" / "models" / "resnet" / "README.md"
+            / "src" / "dl_techniques" / "models" / "vision" / "resnet" / "README.md"
         ).read_text()
 
     def test_the_premise_holds_no_pretrained_weights_are_obtainable(self):

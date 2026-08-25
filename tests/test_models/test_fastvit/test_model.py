@@ -48,7 +48,7 @@ from tests.test_models.test_fastvit.reference_oracle import (
 
 # ---------------------------------------------------------------------
 # The reference tables, transcribed a SECOND time, independently of the module.
-# mci0/mci1/mci2: timm upstream `timm/models/vision/fastvit.py` (no local oracle, H-7)
+# mci0/mci1/mci2: timm upstream `timm/models/fastvit.py` (no local oracle, H-7)
 #   -- for those three rows this transcription is all there is.
 # mci3/mci4: ALSO covered by a real oracle -- see
 #   `test_mci3_mci4_match_supplied_source`, which parses the committed

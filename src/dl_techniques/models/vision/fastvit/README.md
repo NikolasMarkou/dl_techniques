@@ -314,7 +314,7 @@ silently.
 > (see below). X-3 applies to `mci0` / `mci1` / `mci2` only.
 
 Those three stage tables are transcribed from **timm upstream**
-(`timm/models/vision/fastvit.py`, fetched 2026-08-13), **not** from the supplied
+(`timm/models/fastvit.py`, fetched 2026-08-13), **not** from the supplied
 `mobileclip2.py`, which defines only `fastvit_mci3` and `fastvit_mci4`. `timm` is
 **not installed** in this environment, so nothing here can check those three rows
 against timm itself — only against a second hand transcription of the same fetch.

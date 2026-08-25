@@ -516,7 +516,7 @@ The codebase includes verification utilities to ensure architectural correctness
 
 ```python
 # Run the included test suite
-python -m pytest tests/models/language/fnet
+python -m pytest tests/models/fnet
 ```
 
 *See `test_fnet.py` in the repository for unit test examples covering shape inference, serialization, and numerical stability.*

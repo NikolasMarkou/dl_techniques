@@ -102,9 +102,9 @@ References:
     - HuggingFace ``Gemma3TextConfig.hidden_activation = "gelu_pytorch_tanh"``:
       https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/configuration_gemma3.py
     - HuggingFace ``ViTConfig.initializer_range = 0.02``:
-      https://github.com/huggingface/transformers/blob/main/src/transformers/models/vision/vit/configuration_vit.py
+      https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py
     - Swin ``_init_weights``: ``trunc_normal_(m.weight, std=.02)``:
-      https://github.com/microsoft/Swin-Transformer/blob/main/models/vision/swin_transformer.py
+      https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
     - DINO ``_init_weights``: ``trunc_normal_(m.weight, std=.02)``:
       https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
     - DINOv3, same ViT/Mlp convention:
@@ -137,7 +137,7 @@ _HF_GEMMA3 = (
 )
 _HF_VIT = (
     "https://github.com/huggingface/transformers/blob/main/"
-    "src/transformers/models/vision/vit/configuration_vit.py"
+    "src/transformers/models/vit/configuration_vit.py"
 )
 _MSFT_SWIN = (
     "https://github.com/microsoft/Swin-Transformer/blob/main/"
@@ -148,7 +148,7 @@ _FAIR_DINO = (
 )
 _HF_BEIT = (
     "https://github.com/huggingface/transformers/blob/main/"
-    "src/transformers/models/vision/beit/configuration_beit.py"
+    "src/transformers/models/beit/configuration_beit.py"
 )
 
 # Keras' own defaults, asserted as the NEGATIVE control: a row whose expected

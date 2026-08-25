@@ -88,7 +88,7 @@ NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 
 #: Kernel initializer for every layer, matching the ViT convention this port
 #: follows: HuggingFace's ``ViTConfig.initializer_range`` defaults to ``0.02``
 #: and is applied as ``TruncatedNormal(std=0.02)`` to every weight matrix:
-#:   https://github.com/huggingface/transformers/blob/main/src/transformers/models/vision/vit/configuration_vit.py
+#:   https://github.com/huggingface/transformers/blob/main/src/transformers/models/vit/configuration_vit.py
 #: Do NOT revert to ``"he_normal"`` (what this parameter used to be):
 #: ``he_normal`` is ``VarianceScaling(scale=2.0, mode='fan_in')``, i.e. a
 #: FAN-DEPENDENT scale, so it disagrees with the reference by a different factor
