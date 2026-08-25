@@ -95,7 +95,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>5. Enterprise-Grade Training & Deployment Infrastructure</b></summary>
 <p>
 
-- **Accelerated Development with Training Pipelines**: **68 ready-to-use `train_*.py` entry points across 46 trainer directories** (`src/train/`, plus the shared `src/train/common/` library), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
+- **Accelerated Development with Training Pipelines**: **70 ready-to-use `train_*.py` entry points across 47 trainer directories** (`src/train/`, plus the shared `src/train/common/` library), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
 - **Assured Reliability**: An extensive **600+ module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions.
 - **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/fastvit/reference.py`) rather than asserting parity in prose.
@@ -352,7 +352,7 @@ The repository is organized for clarity, maintainability, and ease of contributi
 ```
 dl_techniques/
 ├── src/dl_techniques/         # THE LIBRARY — 13 subpackages
-│   ├── models/                # 79 leaf model packages in 11 FAMILY directories
+│   ├── models/                # 80 leaf model packages in 11 FAMILY directories
 │   │   │                      # full catalogue: src/dl_techniques/models/README.md
 │   │   ├── vision/            # 35 — resnet, convnext, vit, dino, swin_transformer, beit,
 │   │   │                      #      yolo12, detr, vae, vq_vae, depth_anything, and the
@@ -390,7 +390,7 @@ dl_techniques/
 │   ├── initializers/          # Structured initializers (Gabor, Haar, orthonormal, KAN)
 │   ├── constraints/           # Weight constraints
 │   └── utils/                 # Core utilities, loggers, masking, and data handlers
-├── src/train/                 # 68 train_*.py entry points across 46 trainer directories
+├── src/train/                 # 70 train_*.py entry points across 47 trainer directories
 ├── src/applications/          # Deployable applications built on the library
 ├── research/                  # 120+ in-depth articles, guides, and LaTeX papers
 ├── tests/                     # 600+ test modules ensuring component reliability
@@ -402,7 +402,7 @@ dl_techniques/
 > `import dl_techniques.models.vision` gives you no models: always import from the *leaf*
 > package (`from dl_techniques.models.vision.resnet.model import create_resnet`). The one
 > exception is `time_series/`, which re-exports its 7 children. The full catalogue — all 11
-> families, all 79 leaf packages, one line each — is
+> families, all 80 leaf packages, one line each — is
 > [`src/dl_techniques/models/README.md`](./src/dl_techniques/models/README.md), and the
 > authoring rules are in [`src/dl_techniques/models/CLAUDE.md`](./src/dl_techniques/models/CLAUDE.md).
 

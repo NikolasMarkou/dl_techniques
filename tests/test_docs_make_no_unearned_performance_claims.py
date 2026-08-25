@@ -276,6 +276,10 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
     Counts READMEs, not occurrences: an occurrence count would churn on every
     example added. If this fails because a package gained a transfer-learning
     section, re-derive the numbers here rather than widening the window above.
+
+    `colbert` joined the population on 2026-08-25 (`plan-2026-08-25-c71fc3ad`): its
+    README names `pretrained=True` only to say the call RAISES `NotImplementedError`,
+    which is the disclaimed form the window above already accepts.
     """
     readmes = [p for p in _iter_doc_files() if p.name == "README.md"]
     assert len(readmes) >= 20, len(readmes)
@@ -283,7 +287,7 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         p for p in readmes if PRETRAINED_TRUE_RE.search(p.read_text(encoding="utf-8"))
     ]
     assert {p.parent.name for p in with_pretrained_true} == {
-        "bert", "bias_free_denoisers", "dino", "distilbert", "gpt2",
+        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "gpt2",
         "masked_autoencoder", "mobilenet", "modern_bert", "resnet",
         "tree_transformer", "vit", "wave_field",
     }, sorted(p.parent.name for p in with_pretrained_true)
