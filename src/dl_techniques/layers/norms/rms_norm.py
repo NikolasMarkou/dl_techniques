@@ -144,6 +144,12 @@ class RMSNorm(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.scale = None
 
+        # Broadcast shape used to reshape 'scale' in call(); computed in build().
+        # None means "no reshape needed" - see the DECISION anchor in build().
+        # Initialized here so build()'s `if self.built: return` early exit can
+        # never leave the attribute undefined.
+        self._scale_broadcast_shape = None
+
         logger.debug(f"Initialized RMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
 
     def _validate_inputs(self, axis: Union[int, Tuple[int, ...]], epsilon: float) -> None:
@@ -215,6 +221,36 @@ class RMSNorm(keras.layers.Layer):
 
             logger.debug(f"Created scale parameter with shape {param_shape}")
 
+            # DECISION plan-2026-08-25T195813-d5a035ab/D-004
+            # The built 'scale' weight shape is checkpoint-visible: every saved
+            # .keras file holding an RMSNorm stores exactly `param_shape`.
+            # Widening it above to a full-rank shape carrying 1s at the
+            # unnormalized axes would be the cleaner algebra, but it would make
+            # every existing checkpoint unloadable. So do NOT touch
+            # add_weight(shape=param_shape); the broadcast is instead done at
+            # CALL time, and only when it is actually needed.
+            # Record: plans/plan-2026-08-25T195813-d5a035ab/decisions.md D-004.
+            rank = len(input_shape)
+            if param_axes == list(range(rank - len(param_axes), rank)):
+                # The normalized axes are exactly the trailing axes, in ascending
+                # order. `param_shape` already broadcasts against the input, so
+                # this path (axis=-1, i.e. 100% of the live consumers) must emit
+                # no reshape op at all.
+                self._scale_broadcast_shape = None
+            elif any(b <= a for a, b in zip(param_axes, param_axes[1:])):
+                # Not strictly ascending (e.g. axis=(-1, -2)): build() orders the
+                # scale's dimensions by the order the axes were WRITTEN, so a
+                # broadcast shape derived from ascending order would silently
+                # reinterpret the stored weight. Deliberate: an unsorted 'axis'
+                # tuple keeps today's behaviour verbatim and is an unsupported
+                # spelling. Do NOT "fix" this by sorting param_axes.
+                self._scale_broadcast_shape = None
+            else:
+                broadcast_shape = [1] * rank
+                for ax, dim in zip(param_axes, param_shape):
+                    broadcast_shape[ax] = dim
+                self._scale_broadcast_shape = tuple(broadcast_shape)
+
         # Always call parent build at the end
         super().build(input_shape)
 
@@ -257,7 +293,14 @@ class RMSNorm(keras.layers.Layer):
 
         # Apply learnable scale if enabled
         if self.use_scale:
-            normalized = normalized * self.scale
+            scale = self.scale
+            if self._scale_broadcast_shape is not None:
+                # Non-trailing normalization axes only: the stored weight shape is
+                # not broadcast-compatible with the input, so give it explicit 1s
+                # at the unnormalized axes here rather than in build()
+                # (DECISION plan-2026-08-25T195813-d5a035ab/D-004).
+                scale = keras.ops.reshape(scale, self._scale_broadcast_shape)
+            normalized = normalized * scale
 
         # Cast back to original dtype
         return keras.ops.cast(normalized, original_dtype)
