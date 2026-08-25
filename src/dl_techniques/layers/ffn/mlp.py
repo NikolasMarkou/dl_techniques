@@ -237,25 +237,6 @@ class MLPBlock(keras.layers.Layer):
             name="fc1"
         )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
-        # `fc2` gets a CLONE. One shared initializer INSTANCE reaches both
-        # `Dense` layers, so whenever `hidden_dim == output_dim` the EXPAND
-        # kernel and the PROJECT kernel are bit-identical -- MEASURED on
-        # `RELGT(embedding_dim=32, ffn_dim=32)`, where
-        # `PredictionFFN/fc1/kernel == fc2/kernel` at (32, 32) even though the
-        # caller passed the STRING `'glorot_uniform'`: `keras.initializers.get`
-        # resolves the string to an instance ONCE, and a shared seedless
-        # instance replays its draw. The string form is NOT a defence here.
-        # See decisions.md D-070.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-160
-        # `output_kernel_initializer`, when supplied, governs `fc2` ALONE. Do NOT
-        # "simplify" by letting it fall back through `kernel_initializer` here --
-        # the whole reason it exists is that GPT-2's reference scales the
-        # residual-path projection (`mlp.c_proj`) by `1/sqrt(2*n_layer)` while
-        # leaving the expansion (`fc1`) at the plain `initializer_range`, so a
-        # fallback that reached `fc1` too would reproduce exactly the defect this
-        # parameter removes. Still cloned: a caller can legitimately hand the SAME
-        # instance to both roles. See decisions.md D-160.
         self.fc2 = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
@@ -285,7 +266,10 @@ class MLPBlock(keras.layers.Layer):
             f"dropout_rate={dropout_rate}"
         )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+    def build(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> None:
         """
         Build the layer and all its sub-layers.
 
@@ -347,7 +331,10 @@ class MLPBlock(keras.layers.Layer):
 
         return x
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """
         Compute the output shape of the layer.
 
@@ -389,3 +376,5 @@ class MLPBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
