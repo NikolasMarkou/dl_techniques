@@ -161,7 +161,11 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         :raises ValueError: If eps <= 0.
         """
-        super().__init__(**kwargs)
+        # activity_regularizer is a base-Layer constructor argument: forward it
+        # rather than assigning it afterwards. Plain assignment also works (it
+        # goes through the inherited property setter), but the forwarded form is
+        # the idiom the rest of this package uses.
+        super().__init__(activity_regularizer=activity_regularizer, **kwargs)
 
         if eps <= 0:
             raise ValueError(f"eps must be positive, got {eps}")
@@ -172,7 +176,6 @@ class GlobalResponseNormalization(keras.layers.Layer):
         self.beta_initializer = keras.initializers.get(beta_initializer)
         self.gamma_regularizer = keras.regularizers.get(gamma_regularizer)
         self.beta_regularizer = keras.regularizers.get(beta_regularizer)
-        self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
         self.gamma = None
         self.beta = None
