@@ -16,7 +16,6 @@ This ensures the output has L2 norm in the range [1-max_band_width, 1].
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------
@@ -200,9 +199,9 @@ class BandLogitNorm(keras.layers.Layer):
 
         # Step 1: Compute L2 norm along the specified axis
         # Shape: [..., specified_axis, ...] -> [..., 1, ...] (with keepdims=True)
-        x_squared = ops.square(x)
-        x_sum_squared = ops.maximum(ops.sum(x_squared, axis=self.axis, keepdims=True), self.epsilon)
-        x_length = ops.sqrt(x_sum_squared)  # Add epsilon for numerical stability
+        x_squared = keras.ops.square(x)
+        x_sum_squared = keras.ops.maximum(keras.ops.sum(x_squared, axis=self.axis, keepdims=True), self.epsilon)
+        x_length = keras.ops.sqrt(x_sum_squared)  # Add epsilon for numerical stability
 
         # Step 2: Normalize to unit L2 norm
         # This gives us a tensor with ||x||_2 = 1

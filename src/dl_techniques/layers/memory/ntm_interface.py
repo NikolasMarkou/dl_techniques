@@ -21,11 +21,14 @@ Classes:
 """
 
 import keras
-from keras import ops
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
@@ -774,8 +777,8 @@ class BaseNTM(keras.layers.Layer, ABC):
         :return: Output tensor(s) and optionally final states.
         :rtype: Any | tuple[Any, ...]
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # Initialize states
         if initial_state is None:
@@ -804,7 +807,7 @@ class BaseNTM(keras.layers.Layer, ABC):
 
         # Stack outputs
         if return_sequences:
-            output = ops.stack(outputs, axis=1)
+            output = keras.ops.stack(outputs, axis=1)
         else:
             output = outputs[-1]
 
@@ -906,22 +909,22 @@ def cosine_similarity(
     :rtype: Any
     """
     # Ensure query has 3 dimensions for broadcasting
-    if len(ops.shape(query)) == 2:
-        query = ops.expand_dims(query, axis=1)
+    if len(keras.ops.shape(query)) == 2:
+        query = keras.ops.expand_dims(query, axis=1)
 
     # Normalize query and keys
-    query_norm = ops.sqrt(ops.sum(ops.square(query), axis=-1, keepdims=True) + epsilon)
-    keys_norm = ops.sqrt(ops.sum(ops.square(keys), axis=-1, keepdims=True) + epsilon)
+    query_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(query), axis=-1, keepdims=True) + epsilon)
+    keys_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(keys), axis=-1, keepdims=True) + epsilon)
 
     query_normalized = query / query_norm
     keys_normalized = keys / keys_norm
 
     # Compute similarity
-    similarity = ops.sum(query_normalized * keys_normalized, axis=-1)
+    similarity = keras.ops.sum(query_normalized * keys_normalized, axis=-1)
 
     # Squeeze if query was 2D
-    if len(ops.shape(similarity)) == 2 and ops.shape(similarity)[1] == 1:
-        similarity = ops.squeeze(similarity, axis=1)
+    if len(keras.ops.shape(similarity)) == 2 and keras.ops.shape(similarity)[1] == 1:
+        similarity = keras.ops.squeeze(similarity, axis=1)
 
     return similarity
 
@@ -944,13 +947,14 @@ def circular_convolution(
     :return: Shifted weights of shape (batch, num_slots).
     :rtype: Any
     """
-    shift_range = ops.shape(shift)[-1]
+    shift_range = keras.ops.shape(shift)[-1]
     half_shift = shift_range // 2
 
     # Build all shifted versions and stack them
     shifted_versions = []
 
-    # Iterate over shift positions. Note: shift_range is expected to be
+    # Iterate over shift positions.
+    # Note: shift_range is expected to be
     # a static integer in most cases, or a small dynamic value.
     # If shift_range is purely symbolic in some backends, this might require
     # using a static configuration value, but standard NTM usage implies
@@ -962,17 +966,17 @@ def circular_convolution(
         # keras.ops.roll(a, k)[i] == a[(i - k) mod N], so the tap carrying offset
         # k is roll(w, +k). Do NOT "simplify" this back to shift=-shift_offset:
         # that mirrors the shift (offset +1 lands at slot N-1). See decisions.md D-001.
-        rolled = ops.roll(weights, shift=shift_offset, axis=-1)
+        rolled = keras.ops.roll(weights, shift=shift_offset, axis=-1)
         shifted_versions.append(rolled)
 
     # Stack: (batch, num_shifts, memory_size)
-    stacked = ops.stack(shifted_versions, axis=1)
+    stacked = keras.ops.stack(shifted_versions, axis=1)
 
     # Weight by shift probabilities: (batch, num_shifts, 1)
-    shift_weights = ops.expand_dims(shift, axis=-1)
+    shift_weights = keras.ops.expand_dims(shift, axis=-1)
 
     # Weighted sum: (batch, memory_size)
-    shifted_weights = ops.sum(stacked * shift_weights, axis=1)
+    shifted_weights = keras.ops.sum(stacked * shift_weights, axis=1)
 
     return shifted_weights
 
@@ -995,8 +999,10 @@ def sharpen_weights(
     :rtype: Any
     """
     # Ensure gamma >= 1
-    gamma = ops.maximum(gamma, 1.0)
+    gamma = keras.ops.maximum(gamma, 1.0)
 
     # Raise to power and normalize
-    sharpened = ops.power(weights + epsilon, gamma)
-    return sharpened / (ops.sum(sharpened, axis=-1, keepdims=True) + epsilon)
+    sharpened = keras.ops.power(weights + epsilon, gamma)
+    return sharpened / (keras.ops.sum(sharpened, axis=-1, keepdims=True) + epsilon)
+
+# ---------------------------------------------------------------------

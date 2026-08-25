@@ -18,12 +18,14 @@ Functions:
 """
 
 import keras
-from keras import ops
-from keras import layers
-from keras import initializers
 from typing import Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers import clone_initializer
+
 from .ntm_interface import (
     AddressingMode,
     BaseMemory,
@@ -117,7 +119,7 @@ class NTMMemory(BaseMemory):
             stddev=1e-3,
             seed=self.memory_init_seed,
         )
-        usage = ops.zeros((batch_size, self.memory_size))
+        usage = keras.ops.zeros((batch_size, self.memory_size))
         return MemoryState(memory=memory, usage=usage)
 
     def read(
@@ -135,8 +137,8 @@ class NTMMemory(BaseMemory):
         :return: Read vector of shape (batch, memory_dim).
         :rtype: Any
         """
-        weights_expanded = ops.expand_dims(read_weights, axis=-1)
-        read_vector = ops.sum(memory_state.memory * weights_expanded, axis=1)
+        weights_expanded = keras.ops.expand_dims(read_weights, axis=-1)
+        read_vector = keras.ops.sum(memory_state.memory * weights_expanded, axis=1)
         return read_vector
 
     def write(
@@ -163,9 +165,9 @@ class NTMMemory(BaseMemory):
         prev_memory = memory_state.memory
 
         # Expand dims for broadcasting
-        weights_expanded = ops.expand_dims(write_weights, axis=-1)
-        erase_expanded = ops.expand_dims(erase_vector, axis=1)
-        add_expanded = ops.expand_dims(add_vector, axis=1)
+        weights_expanded = keras.ops.expand_dims(write_weights, axis=-1)
+        erase_expanded = keras.ops.expand_dims(erase_vector, axis=1)
+        add_expanded = keras.ops.expand_dims(add_vector, axis=1)
 
         # Erase: M_t = M_{t-1} * (1 - w_t * e_t)
         erase_matrix = 1.0 - (weights_expanded * erase_expanded)
@@ -281,12 +283,12 @@ class NTMReadHead(BaseHead):
             **kwargs,
         )
 
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Create sub-layers in __init__ (Golden Rule)
-        self.key_dense = layers.Dense(
+        self.key_dense = keras.layers.Dense(
             memory_dim,
             # DECISION plan-2026-08-19T163559-499b6f0e/D-068
             # EVERY consumer clones. Handing the SAME initializer instance to
@@ -303,7 +305,7 @@ class NTMReadHead(BaseHead):
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
-        self.beta_dense = layers.Dense(
+        self.beta_dense = keras.layers.Dense(
             1,
             activation="softplus",
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -321,7 +323,7 @@ class NTMReadHead(BaseHead):
         # this branch closes, and it makes the CONTENT checkpoint carry HYBRID-shaped
         # weights. See decisions.md D-073.
         if self.addressing_mode is AddressingMode.HYBRID:
-            self.gate_dense = layers.Dense(
+            self.gate_dense = keras.layers.Dense(
                 1,
                 activation="sigmoid",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -329,7 +331,7 @@ class NTMReadHead(BaseHead):
                 kernel_regularizer=self.kernel_regularizer,
                 name="gate",
             )
-            self.shift_dense = layers.Dense(
+            self.shift_dense = keras.layers.Dense(
                 shift_range,
                 activation="softmax",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -337,7 +339,7 @@ class NTMReadHead(BaseHead):
                 kernel_regularizer=self.kernel_regularizer,
                 name="shift",
             )
-            self.gamma_dense = layers.Dense(
+            self.gamma_dense = keras.layers.Dense(
                 1,
                 activation="softplus",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -384,7 +386,7 @@ class NTMReadHead(BaseHead):
         :rtype: Any
         """
         similarity = cosine_similarity(key, memory, epsilon=self.epsilon)
-        return ops.softmax(beta * similarity, axis=-1)
+        return keras.ops.softmax(beta * similarity, axis=-1)
 
     def compute_addressing(
         self,
@@ -409,7 +411,7 @@ class NTMReadHead(BaseHead):
         beta = self.beta_dense(controller_output)
 
         # 2. Content Addressing
-        key_expanded = ops.expand_dims(key, axis=1)
+        key_expanded = keras.ops.expand_dims(key, axis=1)
         content_weights = self.content_addressing(
             key_expanded, beta, memory_state.memory
         )
@@ -490,8 +492,8 @@ class NTMReadHead(BaseHead):
         config = super().get_config()
         config.update(
             {
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
@@ -556,18 +558,18 @@ class NTMWriteHead(BaseHead):
             **kwargs,
         )
 
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Addressing parameters
-        self.key_dense = layers.Dense(
+        self.key_dense = keras.layers.Dense(
             memory_dim,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
-        self.beta_dense = layers.Dense(
+        self.beta_dense = keras.layers.Dense(
             1,
             activation="softplus",
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -579,7 +581,7 @@ class NTMWriteHead(BaseHead):
         # Same branch as NTMReadHead: under CONTENT the location-addressing projections do
         # not exist. See decisions.md D-073.
         if self.addressing_mode is AddressingMode.HYBRID:
-            self.gate_dense = layers.Dense(
+            self.gate_dense = keras.layers.Dense(
                 1,
                 activation="sigmoid",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -587,7 +589,7 @@ class NTMWriteHead(BaseHead):
                 kernel_regularizer=self.kernel_regularizer,
                 name="gate",
             )
-            self.shift_dense = layers.Dense(
+            self.shift_dense = keras.layers.Dense(
                 shift_range,
                 activation="softmax",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -595,7 +597,7 @@ class NTMWriteHead(BaseHead):
                 kernel_regularizer=self.kernel_regularizer,
                 name="shift",
             )
-            self.gamma_dense = layers.Dense(
+            self.gamma_dense = keras.layers.Dense(
                 1,
                 activation="softplus",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -609,7 +611,7 @@ class NTMWriteHead(BaseHead):
             self.gamma_dense = None
 
         # Write-specific parameters
-        self.erase_dense = layers.Dense(
+        self.erase_dense = keras.layers.Dense(
             memory_dim,
             activation="sigmoid",
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -617,7 +619,7 @@ class NTMWriteHead(BaseHead):
             kernel_regularizer=self.kernel_regularizer,
             name="erase",
         )
-        self.add_dense = layers.Dense(
+        self.add_dense = keras.layers.Dense(
             memory_dim,
             activation="tanh",
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -662,7 +664,7 @@ class NTMWriteHead(BaseHead):
         :rtype: Any
         """
         similarity = cosine_similarity(key, memory, epsilon=self.epsilon)
-        return ops.softmax(beta * similarity, axis=-1)
+        return keras.ops.softmax(beta * similarity, axis=-1)
 
     def compute_addressing(
         self,
@@ -689,7 +691,7 @@ class NTMWriteHead(BaseHead):
         add = self.add_dense(controller_output)
 
         # 2. Content Addressing
-        key_expanded = ops.expand_dims(key, axis=1)
+        key_expanded = keras.ops.expand_dims(key, axis=1)
         content_weights = self.content_addressing(
             key_expanded, beta, memory_state.memory
         )
@@ -755,8 +757,8 @@ class NTMWriteHead(BaseHead):
         config = super().get_config()
         config.update(
             {
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
@@ -806,13 +808,13 @@ class NTMController(BaseController):
             **kwargs,
         )
 
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Create core cell in __init__ (Golden Rule)
         if self.controller_type == "lstm":
-            self.core = layers.LSTMCell(
+            self.core = keras.layers.LSTMCell(
                 self.controller_dim,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
@@ -820,7 +822,7 @@ class NTMController(BaseController):
                 name="controller_cell",
             )
         elif self.controller_type == "gru":
-            self.core = layers.GRUCell(
+            self.core = keras.layers.GRUCell(
                 self.controller_dim,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=self.bias_initializer,
@@ -828,7 +830,7 @@ class NTMController(BaseController):
                 name="controller_cell",
             )
         else:
-            self.core = layers.Dense(
+            self.core = keras.layers.Dense(
                 self.controller_dim,
                 activation="relu",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -864,11 +866,11 @@ class NTMController(BaseController):
         """
         if self.controller_type == "lstm":
             return [
-                ops.zeros((batch_size, self.controller_dim)),
-                ops.zeros((batch_size, self.controller_dim)),
+                keras.ops.zeros((batch_size, self.controller_dim)),
+                keras.ops.zeros((batch_size, self.controller_dim)),
             ]
         elif self.controller_type == "gru":
-            return [ops.zeros((batch_size, self.controller_dim))]
+            return [keras.ops.zeros((batch_size, self.controller_dim))]
         return None
 
     def call(
@@ -891,7 +893,7 @@ class NTMController(BaseController):
         """
         if self.controller_type in ["lstm", "gru"]:
             if state is None:
-                batch_size = ops.shape(inputs)[0]
+                batch_size = keras.ops.shape(inputs)[0]
                 state = self.initialize_state(batch_size)
 
             output, new_states = self.core(inputs, state, training=training)
@@ -940,8 +942,8 @@ class NTMController(BaseController):
         config = super().get_config()
         config.update(
             {
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
@@ -991,8 +993,8 @@ class NTMCell(keras.layers.Layer):
         else:
             self.config = config
 
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Create sub-layers
@@ -1171,8 +1173,8 @@ class NTMCell(keras.layers.Layer):
         memory_state = MemoryState(memory=memory_val)
 
         # Controller Step
-        flat_read_vectors = ops.concatenate(prev_read_vectors, axis=-1)
-        controller_input = ops.concatenate([inputs, flat_read_vectors], axis=-1)
+        flat_read_vectors = keras.ops.concatenate(prev_read_vectors, axis=-1)
+        controller_input = keras.ops.concatenate([inputs, flat_read_vectors], axis=-1)
 
         controller_output, new_controller_state = self.controller(
             controller_input,
@@ -1228,8 +1230,8 @@ class NTMCell(keras.layers.Layer):
         new_states.extend(new_write_weights)
 
         # Output
-        flat_new_read_vectors = ops.concatenate(new_read_vectors, axis=-1)
-        cell_output = ops.concatenate([controller_output, flat_new_read_vectors], axis=-1)
+        flat_new_read_vectors = keras.ops.concatenate(new_read_vectors, axis=-1)
+        cell_output = keras.ops.concatenate([controller_output, flat_new_read_vectors], axis=-1)
 
         return cell_output, new_states
 
@@ -1252,22 +1254,22 @@ class NTMCell(keras.layers.Layer):
         :rtype: list[keras.KerasTensor]
         """
         if batch_size is None and inputs is not None:
-            batch_size = ops.shape(inputs)[0]
+            batch_size = keras.ops.shape(inputs)[0]
 
         states = []
 
         # Controller states
         if self.config.controller_type == "lstm":
             states.extend([
-                ops.zeros((batch_size, self.config.controller_dim)),
-                ops.zeros((batch_size, self.config.controller_dim)),
+                keras.ops.zeros((batch_size, self.config.controller_dim)),
+                keras.ops.zeros((batch_size, self.config.controller_dim)),
             ])
         elif self.config.controller_type == "gru":
             states.append(ops.zeros((batch_size, self.config.controller_dim)))
 
         # Memory — use learnable initial memory if available, else random
         if self._initial_memory is not None:
-            memory = ops.broadcast_to(
+            memory = keras.ops.broadcast_to(
                 self._initial_memory,
                 (batch_size, self.config.memory_size, self.config.memory_dim),
             )
@@ -1295,7 +1297,7 @@ class NTMCell(keras.layers.Layer):
             states.append(ops.zeros((batch_size, self.config.memory_dim)))
 
         # Read Weights (uniform)
-        uniform_weight = ops.ones((1, self.config.memory_size)) / self.config.memory_size
+        uniform_weight = keras.ops.ones((1, self.config.memory_size)) / self.config.memory_size
         for _ in range(self.config.num_read_heads):
             states.append(ops.broadcast_to(uniform_weight, (batch_size, self.config.memory_size)))
 

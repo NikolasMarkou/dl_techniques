@@ -31,7 +31,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Union, Tuple, List
 
 # ---------------------------------------------------------------------
@@ -347,13 +346,13 @@ class AdaptiveBandRMS(keras.layers.Layer):
         aggregation_axes = list(range(1, len(rms_tensor.shape)))
 
         if aggregation_axes:
-            rms_stats = ops.mean(rms_tensor, axis=aggregation_axes, keepdims=True)
+            rms_stats = keras.ops.mean(rms_tensor, axis=aggregation_axes, keepdims=True)
         else:
             # Handle edge case of 1D input (batch,)
             rms_stats = rms_tensor
 
         # Ensure shape is [batch, 1] for dense layer
-        return ops.reshape(rms_stats, [-1, 1])
+        return keras.ops.reshape(rms_stats, [-1, 1])
 
     def _reshape_scaling_factors(
         self,
@@ -367,9 +366,9 @@ class AdaptiveBandRMS(keras.layers.Layer):
         :return: Reshaped scaling factors ready for element-wise multiplication.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(scaling_factors)[0]
+        batch_size = keras.ops.shape(scaling_factors)[0]
         target_shape = [batch_size] + list(self._param_shape)
-        return ops.reshape(scaling_factors, target_shape)
+        return keras.ops.reshape(scaling_factors, target_shape)
 
     def call(
         self,
@@ -387,17 +386,17 @@ class AdaptiveBandRMS(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Cast to float32 for numerical stability in mixed precision
-        inputs_fp32 = ops.cast(inputs, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, "float32")
 
         # Step 1: Compute RMS for normalization
-        mean_square = ops.mean(
-            ops.square(inputs_fp32),
+        mean_square = keras.ops.mean(
+            keras.ops.square(inputs_fp32),
             axis=self.axis,
             keepdims=True
         )
 
-        rms = ops.maximum(
-            ops.sqrt(mean_square + self.epsilon),
+        rms = keras.ops.maximum(
+            keras.ops.sqrt(mean_square + self.epsilon),
             self.epsilon
         )
 
@@ -408,23 +407,23 @@ class AdaptiveBandRMS(keras.layers.Layer):
         rms_stats = self._aggregate_rms_statistics(rms)
 
         # Step 3: Logarithmic transformation for variance stabilization
-        log_rms = ops.log(rms_stats)
+        log_rms = keras.ops.log(rms_stats)
 
         # Step 4: Dense projection to compute adaptive scaling parameters
         band_logits = self.dense_layer(log_rms, training=training)
 
         # Step 5: Convert to scaling factors in [1-α, 1] range
-        band_activation = ops.sigmoid(5.0 * band_logits)
+        band_activation = keras.ops.sigmoid(5.0 * band_logits)
         scale_factors = (1.0 - self.max_band_width) + (
             self.max_band_width * band_activation
         )
 
         # Step 6: Reshape for broadcasting and apply adaptive scaling
         scale_factors = self._reshape_scaling_factors(scale_factors)
-        output = normalized * ops.cast(scale_factors, "float32")
+        output = normalized * keras.ops.cast(scale_factors, "float32")
 
         # Cast back to original dtype
-        return ops.cast(output, inputs.dtype)
+        return keras.ops.cast(output, inputs.dtype)
 
     def compute_output_shape(
         self,

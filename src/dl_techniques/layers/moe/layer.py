@@ -7,7 +7,6 @@ Refined to use the simplified FFN-only expert system and follow modern Keras 3 p
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Any, Dict, List
 
 # ---------------------------------------------------------------------
@@ -181,7 +180,7 @@ class MixtureOfExperts(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the MoE layer."""
-        original_shape = ops.shape(inputs)
+        original_shape = keras.ops.shape(inputs)
         input_ndim = len(inputs.shape)  # Static rank — works on all backends
 
         # Handle different input dimensions
@@ -195,13 +194,13 @@ class MixtureOfExperts(keras.layers.Layer):
             batch_size = original_shape[0]
             seq_len = original_shape[1]
             hidden_dim = original_shape[2]
-            inputs_flat = ops.reshape(inputs, (-1, hidden_dim))
+            inputs_flat = keras.ops.reshape(inputs, (-1, hidden_dim))
             is_sequence = True
 
         else:
             # Higher dimensional input: flatten all but last dimension
             hidden_dim = original_shape[-1]
-            inputs_flat = ops.reshape(inputs, (-1, hidden_dim))
+            inputs_flat = keras.ops.reshape(inputs, (-1, hidden_dim))
             is_sequence = True
 
         # Determine gating input based on routing type
@@ -291,7 +290,7 @@ class MixtureOfExperts(keras.layers.Layer):
         # Flatten weights to (num_tokens, num_experts)
         weights_ndim = len(expert_weights.shape)
         if weights_ndim > 2:
-            weights_flat = ops.reshape(expert_weights, (-1, self.num_experts))
+            weights_flat = keras.ops.reshape(expert_weights, (-1, self.num_experts))
         else:
             weights_flat = expert_weights
 
@@ -299,17 +298,17 @@ class MixtureOfExperts(keras.layers.Layer):
         indices_ndim = len(expert_indices.shape)
         if indices_ndim > 1:
             # Flatten indices to 2D: (num_tokens, top_k) or (num_tokens, num_experts)
-            indices_flat = ops.reshape(expert_indices, (-1, expert_indices.shape[-1]))
+            indices_flat = keras.ops.reshape(expert_indices, (-1, expert_indices.shape[-1]))
         else:
             indices_flat = expert_indices
 
         if indices_flat.shape[-1] is not None and indices_flat.shape[-1] < self.num_experts:
             # top_k selection: create assignment from one-hot sum
-            expert_one_hot = ops.one_hot(indices_flat, self.num_experts)
-            expert_assignment = ops.sum(expert_one_hot, axis=-2)  # (num_tokens, num_experts)
+            expert_one_hot = keras.ops.one_hot(indices_flat, self.num_experts)
+            expert_assignment = keras.ops.sum(expert_one_hot, axis=-2)  # (num_tokens, num_experts)
         else:
             # All experts selected
-            expert_assignment = ops.ones_like(weights_flat)
+            expert_assignment = keras.ops.ones_like(weights_flat)
 
         # Process all experts and combine
         expert_outputs = []
@@ -330,16 +329,16 @@ class MixtureOfExperts(keras.layers.Layer):
             # the gate rather than the expert output is deliberate: the routing
             # weights are a convex combination in [0, 1], so half precision
             # costs nothing there. See decisions.md D-064.
-            expert_weight = ops.cast(
+            expert_weight = keras.ops.cast(
                 weights_flat[:, expert_id:expert_id + 1], expert_output.dtype)
-            expert_mask = ops.cast(
+            expert_mask = keras.ops.cast(
                 expert_assignment[:, expert_id:expert_id + 1],
                 expert_output.dtype)
             weighted_output = expert_output * expert_weight * expert_mask
             expert_outputs.append(weighted_output)
 
         # Sum outputs from all experts
-        outputs = ops.sum(ops.stack(expert_outputs, axis=0), axis=0)
+        outputs = keras.ops.sum(ops.stack(expert_outputs, axis=0), axis=0)
 
         # NOTE: residual-for-dropped-tokens is intentionally not applied. The
         # current kernel is dense (all experts process all tokens) so no
@@ -351,9 +350,9 @@ class MixtureOfExperts(keras.layers.Layer):
             return outputs
         else:
             # Infer output_dim from actual output
-            actual_output_dim = ops.shape(outputs)[-1]
+            actual_output_dim = keras.ops.shape(outputs)[-1]
             new_shape = list(original_shape[:-1]) + [actual_output_dim]
-            return ops.reshape(outputs, new_shape)
+            return keras.ops.reshape(outputs, new_shape)
 
     def _process_softmoe(
             self,
@@ -372,8 +371,8 @@ class MixtureOfExperts(keras.layers.Layer):
         expert_inputs shape:    [batch, num_experts, num_slots * hidden_dim]
         combine_weights shape:  [batch, seq_len, num_experts, num_slots]
         """
-        batch_size = ops.shape(inputs)[0]
-        hidden_dim = ops.shape(inputs)[-1]
+        batch_size = keras.ops.shape(inputs)[0]
+        hidden_dim = keras.ops.shape(inputs)[-1]
         num_slots = self.gating_config.num_slots
 
         # Process each expert on its slots independently.
@@ -382,23 +381,23 @@ class MixtureOfExperts(keras.layers.Layer):
         for expert_id in range(self.num_experts):
             # This expert's concatenated slot input: [batch, num_slots * hidden_dim]
             expert_input = expert_inputs[:, expert_id, :]
-            expert_input = ops.reshape(expert_input, (batch_size * num_slots, hidden_dim))
+            expert_input = keras.ops.reshape(expert_input, (batch_size * num_slots, hidden_dim))
             expert_output = self.experts[expert_id](expert_input, training=training)
-            output_dim = ops.shape(expert_output)[-1]
-            expert_output = ops.reshape(expert_output, (batch_size, num_slots, output_dim))
+            output_dim = keras.ops.shape(expert_output)[-1]
+            expert_output = keras.ops.reshape(expert_output, (batch_size, num_slots, output_dim))
             expert_slot_outputs.append(expert_output)
 
         # Stack: [batch, num_experts, num_slots, output_dim]
-        all_expert_outputs = ops.stack(expert_slot_outputs, axis=1)
+        all_expert_outputs = keras.ops.stack(expert_slot_outputs, axis=1)
 
         # Combine expert-slot outputs back to token positions using
         # combine_weights (softmax over experts*slots per token).
         # combine_weights:    [b, s, e, l]
         # all_expert_outputs: [b,    e, l, h']
-        combine_expanded = ops.expand_dims(combine_weights, axis=-1)  # [b, s, e, l, 1]
-        outputs_expanded = ops.expand_dims(all_expert_outputs, axis=1)  # [b, 1, e, l, h']
+        combine_expanded = keras.ops.expand_dims(combine_weights, axis=-1)  # [b, s, e, l, 1]
+        outputs_expanded = keras.ops.expand_dims(all_expert_outputs, axis=1)  # [b, 1, e, l, h']
         weighted = combine_expanded * outputs_expanded                  # [b, s, e, l, h']
-        outputs = ops.sum(weighted, axis=(2, 3))                        # [b, s, h']
+        outputs = keras.ops.sum(weighted, axis=(2, 3))                        # [b, s, h']
 
         return outputs
 

@@ -73,8 +73,7 @@ The foundational work that introduced Random Fourier Features is:
 
 import keras
 import numpy as np
-from typing import Optional, Union, Tuple, Any, Dict
-from keras import ops, layers, initializers, regularizers, constraints
+from typing import Optional, Union, Tuple, Any, Dict, Callable
 
 # ---------------------------------------------------------------------
 
@@ -162,13 +161,13 @@ class RFFKernelLayer(keras.layers.Layer):
             n_features: int = 1000,
             gamma: float = 1.0,
             use_bias: bool = True,
-            activation: Optional[Union[str, callable]] = None,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
-            kernel_constraint: Optional[constraints.Constraint] = None,
-            bias_constraint: Optional[constraints.Constraint] = None,
+            activation: Optional[Union[str, Callable]] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_constraint: Optional[keras.constraints.Constraint] = None,
+            bias_constraint: Optional[keras.constraints.Constraint] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -188,19 +187,19 @@ class RFFKernelLayer(keras.layers.Layer):
         self.gamma = gamma
         self.use_bias = use_bias
         self.activation = keras.activations.get(activation)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
-        self.kernel_constraint = constraints.get(kernel_constraint)
-        self.bias_constraint = constraints.get(bias_constraint)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.kernel_constraint = keras.constraints.get(kernel_constraint)
+        self.bias_constraint = keras.constraints.get(bias_constraint)
 
         # Validate output_dim
         if self.output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {self.output_dim}")
 
         # Create output linear layer in __init__
-        self.linear = layers.Dense(
+        self.linear = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,

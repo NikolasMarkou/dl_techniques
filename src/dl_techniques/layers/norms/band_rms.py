@@ -300,7 +300,10 @@ class BandRMS(keras.layers.Layer):
         # Cast back to original dtype
         return ops.cast(output, inputs.dtype)
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """
         Compute the shape of output tensor.
 

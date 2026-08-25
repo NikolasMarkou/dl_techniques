@@ -38,7 +38,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -241,17 +240,17 @@ class RMSNorm(keras.layers.Layer):
         original_dtype = inputs.dtype
 
         # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = ops.cast(inputs, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, "float32")
 
         # Compute RMS: sqrt(mean(x²) + ε)
-        mean_square = ops.mean(
-            ops.square(inputs_fp32),
+        mean_square = keras.ops.mean(
+            keras.ops.square(inputs_fp32),
             axis=self.axis,
             keepdims=True
         )
 
         # Add epsilon for numerical stability and compute RMS
-        rms = ops.sqrt(mean_square + self.epsilon)
+        rms = keras.ops.sqrt(mean_square + self.epsilon)
 
         # Normalize by RMS
         normalized = inputs_fp32 / rms
@@ -261,7 +260,7 @@ class RMSNorm(keras.layers.Layer):
             normalized = normalized * self.scale
 
         # Cast back to original dtype
-        return ops.cast(normalized, original_dtype)
+        return keras.ops.cast(normalized, original_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """

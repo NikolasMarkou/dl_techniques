@@ -26,7 +26,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
@@ -40,7 +39,8 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class MaxLogitNorm(keras.layers.Layer):
-    """Basic MaxLogit normalization layer for out-of-distribution detection.
+    """
+    Basic MaxLogit normalization layer for out-of-distribution detection.
 
     Applies L2 normalization to logits to separate magnitude and direction
     components, improving OOD detection. The layer computes:
@@ -139,12 +139,12 @@ class MaxLogitNorm(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Cast inputs to computation dtype for numerical stability
-        inputs = ops.cast(inputs, self.compute_dtype)
+        inputs = keras.ops.cast(inputs, self.compute_dtype)
 
         # Compute L2 norm with numerical stability
-        squared = ops.square(inputs)
-        norm = ops.sqrt(
-            ops.sum(squared, axis=self.axis, keepdims=True) + self.epsilon
+        squared = keras.ops.square(inputs)
+        norm = keras.ops.sqrt(
+            keras.ops.sum(squared, axis=self.axis, keepdims=True) + self.epsilon
         )
 
         # L2 normalize
@@ -301,31 +301,35 @@ class DecoupledMaxLogit(keras.layers.Layer):
         :return: Tuple of (combined score, MaxCosine component, MaxNorm component).
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
         """
-        inputs = ops.cast(inputs, self.compute_dtype)
+        inputs = keras.ops.cast(inputs, self.compute_dtype)
 
         # Compute L2 norm with numerical stability
-        squared = ops.square(inputs)
-        norm = ops.sqrt(
-            ops.sum(squared, axis=self.axis, keepdims=True) + self.epsilon
+        squared = keras.ops.square(inputs)
+        norm = keras.ops.sqrt(
+            keras.ops.sum(squared, axis=self.axis, keepdims=True) + self.epsilon
         )
 
         # Compute normalized features (cosine)
         normalized = inputs / norm
 
         # Get maximum cosine similarity (remove keepdims for final output)
-        max_cosine = ops.max(normalized, axis=self.axis)
+        max_cosine = keras.ops.max(normalized, axis=self.axis)
 
         # Get maximum norm. ops.max over the keepdims=True `norm` already drops
         # the reduced axis, yielding the same shape as `max_cosine` above.
-        max_norm = ops.max(norm, axis=self.axis)
+        max_norm = keras.ops.max(norm, axis=self.axis)
 
         # Combine with the fixed decoupling constant (a hyperparameter, not a weight)
         output = self.constant * max_cosine + max_norm
 
         return output, max_cosine, max_norm
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Compute the output shape of the layer.
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
+        """
+        Compute the output shape of the layer.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -347,7 +351,8 @@ class DecoupledMaxLogit(keras.layers.Layer):
         return (output_shape, output_shape, output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization.
+        """
+        Return configuration for serialization.
 
         :return: Dictionary containing all constructor arguments.
         :rtype: Dict[str, Any]
@@ -363,7 +368,8 @@ class DecoupledMaxLogit(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class DMLPlus(keras.layers.Layer):
-    """DML+ layer for separate focal and center OOD detection models.
+    """
+    DML+ layer for separate focal and center OOD detection models.
 
     Designed for specialized models optimized for different components of
     decoupled MaxLogit. The focal model computes ``MaxCosine = max(x / ||x||_2)``
@@ -475,12 +481,12 @@ class DMLPlus(keras.layers.Layer):
             tuple of (MaxNorm score, normalization factor).
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
-        inputs = ops.cast(inputs, self.compute_dtype)
+        inputs = keras.ops.cast(inputs, self.compute_dtype)
 
         # Compute L2 norm with numerical stability
-        squared = ops.square(inputs)
-        norm = ops.sqrt(
-            ops.sum(squared, axis=self.axis, keepdims=True) + self.epsilon
+        squared = keras.ops.square(inputs)
+        norm = keras.ops.sqrt(
+            keras.ops.sum(squared, axis=self.axis, keepdims=True) + self.epsilon
         )
 
         # Compute normalized features
@@ -488,15 +494,19 @@ class DMLPlus(keras.layers.Layer):
 
         if self.model_type == "focal":
             # Focal model returns MaxCosine
-            return ops.max(normalized, axis=self.axis)
+            return keras.ops.max(normalized, axis=self.axis)
         else:
             # Center model returns MaxNorm and norm factor. ops.max over the
             # keepdims=True `norm` already drops the reduced axis.
-            max_norm = ops.max(norm, axis=self.axis)
+            max_norm = keras.ops.max(norm, axis=self.axis)
             return max_norm, norm
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]:
-        """Compute the output shape of the layer.
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]:
+        """
+        Compute the output shape of the layer.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]

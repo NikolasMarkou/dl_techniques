@@ -1,12 +1,11 @@
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
+from dl_techniques.layers.embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
 
 # ---------------------------------------------------------------------
 
@@ -197,7 +196,10 @@ class SupernodePooling(keras.layers.Layer):
             name="proj"
         )
 
-    def build(self, input_shape: Union[Dict[str, Tuple[Optional[int], ...]], Any]) -> None:
+    def build(
+            self,
+            input_shape: Union[Dict[str, Tuple[Optional[int], ...]], Any]
+    ) -> None:
         """Build the layer and all its sub-layers.
 
         CRITICAL: Explicitly build each sub-layer for robust serialization.
@@ -262,11 +264,11 @@ class SupernodePooling(keras.layers.Layer):
         positions = inputs["positions"]  # (num_points, ndim)
         supernode_indices = inputs["supernode_indices"]  # (num_supernodes,)
 
-        num_points = ops.shape(positions)[0]
-        num_supernodes = ops.shape(supernode_indices)[0]
+        num_points = keras.ops.shape(positions)[0]
+        num_supernodes = keras.ops.shape(supernode_indices)[0]
 
         # Get supernode positions
-        supernode_positions = ops.take(positions, supernode_indices, axis=0)  # (num_supernodes, ndim)
+        supernode_positions = keras.ops.take(positions, supernode_indices, axis=0)  # (num_supernodes, ndim)
 
         # Find neighbors for each supernode
         if self.radius is not None:
@@ -281,59 +283,67 @@ class SupernodePooling(keras.layers.Layer):
         aggregated = self._aggregate_messages(messages, neighbor_mask)
 
         # Get supernode position embeddings
-        supernode_pos_embed = self.pos_embed(ops.expand_dims(supernode_positions, 0), training=training)  # (1, num_supernodes, hidden_dim)
-        supernode_pos_embed = ops.squeeze(supernode_pos_embed, 0)  # (num_supernodes, hidden_dim)
+        supernode_pos_embed = self.pos_embed(keras.ops.expand_dims(supernode_positions, 0), training=training)  # (1, num_supernodes, hidden_dim)
+        supernode_pos_embed = keras.ops.squeeze(supernode_pos_embed, 0)  # (num_supernodes, hidden_dim)
 
         # Combine aggregated messages with position embeddings
-        combined = ops.concatenate([aggregated, supernode_pos_embed], axis=-1)  # (num_supernodes, hidden_dim * 2)
+        combined = keras.ops.concatenate([aggregated, supernode_pos_embed], axis=-1)  # (num_supernodes, hidden_dim * 2)
         output = self.proj_layer(combined, training=training)  # (num_supernodes, hidden_dim)
 
         # Add batch dimension for consistency
-        output = ops.expand_dims(output, 0)  # (1, num_supernodes, hidden_dim)
+        output = keras.ops.expand_dims(output, 0)  # (1, num_supernodes, hidden_dim)
 
         return output
 
-    def _radius_neighbors(self, positions: keras.KerasTensor, supernode_positions: keras.KerasTensor) -> keras.KerasTensor:
+    def _radius_neighbors(
+            self,
+            positions: keras.KerasTensor,
+            supernode_positions: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """Find neighbors within radius for each supernode."""
         # Compute pairwise distances
         # positions: (num_points, ndim) -> (num_points, 1, ndim)
         # supernode_positions: (num_supernodes, ndim) -> (1, num_supernodes, ndim)
-        pos_expanded = ops.expand_dims(positions, 1)
-        super_expanded = ops.expand_dims(supernode_positions, 0)
+        pos_expanded = keras.ops.expand_dims(positions, 1)
+        super_expanded = keras.ops.expand_dims(supernode_positions, 0)
 
         # Compute squared distances
         diff = pos_expanded - super_expanded  # (num_points, num_supernodes, ndim)
-        sq_distances = ops.sum(ops.square(diff), axis=-1)  # (num_points, num_supernodes)
+        sq_distances = keras.ops.sum(keras.ops.square(diff), axis=-1)  # (num_points, num_supernodes)
 
         # Create mask for points within radius
         mask = sq_distances <= (self.radius ** 2)  # (num_points, num_supernodes)
 
         return mask
 
-    def _knn_neighbors(self, positions: keras.KerasTensor, supernode_positions: keras.KerasTensor) -> keras.KerasTensor:
+    def _knn_neighbors(
+            self,
+            positions: keras.KerasTensor,
+            supernode_positions: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """Find k nearest neighbors for each supernode."""
-        num_points = ops.shape(positions)[0]
+        num_points = keras.ops.shape(positions)[0]
 
         # Compute pairwise distances (same as radius method)
-        pos_expanded = ops.expand_dims(positions, 1)
-        super_expanded = ops.expand_dims(supernode_positions, 0)
+        pos_expanded = keras.ops.expand_dims(positions, 1)
+        super_expanded = keras.ops.expand_dims(supernode_positions, 0)
 
         diff = pos_expanded - super_expanded
-        sq_distances = ops.sum(ops.square(diff), axis=-1)  # (num_points, num_supernodes)
+        sq_distances = keras.ops.sum(ops.square(diff), axis=-1)  # (num_points, num_supernodes)
 
         # Find k nearest neighbors for each supernode
-        k = ops.minimum(self.k_neighbors, num_points)
+        k = keras.ops.minimum(self.k_neighbors, num_points)
 
         # Get indices of k smallest distances for each supernode
-        _, top_k_indices = ops.top_k(-sq_distances, k=k)  # (num_points, k) - using negative for smallest
+        _, top_k_indices = keras.ops.top_k(-sq_distances, k=k)  # (num_points, k) - using negative for smallest
 
         # Create mask from top-k indices
-        mask = ops.zeros_like(sq_distances, dtype="bool")
+        mask = keras.ops.zeros_like(sq_distances, dtype="bool")
 
         # This is a simplified approach - in practice, you'd use scatter operations
         # For now, we'll use top-k based selection
-        threshold_distances = ops.take_along_axis(-ops.sort(-sq_distances, axis=0)[:k, :],
-                                                  ops.array([k - 1]), axis=0)  # (1, num_supernodes)
+        threshold_distances = keras.ops.take_along_axis(-ops.sort(-sq_distances, axis=0)[:k, :],
+                                                  keras.ops.array([k - 1]), axis=0)  # (1, num_supernodes)
         mask = sq_distances <= threshold_distances
 
         return mask
@@ -346,56 +356,62 @@ class SupernodePooling(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Create messages from neighbors to supernodes."""
-        num_points = ops.shape(positions)[0]
-        num_supernodes = ops.shape(supernode_positions)[0]
+        num_points = keras.ops.shape(positions)[0]
+        num_supernodes = keras.ops.shape(supernode_positions)[0]
 
         if self.mode == "abspos":
             # Absolute position mode: embed all positions
             pos_embed_all = self.pos_embed(ops.expand_dims(positions, 0), training=training)  # (1, num_points, hidden_dim)
-            pos_embed_all = ops.squeeze(pos_embed_all, 0)  # (num_points, hidden_dim)
+            pos_embed_all = keras.ops.squeeze(pos_embed_all, 0)  # (num_points, hidden_dim)
 
             super_embed_all = self.pos_embed(
-                ops.expand_dims(supernode_positions, 0), training=training)  # (1, num_supernodes, hidden_dim)
-            super_embed_all = ops.squeeze(super_embed_all, 0)  # (num_supernodes, hidden_dim)
+                keras.ops.expand_dims(supernode_positions, 0), training=training)  # (1, num_supernodes, hidden_dim)
+            super_embed_all = keras.ops.squeeze(super_embed_all, 0)  # (num_supernodes, hidden_dim)
 
             # Combine source and target embeddings
-            pos_expanded = ops.expand_dims(pos_embed_all, 1)  # (num_points, 1, hidden_dim)
-            super_expanded = ops.expand_dims(super_embed_all, 0)  # (1, num_supernodes, hidden_dim)
+            pos_expanded = keras.ops.expand_dims(pos_embed_all, 1)  # (num_points, 1, hidden_dim)
+            super_expanded = keras.ops.expand_dims(super_embed_all, 0)  # (1, num_supernodes, hidden_dim)
 
-            combined = ops.concatenate([
-                ops.tile(pos_expanded, [1, num_supernodes, 1]),
-                ops.tile(super_expanded, [num_points, 1, 1])
+            combined = keras.ops.concatenate([
+                keras.ops.tile(pos_expanded, [1, num_supernodes, 1]),
+                keras.ops.tile(super_expanded, [num_points, 1, 1])
             ], axis=-1)  # (num_points, num_supernodes, hidden_dim * 2)
 
         else:
             # Relative position mode: embed relative positions + distance
-            pos_expanded = ops.expand_dims(positions, 1)  # (num_points, 1, ndim)
-            super_expanded = ops.expand_dims(supernode_positions, 0)  # (1, num_supernodes, ndim)
+            pos_expanded = keras.ops.expand_dims(positions, 1)  # (num_points, 1, ndim)
+            super_expanded = keras.ops.expand_dims(supernode_positions, 0)  # (1, num_supernodes, ndim)
 
             relative_pos = super_expanded - pos_expanded  # (num_points, num_supernodes, ndim)
-            distances = ops.sqrt(
-                ops.sum(ops.square(relative_pos), axis=-1, keepdims=True))  # (num_points, num_supernodes, 1)
+            distances = keras.ops.sqrt(
+                keras.ops.sum(ops.square(relative_pos), axis=-1, keepdims=True))  # (num_points, num_supernodes, 1)
 
             # Combine relative position with distance magnitude
-            rel_pos_with_dist = ops.concatenate([relative_pos, distances],
+            rel_pos_with_dist = keras.ops.concatenate([relative_pos, distances],
                                                 axis=-1)  # (num_points, num_supernodes, ndim + 1)
 
             # Embed relative positions
-            combined = self.rel_pos_embed(rel_pos_with_dist, training=training)  # (num_points, num_supernodes, hidden_dim)
+            # (num_points, num_supernodes, hidden_dim)
+            combined = self.rel_pos_embed(rel_pos_with_dist, training=training)
 
         # Apply message MLP
-        messages = self.message_mlp(combined, training=training)  # (num_points, num_supernodes, hidden_dim)
+        # (num_points, num_supernodes, hidden_dim)
+        messages = self.message_mlp(combined, training=training)
 
         # Mask out non-neighbors
-        mask_expanded = ops.expand_dims(ops.cast(neighbor_mask, messages.dtype), -1)
+        mask_expanded = keras.ops.expand_dims(ops.cast(neighbor_mask, messages.dtype), -1)
         messages = messages * mask_expanded
 
         return messages
 
-    def _aggregate_messages(self, messages: keras.KerasTensor, neighbor_mask: keras.KerasTensor) -> keras.KerasTensor:
+    def _aggregate_messages(
+            self,
+            messages: keras.KerasTensor,
+            neighbor_mask: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """Aggregate messages for each supernode."""
         # Sum messages for each supernode
-        aggregated = ops.sum(messages, axis=0)  # (num_supernodes, hidden_dim)
+        aggregated = keras.ops.sum(messages, axis=0)  # (num_supernodes, hidden_dim)
 
         # Normalize by number of neighbors to get mean.
         # DECISION plan-2026-07-31T210633-b63a35aa/D-002
@@ -408,16 +424,19 @@ class SupernodePooling(keras.layers.Layer):
         # under mixed_float16, float64 and mixed_bfloat16. This is the SECOND of the
         # two hard dtype literals on the sincos path; fixing only
         # `ContinuousSinCosEmbed` left this layer dead at 3 of the 4 policies.
-        neighbor_counts = ops.sum(
-            ops.cast(neighbor_mask, aggregated.dtype), axis=0, keepdims=True)  # (1, num_supernodes)
-        neighbor_counts = ops.maximum(
-            neighbor_counts, ops.cast(1.0, aggregated.dtype))  # Avoid division by zero
+        neighbor_counts = keras.ops.sum(
+            keras.ops.cast(neighbor_mask, aggregated.dtype), axis=0, keepdims=True)  # (1, num_supernodes)
+        neighbor_counts = keras.ops.maximum(
+            neighbor_counts, keras.ops.cast(1.0, aggregated.dtype))  # Avoid division by zero
 
-        aggregated = aggregated / ops.transpose(neighbor_counts)  # (num_supernodes, hidden_dim)
+        aggregated = aggregated / keras.ops.transpose(neighbor_counts)  # (num_supernodes, hidden_dim)
 
         return aggregated
 
-    def compute_output_shape(self, input_shape: Union[Dict[str, Tuple[Optional[int], ...]], Any]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Union[Dict[str, Tuple[Optional[int], ...]], Any]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         if not isinstance(input_shape, dict) or "supernode_indices" not in input_shape:
             raise ValueError("Cannot determine output shape without supernode_indices")

@@ -41,12 +41,12 @@ import keras
 from typing import Optional, Union, List, Dict, Any, Tuple, Literal, Callable
 
 # ---------------------------------------------------------------------
-# Local imports - Assumed to exist in the project structure
+# local imports
 # ---------------------------------------------------------------------
 
-from ..ffn.factory import create_ffn_layer, FFNType
-from ..attention.factory import create_attention_layer
-from ..norms.factory import create_normalization_layer, NormalizationType
+from dl_techniques.layers.ffn import create_ffn_layer, FFNType
+from dl_techniques.layers.attention import create_attention_layer
+from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
 # Type definitions for fusion strategies
@@ -65,7 +65,7 @@ FusionStrategy = Literal[
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package='MultiModalFusion')
+@keras.saving.register_keras_serializable()
 class MultiModalFusion(keras.layers.Layer):
     """General-purpose configurable multi-modal fusion layer.
 

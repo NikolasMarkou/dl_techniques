@@ -65,13 +65,12 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class TverskyProjectionLayer(layers.Layer):
+class TverskyProjectionLayer(keras.layers.Layer):
     """
     Projection layer based on a differentiable Tversky similarity model.
 
@@ -145,9 +144,9 @@ class TverskyProjectionLayer(layers.Layer):
         num_features: int,
         intersection_reduction: Literal['product', 'min', 'mean'] = 'product',
         difference_reduction: Literal['ignorematch', 'subtractmatch'] = 'subtractmatch',
-        prototype_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        feature_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        contrast_initializer: Union[str, initializers.Initializer] = 'ones',
+        prototype_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        feature_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        contrast_initializer: Union[str, keras.initializers.Initializer] = 'ones',
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -163,9 +162,9 @@ class TverskyProjectionLayer(layers.Layer):
         self.num_features = num_features
         self.intersection_reduction = intersection_reduction
         self.difference_reduction = difference_reduction
-        self.prototype_initializer = initializers.get(prototype_initializer)
-        self.feature_initializer = initializers.get(feature_initializer)
-        self.contrast_initializer = initializers.get(contrast_initializer)
+        self.prototype_initializer = keras.initializers.get(prototype_initializer)
+        self.feature_initializer = keras.initializers.get(feature_initializer)
+        self.contrast_initializer = keras.initializers.get(contrast_initializer)
 
         # Initialize weight attributes - they will be created in build()
         self.prototypes = None
@@ -240,11 +239,11 @@ class TverskyProjectionLayer(layers.Layer):
         # inputs shape: (batch_size, input_dim)
         # feature_bank shape: (num_features, input_dim)
         # -> input_dots shape: (batch_size, num_features)
-        input_dots = ops.matmul(inputs, ops.transpose(self.feature_bank))
+        input_dots = keras.ops.matmul(inputs, keras.ops.transpose(self.feature_bank))
 
         # prototypes shape: (units, input_dim)
         # -> proto_dots shape: (units, num_features)
-        proto_dots = ops.matmul(self.prototypes, ops.transpose(self.feature_bank))
+        proto_dots = keras.ops.matmul(self.prototypes, keras.ops.transpose(self.feature_bank))
 
         # Create boolean masks for set operations (feature is present if dot > 0).
         input_mask = input_dots > 0
@@ -253,46 +252,46 @@ class TverskyProjectionLayer(layers.Layer):
         # Reshape for broadcasting:
         # (batch, 1, num_features) vs (1, units, num_features)
         # -> results will have shape: (batch, units, num_features)
-        input_dots_b = ops.expand_dims(input_dots, axis=1)
-        input_mask_b = ops.expand_dims(input_mask, axis=1)
-        proto_dots_b = ops.expand_dims(proto_dots, axis=0)
-        proto_mask_b = ops.expand_dims(proto_mask, axis=0)
+        input_dots_b = keras.ops.expand_dims(input_dots, axis=1)
+        input_mask_b = keras.ops.expand_dims(input_mask, axis=1)
+        proto_dots_b = keras.ops.expand_dims(proto_dots, axis=0)
+        proto_mask_b = keras.ops.expand_dims(proto_mask, axis=0)
 
         # Calculate f(A ∩ B): common features measure.
-        common_mask = ops.logical_and(input_mask_b, proto_mask_b)
+        common_mask = keras.ops.logical_and(input_mask_b, proto_mask_b)
 
         if self.intersection_reduction == 'product':
             intersection_scores = input_dots_b * proto_dots_b
         elif self.intersection_reduction == 'min':
-            intersection_scores = ops.minimum(input_dots_b, proto_dots_b)
+            intersection_scores = keras.ops.minimum(input_dots_b, proto_dots_b)
         elif self.intersection_reduction == 'mean':
             intersection_scores = (input_dots_b + proto_dots_b) / 2.0
         else:
             raise NotImplementedError(
                 f"Intersection reduction '{self.intersection_reduction}' not implemented."
             )
-        f_intersection = ops.sum(
-            ops.where(common_mask, intersection_scores, 0.0), axis=-1
+        f_intersection = keras.ops.sum(
+            keras.ops.where(common_mask, intersection_scores, 0.0), axis=-1
         )
 
         # Calculate f(A - B) and f(B - A): distinctive features measures.
         if self.difference_reduction == 'ignorematch':
-            input_distinct_mask = ops.logical_and(input_mask_b, ops.logical_not(proto_mask_b))
-            f_input_distinctive = ops.sum(
-                ops.where(input_distinct_mask, input_dots_b, 0.0), axis=-1
+            input_distinct_mask = keras.ops.logical_and(input_mask_b, keras.ops.logical_not(proto_mask_b))
+            f_input_distinctive = keras.ops.sum(
+                keras.ops.where(input_distinct_mask, input_dots_b, 0.0), axis=-1
             )
-            proto_distinct_mask = ops.logical_and(proto_mask_b, ops.logical_not(input_mask_b))
-            f_proto_distinctive = ops.sum(
-                ops.where(proto_distinct_mask, proto_dots_b, 0.0), axis=-1
+            proto_distinct_mask = keras.ops.logical_and(proto_mask_b, keras.ops.logical_not(input_mask_b))
+            f_proto_distinctive = keras.ops.sum(
+                keras.ops.where(proto_distinct_mask, proto_dots_b, 0.0), axis=-1
             )
         elif self.difference_reduction == 'subtractmatch':
-            subtract_mask_A = ops.logical_and(common_mask, input_dots_b > proto_dots_b)
-            f_input_distinctive = ops.sum(
-                ops.where(subtract_mask_A, input_dots_b - proto_dots_b, 0.0), axis=-1
+            subtract_mask_A = keras.ops.logical_and(common_mask, input_dots_b > proto_dots_b)
+            f_input_distinctive = keras.ops.sum(
+                keras.ops.where(subtract_mask_A, input_dots_b - proto_dots_b, 0.0), axis=-1
             )
-            subtract_mask_B = ops.logical_and(common_mask, proto_dots_b > input_dots_b)
-            f_proto_distinctive = ops.sum(
-                ops.where(subtract_mask_B, proto_dots_b - input_dots_b, 0.0), axis=-1
+            subtract_mask_B = keras.ops.logical_and(common_mask, proto_dots_b > input_dots_b)
+            f_proto_distinctive = keras.ops.sum(
+                keras.ops.where(subtract_mask_B, proto_dots_b - input_dots_b, 0.0), axis=-1
             )
         else:
             raise NotImplementedError(
@@ -321,9 +320,9 @@ class TverskyProjectionLayer(layers.Layer):
             'num_features': self.num_features,
             'intersection_reduction': self.intersection_reduction,
             'difference_reduction': self.difference_reduction,
-            'prototype_initializer': initializers.serialize(self.prototype_initializer),
-            'feature_initializer': initializers.serialize(self.feature_initializer),
-            'contrast_initializer': initializers.serialize(self.contrast_initializer),
+            'prototype_initializer': keras.initializers.serialize(self.prototype_initializer),
+            'feature_initializer': keras.initializers.serialize(self.feature_initializer),
+            'contrast_initializer': keras.initializers.serialize(self.contrast_initializer),
         })
         return config
 

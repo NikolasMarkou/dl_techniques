@@ -160,6 +160,9 @@ from keras.src.layers.rnn.dropout_rnn_cell import (  # type: ignore
 # local imports
 # ---------------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger  # type: ignore
+from dl_techniques.layers.norms import create_normalization_layer  # type: ignore
+
 from .clifford_block import (
     SparseRollingGeometricProduct,
     GatedGeometricResidual,
@@ -176,8 +179,6 @@ from .clifford_block import (
     _resolve_activation,
     _serialize_activation,
 )
-from ..norms.factory import create_normalization_layer  # type: ignore
-from ...utils.logger import logger  # type: ignore
 
 __all__ = ["CliffordRNNCell", "CliffordRNN"]
 
@@ -410,9 +411,9 @@ class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
         self.normalization_kwargs = dict(normalization_kwargs or {})
         self.state_normalization_type = state_normalization_type
         self.state_normalization_kwargs = dict(state_normalization_kwargs or {})
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.recurrent_initializer = initializers.get(recurrent_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.recurrent_initializer = keras.initializers.get(recurrent_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.recurrent_regularizer = regularizers.get(recurrent_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
@@ -522,7 +523,7 @@ class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
                 use_bias=use_bias,
                 kernel_initializer=kernel_initializer,
                 bias_initializer=(
-                    initializers.Constant(forget_bias_init)
+                    keras.initializers.Constant(forget_bias_init)
                     if use_bias
                     else bias_initializer
                 ),
@@ -788,13 +789,13 @@ class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
                 "state_normalization_kwargs": dict(
                     self.state_normalization_kwargs
                 ),
-                "kernel_initializer": initializers.serialize(
+                "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer
                 ),
-                "recurrent_initializer": initializers.serialize(
+                "recurrent_initializer": keras.initializers.serialize(
                     self.recurrent_initializer
                 ),
-                "bias_initializer": initializers.serialize(
+                "bias_initializer": keras.initializers.serialize(
                     self.bias_initializer
                 ),
                 "kernel_regularizer": regularizers.serialize(
@@ -1015,13 +1016,13 @@ class CliffordRNN(keras.layers.RNN):
             "state_normalization_kwargs": dict(
                 cell.state_normalization_kwargs
             ),
-            "kernel_initializer": initializers.serialize(
+            "kernel_initializer": keras.initializers.serialize(
                 cell.kernel_initializer
             ),
-            "recurrent_initializer": initializers.serialize(
+            "recurrent_initializer": keras.initializers.serialize(
                 cell.recurrent_initializer
             ),
-            "bias_initializer": initializers.serialize(cell.bias_initializer),
+            "bias_initializer": keras.initializers.serialize(cell.bias_initializer),
             "kernel_regularizer": regularizers.serialize(
                 cell.kernel_regularizer
             ),

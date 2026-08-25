@@ -30,7 +30,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -173,8 +172,8 @@ class LogitNorm(keras.layers.Layer):
         """
         # Compute L2 norm along specified axis with numerical stability
         # Use maximum to prevent sqrt of values smaller than epsilon
-        norm_squared = ops.sum(ops.square(inputs), axis=self.axis, keepdims=True)
-        norm = ops.sqrt(ops.maximum(norm_squared, self.epsilon))
+        norm_squared = keras.ops.sum(keras.ops.square(inputs), axis=self.axis, keepdims=True)
+        norm = keras.ops.sqrt(keras.ops.maximum(norm_squared, self.epsilon))
 
         # Normalize logits and scale by temperature
         # Division by temperature controls the "sharpness" of the distribution

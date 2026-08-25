@@ -43,7 +43,6 @@ For an input X with rank N:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Union, Tuple
 
 # ---------------------------------------------------------------------
@@ -238,7 +237,8 @@ class GlobalResponseNormalization(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply global response normalization to the input tensor.
+        """
+        Apply global response normalization to the input tensor.
 
         Implements the core GRN algorithm for 2D, 3D, or 4D inputs.
 
@@ -250,7 +250,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         :return: Normalized tensor of the same shape as input.
         :rtype: keras.KerasTensor
         """
-        rank = ops.ndim(inputs)
+        rank = keras.ops.ndim(inputs)
 
         # Step 1: Compute the L2 norm over spatial/sequence dimensions.
         # For rank 2 (batch, features), axes is empty, so sum is identity,
@@ -258,12 +258,15 @@ class GlobalResponseNormalization(keras.layers.Layer):
         # For rank 3 (batch, seq, features), axis is (1,).
         # For rank 4 (batch, h, w, channels), axis is (1, 2).
         axes_to_reduce = tuple(range(1, rank - 1))
-        norm = ops.sqrt(
-            ops.sum(ops.square(inputs), axis=axes_to_reduce, keepdims=True) + self.eps
+        norm = keras.ops.sqrt(
+            keras.ops.sum(
+                keras.ops.square(inputs),
+                axis=axes_to_reduce,
+                keepdims=True) + self.eps
         )
 
         # Step 2: Normalize by the mean norm across channels.
-        mean_norm = ops.mean(norm, axis=-1, keepdims=True)
+        mean_norm = keras.ops.mean(norm, axis=-1, keepdims=True)
         normalized_norm = norm / (mean_norm + self.eps)
 
         # Step 3: Apply GRN transformation with residual connection.
@@ -275,7 +278,10 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         return output
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         :param input_shape: Shape tuple of the input tensor.

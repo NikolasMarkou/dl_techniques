@@ -45,7 +45,6 @@ this layer follows the same backend-agnostic `keras.ops` style.
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -185,7 +184,7 @@ class MatchChannels(keras.layers.Layer):
             # dynamic leading dims). Concatenation-with-zeros is degree-1
             # homogeneous and bias-free.
             delta = self.target_channels - self._in_channels
-            return ops.pad(inputs, [[0, 0], [0, 0], [0, 0], [0, delta]])
+            return keras.ops.pad(inputs, [[0, 0], [0, 0], [0, 0], [0, delta]])
 
         # in_channels > target_channels: slice. A coordinate projection is degree-1
         # homogeneous and bias-free regardless of which end is kept.

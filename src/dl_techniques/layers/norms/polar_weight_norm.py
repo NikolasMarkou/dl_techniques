@@ -1,4 +1,5 @@
-"""Polar weight reparameterization, after PolarQuant (Han et al., 2025).
+"""
+Polar weight reparameterization, after PolarQuant (Han et al., 2025).
 
 This module repurposes PolarQuant's recursive Cartesian->polar transform -- the
 paper uses it to *quantize* KV-cache vectors -- as a *trainable weight
@@ -52,23 +53,6 @@ Performance:
     ``O(units * d)`` overhead, negligible relative to the matmul for research
     use but not tuned for production inference throughput.
 
-Usage:
-    ```python
-    import keras
-    from dl_techniques.layers.norms import PolarWeightNorm
-
-    inputs = keras.Input(shape=(256,))
-    h = PolarWeightNorm(128, activation="relu")(inputs)
-    out = PolarWeightNorm(10)(h)
-    model = keras.Model(inputs, out)
-    ```
-
-    This module exposes ``polar_encode`` / ``polar_decode`` (the differentiable
-    transform pair) and the ``PolarWeightNorm`` layer. A matching initializer,
-    ``PolarInitializer`` (in ``dl_techniques/initializers/polar_initializer.py``),
-    samples weights directly in polar coordinates for exact per-vector-norm
-    control; see its own module docstring.
-
 References:
     - PolarQuant: Quantizing KV Caches with Polar Transformation. Han, Kacham,
       Mirrokni, Karbasi, Zandieh. arXiv:2502.02617 (2025). The paper notes the
@@ -83,7 +67,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -148,16 +131,16 @@ def polar_encode(
     m = d
     while m > 1:
         # Pair up adjacent coordinates: (..., m) -> (..., m/2, 2).
-        pair = ops.reshape(r, (-1, m // 2, 2))
+        pair = keras.ops.reshape(r, (-1, m // 2, 2))
         a = pair[:, :, 0]  # r_{2j-1}
         b = pair[:, :, 1]  # r_{2j}
-        angle_levels.append(ops.arctan2(b, a))  # psi in [0, 2pi) (lvl 1) / [0, pi/2]
-        r = ops.sqrt(ops.square(a) + ops.square(b))  # new radius vector
+        angle_levels.append(keras.ops.arctan2(b, a))  # psi in [0, 2pi) (lvl 1) / [0, pi/2]
+        r = keras.ops.sqrt(keras.ops.square(a) + keras.ops.square(b))  # new radius vector
         m //= 2
 
     radius = r  # (N, 1)
     if angle_levels:
-        angles = ops.concatenate(angle_levels, axis=-1)  # (N, d-1)
+        angles = keras.ops.concatenate(angle_levels, axis=-1)  # (N, d-1)
     else:
         angles = radius[:, :0]  # (N, 0) for d == 1
     return radius, angles
@@ -191,11 +174,11 @@ def polar_decode(
     r = radius  # (N, 1) == r^(L)
     # Walk levels top-down (smallest level first) interleaving cos/sin children.
     for psi in reversed(splits):
-        a = r * ops.cos(psi)
-        b = r * ops.sin(psi)
-        stacked = ops.stack([a, b], axis=-1)  # (N, m, 2)
+        a = r * keras.ops.cos(psi)
+        b = r * keras.ops.sin(psi)
+        stacked = keras.ops.stack([a, b], axis=-1)  # (N, m, 2)
         m = psi.shape[-1]
-        r = ops.reshape(stacked, (-1, 2 * m))  # (N, 2m)
+        r = keras.ops.reshape(stacked, (-1, 2 * m))  # (N, 2m)
     return r
 
 
@@ -203,9 +186,12 @@ def polar_decode(
 
 @keras.saving.register_keras_serializable()
 class PolarWeightNorm(keras.layers.Layer):
-    """Dense layer with a polar-coordinate weight reparameterization.
+    """
+    Dense layer with a polar-coordinate weight reparameterization.
 
-    **Intent**: Give every output unit's weight vector an explicit, trainable
+    **Intent**:
+
+    Give every output unit's weight vector an explicit, trainable
     magnitude (``radius``) and a hierarchical angular direction (``angles``),
     instead of a free Cartesian kernel. This generalizes Weight Normalization
     (``w = g * v / ||v||``) to a full ``log2(d)``-level angular coordinate
@@ -370,29 +356,29 @@ class PolarWeightNorm(keras.layers.Layer):
 
         Each column has exact L2 norm ``|radius[j]|``.
         """
-        angles = ops.cast(self.angles, "float32")
-        radius = ops.cast(self.radius, "float32")
-        ones = ops.ones((self.units, 1), dtype="float32")
+        angles = keras.ops.cast(self.angles, "float32")
+        radius = keras.ops.cast(self.radius, "float32")
+        ones = keras.ops.ones((self.units, 1), dtype="float32")
         full = polar_decode(ones, angles)  # (units, d), ~unit norm over d
         sliced = full[:, : self._fan_in]  # (units, fan_in)
-        norm = ops.sqrt(ops.sum(ops.square(sliced), axis=-1, keepdims=True))
+        norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(sliced), axis=-1, keepdims=True))
         unit = sliced / (norm + self.epsilon)  # exact unit over fan_in
         kernel_t = unit * radius[:, None]  # (units, fan_in), col-norm = |radius|
-        return ops.transpose(kernel_t)  # (fan_in, units)
+        return keras.ops.transpose(kernel_t)  # (fan_in, units)
 
     def call(
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        inputs_fp32 = ops.cast(inputs, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, "float32")
         kernel = self._reconstruct_kernel()
-        outputs = ops.matmul(inputs_fp32, kernel)
+        outputs = keras.ops.matmul(inputs_fp32, kernel)
         if self.use_bias:
-            outputs = ops.add(outputs, ops.cast(self.bias, "float32"))
+            outputs = keras.ops.add(outputs, ops.cast(self.bias, "float32"))
         if self.activation is not None:
             outputs = self.activation(outputs)
-        return ops.cast(outputs, inputs.dtype)
+        return keras.ops.cast(outputs, inputs.dtype)
 
     def compute_output_shape(
         self,

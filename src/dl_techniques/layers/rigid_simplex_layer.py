@@ -79,8 +79,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
-from keras import initializers
 from typing import Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -93,7 +91,8 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 
 @keras.saving.register_keras_serializable()
 class RigidSimplexLayer(keras.layers.Layer):
-    """Project inputs onto a rigid Simplex with learnable rotation and scaling.
+    """
+    Project inputs onto a rigid Simplex with learnable rotation and scaling.
 
     The layer maintains a frozen Equiangular Tight Frame (Simplex) weight
     matrix whose rows are maximally separated unit vectors
@@ -145,13 +144,13 @@ class RigidSimplexLayer(keras.layers.Layer):
     :type scale_min: float
     :param scale_max: Maximum allowed scaling factor.
     :type scale_max: float
-    :param orthogonality_penalty: Weight for the orthogonality
-        regularisation loss on the rotation kernel.
+    :param orthogonality_penalty: Weight for the orthogonality regularisation loss on the rotation kernel.
     :type orthogonality_penalty: float
     :param rotation_initializer: Initializer for the rotation matrix.
     :type rotation_initializer: Union[str, initializers.Initializer]
     :param kwargs: Additional keyword arguments for the Layer base class.
-    :type kwargs: Any"""
+    :type kwargs: Any
+    """
 
     def __init__(
             self,
@@ -159,7 +158,7 @@ class RigidSimplexLayer(keras.layers.Layer):
             scale_min: float = 0.5,
             scale_max: float = 2.0,
             orthogonality_penalty: float = 1e-4,
-            rotation_initializer: Union[str, initializers.Initializer] = 'identity',
+            rotation_initializer: Union[str, keras.initializers.Initializer] = 'identity',
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -181,7 +180,7 @@ class RigidSimplexLayer(keras.layers.Layer):
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.orthogonality_penalty = orthogonality_penalty
-        self.rotation_initializer = initializers.get(rotation_initializer)
+        self.rotation_initializer = keras.initializers.get(rotation_initializer)
 
         # Weight attributes - created in build()
         self.static_simplex = None
@@ -194,14 +193,17 @@ class RigidSimplexLayer(keras.layers.Layer):
             input_dim: int,
             output_dim: int
     ) -> np.ndarray:
-        """Generate a centred, normalised Simplex weight matrix.
+        """
+        Generate a centred, normalised Simplex weight matrix.
 
         :param input_dim: Input dimensionality.
         :type input_dim: int
         :param output_dim: Number of Simplex projections.
         :type output_dim: int
         :return: Weight matrix ``(input_dim, output_dim)`` as float32.
-        :rtype: np.ndarray"""
+        :rtype: np.ndarray
+        """
+
         dimensions = input_dim
         matrix = np.identity(dimensions, dtype=np.float32)
 
@@ -251,7 +253,7 @@ class RigidSimplexLayer(keras.layers.Layer):
         self.static_simplex = self.add_weight(
             name='static_simplex',
             shape=(input_dim, self.units),
-            initializer=initializers.Constant(simplex_weights),
+            initializer=keras.initializers.Constant(simplex_weights),
             trainable=False,
             dtype=self.dtype,
         )
@@ -269,7 +271,7 @@ class RigidSimplexLayer(keras.layers.Layer):
         self.global_scale = self.add_weight(
             name='global_scale',
             shape=(1,),
-            initializer=initializers.Constant(1.0),
+            initializer=keras.initializers.Constant(1.0),
             constraint=ValueRangeConstraint(min_value=self.scale_min, max_value=self.scale_max),
             trainable=True,
             dtype=self.dtype,
@@ -282,29 +284,32 @@ class RigidSimplexLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass: rotate, project onto Simplex, and scale.
+        """
+        Forward pass: rotate, project onto Simplex, and scale.
 
         :param inputs: Input tensor ``(batch, ..., input_dim)``.
         :type inputs: keras.KerasTensor
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: Output tensor ``(batch, ..., units)``.
-        :rtype: keras.KerasTensor"""
+        :rtype: keras.KerasTensor
+        """
+
         # 1. Add orthogonality regularization loss (soft constraint for rotation)
         # R^T * R should approximate Identity for valid rotation
-        r_t_r = ops.matmul(
-            ops.transpose(self.rotation_kernel),
+        r_t_r = keras.ops.matmul(
+            keras.ops.transpose(self.rotation_kernel),
             self.rotation_kernel
         )
-        identity = ops.eye(self._input_dim, dtype=self.dtype)
-        ortho_loss = ops.mean(ops.square(r_t_r - identity))
+        identity = keras.ops.eye(self._input_dim, dtype=self.dtype)
+        ortho_loss = keras.ops.mean(keras.ops.square(r_t_r - identity))
         self.add_loss(self.orthogonality_penalty * ortho_loss)
 
         # 2. Rotate inputs to align with Simplex
-        rotated_inputs = ops.matmul(inputs, self.rotation_kernel)
+        rotated_inputs = keras.ops.matmul(inputs, self.rotation_kernel)
 
         # 3. Project onto static Simplex
-        outputs = ops.matmul(rotated_inputs, self.static_simplex)
+        outputs = keras.ops.matmul(rotated_inputs, self.static_simplex)
 
         # 4. Apply bounded scaling
         outputs = outputs * self.global_scale
@@ -315,41 +320,50 @@ class RigidSimplexLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape from input shape.
+        """
+        Compute output shape from input shape.
 
         :param input_shape: Shape tuple of the input.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape with last dimension replaced by ``units``.
-        :rtype: Tuple[Optional[int], ...]"""
+        :rtype: Tuple[Optional[int], ...]
+        """
+
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return layer configuration for serialization.
+        """
+        Return layer configuration for serialization.
 
         :return: Dictionary containing all constructor parameters.
-        :rtype: Dict[str, Any]"""
+        :rtype: Dict[str, Any]
+        """
+
         config = super().get_config()
         config.update({
             'units': self.units,
             'scale_min': self.scale_min,
             'scale_max': self.scale_max,
             'orthogonality_penalty': self.orthogonality_penalty,
-            'rotation_initializer': initializers.serialize(self.rotation_initializer),
+            'rotation_initializer': keras.initializers.serialize(self.rotation_initializer),
         })
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'RigidSimplexLayer':
-        """Create a layer instance from a configuration dictionary.
+        """
+        Create a layer instance from a configuration dictionary.
 
         :param config: Configuration from ``get_config()``.
         :type config: Dict[str, Any]
         :return: New ``RigidSimplexLayer`` instance.
-        :rtype: RigidSimplexLayer"""
+        :rtype: RigidSimplexLayer
+        """
+
         if 'rotation_initializer' in config:
-            config['rotation_initializer'] = initializers.deserialize(
+            config['rotation_initializer'] = keras.initializers.deserialize(
                 config['rotation_initializer']
             )
         return cls(**config)

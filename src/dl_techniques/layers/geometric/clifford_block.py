@@ -1,41 +1,6 @@
 """
 CliffordNet block and constituent primitives.
 
-.. warning::
-
-   **HIGH blast radius. Any edit to this module must run EVERY importer's test
-   suite, not just ``tests/test_layers/test_geometric/``.**
-
-   The importers are not local and the diff size does not predict the risk.
-   Re-derive the list before editing::
-
-       grep -rln "geometric.clifford_block" src/ tests/
-
-   Re-derived 2026-08-11 with exactly that grep: 15 paths, unchanged in
-   substance since 2026-08-10. They are this module itself, **8 importing
-   source modules across 4 packages** (the earlier "9" counted this file):
-   ``models/vision/cliffordnet/{lm,model}.py``,
-   ``models/vision_language/clip/clifford_clip.py``,
-   ``models/vision/video_jepa/{encoder,predictor}.py``,
-   ``train/cliffordnet/{infer_cliffordnet_nlp,train_cliffordnet_nlp,
-   train_downsampling_techniques}.py``; **3 test modules**
-   (``tests/test_layers/test_geometric/test_clifford_block.py`` and
-   ``..._external_residual.py``, ``tests/test_models/test_video_jepa/
-   test_video_jepa.py``); and **3 READMEs** that only name the class
-   (``models/vision/cliffordnet/``, ``train/cliffordnet/``, ``train/video_jepa/``).
-   The corresponding suites are
-   ``tests/test_layers/test_geometric/``, ``tests/test_models/test_cliffordnet/``,
-   ``tests/test_models/test_clip/`` and ``tests/test_models/test_video_jepa/``
-   -- note the last two contain no textual match at all: they exercise models
-   whose *modules* import this one, which is precisely why the grep alone is
-   not a sufficient blast-radius estimate.
-
-   This warning exists because it was learned the expensive way: an edit to this
-   file (plan-2026-08-10-3649c19e/iter-1/step-2) was scored ``radius:MED`` on
-   diff size, so ``test_clip`` and ``test_video_jepa`` were never run — and the
-   adversarial review found a red test in the first unrun one it opened. See
-   decisions.md D-033.
-
 Implements the geometric-algebra block from
     Zhongping Ji, "CliffordNet: All You Need is Geometric Algebra",
     arXiv:2601.06793v2 (2026).  Reference code: github.com/ParaMind2025/CAN
@@ -346,17 +311,6 @@ Key primitives
 - :class:`GatedGeometricResidual`         -- GGR update with LayerScale
 - :class:`CliffordNetBlock`               -- full isotropic block (no FFN)
 - :class:`CausalCliffordNetBlock`         -- autoregressive variant
-
-Removed surface
----------------
-``CliffordNetBlockDSv2`` and ``CausalCliffordNetBlockDSv2`` -- the strided
-downsampling design-space siblings (decoupled stream/skip pools, pyramid-diff
-context) -- were deleted together with their entire consumer closure by
-plan-2026-08-10-3649c19e/iter-1/step-2. Do NOT re-add them: the experiment they
-served was declared dead by the owner, and their two model consumers
-(``cliffordnet/embedding_unet.py``, ``cliffordnet/lmunet.py``) plus four
-trainers no longer exist. See decisions.md D-005/D-006. ``.keras`` checkpoints
-that serialized either registered class name can no longer be loaded.
 """
 
 from __future__ import annotations
@@ -375,14 +329,13 @@ from typing import (
 )
 
 import keras
-from keras import initializers, regularizers
 
 # ---------------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from ..norms.factory import create_normalization_layer
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -692,10 +645,10 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         # The default "silu" reproduces the reference implementation exactly.
         self.dot_activation = _activation_spec(dot_activation)
         self._dot_activation_fn = _resolve_activation(self.dot_activation)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Number of concatenated channels before projection.
         multiplier = 2 if cli_mode == "full" else 1
@@ -826,10 +779,10 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
                 "cli_mode": self.cli_mode,
                 "use_bias": self.use_bias,
                 "dot_activation": _serialize_activation(self.dot_activation),
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
-                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-                "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+                "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+                "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             }
         )
         return config
@@ -936,10 +889,10 @@ class GatedGeometricResidual(keras.layers.Layer):
         self.use_gate = use_gate
         self._gate_activation_fn = _resolve_activation(self.gate_activation)
         self._feature_activation_fn = _resolve_activation(self.feature_activation)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Learned gate: Dense(2C -> C) followed by the gate activation.
         # NOTE: built unconditionally (even when use_gate=False) so a
@@ -955,47 +908,7 @@ class GatedGeometricResidual(keras.layers.Layer):
             bias_regularizer=bias_regularizer,
             name="gate_dense",
         )
-        # DECISION plan-2026-08-10T130454-3649c19e/D-008: `use_gate` is a real,
-        # live, tested constructor kwarg and STAYS. Do NOT delete it "to follow
-        # the rewrite's intent" (the reading recorded in decisions.md D-007):
-        # that plan entry rested on a measured-false premise -- that this class
-        # had lost `use_gate` and that `clifford_rnn.py` therefore raised a
-        # construction-time TypeError. Measured 2026-08-10: `CliffordRNN(units=8)`
-        # constructs and runs. Removing the flag would strip a documented
-        # checkpoint-stability pattern and its regression tests
-        # (TestInertGateNotTrainable) from working code.
-        # Do NOT re-introduce a `_LEGACY_CONFIG_KEYS`-style shim listing it
-        # either: a module-level tuple with no use site and no `from_config`
-        # override documents a compatibility promise the code does not keep.
-        #
-        # DECISION plan-2026-07-22T090932-e433f233/D-001: when use_gate=False the
-        # gate is inert, so its kernel/bias receive no gradient and Keras emits a
-        # "Gradients do not exist for variables [...gate_dense...]" UserWarning
-        # once per training run (42 entries for the bias-free Clifford U-Net).
-        # Marking the inert sub-layer non-trainable removes those variables from
-        # model.trainable_variables, so the optimizer never sees them and
-        # _filter_empty_gradients() never warns.
-        #
-        # Do NOT "simplify" this by deleting the sub-layer or building it
-        # conditionally: `weights` is independent of `trainable`
-        # (keras/src/layers/layer.py:632-652), so the variables are still SAVED
-        # and the .keras weight layout stays byte-identical — which is the whole
-        # point of building it unconditionally above.
-        #
-        # DECISION plan-2026-07-22T090932-e433f233/D-003: placement is
-        # load-bearing but subtle. This works PRE-build because
-        # Layer._track_variable() (keras/src/layers/layer.py:1316-1322) applies
-        # `if not self.trainable: variable.trainable = False` to every variable
-        # as it is created, so the flag propagates to weights that do not exist
-        # yet. The `trainable` SETTER alone (layer.py:564-582) would not — it
-        # only walks variables that already exist.
-        #
-        # DECISION plan-2026-07-22T090932-e433f233/D-006: known, accepted
-        # consequence — `model.trainable = True` (the standard unfreeze idiom,
-        # used at src/train/bfunet/variance_probe.py:177) RE-ENABLES gate_dense
-        # and brings the warning back: the setter recurses into `_layers`
-        # (layer.py:581-582) and has no knowledge of `use_gate`. Re-apply this
-        # guard manually after any global unfreeze.
+
         if not self.use_gate:
             self.gate_dense.trainable = False
 
@@ -1016,7 +929,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         self.gamma = self.add_weight(
             name="gamma",
             shape=(self.channels,),
-            initializer=initializers.Constant(self.layer_scale_init),
+            initializer=keras.initializers.Constant(self.layer_scale_init),
             trainable=True,
         )
         self.gate_dense.build((*input_shape[:-1], 2 * self.channels))
@@ -1080,10 +993,10 @@ class GatedGeometricResidual(keras.layers.Layer):
                     self.feature_activation
                 ),
                 "use_gate": self.use_gate,
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
-                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-                "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+                "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+                "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             }
         )
         return config
@@ -1447,10 +1360,10 @@ class CliffordNetBlock(keras.layers.Layer):
         self._activation_fn = _resolve_activation(self.activation)
         self.use_gate = use_gate
         self.context_kernel_size = int(context_kernel_size)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         # The RESOLVED string, never the None sentinel: get_config() serializes
         # this attribute, so a future change to the mode-derived default cannot
         # silently re-type an existing checkpoint's context norm.
@@ -1966,10 +1879,10 @@ class CliffordNetBlock(keras.layers.Layer):
                     self.feature_activation
                 ),
                 "context_kernel_size": self.context_kernel_size,
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
-                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-                "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+                "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+                "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
                 "normalization_type": self.normalization_type,
                 "normalization_kwargs": dict(self.normalization_kwargs),
                 "input_normalization_type": self.input_normalization_type,
@@ -2088,18 +2001,3 @@ class CausalCliffordNetBlock(CliffordNetBlock):
         # duplicate-kwarg TypeError).
         kwargs["causal"] = True
         super().__init__(**kwargs)
-
-
-# DECISION plan-2026-08-10T130454-3649c19e/D-006
-# `CliffordNetBlockDSv2` and `CausalCliffordNetBlockDSv2` used to live below this
-# line (~700 lines, plus `_make_pool_v2`, `_make_ctx_norm`, `_make_causal_pool`
-# and the `SkipPoolV2` / `CtxModeV2` / `CtxNormType` aliases). They were DELETED
-# together with their whole consumer closure, not merely orphaned.
-#
-# Do NOT restore them, and do NOT add a `strides`/`out_channels` downsampling
-# path onto `CliffordNetBlock` as a stand-in. The owner declared the DSv2
-# downsampling experiment dead; the two model modules that consumed it
-# (`models/vision/cliffordnet/embedding_unet.py`, `models/vision/cliffordnet/lmunet.py`), four
-# trainers, and three test suites were removed in the same commit. Re-adding the
-# classes here would re-create exactly the half-deleted state this cleanup
-# exists to repair. See decisions.md D-005/D-006.

@@ -84,8 +84,8 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-from ...initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 
 # ---------------------------------------------------------------------
@@ -851,3 +851,5 @@ class NeuroGrid(keras.layers.Layer):
             'high_quality_mask': high_quality_mask,
             'quality_scores': quality_scores
         }
+
+# ---------------------------------------------------------------------

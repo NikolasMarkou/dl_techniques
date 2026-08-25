@@ -1,13 +1,9 @@
 import keras
-from keras import ops
 from typing import List, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 
 
-# DECISION plan_2026-06-15_00924f53/D-001: keras.ops.get_graph_feature never existed in
-# Keras 3.8 -- this is the local DGCNN kNN edge-feature impl; output last-dim MUST be 2*C to
-# match mlp.build() (6 for C=3, 128 for C=64). Do NOT call a nonexistent keras.ops symbol.
 def _get_graph_feature(x: keras.KerasTensor, k: int) -> keras.KerasTensor:
     """Build DGCNN kNN edge features for a channels-last point cloud.
 
@@ -24,32 +20,32 @@ def _get_graph_feature(x: keras.KerasTensor, k: int) -> keras.KerasTensor:
     """
     # Pairwise squared distances -> (B, N, N).
     # dist[b,i,j] = ||x_i - x_j||^2 = |x_i|^2 - 2 x_i . x_j + |x_j|^2
-    x2 = ops.sum(ops.square(x), axis=-1, keepdims=True)  # (B, N, 1)
-    inner = ops.matmul(x, ops.transpose(x, (0, 2, 1)))   # (B, N, N)
-    dist = x2 - 2.0 * inner + ops.transpose(x2, (0, 2, 1))  # (B, N, N)
+    x2 = keras.ops.sum(keras.ops.square(x), axis=-1, keepdims=True)  # (B, N, 1)
+    inner = keras.ops.matmul(x, keras.ops.transpose(x, (0, 2, 1)))   # (B, N, N)
+    dist = x2 - 2.0 * inner + keras.ops.transpose(x2, (0, 2, 1))  # (B, N, N)
 
     # k nearest neighbours = k smallest distances = top_k of the negated distances.
-    idx = ops.top_k(-dist, k=k)[1]  # (B, N, k), int
+    idx = keras.ops.top_k(-dist, k=k)[1]  # (B, N, k), int
 
     # Gather neighbour features via take_along_axis.
     # Broadcast x to (B, 1, N, C) and idx to (B, N, k, 1); gather along the
     # source-point axis (axis=2 of the broadcast tensor).
-    c = ops.shape(x)[-1]
-    x_b = ops.expand_dims(x, axis=1)        # (B, 1, N, C)
-    idx_b = ops.expand_dims(idx, axis=-1)   # (B, N, k, 1)
-    idx_b = ops.broadcast_to(idx_b, (ops.shape(idx)[0], ops.shape(idx)[1], k, c))  # (B, N, k, C)
-    x_b = ops.broadcast_to(
-        x_b, (ops.shape(x)[0], ops.shape(idx)[1], ops.shape(x)[1], c)
+    c = keras.ops.shape(x)[-1]
+    x_b = keras.ops.expand_dims(x, axis=1)        # (B, 1, N, C)
+    idx_b = keras.ops.expand_dims(idx, axis=-1)   # (B, N, k, 1)
+    idx_b = keras.ops.broadcast_to(idx_b, (keras.ops.shape(idx)[0], keras.ops.shape(idx)[1], k, c))  # (B, N, k, C)
+    x_b = keras.ops.broadcast_to(
+        x_b, (keras.ops.shape(x)[0], keras.ops.shape(idx)[1], keras.ops.shape(x)[1], c)
     )  # (B, N, N, C)
-    neighbors = ops.take_along_axis(x_b, idx_b, axis=2)  # (B, N, k, C)
+    neighbors = keras.ops.take_along_axis(x_b, idx_b, axis=2)  # (B, N, k, C)
 
     # Centre features broadcast over the k axis -> (B, N, k, C).
-    center = ops.broadcast_to(
-        ops.expand_dims(x, axis=2), (ops.shape(x)[0], ops.shape(x)[1], k, c)
+    center = keras.ops.broadcast_to(
+        keras.ops.expand_dims(x, axis=2), (keras.ops.shape(x)[0], keras.ops.shape(x)[1], k, c)
     )  # (B, N, k, C)
 
     # Edge feature: [center ; neighbor - center] -> (B, N, k, 2*C).
-    return ops.concatenate([center, neighbors - center], axis=-1)
+    return keras.ops.concatenate([center, neighbors - center], axis=-1)
 
 
 # ---------------------------------------------------------------------
@@ -182,30 +178,30 @@ class PointCloudAutoencoder(keras.layers.Layer):
         # Edge feature = [point_features; neighbor_features - point_features]
         graph1 = _get_graph_feature(pc, self.k_neighbors)
         f1 = self.mlp1(graph1)  # Apply MLP to edge features
-        f1 = ops.max(f1, axis=2)  # Max pool over neighbors → (B, N, 64)
+        f1 = keras.ops.max(f1, axis=2)  # Max pool over neighbors → (B, N, 64)
 
         # EdgeConv Block 2: Extract second-level features from f1
         # Now working in feature space rather than coordinate space
         graph2 = _get_graph_feature(f1, self.k_neighbors)
         f2 = self.mlp2(graph2)
-        f2 = ops.max(f2, axis=2)  # → (B, N, 64)
+        f2 = keras.ops.max(f2, axis=2)  # → (B, N, 64)
 
         # EdgeConv Block 3: Extract third-level features from f2
         # Captures higher-order geometric relationships
         graph3 = _get_graph_feature(f2, self.k_neighbors)
         f3 = self.mlp3(graph3)
-        f3 = ops.max(f3, axis=2)  # → (B, N, 64)
+        f3 = keras.ops.max(f3, axis=2)  # → (B, N, 64)
 
         # Multi-scale feature aggregation
         # Concatenate features from all levels to capture both fine and coarse details
-        combined_features = ops.concatenate([f1, f2, f3], axis=-1)  # → (B, N, 192)
+        combined_features = keras.ops.concatenate([f1, f2, f3], axis=-1)  # → (B, N, 192)
         local_features = self.mlp4(combined_features)  # → (B, N, 1024)
 
         # Global feature extraction via symmetric pooling functions
         # Max pooling captures most prominent features, avg pooling captures overall distribution
-        global_max = ops.max(local_features, axis=1)  # → (B, 1024)
-        global_avg = ops.mean(local_features, axis=1)  # → (B, 1024)
-        global_features = ops.concatenate([global_max, global_avg], axis=-1)  # → (B, 2048)
+        global_max = keras.ops.max(local_features, axis=1)  # → (B, 1024)
+        global_avg = keras.ops.mean(local_features, axis=1)  # → (B, 1024)
+        global_features = keras.ops.concatenate([global_max, global_avg], axis=-1)  # → (B, 2048)
 
         return local_features, global_features
 
@@ -225,7 +221,7 @@ class PointCloudAutoencoder(keras.layers.Layer):
         x = self.decoder_mlp3(x)  # → (B, num_points × 3)
 
         # Reshape flat vector to point cloud format
-        return ops.reshape(x, (-1, num_points, 3))  # → (B, num_points, 3)
+        return keras.ops.reshape(x, (-1, num_points, 3))  # → (B, num_points, 3)
 
     def call(self, inputs: Tuple[keras.KerasTensor, keras.KerasTensor]) -> Tuple[Tuple, Tuple, Tuple]:
         """Forward pass through the autoencoder for both point clouds.
@@ -236,8 +232,8 @@ class PointCloudAutoencoder(keras.layers.Layer):
         :rtype: Tuple[Tuple, Tuple, Tuple]
         """
         source_pc, target_pc = inputs
-        num_points_source = ops.shape(source_pc)[1]
-        num_points_target = ops.shape(target_pc)[1]
+        num_points_source = keras.ops.shape(source_pc)[1]
+        num_points_target = keras.ops.shape(target_pc)[1]
 
         # Process source point cloud through shared encoder-decoder
         # Extract hierarchical features and reconstruct
@@ -286,7 +282,8 @@ class PointCloudAutoencoder(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class CorrespondenceNetwork(keras.layers.Layer):
-    """Correspondence network estimating point-to-GMM soft assignments.
+    """
+    Correspondence network estimating point-to-GMM soft assignments.
 
     Replaces the iterative E-step of a traditional GMM with a learned feed-forward
     network. Local per-point features are concatenated with tiled global features
@@ -370,18 +367,18 @@ class CorrespondenceNetwork(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         local_features, global_features = inputs
-        num_points = ops.shape(local_features)[1]
+        num_points = keras.ops.shape(local_features)[1]
 
         # Broadcast global features to each point
         # This provides context about the overall point cloud structure to each point
-        global_features_tiled = ops.tile(
-            ops.expand_dims(global_features, axis=1),  # (B, 1, F_global)
+        global_features_tiled = keras.ops.tile(
+            keras.ops.expand_dims(global_features, axis=1),  # (B, 1, F_global)
             [1, num_points, 1]  # → (B, N, F_global)
         )
 
         # Combine local and global context for each point
         # Local features capture neighborhood geometry, global features provide overall structure
-        combined_features = ops.concatenate(
+        combined_features = keras.ops.concatenate(
             [local_features, global_features_tiled],
             axis=-1
         )  # → (B, N, F_local + F_global)
