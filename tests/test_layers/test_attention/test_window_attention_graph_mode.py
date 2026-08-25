@@ -208,3 +208,90 @@ class TestTheSlotMapDoesNotSurviveIntoTheNextCall:
         layer(x, training=False)
 
         assert layer.attention._window_slots is None
+
+class TestAStaticallyUnknownSequenceLength:
+    """What each partition mode does when the sequence axis is `None`.
+
+    Why this class exists: the adversarial review named "no test at a statically
+    UNKNOWN sequence length" as a blind spot. The short-circuit's guard is
+    `inputs.shape[1] is not None` -- the slot vector is a numpy constant derived
+    from `N` -- so a `keras.Input(shape=(None, DIM))` model silently takes a
+    DIFFERENT branch from every other cell in this file. The three modes then
+    behave in three different ways, and none of them was asserted anywhere. They
+    are pinned here so a future change cannot alter them by accident.
+
+    Why this can fail if the implementation is wrong: a change that made `grid`
+    raise at dynamic length, or made `band` silently pad, or removed `zigzag`'s
+    named refusal in favour of a `ResourceExhaustedError` deep inside `Pad`,
+    would all pass every other test in the package.
+    """
+
+    @staticmethod
+    def _dynamic_model(partition_mode: str) -> keras.Model:
+        keras.utils.set_random_seed(23)
+        inputs = keras.Input(shape=(None, DIM))
+        outputs = WindowAttention(
+            dim=DIM,
+            window_size=WINDOW_SIZE,
+            num_heads=NUM_HEADS,
+            partition_mode=partition_mode,
+            use_relative_position_bias=(partition_mode != "band"),
+            dropout_rate=0.0,
+        )(inputs)
+        return keras.Model(inputs, outputs)
+
+    @pytest.mark.parametrize("partition_mode", ["grid", "band"])
+    def test_predict_runs_and_agrees_with_the_eager_call(self, partition_mode):
+        """`grid` and `band` accept `None` and stay self-consistent.
+
+        `grid` gets there by FALLING BACK to the padding path -- the
+        short-circuit needs a static `N`. That fallback is correct but it
+        reinstates the `O(window_size ** 4)` cost the short-circuit removes, so
+        a caller who wants the cheap path must give the layer a static length.
+        `band` needs no static length at all: its predicate is built from
+        `keras.ops.shape`.
+        """
+        model = self._dynamic_model(partition_mode)
+        x = np.random.default_rng(0).normal(size=(2, 20, DIM)).astype("float32")
+
+        graph = model.predict(x, verbose=0)
+        eager = np.asarray(model(x, training=False))
+
+        assert graph.shape == (2, 20, DIM)
+        assert np.all(np.isfinite(graph))
+        assert np.abs(graph - eager).max() == 0.0, (
+            f"partition_mode={partition_mode!r} at a dynamic sequence length: the "
+            "traced and eager calls disagree, so they took different branches"
+        )
+
+    def test_band_serves_two_different_lengths_from_one_model(self):
+        """The band is the only mode that is genuinely length-polymorphic.
+
+        Why this can fail if the implementation is wrong: a band built from a
+        cached or captured `N` would return the first length's shape (or raise)
+        on the second call. This is the property ModernBERT's local layers rely
+        on for variable-length batches.
+        """
+        model = self._dynamic_model("band")
+        rng = np.random.default_rng(1)
+
+        first = model.predict(
+            rng.normal(size=(2, 20, DIM)).astype("float32"), verbose=0
+        )
+        second = model.predict(
+            rng.normal(size=(2, 37, DIM)).astype("float32"), verbose=0
+        )
+
+        assert first.shape == (2, 20, DIM)
+        assert second.shape == (2, 37, DIM)
+
+    def test_zigzag_refuses_a_dynamic_length_by_name(self):
+        """`zigzag` cannot be built at all without a static length, and says so.
+
+        Its boustrophedon permutation is a numpy constant indexed by `N`, so it
+        raises a NAMED `ValueError` in `build()` rather than failing obscurely
+        later. That refusal is the behaviour; do not "fix" it by falling back to
+        a traced permutation.
+        """
+        with pytest.raises(ValueError, match="fixed sequence length"):
+            self._dynamic_model("zigzag")

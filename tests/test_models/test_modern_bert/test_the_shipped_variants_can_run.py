@@ -67,7 +67,7 @@ VARIANTS = sorted(ModernBERT.MODEL_VARIANTS)
 
 @pytest.fixture(autouse=True)
 def release_the_variant_between_tests():
-    """``large`` alone is 409,522,176 parameters (~1.6 GB in float32) and this
+    """``large`` alone is 399,560,704 parameters (~1.5 GB in float32) and this
     module builds three variants twice over. Run as part of the whole
     ``test_modern_bert/`` directory -- 79 tests in ONE process -- that was
     enough to get the pytest process ``Killed`` (exit 137) by the OOM killer,

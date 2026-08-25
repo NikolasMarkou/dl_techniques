@@ -170,7 +170,9 @@ class ModernBERT(keras.Model):
         base        768     22     12     1152       3       128
         large      1024     28     16     2624       3       128
 
-        base 160.6M / large 409.5M parameters (measured).
+        base 152.7M / large 399.6M parameters (measured 2026-08-25 at the
+        shipped interval of 3; the 160.6M / 409.5M figures carried until then
+        were the all-global interval=1 repair, which has more RoPE state).
         `window` is the local band's FULL span in tokens; the layer
         receives half of it as the half-width.
         interval == 1 at base/large was a REPAIR for the old square-
@@ -403,7 +405,7 @@ class ModernBERT(keras.Model):
             "global_attention_interval": 3,
             "local_attention_window_size": 128,
             "description": (
-                "ModernBERT-Base: 160.6M parameters (measured), hybrid 1-D "
+                "ModernBERT-Base: 152.7M parameters (measured), hybrid 1-D "
                 "local band / global attention"
             ),
         },
@@ -433,7 +435,7 @@ class ModernBERT(keras.Model):
             "global_attention_interval": 3,
             "local_attention_window_size": 128,
             "description": (
-                "ModernBERT-Large: 409.5M parameters (measured), hybrid 1-D "
+                "ModernBERT-Large: 399.6M parameters (measured), hybrid 1-D "
                 "local band / global attention"
             ),
         },
@@ -500,7 +502,10 @@ class ModernBERT(keras.Model):
         :type use_bias: bool
         :param global_attention_interval: Every k-th layer is global.
         :type global_attention_interval: int
-        :param local_attention_window_size: Square window edge length.
+        :param local_attention_window_size: The local band's FULL span in
+            tokens (upstream's ``local_attention``); the layer receives
+            ``local_attention_window_size // 2`` as its half-width. Not a
+            square spatial edge length.
         :type local_attention_window_size: int
         :param max_position_embeddings: RoPE precomputation length.
         :type max_position_embeddings: int

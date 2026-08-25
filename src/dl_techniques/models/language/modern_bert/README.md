@@ -317,6 +317,15 @@ The paper releases two main variants, which are provided here.
 | **`base`**| 768         | 22     | 12    | 2304           | 149M   | 3               | 128         |
 | **`large`** | 1024        | 28     | 16    | 5248           | 395M   | 3               | 128         |
 
+The `Params` and `FFN (GLU) Size` columns are the PAPER's, not this implementation's:
+`MODEL_VARIANTS` ships `intermediate_size` 1152 / 2624 (the per-branch width; the GLU
+pair is twice that). Measured here on 2026-08-25 at the shipped
+`global_attention_interval = 3`, `from_variant(v)` plus one forward at `L=8`:
+`base` **152,720,384 parameters / 208 weight tensors**, `large` **399,560,704 / 264**.
+Both counts move with `global_attention_interval` — between 2026-08-21 and 2026-08-25
+these variants shipped `1` and measured 160,584,704 / 268 and 409,522,176 / 340 — so
+never quote a ModernBERT parameter count without the interval it was measured at.
+
 ---
 
 ## 8. Comprehensive Usage Examples

@@ -1350,5 +1350,144 @@ class TestBandFactoryRegistration:
         )
 
 
+class TestTheShortCircuitIsCorrectAtWindowSize128:
+    """The one regime the external-golden harness structurally cannot grade.
+
+    ``test_window_attention_restructure_is_inert.py`` compares against the
+    PRE-restructure code, and that code cannot run ``window_size=128`` cheaply
+    enough to produce a reference (it inflates N real tokens to 16,384 slots and
+    peaked at 17.69 GB). So the plan's own record listed "correctness of the
+    short-circuit at ``ws=128``" under **Not Verified**, backed only by a MEMORY
+    measurement. This class supplies the missing arm with a DIFFERENT oracle: a
+    from-scratch float64 dense reference written against the Swin definition, not
+    against the layer's own index code.
+
+    Why this can fail if the implementation is wrong: the short-circuit attends the
+    N real tokens directly, so it must gather the relative-position bias at each
+    token's TILE SLOT ``(i // ceil(sqrt(N))) * ws + (i % ceil(sqrt(N)))`` -- which
+    is NOT ``i`` whenever the grid side is smaller than ``ws``, i.e. always in this
+    regime. RED-PROVED: replacing the slot map with the identity ``arange(N)`` --
+    the "just call dense attention" shortcut the D-007 anchor forbids -- moves the
+    ``rpb=True`` cells to 1.618e-02 / 7.614e-03 / 5.080e-03 (N = 17 / 100 / 300)
+    against a noise floor of 2.7e-07, five orders of magnitude, while leaving the
+    ``rpb=False`` cells at 2.086e-07 exactly as they should be.
+    """
+
+    WINDOW_SIZE = 128
+    #: float32 reduction noise against a float64 reference. MEASURED worst case
+    #: over all six cells: 2.682e-07. Do NOT widen it -- the RED injection above
+    #: lands five orders of magnitude higher, so any real defect is unmissable.
+    ATOL = 5e-7
+
+    @staticmethod
+    def _dense_reference(layer, x_f64, use_relative_position_bias):
+        """Dense attention over the N real tokens, in float64, from the weights."""
+        import math
+
+        inner = layer.attention
+        assert inner.q_norm is None, "this reference assumes no q/k normalization"
+        batch, seq_len, _ = x_f64.shape
+        heads, head_dim = inner.num_heads, inner.head_dim
+
+        kernel, bias = [np.asarray(w, dtype=np.float64)
+                        for w in inner.qkv.get_weights()]
+        qkv = x_f64 @ kernel + bias
+        qkv = qkv.reshape(batch, seq_len, 3, heads, head_dim)
+        qkv = qkv.transpose(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        attn = (q * inner.scale) @ k.transpose(0, 1, 3, 2)
+
+        if use_relative_position_bias:
+            ws = layer.window_size
+            grid_side = int(math.ceil(math.sqrt(seq_len)))
+            tokens = np.arange(seq_len)
+            slots = (tokens // grid_side) * ws + (tokens % grid_side)
+            # The Swin reference form: stack the two coordinate axes, difference
+            # them pairwise, shift to non-negative, encode row-major.
+            coords = np.stack([slots // ws, slots % ws])
+            rel = (coords[:, :, None] - coords[:, None, :]).transpose(1, 2, 0)
+            rel = rel.astype(np.int64)
+            rel[:, :, 0] += ws - 1
+            rel[:, :, 1] += ws - 1
+            rel[:, :, 0] *= 2 * ws - 1
+            index = rel.sum(-1)
+            table = np.asarray(
+                inner.relative_position_bias_table, dtype=np.float64
+            )
+            attn = attn + table[index].transpose(2, 0, 1)[None]
+
+        attn = np.clip(attn, -30.0, 30.0)
+        attn = attn - attn.max(-1, keepdims=True)
+        weights = np.exp(attn)
+        weights = weights / weights.sum(-1, keepdims=True)
+
+        out = (weights @ v).transpose(0, 2, 1, 3)
+        out = out.reshape(batch, seq_len, heads * head_dim)
+        proj_kernel, proj_bias = [np.asarray(w, dtype=np.float64)
+                                  for w in inner.proj.get_weights()]
+        return out @ proj_kernel + proj_bias
+
+    @pytest.mark.parametrize("use_relative_position_bias", [True, False])
+    @pytest.mark.parametrize("seq_len", [17, 100, 300])
+    def test_matches_an_independent_dense_reference(
+        self, seq_len, use_relative_position_bias
+    ):
+        keras.utils.set_random_seed(11)
+        layer = WindowAttention(
+            dim=64,
+            window_size=self.WINDOW_SIZE,
+            num_heads=4,
+            partition_mode="grid",
+            use_relative_position_bias=use_relative_position_bias,
+            dropout_rate=0.0,
+        )
+        x = np.random.default_rng(seq_len).normal(
+            size=(2, seq_len, 64)
+        ).astype("float32")
+
+        got = np.asarray(layer(x, training=False))
+        reference = self._dense_reference(
+            layer, x.astype(np.float64), use_relative_position_bias
+        ).astype(np.float32)
+
+        delta = float(np.abs(got - reference).max())
+        assert delta <= self.ATOL, (
+            f"window_size={self.WINDOW_SIZE}, N={seq_len}, "
+            f"rpb={use_relative_position_bias}: the short-circuit disagrees with an "
+            f"independent float64 dense reference by {delta:g} > {self.ATOL:g}. "
+            "WIDEN NOTHING -- the slot map or the bias gather is wrong."
+        )
+
+    def test_the_reference_actually_sees_the_bias(self):
+        """Anti-vacuity: the two rpb settings must not produce the same answer.
+
+        Why this can fail if the implementation is wrong: if the bias were dropped
+        (the failure mode the slot map exists to prevent) both cells above would
+        agree with the same reference and the parametrization would be graded
+        twice over the same computation.
+        """
+        outputs = []
+        for use_relative_position_bias in (True, False):
+            keras.utils.set_random_seed(11)
+            layer = WindowAttention(
+                dim=64,
+                window_size=self.WINDOW_SIZE,
+                num_heads=4,
+                partition_mode="grid",
+                use_relative_position_bias=use_relative_position_bias,
+                dropout_rate=0.0,
+            )
+            x = np.random.default_rng(17).normal(size=(2, 17, 64)).astype("float32")
+            outputs.append(np.asarray(layer(x, training=False)))
+
+        spread = float(np.abs(outputs[0] - outputs[1]).max())
+        assert spread > 1e-3, (
+            "the relative-position bias changes the output by only "
+            f"{spread:g} at window_size=128 -- it is not reaching the scores, so "
+            "the parametrized cells above are grading one computation twice"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

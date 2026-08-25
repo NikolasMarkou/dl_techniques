@@ -573,7 +573,7 @@ table are named precisely *because* they do not resolve.
 | `tools/` is a repo directory | nothing tracked claims it; it existed on disk and in one closed plan's records | Deleted 2026-08-25 together with its only file, `tools/sam_move_probe.py`, a self-declared throwaway probe whose owning plan's deletion step never ran. `test -e tools/` fails. It was never in Part A's top-level tree, which is why nothing here had to change when it went |
 | `src/train/` is one directory per model architecture | implied by root `CLAUDE.md` and `plans/SYSTEM.md` | `src/train/logic/` and `src/train/rms_variants_train/` are research and ablation harnesses, not model trainers; and several model packages are trained under a *renamed* directory. See Part B |
 | **The subtree `CLAUDE.md` files this map routes to are themselves unaudited** — every sample taken so far has found rot, and the rot is numeric as often as it is a dead path | `src/dl_techniques/models/CLAUDE.md` listed a package `src/dl_techniques/models/jepa/` and four more stale claims, three of them numeric (MobileNet "V1, V2, V3"; "23 of the 72" packages binding a `create_*`; "the remaining ~50"; "45+ test suites"). `src/dl_techniques/CLAUDE.md` cited `tests/test_models/test_mobilenet_v1.py` as the test-mirroring exemplar, claimed a pytest **pre-commit** hook runs on every commit, and gave a docstring split of "248 of 285" | **Every instance named here is now repaired** — the row is kept as a standing warning, not as a live indictment. `jepa/` in `ba3ec3122` (the real name is `src/dl_techniques/models/vision/video_jepa/`; a bare `jepa/` never existed); the `models/CLAUDE.md` numbers in `7680bdec0` (to V4; 26 of 73, with the remainder following from it; 81 test directories); the `src/dl_techniques/CLAUDE.md` claims in the same change as this edit — the exemplar is the *directory* `tests/test_models/test_mobilenet/`, only `pre-push` is installed on this machine so the suite fires on push and not on commit, and the docstring split was repaired to 255 of 294 — that file now asserts **256 of 296**, re-derived 2026-08-19, which is this row's own lesson happening to this row's own text. Two lessons the row's own history teaches. First, **it went stale for four days** between the `ba3ec3122` repair and the re-derivation that caught it, across two whole-table sweeps — the Numbers sweep only covers rows carrying a Value and a command, and ledger subjects carry neither, so **re-verify a ledger row before quoting it**. Second, "248 of 285" was *exactly right when written* on 2026-08-11 and was falsified by one package landing: a correct derived number is a perishable good. This map verifies only that its routing targets **exist** — never what they say — so this row is a found-by-sampling floor, not a count |
-| `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/language/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired by shipping `global_attention_interval = 1` for those two variants (all-global attention); they now run and measure **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
+| `ModernBERT`'s `base` and `large` variants are "95M" / "280M" parameter hybrid local/global encoders | `models/language/modern_bert/model.py`'s own `MODEL_VARIANTS` descriptions, until 2026-08-21 | Both numbers and the architecture label were wrong, and the variants **could not run at all**. Measured 2026-08-21 on a 12 GB RTX 4070 at a sequence length of **8**: `ModernBERT.from_variant("base")` and `from_variant("large")` both raised `ResourceExhaustedError` inside `SingleWindowAttention.call`, because a `window` local layer pads every window to `window_size**2 = 16384` slots independent of `L`. Repaired on 2026-08-21 by shipping `global_attention_interval = 1` for those two variants (all-global attention), which measured **160,584,704 params / 268 weight tensors** and **409,522,176 params / 340 weight tensors**. **That repair was SUPERSEDED on 2026-08-25** by `plan-2026-08-25T053412-0f1fa04f`: the local layers now use the 1-D `window_band` layout instead of a square grid, the cause is gone, and `base`/`large` ship the paper's `global_attention_interval = 3` again — so the current counts are **152,720,384 params / 208 weight tensors** and **399,560,704 params / 264 weight tensors** (measured 2026-08-25, `from_variant(v)` then one forward at L=8). Quote a ModernBERT parameter count only with the interval it was measured at. `tiny` is untouched and still hybrid. Pinned by `tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py` |
 
 Two of the sources above — `plans/SYSTEM.md` and the plan directories it summarizes —
 are gitignored and will not be in your clone. The root `CLAUDE.md` is tracked, and the
@@ -645,9 +645,22 @@ the tracked place a future reader will look.
   returned **8 files, all `sam3_tiny_*/final_model.keras`** — so the local impact is **zero**.
   A clone contains no checkpoints at all (see the `results/` row above). The hybrid schedule
   remains reachable as `ModernBERT.from_variant("base", global_attention_interval=3)`, which
-  is the configuration that cannot complete a forward pass on this hardware.
+  at the time was the configuration that could not complete a forward pass on this hardware.
   Rationale and the rejected alternatives: the `D-019` / `D-027` / `D-135` anchors in
   `models/language/modern_bert/model.py`.
+
+* **2026-08-25 — `ModernBERT` `base` / `large` moved BACK to `global_attention_interval = 3`,
+  and the weight tree changed again.** `plan-2026-08-25T053412-0f1fa04f` gave
+  `WindowAttention` a 1-D `partition_mode='band'` and routed the local layers to it, so
+  D-135's reason for forcing `1` (the square-grid local layer raised `ResourceExhaustedError`
+  at L=8) no longer exists. Two thirds of the layers are local again, so the RoPE caches of
+  the layers that were global go away and the local layers' own subtree returns: `base` moves
+  from 160,584,704 params / 268 weight tensors to **152,720,384 / 208**, `large` from
+  409,522,176 / 340 to **399,560,704 / 264**. Any checkpoint written between 2026-08-21 and
+  2026-08-25 is unloadable; the same impact check as above still returns nothing under
+  `results/`. Note the band's local layers carry NO relative-position bias and no positional
+  term of their own — that is the layout, not an omission. See the `D-012` / `D-016` anchors
+  in `models/language/modern_bert/model.py`.
 
 ---
 
@@ -787,7 +800,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1013 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1050 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1051 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 298 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |

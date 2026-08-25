@@ -495,7 +495,7 @@ class WindowAttention(keras.layers.Layer):
         #   * Do NOT relax this to a warning. This repo escalates warnings to
         #     errors in pytest but not at runtime, so a warning would be silent
         #     in production and loud only in the one place it is not needed.
-        # See decisions.md D-009 (plan-2026-08-25T053412-0f1fa04f).
+        # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
         if partition_mode == "band":
             if use_relative_position_bias:
                 raise ValueError(
@@ -1134,7 +1134,7 @@ class WindowAttention(keras.layers.Layer):
         #     index a TILE -- at ModernBERT's `window_size = 128 // 2 = 64` that
         #     caps the sequence at 4096 tokens for a layout that has no such
         #     bound. `pad_to_window=False` is the layout-free spelling; see the
-        #     D-009 anchor in `single_window_attention.py`.
+        #     D-010 anchor in `single_window_attention.py`.
         #
         # ACCEPTED COST, stated because D-027 records ten previously-INVERTED
         # cost claims about this exact layer: a dense `N x N` banded mask is
@@ -1149,7 +1149,7 @@ class WindowAttention(keras.layers.Layer):
         #   WindowAttention(64, 64, 4, partition_mode='band',
         #   use_relative_position_bias=False)(x);
         #   print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)"
-        # See decisions.md D-009 (plan-2026-08-25T053412-0f1fa04f).
+        # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
         n_tokens = keras.ops.shape(inputs)[1]
         positions = keras.ops.arange(n_tokens, dtype="int32")
         distance = keras.ops.absolute(

@@ -1152,12 +1152,19 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'full multi_head attention, and deliberately NOT advertised as O(N*W): a true '
             'banded kernel is not reachable from keras.ops. What it does remove is the '
             "'window' key's O(W**4) floor — N real tokens are never inflated to "
-            'window_size**2 slots. Measure both, do not trust this field: '
-            '.venv/bin/python -c "import resource, numpy as np; from '
+            'window_size**2 slots. THE PREMIUM OVER multi_head GROWS WITH N, so one '
+            'measuring point is not a cost model. MEASURED CPU peak RSS, dim=64, '
+            'window_size=64, interpreter+import floor 0.655 GB: at N=512 window_band '
+            '0.705 GB vs multi_head 0.684 GB (+3.1%); at N=8192 window_band 5.751 GB vs '
+            'multi_head 2.796 GB (+105.7%) — the dense N x N int32 band predicate is '
+            'itself O(N^2) and at N=8192 it costs about as much as the scores. Pick this '
+            'key for the ADJACENCY it gives a 1-D sequence, never to save memory. Measure '
+            'at YOUR N, do not trust this field: '
+            '.venv/bin/python -c "import sys, resource, numpy as np; from '
             'dl_techniques.layers.attention import create_attention_layer as c; '
-            "x = np.zeros((1, 512, 64), 'float32'); "
+            "N = int(sys.argv[1]); x = np.zeros((1, N, 64), 'float32'); "
             "c('window_band', dim=64, window_size=64, num_heads=4)(x); "
-            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)"'
+            'print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)" 8192'
         ),
         'paper': (
             'Longformer / Mistral / ModernBERT 1-D sliding-window attention '

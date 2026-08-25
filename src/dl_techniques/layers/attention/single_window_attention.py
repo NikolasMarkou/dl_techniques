@@ -710,7 +710,7 @@ class SingleWindowAttention(keras.layers.Layer):
             #     and `window_slots` are mutually exclusive by explicit check;
             #     two spellings of "do not pad" is the failure mode D-005 exists
             #     to avoid.
-            # See decisions.md D-009 (plan-2026-08-25T053412-0f1fa04f).
+            # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
             if pad_to_window:
                 N_target = self.window_size * self.window_size
             else:

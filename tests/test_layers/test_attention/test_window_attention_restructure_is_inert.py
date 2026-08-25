@@ -401,6 +401,30 @@ import pytest
 # ---------------------------------------------------------------------
 # Pinned capture parameters.
 
+# DECISION plan-2026-08-25T053412-0f1fa04f/D-002
+# This whole module exists because D-002 ruled the short-circuit must be
+# OUTPUT-IDENTICAL and PROVEN so, with an EXTERNAL golden reference built
+# BEFORE the first edit.
+#
+# WHAT NOT TO DO, and why:
+#   * Do NOT re-point :data:`PRE_RESTRUCTURE_COMMIT` at ``HEAD``, or at any
+#     commit at or after the first restructure edit. The golden side would
+#     then be the restructured code and every cell would become a
+#     self-comparison that cannot fail.
+#   * Do NOT replace the ``git show`` + ``importlib`` reference with an
+#     A/B of the CURRENT code under two flag settings. D-002 rejected that
+#     explicitly: an injection moves BOTH sides, so such an arm passes
+#     against arbitrary breakage -- this repo has a measured instance of a
+#     bit-identity arm passing 7/7 against a deliberately broken model.
+#   * Do NOT widen :data:`RAGGED_ATOL` to make a cell pass. Pre-Mortem #1
+#     and D-007 both require escalating with the measured delta instead.
+#   * Do NOT read a green run here as cost coverage. Every instrument in
+#     this file compares VALUES, and since step 4.1 the padding path masks
+#     its own pads, so an inflated computation and a short-circuited one
+#     agree to reduction noise -- see D-014 and the module docstring's
+#     "disabling the zigzag short-circuit leaves all 42 tests here GREEN".
+# See decisions.md D-002 (plan-2026-08-25T053412-0f1fa04f).
+
 #: ``git rev-parse HEAD`` immediately before the first restructure edit. This is a
 #: LITERAL HASH and must never become ``HEAD``: once step 2 commits, ``HEAD`` contains
 #: the restructured file and this whole file silently degrades into a
