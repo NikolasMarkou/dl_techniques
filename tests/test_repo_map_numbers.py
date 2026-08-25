@@ -17,8 +17,10 @@ Failure means one of two things, and the message says which is which:
 
 Do NOT "fix" a failure by editing the expected Value alone: REPO_MAP.md warns
 that a prose digit and its table Value must move in the SAME edit, and that a
-single directory addition has moved 19 of the ~68 rows at once. Re-derive the
-WHOLE table.
+single directory addition once moved 19 rows at once — out of the 68 the table
+held on 2026-08-01, a historical figure, not the table's present size, which
+``len(ROWS)`` below reports and which the failure message quotes live.
+Re-derive the WHOLE table.
 
 Landed 2026-08-10 by plan-2026-08-10-3649c19e/iter-2/step-13 (decisions.md
 D-032), from the throwaway checker step 11 used to reach 68/68.
@@ -114,7 +116,8 @@ def test_repo_map_number_reproduces(lineno, quantity, expected, cmd):
         f"its own command re-derives {int(printed)}.\n  {cmd}\n"
         "Either the repo changed and the map did not, or the command is wrong. "
         "Re-derive the WHOLE table, not just this row (REPO_MAP.md § 'Numbers': "
-        "one src/train/ addition once moved 19 of the 68 rows), and move any "
+        "one src/train/ addition once moved 19 of the 68 rows the table held on "
+        f"2026-08-01; it holds {len(ROWS)} today), and move any "
         "prose digit sourced from this row in the SAME edit."
     )
 

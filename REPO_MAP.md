@@ -698,7 +698,11 @@ direction:
 - A change that adds one directory or one file moves rows in sections you did not open.
   One `src/train/` addition on 2026-08-01 moved **19 of the 68 numeric rows** — the
   trainer count, the callback counts, the serializable / `get_config` / logger counts,
-  the docstring-style counts, the file and line totals, and the coverage row.
+  the docstring-style counts, the file and line totals, and the coverage row. **Both
+  digits in that sentence are a 2026-08-01 record and neither is the table's present
+  size** — 19 rows moved out of the 68 the table held on that day. It parses at **76**
+  enforceable rows today (`_rows()` in `tests/test_repo_map_numbers.py`, re-derived
+  2026-08-25), and 76 is the figure a fresh sweep must reproduce.
 - **Fixing the prose without fixing the table silently breaks the invariant this section
   claims.** On 2026-08-01 the "22 of the 73 bind a `create_*`" prose was corrected to 23
   while the table row behind it stayed at 22, so the map contradicted itself for one
