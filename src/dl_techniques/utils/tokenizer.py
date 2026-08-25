@@ -64,7 +64,7 @@ def get_special_token_ids(
     # Use the highest valid token IDs for special tokens
     # cl100k_base vocab size is 100277, so we use IDs near the end
     special_tokens = {
-        'pad': 100256,    # <|endoftext|> token (standard padding)
+        'pad': 100256,    # unassigned gap id between the last merge (100255) and the special block (<|endoftext|> is 100257)
         'cls': vocab_size - 20,  # High but valid
         'sep': vocab_size - 19,  # High but valid
         'mask': vocab_size - 18,  # High but valid
