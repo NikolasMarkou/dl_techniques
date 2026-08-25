@@ -113,8 +113,8 @@ universal law — see "When it does not apply".
 ### Things you must NOT do
 
 - **Never delete or reword a `# DECISION <plan-id>/D-NNN` comment.** They resolve through the
-  append-only manifest `plans/ANCHORS.md`; removing one destroys the record. This file carries
-  the two below.
+  append-only manifest `plans/ANCHORS.md`; removing one destroys the record. If a comment must
+  go, record the removal in that manifest first — see its "Retired anchors" section.
 - **A module rename must carry every referencing site in the same commit** — documents and
   path-keyed test data included, not just `import` lines.
 - **Never convert docstring style.** See above.
@@ -124,33 +124,6 @@ universal law — see "When it does not apply".
   `# noqa: F401`, bound for its `@keras.saving.register_keras_serializable` side effect) is
   NOT a re-export, is load-bearing, and must not be swept.
 - **Never re-export a family.** See Conventions.
-
-<!-- DECISION plan-2026-08-24T120026-64ffd751/D-006: the bullet below INVERTS the
-     absolute "Never rename a module file to `model.py`" prohibition that stood here until
-     2026-08-24. Do NOT rename `bert/model.py` back to `bert/bert.py` — its 13 referencing
-     sites were repointed in `62d0b05cb` and are consistent. Do NOT read this bullet as
-     permission to rename `gpt2/gpt2.py` or `time_series/forecast.py`: both are cited by
-     path elsewhere in the tree, and `gpt2/gpt2.py` is a live waiver key in
-     `tests/test_models/test_package_api_contract.py`.
-     This anchor was placed retroactively per DECISION
-     plan-2026-08-24T120026-64ffd751/D-008, which corrects the false claim that a Markdown
-     convention document cannot carry one.
-     Paths in the bullet below were re-prefixed for the 11-family layout on 2026-08-25
-     (`bert/` -> `language/bert/`, `gpt2/` -> `language/gpt2/`, `convnext/` ->
-     `vision/convnext/`, `mobilenet/` -> `vision/mobilenet/`). The ruling and the reasoning
-     are unchanged. -->
-<!-- DECISION plan-2026-08-24T120026-64ffd751/D-002: the bullet below INVERTS the
-     "Never delete the deep-supervision re-export shim" rule that stood here until
-     2026-08-24. Do NOT restore the pass-throughs at the tail of `models/*` modules or in
-     `models/*/__init__.py`, and do NOT read the current tree as drift. This is NOT a
-     licence to sweep cross-package imports generally: a registrar import (`# noqa: F401`,
-     bound for its Keras registration side effect) is load-bearing and is carved out below.
-     Removal decided in DECISION plan-2026-08-24T120026-64ffd751/D-001; this anchor placed
-     retroactively per DECISION plan-2026-08-24T120026-64ffd751/D-008.
-     Paths in the bullet below were re-prefixed for the 11-family layout on 2026-08-25
-     (`models/vit/` -> `models/vision/vit/`, `models/resnet/` -> `models/vision/resnet/`,
-     `models/bias_free_denoisers/` -> `models/vision/bias_free_denoisers/`). The ruling and
-     the reasoning are unchanged. -->
 
 ### When the shape does not apply
 
