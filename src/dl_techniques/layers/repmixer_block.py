@@ -79,18 +79,18 @@ from efficient CNNs:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import layers, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from .mobile_one_block import MobileOneBlock
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+
+from .mobile_one_block import MobileOneBlock
 
 # ---------------------------------------------------------------------
 
@@ -167,10 +167,10 @@ class RepMixerBlock(keras.layers.Layer):
             dropout_rate: float = 0.0,
             activation: Union[str, callable] = 'gelu',
             use_layer_norm: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -190,10 +190,10 @@ class RepMixerBlock(keras.layers.Layer):
         self.kernel_size = kernel_size
         self.expansion_ratio = expansion_ratio
         self.dropout_rate = dropout_rate
-        self.activation = activations.get(activation)
+        self.activation = keras.activations.get(activation)
         self.use_layer_norm = use_layer_norm
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
 
@@ -202,15 +202,15 @@ class RepMixerBlock(keras.layers.Layer):
 
         # CREATE normalization layers
         if use_layer_norm:
-            self.norm1 = layers.LayerNormalization(name='token_norm')
-            self.norm2 = layers.LayerNormalization(name='channel_norm')
+            self.norm1 = keras.layers.LayerNormalization(name='token_norm')
+            self.norm2 = keras.layers.LayerNormalization(name='channel_norm')
         else:
-            self.norm1 = layers.BatchNormalization(name='token_norm')
-            self.norm2 = layers.BatchNormalization(name='channel_norm')
+            self.norm1 = keras.layers.BatchNormalization(name='token_norm')
+            self.norm2 = keras.layers.BatchNormalization(name='channel_norm')
 
         # CREATE token mixer (spatial mixing with depthwise convolutions)
         self.token_mixer = keras.Sequential([
-            layers.DepthwiseConv2D(
+            keras.layers.DepthwiseConv2D(
                 kernel_size=kernel_size,
                 padding='same',
                 use_bias=False,
@@ -218,9 +218,9 @@ class RepMixerBlock(keras.layers.Layer):
                 depthwise_regularizer=self.kernel_regularizer,
                 name='token_dw_conv1'
             ),
-            layers.BatchNormalization(name='token_bn1'),
-            layers.Activation(self.activation, name='token_act1'),
-            layers.DepthwiseConv2D(
+            keras.layers.BatchNormalization(name='token_bn1'),
+            keras.layers.Activation(self.activation, name='token_act1'),
+            keras.layers.DepthwiseConv2D(
                 kernel_size=1,
                 padding='same',
                 use_bias=True,
@@ -230,12 +230,12 @@ class RepMixerBlock(keras.layers.Layer):
                 bias_regularizer=self.bias_regularizer,
                 name='token_dw_conv2'
             ),
-            layers.BatchNormalization(name='token_bn2'),
+            keras.layers.BatchNormalization(name='token_bn2'),
         ], name='token_mixer')
 
         # CREATE channel mixer (feature mixing with pointwise convolutions)
         channel_layers = [
-            layers.Conv2D(
+            keras.layers.Conv2D(
                 filters=self.expanded_dim,
                 kernel_size=1,
                 padding='same',
@@ -246,15 +246,15 @@ class RepMixerBlock(keras.layers.Layer):
                 bias_regularizer=self.bias_regularizer,
                 name='channel_expand'
             ),
-            layers.Activation(self.activation, name='channel_act'),
+            keras.layers.Activation(self.activation, name='channel_act'),
         ]
 
         # Add dropout if specified
         if dropout_rate > 0.0:
-            channel_layers.append(layers.Dropout(dropout_rate, name='channel_dropout'))
+            channel_layers.append(keras.layers.Dropout(dropout_rate, name='channel_dropout'))
 
         channel_layers.append(
-            layers.Conv2D(
+            keras.layers.Conv2D(
                 filters=dim,
                 kernel_size=1,
                 padding='same',
@@ -271,8 +271,8 @@ class RepMixerBlock(keras.layers.Layer):
 
         # Dropout for token mixer
         if dropout_rate > 0.0:
-            self.token_dropout = layers.Dropout(dropout_rate, name='token_dropout')
-            self.channel_dropout_final = layers.Dropout(dropout_rate, name='channel_dropout_final')
+            self.token_dropout = keras.layers.Dropout(dropout_rate, name='token_dropout')
+            self.channel_dropout_final = keras.layers.Dropout(dropout_rate, name='channel_dropout_final')
         else:
             self.token_dropout = None
             self.channel_dropout_final = None
@@ -364,12 +364,12 @@ class RepMixerBlock(keras.layers.Layer):
             'kernel_size': self.kernel_size,
             'expansion_ratio': self.expansion_ratio,
             'dropout_rate': self.dropout_rate,
-            'activation': activations.serialize(self.activation),
+            'activation': keras.activations.serialize(self.activation),
             'use_layer_norm': self.use_layer_norm,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
@@ -392,30 +392,30 @@ class ConvolutionalStem(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input [H, W, 3]                │
+        │  Input [H, W, 3]                 │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  MobileOneBlock(k=3, s=2)       │
-        │  → [H/2, W/2, out_channels]     │
+        │  MobileOneBlock(k=3, s=2)        │
+        │  → [H/2, W/2, out_channels]      │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  MobileOneBlock(k=3, s=2, dw)   │
-        │  → [H/4, W/4, out_channels]     │
+        │  MobileOneBlock(k=3, s=2, dw)    │
+        │  → [H/4, W/4, out_channels]      │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  MobileOneBlock(k=1, s=1)       │
-        │  → [H/4, W/4, out_channels]     │
+        │  MobileOneBlock(k=1, s=1)        │
+        │  → [H/4, W/4, out_channels]      │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Output [H/4, W/4, out_channels]│
+        │  Output [H/4, W/4, out_channels] │
         └──────────────────────────────────┘
 
     :param out_channels: Number of output channels for all blocks.
@@ -436,8 +436,8 @@ class ConvolutionalStem(keras.layers.Layer):
             out_channels: int,
             use_se: bool = False,
             activation: Union[str, callable] = 'gelu',
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -562,10 +562,10 @@ class ConvolutionalStem(keras.layers.Layer):
             'out_channels': self.out_channels,
             'use_se': self.use_se,
             'activation': serialize_activation(self.activation),
-            'kernel_initializer': initializers.serialize(
-                initializers.get(self.kernel_initializer)
+            'kernel_initializer': keras.initializers.serialize(
+                keras.initializers.get(self.kernel_initializer)
             ),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 

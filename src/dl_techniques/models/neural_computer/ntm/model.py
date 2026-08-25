@@ -67,7 +67,6 @@ References:
 """
 
 import keras
-from keras import layers
 import dataclasses
 from typing import Optional, Union, Tuple, Dict, Any
 
@@ -81,38 +80,136 @@ from dl_techniques.layers.memory import NTMCell, NTMConfig
 # NTM Model
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
 class NTMModel(keras.Model):
     """
-    Neural Turing Machine Model.
+    Neural Turing Machine: an ``NTMCell`` unrolled by ``keras.layers.RNN``.
 
-    A wrapper around the `NTMCell` that creates a fully unrolled Recurrent Neural Network.
-    This model provides a sequence-to-sequence or sequence-to-vector interface
-    compatible with standard Keras workflows.
+    Wraps the cell in an ``RNN`` layer to give a sequence-to-sequence or
+    sequence-to-vector interface compatible with standard Keras workflows. The
+    cell emits the controller output concatenated with the freshly read vectors,
+    so its width is ``controller_dim + num_read_heads * memory_dim`` -- an
+    artifact of the memory configuration rather than of the task, which is what
+    the optional dense projection exists to fix.
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, input_dim])
-           ↓
-    RNN(NTMCell) -> Unrolls over sequence
-           ↓
-    (Optional) Dense(output_dim)
-           ↓
-    Output
-    ```
+    ``return_state=False`` on the ``RNN`` is deliberate and not exposed: the state
+    tuple carries the full memory matrix, and surfacing it from the model's
+    outputs would drag a large bookkeeping tensor through every ``fit()`` metric
+    path for the rare caller who wants to inspect it.
 
-    **Presets**:
-    - **tiny**: Small memory (32x16), simple controller, good for unit tests.
-    - **base**: Standard NTM (128x32), LSTM controller, robust baseline.
-    - **large**: Large memory (256x64), deep controller, for complex tasks.
+    **Architecture Overview:**
 
-    Args:
-        input_shape: Tuple (seq_len, input_dim). seq_len can be None.
-        output_dim: Dimension of the final output.
-        config: NTMConfig object or dict defining NTM hyperparameters.
-        return_sequences: Whether to return the full sequence or just the last output.
-        use_projection: Whether to apply a dense projection to the NTM output.
-        **kwargs: Additional arguments for Model base class.
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  Input [B, T, input_dim]             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  ntm_rnn: RNN(NTMCell), unrolled over T                      │
+        │                                                              │
+        │   per timestep:                                              │
+        │     controller( x_t ‖ read_{t-1} )                           │
+        │            │                                                 │
+        │            ▼   head params: key, β, g, s, γ, erase, add      │
+        │     ┌──────────────────────────────────────────────┐         │
+        │     │ addressing:  content(key, β) → gate(g)       │         │
+        │     │             → shift(s, circular) → sharpen(γ)│         │
+        │     └──────────────────────────────────────────────┘         │
+        │            │ w over N slots                                  │
+        │            ▼                                                 │
+        │     write heads:  M ← M·(1 − w eᵀ) + w aᵀ   (erase, then add)│
+        │            ▼                                                 │
+        │     read heads:   r = wᵀ M      (sees THIS step's writes)    │
+        │            ▼                                                 │
+        │     output_t = controller_out ‖ r                            │
+        │            width = controller_dim + num_read_heads·memory_dim│
+        │                                                              │
+        │   return_sequences as configured; return_state=False, always │
+        └───────────────┬──────────────────────────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  output_projection: Dense(output_dim)│
+        │   (omitted when use_projection=False)│
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output  return_sequences=True  → [B, T, output_dim]         │
+        │          return_sequences=False → [B, output_dim]            │
+        │          use_projection=False   → last dim is the cell's     │
+        │                                    output_size instead       │
+        └──────────────────────────────────────────────────────────────┘
+
+    **Variants:**
+
+    .. code-block:: text
+
+        tiny    memory  32×16   controller  64   1 read / 1 write   shift 3   lstm
+        base    memory 128×20   controller 256   1 read / 1 write   shift 3   lstm
+        large   memory 256×64   controller 512   2 read / 2 write   shift 3   lstm
+
+        'base' quotes the paper's memory shape (128 × 20, every row of Tables 1
+        and 2); its controller width and both other tiers are this repo's own.
+        Shift range is 3 (offsets −1, 0, +1) throughout — see the module docstring.
+
+    :param input_shape: Sequence shape ``(seq_len, input_dim)`` excluding the
+        batch dimension. ``seq_len`` may be ``None``. Stored for serialization;
+        the layers are built from the shape passed to :meth:`build`.
+    :type input_shape: Tuple[Optional[int], int]
+    :param output_dim: Width of the final output. Used only when
+        ``use_projection=True``.
+    :type output_dim: int
+    :param output_dim: Dimension of the final output.
+    :param config: NTM hyperparameters — an :class:`NTMConfig`, or the dict it
+        serializes to (the ``from_config`` path). Both spellings are retained on
+        the instance so ``get_config`` round-trips without re-deriving either.
+    :type config: Union[NTMConfig, Dict[str, Any]]
+    :param return_sequences: Whether to return every timestep's output or only
+        the last. Defaults to ``True``.
+    :type return_sequences: bool
+    :param use_projection: Whether to apply the dense projection to the cell's
+        output. With it off, the output width is
+        ``controller_dim + num_read_heads * memory_dim`` and ``output_dim`` is
+        ignored. Defaults to ``True``.
+    :type use_projection: bool
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
+
+    :raises ValueError: From :meth:`from_variant`, if the variant is unknown.
+
+    Input shape:
+        3D tensor with shape ``(batch_size, seq_len, input_dim)``.
+
+    Output shape:
+        - ``return_sequences=True``: ``(batch_size, seq_len, output_dim)``.
+        - ``return_sequences=False``: ``(batch_size, output_dim)``.
+        - ``use_projection=False``: the last dimension is the cell's
+          ``output_size`` instead of ``output_dim``.
+
+    Example:
+        >>> # From a preset variant
+        >>> model = NTMModel.from_variant('base', input_shape=(None, 8),
+        ...                               output_dim=8)
+        >>>
+        >>> # Sequence-to-vector, no projection: output width follows the memory
+        >>> model = NTMModel.from_variant('tiny', (20, 8), output_dim=8,
+        ...                               return_sequences=False,
+        ...                               use_projection=False)
+        >>>
+        >>> # Overriding an NTM hyperparameter through the variant factory
+        >>> model = NTMModel.from_variant('base', (None, 8), 8, num_read_heads=2)
+
+    Note:
+        Only ``base`` has a published counterpart, and only for its memory shape.
+        ``tiny`` and ``large`` are repo-invented tiers; do not read them as
+        reproducing anything from the paper.
+
+    Attributes:
+        cell: The ``NTMCell``, named ``ntm_cell``.
+        rnn: The ``keras.layers.RNN`` wrapper, named ``ntm_rnn``.
+        projection: The output ``Dense``, or ``None`` when disabled.
+        config_obj: The resolved :class:`NTMConfig`.
+        config_dict: Its dict form, as re-emitted by :meth:`get_config`.
     """
 
     # Only 'base' has a published counterpart. Graves et al. 2014
@@ -178,6 +275,12 @@ class NTMModel(keras.Model):
             use_projection: bool = True,
             **kwargs: Any
     ) -> None:
+        """Resolve the NTM configuration and create the cell, the RNN and the projection.
+
+        The config is accepted either live or as its serialized dict, so
+        ``from_config`` and direct construction take the same path. See the class
+        docstring for the parameter reference.
+        """
         super().__init__(**kwargs)
 
         self.input_shape_config = input_shape
@@ -202,7 +305,7 @@ class NTMModel(keras.Model):
         # We wrap the cell in an RNN layer to handle unrolling
         # return_state=False because we usually don't need raw NTM internal states
         # in the high-level model output
-        self.rnn = layers.RNN(
+        self.rnn = keras.layers.RNN(
             self.cell,
             return_sequences=return_sequences,
             return_state=False,
@@ -211,7 +314,7 @@ class NTMModel(keras.Model):
 
         # 3. Output Projection
         if self.use_projection:
-            self.projection = layers.Dense(
+            self.projection = keras.layers.Dense(
                 output_dim,
                 name="output_projection"
             )
@@ -224,11 +327,16 @@ class NTMModel(keras.Model):
         # but we can set the input spec.
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model layers with explicit shapes.
+        """Build the RNN and, when enabled, the projection.
 
-        Args:
-            input_shape: Shape of the input tensor (batch, seq_len, dim).
+        The projection is built at the CELL's output width, not the model input's:
+        ``NTMCell.output_size`` is ``controller_dim + num_read_heads * memory_dim``.
+        Dense builds on the last axis alone, so one shape serves both the
+        sequence and the last-step case.
+
+        :param input_shape: Shape of the input tensor,
+            ``(batch, seq_len, input_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # 1. Build RNN
         self.rnn.build(input_shape)
@@ -246,15 +354,16 @@ class NTMModel(keras.Model):
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """
-        Forward pass.
+        """Unroll the cell over the sequence, then project.
 
-        Args:
-            inputs: Input tensor (batch, seq_len, input_dim).
-            training: Whether to run in training mode (affects Dropout/RNN).
-
-        Returns:
-            Output tensor.
+        :param inputs: Input tensor of shape ``(batch, seq_len, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the call is in training mode; forwarded to the
+            RNN, which passes it down to the cell.
+        :type training: Optional[bool]
+        :return: The unrolled output, projected when ``use_projection`` is set.
+            See the class docstring's Output shape for the four cases.
+        :rtype: keras.KerasTensor
         """
         x = self.rnn(inputs, training=training)
 
@@ -264,7 +373,18 @@ class NTMModel(keras.Model):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape based on configuration."""
+        """Return the output shape, from configuration alone.
+
+        ``return_sequences`` decides the rank and ``use_projection`` decides the
+        last dimension, so all four combinations are covered here.
+
+        :param input_shape: Shape of the input tensor,
+            ``(batch, seq_len, input_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``(batch, seq_len, last_dim)`` or ``(batch, last_dim)``, where
+            ``last_dim`` is ``output_dim`` or the cell's ``output_size``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         batch_size = input_shape[0]
         seq_len = input_shape[1]
 
@@ -276,7 +396,14 @@ class NTMModel(keras.Model):
             return (batch_size, last_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialize configuration."""
+        """Get model configuration for serialization.
+
+        The NTM hyperparameters are emitted as the stored dict form, so the cell
+        is reconstructed from config rather than serialized as a sub-layer.
+
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'input_shape': self.input_shape_config,
@@ -289,7 +416,16 @@ class NTMModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'NTMModel':
-        """Deserialize configuration."""
+        """Create a model from its configuration.
+
+        No ``NTMConfig`` reconstruction is needed here: ``__init__`` accepts the
+        dict form directly. The copy keeps the caller's dict unmodified.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: An ``NTMModel`` instance.
+        :rtype: NTMModel
+        """
         # NTMConfig reconstruction happens in __init__ via dict check
         # We copy to avoid modifying the original config dict
         config = config.copy()
@@ -304,18 +440,29 @@ class NTMModel(keras.Model):
             return_sequences: bool = True,
             **kwargs: Any
     ) -> 'NTMModel':
-        """
-        Create NTM model from a predefined variant.
+        """Create an NTM model from a predefined variant.
 
-        Args:
-            variant: One of 'tiny', 'base', 'large'.
-            input_shape: Input sequence shape (seq_len, dim).
-            output_dim: Output dimension.
-            return_sequences: Whether to output full sequence.
-            **kwargs: Overrides for specific config parameters (e.g., controller_type).
+        ``kwargs`` is split against :class:`NTMConfig`'s dataclass fields: keys
+        that name an NTM hyperparameter override the preset before the config is
+        built, and everything else is forwarded to the constructor. The preset is
+        copied first, so the class-level table is never mutated for later callers.
 
-        Returns:
-            Configured NTMModel instance.
+        :param variant: One of ``'tiny'``, ``'base'``, ``'large'``.
+        :type variant: str
+        :param input_shape: Input sequence shape ``(seq_len, input_dim)``.
+        :type input_shape: Tuple[Optional[int], int]
+        :param output_dim: Output width.
+        :type output_dim: int
+        :param return_sequences: Whether to output the full sequence. Defaults to
+            ``True``.
+        :type return_sequences: bool
+        :param kwargs: Overrides for :class:`NTMConfig` fields (e.g.
+            ``controller_type``, ``num_read_heads``) and/or constructor arguments
+            (e.g. ``use_projection``, ``name``).
+        :type kwargs: Any
+        :return: The configured ``NTMModel``.
+        :rtype: NTMModel
+        :raises ValueError: If ``variant`` is not recognized.
         """
         if variant not in cls.NTM_VARIANTS:
             raise ValueError(f"Unknown variant '{variant}'. Available: {list(cls.NTM_VARIANTS.keys())}")
@@ -353,18 +500,30 @@ def create_ntm_variant(
         return_sequences: bool = True,
         **kwargs: Any
 ) -> NTMModel:
-    """
-    Factory function to create an NTM model variant.
+    """Convenience function to create an NTM model variant.
 
-    Args:
-        variant: One of 'tiny', 'base', 'large'.
-        input_shape: Tuple (seq_len, input_dim).
-        output_dim: Size of output vector.
-        return_sequences: If True, returns (batch, seq, out). Else (batch, out).
-        **kwargs: Additional overrides for NTM configuration.
+    :param variant: One of ``'tiny'``, ``'base'``, ``'large'``.
+    :type variant: str
+    :param input_shape: Sequence shape ``(seq_len, input_dim)``.
+    :type input_shape: Tuple[Optional[int], int]
+    :param output_dim: Size of the output vector.
+    :type output_dim: int
+    :param return_sequences: If ``True``, returns ``(batch, seq, out)``; else
+        ``(batch, out)``. Defaults to ``True``.
+    :type return_sequences: bool
+    :param kwargs: Additional overrides, split between :class:`NTMConfig` fields
+        and constructor arguments; see :meth:`NTMModel.from_variant`.
+    :type kwargs: Any
+    :return: An uncompiled ``NTMModel`` instance.
+    :rtype: NTMModel
 
-    Returns:
-        An uncompiled NTMModel instance.
+    Example:
+        >>> # Copy-task-shaped model
+        >>> model = create_ntm_variant('base', input_shape=(None, 8), output_dim=8)
+        >>>
+        >>> # Sequence-to-vector classifier head
+        >>> model = create_ntm_variant('tiny', (20, 8), output_dim=4,
+        ...                            return_sequences=False)
     """
     return NTMModel.from_variant(
         variant=variant,
@@ -373,3 +532,5 @@ def create_ntm_variant(
         return_sequences=return_sequences,
         **kwargs
     )
+
+# ---------------------------------------------------------------------
