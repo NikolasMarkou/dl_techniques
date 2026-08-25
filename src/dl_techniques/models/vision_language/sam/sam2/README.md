@@ -181,11 +181,14 @@ location so a reader knows where to look, not restated:
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
 
-> **`SAM2MemoryBank` is not to be confused with
-> `src/dl_techniques/models/memory_bank/`.** That package is
+> **`SAM2MemoryBank` is not to be confused with the former
+> `src/dl_techniques/models/memory_bank/`.** That package was
 > `WaveFieldMemoryLLM`'s keyed read/write store for language modelling — a
 > different data structure with a colliding name. It was reviewed and REJECTED
-> as a reuse target here; nothing in this package derives from it.
+> as a reuse target here; nothing in this package derives from it. **The package
+> itself was DELETED by the 2026-08-24 family restructure** (`d0b599ff2` /
+> `452d663d2`), so the collision no longer exists; the note is kept because the
+> name `SAM2MemoryBank` still invites the confusion.
 
 ## 6. Variants
 
