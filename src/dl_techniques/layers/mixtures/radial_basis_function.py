@@ -45,12 +45,37 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Literal, Optional, Union, Tuple, Dict, Any, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 
 from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
+
+# ---------------------------------------------------------------------
+
+# Named numeric constants. Each is the value that was previously spelled inline at
+# its single use site; introducing the name changed NO number.
+
+# Upper bound on the RBF exponent in the 'basis' arm: exp(-min(scaled_dist_sq, 50.0)).
+# It is an UNDERFLOW FLOOR, not a saturation guard -- unclipped, exp(-128) is exactly
+# 0.0 in float32, strictly worse than exp(-50) = 1.929e-22. Load-bearing; the full
+# argument is at the use site in `call()`, under the f3aca1ff/D-001 anchor there.
+_EXP_CLIP_MAX = 50.0
+
+# DECISION plan-2026-08-26T061816-c515641a/D-014: additive epsilon under the repulsion
+# loss's sqrt, so d(sqrt)/dx is finite at dist_sq == 0 (the diagonal, which the eye
+# mask then zeroes anyway).
+# DELIBERATELY NOT `keras.backend.epsilon()`. That happens to return 1e-7 today, so
+# the substitution would look like a no-op, but it is a MUTABLE PROCESS GLOBAL --
+# any caller of `keras.backend.set_epsilon()` would silently move this layer's
+# gradients. KMeansLayer's use of `keras.backend.epsilon()` is a separate, existing
+# choice at a different site; this divergence is intentional and documented rather
+# than unified.
+_REPULSION_SQRT_EPSILON = 1e-7
+
+# Above this gamma, softplus is linear to float32 precision, so the inverse-softplus
+# initialisation `log(expm1(gamma))` is replaced by `gamma` itself.
+_SOFTPLUS_LINEAR_THRESHOLD = 20.0
 
 # ---------------------------------------------------------------------
 
@@ -203,7 +228,7 @@ class RBFLayer(keras.layers.Layer):
            *What is guaranteed.* With ``gamma_init=None`` (the default), gamma
            resolves on this arm to ``1/feature_dim``, which keeps the exponent
            ``O(1)`` at every dimension. The 50.0 clip below is RETAINED, but at stock
-           defaults it no longer engages, so ``ops.minimum``'s structurally zero
+           defaults it no longer engages, so ``keras.ops.minimum``'s structurally zero
            saturated-branch gradient is no longer reachable. Measured,
            ``units=8``, ``normal(0, 1)`` input, 3 seeds: gradmax on
            ``(centers, gamma_raw)`` goes from EXACTLY ``0.0 / 0.0`` to
@@ -414,13 +439,16 @@ class RBFLayer(keras.layers.Layer):
         )
 
         # Calculate inverse softplus for initialization
-        # softplus(x) = log(1 + exp(x)) -> x = log(exp(y) - 1)
-        # We use numpy for stable constant calculation
-        if self._gamma_init_resolved > 20.0:
+        # softplus(x) = log(1 + exp(x)) -> x = log(exp(y) - 1) = log(expm1(y))
+        # We use numpy for stable constant calculation. `expm1` is the idiomatic
+        # spelling; it is NOT a precision fix here -- measured bit-identical to
+        # `exp(y) - 1.0` after the float32 cast at every gamma this layer resolves
+        # (1/D for D in 64 / 784 / 4096).
+        if self._gamma_init_resolved > _SOFTPLUS_LINEAR_THRESHOLD:
             # For large values, softplus is approximately linear
             init_val = self._gamma_init_resolved
         else:
-            init_val = np.log(np.exp(self._gamma_init_resolved) - 1.0)
+            init_val = np.log(np.expm1(self._gamma_init_resolved))
 
         self.gamma_raw = self.add_weight(
             name='gamma_raw',
@@ -453,17 +481,17 @@ class RBFLayer(keras.layers.Layer):
         dist_sq = pairwise_squared_distance(self.centers, self.centers)
 
         # Safe sqrt for gradient stability (avoid sqrt(0))
-        dist = ops.sqrt(dist_sq + 1e-7)
+        dist = keras.ops.sqrt(dist_sq + _REPULSION_SQRT_EPSILON)
 
         # Effective threshold
         threshold = self.min_center_distance * (1.0 + self.safety_margin)
 
         # Penalty: max(0, threshold - distance)^2
-        penalty = ops.square(ops.maximum(0.0, threshold - dist))
+        penalty = keras.ops.square(keras.ops.maximum(0.0, threshold - dist))
 
         # Mask the diagonal (distance to self is 0, which would cause max penalty).
         # variable_dtype (float32) to match the autocast=False centers under mixed precision.
-        eye_mask = ops.eye(self.units, dtype=self.variable_dtype)
+        eye_mask = keras.ops.eye(self.units, dtype=self.variable_dtype)
         # Invert mask: 1.0 for off-diagonal, 0.0 for diagonal
         off_diag_mask = 1.0 - eye_mask
 
@@ -473,23 +501,24 @@ class RBFLayer(keras.layers.Layer):
         # We normalize by units^2 - units (number of off-diagonal elements)
         # or just mean over all and let the weight handle scaling.
         # Following original logic: scale by dim and strength.
-        mean_penalty = ops.mean(masked_penalty)
+        mean_penalty = keras.ops.mean(masked_penalty)
 
-        dim_scale = ops.cast(self._feature_dim, dtype=self.variable_dtype)
+        dim_scale = keras.ops.cast(self._feature_dim, dtype=self.variable_dtype)
 
         return self.repulsion_strength * dim_scale * mean_penalty
 
     def call(
         self,
         inputs: keras.KerasTensor,
-        training: bool = False
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass computing Gaussian RBF activations.
 
         :param inputs: Input tensor of shape ``(batch, ..., dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Whether in training mode.
-        :type training: bool
+        :param training: Whether in training mode. ``None`` defers to the
+            enclosing Keras call context.
+        :type training: Optional[bool]
         :return: RBF activations of shape ``(batch, ..., units)``. Unnormalized
             under ``output_mode='basis'``; summing to 1.0 along the last axis
             under ``output_mode='normalized'``.
@@ -500,7 +529,7 @@ class RBFLayer(keras.layers.Layer):
         # Cast inputs to variable_dtype (float32) so the distance / exp math runs in full
         # precision and matches the autocast=False centers under a mixed_float16 policy.
         # The output is cast back to compute_dtype before returning (no-op under float32).
-        inputs = ops.cast(inputs, self.variable_dtype)
+        inputs = keras.ops.cast(inputs, self.variable_dtype)
 
         # R3 (D-002): shared pairwise squared-distance helper. inputs (batch, ..., dim)
         # x centers (units, dim) -> (batch, ..., units). The helper uses the same
@@ -512,28 +541,28 @@ class RBFLayer(keras.layers.Layer):
         # dist_sq is (batch, ..., units), gamma broadcasts automatically to last dim
 
         # log(phi_k) = -gamma_k * ||x - c_k||^2, UNCLIPPED. The 50.0 clip belongs to
-        # the 'basis' arm alone (applied below, at the ops.exp) -- see the D-002 anchor.
+        # the 'basis' arm alone (applied below, at the keras.ops.exp) -- see the D-002 anchor.
         scaled_dist_sq = dist_sq * self.gamma
 
         # DECISION plan-2026-07-20T160907-7de371a1/D-002: NRBF is a softmax over the
         # UNCLIPPED, PRE-exp `-scaled_dist_sq` (which IS log(phi)), computed here in
-        # variable_dtype (float32) and strictly ABOVE the ops.cast(output,
+        # variable_dtype (float32) and strictly ABOVE the keras.ops.cast(output,
         # self.compute_dtype) below. Three rewrites are real bugs, not style choices:
         #
-        # 1. Do NOT feed `ops.minimum(scaled_dist_sq, 50.0)` into the softmax. The clip
-        #    exists only to keep ops.exp from underflowing in the 'basis' arm; softmax
+        # 1. Do NOT feed `keras.ops.minimum(scaled_dist_sq, 50.0)` into the softmax. The clip
+        #    exists only to keep keras.ops.exp from underflowing in the 'basis' arm; softmax
         #    never calls exp on the raw value and is internally shift-stabilized, so it
         #    needs no clip. Feeding it the CLIPPED value makes this arm a DEAD LAYER at
         #    ordinary feature dimensions: E[dist_sq] ~ D, so once D*gamma >~ 50 every
         #    unit saturates at the same 50.0, softmax sees a constant vector and returns
-        #    uniform 1/units -- and ops.minimum has a STRUCTURAL ZERO gradient in the
+        #    uniform 1/units -- and keras.ops.minimum has a STRUCTURAL ZERO gradient in the
         #    saturated branch, so `centers` and `gamma_raw` both get gradient exactly
         #    0.0. Measured at D=128 with stock defaults: output [0.16667]*6, gradmax
         #    0.0/0.0. It also destroys NRBF's defining property -- selecting the nearest
         #    center far from the data -- which is the whole reason to prefer it over
         #    'basis'. This shipped once (D-008); the test that should have caught it ran
         #    at dim=4, below the saturation threshold.
-        # 2. Do NOT rewrite as `output / ops.sum(output, axis=-1, keepdims=True)`, and
+        # 2. Do NOT rewrite as `output / keras.ops.sum(output, axis=-1, keepdims=True)`, and
         # 3. do NOT move the normalization below the cast.
         #    (2) and (3) are the same NaN: phi underflows to EXACT 0.0 in float16 for
         #    ordinary inputs (normal(0,1) in 16 dims already gives phi ~ 1.1e-7), so
@@ -545,10 +574,11 @@ class RBFLayer(keras.layers.Layer):
         #
         # `training` is not consulted: normalization is identical in train and inference.
         if self.output_mode == 'normalized':
-            output = ops.softmax(-scaled_dist_sq, axis=-1)
+            output = keras.ops.softmax(-scaled_dist_sq, axis=-1)
         else:
             # DECISION plan-2026-07-20T175634-f3aca1ff/D-001: THE 50.0 CLIP STAYS,
-            # AND IT IS NOT THE DEFECT. It supersedes the former D-012 anchor here.
+            # AND IT IS NOT THE DEFECT. (The 50.0 is now spelled `_EXP_CLIP_MAX` at
+            # module scope; the NAME changed, the VALUE did not.) It supersedes the former D-012 anchor here.
             # (Anchored to D-001, whose Reasoning holds the retain-the-clip and
             # soft-clamp-is-inert measurements. plan.md step 3 said "D-002"; that was
             # a drafting slip copied from the sibling 7de371a1/D-002 anchor 30 lines
@@ -577,7 +607,7 @@ class RBFLayer(keras.layers.Layer):
             # build() (see the D-001 anchor there), pinned by
             # tests/test_layers/test_mixtures/test_radial_basis_function.py
             # ::test_basis_mode_gradients_are_live_at_realistic_dimension.
-            output = ops.exp(-ops.minimum(scaled_dist_sq, 50.0))
+            output = keras.ops.exp(-keras.ops.minimum(scaled_dist_sq, _EXP_CLIP_MAX))
 
         # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
         # the repulsion loss fires for a symbolic training=True tensor (custom @tf.function
@@ -597,7 +627,7 @@ class RBFLayer(keras.layers.Layer):
 
         # Cast to compute_dtype so the layer emits the policy's compute dtype
         # (float16 under mixed precision; no-op under float32).
-        return ops.cast(output, self.compute_dtype)
+        return keras.ops.cast(output, self.compute_dtype)
 
     def compute_output_shape(
         self,

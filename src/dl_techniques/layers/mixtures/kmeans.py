@@ -76,7 +76,7 @@ References:
 """
 
 import keras
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, FrozenSet
+from typing import Optional, Union, Any, Tuple, Dict, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 # local imports
@@ -84,17 +84,17 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, F
 
 from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
 from .base import (
+    Axis,
     BaseMixtureLayer,
+    OutputMode,
     resolve_initializer_arg,
     resolve_prototype_initializer,
 )
 
 # ---------------------------------------------------------------------
 
-# Type aliases for better readability
-OutputMode = Literal['assignments', 'mixture']
-TensorShape = Union[Tuple[int, ...], List[int]]
-Axis = Union[int, List[int]]
+# ``OutputMode`` and ``Axis`` are shared with ``GMMLayer`` and are imported from
+# ``base.py`` above.
 
 # Soft assignments never give a cluster EXACTLY zero mass, so "dead" needs a threshold.
 # Mass is a sum of responsibilities in units of whole data points, so 1e-3 reads as
@@ -102,6 +102,12 @@ Axis = Union[int, List[int]]
 # deliberately NOT scaled by batch size, so the same centroid is judged alive or dead
 # identically at batch 8 and at batch 8192.
 _MIN_CLUSTER_MASS = 1e-3
+
+# Scale of the fresh normal draw used by `reset_centroids()` when no explicit
+# centroids are supplied. Small on purpose: a reset seeds centroids near the origin
+# and lets the EMA update carry them out to the data, rather than starting them at
+# unit scale in a direction the data may not occupy.
+_RESET_CENTROID_SCALE = 0.1
 
 # ---------------------------------------------------------------------
 
@@ -696,7 +702,7 @@ class KMeansLayer(BaseMixtureLayer):
             new_values = keras.random.normal(
                 shape=(self.n_clusters, self.feature_dims),
                 dtype=self.dtype
-            ) * 0.1  # Small scale for stability
+            ) * _RESET_CENTROID_SCALE
             self.centroids.assign(new_values)
 
         # Reset momentum buffer

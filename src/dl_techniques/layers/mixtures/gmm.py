@@ -87,7 +87,7 @@ References:
 
 import keras
 import numpy as np
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, FrozenSet
+from typing import Optional, Union, Literal, Any, Tuple, Dict, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 # local imports
@@ -96,18 +96,18 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, F
 from ...utils.logger import logger
 from ...utils.tensors import resolve_training_factor
 from .base import (
+    Axis,
     BaseMixtureLayer,
+    OutputMode,
     resolve_initializer_arg,
     resolve_prototype_initializer,
 )
 
 # ---------------------------------------------------------------------
 
-# Type aliases for better readability
-OutputMode = Literal['assignments', 'mixture']
+# ``OutputMode`` and ``Axis`` are shared with ``KMeansLayer`` and are imported from
+# ``base.py`` above. ``CovarianceType`` is GMM-only and stays here.
 CovarianceType = Literal['diagonal', 'low_rank']
-TensorShape = Union[Tuple[int, ...], List[int]]
-Axis = Union[int, List[int]]
 
 # DECISION plan-2026-07-21T083606-47dc4421/D-003: upper bound on effective variance
 # (R1). exp(log_variances) is otherwise unbounded above; a large log_variance

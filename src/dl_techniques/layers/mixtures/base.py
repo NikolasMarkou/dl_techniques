@@ -43,10 +43,23 @@ no ``cluster_axis`` concept and is left untouched.
 import keras
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Optional, List, Any, Tuple, Union
+from typing import Optional, List, Any, Tuple, Union, Literal
 
 from ...utils.logger import logger
 from ...initializers.orthonormal_initializer import OrthonormalInitializer
+
+# ---------------------------------------------------------------------
+
+# Type aliases shared by the two concrete layers of this hierarchy. They live here
+# rather than once per module because ``GMMLayer`` and ``KMeansLayer`` spelled them
+# identically; ``gmm.py`` and ``kmeans.py`` import them from here.
+#
+# ``RBFLayer`` deliberately does NOT use ``OutputMode``: it is outside this hierarchy
+# and its legal set is the disjoint ``{'basis', 'normalized'}``, spelled inline at its
+# own parameter. See the D-003 amendment in ``factory.py`` -- the two vocabularies must
+# stay two.
+OutputMode = Literal['assignments', 'mixture']
+Axis = Union[int, List[int]]
 
 # ---------------------------------------------------------------------
 
