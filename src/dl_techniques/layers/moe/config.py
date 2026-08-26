@@ -263,6 +263,56 @@ class MoEConfig:
     # Advanced features
     routing_dtype: str = 'float32'
 
+    def __post_init__(self):
+        """Validate the complete MoE configuration after dataclass creation.
+
+        Mirrors ``ExpertConfig.__post_init__`` and ``GatingConfig.__post_init__`` so
+        the top-level config fails loud at construction time rather than deep inside
+        layer assembly. ``MoEConfig`` is the only place the cross-field invariant
+        ``top_k <= num_experts`` can be checked at all: ``GatingConfig`` owns
+        ``top_k`` but does not know ``num_experts``, which is a sibling field here.
+
+        Validated:
+
+        * ``num_experts >= 1``.
+        * ``top_k <= num_experts``, for ``gating_type`` in ``('linear', 'cosine')``
+          only — see the note below.
+        * ``jitter_noise >= 0`` (rejected, not silently disabled, matching
+          ``GatingConfig``'s ``noise_std >= 0`` precedent).
+
+        .. note::
+            ``gating_type='softmoe'`` is **excluded** from the ``top_k`` cross-check
+            on purpose. SoftMoE does not perform top-k routing: it dispatches every
+            token to every expert through ``num_slots`` learned slots, and
+            ``MixtureOfExperts.__init__`` forwards only ``num_slots`` to
+            ``SoftMoEGating`` (``layer.py``), never ``top_k``. Requiring
+            ``top_k <= num_experts`` there would reject configurations that are
+            perfectly valid because the field is inert for that gating type.
+
+        :raises ValueError: If any of the above invariants is violated.
+        """
+        if self.num_experts < 1:
+            raise ValueError(f"num_experts must be >= 1, got {self.num_experts}")
+
+        # DECISION plan-2026-08-26T100331-f3744602/D-012
+        # The `top_k <= num_experts` cross-check is deliberately SKIPPED for
+        # `gating_type='softmoe'`. Do NOT "fix the omission" by dropping the
+        # gating_type test: SoftMoE ignores `top_k` entirely -- `layer.py`'s
+        # gating_kwargs allow-list forwards only `num_slots` to SoftMoEGating --
+        # so an unrelated `top_k` value is inert there, and validating it would
+        # reject working configs (e.g. num_experts=4, top_k=999, softmoe) that
+        # construct and run correctly today.
+        if self.gating_config.gating_type in ('linear', 'cosine'):
+            if self.gating_config.top_k > self.num_experts:
+                raise ValueError(
+                    f"top_k must be between 1 and num_experts ({self.num_experts}), "
+                    f"got {self.gating_config.top_k} "
+                    f"(gating_type='{self.gating_config.gating_type}')"
+                )
+
+        if self.jitter_noise < 0:
+            raise ValueError(f"jitter_noise must be >= 0, got {self.jitter_noise}")
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary for serialization."""
         # Serialize ExpertConfig, handling Keras initializer/regularizer objects

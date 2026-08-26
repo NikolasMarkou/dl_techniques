@@ -403,10 +403,18 @@ class TestMixtureOfExperts:
     def test_edge_cases(self):
         """Test error conditions and edge cases."""
 
-        # Test invalid num_experts
+        # Test invalid num_experts. Since step 4 (B1) this is rejected by
+        # ``MoEConfig.__post_init__`` itself, before ``MixtureOfExperts`` ever
+        # sees it -- the config object can no longer be constructed at all.
+        with pytest.raises(ValueError, match="num_experts must be >= 1"):
+            MoEConfig(num_experts=0)
+
+        # ``MixtureOfExperts``'s own guard is retained as defence in depth and
+        # still fires when the (mutable) dataclass is mutated after construction.
+        mutated = MoEConfig(num_experts=2)
+        mutated.num_experts = 0
         with pytest.raises(ValueError, match="num_experts must be positive"):
-            invalid_config = MoEConfig(num_experts=0)
-            MixtureOfExperts(config=invalid_config)
+            MixtureOfExperts(config=mutated)
 
         # Test invalid FFN config
         with pytest.raises(ValueError, match="Invalid FFN configuration"):
@@ -1369,6 +1377,121 @@ class TestMoEReviewRegressions:
             w = ops.convert_to_numpy(g(x, training=False)[0])
             assert np.isfinite(w).all()
             np.testing.assert_allclose(w.sum(-1), np.ones(w.shape[:-1]), atol=1e-4)
+
+
+class TestMoEConfigValidation:
+    """F-3 / B1 + B3: the config layer owns ``num_experts``, ``top_k`` and ``jitter_noise``.
+
+    Before step 4 these invariants were enforced *only* inside
+    ``LinearGating.__init__`` / ``CosineGating.__init__``, two classes away from the
+    object every real consumer constructs. The measured consequence: deleting the
+    upper bound at both ``gating.py`` sites left 83 of 84 tests passing, and
+    ``CosineGating``'s copy of the guard had zero coverage.
+
+    The tests below split deliberately into two groups:
+
+    * config-level -- reject at ``MoEConfig`` construction;
+    * layer-level -- the retained ``gating.py`` guards, reached by mutating an
+      already-constructed config, which is the only way past the config guard.
+      These are the ones that must go RED under the F-3 mutation.
+    """
+
+    @staticmethod
+    def _small_expert() -> ExpertConfig:
+        """A cheap, valid expert configuration.
+
+        :return: An ``ExpertConfig`` whose FFN is small enough to construct fast.
+        :rtype: ExpertConfig
+        """
+        return ExpertConfig(
+            ffn_config={'type': 'mlp', 'hidden_dim': 16, 'output_dim': 8}
+        )
+
+    # --- config-level rejection ------------------------------------------
+
+    @pytest.mark.parametrize("gating_type", ['linear', 'cosine'])
+    def test_top_k_above_num_experts_rejected_by_moe_config(self, gating_type):
+        """``top_k > num_experts`` must fail at ``MoEConfig`` construction."""
+        with pytest.raises(ValueError, match="top_k must be between 1 and num_experts"):
+            MoEConfig(
+                num_experts=4,
+                gating_config=GatingConfig(gating_type=gating_type, top_k=8),
+            )
+
+    @pytest.mark.parametrize("bad", [0, -3])
+    def test_num_experts_below_one_rejected_by_moe_config(self, bad):
+        """``num_experts < 1`` must fail at ``MoEConfig`` construction."""
+        with pytest.raises(ValueError, match="num_experts must be >= 1"):
+            MoEConfig(num_experts=bad)
+
+    def test_negative_jitter_noise_rejected_by_moe_config(self):
+        """B3: a negative ``jitter_noise`` is REJECTED, not silently disabled."""
+        with pytest.raises(ValueError, match="jitter_noise must be >= 0"):
+            MoEConfig(num_experts=4, jitter_noise=-1.0)
+
+    def test_zero_jitter_noise_is_accepted(self):
+        """``jitter_noise=0`` is the documented way to disable input jitter."""
+        assert MoEConfig(num_experts=4, jitter_noise=0.0).jitter_noise == 0.0
+
+    def test_top_k_equal_to_num_experts_is_accepted(self):
+        """``top_k == num_experts`` is the legal "all experts" boundary."""
+        cfg = MoEConfig(num_experts=4, gating_config=GatingConfig(top_k=4))
+        assert cfg.gating_config.top_k == 4
+
+    def test_softmoe_top_k_is_not_cross_checked(self):
+        """SoftMoE ignores ``top_k`` by design, so it is exempt from the check.
+
+        ``MixtureOfExperts.__init__``'s gating allow-list forwards only
+        ``num_slots`` to ``SoftMoEGating``; ``top_k`` never reaches routing. This
+        test pins the exemption so a future reader does not "fix" it into a
+        rejection of configurations that construct and run correctly.
+        """
+        cfg = MoEConfig(
+            num_experts=4,
+            expert_config=self._small_expert(),
+            gating_config=GatingConfig(gating_type='softmoe', top_k=999, num_slots=2),
+        )
+        assert cfg.gating_config.top_k == 999
+        # And it really does build -- the field is inert, not merely tolerated.
+        MixtureOfExperts(config=cfg)
+
+    def test_valid_config_still_constructs(self):
+        """The new guard must not reject the configurations consumers ship."""
+        MoEConfig(
+            num_experts=8,
+            expert_config=self._small_expert(),
+            gating_config=GatingConfig(top_k=2),
+        )
+
+    # --- layer-level rejection (the retained gating.py guards) ------------
+    #
+    # These three are the F-3 mutation detectors. Deleting the `top_k > num_experts`
+    # upper bound at gating.py's LinearGating and CosineGating sites must turn all
+    # three RED; the config-level tests above cannot see that mutation at all.
+
+    @pytest.mark.parametrize("gating_type", ['linear', 'cosine'])
+    def test_mixture_of_experts_rejects_top_k_above_num_experts(self, gating_type):
+        """``MixtureOfExperts`` still rejects a bad ``top_k`` reaching it.
+
+        The config guard makes this unreachable through normal construction, so the
+        config is mutated after the fact -- exercising the ``gating.py`` guards that
+        are deliberately retained as defence in depth.
+        """
+        config = MoEConfig(
+            num_experts=4,
+            expert_config=self._small_expert(),
+            gating_config=GatingConfig(
+                gating_type=gating_type, top_k=2, embedding_dim=8
+            ),
+        )
+        config.gating_config.top_k = 8  # post-construction mutation
+        with pytest.raises(ValueError, match="top_k must be between 1 and 4"):
+            MixtureOfExperts(config=config)
+
+    def test_cosine_gating_rejects_top_k_above_num_experts(self):
+        """``CosineGating``'s own guard -- measured to have ZERO coverage before."""
+        with pytest.raises(ValueError, match="top_k must be between 1 and 4"):
+            CosineGating(num_experts=4, top_k=8, embedding_dim=8)
 
 
 # Run tests with: pytest test_mixture_of_experts.py -v
