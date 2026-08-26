@@ -16,7 +16,11 @@ from keras import ops
 from typing import Dict, Any, List, Tuple
 
 from dl_techniques.layers.mixtures.gmm import GMMLayer
-from .cluster_axis_oracle import build_cluster_axis_oracle, flat_twin_forward
+from .cluster_axis_oracle import (
+    build_cluster_axis_oracle,
+    flat_twin_forward,
+    leading_dims as _leading_dims,
+)
 
 
 # --------------------------------------------------------------------- fixtures
@@ -1335,7 +1339,7 @@ class TestGMMClusterAxisLayout:
         declared = list(shape)
         declared[-1] = width
         np.testing.assert_array_equal(
-            np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer))),
+            np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer, _leading_dims(layer, shape)))),
             buffer.reshape(declared),
             err_msg=(
                 "the fast-path permutation is NOT the identity -- backward "
@@ -1352,7 +1356,7 @@ class TestGMMClusterAxisLayout:
         m_buffer = np.arange(
             m_rows * m_width, dtype="float32"
         ).reshape(m_rows, m_width)
-        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer)))
+        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer, _leading_dims(multi, shape))))
         assert not np.array_equal(m_got.reshape(-1), m_buffer.reshape(-1)), (
             "multi-axis _reshape_output returned the raw buffer order, i.e. it "
             "performed a bare reshape -- the transpose is missing"

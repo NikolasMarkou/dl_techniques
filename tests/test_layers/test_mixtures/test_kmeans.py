@@ -17,7 +17,11 @@ from keras import ops
 from typing import Dict, Any, List, Tuple, Union
 
 from dl_techniques.layers.mixtures.kmeans import KMeansLayer
-from .cluster_axis_oracle import build_cluster_axis_oracle, flat_twin_forward
+from .cluster_axis_oracle import (
+    build_cluster_axis_oracle,
+    flat_twin_forward,
+    leading_dims as _leading_dims,
+)
 
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
@@ -929,7 +933,7 @@ class TestKMeansClusterAxisLayout:
         declared[-1] = width
         bare_reshape = buffer.reshape(declared)
 
-        got = np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer)))
+        got = np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer, _leading_dims(layer, shape))))
         np.testing.assert_array_equal(
             got, bare_reshape,
             err_msg=(
@@ -947,7 +951,7 @@ class TestKMeansClusterAxisLayout:
         m_width = k if output_mode == "assignments" else multi.feature_dims
         m_rows = shape[0] * shape[3]
         m_buffer = np.arange(m_rows * m_width, dtype="float32").reshape(m_rows, m_width)
-        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer)))
+        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer, _leading_dims(multi, shape))))
         assert not np.array_equal(
             m_got.reshape(-1), m_buffer.reshape(-1)
         ), (

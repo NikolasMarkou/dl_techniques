@@ -532,7 +532,7 @@ class KMeansLayer(BaseMixtureLayer):
         inputs = keras.ops.cast(inputs, self.variable_dtype)
 
         # Reshape input for clustering
-        reshaped_inputs = self._reshape_for_clustering(inputs)
+        reshaped_inputs, leading_dims = self._reshape_for_clustering(inputs)
 
         # Compute distances and assignments
         distances = self._compute_distances(reshaped_inputs)
@@ -565,7 +565,7 @@ class KMeansLayer(BaseMixtureLayer):
 
         # Reshape, then cast to compute_dtype so the layer emits the policy's compute
         # dtype (float16 under mixed precision; no-op under float32).
-        return keras.ops.cast(self._reshape_output(output), self.compute_dtype)
+        return keras.ops.cast(self._reshape_output(output, leading_dims), self.compute_dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.

@@ -35,7 +35,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-__all__ = ["build_cluster_axis_oracle", "flat_twin_forward"]
+__all__ = ["build_cluster_axis_oracle", "flat_twin_forward", "leading_dims"]
 
 
 def build_cluster_axis_oracle(
@@ -126,3 +126,21 @@ def flat_twin_forward(
         return np.asarray(ops.convert_to_numpy(twin(flat_in)))
 
     return _forward
+
+
+def leading_dims(layer: object, input_shape: Sequence[int]) -> np.ndarray:
+    """Return what ``_reshape_for_clustering`` hands to ``_reshape_output``.
+
+    Since plan-2026-08-26T061816-c515641a/D-004 the leading (non-feature) axis
+    lengths are MEASURED off the concrete tensor and passed forward, rather than
+    rebuilt from the build-time static ``original_shape``. Tests that invoke
+    ``_reshape_output`` directly must therefore supply them.
+
+    :param layer: A BUILT layer exposing ``non_feature_dims``.
+    :param input_shape: The concrete input shape the buffer was derived from.
+    :returns: 1-D ``int32`` array of non-feature axis lengths, in axis order.
+    :raises AttributeError: if ``layer`` was never built.
+    """
+    return np.array(
+        [input_shape[axis] for axis in layer.non_feature_dims], dtype="int32"
+    )

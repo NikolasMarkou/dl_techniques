@@ -152,28 +152,57 @@ class _ClusterAxisMixin:
         # For mixture mode, output shape matches input
         return tuple(input_shape)
 
-    def _reshape_for_clustering(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+    def _reshape_for_clustering(
+        self, inputs: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Reshape input tensor for clustering operations.
 
         :param inputs: Input tensor.
         :type inputs: keras.KerasTensor
-        :return: Reshaped tensor with shape ``(batch * non_feature_dims, feature_dims)``.
-        :rtype: keras.KerasTensor
+        :return: ``(flat, leading)`` -- ``flat`` has shape
+            ``(batch * non_feature_dims, feature_dims)``; ``leading`` is a 1-D
+            ``int32`` tensor holding the length of every non-feature axis, in the
+            post-transpose order, to be handed to ``_reshape_output``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Optimize for common case of single axis at end
         if len(self.cluster_axis) == 1 and self.cluster_axis[0] == self.input_rank - 1:
-            return keras.ops.reshape(inputs, [-1, self.feature_dims])
+            laid_out = inputs
+        else:
+            # General case requires transpose
+            laid_out = keras.ops.transpose(
+                inputs, self.non_feature_dims + self.cluster_axis
+            )
 
-        # General case requires transpose
-        perm = self.non_feature_dims + self.cluster_axis
-        transposed = keras.ops.transpose(inputs, perm)
-        return keras.ops.reshape(transposed, [-1, self.feature_dims])
+        # DECISION plan-2026-08-26T061816-c515641a/D-004: read the non-feature axis
+        # lengths off the CONCRETE tensor here, AFTER the transpose, and hand them to
+        # _reshape_output -- do NOT let that method rebuild them from
+        # self.original_shape. original_shape is captured at build() time, so for a
+        # layer built against keras.Input(shape=(None, C)) it holds a Python None,
+        # and a later concrete call raises ("Can't convert Python sequence with mixed
+        # types to Tensor" under model(x); "Failed to convert elements of
+        # [-1, None, K] to Tensor" under model.predict(x)). That is ordinary fit /
+        # predict usage for any variable-length sequence model. Both forward paths
+        # need this: the last-axis fast path skips the transpose on the way IN but
+        # its output side is reconstructed identically. See decisions.md D-004.
+        leading = keras.ops.stack(
+            [
+                keras.ops.cast(keras.ops.convert_to_tensor(dim), "int32")
+                for dim in keras.ops.shape(laid_out)[: len(self.non_feature_dims)]
+            ]
+        )
+        return keras.ops.reshape(laid_out, [-1, self.feature_dims]), leading
 
-    def _reshape_output(self, output: keras.KerasTensor) -> keras.KerasTensor:
+    def _reshape_output(
+        self, output: keras.KerasTensor, leading: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """Reshape clustering output to match desired output shape.
 
         :param output: Output tensor from clustering.
         :type output: keras.KerasTensor
+        :param leading: 1-D ``int32`` tensor of non-feature axis lengths, as
+            returned by ``_reshape_for_clustering`` for this same call.
+        :type leading: keras.KerasTensor
         :return: Reshaped output tensor.
         :rtype: keras.KerasTensor
         """
@@ -203,20 +232,22 @@ class _ClusterAxisMixin:
         # See decisions.md D-001.
         n_non_feature = len(self.non_feature_dims)
 
-        # Undo the [-1, W] collapse: recover the per-axis shape that
-        # _reshape_for_clustering transposed TO. -1 occupies the leading (batch) slot
-        # only, so the dynamic batch dimension is carried through.
-        leading_dims = [-1] + [
-            self.original_shape[axis] for axis in self.non_feature_dims[1:]
-        ]
+        def _target(static_tail: List[int]) -> keras.KerasTensor:
+            """Undo the ``[-1, W]`` collapse: the measured leading dims, then the tail.
+
+            ``leading`` already carries every non-feature length concretely (see
+            D-004 above), so no ``-1`` placeholder and no static lookup is needed.
+            """
+            return keras.ops.concatenate(
+                [leading, keras.ops.convert_to_tensor(static_tail, dtype="int32")],
+                axis=0,
+            )
 
         if self.output_mode == 'assignments':
             # Buffer is (non_feature_dims..., K); K sits at source index n_non_feature.
             # Target order places K where cluster_axis[0] sat in the original axis order,
             # i.e. after the `p` non-feature axes that precede it.
-            output = keras.ops.reshape(
-                output, leading_dims + [self._n_prototypes]
-            )
+            output = keras.ops.reshape(output, _target([self._n_prototypes]))
             p = sum(1 for axis in self.non_feature_dims if axis < self.cluster_axis[0])
             perm = (
                 list(range(p))
@@ -231,7 +262,7 @@ class _ClusterAxisMixin:
         forward_perm = self.non_feature_dims + self.cluster_axis
         output = keras.ops.reshape(
             output,
-            leading_dims + [self.original_shape[axis] for axis in self.cluster_axis],
+            _target([self.original_shape[axis] for axis in self.cluster_axis]),
         )
         inv_perm = sorted(range(len(forward_perm)), key=lambda j: forward_perm[j])
         return keras.ops.transpose(output, inv_perm)
