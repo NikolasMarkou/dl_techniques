@@ -11,6 +11,40 @@ from typing import Optional, Union, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 
+
+def _validate_positive_int(name: str, value: Any, minimum: int = 1) -> None:
+    """Reject anything that is not a true integer at or above ``minimum``.
+
+    ``bool`` is tested **first** and rejected, because ``isinstance(True, int)``
+    is ``True`` in Python: without this branch, ``top_k=True`` silently becomes
+    ``top_k=1`` and ``embedding_dim=True`` silently becomes a one-dimensional
+    expert embedding. YAML is the live path for this -- ``yaml.safe_load`` turns
+    an unquoted ``true`` into ``True``, and a config-driven caller never sees it.
+
+    :param name: Field name, used in the error message.
+    :type name: str
+    :param value: The value to validate.
+    :type value: Any
+    :param minimum: Smallest accepted value, inclusive.
+    :type minimum: int
+    :raises ValueError: If ``value`` is a ``bool``, is not an ``int``, or is
+        below ``minimum``.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{name} must be an int, got bool ({value!r}). Note that YAML's "
+            f"unquoted `true`/`false` load as Python bools; quote the value or "
+            f"write a number."
+        )
+    if not isinstance(value, int):
+        raise ValueError(
+            f"{name} must be an int, got {type(value).__name__} ({value!r})"
+        )
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+
+# ---------------------------------------------------------------------
+
 @dataclass
 class ExpertConfig:
     """
@@ -146,7 +180,32 @@ class GatingConfig:
     :type learnable_temperature: bool
     :param num_slots: Number of input slots per expert in SoftMoE.
     :type num_slots: int
-    :param aux_loss_weight: Weight for auxiliary load balancing loss.
+    :param aux_loss_weight: Weight for the auxiliary load-balancing loss.
+
+        **Its effective strength scales with** ``top_k``. The loss uses the
+        Switch Transformer formula, which is calibrated for ``top_k = 1``, and
+        it is deliberately not normalized (see the anchored decision in
+        :func:`~dl_techniques.layers.moe.gating.compute_auxiliary_loss`).
+        Perfectly balanced routing therefore does not reach zero but a floor of
+        exactly ``aux_loss_weight * top_k``. MEASURED 2026-08-26 at
+        ``aux_loss_weight=0.01``, exact uniform gate probabilities and
+        round-robin balanced dispatch over 4096 tokens:
+
+        .. code-block:: text
+
+            num_experts   top_k=1    top_k=2    top_k=4
+            -----------   --------   --------   --------
+                      4   0.010000   0.020000   0.040000
+                      8   0.010000   0.020000   0.040000
+                     16   0.010000   0.020000   0.040000
+                     64   0.010000   0.020000   0.040000
+
+        The floor is independent of ``num_experts`` and of the token count. The
+        worst case -- every token to the same ``k`` experts -- is
+        ``aux_loss_weight * num_experts`` regardless of ``top_k``, so the
+        regularizer's dynamic range is ``num_experts / top_k``. To hold the
+        regularization strength fixed across ``top_k``, divide your intended
+        weight by ``top_k`` yourself.
     :type aux_loss_weight: float
     :param z_loss_weight: Weight for router z-loss (entropy regularization).
     :type z_loss_weight: float
@@ -180,18 +239,19 @@ class GatingConfig:
 
         Mirrors ``ExpertConfig.__post_init__`` so both sub-configs fail loud at
         construction time rather than deep inside layer assembly.
+
+        Integer fields (``top_k``, ``num_slots``, ``embedding_dim``) go through
+        :func:`_validate_positive_int`, which rejects ``bool`` before it applies
+        the range test.
         """
         valid_types = ('linear', 'cosine', 'softmoe')
         if self.gating_type not in valid_types:
             raise ValueError(
                 f"gating_type must be one of {valid_types}, got '{self.gating_type}'"
             )
-        if self.top_k < 1:
-            raise ValueError(f"top_k must be >= 1, got {self.top_k}")
-        if self.num_slots < 1:
-            raise ValueError(f"num_slots must be >= 1, got {self.num_slots}")
-        if self.embedding_dim < 1:
-            raise ValueError(f"embedding_dim must be >= 1, got {self.embedding_dim}")
+        _validate_positive_int('top_k', self.top_k)
+        _validate_positive_int('num_slots', self.num_slots)
+        _validate_positive_int('embedding_dim', self.embedding_dim)
         if self.temperature <= 0:
             raise ValueError(f"temperature must be > 0, got {self.temperature}")
         if self.noise_std < 0:
@@ -276,7 +336,8 @@ class MoEConfig:
 
         Validated:
 
-        * ``num_experts >= 1``.
+        * ``num_experts >= 1``, and not a ``bool`` (see
+          :func:`_validate_positive_int`).
         * ``top_k <= num_experts``, for ``gating_type`` in ``('linear', 'cosine')``
           only — see the note below.
         * ``jitter_noise >= 0`` (rejected, not silently disabled, matching
@@ -293,8 +354,7 @@ class MoEConfig:
 
         :raises ValueError: If any of the above invariants is violated.
         """
-        if self.num_experts < 1:
-            raise ValueError(f"num_experts must be >= 1, got {self.num_experts}")
+        _validate_positive_int('num_experts', self.num_experts)
 
         # DECISION plan-2026-08-26T100331-f3744602/D-012
         # The `top_k <= num_experts` cross-check is deliberately SKIPPED for

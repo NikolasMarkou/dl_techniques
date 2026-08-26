@@ -779,11 +779,19 @@ class SoftMoEGating(BaseGating):
             'soft_slots': soft_slots,
             'expert_inputs': expert_inputs,
             'expert_weights': expert_weights,
-            'gate_logits': phi_logits,  # For z-loss computation
+            # Raw dispatch logits, exposed for inspection and to keep this
+            # gating type's aux-info contract shaped like the others'. NOT used
+            # for z-loss: `MixtureOfExperts.call` skips both the auxiliary loss
+            # and the z-loss entirely when `gating_type == 'softmoe'`, because
+            # SoftMoE dispatches every token to every expert and so has no load
+            # imbalance for those losses to regularize.
+            'gate_logits': phi_logits,
             # Per-token marginal probability over experts: softmax over the
             # expert axis (2), then average out the slot axis. Shape
             # [batch, seq_len, num_experts] to match the LinearGating /
-            # CosineGating aux-info contract consumed by compute_auxiliary_loss.
+            # CosineGating aux-info contract. Same caveat as `gate_logits`: the
+            # contract is matched, but compute_auxiliary_loss is not called for
+            # this gating type.
             'raw_gate_probs': ops.mean(ops.softmax(phi_logits, axis=2), axis=-1),
         }
 
@@ -828,6 +836,46 @@ def compute_auxiliary_loss(
     fraction of tokens dispatched to expert *i* and ``P_i`` is the average
     gate probability for expert *i*.
 
+    .. important::
+
+        **This loss scales with** ``top_k``, **and is deliberately not
+        normalized.** ``f_i`` is the fraction of tokens *dispatched to* expert
+        *i*, and at ``top_k = k`` every token is dispatched to ``k`` experts, so
+        ``sum_i f_i = k`` rather than ``1``. The formula is the Switch
+        Transformer's, which is calibrated for ``top_k = 1``.
+
+        The consequence is that ``aux_loss_weight`` does **not** mean the same
+        thing at different ``top_k``. Perfectly balanced routing does not drive
+        this loss to zero -- it drives it to a floor of exactly
+        ``aux_loss_weight * top_k``:
+
+        .. code-block:: text
+
+            MEASURED (this repo, 2026-08-26; exact uniform gate probs,
+            round-robin balanced dispatch, 4096 tokens):
+
+              aux_loss_weight = 0.01
+
+              num_experts   top_k=1    top_k=2    top_k=4
+              -----------   --------   --------   --------
+                        4   0.010000   0.020000   0.040000
+                        8   0.010000   0.020000   0.040000
+                       16   0.010000   0.020000   0.040000
+                       64   0.010000   0.020000   0.040000
+
+              floor = aux_loss_weight * top_k, exactly, and is INDEPENDENT of
+              num_experts and of the token count.
+
+              The worst case (every token routed to the same k experts) is
+              aux_loss_weight * num_experts -- 0.08 for all three columns at
+              num_experts=8. So the usable dynamic range, worst/floor, is
+              num_experts / top_k: raising top_k lifts the floor and shrinks the
+              headroom the regularizer actually has to work with.
+
+        A caller who wants a ``top_k``-invariant regularization strength should
+        divide their intended weight by ``top_k``. Nothing here does it for
+        them; see the anchored decision below.
+
     :param expert_weights: Expert selection weights ``[batch, ..., num_experts]``.
     :type expert_weights: keras.KerasTensor
     :param gate_probs: Raw gating probabilities ``[batch, ..., num_experts]``.
@@ -839,6 +887,18 @@ def compute_auxiliary_loss(
     :return: Auxiliary load balancing loss scalar.
     :rtype: keras.KerasTensor
     """
+    # DECISION plan-2026-08-26T100331-f3744602/D-017
+    # The `top_k` scaling documented above is DELIBERATE and measured, not an
+    # oversight. Do NOT "fix" it by dividing `tokens_per_expert` (or the final
+    # loss) by top_k to make the balanced floor top_k-invariant. Doing so
+    # rescales the load-balancing regularizer for every shipped consumer --
+    # models/language/qwen/qwen3.py (top_k=8) and qwen3_next.py (top_k=10) both
+    # train with it -- and there is no measurement showing the published
+    # Switch-Transformer calibration is wrong, only that it is a top-1 property
+    # being used at top_k > 1. The relationship is pinned by
+    # tests/test_layers/test_moe/test_gating.py::TestAuxiliaryLossTopKScaling.
+    # See decisions.md D-017.
+    #
     # NOTE: unlike ``compute_z_loss`` (D-009), this reduction needs NO float32
     # upcast, and one was deliberately not added. ``f_i`` is a mean of a 0/1 mask
     # and ``P_i`` a mean of softmax probabilities, so both lie in [0, 1] and

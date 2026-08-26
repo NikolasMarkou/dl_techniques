@@ -1637,6 +1637,61 @@ class TestFactoryAndShapeContract:
         assert layer.name == "moe_ffn"
 
 
+
+class TestIntegerFieldsRejectBool:
+    """B2 / F-13: `bool` is an `int` subclass, so every int field silently took it.
+
+    RED-proven at 1ac2908e7: `GatingConfig(top_k=True)` constructed with
+    `top_k=True` (arithmetic value 1), `GatingConfig(embedding_dim=True)` gave a
+    one-dimensional expert embedding, and `MoEConfig(num_experts=True)` gave a
+    one-expert MoE. YAML is the live path -- `yaml.safe_load("top_k: true")`
+    returns Python `True`.
+    """
+
+    @pytest.mark.parametrize("value", [True, False])
+    @pytest.mark.parametrize("field", ["top_k", "num_slots", "embedding_dim"])
+    def test_gating_config_int_fields_reject_bool(self, field, value):
+        with pytest.raises(ValueError, match=f"{field} must be an int, got bool"):
+            GatingConfig(**{field: value})
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_moe_config_num_experts_rejects_bool(self, value):
+        with pytest.raises(ValueError, match="num_experts must be an int, got bool"):
+            MoEConfig(num_experts=value)
+
+    def test_yaml_true_is_the_live_path(self):
+        """The value a config-driven caller actually gets from an unquoted `true`."""
+        yaml = pytest.importorskip("yaml")
+        loaded = yaml.safe_load("top_k: true")["top_k"]
+        assert loaded is True
+        with pytest.raises(ValueError, match="must be an int, got bool"):
+            GatingConfig(top_k=loaded)
+
+    @pytest.mark.parametrize("field", ["top_k", "num_slots", "embedding_dim"])
+    def test_non_int_types_are_rejected(self, field):
+        with pytest.raises(ValueError, match=f"{field} must be an int, got"):
+            GatingConfig(**{field: 2.5})
+
+    def test_real_ints_still_construct(self):
+        """The bool branch must not have swallowed the ordinary path."""
+        gating = GatingConfig(top_k=3, num_slots=5, embedding_dim=64)
+        assert (gating.top_k, gating.num_slots, gating.embedding_dim) == (3, 5, 64)
+        assert MoEConfig(num_experts=4).num_experts == 4
+
+    @pytest.mark.parametrize(
+        "field,message",
+        [
+            ("top_k", "top_k must be >= 1, got 0"),
+            ("num_slots", "num_slots must be >= 1, got 0"),
+            ("embedding_dim", "embedding_dim must be >= 1, got 0"),
+        ],
+    )
+    def test_range_messages_are_unchanged(self, field, message):
+        """The bool check is inserted ahead of the range check, not in place of it."""
+        with pytest.raises(ValueError, match=message):
+            GatingConfig(**{field: 0})
+
+
 # Run tests with: pytest test_mixture_of_experts.py -v
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

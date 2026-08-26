@@ -327,3 +327,104 @@ class TestAuxiliaryLossMixedPrecision:
         assert measured == pytest.approx(reference, rel=1e-2)
         # The structural bound: aux <= aux_loss_weight * num_experts (plus fp16 rounding).
         assert measured <= 0.01 * num_experts * 1.001
+
+
+# ---------------------------------------------------------------------
+
+
+class TestAuxiliaryLossTopKScaling:
+    """D3 / F-5: pin the documented ``top_k`` interaction so the docstring cannot rot.
+
+    `compute_auxiliary_loss` uses the Switch Transformer formula, calibrated for
+    ``top_k = 1``, and is DELIBERATELY not normalized (decisions.md D-017,
+    anchored in `gating.py`). These tests exist so that a later "cleanup" that
+    divides the loss by ``top_k`` fails loudly instead of silently rescaling the
+    load-balancing regularizer for Qwen3 and Qwen3-Next.
+    """
+
+    AUX_WEIGHT = 0.01
+    NUM_TOKENS = 4096
+
+    @staticmethod
+    def _balanced(num_experts, top_k, num_tokens):
+        """Exactly balanced round-robin dispatch with exactly uniform gate probs."""
+        probs = np.full((num_tokens, num_experts), 1.0 / num_experts, dtype="float32")
+        weights = np.zeros((num_tokens, num_experts), dtype="float32")
+        for t in range(num_tokens):
+            for j in range(top_k):
+                weights[t, (t * top_k + j) % num_experts] = 1.0 / top_k
+        return weights, probs
+
+    @pytest.mark.parametrize("num_experts", [4, 8, 16, 64])
+    @pytest.mark.parametrize("top_k", [1, 2, 4])
+    def test_balanced_floor_is_weight_times_top_k(self, num_experts, top_k):
+        """The floor is ``aux_loss_weight * top_k``, independent of ``num_experts``."""
+        weights, probs = self._balanced(num_experts, top_k, self.NUM_TOKENS)
+        measured = float(
+            compute_auxiliary_loss(
+                keras.ops.convert_to_tensor(weights),
+                keras.ops.convert_to_tensor(probs),
+                num_experts,
+                self.AUX_WEIGHT,
+            )
+        )
+        assert measured == pytest.approx(self.AUX_WEIGHT * top_k, rel=1e-5)
+
+    def test_the_floor_actually_moves_with_top_k(self):
+        """Guard against a vacuous parametrization: k=1, 2, 4 must give 3 values.
+
+        A normalized implementation would make every row of the table above equal,
+        and each individual `approx` above would then be checking one number
+        against itself. This asserts the spread the documentation claims.
+        """
+        floors = []
+        for top_k in (1, 2, 4):
+            weights, probs = self._balanced(8, top_k, self.NUM_TOKENS)
+            floors.append(
+                float(
+                    compute_auxiliary_loss(
+                        keras.ops.convert_to_tensor(weights),
+                        keras.ops.convert_to_tensor(probs),
+                        8,
+                        self.AUX_WEIGHT,
+                    )
+                )
+            )
+        assert floors[1] == pytest.approx(2 * floors[0], rel=1e-5)
+        assert floors[2] == pytest.approx(4 * floors[0], rel=1e-5)
+        assert len(set(round(f, 6) for f in floors)) == 3
+
+    @pytest.mark.parametrize("top_k", [1, 2, 4])
+    def test_worst_case_is_weight_times_num_experts_regardless_of_top_k(self, top_k):
+        """The ceiling does NOT move with ``top_k`` -- which is why the range shrinks."""
+        num_experts = 8
+        probs = np.zeros((self.NUM_TOKENS, num_experts), dtype="float32")
+        probs[:, :top_k] = 1.0 / top_k
+        weights = np.zeros((self.NUM_TOKENS, num_experts), dtype="float32")
+        weights[:, :top_k] = 1.0 / top_k
+        measured = float(
+            compute_auxiliary_loss(
+                keras.ops.convert_to_tensor(weights),
+                keras.ops.convert_to_tensor(probs),
+                num_experts,
+                self.AUX_WEIGHT,
+            )
+        )
+        assert measured == pytest.approx(self.AUX_WEIGHT * num_experts, rel=1e-5)
+
+    def test_floor_is_reached_by_a_real_gating_layer(self):
+        """The table is not an artefact of hand-built tensors."""
+        keras.utils.set_random_seed(0)
+        inputs = keras.ops.convert_to_tensor(
+            np.random.randn(4, 512, 32).astype("float32")
+        )
+        for top_k in (1, 2, 4):
+            gate = LinearGating(num_experts=8, top_k=top_k, add_noise=False)
+            expert_weights, _, info = gate(inputs, training=False)
+            measured = float(
+                compute_auxiliary_loss(
+                    expert_weights, info["raw_gate_probs"], 8, self.AUX_WEIGHT
+                )
+            )
+            assert measured >= self.AUX_WEIGHT * top_k * (1 - 1e-5)
+            assert measured <= self.AUX_WEIGHT * 8 * (1 + 1e-5)
