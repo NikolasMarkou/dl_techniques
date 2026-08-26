@@ -15,8 +15,15 @@ Two classes are provided:
     concrete layer (or ``BaseMixtureLayer``) is responsible for setting.
 
 2.  ``BaseMixtureLayer`` -- the abstract Keras ``Layer`` seat that composes the
-    mixin with ``keras.layers.Layer``, declares ``call`` abstract, and initializes
-    the four build-derived placeholders the mixin reads.
+    mixin with ``keras.layers.Layer``, declares ``call`` abstract, initializes
+    the four build-derived placeholders the mixin reads, and provides
+    ``_init_cluster_axis`` for the shared constructor-side axis intake.
+
+Two module-level helpers hold the prototype-initializer handling that the two
+concrete layers also carried verbatim: :func:`resolve_initializer_arg`
+(``__init__``-time, preserves the ``'orthonormal'`` string) and
+:func:`resolve_prototype_initializer` (``build()``-time, resolves it to a
+concrete initializer with a documented fallback).
 
 Note on the pre-build / post-build cluster-axis split (load-bearing):
 
@@ -36,7 +43,102 @@ no ``cluster_axis`` concept and is left untouched.
 import keras
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Optional, List, Any, Tuple
+from typing import Optional, List, Any, Tuple, Union
+
+from ...utils.logger import logger
+from ...initializers.orthonormal_initializer import OrthonormalInitializer
+
+# ---------------------------------------------------------------------
+
+
+def resolve_initializer_arg(
+    value: Union[str, keras.initializers.Initializer]
+) -> Union[str, keras.initializers.Initializer]:
+    """Resolve a prototype-initializer constructor argument, preserving ``'orthonormal'``.
+
+    Shared by ``GMMLayer.__init__`` (``mean_initializer``) and
+    ``KMeansLayer.__init__`` (``centroid_initializer``). The return value is what
+    ``get_config()`` serializes and what :func:`resolve_prototype_initializer`
+    consumes at ``build()``, so the string passthrough must survive both.
+
+    :param value: An initializer alias string or an ``Initializer`` instance.
+    :type value: Union[str, keras.initializers.Initializer]
+    :return: ``value`` unchanged when it is the string ``'orthonormal'`` (any
+        case); otherwise ``keras.initializers.get(value)``.
+    :rtype: Union[str, keras.initializers.Initializer]
+    :raises ValueError: Propagated from ``keras.initializers.get`` for an
+        unknown alias.
+    """
+    # DECISION plan_2026-06-08_57a975d1/D-002: do NOT replace this with a bare
+    # keras.initializers.get(value). 'orthonormal' is not a registered keras alias
+    # (OrthonormalInitializer registers as Custom>OrthonormalInitializer), so
+    # get('orthonormal') raises. Keep the string and let build() resolve it via
+    # resolve_prototype_initializer (which handles both the string and an
+    # Initializer instance). See D-001. Single copy of an invariant previously
+    # duplicated verbatim in gmm.py and kmeans.py.
+    if isinstance(value, str) and value.lower() == 'orthonormal':
+        return value
+    return keras.initializers.get(value)
+
+
+def resolve_prototype_initializer(
+    value: Union[str, keras.initializers.Initializer],
+    count: int,
+    count_name: str,
+    feature_dims: int,
+    seed: Optional[int],
+) -> keras.initializers.Initializer:
+    """Turn a stored prototype-initializer argument into a concrete initializer.
+
+    Shared by ``GMMLayer._initialize_means`` and
+    ``KMeansLayer._initialize_centroids``. Non-orthonormal values pass straight
+    through; an orthonormal request is honoured only when the prototype matrix
+    is not wider than it is tall, since ``OrthonormalInitializer`` cannot produce
+    ``count`` mutually orthonormal rows in ``feature_dims`` dimensions.
+
+    :param value: The stored initializer, as produced by
+        :func:`resolve_initializer_arg`.
+    :type value: Union[str, keras.initializers.Initializer]
+    :param count: Number of prototype rows (``n_components`` / ``n_clusters``).
+    :type count: int
+    :param count_name: The caller's public name for ``count``; used verbatim in
+        the fallback warning so each layer reports its own vocabulary.
+    :type count_name: str
+    :param feature_dims: Width of the prototype matrix.
+    :type feature_dims: int
+    :param seed: Random seed forwarded to the constructed initializer.
+    :type seed: Optional[int]
+    :return: ``OrthonormalInitializer(seed=seed)`` when orthonormal is requested
+        and fits; ``keras.initializers.GlorotNormal(seed=seed)`` (with a logged
+        warning) when it is requested but does not fit; otherwise ``value``
+        unchanged.
+    :rtype: keras.initializers.Initializer
+    """
+    # DECISION plan-2026-08-26T061816-c515641a/D-013: detect orthonormal with
+    # isinstance, not the `__class__.__name__ == 'OrthonormalInitializer'` string
+    # sniff the two pre-extraction duplicates used. MEASURED to agree with the sniff
+    # on the string alias, an OrthonormalInitializer instance, GlorotNormal and
+    # HeOrthonormalInitializer (which derives from keras.initializers.Initializer,
+    # NOT from OrthonormalInitializer). It differs on a SUBCLASS, which the sniff
+    # rejected and isinstance accepts -- an intentional widening with no instance in
+    # the repo today. Do NOT restore the sniff: it silently gives a subclass the
+    # non-orthonormal path, skipping the count <= feature_dims feasibility check that
+    # is the only thing standing between an over-wide request and a failed init.
+    is_orthonormal = (
+        isinstance(value, OrthonormalInitializer)
+        or (isinstance(value, str) and value.lower() == 'orthonormal')
+    )
+    if not is_orthonormal:
+        return value
+
+    if count <= feature_dims:
+        return OrthonormalInitializer(seed=seed)
+
+    logger.warning(
+        f"{count_name} ({count}) > feature_dims ({feature_dims}), "
+        "falling back to glorot_normal initializer"
+    )
+    return keras.initializers.GlorotNormal(seed=seed)
 
 # ---------------------------------------------------------------------
 
@@ -309,10 +411,11 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
     layers are registered; registering an ABC would put an unconstructible entry
     in the Keras custom-object registry. Concrete subclasses carry the decorator.
 
-    Subclasses are responsible for setting ``output_mode``, ``cluster_axis`` and
-    ``_cluster_axis_arg`` in their own ``__init__`` (their constructor signatures
-    and ``get_config()`` keys differ), and for calling ``_setup_cluster_axes()``
-    from ``build()``.
+    Subclasses are responsible for setting ``output_mode`` in their own
+    ``__init__`` (their constructor signatures and ``get_config()`` keys differ),
+    for calling ``_init_cluster_axis()`` there to set ``cluster_axis`` /
+    ``_cluster_axis_arg``, and for calling ``_setup_cluster_axes()`` from
+    ``build()``.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -323,6 +426,35 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
         self.feature_dims: Optional[int] = None
         self.non_feature_dims: Optional[List[int]] = None
         self.original_shape: Optional[List[int]] = None
+
+    def _init_cluster_axis(self, cluster_axis: Any) -> None:
+        """Store the constructor's ``cluster_axis`` in both of its required forms.
+
+        Called from each concrete layer's ``__init__``. Sets the two attributes
+        the mixin reads: ``self.cluster_axis`` (a fresh mutable list, rewritten
+        in place to positive-and-sorted form by ``_setup_cluster_axes()`` at
+        ``build()``) and ``self._cluster_axis_arg`` (an independent copy of the
+        ORIGINAL value, never mutated).
+
+        :param cluster_axis: A single axis index, or an iterable of them.
+            Negative values are preserved as passed.
+        :type cluster_axis: Union[int, List[int]]
+        :return: ``None``. The two attributes above are set as a side effect.
+        :rtype: None
+        """
+        self.cluster_axis = (
+            [cluster_axis] if isinstance(cluster_axis, int) else list(cluster_axis)
+        )
+        # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the ORIGINAL (pre-build)
+        # cluster_axis, not the build()-mutated positive form. build() rewrites negative
+        # axes to positive against input_rank (_setup_cluster_axes), so serializing
+        # self.cluster_axis would bake in a rank-specific value -> cross-rank reload picks
+        # the wrong logical axis. Stash the constructor value here and emit it in
+        # get_config. The list() copy is load-bearing: the two attributes must not alias,
+        # or _setup_cluster_axes' in-place sort would mutate the serialized source. Single
+        # copy of an invariant previously duplicated verbatim in gmm.py and kmeans.py; the
+        # matching D-005 anchors on the get_config() side are a DIFFERENT site and stay.
+        self._cluster_axis_arg = list(self.cluster_axis)
 
     # DECISION plan-2026-07-20T141712-e03557c8/D-007: this property is a pure NAMING seam and
     # nothing more. GMMLayer calls its prototype count `n_components`, KMeansLayer calls

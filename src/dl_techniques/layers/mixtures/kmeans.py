@@ -82,10 +82,12 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, F
 # local imports
 # ---------------------------------------------------------------------
 
-from ...utils.logger import logger
 from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
-from ...initializers.orthonormal_initializer import OrthonormalInitializer
-from .base import BaseMixtureLayer
+from .base import (
+    BaseMixtureLayer,
+    resolve_initializer_arg,
+    resolve_prototype_initializer,
+)
 
 # ---------------------------------------------------------------------
 
@@ -229,22 +231,8 @@ class KMeansLayer(BaseMixtureLayer):
         self.repulsion_strength = repulsion_strength
         self.min_distance = min_distance
         self.output_mode = output_mode
-        self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else list(cluster_axis)
-        # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the ORIGINAL (pre-build)
-        # cluster_axis, not the build()-mutated positive form. build() rewrites negative
-        # axes to positive against input_rank (_setup_cluster_axes), so serializing
-        # self.cluster_axis would bake in a rank-specific value -> cross-rank reload picks
-        # the wrong logical axis. Stash the constructor value here and emit it in get_config.
-        self._cluster_axis_arg = list(self.cluster_axis)
-        # DECISION plan_2026-06-08_57a975d1/D-002: do NOT replace this with a bare
-        # keras.initializers.get(centroid_initializer). 'orthonormal' is not a registered
-        # keras alias (OrthonormalInitializer registers as Custom>OrthonormalInitializer),
-        # so get('orthonormal') raises. Keep the string and let build() resolve it
-        # (build handles both the string and an Initializer instance). See D-001.
-        if isinstance(centroid_initializer, str) and centroid_initializer.lower() == 'orthonormal':
-            self.centroid_initializer = centroid_initializer
-        else:
-            self.centroid_initializer = keras.initializers.get(centroid_initializer)
+        self._init_cluster_axis(cluster_axis)
+        self.centroid_initializer = resolve_initializer_arg(centroid_initializer)
         self.centroid_regularizer = keras.regularizers.get(centroid_regularizer)
         self.random_seed = random_seed
 
@@ -362,27 +350,13 @@ class KMeansLayer(BaseMixtureLayer):
 
     def _initialize_centroids(self) -> None:
         """Initialize centroid variables with appropriate initializer."""
-        # Handle orthonormal initialization specially
-        initializer_name = getattr(
+        initializer = resolve_prototype_initializer(
             self.centroid_initializer,
-            '__class__',
-            type(self.centroid_initializer)
-        ).__name__
-
-        if (initializer_name == 'OrthonormalInitializer' or
-            (isinstance(self.centroid_initializer, str) and
-             self.centroid_initializer.lower() == 'orthonormal')):
-
-            if self.n_clusters <= self.feature_dims:
-                initializer = OrthonormalInitializer(seed=self.random_seed)
-            else:
-                logger.warning(
-                    f"n_clusters ({self.n_clusters}) > feature_dims ({self.feature_dims}), "
-                    "falling back to glorot_normal initializer"
-                )
-                initializer = keras.initializers.GlorotNormal(seed=self.random_seed)
-        else:
-            initializer = self.centroid_initializer
+            count=self.n_clusters,
+            count_name='n_clusters',
+            feature_dims=self.feature_dims,
+            seed=self.random_seed,
+        )
 
         # Create centroids weight.
         # Mixed-precision: autocast=False keeps the centroids in variable_dtype (float32)
