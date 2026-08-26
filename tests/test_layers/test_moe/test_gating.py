@@ -15,7 +15,15 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.moe.gating import LinearGating, CosineGating, SoftMoEGating
+from dl_techniques.layers.moe.gating import (
+    LinearGating,
+    CosineGating,
+    SoftMoEGating,
+    compute_auxiliary_loss,
+    compute_z_loss,
+    _mask_neg_inf,
+    _min_temperature,
+)
 from dl_techniques.layers.moe.experts import FFNExpert
 
 B, D = 4, 16
@@ -128,3 +136,194 @@ class TestFFNExpert:
             keras.ops.convert_to_numpy(y0), keras.ops.convert_to_numpy(y1),
             rtol=1e-5, atol=1e-5,
         )
+
+
+# ---------------------------------------------------------------------
+# Mixed-precision numerics (plan-2026-08-26T100331-f3744602, step 2 / SC-5)
+#
+# Both classes below were RED against the pre-fix code, MEASURED in a scratch
+# worktree at 62adc45d0 under an actual `mixed_float16` policy:
+#   * compute_z_loss(logits in [-426.75, 435.0]) -> `inf` (float32 ref 70.707)
+#   * CosineGating with temperature_param = 1e-6 -> gate_logits min/max
+#     `-inf inf`, 63/80 non-finite logits, 80/80 non-finite expert_weights
+# They use `mixed_float16_policy` (tests/test_layers/conftest.py) rather than the
+# parametrized `dtype_policy`: an fp16 overflow is unobservable at float32, so
+# the other two policies would only add tests that cannot fail.
+# ---------------------------------------------------------------------
+
+
+class TestZLossMixedPrecision:
+    """`compute_z_loss` must not overflow to inf under `mixed_float16` (D-009)."""
+
+    # The exact logit range measured to overflow at HEAD.
+    LOGIT_LO, LOGIT_HI = -426.75, 435.0
+
+    def _logits_f32(self):
+        return np.linspace(
+            self.LOGIT_LO, self.LOGIT_HI, 64 * 4, dtype=np.float32
+        ).reshape(1, 4, 64)
+
+    def test_large_logits_stay_finite_and_match_float32(self, mixed_float16_policy):
+        logits_np = self._logits_f32()
+        reference = float(
+            compute_z_loss(keras.ops.convert_to_tensor(logits_np), z_loss_weight=1e-3)
+        )
+        assert np.isfinite(reference), "float32 reference must be finite"
+
+        half = keras.ops.cast(keras.ops.convert_to_tensor(logits_np), "float16")
+        assert "float16" in str(half.dtype)
+        measured = float(compute_z_loss(half, z_loss_weight=1e-3))
+
+        assert np.isfinite(measured), (
+            f"z_loss overflowed in fp16: {measured} (float32 reference {reference})"
+        )
+        assert abs(measured - reference) <= 0.01 * abs(reference), (
+            f"z_loss {measured} differs from the float32 reference {reference} by more than 1%"
+        )
+
+    def test_returns_float32_regardless_of_input_dtype(self, mixed_float16_policy):
+        half = keras.ops.cast(
+            keras.ops.convert_to_tensor(self._logits_f32()), "float16"
+        )
+        assert "float32" in str(compute_z_loss(half).dtype)
+
+    def test_reaches_add_loss_finite_through_the_gating_layer(self, mixed_float16_policy):
+        """The production path: LinearGating -> gate_logits -> compute_z_loss."""
+        layer = LinearGating(num_experts=64, top_k=4, add_noise=False)
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(0).standard_normal((2, 8, 32)).astype("float32") * 90.0
+        )
+        _, _, aux = layer(x, training=True)
+        assert "float16" in str(aux["gate_logits"].dtype), (
+            "guard is vacuous unless the gate emits fp16 under mixed_float16"
+        )
+        z_loss = compute_z_loss(aux["gate_logits"], z_loss_weight=1e-3)
+        assert np.isfinite(float(z_loss))
+        # RED pre-fix: the value handed to `add_loss` was fp16, i.e. one logit
+        # excursion away from `inf`. Finiteness alone is not the invariant.
+        assert "float32" in str(z_loss.dtype)
+
+
+class TestCosineGatingTemperatureFloor:
+    """`CosineGating`'s temperature floor must be dtype-aware (D-008)."""
+
+    def _layer_and_data(self):
+        layer = CosineGating(
+            num_experts=8, top_k=2, embedding_dim=16, learnable_temperature=True
+        )
+        data = keras.ops.convert_to_tensor(
+            np.random.default_rng(2).standard_normal((2, 5, 32)).astype("float32")
+        )
+        return layer, data
+
+    def test_min_temperature_is_dtype_dependent(self):
+        assert _min_temperature("float16") == pytest.approx(1e-3)
+        assert _min_temperature("bfloat16") == pytest.approx(1e-3)
+        assert _min_temperature("float32") == pytest.approx(keras.backend.epsilon())
+        # The invariant the floor exists to deliver: bounded logits stay an order
+        # of magnitude inside the top-k mask sentinel.
+        for dtype in ("float16", "bfloat16", "float32"):
+            assert 1.0 / _min_temperature(dtype) <= abs(_mask_neg_inf(dtype)) / 10.0
+
+    def test_tiny_temperature_yields_no_non_finite_values(self, mixed_float16_policy):
+        layer, data = self._layer_and_data()
+        layer(data)  # build
+        layer.temperature_param.assign(1e-6)  # bypasses the constraint on purpose
+
+        weights, _, aux = layer(data, training=False)
+        logits = np.asarray(
+            keras.ops.convert_to_numpy(aux["gate_logits"])
+        ).astype("float32")
+        weights = np.asarray(keras.ops.convert_to_numpy(weights)).astype("float32")
+
+        assert int((~np.isfinite(logits)).sum()) == 0, (
+            f"{int((~np.isfinite(logits)).sum())}/{logits.size} non-finite gate_logits"
+        )
+        assert int((~np.isfinite(weights)).sum()) == 0, (
+            f"{int((~np.isfinite(weights)).sum())}/{weights.size} non-finite expert_weights"
+        )
+
+    def test_temperature_param_carries_a_min_value_constraint(self, mixed_float16_policy):
+        layer, data = self._layer_and_data()
+        layer(data)
+        constraint = layer.temperature_param.constraint
+        assert constraint is not None, "temperature_param has no constraint"
+        assert float(constraint.min_value) == pytest.approx(
+            _min_temperature(layer.compute_dtype)
+        )
+        clamped = float(
+            keras.ops.convert_to_numpy(
+                constraint(keras.ops.convert_to_tensor(-5.0, dtype="float32"))
+            )
+        )
+        assert clamped >= _min_temperature(layer.compute_dtype)
+
+    def test_optimizer_cannot_drive_temperature_below_the_floor(self):
+        """An SGD step, not Adam — Adam rescales and can hide the raw update."""
+        layer, data = self._layer_and_data()
+        layer(data)
+        floor = _min_temperature(layer.compute_dtype)
+        layer.temperature_param.assign(floor * 2.0)
+
+        var = layer.temperature_param
+        optimizer = keras.optimizers.SGD(learning_rate=1.0)
+        optimizer.build([var])
+        # A large positive gradient pushes the temperature far negative.
+        optimizer.apply_gradients([(keras.ops.convert_to_tensor(1e3), var)])
+        assert float(var) >= floor, (
+            f"temperature fell to {float(var)}, below the {floor} floor"
+        )
+
+    def test_constraint_survives_config_and_keras_round_trip(self, tmp_path):
+        layer, data = self._layer_and_data()
+        rebuilt = CosineGating.from_config(layer.get_config())
+        rebuilt(data)
+        assert rebuilt.temperature_param.constraint is not None
+        assert float(rebuilt.temperature_param.constraint.min_value) == pytest.approx(
+            _min_temperature(rebuilt.compute_dtype)
+        )
+
+        inputs = keras.Input(shape=(32,))
+        weights, _, _ = CosineGating(
+            num_experts=8, top_k=2, embedding_dim=16, learnable_temperature=True
+        )(inputs)
+        model = keras.Model(inputs, weights)
+        path = os.path.join(tmp_path, "cosine_gating.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        reloaded_layer = [
+            sub for sub in loaded.layers if isinstance(sub, CosineGating)
+        ][0]
+        assert reloaded_layer.temperature_param.constraint is not None, (
+            "the min-value constraint did not survive .keras save/load"
+        )
+        assert float(
+            reloaded_layer.temperature_param.constraint.min_value
+        ) == pytest.approx(_min_temperature(reloaded_layer.compute_dtype))
+
+
+class TestAuxiliaryLossMixedPrecision:
+    """2c audit outcome: `compute_auxiliary_loss` does NOT share D-009's defect.
+
+    Kept as a REGRESSION pin on the bound that made the float32 upcast
+    unnecessary — ``sum_i(f_i * P_i) <= 1`` so the loss is bounded by
+    ``num_experts`` — not as a bug guard.
+    """
+
+    @pytest.mark.parametrize("num_experts,num_tokens", [(64, 8), (512, 4096), (4096, 64)])
+    def test_stays_finite_in_fp16_at_worst_case_imbalance(
+        self, mixed_float16_policy, num_experts, num_tokens
+    ):
+        # Fully imbalanced routing: every token to expert 0 with probability 1.
+        weights = np.zeros((1, num_tokens, num_experts), dtype=np.float32)
+        weights[..., 0] = 1.0
+        half = keras.ops.cast(keras.ops.convert_to_tensor(weights), "float16")
+        full = keras.ops.convert_to_tensor(weights)
+
+        measured = float(compute_auxiliary_loss(half, half, num_experts, 0.01))
+        reference = float(compute_auxiliary_loss(full, full, num_experts, 0.01))
+        assert np.isfinite(measured)
+        assert measured == pytest.approx(reference, rel=1e-2)
+        # The structural bound: aux <= aux_loss_weight * num_experts (plus fp16 rounding).
+        assert measured <= 0.01 * num_experts * 1.001

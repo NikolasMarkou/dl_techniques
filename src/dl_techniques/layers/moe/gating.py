@@ -16,6 +16,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 # ---------------------------------------------------------------------
 
 from ..norms import create_normalization_layer
+from ...constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
 
@@ -25,6 +26,38 @@ def _mask_neg_inf(dtype: Any) -> float:
     if 'float16' in dtype_str or 'bfloat16' in dtype_str:
         return -1e4
     return -1e9
+
+# ---------------------------------------------------------------------
+
+def _min_temperature(dtype: Any) -> float:
+    """Return the smallest softmax temperature that is safe in ``dtype``.
+
+    # DECISION plan-2026-08-26T100331-f3744602/D-008
+    The floor is derived from ``dtype``, NOT from ``keras.backend.epsilon()``.
+    Do not "simplify" this back to a single float32-scale constant. Cosine
+    similarities are bounded in ``[-1, 1]``, so dividing by ``t`` yields logits
+    bounded by ``1 / t``. Two dtype-dependent ceilings must be respected:
+
+    * the finite range of the dtype (float16 tops out at ``65504``), and
+    * the softmax mask sentinel ``_mask_neg_inf(dtype)`` (``-1e4`` for float16,
+      ``-1e9`` for float32), which must stay an order of magnitude BELOW every
+      real logit or top-k masking silently stops masking.
+
+    The floor is therefore chosen so that ``1 / t <= |_mask_neg_inf(dtype)| / 10``,
+    i.e. ``1e-3`` for float16/bfloat16 and ``1e-8`` for float32 -- with the
+    float32 branch further tightened to ``keras.backend.epsilon()`` (``1e-7``),
+    which is stricter, so float32 behaviour is unchanged. MEASURED at HEAD under
+    ``mixed_float16``: ``temperature_param = 1e-6`` -- a no-op for the old
+    ``epsilon()`` floor -- produced ``gate_logits min/max: -inf inf`` and 80/80
+    NaN ``expert_weights``. See decisions.md D-008.
+
+    :param dtype: Dtype the gate logits will be computed in.
+    :type dtype: Any
+    :return: Minimum safe temperature for that dtype.
+    :rtype: float
+    """
+    sentinel_headroom = 10.0 / abs(_mask_neg_inf(dtype))
+    return max(sentinel_headroom, keras.backend.epsilon())
 
 # ---------------------------------------------------------------------
 
@@ -445,10 +478,23 @@ class CosineGating(BaseGating):
         )
 
         if self.learnable_temperature:
+            # DECISION plan-2026-08-26T100331-f3744602/D-008
+            # The constraint is the real lower bound; the ``ops.maximum`` in
+            # ``call`` is only the second line of defence. Do not drop it in
+            # favour of the in-call clamp alone: nothing else stops an optimizer
+            # from parking the variable at (or below) zero, where the gradient
+            # of ``1 / t`` explodes and every subsequent step is computed from a
+            # temperature the forward pass never actually used. The constraint is
+            # re-created from ``self.compute_dtype`` on every ``build()``, so it
+            # survives ``get_config``/``from_config`` and ``.keras`` reload
+            # without being serialized itself. See decisions.md D-008.
             self.temperature_param = self.add_weight(
                 name='temperature',
                 shape=(),
                 initializer=initializers.Constant(value=self.temperature),
+                constraint=ValueRangeConstraint(
+                    min_value=_min_temperature(self.compute_dtype)
+                ),
                 trainable=True
             )
 
@@ -488,12 +534,18 @@ class CosineGating(BaseGating):
         cosine_similarities = ops.matmul(projected_inputs_norm, expert_embeddings_norm)
 
         # Apply temperature (standard softmax-temperature semantics: divide).
-        # Larger ``temperature`` -> flatter distribution. Floor the divisor at a
-        # small positive epsilon so a learnable temperature that drifts to zero
-        # (or a zero/negative user value) cannot produce inf/NaN logits or
-        # silently invert routing. No-op for any temperature >= epsilon.
+        # Larger ``temperature`` -> flatter distribution. The divisor is floored
+        # at ``_min_temperature(dtype)``, a bound derived from the dtype the
+        # logits are actually computed in -- 1e-3 under float16/bfloat16, 1e-7
+        # under float32. Because cosine similarities are bounded in [-1, 1], the
+        # floor bounds |gate_logits| by 1 / floor, which keeps them finite AND an
+        # order of magnitude inside the top-k mask sentinel `_mask_neg_inf`.
+        # A float32-scale epsilon does NOT deliver this under mixed precision:
+        # 1e-7 admits logits of ~1e7, past float16's max of 65504 (MEASURED:
+        # -inf/inf logits, NaN weights). No-op for any temperature above the floor.
         temperature_value = self.temperature_param if self.learnable_temperature else self.temperature
-        temperature_value = ops.maximum(temperature_value, keras.backend.epsilon())
+        temperature_value = ops.maximum(
+            temperature_value, _min_temperature(cosine_similarities.dtype))
         gate_logits = cosine_similarities / temperature_value
 
         # Top-k selection
@@ -787,6 +839,14 @@ def compute_auxiliary_loss(
     :return: Auxiliary load balancing loss scalar.
     :rtype: keras.KerasTensor
     """
+    # NOTE: unlike ``compute_z_loss`` (D-009), this reduction needs NO float32
+    # upcast, and one was deliberately not added. ``f_i`` is a mean of a 0/1 mask
+    # and ``P_i`` a mean of softmax probabilities, so both lie in [0, 1] and
+    # ``sum_i(f_i * P_i) <= max_i(f_i) * sum_i(P_i) = 1``; the loss is therefore
+    # bounded by ``num_experts``, which is representable in float16 for any
+    # plausible expert count. MEASURED under ``mixed_float16``: finite at every
+    # token count up to 2**20 and at ``num_experts`` up to 4096 (worst case,
+    # fully-imbalanced routing, ``N=512`` -> 5.121 fp16 vs 5.120 float32).
     # Determine axes for token-wise mean calculation (all but the last axis)
     num_token_axes = len(ops.shape(expert_weights)) - 1
     token_axes = list(range(num_token_axes))
@@ -819,9 +879,24 @@ def compute_z_loss(
     :type gate_logits: keras.KerasTensor
     :param z_loss_weight: Weight for the z-loss.
     :type z_loss_weight: float
-    :return: Router z-loss scalar.
+    :return: Router z-loss scalar, always ``float32``.
     :rtype: keras.KerasTensor
     """
+    # DECISION plan-2026-08-26T100331-f3744602/D-009
+    # The float32 upcast is load-bearing; do not remove it as redundant and do
+    # not restructure the expression around it. `logsumexp` grows like the
+    # largest logit and `square` then doubles that exponent, so under
+    # `mixed_float16` (where a Dense gate emits float16) any logit past ~256
+    # squares out of float16's 65504 range. MEASURED at HEAD: logits in
+    # [-426.75, 435.0] gave `compute_z_loss = inf` where the float32 reference is
+    # 70.707. `layer.py:262-267` feeds that value straight into `add_loss`
+    # whenever `training` is truthy and `z_loss_weight > 0` -- the GatingConfig
+    # DEFAULT (1e-3) -- so the `inf` poisons the whole model's loss and gradients
+    # silently, with no warning and no exception. This mirrors the D-064 template
+    # at `layer.py:320-337`: cast at the numerically fragile boundary, leave the
+    # arithmetic alone. See decisions.md D-009.
+    gate_logits = ops.cast(gate_logits, 'float32')
+
     # Compute logsumexp for each token
     logsumexp = ops.logsumexp(gate_logits, axis=-1, keepdims=False)  # [batch, seq_len]
 
