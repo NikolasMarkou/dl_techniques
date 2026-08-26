@@ -32,9 +32,9 @@ The following layers are supported by the factory system with automated paramete
 | `rms_norm` | `RMSNorm` | Root Mean Square normalization without centering for efficiency. | Transformers, especially for faster training and inference. | Arbitrary |
 | `zero_centered_rms_norm`| `ZeroCenteredRMSNorm` | Combines RMSNorm efficiency with LayerNorm's zero-mean stability. | Large language models (LLMs) requiring enhanced training stability. | Arbitrary |
 | `zero_centered_band_rms_norm`| `ZeroCenteredBandRMSNorm` | Adds a learnable band constraint to Zero-Centered RMSNorm. | Advanced LLMs for maximum stability and controlled flexibility. | Arbitrary |
-| `zero_centered_adaptive_band_rms_norm`| `ZeroCenteredAdaptiveBandRMS` | Zero-centered RMS with adaptive (log-RMS dense-projected) per-feature scaling. | Advanced LLMs needing zero-mean stability + input-adaptive flexibility. | Arbitrary |
+| `zero_centered_adaptive_band_rms_norm`| `ZeroCenteredAdaptiveBandRMS` | Zero-centered RMS with adaptive (log-RMS dense-projected) per-feature scaling. | Advanced LLMs needing zero-mean stability + input-adaptive flexibility. | Arbitrary rank, but **resolution-locked** when a spatial/sequence axis is normalized (see note) |
 | `band_rms` | `BandRMS` | RMS normalization with a learnable, bounded magnitude constraint. | Imposing "thick spherical shell" constraints for stable training. | Arbitrary |
-| `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary |
+| `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary rank, but **resolution-locked** when a spatial/sequence axis is normalized (see note) |
 | `band_logit_norm` | `BandLogitNorm` | L2 normalization with a band-bounded scale. (Known limitation: the "adaptive" component is degenerate — see note in `band_logit_norm.py`; it reduces to a constant scale `1 - 0.5·max_band_width`.) | Classification tasks with constrained logit magnitude. | Arbitrary |
 | `global_response_norm`| `GlobalResponseNormalization` | Global Response Normalization (GRN) from ConvNeXt V2. | ConvNeXt-style architectures to enhance inter-channel competition. | 2D, 3D, or 4D tensors |
 | `logit_norm` | `LogitNorm` | Temperature-scaled L2 normalization for classification logits. | Classification with calibrated confidence estimates. | Arbitrary |
@@ -184,6 +184,16 @@ norm = create_normalization_layer(
 )
 ```
 
+> **Note (resolution lock):** the internal `Dense` is sized in `build()` from the **product of the
+> sizes at the normalized axes**, so any normalized axis whose size varies between calls locks the
+> layer to its build-time value. Measured: `axis=(1, 2)` built on `(None, 8, 8, 3)` gives
+> `Dense(units=64)`, and calling that built layer on `(2, 16, 16, 3)` raises
+> `InvalidArgumentError: Incompatible shapes: [2,16,16,3] vs. [2,8,8,1] [Op:Mul]`. Two configurations
+> are NOT locked and accept any resolution: the default `axis=-1` (`units` = the channel count, which
+> does not vary), and the global case where every non-batch axis is normalized (e.g. `axis=(1, 2, 3)`
+> on a rank-4 input), which yields a single broadcasting parameter (`units=1`). Use one of those for
+> a fully-convolutional model; `axis=(1, 2)` is only safe at a fixed input resolution.
+
 ### `band_rms`
 **Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: L2(1e-5))
 ```python
@@ -204,6 +214,19 @@ norm = create_normalization_layer(
 )
 ```
 
+> **Note (resolution lock):** the internal `Dense` is sized in `build()` from the **product of the
+> sizes at the normalized axes**, so any normalized axis whose size varies between calls locks the
+> layer to its build-time value. Measured: `axis=(1, 2)` built on `(None, 8, 8, 3)` gives
+> `Dense(units=64)`, and calling that built layer on `(2, 16, 16, 3)` raises
+> `InvalidArgumentError: Incompatible shapes: [2,16,16,3] vs. [2,8,8,1] [Op:Mul]`. Two configurations
+> are NOT locked and accept any resolution: the default `axis=-1` (`units` = the channel count, which
+> does not vary), and the global case where every non-batch axis is normalized (e.g. `axis=(1, 2, 3)`
+> on a rank-4 input), which yields a single broadcasting parameter (`units=1`). Use one of those for
+> a fully-convolutional model; `axis=(1, 2)` is only safe at a fixed input resolution.
+
+> The `axis=(1, 2)` example above is exactly the locked case: that layer accepts `8x8` inputs only
+> once it has been built on an `8x8` input.
+
 ### `band_logit_norm`
 **Optional:** `max_band_width` (default: 0.01), `axis` (default: -1), `epsilon` (default: 1e-7)
 
@@ -221,7 +244,9 @@ norm = create_normalization_layer(
 ```
 
 ### `global_response_norm`
-**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros'), `gamma_regularizer`, `beta_regularizer`, `activity_regularizer`
+**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros'), `gamma_regularizer`, `beta_regularizer`, `activity_regularizer`, `use_beta` (default: `True`)
+
+> **Note (`use_beta`):** `use_beta=False` creates no `beta` weight at all (`layer.beta is None`) and drops the additive term, giving `Y = X + γ * (X ⊙ norm')`. The default `True` keeps existing ConvNeXt V2 checkpoints byte-identical.
 
 > **Note (gamma init):** this layer defaults `gamma_initializer='ones'`. The ConvNeXt V2
 > paper initializes gamma=0 (and beta=0) so GRN is an identity at init. To reproduce the
@@ -268,10 +293,20 @@ focal_norm = create_normalization_layer('dml_plus_focal')
 # Center model variant
 center_norm = create_normalization_layer('dml_plus_center')
 ```
-> **Note (tuple outputs):** `dml_plus_center` (and `decoupled_max_logit`) return a
-> **tuple** `(score, norm_factor)` from `call()`, not a single tensor. Generic code
-> that expects one tensor from any normalization layer must special-case these keys.
-> `dml_plus_focal` returns a single tensor.
+> **Note (these three keys break the shape-preserving contract):** all three reduce the
+> normalized axis away, and two of them return a tuple rather than one tensor. Measured on a
+> `(3, 5, 8)` input at the default `axis=-1`:
+>
+> | Key | `call()` returns | Elements | Shapes |
+> |-----|------------------|----------|--------|
+> | `decoupled_max_logit` | a **3-tuple** | `(combined score, MaxCosine, MaxNorm)` | `(3, 5)`, `(3, 5)`, `(3, 5)` |
+> | `dml_plus_center` | a **2-tuple** | `(MaxNorm score, norm factor)` | `(3, 5)`, `(3, 5, 1)` |
+> | `dml_plus_focal` | a **single tensor** (no tuple) | the MaxCosine score | `(3, 5)` |
+>
+> The norm factor of `dml_plus_center` keeps the reduced axis (`keepdims=True`); every other
+> element drops it. Generic code that expects exactly one same-shaped tensor back from any
+> normalization layer must special-case these three keys — see the `:return:` carve-out on
+> `create_normalization_layer`.
 
 ### `dynamic_tanh`
 **Optional:** `axis` (default: -1), `alpha_init_value` (default: 0.5), `kernel_initializer` (default: 'ones'), `bias_initializer` (default: 'zeros'), `kernel_regularizer`, `bias_regularizer`, `kernel_constraint`, `bias_constraint`

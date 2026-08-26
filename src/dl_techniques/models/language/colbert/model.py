@@ -154,11 +154,6 @@ class ColBERT(keras.Model):
     :param doc_maxlen: Maximum document length. Defaults to ``220``, the
         reference default.
     :type doc_maxlen: int
-    :param mask_punctuation: Whether the document path is expected to receive a
-        punctuation ``skiplist_mask``. ADVISORY: the mask is applied whenever it
-        is supplied; this flag records the intent, is serialized, and is what a
-        trainer reads to decide whether to ask the tokenizer for the mask.
-    :type mask_punctuation: bool
     :param max_position_embeddings: Backbone position-table size. Must be at
         least ``max(query_maxlen, doc_maxlen)``.
     :type max_position_embeddings: int
@@ -273,7 +268,17 @@ class ColBERT(keras.Model):
         dim: int = DEFAULT_DIM,
         query_maxlen: int = DEFAULT_QUERY_MAXLEN,
         doc_maxlen: int = DEFAULT_DOC_MAXLEN,
-        mask_punctuation: bool = True,
+        # DECISION plan-2026-08-25T165753-704a9bcb/D-002
+        # Do NOT re-add a model-side ``mask_punctuation`` parameter here (nor to
+        # ``get_config``, nor to ``MODEL_VARIANTS``). It existed until 2026-08-25
+        # and had no reader anywhere in the tree: the model applies whatever
+        # ``doc_skiplist_mask`` it is handed, so the flag changed nothing while
+        # serializing an intent nothing honored. The live flag is
+        # ``ColBERTTokenizer.mask_punctuation`` (``tokenization.py:296``), which
+        # gates skiplist construction; the trainer hardcodes it on the tokenizer
+        # (``src/train/language/colbert/common.py:549``) and never reads a model
+        # flag. Passing ``mask_punctuation=`` now raises ``ValueError`` from
+        # Keras, which is the intended loud rejection.
         max_position_embeddings: int = 512,
         hidden_dropout_rate: float = 0.1,
         attention_probs_dropout_rate: float = 0.1,
@@ -298,7 +303,6 @@ class ColBERT(keras.Model):
         self.dim = dim
         self.query_maxlen = query_maxlen
         self.doc_maxlen = doc_maxlen
-        self.mask_punctuation = mask_punctuation
         self.max_position_embeddings = max_position_embeddings
         self.hidden_dropout_rate = hidden_dropout_rate
         self.attention_probs_dropout_rate = attention_probs_dropout_rate
@@ -839,7 +843,6 @@ class ColBERT(keras.Model):
                 "dim": self.dim,
                 "query_maxlen": self.query_maxlen,
                 "doc_maxlen": self.doc_maxlen,
-                "mask_punctuation": self.mask_punctuation,
                 "max_position_embeddings": self.max_position_embeddings,
                 "hidden_dropout_rate": self.hidden_dropout_rate,
                 "attention_probs_dropout_rate": self.attention_probs_dropout_rate,
@@ -945,9 +948,9 @@ def create_colbert_v2(
     ``src/train/language/colbert/train_colbert_v2.py``: KL divergence between
     ``log_softmax`` of the student scores and ``log_softmax`` of
     ``distillation_alpha``-scaled cross-encoder teacher scores over ``nway``
-    (typically 64) candidates, with optional in-batch negatives. Index-time
-    residual compression (``compression.ResidualCompressionCodec``) is the other
-    v2 addition; it is never part of the forward pass or of any loss.
+    (typically 64) candidates. Index-time residual compression
+    (``compression.ResidualCompressionCodec``) is the other v2 addition; it is
+    never part of the forward pass or of any loss.
 
     **This builds exactly the same network as** :func:`create_colbert_v1` --
     see that docstring for the citation. v2 changed the supervision and the

@@ -69,6 +69,34 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     6. ``scale = (1 - alpha) + alpha * sigmoid(5 * Dense(log_rms))``
     7. ``y = x_hat * scale``
 
+    .. note::
+        **No masking support, deliberately.** ``supports_masking`` is left ``False``
+        because the aggregate RMS driving the ``Dense`` is reduced over every non-batch
+        axis, so ONE sigmoid rescales all of a sample's positions together. Any position's
+        value therefore reaches every other position's output as soon as the ``Dense``
+        kernel is non-zero - which is the trained regime. A propagated Keras mask would be
+        invalid on the output.
+
+        **The figure is conditional and the default hides it.** The default
+        ``band_initializer="zeros"`` pins the ``Dense`` output to a constant, so a probe on
+        a default-constructed layer measures a cross-position leak of exactly ``0.0`` and
+        the flag looks safe for the wrong reason. Measured on a ``(4, 5, 8)`` input,
+        perturbing one ``(sample, token)`` slot, with the ``Dense`` kernel assigned from
+        ``numpy.random.default_rng(1).normal`` (the ``_make_nontrivial`` helper in
+        ``tests/test_layers/test_norms/test_the_norms_propagate_masks.py``): other
+        positions move by up to ``1.864e-01``. With the untouched default kernel: exactly
+        ``0.0``.
+
+    .. warning::
+        **Resolution lock**, identical to :class:`AdaptiveBandRMS` (shared
+        ``_compute_param_shape_and_axes`` logic). ``build()`` sizes the internal ``Dense``
+        from the PRODUCT of the sizes at the normalized axes, so ``axis=(1, 2)`` built on
+        ``(None, 8, 8, 3)`` gives ``Dense(units=64)`` and calling that built layer on
+        ``(2, 16, 16, 3)`` raises ``InvalidArgumentError: Incompatible shapes`` at the
+        scale multiply (measured). The default ``axis=-1`` and the global spelling
+        ``axis=(1, 2, 3)`` (which yields ``units=1``) are NOT locked and accept any
+        resolution.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -130,9 +158,14 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     :param epsilon: Small positive constant added to denominator for numerical
         stability.
     :type epsilon: float
-    :param band_initializer: Initializer for the dense layer computing scaling
-        parameters. Defaults to ``"zeros"`` for stable initialization near
-        unit scaling.
+    :param band_initializer: Initializer for the dense kernel computing the scaling
+        parameters. Defaults to ``"zeros"``, which does NOT start the layer near
+        unit scaling: a zero kernel and zero bias make the dense output zero, and
+        ``sigmoid(0) = 0.5``, so the initial scale is
+        ``(1 - max_band_width) + max_band_width * 0.5 = 1 - max_band_width / 2`` -
+        the MIDPOINT of the band, uniformly for every element. At the default
+        ``max_band_width=0.1`` that is a measured initial scale of exactly 0.95, not
+        1.0.
     :type band_initializer: Union[str, keras.initializers.Initializer]
     :param band_regularizer: Optional regularizer for the dense layer weights.
         Defaults to ``None`` (matching :class:`AdaptiveBandRMS`).
@@ -315,8 +348,15 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
         """Apply zero-centered adaptive RMS normalization."""
         original_dtype = inputs.dtype
 
-        # Cast to fp32 internally for numerical stability under mixed precision.
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the centered tensor collapsed to
+        # exactly zero on an input whose float64 answer is O(1)). This also
+        # feeds the internal Dense at the policy's dtype, so a float64 policy no
+        # longer promotes a float32 tensor against a float64 kernel.
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: Zero-centering.
         mean = ops.mean(inputs_fp32, axis=self.axis, keepdims=True)
@@ -345,7 +385,14 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
 
         # Step 5: Reshape and apply adaptive scaling.
         scale_factors = self._reshape_scaling_factors(scale_factors)
-        output = normalized * ops.cast(scale_factors, "float32")
+        # DECISION plan-2026-08-25T195813-d5a035ab/D-005: this cast is NOT redundant
+        # with the one above and must not be deleted. `self.dense_layer` returns its
+        # own COMPUTE dtype, which under mixed_float16 is float16 while `normalized`
+        # is float32 - measured: `fp32 * fp16` raises
+        # `InvalidArgumentError: cannot compute Mul as input #1 ... is a half tensor`.
+        # The destination is `stat_dtype` rather than a hardcoded "float32" so a
+        # float64 policy keeps the multiply in float64.
+        output = normalized * ops.cast(scale_factors, stat_dtype)
 
         return ops.cast(output, original_dtype)
 

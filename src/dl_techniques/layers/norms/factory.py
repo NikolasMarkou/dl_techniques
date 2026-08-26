@@ -215,6 +215,14 @@ def create_normalization_layer(
         / bias_free_batch_norm), max_band_width, temperature, constant, alpha_init_value,
         and eps (for GRN).
     :return: Configured normalization layer instance ready for use in neural networks.
+        **Three types are not shape-preserving and two of them do not return a single
+        tensor**, so a config-driven caller that swaps ``layer_norm`` for one of them will
+        not get a drop-in substitute. Measured on a ``(3, 5, 8)`` input at the default
+        ``axis=-1``: ``decoupled_max_logit`` returns a **3-tuple**
+        ``(combined score, MaxCosine, MaxNorm)`` of ``(3, 5)`` tensors; ``dml_plus_center``
+        returns a **2-tuple** ``(MaxNorm score, norm factor)`` shaped ``(3, 5)`` and
+        ``(3, 5, 1)``; ``dml_plus_focal`` returns a **single** ``(3, 5)`` tensor. All three
+        reduce the normalized axis away. See ``norms/README.md`` for the same table.
     :rtype: keras.layers.Layer
     :raises ValueError: If normalization_type is not supported or if invalid parameters
         are provided for the specific normalization type.
@@ -565,6 +573,11 @@ def validate_normalization_config(
             constant = kwargs['constant']
             if not isinstance(constant, (int, float)):
                 raise ValueError("constant must be a number")
+            # Sign check mirrored from DecoupledMaxLogit._validate_inputs (same
+            # message), so validate_normalization_config never green-lights a
+            # config the class itself refuses.
+            if constant <= 0:
+                raise ValueError(f"constant must be positive, got {constant}")
 
     if normalization_type in ['rms_norm', 'zero_centered_rms_norm']:
         if 'epsilon' in kwargs:

@@ -77,7 +77,11 @@ class DynamicTanh(keras.layers.Layer):
     :param axis: Integer or list of integers specifying normalization axes.
         Typically -1 (features axis). Defaults to -1.
     :type axis: Union[int, List[int]]
-    :param alpha_init_value: Initial value for learnable alpha parameter.
+    :param alpha_init_value: Initial value for learnable alpha parameter. Must be a
+        strictly positive number: a non-positive alpha flips the transform's sign and
+        ``alpha == 0`` makes the layer the constant-zero map ``tanh(0 * x)``, so both
+        are rejected (matching ``validate_normalization_config``'s ``dynamic_tanh``
+        branch, which has always refused them).
         Paper suggests 0.6-0.8 for attention normalization, 0.1-0.2 for FFN
         and final decoder normalization. Defaults to 0.5.
     :type alpha_init_value: float
@@ -95,6 +99,20 @@ class DynamicTanh(keras.layers.Layer):
     :type bias_constraint: Optional[constraints.Constraint]
 
     :raises ValueError: If alpha_init_value is not a number.
+    :raises ValueError: If alpha_init_value is not strictly positive. **This check is
+        checkpoint-visible**: ``get_config()`` writes ``alpha_init_value``, so a ``.keras``
+        model serialized by a version that accepted a non-positive value no longer
+        deserializes. Measured - a functional model containing
+        ``DynamicTanh(alpha_init_value=-0.5)``, saved at commit ``a8a042f53``, now fails
+        with ``TypeError: <class 'keras.src.models.functional.Functional'> could not be
+        deserialized properly``, whose root cause is this very
+        ``ValueError: alpha_init_value must be a positive number``. The exposure is narrow
+        and was accepted deliberately (see ``decisions.md`` D-014 of
+        ``plan-2026-08-25T195813-d5a035ab``): the repo-wide grep found zero call sites
+        passing a non-positive value, the same model saved with the default ``0.5`` reloads
+        fine, and - measured - a checkpoint whose LEARNED ``alpha`` weight is negative also
+        still loads and reproduces its outputs exactly, because only the config's INIT
+        value is validated, never the restored weight.
     :raises ValueError: If axis is out of bounds for input tensor.
     """
 
@@ -115,12 +133,37 @@ class DynamicTanh(keras.layers.Layer):
         # Validate alpha initialization value
         if not isinstance(alpha_init_value, (int, float)):
             raise ValueError(f"alpha_init_value must be a number, got {type(alpha_init_value)}")
+        # Sign check mirrored from validate_normalization_config's 'dynamic_tanh'
+        # branch in factory.py (same message). A non-positive alpha flips the
+        # transform's sign, and alpha == 0 makes the layer the constant-zero map
+        # tanh(0 * x); the factory has always refused both.
+        #
+        # DECISION plan-2026-08-25T195813-d5a035ab/D-014
+        # This guard is CHECKPOINT-VISIBLE and the break was accepted knowingly.
+        # `get_config()` writes `alpha_init_value`, so a `.keras` archive written by a
+        # version that accepted a non-positive value can no longer be loaded (MEASURED:
+        # `DynamicTanh(alpha_init_value=-0.5)` saved at a8a042f53 -> TypeError at HEAD,
+        # root cause this ValueError). Do NOT "fix" a failing load by loosening this
+        # check back to construction-only or by special-casing `from_config`: the same
+        # plan DROPPED review-finding B14 precisely because it broke checkpoints, and
+        # the asymmetry only holds while the exposure stays this narrow (zero call sites
+        # repo-wide; only the INIT value is validated, never the restored `alpha`
+        # weight, so a trained-negative alpha still loads - measured). If a real
+        # checkpoint ever turns up, delete this guard, do not weaken it silently.
+        # See decisions.md D-014 and
+        # tests/test_layers/test_norms/test_the_negative_alpha_init_is_checkpoint_visible.py
+        if alpha_init_value <= 0:
+            raise ValueError("alpha_init_value must be a positive number")
 
         # Store ALL configuration parameters. self.axis keeps the constructor value
         # verbatim (never mutated by build) so get_config is build-state-independent;
         # the build-normalized (positive) axes live in self._norm_axis.
         self.axis = list(axis) if isinstance(axis, (list, tuple)) else [axis]
         self._norm_axis: Optional[List[int]] = None
+        # Static broadcast tuple for weight/bias, derived once in build(). Kept
+        # None here so the `if self.built: return` early exit in build() can
+        # never leave it undefined.
+        self._broadcast_shape: Optional[Tuple[int, ...]] = None
         self.alpha_init_value = float(alpha_init_value)
 
         # Store serializable initializers/regularizers/constraints
@@ -207,6 +250,15 @@ class DynamicTanh(keras.layers.Layer):
             dtype=self.dtype
         )
 
+        # Static broadcast tuple: every value is known here (param_shape comes
+        # from input_shape), so call() never has to re-derive it from a dynamic
+        # per-call shape query. Built by axis index, not by the order the axes
+        # were written, so it stays identical to the previous construction.
+        axis_to_size = dict(zip(self._norm_axis, param_shape))
+        self._broadcast_shape = tuple(
+            axis_to_size[i] if i in axis_to_size else 1 for i in range(ndims)
+        )
+
         super().build(input_shape)
 
     def call(
@@ -231,21 +283,13 @@ class DynamicTanh(keras.layers.Layer):
         # Step 2: Apply hyperbolic tangent
         tanh_outputs = ops.tanh(scaled_inputs)
 
-        # Step 3: Apply affine transformation with proper broadcasting
-        input_shape = ops.shape(inputs)
-        ndims = len(inputs.shape)
-
-        # Create broadcast shape for weight and bias
-        broadcast_shape = []
-        for i in range(ndims):
-            if i in self._norm_axis:
-                broadcast_shape.append(input_shape[i])
-            else:
-                broadcast_shape.append(1)
-
-        # Reshape parameters for broadcasting
-        weight_broadcasted = ops.reshape(self.weight, broadcast_shape)
-        bias_broadcasted = ops.reshape(self.bias, broadcast_shape)
+        # Step 3: Apply affine transformation with proper broadcasting.
+        # The reshape is required: a naive `tanh_outputs * self.weight` raises
+        # for any non-trailing axis (measured: InvalidArgumentError,
+        # Incompatible shapes [2,8,16] vs [8] at axis=1). Its target shape is
+        # the static tuple computed in build().
+        weight_broadcasted = ops.reshape(self.weight, self._broadcast_shape)
+        bias_broadcasted = ops.reshape(self.bias, self._broadcast_shape)
 
         # Final affine transformation
         outputs = tanh_outputs * weight_broadcasted + bias_broadcasted

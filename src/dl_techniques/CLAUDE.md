@@ -73,7 +73,7 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 
 | Package | Convention | Measured 2026-08-25 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 258 of 298 modules carry `:param ` |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 260 of 300 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 81 Sphinx-only, 8 both, 106 neither, over 275 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
@@ -138,6 +138,21 @@ predates it; it is repaired here only because leaving half a measurement block u
 the file contradict itself. **Re-run the block above before quoting any of it** — a derived number
 is a perishable good, and this table has now been wrong twice in the same week in two different
 ways.
+
+Re-derived a third time on **2026-08-25** by `plan-2026-08-25-704a9bcb/iter-1/step-7`, which
+re-ran the WHOLE of `REPO_MAP.md`'s Numbers table (all 76 enforceable rows) rather than only the
+red ones: `layers/` **258 of 298 -> 259 of 299**. That drift is **not** that plan's either — it was
+already red at its base commit and comes from `4ab68e323` adding
+`src/dl_techniques/layers/activations/common.py` (3 `:param ` lines); it is repaired here because
+`REPO_MAP.md` § Numbers requires a prose digit to move in the SAME edit as the table row that
+sources it. **Every other figure in the table above was re-run in the same edit and reproduces
+exactly** — `layers/attention/` 34 of 35, `models/` 88 anchored-`Args:` / 89 `:param ` / 8 both over
+275 files (so 80 Google-only, 81 Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both,
+`metrics/` 12 of 15 / 2, `utils/` 22 of 41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/`
+10 of 24 / 0, `visualization/` 6 of 7 / 0, `bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py`
+31 `:param ` with the stray `Args:` still at `:273`. Note that the drift log in
+the paragraph before this one records what was measured *on those dates* and is deliberately left
+as-is: it is a history of readings, not a set of live claims.
 
 ### Factory Pattern
 

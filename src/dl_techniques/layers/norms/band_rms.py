@@ -51,6 +51,9 @@ from typing import Any, Dict, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 # ---------------------------------------------------------------------
 
@@ -73,6 +76,17 @@ class BandRMS(keras.layers.Layer):
     The layer creates a "thick shell" in the RMS space rather than geometric space,
     allowing features to exist within a bounded range while maintaining dimension-
     independent behavior across different layer widths.
+
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At the default ``axis=-1`` the band scale is a single global
+    parameter and the RMS is per-position, so perturbing one ``(sample, token)``
+    slot of a ``(3, 5, 8)`` input moves no other position by more than ``0.0``
+    (measured, both training regimes).
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``1.960`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -176,6 +190,12 @@ class BandRMS(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.band_param = None
 
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
+
         logger.debug(f"Initialized BandRMS with max_band_width={max_band_width}, axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(
@@ -226,6 +246,13 @@ class BandRMS(keras.layers.Layer):
         if self.built:
             return
 
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
+
         # Create a single scalar band parameter using add_weight()
         self.band_param = self.add_weight(
             name="band_param",
@@ -256,8 +283,16 @@ class BandRMS(keras.layers.Layer):
             L2 norm approximately in [(1-max_band_width)*sqrt(D), sqrt(D)].
         :rtype: keras.KerasTensor
         """
-        # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = ops.cast(inputs, "float32")
+        # Store original dtype for casting back
+        original_dtype = inputs.dtype
+
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the output matched a float32
+        # reference exactly and missed the float64 one by 2.6e-8).
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: RMS normalization to achieve dimension-independent scaling
         # Compute RMS: sqrt(mean(x²))
@@ -282,10 +317,14 @@ class BandRMS(keras.layers.Layer):
         # Step 2: Apply learnable scaling within [1-α, 1] band
         # Use sigmoid to map the band_param to [0, 1]
         # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
-        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to fp32 explicitly.
-        # Under mixed_float16, variables auto-cast on read (LESSONS L136); without
-        # this cast, the subsequent multiply against fp32 `normalized` crashes.
-        band_param_fp32 = ops.cast(self.band_param, "float32")
+        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to the statistics
+        # dtype explicitly. Under mixed_float16, variables auto-cast on read
+        # (LESSONS L136); without this cast, the subsequent multiply against
+        # `normalized` crashes on a dtype mismatch. The destination is `stat_dtype`,
+        # not a hardcoded "float32", so the multiply stays in whatever dtype the
+        # active policy makes the statistics
+        # (DECISION plan-2026-08-25T195813-d5a035ab/D-005).
+        band_param_fp32 = ops.cast(self.band_param, stat_dtype)
         band_activation = ops.sigmoid(5.0 * band_param_fp32)
 
         # Scale the activation to be within [1-max_band_width, 1]

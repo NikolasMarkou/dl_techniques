@@ -67,6 +67,39 @@ class AdaptiveBandRMS(keras.layers.Layer):
 
     Where scale(.) is in [1-alpha, 1] computed via dense projection and sigmoid activation.
 
+    .. note::
+        **No masking support, deliberately.** ``supports_masking`` is left ``False``
+        because ``_aggregate_rms_statistics`` means the RMS over every non-batch axis
+        before feeding the internal ``Dense``, so ONE sigmoid rescales all of a sample's
+        positions together. Any position's value therefore reaches every other position's
+        output as soon as the ``Dense`` kernel is non-zero - which is the trained regime.
+        Propagating a Keras mask would advertise padding-independent outputs that were in
+        fact computed from the padding.
+
+        **The figure is conditional and the default hides it.** The layer's default
+        ``band_initializer="zeros"`` pins the ``Dense`` output to a constant, so a probe
+        on a default-constructed layer measures a cross-position leak of exactly ``0.0``
+        and the flag looks safe for the wrong reason. Measured on a ``(4, 5, 8)`` input,
+        perturbing one ``(sample, token)`` slot, with the ``Dense`` kernel assigned from
+        ``numpy.random.default_rng(1).normal`` (the ``_make_nontrivial`` helper in
+        ``tests/test_layers/test_norms/test_the_norms_propagate_masks.py``): other
+        positions move by up to ``1.591e-01``. With the untouched default kernel: exactly
+        ``0.0``.
+
+    .. warning::
+        **Resolution lock.** ``build()`` sizes the internal ``Dense`` from the PRODUCT of
+        the sizes at the normalized axes, so normalizing an axis whose size varies between
+        calls locks the layer to its build-time value. Measured: ``axis=(1, 2)`` built on
+        ``(None, 8, 8, 3)`` gives ``Dense(units=64)``, and calling that built layer on
+        ``(2, 16, 16, 3)`` raises
+        ``InvalidArgumentError: Incompatible shapes: [2,16,16,3] vs. [2,8,8,1] [Op:Mul]``.
+        Two configurations are NOT locked: the default ``axis=-1`` (``units`` = the channel
+        count, which does not vary), and the global case where every non-batch axis is
+        normalized (e.g. ``axis=(1, 2, 3)`` on a rank-4 input), which collapses
+        ``param_shape`` to all ones and yields a single broadcasting parameter
+        (``units=1``) - both accept ``16x16`` after being built at ``8x8`` (measured).
+        Use one of those in a fully-convolutional model.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -119,8 +152,15 @@ class AdaptiveBandRMS(keras.layers.Layer):
     :param epsilon: Small positive constant added to denominator for numerical
         stability.
     :type epsilon: float
-    :param band_initializer: Initializer for the dense layer computing scaling
-        parameters. Defaults to 'zeros' for stable initialization near unit scaling.
+    :param band_initializer: Initializer for the dense kernel computing the scaling
+        parameters. Defaults to ``'zeros'``, which does NOT start the layer near
+        unit scaling: a zero kernel and zero bias make the dense output zero, and
+        ``sigmoid(0) = 0.5``, so the initial scale is
+        ``(1 - max_band_width) + max_band_width * 0.5 = 1 - max_band_width / 2`` -
+        the MIDPOINT of the band, uniformly for every element. At the default
+        ``max_band_width=0.1`` that is a measured initial scale of exactly 0.95, not
+        1.0. Pass a large-positive-bias initializer if you want to start near the
+        band's upper edge.
     :type band_initializer: Union[str, keras.initializers.Initializer]
     :param band_regularizer: Optional regularizer for the dense layer weights.
         Can help prevent overfitting of adaptive scaling.
@@ -385,8 +425,18 @@ class AdaptiveBandRMS(keras.layers.Layer):
         :return: Normalized tensor with adaptive RMS-based scaling.
         :rtype: keras.KerasTensor
         """
-        # Cast to float32 for numerical stability in mixed precision
-        inputs_fp32 = keras.ops.cast(inputs, "float32")
+        # Store original dtype for casting back
+        original_dtype = inputs.dtype
+
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the output matched a float32
+        # reference exactly and missed the float64 one by 2.6e-8). This also
+        # feeds the internal Dense at the policy's dtype, so a float64 policy no
+        # longer promotes a float32 tensor against a float64 kernel.
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, stat_dtype)
 
         # Step 1: Compute RMS for normalization
         mean_square = keras.ops.mean(
@@ -420,10 +470,17 @@ class AdaptiveBandRMS(keras.layers.Layer):
 
         # Step 6: Reshape for broadcasting and apply adaptive scaling
         scale_factors = self._reshape_scaling_factors(scale_factors)
-        output = normalized * keras.ops.cast(scale_factors, "float32")
+        # DECISION plan-2026-08-25T195813-d5a035ab/D-005: this cast is NOT redundant
+        # with the one above and must not be deleted. `self.dense_layer` returns its
+        # own COMPUTE dtype, which under mixed_float16 is float16 while `normalized`
+        # is float32 - measured: `fp32 * fp16` raises
+        # `InvalidArgumentError: cannot compute Mul as input #1 ... is a half tensor`.
+        # The destination is `stat_dtype` rather than a hardcoded "float32" so a
+        # float64 policy keeps the multiply in float64.
+        output = normalized * keras.ops.cast(scale_factors, stat_dtype)
 
         # Cast back to original dtype
-        return keras.ops.cast(output, inputs.dtype)
+        return keras.ops.cast(output, original_dtype)
 
     def compute_output_shape(
         self,

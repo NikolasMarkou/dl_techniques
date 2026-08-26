@@ -29,7 +29,10 @@ Performance Benefits:
     - Better gradient flow in some architectures
     - Maintains similar normalization benefits to LayerNorm
     - More stable in mixed precision training
-    - Approximately 10-15% faster than LayerNorm in practice
+
+    No throughput figure is quoted here. The only quantitative claim this module can
+    make from its own code is structural: one reduction over the normalization axes
+    instead of LayerNorm's two.
 
 References:
     - Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
@@ -45,6 +48,9 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 # ---------------------------------------------------------------------
 
@@ -67,10 +73,25 @@ class RMSNorm(keras.layers.Layer):
 
     Where scale is a learnable parameter when ``use_scale=True``.
 
-    RMSNorm is approximately 10-15% faster than LayerNorm due to avoiding mean
-    computation. It is particularly effective in transformer architectures and large
-    language models. The implementation automatically handles mixed precision training
-    with appropriate casting.
+    RMSNorm avoids LayerNorm's mean subtraction, so it performs one reduction over
+    the normalization axes where LayerNorm performs two. It is particularly effective
+    in transformer architectures and large language models.
+
+    Statistics are computed in ``keras.backend.result_type(input_dtype, "float32")``
+    - float32 at minimum for numerical stability under mixed precision, and float64
+    when the layer's own policy is float64 - and the result is cast back to the input
+    dtype before it is returned.
+
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At the default ``axis=-1`` each position's output depends
+    only on that position: perturbing one ``(sample, token)`` slot of a ``(3, 5, 8)``
+    input moves no other position by more than ``0.0`` (measured, in both
+    ``training=False`` and ``training=True``), so a Keras mask stays valid.
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``2.063`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     **Architecture Overview:**
 
@@ -107,6 +128,17 @@ class RMSNorm(keras.layers.Layer):
         The default (-1) computes RMS over the last dimension. For multi-axis
         normalization, pass a tuple (e.g., (-2, -1) for normalizing over last
         two dimensions).
+
+        Non-trailing axes are supported together with ``use_scale=True``: the
+        ``scale`` weight is stored with one dimension per normalized axis (the
+        checkpoint-visible shape, deliberately unchanged) and is reshaped for
+        broadcasting at call time only when the normalized axes are not the
+        trailing ones, so the ``axis=-1`` path emits no reshape op.
+
+        One spelling is deliberately carved out: an axis tuple that is not
+        strictly ascending (e.g. ``(-1, -2)``) keeps the legacy broadcast rather
+        than a corrected one, because ``build()`` orders the scale's dimensions
+        by the order the axes were WRITTEN. Use an ascending tuple.
     :type axis: Union[int, Tuple[int, ...]]
     :param epsilon: Small constant added to denominator for numerical stability.
         Should be positive and typically in range [1e-8, 1e-5].
@@ -143,6 +175,18 @@ class RMSNorm(keras.layers.Layer):
 
         # Initialize weight attributes - created in build()
         self.scale = None
+
+        # Broadcast shape used to reshape 'scale' in call(); computed in build().
+        # None means "no reshape needed" - see the DECISION anchor in build().
+        # Initialized here so build()'s `if self.built: return` early exit can
+        # never leave the attribute undefined.
+        self._scale_broadcast_shape = None
+
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(f"Initialized RMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
 
@@ -183,6 +227,13 @@ class RMSNorm(keras.layers.Layer):
         if self.built:
             return
 
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
+
         if self.use_scale:
             # Determine the shape for the scale parameter
             # Scale parameter shape matches the input shape along normalization axes
@@ -215,6 +266,36 @@ class RMSNorm(keras.layers.Layer):
 
             logger.debug(f"Created scale parameter with shape {param_shape}")
 
+            # DECISION plan-2026-08-25T195813-d5a035ab/D-004
+            # The built 'scale' weight shape is checkpoint-visible: every saved
+            # .keras file holding an RMSNorm stores exactly `param_shape`.
+            # Widening it above to a full-rank shape carrying 1s at the
+            # unnormalized axes would be the cleaner algebra, but it would make
+            # every existing checkpoint unloadable. So do NOT touch
+            # add_weight(shape=param_shape); the broadcast is instead done at
+            # CALL time, and only when it is actually needed.
+            # Record: plans/plan-2026-08-25T195813-d5a035ab/decisions.md D-004.
+            rank = len(input_shape)
+            if param_axes == list(range(rank - len(param_axes), rank)):
+                # The normalized axes are exactly the trailing axes, in ascending
+                # order. `param_shape` already broadcasts against the input, so
+                # this path (axis=-1, i.e. 100% of the live consumers) must emit
+                # no reshape op at all.
+                self._scale_broadcast_shape = None
+            elif any(b <= a for a, b in zip(param_axes, param_axes[1:])):
+                # Not strictly ascending (e.g. axis=(-1, -2)): build() orders the
+                # scale's dimensions by the order the axes were WRITTEN, so a
+                # broadcast shape derived from ascending order would silently
+                # reinterpret the stored weight. Deliberate: an unsorted 'axis'
+                # tuple keeps today's behaviour verbatim and is an unsupported
+                # spelling. Do NOT "fix" this by sorting param_axes.
+                self._scale_broadcast_shape = None
+            else:
+                broadcast_shape = [1] * rank
+                for ax, dim in zip(param_axes, param_shape):
+                    broadcast_shape[ax] = dim
+                self._scale_broadcast_shape = tuple(broadcast_shape)
+
         # Always call parent build at the end
         super().build(input_shape)
 
@@ -239,8 +320,13 @@ class RMSNorm(keras.layers.Layer):
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Cast to float32 for numerical stability in mixed precision training
-        inputs_fp32 = keras.ops.cast(inputs, "float32")
+        # Statistics dtype: float32 at minimum (numerical stability under
+        # mixed precision), but float64 when the layer really is float64 -
+        # a hardcoded "float32" here silently ran the statistics in float32
+        # under a float64 policy (measured: the output matched a float32
+        # reference exactly and missed the float64 one by 1.5e-8).
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        inputs_fp32 = keras.ops.cast(inputs, stat_dtype)
 
         # Compute RMS: sqrt(mean(x²) + ε)
         mean_square = keras.ops.mean(
@@ -257,7 +343,14 @@ class RMSNorm(keras.layers.Layer):
 
         # Apply learnable scale if enabled
         if self.use_scale:
-            normalized = normalized * self.scale
+            scale = self.scale
+            if self._scale_broadcast_shape is not None:
+                # Non-trailing normalization axes only: the stored weight shape is
+                # not broadcast-compatible with the input, so give it explicit 1s
+                # at the unnormalized axes here rather than in build()
+                # (DECISION plan-2026-08-25T195813-d5a035ab/D-004).
+                scale = keras.ops.reshape(scale, self._scale_broadcast_shape)
+            normalized = normalized * scale
 
         # Cast back to original dtype
         return keras.ops.cast(normalized, original_dtype)

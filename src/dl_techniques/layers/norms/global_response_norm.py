@@ -65,6 +65,14 @@ class GlobalResponseNormalization(keras.layers.Layer):
     ``Y = X + γ * (X ⊙ (norm_c / (mean(norm) + ε))) + β``.
     Generalizes to 2D (MLP), 3D (sequence), and 4D (image) inputs.
 
+    .. note::
+        **No masking support, deliberately.** ``supports_masking`` is left ``False``
+        because the per-channel L2 norm is reduced over the spatial/sequence axes:
+        perturbing a single ``(sample, token)`` slot moves the other positions of
+        that sample by up to ``2.971e+00`` (measured on a ``(3, 5, 8)`` input). A
+        propagated Keras mask would claim padding-independent outputs that were in
+        fact computed from the padding, which is worse than no mask at all.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -119,8 +127,14 @@ class GlobalResponseNormalization(keras.layers.Layer):
         the paper's identity-at-init behavior.
     :type gamma_initializer: Union[str, keras.initializers.Initializer]
     :param beta_initializer: Initializer for beta (bias) weights.
-        Defaults to ``'zeros'``.
+        Defaults to ``'zeros'``. Ignored when ``use_beta=False``.
     :type beta_initializer: Union[str, keras.initializers.Initializer]
+    :param use_beta: Whether to create the trainable additive offset ``beta``.
+        Defaults to ``True``, which keeps every existing ConvNeXt V2 checkpoint
+        byte-identical. Pass ``False`` for a bias-free layer: no ``beta`` weight is
+        created at all (``layer.beta is None``) and the additive term is dropped
+        from the output, giving ``Y = X + γ * (X ⊙ norm')``.
+    :type use_beta: bool
     :param gamma_regularizer: Optional regularizer for gamma weights.
     :type gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param beta_regularizer: Optional regularizer for beta weights.
@@ -150,7 +164,8 @@ class GlobalResponseNormalization(keras.layers.Layer):
         :type eps: float
         :param gamma_initializer: Initializer for gamma (scale) weights.
         :type gamma_initializer: Union[str, keras.initializers.Initializer]
-        :param beta_initializer: Initializer for beta (bias) weights.
+        :param beta_initializer: Initializer for beta (bias) weights. Ignored when
+            ``use_beta=False``.
         :type beta_initializer: Union[str, keras.initializers.Initializer]
         :param gamma_regularizer: Regularizer for gamma weights.
         :type gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
@@ -158,10 +173,17 @@ class GlobalResponseNormalization(keras.layers.Layer):
         :type beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
         :param activity_regularizer: Regularizer for the layer output.
         :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param use_beta: Whether to create the trainable additive offset ``beta``.
+            ``False`` creates no ``beta`` weight and drops the additive term.
+        :type use_beta: bool
 
         :raises ValueError: If eps <= 0.
         """
-        super().__init__(**kwargs)
+        # activity_regularizer is a base-Layer constructor argument: forward it
+        # rather than assigning it afterwards. Plain assignment also works (it
+        # goes through the inherited property setter), but the forwarded form is
+        # the idiom the rest of this package uses.
+        super().__init__(activity_regularizer=activity_regularizer, **kwargs)
 
         if eps <= 0:
             raise ValueError(f"eps must be positive, got {eps}")
@@ -172,7 +194,6 @@ class GlobalResponseNormalization(keras.layers.Layer):
         self.beta_initializer = keras.initializers.get(beta_initializer)
         self.gamma_regularizer = keras.regularizers.get(gamma_regularizer)
         self.beta_regularizer = keras.regularizers.get(beta_regularizer)
-        self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
         self.gamma = None
         self.beta = None

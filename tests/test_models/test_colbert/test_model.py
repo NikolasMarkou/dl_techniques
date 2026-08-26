@@ -27,6 +27,17 @@ Injection                                               Named assertion that fir
 (f) build the backbone with ``hidden_act="gelu"``        ``test_the_backbone_runs_the_tanh_gelu_approximation``
     (the exact erf form, not the tanh                    -- "the ColBERT backbone's activation drifted away from
     approximation README §9.4 documents)                    the tanh GELU approximation documented in README §9.4"
+(g) narrow the D-007 reduction dtype in                  ``test_a_fully_masked_document_scores_the_exact_sentinel_under_xla``
+    ``components.py`` (``MaxSimScorer._reduction_dtype`` -- "the XLA-compiled score is not float32 under
+    returns the incoming dtype unchanged, dropping          mixed_float16: got <dtype: 'float16'>"
+    the float32 promotion)
+(h) rewrite the ``base`` row to hidden 1024 / layers    ``test_the_base_and_large_rows_keep_their_reference_backbone_geometry``
+    10 / heads 16 / intermediate 4096 -- internally      -- "the 'base' row no longer matches its reference
+    consistent, but no longer BERT-Base                     backbone: hidden_size=1024, but BERT-Base/ColBERT
+                                                           declares hidden_size=768"
+(i) ``DEFAULT_MAXSIM_MASK_VALUE = -2e4`` in             ``test_a_fully_masked_document_scores_the_exact_sentinel_under_xla``
+    ``components.py``                                    -- "the MaxSim mask sentinel moved to -20000.0; this
+                                                           guard's hand-derived reference is 32 * -1e4"
 ======================================================  ========================================================
 
 Each injection was verified to redden its OWN named assertion -- the message
@@ -44,6 +55,23 @@ mask on the way to the backbone would have shipped green. Injections (e) and
 (f) each reddened EXACTLY ONE test (1 failed / 90 passed for the directory), at
 the assertion quoted above, and both were restored from the ``cp`` backup and
 re-verified byte-identical with ``diff -q``.
+
+Injection (g) is the only one applied to ``components.py`` rather than to
+``model.py``. It is invisible under the default ``float32`` policy -- the
+promotion it removes is a no-op there -- which is why the guard runs under
+``mixed_float16``: with the promotion gone the compiled score came back
+``float16`` and valued ``-inf``, so BOTH the dtype assertion quoted above and
+the ``query_maxlen * mask_value`` value assertion below it are live. Restored
+from the ``cp`` backup and re-verified byte-identical with ``diff -q``.
+
+Injections (h) and (i) were added by the iter-1 completion fixes. (h) is the
+adversarial reviewer's own injection: before the external
+``REFERENCE_BACKBONE_GEOMETRY`` table existed it left BOTH parametrizations
+GREEN, because every other arm in that test compares the built model against
+the same row the injection edited. (i) is the same defect class one level down
+-- the XLA guard read ``query_maxlen * mask_value`` off the object under test,
+so moving the sentinel moved the expectation with it; with the two operands now
+pinned it fails by name. Both restored by ``cp`` + ``diff -q``.
 """
 
 import os
@@ -728,7 +756,6 @@ def test_get_config_round_trip_reconstructs_an_equivalent_model():
             f"get_config lost constructor argument '{key}': expected {value}, "
             f"got {config.get(key)}"
         )
-    assert "mask_punctuation" in config
     assert "mask_value" in config
 
     rebuilt = ColBERT.from_config(config)
@@ -738,6 +765,38 @@ def test_get_config_round_trip_reconstructs_an_equivalent_model():
     assert weight_paths(rebuilt) == weight_paths(model)
     assert rebuilt.count_params() == model.count_params()
     assert rebuilt.get_config()["dim"] == config["dim"]
+
+
+def test_mask_punctuation_is_rejected_loudly_rather_than_silently_inert():
+    """``mask_punctuation=`` must RAISE, not serialize an intent nothing honors.
+
+    Until 2026-08-25 ``ColBERT`` took a ``mask_punctuation`` constructor
+    argument, stored it and emitted it from ``get_config()`` -- and nothing
+    anywhere read it. The model applies whatever ``doc_skiplist_mask`` it is
+    handed, so ``create_colbert_v2(..., mask_punctuation=False)`` returned a
+    model that still applied the punctuation mask in full while reporting the
+    opposite. The live flag is ``ColBERTTokenizer.mask_punctuation``, a
+    different class.
+
+    The field was deleted, so Keras' unknown-keyword check now fires. MEASURED:
+    the exception is ``ValueError`` with the message ``Unrecognized keyword
+    arguments passed to ColBERT: {'mask_punctuation': False}`` -- on the class
+    and through both factories. This test also pins that the key is gone from
+    ``get_config()``, so a re-added-but-still-inert field cannot pass it.
+    """
+    for construct in (
+        lambda: make_model(mask_punctuation=False),
+        lambda: ColBERT.from_variant("tiny", mask_punctuation=False),
+        lambda: create_colbert_v1("tiny", mask_punctuation=False),
+        lambda: create_colbert_v2("tiny", mask_punctuation=False),
+    ):
+        with pytest.raises(ValueError, match="mask_punctuation"):
+            construct()
+
+    assert "mask_punctuation" not in make_model().get_config(), (
+        "mask_punctuation reappeared in get_config(): the model has no reader "
+        "for it, so serializing it advertises an intent nothing honors"
+    )
 
 
 def test_a_structural_knob_changes_the_weight_signature():
@@ -869,3 +928,240 @@ def test_encode_query_and_encode_document_return_normalized_embeddings():
             rtol=0,
             err_msg=f"{name} embeddings are not unit-norm at kept positions",
         )
+
+
+# ---------------------------------------------------------------------
+# 10. XLA-compiled forward pass
+# ---------------------------------------------------------------------
+
+
+def test_a_fully_masked_document_scores_the_exact_sentinel_under_xla():
+    """The D-006/D-007 arithmetic survives ``jit_compile=True``.
+
+    This is the module's only XLA-compiled guard, and it runs the whole
+    ``from_variant("tiny")`` forward pass -- backbone, projection and
+    ``MaxSimScorer`` -- inside ``tf.function(..., jit_compile=True)`` under
+    ``mixed_float16``, the policy the promotion exists for.
+
+    The reference is HAND-DERIVED, not a second run of the same source. A
+    document whose ``doc_attention_mask`` is all zeros puts every document
+    position behind the sentinel, so every one of the ``query_maxlen`` query
+    terms maxes to ``mask_value`` and the sum is exactly
+    ``query_maxlen * mask_value`` -- ``32 * -1e4 = -320000.0`` for every
+    variant row. That number is arithmetic, so an injection can only move the
+    measured side; an eager-vs-XLA comparison of the same source would move
+    both sides and could never fail. Same construction and same claim as
+    ``test_components.py``'s
+    ``test_an_all_masked_document_yields_a_finite_score``, lifted to the full
+    model and to XLA.
+
+    The scorer's return dtype is asserted too: it is ``float32`` under
+    ``mixed_float16`` by D-007's deliberately accepted consequence, and a
+    float16 sum of 32 sentinels overflows binary16's 65504 to ``-inf``.
+    """
+    import tensorflow as tf
+
+    previous = keras.mixed_precision.global_policy()
+    try:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+
+        model = ColBERT.from_variant("tiny")
+        query_len = model.query_maxlen
+        # Pin the two operands the docstring's "32 * -1e4 = -320000.0" is made
+        # of. Without these the expectation below is read off the object under
+        # test, so a change to DEFAULT_MAXSIM_MASK_VALUE or to the row's
+        # query_maxlen would move oracle and measurement together and this
+        # guard would keep passing while the documented arithmetic was gone.
+        assert query_len == 32, (
+            f"the 'tiny' row's query_maxlen moved to {query_len}; this guard's "
+            "hand-derived reference is 32 * -1e4 = -320000.0"
+        )
+        assert model.scorer.mask_value == -1e4, (
+            f"the MaxSim mask sentinel moved to {model.scorer.mask_value}; "
+            "this guard's hand-derived reference is 32 * -1e4 = -320000.0"
+        )
+        doc_len = 16
+        rng = np.random.default_rng(17)
+        inputs = {
+            QUERY_INPUT_IDS_KEY: rng.integers(
+                0, model.vocab_size, (BATCH, query_len)
+            ).astype("int32"),
+            QUERY_ATTENTION_MASK_KEY: np.ones((BATCH, query_len), dtype="int32"),
+            DOC_INPUT_IDS_KEY: rng.integers(
+                0, model.vocab_size, (BATCH, doc_len)
+            ).astype("int32"),
+            # Every document position masked out.
+            DOC_ATTENTION_MASK_KEY: np.zeros((BATCH, doc_len), dtype="int32"),
+            DOC_SKIPLIST_MASK_KEY: np.ones((BATCH, doc_len), dtype="int32"),
+        }
+
+        compiled = tf.function(
+            lambda batch: model(batch, training=False), jit_compile=True
+        )
+        outputs = compiled(inputs)
+
+        assert outputs["score"].dtype == tf.float32, (
+            "the XLA-compiled score is not float32 under mixed_float16: got "
+            f"{outputs['score'].dtype}; the D-007 promotion did not survive "
+            "XLA lowering, and a float16 sum of "
+            f"{query_len} sentinels overflows to -inf"
+        )
+
+        score = np.asarray(
+            keras.ops.convert_to_numpy(outputs["score"]), dtype=np.float64
+        )
+        assert np.all(np.isfinite(score)), (
+            f"an all-masked document produced a non-finite score under XLA: "
+            f"{score}"
+        )
+        np.testing.assert_allclose(
+            score,
+            np.full((BATCH,), query_len * model.scorer.mask_value),
+            atol=1e-6,
+            rtol=0,
+            err_msg=(
+                "the XLA-compiled all-masked score is not "
+                "query_maxlen * mask_value"
+            ),
+        )
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# 11. base/large variant geometry
+# ---------------------------------------------------------------------
+
+# EXTERNAL oracle. These are the published BERT-Base and BERT-Large backbone
+# dimensions (Devlin et al. 2018, table at the end of section 3: L=12 H=768
+# A=12 and L=24 H=1024 A=16, feed-forward 4H in both), plus ColBERT's own
+# retrieval dimension dim=128 (Khattab & Zaharia 2020, section 3.1). They are
+# facts about the literature, NOT about this implementation, and that is the
+# whole point: every other assertion in the test below compares the built
+# model against the SAME MODEL_VARIANTS row, so a row rewritten to a different
+# but internally consistent backbone moves both sides together and stays green
+# (measured: rewriting `base` to hidden 1024 / layers 10 / heads 16 /
+# intermediate 4096 passed both parametrizations before this table existed).
+REFERENCE_BACKBONE_GEOMETRY = {
+    "base": {
+        "hidden_size": 768,
+        "num_layers": 12,
+        "num_heads": 12,
+        "intermediate_size": 3072,
+        "dim": 128,
+    },
+    "large": {
+        "hidden_size": 1024,
+        "num_layers": 24,
+        "num_heads": 16,
+        "intermediate_size": 4096,
+        "dim": 128,
+    },
+}
+
+
+@pytest.mark.parametrize("variant", ("base", "large"))
+def test_the_base_and_large_rows_keep_their_reference_backbone_geometry(variant):
+    """Structural regression guard over the two full-size ``MODEL_VARIANTS`` rows.
+
+    Both rows are internally consistent today -- ``intermediate_size /
+    hidden_size`` is exactly 4.0x and ``hidden_size % num_heads == 0`` for
+    every row in the table -- so this test finds nothing at the commit that
+    adds it. Its subject is a FUTURE edit to those rows: ``base`` is
+    BERT-Base's backbone and ``large`` is BERT-Large's, and a hand-tweaked
+    number that breaks the head divisor or the 4x feed-forward ratio would
+    otherwise only surface as a construction error in somebody's training run.
+
+    The FIRST arm compares the row against ``REFERENCE_BACKBONE_GEOMETRY``, an
+    external oracle taken from the BERT and ColBERT papers. Everything after it
+    compares the built model against the row, which is self-referential: a row
+    rewritten to a different-but-consistent backbone moves both sides together.
+    Those arms are kept because they catch a different defect class -- a row the
+    constructor silently fails to honour -- but only the external table can
+    catch the row itself drifting off BERT-Base/BERT-Large.
+
+    The build shape is fixed and stated: ``{query_input_ids: (None, 32),
+    doc_input_ids: (None, 64)}``. It is written here rather than taken from
+    the row's ``doc_maxlen`` because these are the two largest variants and
+    construction alone is what is being guarded -- there is no forward pass.
+
+    Construction runs inside ``tf.device("/CPU:0")``. ``large`` is ~334M
+    parameters, new peak memory for this module, and on a GPU 1 shared with a
+    training job it raised ``ResourceExhaustedError ... [Op:AddV2]`` -- a red
+    that depends on what else is running, in the gate this plan uses as its
+    instrument. The test needs no device (it never runs a forward pass) and
+    costs 4.45s on CPU against 2.8s on an idle GPU.
+
+    No exact ``count_params()`` is asserted, deliberately. That figure tracks
+    the build shapes the caller happens to pass, not the variant row: the same
+    ``base`` model measures 108,989,952 parameters at document length 64 and
+    162,561,792 at a longer one, because the backbone's position-embedding
+    table is sized by the build. Pinning either number would pin whatever the
+    implementation produced on the day this was written. The geometry
+    invariants below are build-shape independent, and they are what a bad row
+    edit actually violates.
+    """
+    import tensorflow as tf
+
+    row = ColBERT.MODEL_VARIANTS[variant]
+    reference = REFERENCE_BACKBONE_GEOMETRY[variant]
+
+    # Asserted from the row BEFORE construction, so a bad row is reported as a
+    # geometry violation naming the offending numbers rather than as whatever
+    # the backbone happens to raise first.
+    assert row["hidden_size"] % row["num_heads"] == 0, (
+        f"the '{variant}' row cannot split its hidden size across its heads: "
+        f"hidden_size={row['hidden_size']} is not divisible by "
+        f"num_heads={row['num_heads']}"
+    )
+    assert row["intermediate_size"] == 4 * row["hidden_size"], (
+        f"the '{variant}' row broke the 4x feed-forward ratio every BERT-family "
+        f"backbone in this table uses: intermediate_size="
+        f"{row['intermediate_size']}, hidden_size={row['hidden_size']}"
+    )
+
+    # The external arm, run AFTER the two intra-row arms so an internally
+    # INCONSISTENT row still reports as the specific violation it is (a head
+    # divisor or ratio break) rather than as a reference mismatch. Nothing
+    # here reads the built model, so an edit to the row cannot move this
+    # expectation with it.
+    for key, expected in reference.items():
+        assert row[key] == expected, (
+            f"the '{variant}' row no longer matches its reference backbone: "
+            f"{key}={row[key]}, but BERT-"
+            f"{'Base' if variant == 'base' else 'Large'}/ColBERT declares "
+            f"{key}={expected}"
+        )
+
+    with tf.device("/CPU:0"):
+        model = ColBERT.from_variant(variant)
+    try:
+        with tf.device("/CPU:0"):
+            model.build(
+                {
+                    QUERY_INPUT_IDS_KEY: (None, 32),
+                    DOC_INPUT_IDS_KEY: (None, 64),
+                }
+            )
+
+        assert len(model.encoder.encoder_layers) == row["num_layers"], (
+            f"the '{variant}' backbone materialized "
+            f"{len(model.encoder.encoder_layers)} transformer layers, but the "
+            f"row declares num_layers={row['num_layers']}"
+        )
+        assert model.projection.dense.units == row["dim"], (
+            f"the '{variant}' projection emits "
+            f"{model.projection.dense.units} dimensions, not the row's "
+            f"dim={row['dim']}"
+        )
+        assert tuple(model.projection.dense.kernel.shape) == (
+            row["hidden_size"],
+            row["dim"],
+        ), (
+            "the projection kernel does not map the backbone's hidden size to "
+            f"the retrieval dimension: got "
+            f"{tuple(model.projection.dense.kernel.shape)}, expected "
+            f"({row['hidden_size']}, {row['dim']})"
+        )
+    finally:
+        del model

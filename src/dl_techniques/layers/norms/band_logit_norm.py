@@ -1,9 +1,14 @@
 """
 BandLogitNorm Layer Implementation
 
-This module implements a custom Keras layer that applies constrained RMS normalization
-with adaptive scaling. The layer normalizes input tensors to unit L2 norm and then
-applies a learned scaling factor bounded within a specified band around 1.0.
+This module implements a custom Keras layer that applies constrained L2 normalization
+with a band-bounded scale. The layer normalizes input tensors to unit L2 norm and then
+applies a scaling factor bounded within a specified band around 1.0.
+
+Note on terminology: the norm used here is an L2 norm, ``sqrt(max(sum(x**2), eps))`` -
+a SUM over the axis, not a mean - so this layer does NOT perform RMS normalization
+(``sqrt(mean(x**2))``). Its output magnitude therefore depends on the size of the
+normalized axis, unlike the RMS-based layers in this package.
 
 Mathematical Operation:
 1. Normalize input to unit L2 norm: x_norm = x / ||x||_2
@@ -23,6 +28,9 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms._masking import (
+    normalizes_only_the_feature_axis,
+)
 
 
 # ---------------------------------------------------------------------
@@ -31,11 +39,25 @@ from dl_techniques.utils.logger import logger
 class BandLogitNorm(keras.layers.Layer):
     """Band-constrained logit normalization layer.
 
-    Applies RMS normalization to input tensors and constrains the resulting L2
+    Applies L2 normalization to input tensors and constrains the resulting L2
     norm to lie within a specified band around 1.0. First normalizes to unit L2
     norm, then applies a LayerNormalization-based learned scaling factor bounded
     via ``tanh`` to the range ``[1 - max_band_width, 1]``. This provides
     controlled normalization strength while preserving directional information.
+
+    The norm is ``sqrt(max(sum(x**2), epsilon))`` - a SUM over ``axis``, i.e. an
+    L2 norm. This layer does not compute an RMS (``sqrt(mean(x**2))``) despite
+    sitting beside the RMS family in this package.
+
+    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
+    unconditionally: it is ``True`` only while every normalized axis is the trailing
+    (feature) axis of the input. At ``axis=-1`` the output at one position is a function of
+    that position only (measured cross-position leak exactly ``0.0`` on a
+    ``(3, 5, 8)`` input, both training regimes).
+    Normalizing over the TOKEN axis instead couples positions - measured leak
+    ``0.914`` at ``axis=1`` on the same input - and there the flag is ``False``, so
+    Keras drops the mask and says so. The decision is made in ``__init__`` from the
+    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
 
     .. note::
         **Degenerate adaptive component (known limitation).** The "learned scaling"
@@ -140,6 +162,12 @@ class BandLogitNorm(keras.layers.Layer):
             name=f"{self.name}_layer_norm",
         )
 
+        # supports_masking is a promise about the AXIS, not about the class: it holds
+        # only while the normalized axis is the trailing (feature) axis. Decided here
+        # from the spelling alone - `-1` names the trailing axis at every rank - and
+        # made exact in build(), where the input rank is finally known.
+        self.supports_masking = normalizes_only_the_feature_axis(axis)
+
         logger.debug(
             f"Initialized BandLogitNorm with "
             f"axis={axis}, "
@@ -173,6 +201,13 @@ class BandLogitNorm(keras.layers.Layer):
         if self.built:
             return
 
+        # Refine the __init__ estimate now that the rank is known. Keras reads
+        # supports_masking inside __call__, which runs build() first, so this is the
+        # value that decides whether the mask actually survives.
+        self.supports_masking = normalizes_only_the_feature_axis(
+            self.axis, rank=len(input_shape)
+        )
+
         # The norm tensor fed to self.norm has shape [..., 1] (keepdims=True).
         norm_shape = list(input_shape)
         norm_shape[self.axis] = 1
@@ -185,7 +220,7 @@ class BandLogitNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply constrained RMS normalization.
+        """Apply constrained L2 normalization.
 
         :param inputs: Input tensor to normalize.
         :type inputs: keras.KerasTensor
@@ -250,16 +285,5 @@ class BandLogitNorm(keras.layers.Layer):
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BandLogitNorm':
-        """Create a layer instance from its configuration.
-
-        :param config: Layer configuration dictionary.
-        :type config: Dict[str, Any]
-
-        :return: New layer instance.
-        :rtype: BandLogitNorm
-        """
-        return cls(**config)
 
 # ---------------------------------------------------------------------

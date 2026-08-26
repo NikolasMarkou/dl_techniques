@@ -712,7 +712,15 @@ Two trainers live under `src/train/language/colbert/`:
 | Entry point | Recipe | Loss |
 |---|---|---|
 | `train_colbert_v1.py` | pairwise/listwise softmax CE over `<q, d+, d-...>` tuples, positive first | `ColBERTPairwiseSoftmaxLoss` |
-| `train_colbert_v2.py` | cross-encoder KL distillation over `nway` tuples, optional in-batch negatives | `ColBERTDistillationLoss` |
+| `train_colbert_v2.py` | cross-encoder KL distillation over `nway` tuples | `ColBERTDistillationLoss` |
+
+**`train_colbert_v2.py` does NOT implement in-batch negatives.** §3 and the model docstring
+describe the ColBERTv2 *paper*, whose v2 supervision is distillation **plus** in-batch negatives;
+this repository implements only the distillation half. Every negative any ColBERT trainer here
+sees is an explicit member of its own `<query, positive, negatives...>` tuple — no other
+example's documents enter a group's loss. Measured 2026-08-25: `grep -rni 'in.\?batch'
+src/train/language/colbert/` returns **0**. The row above is silent about it, which is why this
+sentence exists: the gap has to be stated, not inferred from an absence.
 
 ```bash
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.language.colbert.train_colbert_v1 --help
