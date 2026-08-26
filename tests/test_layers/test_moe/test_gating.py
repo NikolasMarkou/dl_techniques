@@ -96,6 +96,82 @@ class TestCosineGating:
         assert rebuilt.embedding_dim == 8 and rebuilt.temperature == 2.0
 
 
+class TestHardRoutingWeightsSumToOneOverTheSelectedExperts:
+    """The top-k renormalization at `gating.py:309` / `:566` must survive review.
+
+    Both hard-routed gating types mask the non-selected logits to a large negative
+    sentinel and re-softmax, so the SELECTED experts' weights sum to 1 per token.
+    That is the property `layer.py`'s combine step depends on: the routed output is
+    `sum_k w_k * expert_k(x)`, and weights summing to less than 1 scale every token's
+    output down.
+
+    **This class exists because deleting that renormalization left 0 of 353 tests
+    failing.** Replacing the masked resoftmax with a raw `ops.softmax(gate_logits)`
+    keeps the weights summing to 1 over ALL experts -- so a naive "the weights are a
+    probability distribution" assertion cannot see it -- while the top-k SUBSET sums
+    to less than 1 and every unselected expert becomes nonzero. The only sum-to-1
+    assertion in the package was SoftMoE's (`test_the_two_softmaxes_normalize_over_
+    different_axes`), which covers a different mechanism on different axes. The
+    dense-vs-sparse equivalence gate is blind to it as well: both kernels consume the
+    same upstream weights, so the mutation moves both arms identically.
+
+    RED-proved by re-applying that mutation at each of the two sites independently in
+    a scratch worktree; see `verification.md`'s RED-Proof Ledger.
+    """
+
+    @staticmethod
+    def _layer(gating_type: str, top_k: int):
+        if gating_type == "linear":
+            return LinearGating(num_experts=NUM_EXPERTS, top_k=top_k, add_noise=False)
+        return CosineGating(num_experts=NUM_EXPERTS, top_k=top_k, embedding_dim=8)
+
+    @pytest.mark.parametrize("gating_type", ("linear", "cosine"))
+    @pytest.mark.parametrize("top_k", (1, 2, NUM_EXPERTS - 1, NUM_EXPERTS))
+    def test_the_selected_experts_weights_sum_to_one(self, gating_type, top_k):
+        """`top_k=NUM_EXPERTS` takes the dense `else` branch and is the control:
+        it is unaffected by the mutation, so it pins that this assertion is not
+        merely restating "softmax sums to 1"."""
+        layer = self._layer(gating_type, top_k)
+        weights, indices, _ = layer(_f32(B, D))
+
+        selected = np.take_along_axis(
+            keras.ops.convert_to_numpy(weights),
+            keras.ops.convert_to_numpy(indices).astype(np.int64),
+            axis=-1,
+        )
+        assert selected.shape == (B, top_k)
+        np.testing.assert_allclose(
+            selected.sum(axis=-1), np.ones(B), rtol=0.0, atol=1e-6,
+            err_msg=(
+                f"{gating_type}/top_k={top_k}: the selected experts' weights sum to "
+                f"{selected.sum(axis=-1)}, not 1 — the combine step silently scales "
+                "every token's output by that factor"
+            ),
+        )
+
+    @pytest.mark.parametrize("gating_type", ("linear", "cosine"))
+    @pytest.mark.parametrize("top_k", (1, 2, NUM_EXPERTS - 1, NUM_EXPERTS))
+    def test_exactly_top_k_weights_are_nonzero(self, gating_type, top_k):
+        """A second, independent detector of the same mutant.
+
+        The masked softmax drives every unselected expert to exactly 0.0 (the
+        sentinel is `-1e9` in float32); a raw softmax leaves all `NUM_EXPERTS` of
+        them nonzero. This cell would still fail the mutation even if some future
+        change made the sum-to-1 cell above pass for an unrelated reason.
+        """
+        layer = self._layer(gating_type, top_k)
+        weights, _, _ = layer(_f32(B, D))
+
+        nonzero = (keras.ops.convert_to_numpy(weights) != 0.0).sum(axis=-1)
+        np.testing.assert_array_equal(
+            nonzero, np.full(B, top_k),
+            err_msg=(
+                f"{gating_type}/top_k={top_k}: {nonzero} experts carry nonzero "
+                f"weight, expected exactly {top_k}"
+            ),
+        )
+
+
 class TestSoftMoEGating:
     def test_invalid_num_slots(self):
         with pytest.raises(ValueError):
