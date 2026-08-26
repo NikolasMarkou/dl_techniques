@@ -35,8 +35,9 @@ The MoE module implements expert-conditioned neural networks where each input is
 
 ### Known Limitations
 
-- **Hard-routing kernel is dense, not sparse in FLOPs.** The current implementation runs *all* experts on *all* tokens and masks contributions by the top-k routing weights. This is O(N) in FLOPs (not the textbook O(k/N)) and is chosen for graph-mode friendliness — no scatter/gather. The sparsity manifests in the gradient pattern and expert specialization, not in compute. A capacity-based sparse dispatch (with token permutation and batched experts) is planned as a follow-up.
-- **`drop_tokens` and `use_residual_connection` are reserved.** These `MoEConfig` flags are placeholders for the future sparse dispatch; they have no effect on the current dense kernel.
+- **Hard routing is sparse in FLOPs; wall-clock does not always follow.** Each expert runs only on the tokens routed to it (gather → FFN → scatter-add), an exact `num_experts / top_k` reduction in expert-token pairs (measured). But both kernels issue one FFN call per expert, and the sparse one adds a gather/scatter to each, so at small token counts the launch overhead can outweigh the saving. Measured on an RTX 4070 under `tf.function`, `d_model=512`, `hidden=1024`: 2048 tokens → `0.913x` at `num_experts=64` and `0.871x` at `128` (slightly **slower**); 8192 tokens → `2.108x` at `num_experts=64`; and at the `qwen3_next` preset shape (`num_experts=512`, `top_k=10`, 2048 tokens) sparse completes in 179 ms where the dense kernel exhausts the 12 GB device. Memory, unlike time, is reduced at every size.
+- **The dense kernel is retained on purpose.** `MixtureOfExperts._process_hard_routing_dense` runs every expert on every token and masks the result. It is the numerical oracle the sparse kernel is gated against (`atol=1e-5`, `rtol=0`, `tests/test_layers/test_moe/test_the_sparse_kernel_matches_the_dense_oracle.py`), and it is also the kernel that runs whenever `top_k >= num_experts`, where there is no sparsity to exploit.
+- **`drop_tokens` and `use_residual_connection` are inert.** Neither kernel drops a token — the sparse kernel computes exactly the routed `(token, expert)` pairs and the dense kernel computes all of them, so no token is ever left without a contribution. These `MoEConfig` flags are reported by `get_expert_utilization()` and gate no forward-path behaviour.
 - **`CosineGating.temperature` semantics changed.** As of the May-2026 review, cosine gating now *divides* logits by `temperature` (standard softmax-temperature semantics: larger `temperature` → flatter distribution). Earlier versions multiplied; checkpoints/configs using the old behavior will route more diffusely under the new code.
 - **SoftMoE auxiliary info keys changed.** `phi_weights` is replaced by `dispatch_weights` (softmax over the sequence axis) and `combine_weights` (softmax over experts × slots per token), matching Puigcerver et al. (2023). Callers reading `phi_weights` from `gating_info` must migrate.
 
@@ -45,13 +46,13 @@ The MoE module implements expert-conditioned neural networks where each input is
 ### MoE Layer Structure
 
 ```
-Input → Gating Network → Routing Weights → All Experts (run on all tokens) → Weighted Combination → Output
+Input → Gating Network → Routing Weights → Per-expert gather → Expert FFN → Scatter-add → Output
          ↓                ↓                  ↓
-         Router           Top-K Mask         Per-token mask × expert output
-         Logits           (zeros otherwise)  Sum over experts
+         Router           Top-K indices      Only the tokens routed to expert e
+         Logits                              are gathered, run, and scattered back
 ```
 
-(See "Known Limitations" above re: dense vs. sparse compute.)
+(See "Known Limitations" above for the measured sparse-vs-dense wall-clock picture, and for why the dense kernel is retained.)
 
 ### Expert Types
 
@@ -149,7 +150,7 @@ class ExpertConfig:
 class GatingConfig:
     gating_type: Literal['linear', 'cosine', 'softmoe'] = 'linear'
     top_k: int = 1                    # Experts selected per token
-    capacity_factor: float = 1.25     # RESERVED — not consumed by the current dense kernel
+    capacity_factor: float = 1.25     # RESERVED — not consumed by either routing kernel
     add_noise: bool = True            # Exploration noise (linear gating)
     noise_std: float = 1.0            # Noise standard deviation
     temperature: float = 1.0          # Softmax temperature
@@ -184,16 +185,16 @@ class MoEConfig:
 
     # System parameters
     jitter_noise: float = 0.01
-    drop_tokens: bool = True               # RESERVED — dense kernel never drops tokens
+    drop_tokens: bool = True               # RESERVED — no kernel ever drops tokens
     use_residual_connection: bool = True   # RESERVED — pairs with drop_tokens
     routing_dtype: str = 'float32'
 ```
 
-> **Reserved / not-yet-implemented fields.** The current routing kernel is
-> *dense* — every expert processes every token and outputs are masked by the
-> routing weights. Consequently `capacity_factor`, `drop_tokens`, and
-> `use_residual_connection` are accepted and serialized but have **no runtime
-> effect**; they are placeholders for a future capacity-based sparse dispatch.
+> **Reserved / not-yet-implemented fields.** `capacity_factor`, `drop_tokens`
+> and `use_residual_connection` are accepted and serialized but have **no
+> runtime effect**. They describe a capacity-based dispatch with token
+> dropping, which is a different scheme from the sparse gather/scatter kernel
+> that ships: no token is ever dropped by either kernel.
 > The legacy `train_capacity_factor` / `eval_capacity_factor` fields have been
 > **removed** (they are silently ignored by `MoEConfig.from_dict` for backward
 > compatibility). Passing them to a config constructor raises `TypeError`.
@@ -359,13 +360,13 @@ config = MoEConfig(
     gating_config=GatingConfig(
         gating_type='linear',
         top_k=2,
-        capacity_factor=1.25,          # RESERVED (no effect in the dense kernel)
+        capacity_factor=1.25,          # RESERVED (no effect in either kernel)
         add_noise=True,                # Exploration noise
         noise_std=1.0,
         aux_loss_weight=0.01,          # Load balancing
         z_loss_weight=1e-3             # Entropy regularization
     ),
-    # Token management (RESERVED — no effect in the current dense kernel)
+    # Token management (RESERVED — no effect in either kernel)
     drop_tokens=True,
     use_residual_connection=True,
     jitter_noise=0.01                  # Input noise for regularization
@@ -549,9 +550,9 @@ def train_step(batch_x, batch_y):
 
 ### Memory Usage
 
-- **Dense kernel cost**: every expert processes every token (compute scales with `num_experts`, not `top_k`). Control memory via `num_experts` and the per-expert FFN size.
-- **Top-K Selection**: Higher `top_k` changes which experts are weighted into the output; in the dense kernel it does not reduce compute, but it still affects routing quality.
-- **Capacity / token dropping**: `capacity_factor`, `drop_tokens`, and `use_residual_connection` are RESERVED and have no effect in the current dense kernel (see *Reserved / not-yet-implemented fields* above).
+- **Expert cost scales with `top_k`**, not `num_experts` — each expert sees only its routed tokens. Peak activation memory is therefore `num_tokens × top_k` expert rows rather than `num_tokens × num_experts`.
+- **Top-K Selection**: higher `top_k` raises both compute and activation memory proportionally, and affects routing quality.
+- **Capacity / token dropping**: `capacity_factor`, `drop_tokens`, and `use_residual_connection` are RESERVED and have no effect (see *Reserved / not-yet-implemented fields* above); neither kernel drops a token.
 
 ### Computational Efficiency
 
@@ -646,8 +647,8 @@ gating_config = GatingConfig(
 **Symptoms**: Out-of-memory (OOM) errors during training.
 ```python
 # Solution: reduce per-expert cost or the number of active experts.
-# NOTE: the current kernel is dense, so capacity-based token dropping is not
-# yet available — reduce num_experts, top_k, or the FFN size instead.
+# NOTE: no kernel drops tokens, so capacity-based token dropping is not
+# available — reduce num_experts, top_k, or the FFN size instead.
 config = MoEConfig(
     num_experts=8,                                     # fewer experts
     expert_config=ExpertConfig(ffn_config={
@@ -738,10 +739,10 @@ def validate_moe_model(model, sample_input):
 - Check for spelling errors and case sensitivity.
 
 #### Out-of-memory with many experts
-- The kernel is dense (no capacity limit / no token dropping), so memory scales
-  with `num_experts` and the per-expert FFN size.
+- Expert activation memory scales with `top_k` and the per-expert FFN size; the
+  per-expert *weights* still scale with `num_experts`.
 - Reduce `num_experts`, shrink the FFN (`hidden_dim` / `output_dim`), or lower
-  `top_k`. `capacity_factor` / `drop_tokens` are reserved and have no effect yet.
+  `top_k`. `capacity_factor` / `drop_tokens` are reserved and have no effect.
 
 ## Examples
 
