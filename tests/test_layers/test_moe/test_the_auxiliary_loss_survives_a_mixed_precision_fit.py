@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.moe.config import ExpertConfig, GatingConfig, MoEConfig
+from dl_techniques.layers.moe.gating import compute_auxiliary_loss
 from dl_techniques.layers.moe.layer import MixtureOfExperts
 
 SEQ_LEN, MODEL_DIM, NUM_EXPERTS = 6, 16, 4
@@ -172,3 +173,31 @@ def test_the_aggregated_loss_list_is_uniformly_float32(half_policy):
             f"add_loss value has dtype {loss.dtype} under {half_policy}; "
             "Keras casts only NON-float losses, so this crashes ops.sum(self.losses)"
         )
+
+
+def test_the_auxiliary_loss_returns_float32_under_both_half_policies(half_policy):
+    """``compute_auxiliary_loss`` itself, called directly, under BOTH half policies.
+
+    ``test_gating.py::TestAuxiliaryLossReturnDtype`` covers ``float32`` and
+    ``mixed_float16`` directly but its shared ``dtype_policy`` fixture parametrizes
+    ``float64``, not ``mixed_bfloat16``. This cell closes that third policy at the
+    function boundary rather than only through ``moe.losses``.
+
+    The inputs are cast to the policy's COMPUTE dtype first: without that the cell is
+    vacuous, because float32 inputs keep the reduction in float32 and the pre-fix code
+    passes too (MEASURED in the step-1 RED worktree).
+    """
+    compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+    rng = np.random.default_rng(1234)
+    weights = np.abs(rng.standard_normal((3, 7, NUM_EXPERTS))).astype("float32")
+    weights[weights < 0.8] = 0.0
+    probs = rng.random((3, 7, NUM_EXPERTS)).astype("float32")
+    probs /= probs.sum(-1, keepdims=True)
+
+    weights = keras.ops.cast(keras.ops.convert_to_tensor(weights), compute_dtype)
+    probs = keras.ops.cast(keras.ops.convert_to_tensor(probs), compute_dtype)
+    assert compute_dtype in str(weights.dtype), "inputs are not in the policy dtype"
+
+    loss = compute_auxiliary_loss(weights, probs, NUM_EXPERTS, 0.01)
+    assert "float32" in str(loss.dtype), (
+        f"aux loss returned {loss.dtype} under {half_policy}")

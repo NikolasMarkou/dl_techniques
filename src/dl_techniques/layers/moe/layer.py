@@ -46,10 +46,14 @@ class MixtureOfExperts(keras.layers.Layer):
        ``d_model=512``, ``hidden=1024``: at 2048 tokens sparse is ``0.913x``
        (``num_experts=64``) and ``0.871x`` (``128``) — i.e. slightly slower;
        at 8192 tokens with ``num_experts=64`` it is ``2.108x`` faster; and at
-       the shipped ``qwen3_next`` preset shape (``num_experts=512``,
-       ``top_k=10``, 2048 tokens) the sparse kernel completes in 179 ms while
-       the dense kernel exhausts the 12 GB device. Memory, unlike time, is
-       reduced at every size.
+       the shipped ``qwen3_next`` preset's expert COUNT (``num_experts=512``,
+       ``top_k=10``, 2048 tokens, still at ``d_model=512``/``hidden=1024``) the
+       sparse kernel completes in 179 ms while the dense kernel exhausts the
+       12 GB device. At the preset's REAL feature dims (``hidden_size=2048``,
+       ``moe_intermediate_size=512``), measured EAGER on an idle RTX 4070,
+       sparse takes 11.808 s and dense raises ``ResourceExhaustedError``
+       (``OOM ... shape[2048,2048] ... [Op:BiasAdd]``) — a different regime, same
+       verdict. Memory, unlike time, is reduced at every size.
 
        ``drop_tokens`` and ``use_residual_connection`` remain inert: neither
        kernel drops a token. They are diagnostic flags echoed by

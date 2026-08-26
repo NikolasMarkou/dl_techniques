@@ -152,7 +152,12 @@ class LinearGating(BaseGating):
     Linear gating network with optional noise and top-k expert selection.
 
     Implements the most common gating mechanism using a linear transformation
-    ``W * x + b`` followed by softmax normalization and top-k selection. During
+    ``W * x + b`` followed by top-k selection and then a softmax taken over the
+    SELECTED experts only -- the non-selected logits are masked to a
+    dtype-appropriate large negative value first, so the returned weights sum to
+    1 over the top-k subset, which is the property ``layer.py``'s combine step
+    depends on. The order is not interchangeable: a softmax over all experts
+    followed by masking would silently scale the routed output down. During
     training, Gaussian noise can be injected into the gating logits via a
     learned noise scaling network to improve load balancing across experts:
     ``logits = W_g * x + softplus(W_n * x) * N(0, noise_std)``.
@@ -375,9 +380,11 @@ class CosineGating(BaseGating):
     Operates in a normalized embedding space, computing cosine similarity
     ``cos(theta) = (x_proj / ||x_proj||) . (e_k / ||e_k||)`` between input
     representations and learnable expert embeddings. The similarity scores
-    are divided by a (optionally learnable) temperature ``tau`` before top-k
-    selection and softmax normalization (standard softmax-temperature
-    semantics: larger ``tau`` -> flatter distribution). This can provide
+    are divided by a (optionally learnable) temperature ``tau``, then top-k
+    selected, and only then softmaxed over the SELECTED experts (standard
+    softmax-temperature semantics: larger ``tau`` -> flatter distribution). As
+    in ``LinearGating``, masking precedes the softmax so the returned weights
+    sum to 1 over the top-k subset. This can provide
     better domain generalization compared to linear gating.
 
     .. note::
@@ -911,7 +918,7 @@ def compute_auxiliary_loss(
     #
     # That OVERFLOW analysis is RIGHT and still holds -- and it answered the wrong
     # question. The failure mode is not magnitude, it is the DTYPE OF THE RETURNED
-    # TENSOR. `layer.py:278` hands this value to `add_loss`. Keras'
+    # TENSOR. `MixtureOfExperts.call` hands this value to `add_loss`. Keras'
     # `_aggregate_additional_loss` (`keras/src/trainers/trainer.py:389-400`) casts
     # only NON-float losses to `floatx()`, so a float16 value passes through
     # untouched into the list that `compute_loss` reduces at `trainer.py:365`
@@ -977,12 +984,14 @@ def compute_z_loss(
     # `mixed_float16` (where a Dense gate emits float16) any logit past ~256
     # squares out of float16's 65504 range. MEASURED at HEAD: logits in
     # [-426.75, 435.0] gave `compute_z_loss = inf` where the float32 reference is
-    # 70.707. `layer.py:262-267` feeds that value straight into `add_loss`
-    # whenever `training` is truthy and `z_loss_weight > 0` -- the GatingConfig
-    # DEFAULT (1e-3) -- so the `inf` poisons the whole model's loss and gradients
-    # silently, with no warning and no exception. This mirrors the D-064 template
-    # at `layer.py:320-337`: cast at the numerically fragile boundary, leave the
-    # arithmetic alone. See decisions.md D-009.
+    # 70.707. `MixtureOfExperts.call` (the `add_loss(z_loss)` site in `layer.py`,
+    # beside the `add_loss(aux_loss)` one) feeds that value straight into the
+    # model's loss whenever `training` is truthy and `z_loss_weight > 0` -- the
+    # GatingConfig DEFAULT (1e-3) -- so the `inf` poisons the whole model's loss
+    # and gradients silently, with no warning and no exception. This mirrors the
+    # D-064 template in `_process_hard_routing_dense` / `_process_hard_routing_sparse`:
+    # cast at the numerically fragile boundary, leave the arithmetic alone. See
+    # decisions.md D-009.
     gate_logits = keras.ops.cast(gate_logits, 'float32')
 
     # Compute logsumexp for each token
