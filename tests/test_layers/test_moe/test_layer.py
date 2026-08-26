@@ -1543,6 +1543,100 @@ class TestMoEConfigValidation:
             CosineGating(num_experts=4, top_k=8, embedding_dim=8)
 
 
+
+class TestFactoryAndShapeContract:
+    """D1 + D2: `compute_output_shape` honesty and `create_ffn_moe`'s keyword contract."""
+
+    @pytest.mark.parametrize("ffn_type", ["swin_mlp", "gelu_tanh"])
+    def test_explicit_none_output_dim_reports_the_input_width(self, ffn_type):
+        """RED before the fix: symbolic (None, 5, None) vs a measured runtime (2, 5, 10).
+
+        `output_dim: None` is the FFN factory's "same width as the input" spelling,
+        not a declared width. Membership-testing the key propagated the None.
+        """
+        config = MoEConfig(
+            num_experts=4,
+            expert_config=ExpertConfig(
+                ffn_config={"type": ffn_type, "hidden_dim": 8, "output_dim": None}
+            ),
+            gating_config=GatingConfig(gating_type="linear", top_k=2),
+        )
+        layer = MixtureOfExperts(config=config)
+
+        symbolic = layer.compute_output_shape((None, 5, 10))
+        runtime = tuple(layer(np.random.rand(2, 5, 10).astype("float32")).shape)
+
+        assert symbolic[-1] == 10, f"last dim went symbolic-None: {symbolic}"
+        assert symbolic == (None, 5, 10)
+        assert symbolic[1:] == runtime[1:]
+
+    def test_explicit_output_dim_still_overrides_the_input_width(self):
+        """The None-tolerant test must not become blind to a real declared width."""
+        config = MoEConfig(
+            num_experts=4,
+            expert_config=ExpertConfig(
+                ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6}
+            ),
+            gating_config=GatingConfig(gating_type="linear", top_k=2),
+        )
+        layer = MixtureOfExperts(config=config)
+        assert layer.compute_output_shape((None, 5, 10)) == (None, 5, 6)
+
+    def test_gate_use_bias_reaches_the_router(self):
+        """The renamed key routes where its name says: the gating Dense bias.
+
+        Asserted at ``True``, against a ``GatingConfig.use_bias`` default of
+        ``False`` -- at the default the assertion cannot fail and would have
+        passed against pre-fix code that dropped the key entirely.
+        """
+        assert GatingConfig.use_bias is False, "test is vacuous unless the default is False"
+        layer = create_ffn_moe(
+            num_experts=4,
+            ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+            top_k=2,
+            gate_use_bias=True,
+        )
+        assert layer.config.gating_config.use_bias is True
+        # and it must not leak into the expert FFN, which is the other real route
+        assert "use_bias" not in layer.config.expert_config.ffn_config
+
+    def test_bare_use_bias_is_rejected_and_names_both_routes(self):
+        """RED before the fix: `use_bias=False` was silently applied to the GATE.
+
+        A caller passing it alongside an `ffn_config` means the expert FFN's bias,
+        and got the router's instead with no error.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            create_ffn_moe(
+                num_experts=4,
+                ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+                use_bias=False,
+            )
+        message = str(excinfo.value)
+        assert "use_bias" in message
+        assert "gate_use_bias" in message
+        assert "ffn_config['use_bias']" in message
+
+    def test_undeclared_keyword_raises_instead_of_being_dropped(self):
+        """The repo factory contract (layers/CLAUDE.md rule 1): never filter-and-drop."""
+        with pytest.raises(ValueError, match="undeclared keyword"):
+            create_ffn_moe(
+                num_experts=4,
+                ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+                bogus_key=1,
+            )
+
+    def test_keras_layer_keywords_are_forwarded(self):
+        """`name=` was among the silently dropped keys; the README's example used it."""
+        layer = create_ffn_moe(
+            num_experts=4,
+            ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+            top_k=2,
+            name="moe_ffn",
+        )
+        assert layer.name == "moe_ffn"
+
+
 # Run tests with: pytest test_mixture_of_experts.py -v
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

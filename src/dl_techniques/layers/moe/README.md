@@ -462,6 +462,25 @@ def create_ffn_moe(
 ) -> MixtureOfExperts
 ```
 
+`create_ffn_moe` **raises `ValueError` on an undeclared keyword** rather than
+filtering it out, per the factory contract in `src/dl_techniques/layers/CLAUDE.md`.
+The accepted `kwargs` are:
+
+| Group | Keys |
+|---|---|
+| Expert norm | `norm_type`, `norm_config`, `pre_norm`, `post_norm`, `expert_norm_type`, `expert_norm_config` |
+| Gating | `gate_use_bias`, `add_noise`, `noise_std`, `temperature`, `embedding_dim`, `learnable_temperature`, `num_slots`, `z_loss_weight`, `gating_norm_type`, `gating_norm_config` |
+| MoE | `jitter_noise`, `drop_tokens`, `use_residual_connection` |
+| Keras layer | `name`, `dtype`, `trainable` |
+
+`use_bias=` is **not** accepted. It names a bias that exists in two different
+sub-components, so the caller must say which:
+
+```python
+create_ffn_moe(..., gate_use_bias=True)                       # the router's Dense bias
+create_ffn_moe(..., ffn_config={..., 'use_bias': True})       # the expert FFN's bias
+```
+
 ### Expert Networks
 
 ```python

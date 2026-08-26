@@ -577,9 +577,13 @@ class MixtureOfExperts(keras.layers.Layer):
 
         # Determine output dimension from FFN configuration
         ffn_config = self.expert_config.ffn_config
-        if 'output_dim' in ffn_config:
+        # A key that is *present but None* is not a declared output width -- it is
+        # the FFN factory's "same as input" spelling, legal for `swin_mlp` and
+        # `gelu_tanh`. Testing membership alone reported (None, 5, None) against a
+        # measured runtime (2, 5, 10). Test the value, not the key.
+        if ffn_config.get('output_dim') is not None:
             output_shape[-1] = ffn_config['output_dim']
-        elif 'd_model' in ffn_config:
+        elif ffn_config.get('d_model') is not None:
             output_shape[-1] = ffn_config['d_model']
         # Otherwise keep input dimension
 
@@ -630,6 +634,51 @@ class MixtureOfExperts(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+# Keyword routing for :func:`create_ffn_moe`. Declared here, once, so that the
+# filters below and the undeclared-keyword check cannot drift apart -- a factory
+# whose validator is a hand-copied second list is the failure mode this data
+# structure exists to prevent.
+_FFN_MOE_EXPERT_KEYS = frozenset({'norm_type', 'norm_config', 'pre_norm', 'post_norm'})
+_FFN_MOE_EXPERT_ALIASES = {
+    'expert_norm_type': 'norm_type',
+    'expert_norm_config': 'norm_config',
+}
+_FFN_MOE_GATING_KEYS = frozenset({
+    'add_noise', 'noise_std', 'temperature', 'embedding_dim',
+    'learnable_temperature', 'num_slots', 'z_loss_weight',
+})
+_FFN_MOE_GATING_ALIASES = {
+    'gate_use_bias': 'use_bias',
+    'gating_norm_type': 'norm_type',
+    'gating_norm_config': 'norm_config',
+}
+_FFN_MOE_MOE_KEYS = frozenset({'jitter_noise', 'drop_tokens', 'use_residual_connection'})
+# Standard Keras layer keywords, forwarded to the constructed layer.
+_FFN_MOE_LAYER_KEYS = frozenset({'name', 'dtype', 'trainable'})
+
+_FFN_MOE_DECLARED_KEYS = (
+    _FFN_MOE_EXPERT_KEYS
+    | frozenset(_FFN_MOE_EXPERT_ALIASES)
+    | _FFN_MOE_GATING_KEYS
+    | frozenset(_FFN_MOE_GATING_ALIASES)
+    | _FFN_MOE_MOE_KEYS
+    | _FFN_MOE_LAYER_KEYS
+)
+
+# Keywords a caller plausibly reaches for that this factory deliberately does not
+# declare, mapped to the routes that actually exist. Naming the real route is the
+# whole point: an unadorned "unexpected keyword" message sends the caller looking
+# for a typo they did not make.
+_FFN_MOE_MISROUTED_KEYS = {
+    'use_bias': (
+        "'use_bias' is ambiguous here and is deliberately not declared: it could "
+        "mean the router's Dense bias or the expert FFN's. Name the one you mean "
+        "-- gate_use_bias=... for the router, or ffn_config['use_bias'] for the "
+        "expert FFN."
+    ),
+}
+
+
 def create_ffn_moe(
     num_experts: int,
     ffn_config: Dict[str, Any],
@@ -641,6 +690,22 @@ def create_ffn_moe(
     """
     Convenience function to create FFN-based MoE layers.
 
+    Every accepted keyword is declared. An undeclared keyword raises
+    ``ValueError`` rather than being filtered out -- see the factory contract in
+    ``src/dl_techniques/layers/CLAUDE.md``. In particular ``use_bias=`` is *not*
+    accepted: it names a bias that exists in two different sub-components, so the
+    caller must say which (``gate_use_bias=`` or ``ffn_config['use_bias']``).
+
+    Accepted ``kwargs``:
+
+    * Expert norm -- ``norm_type``, ``norm_config``, ``pre_norm``, ``post_norm``,
+      or the unambiguous spellings ``expert_norm_type`` / ``expert_norm_config``.
+    * Gating -- ``add_noise``, ``noise_std``, ``temperature``, ``embedding_dim``,
+      ``learnable_temperature``, ``num_slots``, ``z_loss_weight``,
+      ``gate_use_bias``, ``gating_norm_type``, ``gating_norm_config``.
+    * MoE -- ``jitter_noise``, ``drop_tokens``, ``use_residual_connection``.
+    * Keras layer -- ``name``, ``dtype``, ``trainable``.
+
     :param num_experts: Number of FFN expert networks.
     :type num_experts: int
     :param ffn_config: FFN configuration dictionary (passed to FFN factory).
@@ -651,39 +716,47 @@ def create_ffn_moe(
     :type gating_type: str
     :param aux_loss_weight: Weight for auxiliary load balancing loss.
     :type aux_loss_weight: float
-    :param kwargs: Additional configuration parameters.
+    :param kwargs: Additional configuration parameters, as listed above.
     :type kwargs: Any
     :return: Configured MixtureOfExperts layer with FFN experts.
     :rtype: MixtureOfExperts
+    :raises ValueError: If any keyword is not declared by this factory.
     """
+    # DECISION plan-2026-08-26T100331-f3744602/D-016
+    # Do NOT re-add `use_bias` as a declared key, in either direction. It used to
+    # be declared and routed to the GATE's Dense bias while sitting in the same
+    # call as an `ffn_config`, so a caller who meant the expert FFN got the
+    # opposite of what they asked for, silently. Re-routing it to the FFN instead
+    # would only reverse who gets the silent wrong answer. Two named keys and a
+    # raise is the only spelling that cannot be misread. See decisions.md D-016.
+    unknown = sorted(set(kwargs) - _FFN_MOE_DECLARED_KEYS)
+    if unknown:
+        hints = [_FFN_MOE_MISROUTED_KEYS[k] for k in unknown if k in _FFN_MOE_MISROUTED_KEYS]
+        message = (
+            f"create_ffn_moe() got undeclared keyword(s): {unknown}. "
+            f"Declared keywords: {sorted(_FFN_MOE_DECLARED_KEYS)}."
+        )
+        if hints:
+            message += " " + " ".join(hints)
+        raise ValueError(message)
 
     # Create expert configuration using FFN factory
-    expert_kwargs = {
-        k: v
-        for k, v in kwargs.items()
-        if k in {'norm_type', 'norm_config', 'pre_norm', 'post_norm'}
-    }
+    expert_kwargs = {k: v for k, v in kwargs.items() if k in _FFN_MOE_EXPERT_KEYS}
     # When forwarded under the expert namespace, rename to avoid collision with
     # gating's norm_type/norm_config (callers can use ``expert_norm_type`` for
     # the per-expert norm explicitly).
-    if 'expert_norm_type' in kwargs:
-        expert_kwargs['norm_type'] = kwargs['expert_norm_type']
-    if 'expert_norm_config' in kwargs:
-        expert_kwargs['norm_config'] = kwargs['expert_norm_config']
+    for alias, target in _FFN_MOE_EXPERT_ALIASES.items():
+        if alias in kwargs:
+            expert_kwargs[target] = kwargs[alias]
     expert_config = ExpertConfig(ffn_config=ffn_config, **expert_kwargs)
 
     # Create gating configuration
-    gating_keys = {
-        'add_noise', 'noise_std', 'temperature',
-        'use_bias', 'embedding_dim', 'learnable_temperature', 'num_slots',
-        'z_loss_weight',
-    }
-    gating_init = {k: v for k, v in kwargs.items() if k in gating_keys}
-    # Optional pre-gating norm via dedicated keys to disambiguate from expert norm.
-    if 'gating_norm_type' in kwargs:
-        gating_init['norm_type'] = kwargs['gating_norm_type']
-    if 'gating_norm_config' in kwargs:
-        gating_init['norm_config'] = kwargs['gating_norm_config']
+    gating_init = {k: v for k, v in kwargs.items() if k in _FFN_MOE_GATING_KEYS}
+    # Dedicated keys disambiguate the gating norm and the gating bias from their
+    # expert-side namesakes.
+    for alias, target in _FFN_MOE_GATING_ALIASES.items():
+        if alias in kwargs:
+            gating_init[target] = kwargs[alias]
 
     gating_config = GatingConfig(
         gating_type=gating_type,
@@ -693,14 +766,15 @@ def create_ffn_moe(
     )
 
     # Create complete MoE configuration
-    moe_keys = {'jitter_noise', 'drop_tokens', 'use_residual_connection'}
     moe_config = MoEConfig(
         num_experts=num_experts,
         expert_config=expert_config,
         gating_config=gating_config,
-        **{k: v for k, v in kwargs.items() if k in moe_keys}
+        **{k: v for k, v in kwargs.items() if k in _FFN_MOE_MOE_KEYS}
     )
 
-    return MixtureOfExperts(config=moe_config)
+    layer_kwargs = {k: v for k, v in kwargs.items() if k in _FFN_MOE_LAYER_KEYS}
+    return MixtureOfExperts(config=moe_config, **layer_kwargs)
+
 
 # ---------------------------------------------------------------------
