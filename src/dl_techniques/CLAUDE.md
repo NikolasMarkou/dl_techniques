@@ -71,9 +71,9 @@ exception and does re-export its 7 children. `models/README.md` is the catalogue
 **Docstring style: two are in use. Match the package you are editing; never convert a file
 wholesale.** Docstrings carry mathematical formulations where relevant.
 
-| Package | Convention | Measured 2026-08-25 (re-run of the block below) |
+| Package | Convention | Measured 2026-08-26 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 260 of 300 modules carry `:param ` |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 259 of 299 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 81 Sphinx-only, 8 both, 106 neither, over 275 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
@@ -153,6 +153,21 @@ exactly** — `layers/attention/` 34 of 35, `models/` 88 anchored-`Args:` / 89 `
 31 `:param ` with the stray `Args:` still at `:273`. Note that the drift log in
 the paragraph before this one records what was measured *on those dates* and is deliberately left
 as-is: it is a history of readings, not a set of live claims.
+
+Re-derived a **fourth** time on **2026-08-26** by `plan-2026-08-26-fb07cf4e/iter-1/step-5.1`, again
+by re-running the WHOLE of `REPO_MAP.md`'s Numbers table (all 76 enforceable rows, now executed by
+`tests/test_repo_map_numbers.py` rather than by hand) plus every command printed in this section:
+`layers/` **260 of 300 -> 259 of 299**. The mover is `plan-2026-08-26-f3744602/iter-1/step-6`
+(`0e6b2ea5b`), which deleted `src/dl_techniques/layers/moe/integration.py`; that file carried 14
+`:param ` lines, so it belonged to BOTH populations and its deletion decremented the numerator and
+the denominator together. **A ratio whose terms move in lockstep looks unchanged; check both of
+them, never the ratio.** Every other figure in the table
+and the code block above was re-run in the same edit and reproduces EXACTLY: `layers/attention/` 34
+of 35, `models/` 275 files with 88 anchored-`Args:` / 89 `:param ` / 8 both (so 80 Google-only, 81
+Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both, `metrics/` 12 of 15 / 2, `utils/` 22 of
+41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0, `visualization/` 6 of 7 / 0,
+`bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py` 31 `:param ` with the stray `Args:` still
+at `:273`. The MoE deletion touched `layers/` and nothing else, and the measurement says so.
 
 ### Factory Pattern
 

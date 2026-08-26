@@ -57,7 +57,7 @@ legitimately writes a trainer path as `train/vit/` rather than `src/train/vit/`.
 
 ## src/dl_techniques/ — the 13 subpackages
 
-Weighting matters more than completeness here: layers and models together are 575 of the
+Weighting matters more than completeness here: layers and models together are 574 of the
 library's Python files, i.e. 56% of everything under `src/`. The other eleven subpackages
 combined are smaller than either one.
 
@@ -104,7 +104,7 @@ combined are smaller than either one.
 
 | Subpackage | `.py` | Role |
 |---|---|---|
-| **`src/dl_techniques/layers/`** | 300 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
+| **`src/dl_techniques/layers/`** | 299 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 75 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
 | **`src/dl_techniques/models/`** | 275 | **The second largest, and the only subpackage that is not flat.** Since the 2026-08-24 restructure (`d0b599ff2`, `452d663d2`) it is **11 family directories** — `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `tabular` — holding **80 leaf model packages** between them, with **4 subfamilies** nesting a third level (`src/dl_techniques/models/vision/image_restoration/`, `src/dl_techniques/models/vision/keypoints/`, `src/dl_techniques/models/vision/super_resolution/`, `src/dl_techniques/models/vision_language/sam/`). A *leaf* is a directory that carries an `__init__.py` and has no `__init__.py`-bearing child; a *container* is one that has such children. `vision/` alone holds 35 leaves and `language/` 17. **Listing one level down gives 11, not 80** — so every model-package row in the Numbers table walks to the leaves, and prints that walk in full. Re-derived 2026-08-25: **73 of 80** leaves bind a `create_*` factory in their own package init, **77 of 80** declare a curated `__all__`, **77 of 80** have a non-empty init, and **80 of 80** carry a `README.md`. The 7 that bind no factory are the four `time_series` leaves (`mdn`, `deepar`, `prism`, `tirex` — the curated `src/dl_techniques/models/time_series/__init__.py` re-exports them instead, and it is the one container that does re-export), `src/dl_techniques/models/common/power_sampling/`, and `src/dl_techniques/models/vision_language/sam/sam1/` and `src/dl_techniques/models/vision_language/sam/sam3/`; the 3 with an empty init are `deepar`, `prism` and `tirex`. `sam/` exports nothing on purpose — re-exporting the class `SAM2` there binds the name `SAM2` and shadows the `sam2/` subpackage (its own init docstring carries the reasoning and the exact `ImportError`). **`image_restoration/` is no longer the documentation-only directory this row described until 2026-08-25**: the restructure moved `darkir/`, `pw_fnet/` and `scunet/` underneath it, so it is now a subfamily container that *also* carries `BENCHMARKS.md` and `README.md` — and those tables are still quoted from papers, never measured here, which matters more now that implementations sit beside them. (Before 2026-08-25 this cell read "74 *top-level* model packages ... **71 of 74** bind a `create_*` ... **72 of 74** export a curated `__all__`", and before that "69 of 73" and "70 of 73": four consecutive wrong lists. Every one of them came from quoting a command whose scope had drifted from the question. Re-derive from the Numbers table, never from memory.) The full catalogue is `src/dl_techniques/models/CLAUDE.md`; the family taxonomy is `src/dl_techniques/models/README.md`. See Part C. |
 | `src/dl_techniques/losses/` | 43 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
 | `src/dl_techniques/utils/` | 41 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
@@ -386,7 +386,7 @@ thing you will meet and should not be surprised by.
   it is genuinely unmigratable (FFT, SVD).
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
-  `src/dl_techniques/layers/attention/` — 358 modules carry Sphinx/reST
+  `src/dl_techniques/layers/attention/` — 357 modules carry Sphinx/reST
   `:param:` and 228 carry a Google-style `Args:` block, and the two sets are not
   disjoint: 17 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
@@ -702,7 +702,10 @@ direction:
   digits in that sentence are a 2026-08-01 record and neither is the table's present
   size** — 19 rows moved out of the 68 the table held on that day. It parses at **76**
   enforceable rows today (`_rows()` in `tests/test_repo_map_numbers.py`, re-derived
-  2026-08-25), and 76 is the figure a fresh sweep must reproduce.
+  2026-08-26), and 76 is the figure a fresh sweep must reproduce. That file runs **77** test
+  cases, not 76: the extra one is `test_the_table_is_still_parseable`, an anti-vacuity guard
+  that re-derives nothing. Do not quote the test count as the row count — the 2026-08-26 note
+  below did exactly that and read 77, contradicting this bullet in the same file.
 - **Fixing the prose without fixing the table silently breaks the invariant this section
   claims.** On 2026-08-01 the "22 of the 73 bind a `create_*`" prose was corrected to 23
   while the table row behind it stayed at 22, so the map contradicted itself for one
@@ -838,22 +841,61 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > it lands in both docstring-style populations. The sixth, `Python files under tests/`
 > (1066 -> **1067**), was moved by `iter-1/step-9.2`, which added
 > `tests/test_layers/test_norms/test_the_negative_alpha_init_is_checkpoint_visible.py`.
-> As on 2026-08-25, the **WHOLE** table was re-derived rather than the named rows: all 77
+> As on 2026-08-25, the **WHOLE** table was re-derived rather than the named rows: all 76
 > enforceable rows were re-run by `tests/test_repo_map_numbers.py` and **exactly these 6
-> moved**. Four unenforced prose digits sourced from them moved in the SAME edit — this
+> moved**. (That note said "77" when written, which is the file's TEST count, not its ROW
+> count: the 77th case is `test_the_table_is_still_parseable`, the anti-vacuity guard, which
+> re-derives nothing. Corrected 2026-08-26 — `_rows()` returns 76 and the paragraph above
+> already said so.) Four unenforced prose digits sourced from them moved in the SAME edit — this
 > file's Part A `layers/` subpackage cell (299 -> 300), its "layers and models together are
 > N of the library's Python files" sentence (574 -> 575, still 56%), its docstring-split
 > bullet's Sphinx count (357 -> 358), and `src/dl_techniques/CLAUDE.md`'s `layers/`
 > docstring-style row (`259 of 299` -> `260 of 300`). The Google-style `Args:` counts did
 > NOT move: `_masking.py` is reST-only.
 
+> **Seven rows moved on 2026-08-26**, re-derived by `plan-2026-08-26-fb07cf4e/iter-1/step-5.1` in a
+> commit containing no source file. Only **two of the seven populations** are this plan lineage's,
+> and the split matters because the third is inherited debt that was already RED at our base commit:
+>
+> - **Four rows are one deletion.** `plan-2026-08-26-f3744602/iter-1/step-6` (`0e6b2ea5b`) deleted
+>   `src/dl_techniques/layers/moe/integration.py`, and that single file moves `Python files under
+>   src/` (1026 -> **1025**), `` `.py` in `src/dl_techniques/layers/` `` (300 -> **299**), `` `.py`
+>   in layers + models `` (575 -> **574**), `Modules in src/dl_techniques/layers/ using Sphinx
+>   :param` (260 -> **259**) and `Library modules using Sphinx :param OUTSIDE layers/attention/`
+>   (358 -> **357**) — five rows, because it carried 14 `:param ` lines and so belonged to both
+>   docstring-style populations. It is the exact inverse of the `_masking.py` move recorded
+>   directly above: the same five rows, the same size, the opposite sign. The `Args:` rows did not
+>   move; `integration.py` was reST-only. `layers+models share of src/ (%)` held at **56** (574 of
+>   1025 = 55.99), so a green row here is not evidence that nothing moved.
+> - **One row is a net +6 across three plans.** `Python files under tests/` (1067 -> **1073**) is
+>   seven additions minus one deletion, and all eight are from this lineage:
+>   `plan-2026-08-26-c515641a` added `test_the_dynamic_non_batch_axis_survives_a_concrete_call.py`
+>   and `test_the_dead_centroid_keeps_its_distinctiveness.py` under `tests/test_layers/test_mixtures/`;
+>   `plan-2026-08-26-f3744602` added `test_the_sparse_kernel_matches_the_dense_oracle.py`,
+>   `test_end_to_end.py`, `test_config.py` and `test_experts.py` under `tests/test_layers/test_moe/`
+>   and deleted `test_integration.py` with its subject in the same commit (`0e6b2ea5b`, which is also
+>   the commit behind the five `src/` rows above); this plan added
+>   `test_the_auxiliary_loss_survives_a_mixed_precision_fit.py`.
+> - **One row is inherited debt.** `Lines in README.md` (564 -> **610**) was moved by `27d3e13bc`
+>   "docs: re-derive every count in the root README", a doc-only commit 26 back from here that
+>   updated the README without updating the row sourcing it. It was already RED at this plan's base
+>   commit; it is settled here rather than left RED, per this section's own rule.
+>
+> The **WHOLE** table was re-derived, not the seven: all 76 enforceable rows were re-run with their
+> own commands by `tests/test_repo_map_numbers.py` and exactly these 7 moved. Four unenforced prose
+> digits sourced from them moved in the SAME edit — this file's Part A `layers/` subpackage cell
+> (300 -> 299), its "layers and models together are N of the library's Python files" sentence
+> (575 -> 574, still 56%), its Part A docstring-split bullet's Sphinx count (358 -> 357), and
+> `src/dl_techniques/CLAUDE.md`'s `layers/` docstring-style row (`260 of 300` -> `259 of 299`). No
+> command was found to be wrong; every one of the seven was a stale Value, not a drifted scope.
+
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1026 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1067 | `find tests -name '*.py' \| wc -l` |
+| Python files under `src/` | 1025 | `find src -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1073 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| `.py` in `src/dl_techniques/layers/` | 300 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/layers/` | 299 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/models/` | 275 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 43 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/utils/` | 41 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
@@ -866,7 +908,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/regularizers/` | 8 | `find src/dl_techniques/regularizers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
-| `.py` in layers + models | 575 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in layers + models | 574 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
 | layers+models share of `src/` (%) | 56 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
 | Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 75 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
@@ -897,7 +939,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files under `data/` tracked by git | 0 | `git ls-files data \| wc -l` |
 | Notes in `research/` | 122 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Lines in `README.md` | 564 | `wc -l < README.md` |
+| Lines in `README.md` | 610 | `wc -l < README.md` |
 | Dicts named `*_REGISTRY` under `src/dl_techniques/` | 9 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
 | Keys in `ATTENTION_REGISTRY` | 33 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `ACTIVATION_REGISTRY` | 22 | `awk 'index($0,"ACTIVATION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/activations/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
@@ -921,8 +963,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files importing raw `tensorflow` | 58 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
-| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 260 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
-| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 358 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 259 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 357 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 228 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 17 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 10 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
