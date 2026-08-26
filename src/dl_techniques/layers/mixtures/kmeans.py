@@ -101,8 +101,9 @@ from .base import (
 
 # ``OutputMode`` and ``Axis`` are imported from ``base.py`` above.
 
-# Soft assignments never give a cluster EXACTLY zero mass, so "dead" needs a threshold,
-# set by the mechanism and not by a semantic story. The EMA target below is
+# DECISION plan-2026-08-26T061816-c515641a/D-017: soft assignments never give a cluster
+# EXACTLY zero mass, so "dead" needs a threshold, set by the mechanism and not by a
+# semantic story. The EMA target below is
 # `mean * m/(m + keras.backend.epsilon())`; at eps=1e-7 that factor is a smooth sigmoid
 # in log-mass with no knee (measured 0.469 at m=8.8e-8, 0.500 at 1e-7, 0.909 at 1e-6,
 # 0.999 at 1e-4). NOT 1e-3: uniform mass is `N/K`, and 1e-3 measurably freezes 1024/1024
