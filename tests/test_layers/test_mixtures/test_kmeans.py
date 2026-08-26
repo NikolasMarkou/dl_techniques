@@ -150,7 +150,10 @@ class TestKMeansLayerInitialization:
         ("repulsion_strength", -0.1, "repulsion_strength must be non-negative"),
         ("min_distance", 0, "min_distance must be positive"),
         ("min_distance", -1, "min_distance must be positive"),
-        ("output_mode", "invalid", "output_mode must be 'assignments' or 'mixture'")
+        # B4: the message is now generated from KMeansLayer.VALID_OUTPUT_MODES,
+        # sorted for stability, and quotes the offending value.
+        ("output_mode", "invalid",
+         r"output_mode must be one of \['assignments', 'mixture'\], got 'invalid'")
     ])
     def test_invalid_initialization(
         self,

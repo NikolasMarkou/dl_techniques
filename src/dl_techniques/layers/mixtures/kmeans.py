@@ -76,7 +76,7 @@ References:
 """
 
 import keras
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict
+from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 # local imports
@@ -193,6 +193,11 @@ class KMeansLayer(BaseMixtureLayer):
     :raises ValueError: If output_mode is not ``'assignments'`` or ``'mixture'``.
     """
 
+    #: The legal ``output_mode`` values for this layer, declared once on the class that
+    #: owns them. ``mixtures.factory.validate_mixture_config`` reads this attribute off
+    #: ``MIXTURE_REGISTRY[type]['class']`` instead of carrying its own copy.
+    VALID_OUTPUT_MODES: ClassVar[FrozenSet[str]] = frozenset({'assignments', 'mixture'})
+
     def __init__(
         self,
         n_clusters: int,
@@ -295,9 +300,10 @@ class KMeansLayer(BaseMixtureLayer):
             raise ValueError(f"repulsion_strength must be non-negative, got {repulsion_strength}")
         if min_distance <= 0:
             raise ValueError(f"min_distance must be positive, got {min_distance}")
-        if output_mode not in ['assignments', 'mixture']:
+        if output_mode not in self.VALID_OUTPUT_MODES:
             raise ValueError(
-                f"output_mode must be 'assignments' or 'mixture', got {output_mode}"
+                f"output_mode must be one of {sorted(self.VALID_OUTPUT_MODES)}, "
+                f"got '{output_mode}'"
             )
 
     # DECISION plan-2026-07-20T141712-e03557c8/D-007: this property is a pure NAMING seam

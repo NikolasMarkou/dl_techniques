@@ -259,12 +259,22 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
     # a single shared literal set: that would make the factory REJECT RBF's own legal
     # values with an error naming {'assignments','mixture'}. Do NOT generalize it into
     # MIXTURE_REGISTRY either -- the registry carries no validation-type metadata, so
-    # that is schema design, explicitly cut from this plan's scope (F15).
+    # that is schema design, explicitly cut from that plan's scope (F15).
+    #
+    # AMENDMENT, DECISION plan-2026-08-26T061816-c515641a/D-012: the four hand-maintained
+    # copies of these sets (here plus one per layer) are gone. Each layer class now
+    # declares its own `VALID_OUTPUT_MODES` frozenset and the factory reads it off
+    # `mixture_info['class']`, which is why the `if mixture_type == 'rbf'` branch below no
+    # longer exists. D-003's invariant is UNCHANGED and is now enforced by construction:
+    # the sets stay SEPARATE, one per owning class, and no union is ever formed. Only the
+    # number of PLACES each set is written changed (4 -> 1 per class), not the number of
+    # sets. MIXTURE_REGISTRY still carries no validation metadata -- it points at the
+    # class, and the class owns the vocabulary -- so the F15 schema-design cut also holds.
+    # CONSEQUENCE of later hoisting these onto a shared base class or a single Literal:
+    # the factory would again reject RBF's own legal 'basis'/'normalized' with an error
+    # naming {'assignments','mixture'}, the exact regression D-003 exists to prevent.
     if 'output_mode' in kwargs and kwargs['output_mode'] is not None:
-        valid_modes = (
-            {'basis', 'normalized'} if mixture_type == 'rbf'
-            else {'assignments', 'mixture'}
-        )
+        valid_modes = mixture_info['class'].VALID_OUTPUT_MODES
         if kwargs['output_mode'] not in valid_modes:
             raise ValueError(
                 f"output_mode must be one of {sorted(valid_modes)}, got '{kwargs['output_mode']}'"

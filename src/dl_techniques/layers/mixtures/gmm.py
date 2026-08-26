@@ -87,7 +87,7 @@ References:
 
 import keras
 import numpy as np
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict
+from typing import Optional, Union, Literal, List, Any, Tuple, Dict, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 # local imports
@@ -240,6 +240,11 @@ class GMMLayer(BaseMixtureLayer):
     :raises ValueError: If covariance_rank is not a positive integer.
     """
 
+    #: The legal ``output_mode`` values for this layer, declared once on the class that
+    #: owns them. ``mixtures.factory.validate_mixture_config`` reads this attribute off
+    #: ``MIXTURE_REGISTRY[type]['class']`` instead of carrying its own copy.
+    VALID_OUTPUT_MODES: ClassVar[FrozenSet[str]] = frozenset({'assignments', 'mixture'})
+
     def __init__(
         self,
         n_components: int,
@@ -365,9 +370,10 @@ class GMMLayer(BaseMixtureLayer):
             )
         if not isinstance(variance_floor, (int, float)) or variance_floor <= 0:
             raise ValueError(f"variance_floor must be positive, got {variance_floor}")
-        if output_mode not in ['assignments', 'mixture']:
+        if output_mode not in self.VALID_OUTPUT_MODES:
             raise ValueError(
-                f"output_mode must be 'assignments' or 'mixture', got {output_mode}"
+                f"output_mode must be one of {sorted(self.VALID_OUTPUT_MODES)}, "
+                f"got '{output_mode}'"
             )
         if covariance_type not in ['diagonal', 'low_rank']:
             raise ValueError(

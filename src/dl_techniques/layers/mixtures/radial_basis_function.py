@@ -46,7 +46,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Literal, Optional, Union, Tuple, Dict, Any
+from typing import Literal, Optional, Union, Tuple, Dict, Any, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 
@@ -276,6 +276,11 @@ class RBFLayer(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any"""
 
+    #: The legal ``output_mode`` values for this layer, declared once on the class that
+    #: owns them. Deliberately DISJOINT from ``GMMLayer``/``KMeansLayer``'s set --
+    #: see the D-003 amendment in ``factory.validate_mixture_config``.
+    VALID_OUTPUT_MODES: ClassVar[FrozenSet[str]] = frozenset({'basis', 'normalized'})
+
     def __init__(
         self,
         units: int,
@@ -308,9 +313,10 @@ class RBFLayer(keras.layers.Layer):
             raise ValueError(f"min_center_distance must be positive, got {min_center_distance}")
         if safety_margin < 0:
             raise ValueError(f"safety_margin must be non-negative, got {safety_margin}")
-        if output_mode not in ['basis', 'normalized']:
+        if output_mode not in self.VALID_OUTPUT_MODES:
             raise ValueError(
-                f"output_mode must be 'basis' or 'normalized', got {output_mode}"
+                f"output_mode must be one of {sorted(self.VALID_OUTPUT_MODES)}, "
+                f"got '{output_mode}'"
             )
 
         self.units = units

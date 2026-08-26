@@ -219,3 +219,81 @@ class TestFactoryDiagnostics:
 
         with pytest.raises(RuntimeError, match=fragment):
             _check_registry_literal_consistency(literal_types, registry_keys)
+
+
+class TestValidOutputModesIsDeclaredOnce:
+    """B4 regression pins for the per-class ``VALID_OUTPUT_MODES`` frozensets.
+
+    These are **regression pins, not RED proofs**: they describe a refactor
+    (four hand-maintained copies of two sets collapsed to one declaration per
+    owning class), not a behaviour change, so most of them were green before
+    the refactor too and are labelled as such in ``verification.md``. The one
+    thing that measurably changed is covered by
+    ``test_the_factory_learns_the_legal_set_from_the_class``.
+    """
+
+    @pytest.mark.parametrize("cls,expected", [
+        (GMMLayer, {'assignments', 'mixture'}),
+        (KMeansLayer, {'assignments', 'mixture'}),
+        (RBFLayer, {'basis', 'normalized'}),
+    ])
+    def test_each_class_declares_its_own_legal_set(self, cls, expected) -> None:
+        assert isinstance(cls.VALID_OUTPUT_MODES, frozenset)
+        assert set(cls.VALID_OUTPUT_MODES) == expected
+
+    def test_the_two_vocabularies_stay_disjoint(self) -> None:
+        """`plan-2026-07-20T160907-7de371a1/D-003`'s actual invariant.
+
+        RBF reuses the kwarg NAME only. If these ever become one set, the
+        factory starts accepting 'mixture' for an RBF layer (and the RBF
+        constructor then rejects it), which is the regression D-003 exists to
+        prevent. Pinning inequality is what keeps the D-012 refactor honest.
+        """
+        assert RBFLayer.VALID_OUTPUT_MODES != GMMLayer.VALID_OUTPUT_MODES
+        assert RBFLayer.VALID_OUTPUT_MODES.isdisjoint(GMMLayer.VALID_OUTPUT_MODES)
+        assert GMMLayer.VALID_OUTPUT_MODES == KMeansLayer.VALID_OUTPUT_MODES
+
+    @pytest.mark.parametrize("mtype", sorted(MIXTURE_REGISTRY.keys()))
+    def test_the_factory_learns_the_legal_set_from_the_class(self, mtype) -> None:
+        """The drift guard: the factory's accepted set IS the class's set.
+
+        Before B4 the factory could only learn a type's legal modes from a
+        hardcoded ``if mixture_type == 'rbf'`` branch, so a fourth registered
+        type was silently validated against GMM's vocabulary. This asserts by
+        exercise, not by reading the source: every legal value is accepted and
+        every value legal for the OTHER vocabulary is rejected.
+        """
+        cls = MIXTURE_REGISTRY[mtype]['class']
+        base = {"rbf": {"units": 8}, "kmeans": {"n_clusters": 4},
+                "gmm": {"n_components": 4}}[mtype]
+
+        for mode in sorted(cls.VALID_OUTPUT_MODES):
+            validate_mixture_config(mtype, output_mode=mode, **base)
+
+        foreign = (
+            {'assignments', 'mixture', 'basis', 'normalized'}
+            - set(cls.VALID_OUTPUT_MODES)
+        )
+        for mode in sorted(foreign):
+            with pytest.raises(ValueError, match="output_mode must be one of"):
+                validate_mixture_config(mtype, output_mode=mode, **base)
+
+    @pytest.mark.parametrize("mtype,base", [
+        ("rbf", {"units": 8}),
+        ("kmeans", {"n_clusters": 4}),
+        ("gmm", {"n_components": 4}),
+    ])
+    def test_an_illegal_mode_raises_through_both_entry_points(self, mtype, base) -> None:
+        """Direct constructor AND ``create_mixture_layer``, offending value named."""
+        cls = MIXTURE_REGISTRY[mtype]['class']
+
+        with pytest.raises(ValueError, match="nonsense"):
+            cls(output_mode="nonsense", **base)
+
+        with pytest.raises(ValueError, match="nonsense"):
+            create_mixture_layer(mtype, output_mode="nonsense", **base)
+
+        # ...and the message names the legal set, sorted, so it is stable across runs.
+        legal = str(sorted(cls.VALID_OUTPUT_MODES)).replace("[", r"\[").replace("]", r"\]")
+        with pytest.raises(ValueError, match=f"output_mode must be one of {legal}"):
+            create_mixture_layer(mtype, output_mode="nonsense", **base)
