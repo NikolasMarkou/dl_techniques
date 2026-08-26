@@ -60,12 +60,15 @@ def _build_moe(
         hidden: int,
         output_dim: int,
         gating_type: str,
+        add_noise: bool = False,
 ) -> MixtureOfExperts:
     """Construct a deterministic hard-routed MoE layer.
 
-    ``add_noise`` and ``jitter_noise`` are both off so two forward passes over the
-    same input are bit-identical; otherwise a dense-vs-sparse diff would be
-    measuring the RNG.
+    ``add_noise`` and ``jitter_noise`` default to off so two forward passes over
+    the same input are bit-identical; otherwise a dense-vs-sparse diff would be
+    measuring the RNG. ``add_noise=True`` is only usable together with
+    :func:`_pin_the_noise_draw` -- see
+    ``test_the_kernels_agree_with_the_router_noise_on``.
 
     :param num_experts: Number of experts.
     :type num_experts: int
@@ -79,10 +82,13 @@ def _build_moe(
     :type output_dim: int
     :param gating_type: ``'linear'`` or ``'cosine'``.
     :type gating_type: str
+    :param add_noise: Whether the router adds training-time noise to its logits.
+        Only ``LinearGating`` has a noise path.
+    :type add_noise: bool
     :return: An unbuilt MoE layer.
     :rtype: MixtureOfExperts
     """
-    gating_kwargs = dict(gating_type=gating_type, top_k=top_k, add_noise=False)
+    gating_kwargs = dict(gating_type=gating_type, top_k=top_k, add_noise=add_noise)
     if gating_type == 'cosine':
         # 7 keeps embedding_dim distinct from every other dimension in the grid.
         gating_kwargs['embedding_dim'] = 7
@@ -208,6 +214,94 @@ def test_the_sparse_kernel_matches_the_dense_oracle(shape_name, top_k, gating_ty
         f"max|dense - sparse| = {diff:.3e} exceeds the pre-committed {ATOL:.0e}")
     np.testing.assert_allclose(
         np.asarray(sparse), np.asarray(dense), atol=ATOL, rtol=RTOL)
+
+
+# ---------------------------------------------------------------------
+# 4b: the same equivalence with the router's NOISE path live
+# ---------------------------------------------------------------------
+
+def _pin_the_noise_draw(monkeypatch, calls):
+    """Replace ``keras.random.normal`` with a deterministic shape-keyed draw.
+
+    Resetting a global seed between the two arms does NOT work here: Keras'
+    ``SeedGenerator`` is stateful and is not re-pinned by
+    ``keras.utils.set_random_seed`` mid-process (finding G-6; the reviewer's
+    seed-reset attempt produced a phantom ``1.504e+00`` diff that was the
+    instrument, not the kernels). Pinning the draw itself is the only sound
+    instrument: a fresh ``default_rng(4242)`` per call means two calls with the
+    same shape return bit-identical values, in either arm, in any order.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    :param calls: Mutable list appended to on every intercepted draw, so the
+        test can assert the noise path was actually reached.
+    :type calls: list
+    """
+    def _pinned(shape, mean=0.0, stddev=1.0, dtype=None, seed=None):
+        dims = tuple(int(d) for d in np.asarray(keras.ops.convert_to_numpy(shape)).reshape(-1))
+        calls.append(dims)
+        arr = np.random.default_rng(4242).standard_normal(dims) * stddev + mean
+        return keras.ops.convert_to_tensor(arr.astype('float32'), dtype=dtype)
+
+    monkeypatch.setattr(keras.random, 'normal', _pinned)
+
+
+@pytest.mark.parametrize("top_k", [1, 2, 4])
+def test_the_kernels_agree_with_the_router_noise_on(monkeypatch, top_k):
+    """Dense and sparse agree at ``atol=1e-5, rtol=0`` with ``add_noise=True``.
+
+    This is the first of the two areas the iteration-2 sparse-kernel attack
+    named as UNVERIFIED: every other equivalence cell in this module runs with
+    the noise path off, so the noisy router's ``top_k`` selection -- which can
+    differ from the noiseless one, and is what the sparse gather/scatter is
+    indexed by -- was never compared across the two kernels.
+
+    Three anti-vacuity assertions, because the obvious way to write this test is
+    one that cannot fail: the intercepted draw must actually have happened, the
+    noisy output must differ from the noiseless one, and ``training=True`` must
+    be passed (the noise is training-gated).
+    """
+    calls = []
+    _pin_the_noise_draw(monkeypatch, calls)
+
+    keras.utils.set_random_seed(1234)
+    layer = _build_moe(num_experts=4, top_k=top_k, d_model=9, hidden=13,
+                       output_dim=8, gating_type='linear', add_noise=True)
+    x = keras.ops.convert_to_tensor(
+        np.random.default_rng(7).normal(size=(3, 5, 9)).astype('float32'))
+
+    sparse = layer(x, training=True)
+    assert calls, "the pinned noise draw was never reached: the cell is vacuous"
+    n_after_sparse = len(calls)
+    dense = _dense_output_training(layer, x)
+    assert len(calls) > n_after_sparse, "the dense arm did not draw noise"
+
+    diff = _max_abs_diff(dense, sparse)
+    assert diff <= ATOL, (
+        f"add_noise=True/top_k={top_k}: max|dense - sparse| = {diff:.3e} "
+        f"exceeds the pre-committed {ATOL:.0e}")
+    np.testing.assert_allclose(
+        np.asarray(sparse), np.asarray(dense), atol=ATOL, rtol=RTOL)
+
+    # The noise is not a no-op: without it the output is a different tensor.
+    noiseless = layer(x, training=False)
+    assert _max_abs_diff(noiseless, sparse) > 0.0, (
+        "noisy and noiseless outputs are identical -- the noise path is inert, "
+        "so this cell would pass with the noise code deleted")
+
+
+def _dense_output_training(layer, x):
+    """``_dense_output``'s ``training=True`` twin, for the noise path.
+
+    Kept separate rather than adding a flag to ``_dense_output``: every other
+    caller in this module is deliberately ``training=False``, and a defaulted
+    flag is how a training-gated path silently stops being exercised.
+    """
+    original = layer._process_hard_routing_sparse
+    layer._process_hard_routing_sparse = layer._process_hard_routing_dense
+    try:
+        return layer(x, training=True)
+    finally:
+        layer._process_hard_routing_sparse = original
 
 
 def test_softmoe_never_reaches_the_hard_routing_kernels():

@@ -4,7 +4,9 @@ Scope note (deliberate, to avoid duplicating coverage that already exists):
 
 * The *validation matrix* for the integer fields (``bool`` rejection, non-int
   rejection, range messages) lives in
-  ``test_layer.py::TestIntegerFieldsRejectBool``, and the ``num_experts`` /
+  ``test_layer.py::TestIntegerFieldsRejectBool`` -- except the numpy half of it,
+  which lives here in ``TestValidatePositiveIntAcceptanceTable`` because numpy
+  scalars are the case that motivated widening the predicate. The ``num_experts`` /
   ``top_k <= num_experts`` / ``jitter_noise`` cross-field rules live in
   ``test_layer.py::TestMoEConfigValidation``. This module does **not** repeat
   them; it covers the fields and the surface those two classes leave open.
@@ -18,8 +20,10 @@ Scope note (deliberate, to avoid duplicating coverage that already exists):
 """
 
 import dataclasses
+import json
 
 import keras
+import numpy as np
 import pytest
 
 from dl_techniques.layers.moe.config import (
@@ -271,6 +275,94 @@ class TestExpertConfigValidation:
         ))
         restored = MoEConfig.from_dict(cfg.to_dict())
         assert restored.expert_config.ffn_config['hidden_dim'] == 33
+
+
+
+class TestValidatePositiveIntAcceptanceTable:
+    """The full accept/reject table for ``_validate_positive_int``, per field.
+
+    Driven through the PUBLIC constructors, not the private helper, so the table
+    pins what a caller actually experiences -- including the coercion, which the
+    helper's return value alone would not show.
+
+    The numpy rows are the point of the class: ``np.int64(4)`` is NOT an instance
+    of ``int`` (measured), so before this widening every integral numpy scalar --
+    a legitimate arrival from ``some_array.shape[-1]`` -- was rejected, while
+    ``np.bool_(True)`` must stay rejected.
+    """
+
+    # (field name, constructor) for each of the four validated int fields.
+    FIELDS = [
+        ('top_k', lambda v: GatingConfig(gating_type='linear', top_k=v)),
+        ('num_slots', lambda v: GatingConfig(num_slots=v)),
+        ('embedding_dim', lambda v: GatingConfig(embedding_dim=v)),
+        ('num_experts', lambda v: MoEConfig(num_experts=v)),
+    ]
+    FIELD_IDS = [f for f, _ in FIELDS]
+
+    ACCEPTED = [
+        pytest.param(4, id='python_int'),
+        pytest.param(np.int64(4), id='np_int64'),
+        pytest.param(np.int32(4), id='np_int32'),
+        pytest.param(np.uint8(4), id='np_uint8'),
+    ]
+    REJECTED = [
+        pytest.param(True, id='True'),
+        pytest.param(False, id='False'),
+        pytest.param(np.bool_(True), id='np_bool_'),
+        pytest.param(4.0, id='float_4p0'),
+        pytest.param(4.5, id='float_4p5'),
+        pytest.param(-1, id='minus_1'),
+        pytest.param(0, id='zero'),
+        pytest.param("4", id='str_4'),
+        pytest.param(None, id='None'),
+    ]
+
+    @pytest.mark.parametrize("field,build", FIELDS, ids=FIELD_IDS)
+    @pytest.mark.parametrize("value", ACCEPTED)
+    def test_accepted_values_construct_and_come_back_as_python_int(
+            self, field, build, value
+    ):
+        cfg = build(value)
+        got = getattr(cfg, field)
+        assert got == 4
+        # The coercion, not merely the acceptance: a stored ``np.int64`` would
+        # only fail later, inside ``json.dumps`` at ``model.save()`` time.
+        assert type(got) is int, f"{field} kept {type(got).__name__}, not int"
+
+    @pytest.mark.parametrize("field,build", FIELDS, ids=FIELD_IDS)
+    @pytest.mark.parametrize("value", REJECTED)
+    def test_rejected_values_raise_value_error(self, field, build, value):
+        with pytest.raises(ValueError):
+            build(value)
+
+    @pytest.mark.parametrize("value", [True, False, np.bool_(True)])
+    def test_the_bool_rejection_message_names_bool_not_the_type_name(self, value):
+        """``np.bool_`` must take the SAME branch as ``bool``.
+
+        It is rejected today either way -- ``numbers.Integral`` does not admit
+        ``np.bool_`` under numpy 2.0.2 -- so only the message distinguishes an
+        explicit branch from an accidental one. If numpy ever registers
+        ``np.bool_`` as ``Integral``, this assertion is what fails.
+        """
+        with pytest.raises(ValueError, match=r"got bool \("):
+            GatingConfig(gating_type='linear', top_k=value)
+
+    @pytest.mark.parametrize("field,build", FIELDS, ids=FIELD_IDS)
+    def test_the_int32_ceiling_is_the_upper_bound(self, field, build):
+        assert getattr(build(2 ** 31 - 1), field) == 2 ** 31 - 1
+        with pytest.raises(ValueError, match="int32 tensor-dimension ceiling"):
+            build(2 ** 31)
+
+    def test_a_numpy_supplied_config_is_json_serializable(self):
+        """The reason coercion is mandatory, pinned as an executable claim."""
+        cfg = MoEConfig(
+            num_experts=np.int64(4),
+            gating_config=GatingConfig(gating_type='linear', top_k=np.int64(2)),
+        )
+        # Raises TypeError("Object of type int64 is not JSON serializable")
+        # if either field kept its numpy type.
+        json.dumps(cfg.to_dict())
 
 
 class TestFieldsThatAreDeliberatelyUnvalidated:

@@ -6,20 +6,60 @@ focused exclusively on FFN experts and leveraging the dl_techniques FFN factory.
 """
 
 import keras
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Union, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 
 
-def _validate_positive_int(name: str, value: Any, minimum: int = 1) -> None:
-    """Reject anything that is not a true integer at or above ``minimum``.
+# The largest value an int32 tensor dimension can hold. Every field routed
+# through ``_validate_positive_int`` (``num_experts``, ``top_k``, ``num_slots``,
+# ``embedding_dim``) ends up as a tensor dimension or a one-hot depth, all of
+# which TensorFlow represents in int32.
+_MAX_TENSOR_DIM = 2 ** 31 - 1
 
-    ``bool`` is tested **first** and rejected, because ``isinstance(True, int)``
-    is ``True`` in Python: without this branch, ``top_k=True`` silently becomes
-    ``top_k=1`` and ``embedding_dim=True`` silently becomes a one-dimensional
-    expert embedding. YAML is the live path for this -- ``yaml.safe_load`` turns
-    an unquoted ``true`` into ``True``, and a config-driven caller never sees it.
+
+def _validate_positive_int(name: str, value: Any, minimum: int = 1,
+                           maximum: int = _MAX_TENSOR_DIM) -> int:
+    """Reject anything that is not a true integer within ``[minimum, maximum]``.
+
+    Returns the value **coerced to a Python ``int``**; callers must assign the
+    return value back to the field (see ``__post_init__`` below).
+
+    ``bool`` and ``numpy.bool_`` are tested **first** and rejected, because
+    ``isinstance(True, int)`` is ``True`` in Python: without this branch,
+    ``top_k=True`` silently becomes ``top_k=1`` and ``embedding_dim=True``
+    silently becomes a one-dimensional expert embedding. YAML is the live path
+    for this -- ``yaml.safe_load`` turns an unquoted ``true`` into ``True``, and
+    a config-driven caller never sees it.
+
+    Integral **numpy** scalars (``np.int64``, ``np.int32``, ``np.uint8``, ...)
+    are accepted: arriving here from ``some_array.shape[-1]`` or from
+    ``np.argmax`` is legitimate and used to raise.
+
+    # DECISION plan-2026-08-26T155709-fb07cf4e/D-008
+    Three properties of this function are load-bearing and each looks removable:
+
+    1. **The bool branch names ``np.bool_`` EXPLICITLY.** Do not delete it on the
+       grounds that the ``np.integer`` test below already rejects it. That is
+       true today and was MEASURED (numpy 2.0.2:
+       ``issubclass(np.bool_, np.integer)`` is ``False``), but it is a property
+       of numpy's type hierarchy, not of this module. Relying on it implicitly
+       means a numpy that ever re-parents ``np.bool_`` under an integer type
+       silently reopens the exact hole the bool branch exists to close, with no
+       test to notice. The explicit branch also gives ``np.bool_`` the same
+       YAML-flavoured error message a Python ``bool`` gets.
+    2. **The predicate is ``(int, np.integer)``, not ``int``.** ``np.int64(4)``
+       is NOT an instance of ``int`` (measured), so the narrow check rejected
+       every integral numpy scalar.
+    3. **The return value is coerced with ``int(...)`` and MUST be assigned back
+       by the caller.** Accepting a ``np.int64`` and storing it verbatim only
+       moves the failure downstream to ``model.save()``:
+       ``json.dumps({"n": np.int64(4)})`` raises
+       ``TypeError: Object of type int64 is not JSON serializable`` (measured) --
+       i.e. after training, at the worst possible moment. Widening the check
+       without coercing would trade a loud constructor error for a silent one.
 
     :param name: Field name, used in the error message.
     :type name: str
@@ -27,21 +67,31 @@ def _validate_positive_int(name: str, value: Any, minimum: int = 1) -> None:
     :type value: Any
     :param minimum: Smallest accepted value, inclusive.
     :type minimum: int
-    :raises ValueError: If ``value`` is a ``bool``, is not an ``int``, or is
-        below ``minimum``.
+    :param maximum: Largest accepted value, inclusive. Defaults to the int32
+        tensor-dimension ceiling; see ``_MAX_TENSOR_DIM``.
+    :type maximum: int
+    :return: ``value`` as a Python ``int``.
+    :rtype: int
+    :raises ValueError: If ``value`` is a ``bool``/``np.bool_``, is not integral,
+        or lies outside ``[minimum, maximum]``.
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(
             f"{name} must be an int, got bool ({value!r}). Note that YAML's "
             f"unquoted `true`/`false` load as Python bools; quote the value or "
             f"write a number."
         )
-    if not isinstance(value, int):
+    if not isinstance(value, (int, np.integer)):
         raise ValueError(
             f"{name} must be an int, got {type(value).__name__} ({value!r})"
         )
+    value = int(value)
     if value < minimum:
         raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    if value > maximum:
+        raise ValueError(
+            f"{name} must be <= {maximum} (int32 tensor-dimension ceiling), got {value}")
+    return value
 
 # ---------------------------------------------------------------------
 
@@ -241,17 +291,20 @@ class GatingConfig:
         construction time rather than deep inside layer assembly.
 
         Integer fields (``top_k``, ``num_slots``, ``embedding_dim``) go through
-        :func:`_validate_positive_int`, which rejects ``bool`` before it applies
-        the range test.
+        :func:`_validate_positive_int`, which rejects ``bool``/``np.bool_``
+        before it applies the range test, accepts integral numpy scalars, and
+        returns a Python ``int`` -- the return value is assigned BACK to the
+        field, so a ``np.int64`` supplied by a caller never reaches
+        ``get_config``/``json.dumps``.
         """
         valid_types = ('linear', 'cosine', 'softmoe')
         if self.gating_type not in valid_types:
             raise ValueError(
                 f"gating_type must be one of {valid_types}, got '{self.gating_type}'"
             )
-        _validate_positive_int('top_k', self.top_k)
-        _validate_positive_int('num_slots', self.num_slots)
-        _validate_positive_int('embedding_dim', self.embedding_dim)
+        self.top_k = _validate_positive_int('top_k', self.top_k)
+        self.num_slots = _validate_positive_int('num_slots', self.num_slots)
+        self.embedding_dim = _validate_positive_int('embedding_dim', self.embedding_dim)
         if self.temperature <= 0:
             raise ValueError(f"temperature must be > 0, got {self.temperature}")
         if self.noise_std < 0:
@@ -336,7 +389,8 @@ class MoEConfig:
 
         Validated:
 
-        * ``num_experts >= 1``, and not a ``bool`` (see
+        * ``num_experts`` integral, not a ``bool``/``np.bool_``, and within
+          ``[1, 2**31 - 1]`` -- coerced to a Python ``int`` (see
           :func:`_validate_positive_int`).
         * ``top_k <= num_experts``, for ``gating_type`` in ``('linear', 'cosine')``
           only — see the note below.
@@ -354,7 +408,7 @@ class MoEConfig:
 
         :raises ValueError: If any of the above invariants is violated.
         """
-        _validate_positive_int('num_experts', self.num_experts)
+        self.num_experts = _validate_positive_int('num_experts', self.num_experts)
 
         # DECISION plan-2026-08-26T100331-f3744602/D-012
         # The `top_k <= num_experts` cross-check is deliberately SKIPPED for

@@ -212,10 +212,10 @@ raises at construction rather than deep inside layer assembly:
 
 | Rule | Raised by | Notes |
 |---|---|---|
-| `num_experts >= 1` | `MoEConfig` | |
+| `1 <= num_experts <= 2**31 - 1` | `MoEConfig` | Upper bound is the int32 tensor-dimension ceiling |
 | `top_k <= num_experts` | `MoEConfig` | **Skipped for `gating_type='softmoe'`**, which ignores `top_k` entirely — an unrelated value there is inert |
 | `jitter_noise >= 0` | `MoEConfig` | Rejected, not silently disabled |
-| `top_k`, `num_slots`, `embedding_dim` are positive ints | `GatingConfig` | |
+| `top_k`, `num_slots`, `embedding_dim` are positive ints `<= 2**31 - 1` | `GatingConfig` | |
 | `temperature > 0`, `noise_std >= 0` | `GatingConfig` | |
 | `gating_type in ('linear', 'cosine', 'softmoe')` | `GatingConfig` | |
 | `ffn_config` contains a `'type'` field | `ExpertConfig` | An empty `ffn_config` is replaced by a default `mlp`, not rejected |
@@ -224,10 +224,25 @@ raises at construction rather than deep inside layer assembly:
 place it can be checked: `GatingConfig` owns `top_k` but does not know
 `num_experts`.
 
-Every int field rejects `bool` **before** the range test, because
-`isinstance(True, int)` is `True` in Python. YAML is the live path for this —
-`yaml.safe_load` turns an unquoted `true` into `True`, and without the check
-`top_k: true` would silently become `top_k=1`.
+Every int field rejects `bool` **and `np.bool_`** **before** the range test,
+because `isinstance(True, int)` is `True` in Python. YAML is the live path for
+this — `yaml.safe_load` turns an unquoted `true` into `True`, and without the
+check `top_k: true` would silently become `top_k=1`.
+
+Integral **numpy** scalars are accepted (`np.int64(4)`, `np.int32`, `np.uint8`)
+— arriving from `some_array.shape[-1]` is legitimate — and are coerced to a
+Python `int`, which is what the field ends up holding. The coercion is not
+cosmetic: `json.dumps({"n": np.int64(4)})` raises `TypeError: Object of type
+int64 is not JSON serializable`, so storing the numpy scalar verbatim would move
+the failure to `model.save()`, after training.
+
+The upper bound is `2**31 - 1`, the largest int32 tensor dimension; all four
+fields become tensor dimensions or a one-hot depth. It is a representability
+bound, **not** a sanity bound: `MixtureOfExperts.__init__` materializes one
+`FFNExpert` sublayer per expert in a Python loop (measured at ~2.4 ms/expert:
+250/500/1000/2000 experts took 0.67/1.19/2.19/4.92 s), so a large-but-legal
+`num_experts` still costs linear construction time. No arbitrary tighter cap is
+imposed — see the plan's decisions.md D-008.
 
 ## Basic Usage
 
@@ -853,9 +868,13 @@ def validate_moe_model(model, sample_input):
 - Not raised for `gating_type='softmoe'`, which ignores `top_k`.
 
 #### "... must be an int, got bool"
-- An int config field received `True`/`False`. Usually a YAML `true`/`false`
-  reaching an int field — quote it or write a number. See *Configuration
-  validation* above.
+- An int config field received `True`/`False`/`np.bool_`. Usually a YAML
+  `true`/`false` reaching an int field — quote it or write a number. See
+  *Configuration validation* above.
+
+#### "... must be <= 2147483647 (the int32 tensor-dimension ceiling)"
+- An int config field exceeds what an int32 tensor dimension can hold. This is
+  almost always a unit mix-up rather than an intended configuration.
 
 #### Out-of-memory with many experts
 - Expert activation memory scales with `top_k` and the per-expert FFN size; the
