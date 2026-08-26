@@ -337,25 +337,30 @@ softmoe_config = GatingConfig(
 
 ### Training Configuration
 
+This package ships no optimizer helper. Compile an MoE model with a stock Keras
+optimizer; the auxiliary losses are added through `add_loss` and are already part of
+`model.losses`, so `model.fit()` includes them without any extra wiring.
+
 ```python
-from dl_techniques.layers.moe.integration import MoETrainingConfig, MoEOptimizerBuilder
+import keras
 
-# MoE-optimized training configuration
-training_config = MoETrainingConfig(
-    optimizer_type='adamw',
-    base_learning_rate=1e-4,
-    expert_learning_rate_multiplier=0.1,  # Lower LR for experts
-    warmup_steps=2000,
-    aux_loss_weight=0.01,
-    weight_decay=0.01,
-    gradient_clipping_norm=1.0
+model.compile(
+    optimizer=keras.optimizers.AdamW(
+        learning_rate=keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=1e-4,
+            decay_steps=50_000,
+            warmup_target=1e-4,
+            warmup_steps=2_000,
+        ),
+        weight_decay=0.01,
+        global_clipnorm=1.0,
+    ),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
 )
-
-# Build MoE-optimized optimizer for a given model
-# model = create_transformer_with_moe()
-# builder = MoEOptimizerBuilder()
-# optimizer = builder.build_moe_optimizer(model, training_config)
 ```
+
+The strength of the load-balancing and router-logit regularizers is set on
+`GatingConfig` (`aux_loss_weight`, `z_loss_weight`), not on the optimizer.
 
 ### Load Balancing and Regularization
 
@@ -505,20 +510,26 @@ def compute_z_loss(
 
 ### Optimizer Configuration
 
-```python
-from dl_techniques.layers.moe.integration import MoETrainingConfig
+AdamW with warmup and cosine decay, and a global gradient-norm clip, is a reasonable
+starting point. Per-parameter-group learning rates (a lower rate for the experts than
+for the router) are **not** supported by this package and are not supported by stock
+Keras optimizers either -- `keras.optimizers.AdamW` applies one learning rate to every
+variable it is given. Achieving group-specific rates requires either two optimizers
+over two disjoint variable lists in a custom training loop, or a `LossScaleOptimizer`-
+style wrapper you write yourself.
 
-# Recommended training configuration
-training_config = MoETrainingConfig(
-    optimizer_type='adamw',
-    base_learning_rate=1e-4,
-    expert_learning_rate_multiplier=0.1,    # Lower LR for experts
-    gating_learning_rate_multiplier=1.0,    # Normal LR for gating
-    warmup_steps=2000,
-    decay_steps=50000,
+```python
+import keras
+
+optimizer = keras.optimizers.AdamW(
+    learning_rate=keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=1e-4,
+        decay_steps=50_000,
+        warmup_target=1e-4,
+        warmup_steps=2_000,
+    ),
     weight_decay=0.01,
-    gradient_clipping_norm=1.0,
-    aux_loss_weight=0.01
+    global_clipnorm=1.0,
 )
 ```
 
@@ -665,11 +676,15 @@ config = MoEConfig(
 #### Training Instability
 **Symptoms**: Loss spikes, gradient explosions.
 ```python
-# Solution: Lower learning rates and add gradient clipping
-training_config = MoETrainingConfig(
-    expert_learning_rate_multiplier=0.05,  # Much lower for experts
-    gradient_clipping_norm=0.5,            # Tighter clipping
-    jitter_noise=0.001                     # Less input noise
+# Solution: lower the learning rate, clip gradients globally, and reduce input noise.
+import keras
+
+optimizer = keras.optimizers.AdamW(learning_rate=5e-5, global_clipnorm=0.5)
+config = MoEConfig(
+    num_experts=8,
+    expert_config=expert_config,
+    gating_config=GatingConfig(gating_type='linear', top_k=2),
+    jitter_noise=0.001,                    # less input noise
 )
 ```
 
