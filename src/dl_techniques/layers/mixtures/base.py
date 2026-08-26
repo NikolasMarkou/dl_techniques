@@ -73,7 +73,8 @@ class _ClusterAxisMixin:
     def _setup_cluster_axes(self) -> None:
         """Setup and validate cluster axes.
 
-        :raises ValueError: If cluster axes are invalid.
+        :raises ValueError: If any cluster axis resolves to the batch axis, or
+            if any cluster axis is out of range for ``self.input_rank``.
         """
         # DECISION plan_2026-06-14_7384c2e3/D-003: re-derive from the ORIGINAL constructor
         # value (_cluster_axis_arg), not in-place on self.cluster_axis. This makes build()
@@ -84,6 +85,27 @@ class _ClusterAxisMixin:
             axis if axis >= 0 else self.input_rank + axis
             for axis in self._cluster_axis_arg
         ]
+
+        # DECISION plan-2026-08-26T061816-c515641a/D-007: axis 0 is the BATCH axis and can
+        # never be a cluster axis. Checked HERE -- after the negative-to-positive
+        # normalization above and BEFORE the generic range check below -- because
+        # cluster_axis=-3 on a rank-3 input normalizes to 0, and a guard written against
+        # the raw constructor value would pass it. Ordered first so axis 0 gets the
+        # batch-axis message rather than the shape/range one. Removing this guard restores
+        # the measured pre-fix behaviour: on a STATIC-batch model it builds and runs while
+        # fitting prototypes ACROSS samples, so perturbing one sample changed another
+        # sample's output by 0.787 max abs -- silent cross-sample leakage, not an error.
+        if 0 in self.cluster_axis:
+            raise ValueError(
+                f"cluster_axis resolves to the batch axis (axis 0): "
+                f"cluster_axis={self._cluster_axis_arg} normalizes to "
+                f"{sorted(self.cluster_axis)} on a rank-{self.input_rank} input. "
+                f"Clustering over the batch axis breaks batch independence -- "
+                f"prototypes are fitted across samples, so one sample's values leak "
+                f"into another sample's output. Use a non-batch axis "
+                f"(1..{self.input_rank - 1}, or the negative aliases "
+                f"-1..-{self.input_rank - 1})."
+            )
 
         # Validate axes
         if not all(0 <= axis < self.input_rank for axis in self.cluster_axis):
