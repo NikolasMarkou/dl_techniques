@@ -94,6 +94,13 @@ OutputMode = Literal['assignments', 'mixture']
 TensorShape = Union[Tuple[int, ...], List[int]]
 Axis = Union[int, List[int]]
 
+# Soft assignments never give a cluster EXACTLY zero mass, so "dead" needs a threshold.
+# Mass is a sum of responsibilities in units of whole data points, so 1e-3 reads as
+# "this cluster owns less than a thousandth of one point's vote" -- an absolute floor,
+# deliberately NOT scaled by batch size, so the same centroid is judged alive or dead
+# identically at batch 8 and at batch 8192.
+_MIN_CLUSTER_MASS = 1e-3
+
 # ---------------------------------------------------------------------
 
 
@@ -481,17 +488,37 @@ class KMeansLayer(BaseMixtureLayer):
         # Shape: (n_clusters,)
         sum_weights = keras.ops.sum(assignments, axis=0, keepdims=True)
 
+        # Per-cluster mass, in units of whole data points.
+        # Shape: (n_clusters, 1)
+        cluster_mass = keras.ops.transpose(sum_weights)
+
         # Compute target centroids from data
         # Shape: (n_clusters, features)
         target_centroids = sum_weighted_points / (
-            keras.ops.transpose(sum_weights) + keras.backend.epsilon()
+            cluster_mass + keras.backend.epsilon()
         )
+
+        # DECISION plan-2026-08-26T061816-c515641a/D-006: gate the DATA-DRIVEN pull by
+        # cluster mass. `target_centroids` is 0/epsilon -> the ORIGIN for a centroid that
+        # owns no responsibility, so an ungated update drags every dead centroid toward
+        # the data manifold and it merges with the live ones (measured: separation
+        # 56.46 -> 0.34 in 60 steps, ending closer to a live centroid than the live
+        # centroids are to each other). Multiplying by `alive` makes a zero-mass
+        # centroid's data term exactly zero, leaving it to repulsion alone. Do NOT gate
+        # `repulsion_forces` as well -- repulsion is what separates two centroids that
+        # are BOTH alive and coincident, and masking it would reinstate the collapse this
+        # layer's repulsion term exists to prevent. Do NOT fold the mask into
+        # `target_centroids` (e.g. `alive * target`) either: that pulls a dead centroid
+        # to the origin via the `- self.centroids` term instead of freezing it.
+        # Shape: (n_clusters, 1), exactly 1.0 for every cluster with real mass, so this
+        # is a bit-exact no-op on the all-alive path (pinned by SC-6).
+        alive = keras.ops.cast(cluster_mass > _MIN_CLUSTER_MASS, cluster_mass.dtype)
 
         # Compute repulsion forces
         repulsion_forces = self._compute_repulsion_forces()
 
         # Combine data-driven update with repulsion
-        update = (target_centroids - self.centroids) + repulsion_forces
+        update = alive * (target_centroids - self.centroids) + repulsion_forces
 
         # Update momentum buffer
         new_momentum = (self.momentum * self.centroid_momentum +
