@@ -220,7 +220,6 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
     mixture_info = MIXTURE_REGISTRY[mixture_type]
     required_params = mixture_info['required_params']
 
-    # Check for required parameters
     missing_params = [param for param in required_params if param not in kwargs]
     if missing_params:
         raise ValueError(
@@ -228,7 +227,6 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
             f"Required: {required_params}"
         )
 
-    # Validate positive integer count parameters
     count_params = ['units', 'n_clusters', 'n_components']
     for count_param in count_params:
         if count_param in kwargs and kwargs[count_param] is not None:
@@ -238,14 +236,12 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{count_param} must be a positive integer, got {value}")
 
-    # Validate positive float parameters common across mixtures
     positive_floats = ['temperature', 'gamma_init', 'min_center_distance', 'min_distance', 'variance_floor']
     for float_param in positive_floats:
         if float_param in kwargs and kwargs[float_param] is not None:
             if kwargs[float_param] <= 0:
                 raise ValueError(f"{float_param} must be positive, got {kwargs[float_param]}")
 
-    # Validate non-negative parameters
     non_negative = ['repulsion_strength', 'isometric_regularizer_strength', 'safety_margin']
     for nn_param in non_negative:
         if nn_param in kwargs and kwargs[nn_param] is not None:
@@ -261,18 +257,14 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
     # MIXTURE_REGISTRY either -- the registry carries no validation-type metadata, so
     # that is schema design, explicitly cut from that plan's scope (F15).
     #
-    # AMENDMENT, DECISION plan-2026-08-26T061816-c515641a/D-012: the four hand-maintained
-    # copies of these sets (here plus one per layer) are gone. Each layer class now
+    # AMENDMENT, DECISION plan-2026-08-26T061816-c515641a/D-012: each layer class now
     # declares its own `VALID_OUTPUT_MODES` frozenset and the factory reads it off
-    # `mixture_info['class']`, which is why the `if mixture_type == 'rbf'` branch below no
-    # longer exists. D-003's invariant is UNCHANGED and is now enforced by construction:
-    # the sets stay SEPARATE, one per owning class, and no union is ever formed. Only the
-    # number of PLACES each set is written changed (4 -> 1 per class), not the number of
-    # sets. MIXTURE_REGISTRY still carries no validation metadata -- it points at the
-    # class, and the class owns the vocabulary -- so the F15 schema-design cut also holds.
-    # CONSEQUENCE of later hoisting these onto a shared base class or a single Literal:
-    # the factory would again reject RBF's own legal 'basis'/'normalized' with an error
-    # naming {'assignments','mixture'}, the exact regression D-003 exists to prevent.
+    # `mixture_info['class']`, so there is no `if mixture_type == 'rbf'` branch here.
+    # D-003's invariant is UNCHANGED and now holds by construction: the sets stay SEPARATE,
+    # one per owning class, and no union is ever formed. CONSEQUENCE of later hoisting them
+    # onto a shared base class or a single Literal: the factory would again reject RBF's own
+    # legal 'basis'/'normalized' with an error naming {'assignments','mixture'} -- the exact
+    # regression D-003 exists to prevent.
     if 'output_mode' in kwargs and kwargs['output_mode'] is not None:
         valid_modes = mixture_info['class'].VALID_OUTPUT_MODES
         if kwargs['output_mode'] not in valid_modes:
@@ -305,10 +297,8 @@ def create_mixture_layer(
     :raises ValueError: If mixture_type is invalid or required parameters are missing.
     """
     try:
-        # Validate configuration
         validate_mixture_config(mixture_type, **kwargs)
 
-        # Get mixture info and class
         mixture_info = MIXTURE_REGISTRY[mixture_type]
         mixture_class = mixture_info['class']
 
@@ -321,7 +311,7 @@ def create_mixture_layer(
             | _KERAS_BASE_PARAMS
         )
 
-        # Start with defaults for all optional parameters, then user overrides
+        # Defaults first, then user overrides.
         params: Dict[str, Any] = {}
         params.update(mixture_info['optional_params'])
         params.update(kwargs)
@@ -331,14 +321,12 @@ def create_mixture_layer(
 
         # DECISION plan-2026-08-26T061816-c515641a/D-009: WARN on the dropped keys --
         # never raise. INVARIANT: this factory is NON-STRICT by a deliberate cross-plan
-        # decision recorded at `plans/SYSTEM.md:185,253`; `ffn`, `norms`, `embedding` and
-        # `attention` were each hardened to raise only after a real bug was MEASURED at
-        # their call sites, and `mixtures` is one of the five where none was, so a raise
-        # here would carry unmeasured blast radius across the `**dict`-unpack call sites
-        # that sweep left unresolved. CONSEQUENCE of converting this to a raise (under any
-        # name -- `strict=`, a marker constant, a config flag): a previously-working caller
-        # starts failing for a kwarg that has always been inert, and the SYSTEM.md decision
-        # is silently reversed. The silence was the whole defect; the drop is intended.
+        # decision recorded at `plans/SYSTEM.md:185,253` -- a sibling factory was hardened
+        # only after a real bug was MEASURED at its call sites, and none was for `mixtures`.
+        # CONSEQUENCE of converting this to a raise (under any name -- `strict=`, a marker
+        # constant, a config flag): a previously-working caller starts failing for a kwarg
+        # that has always been inert, and the SYSTEM.md decision is silently reversed. The
+        # silence was the whole defect; the drop is intended.
         dropped_keys = sorted(set(kwargs) - valid_param_names)
         if dropped_keys:
             logger.warning(
@@ -347,14 +335,12 @@ def create_mixture_layer(
                 f"Accepted parameters for '{mixture_type}': {sorted(valid_param_names)}."
             )
 
-        # Add name if provided
         if name is not None:
             final_params['name'] = name
 
         for param_name, param_value in sorted(final_params.items()):
             logger.debug(f"  {param_name}: {param_value!r}")
 
-        # Create mixture layer using registry class directly (no if/elif chain)
         mixture_layer = mixture_class(**final_params)
 
         logger.info(f"Created {mixture_type} mixture layer: {mixture_layer.name}")

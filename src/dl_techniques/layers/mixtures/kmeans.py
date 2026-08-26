@@ -97,8 +97,7 @@ from .base import (
 
 # ---------------------------------------------------------------------
 
-# ``OutputMode`` and ``Axis`` are shared with ``GMMLayer`` and are imported from
-# ``base.py`` above.
+# ``OutputMode`` and ``Axis`` are imported from ``base.py`` above.
 
 # Soft assignments never give a cluster EXACTLY zero mass, so "dead" needs a threshold.
 # Mass is a sum of responsibilities in units of whole data points, so 1e-3 reads as
@@ -231,9 +230,8 @@ class KMeansLayer(BaseMixtureLayer):
     :raises ValueError: If output_mode is not ``'assignments'`` or ``'mixture'``.
     """
 
-    #: The legal ``output_mode`` values for this layer, declared once on the class that
-    #: owns them. ``mixtures.factory.validate_mixture_config`` reads this attribute off
-    #: ``MIXTURE_REGISTRY[type]['class']`` instead of carrying its own copy.
+    #: Legal ``output_mode`` values, declared once on the owning class.
+    #: ``factory.validate_mixture_config`` reads it off ``MIXTURE_REGISTRY[type]['class']``.
     VALID_OUTPUT_MODES: ClassVar[FrozenSet[str]] = frozenset({'assignments', 'mixture'})
 
     def __init__(
@@ -253,13 +251,11 @@ class KMeansLayer(BaseMixtureLayer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Input validation
         self._validate_init_args(
             n_clusters, temperature, momentum, centroid_lr,
             repulsion_strength, min_distance, output_mode
         )
 
-        # Store ALL configuration parameters
         self.n_clusters = n_clusters
         self.temperature = temperature
         self.momentum = momentum
@@ -288,7 +284,7 @@ class KMeansLayer(BaseMixtureLayer):
             )
         self.random_seed = random_seed
 
-        # Initialize attribute placeholders - weights created in build()
+        # Weight placeholders; the weights themselves are created in build().
         # R6: input_rank/feature_dims/non_feature_dims/original_shape are set by
         # BaseMixtureLayer.__init__ (called via super() above) — not re-declared here.
         self.centroids: Optional[keras.Variable] = None
@@ -371,23 +367,17 @@ class KMeansLayer(BaseMixtureLayer):
                 f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
             )
 
-        # Store input information
         self.input_rank = len(input_shape)
         self.original_shape = list(input_shape)
 
-        # Normalize and validate cluster axes
         self._setup_cluster_axes()
-
-        # Compute dimensions
         self.feature_dims = self._compute_feature_dims(input_shape)
         self.non_feature_dims = self._compute_non_feature_dims()
 
-        # Initialize centroids using add_weight
         self._initialize_centroids()
 
-        # Initialize momentum buffer with zeros.
-        # Mixed-precision: autocast=False keeps the EMA buffer in variable_dtype (float32)
-        # so the momentum assign/assign_add stays full precision (see centroids below).
+        # EMA momentum buffer. autocast=False / explicit dtype: see BaseMixtureLayer's
+        # mixed-precision contract -- the assign/assign_add must stay full precision.
         self.centroid_momentum = self.add_weight(
             name="centroid_momentum",
             shape=(self.n_clusters, self.feature_dims),
@@ -397,7 +387,6 @@ class KMeansLayer(BaseMixtureLayer):
             autocast=False
         )
 
-        # Call parent build at the end
         super().build(input_shape)
 
     def _initialize_centroids(self) -> None:
@@ -410,12 +399,7 @@ class KMeansLayer(BaseMixtureLayer):
             seed=self.random_seed,
         )
 
-        # Create centroids weight.
-        # Mixed-precision: autocast=False keeps the centroids in variable_dtype (float32)
-        # inside call() under a mixed_float16 policy. The distance / temperature-softmax
-        # math runs in float32 (matching the float32 inputs cast) and the output is cast to
-        # compute_dtype on return. Without this, the autocast float16 weight mismatches the
-        # float32 inputs (InvalidArgumentError: Sub half vs float).
+        # autocast=False / explicit dtype: see BaseMixtureLayer's mixed-precision contract.
         # DECISION plan-2026-07-21T080009-845927c7/D-002: centroids are trainable=False.
         # They are updated ONLY by the internal EMA/momentum/repulsion mechanism in
         # call() (_update_centroids) — the VQ-VAE-EMA scheme this layer's docstring
@@ -441,9 +425,8 @@ class KMeansLayer(BaseMixtureLayer):
         :return: Distances tensor of shape ``(batch, n_clusters)``.
         :rtype: keras.KerasTensor
         """
-        # R3 (D-002): shared pairwise squared-distance helper. inputs (batch, features)
-        # x centroids (n_clusters, features) -> (batch, n_clusters). Numerically
-        # identical to the prior inline expand-axis-1/0 broadcast.
+        # R3 (D-002): shared helper. (batch, features) x (n_clusters, features)
+        # -> (batch, n_clusters).
         return pairwise_squared_distance(inputs, self.centroids)
 
     def _soft_assignments(self, distances: keras.KerasTensor) -> keras.KerasTensor:
@@ -454,10 +437,7 @@ class KMeansLayer(BaseMixtureLayer):
         :return: Assignment probabilities of shape ``(batch, n_clusters)``.
         :rtype: keras.KerasTensor
         """
-        # Scale distances by temperature
         scaled_distances = -distances / self.temperature
-
-        # Apply stable softmax
         return keras.ops.softmax(scaled_distances, axis=-1)
 
     def _compute_repulsion_forces(self) -> keras.KerasTensor:
@@ -466,39 +446,32 @@ class KMeansLayer(BaseMixtureLayer):
         :return: Tensor of shape ``(n_clusters, feature_dims)`` containing repulsion vectors.
         :rtype: keras.KerasTensor
         """
-        # Compute pairwise differences between centroids
-        # Shape: (n_clusters, n_clusters, feature_dims)
+        # (n_clusters, n_clusters, feature_dims)
         centroid_diffs = (keras.ops.expand_dims(self.centroids, axis=1) -
                          keras.ops.expand_dims(self.centroids, axis=0))
 
-        # Compute squared distances
-        # Shape: (n_clusters, n_clusters)
+        # (n_clusters, n_clusters)
         squared_distances = keras.ops.sum(keras.ops.square(centroid_diffs), axis=-1)
 
         # Add small epsilon to prevent division by zero on diagonal
         distances = keras.ops.sqrt(squared_distances + keras.backend.epsilon())
 
-        # Compute repulsion strength based on distance
-        # Uses soft thresholding with min_distance
-        # Shape: (n_clusters, n_clusters)
+        # Soft threshold at min_distance -> (n_clusters, n_clusters)
         repulsion_weights = keras.ops.maximum(
             0.0,
             1.0 - distances / self.min_distance
         )
 
-        # Scale repulsion by strength parameter and distance
-        # Shape: (n_clusters, n_clusters, 1)
+        # (n_clusters, n_clusters, 1)
         repulsion_scale = keras.ops.expand_dims(
             self.repulsion_strength * repulsion_weights / (distances + keras.backend.epsilon()),
             axis=-1
         )
 
-        # Compute repulsion vectors
-        # Shape: (n_clusters, n_clusters, feature_dims)
+        # (n_clusters, n_clusters, feature_dims)
         repulsion_vectors = repulsion_scale * centroid_diffs
 
-        # Sum repulsion from all other centroids
-        # Shape: (n_clusters, feature_dims)
+        # (n_clusters, feature_dims)
         total_repulsion = keras.ops.sum(repulsion_vectors, axis=1)
 
         return total_repulsion
@@ -521,22 +494,18 @@ class KMeansLayer(BaseMixtureLayer):
             flag is a true no-op.
         :type factor: Any
         """
-        # Compute weighted sum of points
-        # Shape: (n_clusters, features)
+        # (n_clusters, features)
         sum_weighted_points = keras.ops.transpose(
             keras.ops.matmul(keras.ops.transpose(inputs), assignments)
         )
 
-        # Compute sum of weights for normalization
-        # Shape: (n_clusters,)
+        # (n_clusters,)
         sum_weights = keras.ops.sum(assignments, axis=0, keepdims=True)
 
-        # Per-cluster mass, in units of whole data points.
-        # Shape: (n_clusters, 1)
+        # Per-cluster mass in units of whole data points -> (n_clusters, 1)
         cluster_mass = keras.ops.transpose(sum_weights)
 
-        # Compute target centroids from data
-        # Shape: (n_clusters, features)
+        # (n_clusters, features)
         target_centroids = sum_weighted_points / (
             cluster_mass + keras.backend.epsilon()
         )
@@ -553,17 +522,12 @@ class KMeansLayer(BaseMixtureLayer):
         # layer's repulsion term exists to prevent. Do NOT fold the mask into
         # `target_centroids` (e.g. `alive * target`) either: that pulls a dead centroid
         # to the origin via the `- self.centroids` term instead of freezing it.
-        # Shape: (n_clusters, 1), exactly 1.0 for every cluster with real mass, so this
-        # is a bit-exact no-op on the all-alive path (pinned by SC-6).
+        # (n_clusters, 1), exactly 1.0 for every cluster with real mass, so this is a
+        # bit-exact no-op on the all-alive path (pinned by SC-6).
         alive = keras.ops.cast(cluster_mass > _MIN_CLUSTER_MASS, cluster_mass.dtype)
 
-        # Compute repulsion forces
         repulsion_forces = self._compute_repulsion_forces()
-
-        # Combine data-driven update with repulsion
         update = alive * (target_centroids - self.centroids) + repulsion_forces
-
-        # Update momentum buffer
         new_momentum = (self.momentum * self.centroid_momentum +
                        (1.0 - self.momentum) * update)
 
@@ -595,16 +559,10 @@ class KMeansLayer(BaseMixtureLayer):
         :return: Output tensor based on output_mode.
         :rtype: keras.KerasTensor
         """
-        # Cast inputs to variable_dtype (float32) so the distance / softmax math runs in
-        # full precision and matches the autocast=False centroids under a mixed_float16
-        # policy. The output is cast back to compute_dtype before returning. Under the
-        # default float32 policy this is a no-op.
+        # Cast in / cast out: see BaseMixtureLayer's mixed-precision contract.
         inputs = keras.ops.cast(inputs, self.variable_dtype)
 
-        # Reshape input for clustering
         reshaped_inputs, leading_dims = self._reshape_for_clustering(inputs)
-
-        # Compute distances and assignments
         distances = self._compute_distances(reshaped_inputs)
         assignments = self._soft_assignments(distances)
 
@@ -625,16 +583,13 @@ class KMeansLayer(BaseMixtureLayer):
         # training factor (None -> skip; 1.0 -> exact python-True path; 0/1 tensor ->
         # masked symbolic path). This fires the update for a symbolic training=True tensor
         # (custom @tf.function loop) AND keeps a symbolic False a true no-op, without ever
-        # coercing a tensor to a python bool. Supersedes the prior `if training is True:`
-        # gate which silently skipped the symbolic case.
-        # variable_dtype factor so the masked centroid update stays float32-consistent
-        # under a mixed_float16 policy (matches the autocast=False weights).
+        # coercing a tensor to a python bool. Reverting to `if training is True:` silently
+        # skips the symbolic case. The factor is built in variable_dtype so the masked
+        # update stays float32-consistent (see the mixed-precision contract).
         training_factor = resolve_training_factor(training, self.variable_dtype)
         if training_factor is not None:
             self._update_centroids(reshaped_inputs, assignments, training_factor)
 
-        # Reshape, then cast to compute_dtype so the layer emits the policy's compute
-        # dtype (float16 under mixed precision; no-op under float32).
         return keras.ops.cast(self._reshape_output(output, leading_dims), self.compute_dtype)
 
     def get_config(self) -> Dict[str, Any]:
@@ -714,44 +669,29 @@ class KMeansLayer(BaseMixtureLayer):
                 )
             self.centroids.assign(new_centroids)
         else:
-            # Generate fresh random values to ensure different centroids.
             # DECISION plan-2026-07-20T160907-7de371a1/D-009: deliberately UNSEEDED.
             # Do NOT pass `seed=self.random_seed` here for symmetry with
             # `GMMLayer.reset_parameters()`. `keras.random.normal(seed=<int>)` is
-            # STATELESS, so a fixed integer seed returns the identical draw on every
-            # call -- repeated no-arg resets on a seeded layer then produce bit-identical
-            # centroids (measured max|a-b| = 0.0 across three calls), which defeats the
-            # method's only purpose: escaping a collapsed centroid configuration
-            # mid-training. This was added and reverted once (D-009).
+            # STATELESS, so a fixed integer seed returns the identical draw on every call:
+            # repeated no-arg resets on a seeded layer then produce bit-identical centroids
+            # (measured max|a-b| = 0.0 across three calls), defeating this method's only
+            # purpose -- escaping a collapsed centroid configuration mid-training.
             #
-            # CORRECTION (D-009 pass-2 review): an earlier version of this comment
-            # said "reproducibility already lives at the layer level". That is only
-            # HALF true and must not be read as "a whole-run seeding protocol covers
-            # this call". BUILD-time reproducibility does hold -- `random_seed` governs
-            # build() init, and two KMeansLayer(random_seed=42) build to identical
-            # centroids. RESET-time reproducibility holds under NO protocol at all:
-            # a bare keras.random.normal(seed=None) is not covered by
-            # keras.utils.set_random_seed() in this Keras/TF version, so build+reset
-            # under a fixed global seed gives different centroids on every run
-            # (verified: max|a-b| = 0.318, 3/3 runs differ). Callers who need
-            # deterministic resets do not have them today.
-            #
-            # This is also not the binary the earlier comment implied. A
-            # `keras.random.SeedGenerator(self.random_seed)` held on the layer would
-            # satisfy BOTH constraints -- it advances state per call, so repeated
-            # resets still re-draw, while a given layer replays the same sequence
-            # across processes. That is a recorded FUTURE OPTION, not implemented
-            # here: it adds a serialized stateful variable to the layer and so is a
-            # change to the save/load contract, which belongs in its own plan.
-            # Until then the honest statement is: unseeded, re-draws correctly,
-            # NOT reproducible.
+            # The honest statement of the cost: BUILD-time reproducibility holds
+            # (`random_seed` governs build() init), RESET-time reproducibility holds under
+            # NO protocol -- `keras.utils.set_random_seed()` does not cover a bare
+            # `keras.random.normal(seed=None)` in this Keras/TF version, so build+reset
+            # under a fixed global seed differs every run (measured max|a-b| = 0.318,
+            # 3/3 runs differ). A layer-held `keras.random.SeedGenerator(self.random_seed)`
+            # would satisfy both constraints; it is a recorded FUTURE OPTION, not taken
+            # here because it adds a serialized variable and so changes the save/load
+            # contract.
             new_values = keras.random.normal(
                 shape=(self.n_clusters, self.feature_dims),
                 dtype=self.dtype
             ) * _RESET_CENTROID_SCALE
             self.centroids.assign(new_values)
 
-        # Reset momentum buffer
         self.centroid_momentum.assign(keras.ops.zeros_like(self.centroid_momentum))
 
 # ---------------------------------------------------------------------

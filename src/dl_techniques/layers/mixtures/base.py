@@ -50,14 +50,10 @@ from ...initializers.orthonormal_initializer import OrthonormalInitializer
 
 # ---------------------------------------------------------------------
 
-# Type aliases shared by the two concrete layers of this hierarchy. They live here
-# rather than once per module because ``GMMLayer`` and ``KMeansLayer`` spelled them
-# identically; ``gmm.py`` and ``kmeans.py`` import them from here.
-#
-# ``RBFLayer`` deliberately does NOT use ``OutputMode``: it is outside this hierarchy
-# and its legal set is the disjoint ``{'basis', 'normalized'}``, spelled inline at its
-# own parameter. See the D-003 amendment in ``factory.py`` -- the two vocabularies must
-# stay two.
+# Type aliases shared by ``GMMLayer`` and ``KMeansLayer``, which import them from here.
+# ``RBFLayer`` deliberately does NOT use ``OutputMode``: it is outside this hierarchy and
+# its legal set is the disjoint ``{'basis', 'normalized'}``. See the D-003 amendment in
+# ``factory.py`` -- the two vocabularies must stay two.
 OutputMode = Literal['assignments', 'mixture']
 Axis = Union[int, List[int]]
 
@@ -87,8 +83,7 @@ def resolve_initializer_arg(
     # (OrthonormalInitializer registers as Custom>OrthonormalInitializer), so
     # get('orthonormal') raises. Keep the string and let build() resolve it via
     # resolve_prototype_initializer (which handles both the string and an
-    # Initializer instance). See D-001. Single copy of an invariant previously
-    # duplicated verbatim in gmm.py and kmeans.py.
+    # Initializer instance). See D-001.
     if isinstance(value, str) and value.lower() == 'orthonormal':
         return value
     return keras.initializers.get(value)
@@ -127,16 +122,13 @@ def resolve_prototype_initializer(
         unchanged.
     :rtype: keras.initializers.Initializer
     """
-    # DECISION plan-2026-08-26T061816-c515641a/D-013: detect orthonormal with
-    # isinstance, not the `__class__.__name__ == 'OrthonormalInitializer'` string
-    # sniff the two pre-extraction duplicates used. MEASURED to agree with the sniff
-    # on the string alias, an OrthonormalInitializer instance, GlorotNormal and
-    # HeOrthonormalInitializer (which derives from keras.initializers.Initializer,
-    # NOT from OrthonormalInitializer). It differs on a SUBCLASS, which the sniff
-    # rejected and isinstance accepts -- an intentional widening with no instance in
-    # the repo today. Do NOT restore the sniff: it silently gives a subclass the
-    # non-orthonormal path, skipping the count <= feature_dims feasibility check that
-    # is the only thing standing between an over-wide request and a failed init.
+    # DECISION plan-2026-08-26T061816-c515641a/D-013: detect orthonormal with isinstance,
+    # not a `__class__.__name__ == 'OrthonormalInitializer'` string sniff. MEASURED to agree
+    # with the sniff on the string alias, an OrthonormalInitializer instance, GlorotNormal
+    # and HeOrthonormalInitializer; it differs only on a SUBCLASS, which the sniff rejected
+    # and isinstance accepts. Do NOT restore the sniff: it silently gives a subclass the
+    # non-orthonormal path, skipping the count <= feature_dims feasibility check that is the
+    # only thing standing between an over-wide request and a failed init.
     is_orthonormal = (
         isinstance(value, OrthonormalInitializer)
         or (isinstance(value, str) and value.lower() == 'orthonormal')
@@ -195,7 +187,6 @@ class _ClusterAxisMixin:
         # value (_cluster_axis_arg), not in-place on self.cluster_axis. This makes build()
         # idempotent -- a second build() re-normalizes from the stable source instead of
         # double-shifting an already-positive axis (which would corrupt cluster_axis).
-        # Convert negative axes to positive
         self.cluster_axis = [
             axis if axis >= 0 else self.input_rank + axis
             for axis in self._cluster_axis_arg
@@ -222,13 +213,11 @@ class _ClusterAxisMixin:
                 f"-1..-{self.input_rank - 1})."
             )
 
-        # Validate axes
         if not all(0 <= axis < self.input_rank for axis in self.cluster_axis):
             raise ValueError(
                 f"Invalid cluster_axis: {self.cluster_axis} for input rank {self.input_rank}"
             )
 
-        # Sort axes for consistent processing
         self.cluster_axis.sort()
 
     def _compute_feature_dims(self, input_shape: Tuple[Optional[int], ...]) -> int:
@@ -274,10 +263,8 @@ class _ClusterAxisMixin:
             )
             output_shape = list(input_shape)
 
-            # Handle multiple clustering axes
             if len(axes) > 1:
-                # Replace clustered dimensions with the prototype count
-                # Remove extra axes in reverse order to preserve indices
+                # Reverse order so popping does not shift the remaining indices.
                 for axis in reversed(axes[1:]):
                     output_shape.pop(axis)
                 output_shape[axes[0]] = self._n_prototypes
@@ -286,7 +273,6 @@ class _ClusterAxisMixin:
 
             return tuple(output_shape)
 
-        # For mixture mode, output shape matches input
         return tuple(input_shape)
 
     def _reshape_for_clustering(
@@ -306,7 +292,6 @@ class _ClusterAxisMixin:
         if len(self.cluster_axis) == 1 and self.cluster_axis[0] == self.input_rank - 1:
             laid_out = inputs
         else:
-            # General case requires transpose
             laid_out = keras.ops.transpose(
                 inputs, self.non_feature_dims + self.cluster_axis
             )
@@ -345,28 +330,23 @@ class _ClusterAxisMixin:
         """
         # DECISION plan-2026-07-20T160907-7de371a1/D-001: this method INVERTS the forward
         # layout move made by _reshape_for_clustering, and that inversion is a TRANSPOSE,
-        # not a reshape. Supersedes plan-2026-07-20T141712-e03557c8/D-010, which pinned
-        # this as a known bug rather than fixing it.
+        # not a reshape.
         #
-        # The layout contract: _reshape_for_clustering (base.py:167-170) transposes by
+        # The layout contract: _reshape_for_clustering transposes by
         # `perm = non_feature_dims + cluster_axis` and then collapses, so the buffer
         # arriving here is laid out (non_feature_dims..., W) -- W is the prototype count K
         # for 'assignments', or feature_dims for 'mixture'. The DECLARED output order is
         # the ORIGINAL axis order. Those two differ for every cluster_axis except the
-        # last-axis fast path. `keras.ops.reshape` is layout-preserving in row-major
-        # order; it does NOT reorder axes. So the old bare reshape stamped a correct
-        # SHAPE onto a wrongly-ordered buffer and scrambled the values whenever
-        # K != non_feature_dims -- which every pre-existing test missed because they all
-        # used K == non_feature_dims, where the defect degenerates to a pure transposition.
+        # last-axis fast path. `keras.ops.reshape` is layout-preserving in row-major order;
+        # it does NOT reorder axes, so a bare reshape stamps a correct SHAPE onto a
+        # wrongly-ordered buffer and scrambles the values whenever K != non_feature_dims.
         #
         # Do NOT replace either transpose below with a bare reshape, and do NOT "simplify"
         # by merging the two branches: they compute genuinely different permutations
         # (insert ONE collapsed axis vs. restore EVERY original cluster axis) and have one
-        # call site each -- see decisions.md D-005 for why no shared helper exists.
-        # Both perms provably degenerate to the identity on the fast path
+        # call site each. Both perms provably degenerate to the identity on the fast path
         # (cluster_axis == [input_rank-1]), which is what makes backward compatibility
-        # structural rather than merely tested; it is regression-tested regardless.
-        # See decisions.md D-001.
+        # structural rather than merely tested. See decisions.md D-001 and D-005.
         n_non_feature = len(self.non_feature_dims)
 
         def _target(static_tail: List[int]) -> keras.KerasTensor:
@@ -429,12 +409,26 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
     for calling ``_init_cluster_axis()`` there to set ``cluster_axis`` /
     ``_cluster_axis_arg``, and for calling ``_setup_cluster_axes()`` from
     ``build()``.
+
+    **Mixed-precision contract (the single home for this rationale).** Every
+    prototype-bearing weight in this package is created with ``autocast=False``
+    and an explicit ``dtype=self.dtype``, and every ``call()`` casts its inputs
+    to ``self.variable_dtype`` on entry and its result back to
+    ``self.compute_dtype`` on return. Reason: the forward math here
+    (``exp`` / ``log`` / ``softmax`` / division, and triangular solves on the
+    low-rank path) is numerically unsafe in float16, so it must run in float32
+    even under a ``mixed_float16`` policy. Dropping ``autocast=False`` gives an
+    autocast float16 weight against float32 inputs and raises
+    ``InvalidArgumentError: Sub half vs float``; dropping either cast makes the
+    layer emit the wrong dtype for the active policy. Under the default float32
+    policy all of it is a no-op. ``RBFLayer`` is deliberately outside this
+    hierarchy (see the module docstring) but follows the same contract, and its
+    call sites point back to this paragraph rather than inheriting it.
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-        # Initialize shared attribute placeholders - all derived in build()
         self.input_rank: Optional[int] = None
         self.feature_dims: Optional[int] = None
         self.non_feature_dims: Optional[List[int]] = None
@@ -464,8 +458,7 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
         # self.cluster_axis would bake in a rank-specific value -> cross-rank reload picks
         # the wrong logical axis. Stash the constructor value here and emit it in
         # get_config. The list() copy is load-bearing: the two attributes must not alias,
-        # or _setup_cluster_axes' in-place sort would mutate the serialized source. Single
-        # copy of an invariant previously duplicated verbatim in gmm.py and kmeans.py; the
+        # or _setup_cluster_axes' in-place sort would mutate the serialized source. The
         # matching D-005 anchors on the get_config() side are a DIFFERENT site and stay.
         self._cluster_axis_arg = list(self.cluster_axis)
 
@@ -476,8 +469,7 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
     # either public attribute to a shared name -- both appear in get_config() keys and in
     # MIXTURE_REGISTRY params, so a rename is a breaking public-API and serialization
     # change, and it would force test edits. Do NOT add further abstract members here to
-    # absorb other differences either; this is an authorized one-off amendment to the
-    # plan's abstraction budget, not a precedent. See decisions.md D-007.
+    # absorb other differences either. See decisions.md D-007.
     @property
     @abstractmethod
     def _n_prototypes(self) -> int:

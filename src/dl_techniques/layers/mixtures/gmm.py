@@ -105,8 +105,7 @@ from .base import (
 
 # ---------------------------------------------------------------------
 
-# ``OutputMode`` and ``Axis`` are shared with ``KMeansLayer`` and are imported from
-# ``base.py`` above. ``CovarianceType`` is GMM-only and stays here.
+# ``CovarianceType`` is GMM-only; ``OutputMode`` / ``Axis`` come from ``base.py``.
 CovarianceType = Literal['diagonal', 'low_rank']
 
 # DECISION plan-2026-07-21T083606-47dc4421/D-003: upper bound on effective variance
@@ -258,9 +257,8 @@ class GMMLayer(BaseMixtureLayer):
     :raises ValueError: If covariance_rank is not a positive integer.
     """
 
-    #: The legal ``output_mode`` values for this layer, declared once on the class that
-    #: owns them. ``mixtures.factory.validate_mixture_config`` reads this attribute off
-    #: ``MIXTURE_REGISTRY[type]['class']`` instead of carrying its own copy.
+    #: Legal ``output_mode`` values, declared once on the owning class.
+    #: ``factory.validate_mixture_config`` reads it off ``MIXTURE_REGISTRY[type]['class']``.
     VALID_OUTPUT_MODES: ClassVar[FrozenSet[str]] = frozenset({'assignments', 'mixture'})
 
     def __init__(
@@ -282,13 +280,11 @@ class GMMLayer(BaseMixtureLayer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Input validation
         self._validate_init_args(
             n_components, temperature, isometric_regularizer_strength,
             variance_floor, output_mode, covariance_type, covariance_rank
         )
 
-        # Store ALL configuration parameters
         self.n_components = n_components
         self.temperature = temperature
         self.isometric_regularizer_strength = isometric_regularizer_strength
@@ -325,7 +321,7 @@ class GMMLayer(BaseMixtureLayer):
                 "Pass isometric_regularizer_strength=0.0 to disable it entirely."
             )
 
-        # Initialize weight placeholders - weights created in build().
+        # Weight placeholders; the weights themselves are created in build().
         # R6: input_rank/feature_dims/non_feature_dims/original_shape are set by
         # BaseMixtureLayer.__init__ (called via super() above) — not re-declared here.
         self.means: Optional[keras.Variable] = None
@@ -414,21 +410,16 @@ class GMMLayer(BaseMixtureLayer):
                 f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
             )
 
-        # Store input information
         self.input_rank = len(input_shape)
         self.original_shape = list(input_shape)
 
-        # Normalize and validate cluster axes
         self._setup_cluster_axes()
-
-        # Compute dimensions
         self.feature_dims = self._compute_feature_dims(input_shape)
         self.non_feature_dims = self._compute_non_feature_dims()
 
-        # Initialize component means using add_weight
         self._initialize_means()
 
-        # Initialize per-dimension log-variances (diagonal covariance, log-space)
+        # Per-dimension log-variances (diagonal covariance, log-space).
         self.log_variances = self.add_weight(
             name="log_variances",
             shape=(self.n_components, self.feature_dims),
@@ -438,7 +429,7 @@ class GMMLayer(BaseMixtureLayer):
             autocast=False  # mixed-precision: keep float32 for the density math
         )
 
-        # Initialize mixing logits (uniform mixture at start)
+        # Mixing logits; 'zeros' makes the initial mixture uniform.
         self.mixture_logits = self.add_weight(
             name="mixture_logits",
             shape=(self.n_components,),
@@ -468,7 +459,6 @@ class GMMLayer(BaseMixtureLayer):
                 autocast=False  # mixed-precision: matrix solves are MORE fp16-fragile
             )
 
-        # Call parent build at the end
         super().build(input_shape)
 
     def _initialize_means(self) -> None:
@@ -481,13 +471,7 @@ class GMMLayer(BaseMixtureLayer):
             seed=self.random_seed,
         )
 
-        # Create means weight.
-        # Mixed-precision: autocast=False keeps the parameter in variable_dtype (float32)
-        # inside call() under a mixed_float16 policy. The diagonal-Gaussian density
-        # (exp/log/softmax/division) is numerically unsafe in float16, so the forward is
-        # computed in float32 and the OUTPUT is cast to compute_dtype on return. Without
-        # this, the autocast float16 weight mismatches the float32 inputs
-        # (InvalidArgumentError: Sub half vs float).
+        # autocast=False / explicit dtype: see BaseMixtureLayer's mixed-precision contract.
         self.means = self.add_weight(
             name="means",
             shape=(self.n_components, self.feature_dims),
@@ -765,28 +749,20 @@ class GMMLayer(BaseMixtureLayer):
         :return: Output tensor based on output_mode.
         :rtype: keras.KerasTensor
         """
-        # Cast inputs to variable_dtype (float32) so the density math runs in full
-        # precision and matches the autocast=False weights under a mixed_float16 policy.
-        # The output is cast back to compute_dtype before returning. Under the default
-        # float32 policy this is a no-op.
+        # Cast in / cast out: see BaseMixtureLayer's mixed-precision contract.
         inputs = keras.ops.cast(inputs, self.variable_dtype)
 
-        # Reshape input for clustering
         reshaped_inputs, leading_dims = self._reshape_for_clustering(inputs)
-
-        # Compute log-densities and posterior responsibilities
         log_density = self._log_gaussian_density(reshaped_inputs)
         responsibilities = self._responsibilities(log_density)
 
-        # Register isometric-kernel regularization during training.
-        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
-        # the loss fires for a symbolic training=True tensor (custom @tf.function loop) and
-        # is a zero contribution under symbolic-False, never coercing a tensor to a bool.
-        # python-True keeps the exact unmasked add_loss; the symbolic path multiplies by the
-        # 0/1 factor.
+        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate the isometric-kernel loss on a
+        # graph-safe training factor so it fires for a symbolic training=True tensor
+        # (custom @tf.function loop) and is a zero contribution under symbolic-False,
+        # never coercing a tensor to a bool. python-True keeps the exact unmasked
+        # add_loss; the symbolic path multiplies by the 0/1 factor, built in
+        # variable_dtype per the mixed-precision contract.
         if self.isometric_regularizer_strength > 0:
-            # variable_dtype factor so the masked loss term stays float32-consistent
-            # under a mixed_float16 policy.
             training_factor = resolve_training_factor(training, self.variable_dtype)
             if training_factor is not None:
                 loss = self._isometric_regularization_loss()
@@ -795,15 +771,12 @@ class GMMLayer(BaseMixtureLayer):
                     else training_factor * loss
                 )
 
-        # Compute output based on mode
         if self.output_mode == 'assignments':
             output = responsibilities
         else:  # output_mode == 'mixture'
             # Reconstruct inputs as responsibility-weighted component means
             output = keras.ops.matmul(responsibilities, self.means)
 
-        # Reshape, then cast to compute_dtype so the layer emits the policy's compute
-        # dtype (float16 under mixed precision; no-op under float32).
         return keras.ops.cast(self._reshape_output(output, leading_dims), self.compute_dtype)
 
     def get_config(self) -> Dict[str, Any]:
@@ -933,10 +906,8 @@ class GMMLayer(BaseMixtureLayer):
             # here. keras.random.normal(seed=<int>) is stateless, so a fixed seed makes
             # every reset_parameters() call redraw BIT-IDENTICAL means, defeating the
             # purpose of the no-arg reset (escaping a collapsed/degenerate mixture by
-            # drawing genuinely fresh means). Mirrors the sibling fix in
-            # KMeansLayer.reset_centroids (D-009 of plan-2026-07-20T160907-7de371a1).
-            # Build-time initialization (in build()) legitimately keeps the seed; only
-            # this reset call must omit it.
+            # drawing genuinely fresh means). Build-time initialization legitimately
+            # keeps the seed; only this reset call must omit it.
             new_values = keras.random.normal(
                 shape=(self.n_components, self.feature_dims),
                 dtype=self.dtype
