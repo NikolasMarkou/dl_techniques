@@ -12,7 +12,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 from typing import Dict, Any
 
@@ -222,8 +221,8 @@ class TestMixtureOfExperts:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="MLP MoE predictions differ after serialization"
             )
@@ -251,8 +250,8 @@ class TestMixtureOfExperts:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="SwiGLU MoE predictions differ after serialization"
             )
@@ -279,8 +278,8 @@ class TestMixtureOfExperts:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="SoftMoE predictions differ after serialization"
             )
@@ -311,7 +310,7 @@ class TestMixtureOfExperts:
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(sample_input_2d)
             output = layer(sample_input_2d, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         # Check gradients with respect to layer parameters
         gradients = tape.gradient(loss, layer.trainable_variables)
@@ -514,7 +513,7 @@ class TestMixtureOfExperts:
         outputs = []
         for _ in range(3):
             output = layer(sample_input_2d, training=True)
-            outputs.append(ops.convert_to_numpy(output))
+            outputs.append(keras.ops.convert_to_numpy(output))
 
         # With jitter noise, outputs should vary slightly
         # (This is probabilistic, but very likely with reasonable noise)
@@ -543,8 +542,8 @@ class TestMixtureOfExperts:
         output2 = layer(sample_input_2d, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output1),
-            ops.convert_to_numpy(output2),
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
             rtol=1e-7, atol=1e-7,
             err_msg="Expected deterministic behavior without noise"
         )
@@ -744,8 +743,8 @@ class TestFFNExpert:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Expert predictions differ after serialization"
             )
@@ -810,7 +809,7 @@ class TestGatingNetworks:
         # Weights should sum to approximately 1 for top-k selections
         selected_weights = keras.ops.sum(weights, axis=-1)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(selected_weights),
+            keras.ops.convert_to_numpy(selected_weights),
             np.ones(6),
             rtol=1e-5, atol=1e-5
         )
@@ -836,7 +835,7 @@ class TestGatingNetworks:
         assert cosine_sims.shape == (6, 4)
 
         # Cosine similarities should be in [-1, 1] range
-        cosine_values = ops.convert_to_numpy(cosine_sims)
+        cosine_values = keras.ops.convert_to_numpy(cosine_sims)
         assert np.all(cosine_values >= -1.0) and np.all(cosine_values <= 1.0)
 
     def test_softmoe_gating(self):
@@ -865,15 +864,15 @@ class TestGatingNetworks:
         assert expert_inputs.shape == (4, 6, 4 * 256)  # (batch, experts, slots * hidden)
 
         # Dispatch weights sum to 1 over the sequence axis for each (expert, slot).
-        dispatch_sum = ops.convert_to_numpy(ops.sum(info['dispatch_weights'], axis=1))
+        dispatch_sum = keras.ops.convert_to_numpy(keras.ops.sum(info['dispatch_weights'], axis=1))
         np.testing.assert_allclose(dispatch_sum, np.ones_like(dispatch_sum), atol=1e-5)
 
         # Combine weights sum to 1 over (experts * slots) for each token.
-        combine_sum = ops.convert_to_numpy(ops.sum(info['combine_weights'], axis=(-2, -1)))
+        combine_sum = keras.ops.convert_to_numpy(keras.ops.sum(info['combine_weights'], axis=(-2, -1)))
         np.testing.assert_allclose(combine_sum, np.ones_like(combine_sum), atol=1e-5)
 
         # Marginalized expert_weights are now non-uniform (no longer 1/N).
-        ew = ops.convert_to_numpy(weights)
+        ew = keras.ops.convert_to_numpy(weights)
         assert ew.std() > 1e-4, "Expected non-uniform per-expert weights after A2 fix"
 
     def test_gating_factory(self, sample_input):
@@ -918,8 +917,8 @@ class TestGatingNetworks:
 
             # Verify identical outputs
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Gating outputs differ after serialization"
             )
@@ -1070,8 +1069,8 @@ class TestMoEPerformance:
         output2 = layer(sample_input, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output1),
-            ops.convert_to_numpy(output2),
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
             rtol=1e-7, atol=1e-7,
             err_msg="Expected deterministic inference behavior"
         )
@@ -1093,7 +1092,7 @@ class TestMoEPerformance:
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(sample_input)
             output = layer(sample_input, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         # Gradients should flow to gating network
         gating_gradients = tape.gradient(loss, layer.gating_network.trainable_variables)
@@ -1160,7 +1159,7 @@ class TestReviewFixes:
     def test_cosine_temperature_divides_softmax(self):
         """Larger ``temperature`` should produce a flatter softmax (A3)."""
         rng = np.random.default_rng(0)
-        x = ops.convert_to_tensor(rng.standard_normal((32, 64)).astype(np.float32))
+        x = keras.ops.convert_to_tensor(rng.standard_normal((32, 64)).astype(np.float32))
 
         # Same kernel init seeds so the only varying factor is temperature.
         keras.utils.set_random_seed(123)
@@ -1175,7 +1174,7 @@ class TestReviewFixes:
 
         # Entropy of weights: higher temperature -> flatter -> larger entropy.
         def entropy(p):
-            p = ops.convert_to_numpy(p)
+            p = keras.ops.convert_to_numpy(p)
             p = np.clip(p, 1e-12, 1.0)
             return float((-p * np.log(p)).sum(axis=-1).mean())
 
@@ -1190,8 +1189,8 @@ class TestReviewFixes:
         gating = SoftMoEGating(num_experts=4, num_slots=3)
         _, _, info = gating(x, training=False)
 
-        dispatch = ops.convert_to_numpy(info['dispatch_weights'])  # [b, s, e, l]
-        combine = ops.convert_to_numpy(info['combine_weights'])    # [b, s, e, l]
+        dispatch = keras.ops.convert_to_numpy(info['dispatch_weights'])  # [b, s, e, l]
+        combine = keras.ops.convert_to_numpy(info['combine_weights'])    # [b, s, e, l]
 
         # Dispatch sums to 1 over seq axis (axis=1) for each (expert, slot).
         np.testing.assert_allclose(dispatch.sum(axis=1),
@@ -1256,11 +1255,11 @@ class TestReviewFixes:
                 use_residual_connection=flag,
             ))
 
-        x = ops.convert_to_tensor(
+        x = keras.ops.convert_to_tensor(
             np.arange(2 * 5 * 10, dtype='float32').reshape(2, 5, 10) / 100.0)
         on, off = build(True), build(False)
-        y_on = ops.convert_to_numpy(on(x, training=False))
-        y_off = ops.convert_to_numpy(off(x, training=False))
+        y_on = keras.ops.convert_to_numpy(on(x, training=False))
+        y_off = keras.ops.convert_to_numpy(off(x, training=False))
 
         np.testing.assert_array_equal(y_on, y_off)
         assert on.get_expert_utilization()['drop_tokens'] is True
@@ -1327,8 +1326,8 @@ class TestReviewFixes:
 
         y_new = restored(x, training=False)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(y_ref),
-            ops.convert_to_numpy(y_new),
+            keras.ops.convert_to_numpy(y_ref),
+            keras.ops.convert_to_numpy(y_new),
             atol=1e-5,
         )
 
@@ -1387,12 +1386,12 @@ class TestMoEReviewRegressions:
         assert tuple(rgp.shape) == (2, 5, num_experts)
 
         # marginal over experts is a probability distribution
-        sums = ops.convert_to_numpy(ops.sum(rgp, axis=-1))
+        sums = keras.ops.convert_to_numpy(keras.ops.sum(rgp, axis=-1))
         np.testing.assert_allclose(sums, np.ones_like(sums), atol=1e-4)
 
         # accepted by compute_auxiliary_loss without shape error
         loss = compute_auxiliary_loss(weights, rgp, num_experts=num_experts)
-        assert np.isfinite(float(ops.convert_to_numpy(loss)))
+        assert np.isfinite(float(keras.ops.convert_to_numpy(loss)))
 
     # --- F5: GatingConfig validation symmetry ----------------------------
 
@@ -1423,7 +1422,7 @@ class TestMoEReviewRegressions:
         x = np.random.randn(2, 5, 16).astype('float32')
         for bad in (0.0, -0.5):
             g.temperature_param.assign(bad)
-            w = ops.convert_to_numpy(g(x, training=False)[0])
+            w = keras.ops.convert_to_numpy(g(x, training=False)[0])
             assert np.isfinite(w).all()
             np.testing.assert_allclose(w.sum(-1), np.ones(w.shape[:-1]), atol=1e-4)
 
