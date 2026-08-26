@@ -493,7 +493,7 @@ class TestMixtureOfExperts:
             expert_config=ExpertConfig(
                 ffn_config={'type': 'mlp', 'hidden_dim': 64, 'output_dim': 32}
             ),
-            gating_config=GatingConfig(top_k=1, capacity_factor=0.5),  # Low capacity
+            gating_config=GatingConfig(top_k=1),
             drop_tokens=True,
             use_residual_connection=True
         )
@@ -629,7 +629,6 @@ class TestMoEConfigurations:
         config = GatingConfig()
         assert config.gating_type == 'linear'
         assert config.top_k == 1
-        assert config.capacity_factor == 1.25
         assert config.add_noise is True
         assert config.aux_loss_weight == 0.01
 
@@ -1216,6 +1215,57 @@ class TestReviewFixes:
         restored = MoEConfig.from_dict(legacy)
         assert restored.num_experts == 2
 
+    # --- C1 (F-6): routing_dtype / capacity_factor removed ----------------
+
+    def test_dead_fields_removed_from_config_surface(self):
+        """C1: `routing_dtype` and `capacity_factor` are gone from the dataclasses.
+
+        Both were accepted, validated and serialized while gating no behaviour;
+        `routing_dtype` additionally accepted any string. Neither may be
+        constructible or serialized any more.
+        """
+        moe = MoEConfig(num_experts=2)
+        gating = GatingConfig()
+        assert not hasattr(moe, 'routing_dtype')
+        assert not hasattr(gating, 'capacity_factor')
+        assert 'routing_dtype' not in moe.to_dict()
+        assert 'capacity_factor' not in moe.to_dict()['gating_config']
+
+        with pytest.raises(TypeError):
+            MoEConfig(num_experts=2, routing_dtype='float32')
+        with pytest.raises(TypeError):
+            GatingConfig(capacity_factor=1.25)
+
+    def test_diagnostic_flags_gate_no_forward_behaviour(self):
+        """C1/5c: `drop_tokens`/`use_residual_connection` are diagnostic-only.
+
+        Pins the claim the rewritten docstrings now make. Flipping both must
+        leave the forward output bit-identical while still being echoed by
+        ``get_expert_utilization()``.
+        """
+        def build(flag):
+            keras.utils.set_random_seed(11)
+            return MixtureOfExperts(MoEConfig(
+                num_experts=4,
+                expert_config=ExpertConfig(
+                    ffn_config={'type': 'mlp', 'hidden_dim': 16, 'output_dim': 10}
+                ),
+                gating_config=GatingConfig(top_k=2, add_noise=False),
+                jitter_noise=0.0,
+                drop_tokens=flag,
+                use_residual_connection=flag,
+            ))
+
+        x = ops.convert_to_tensor(
+            np.arange(2 * 5 * 10, dtype='float32').reshape(2, 5, 10) / 100.0)
+        on, off = build(True), build(False)
+        y_on = ops.convert_to_numpy(on(x, training=False))
+        y_off = ops.convert_to_numpy(off(x, training=False))
+
+        np.testing.assert_array_equal(y_on, y_off)
+        assert on.get_expert_utilization()['drop_tokens'] is True
+        assert off.get_expert_utilization()['use_residual_connection'] is False
+
     def test_gating_pre_norm_via_factory(self):
         """B2: GatingConfig.norm_type wires pre-gating norm via the factory."""
         cfg = MoEConfig(
@@ -1351,7 +1401,6 @@ class TestMoEReviewRegressions:
         {'top_k': 0},
         {'num_slots': 0},
         {'embedding_dim': 0},
-        {'capacity_factor': 0.0},
         {'temperature': 0.0},
         {'noise_std': -1.0},
     ])

@@ -132,8 +132,6 @@ class GatingConfig:
     :type gating_type: Literal['linear', 'cosine', 'softmoe']
     :param top_k: Number of experts to select per token.
     :type top_k: int
-    :param capacity_factor: Multiplier for expert capacity calculation.
-    :type capacity_factor: float
     :param add_noise: Whether to add noise to gating logits for exploration.
     :type add_noise: bool
     :param noise_std: Standard deviation of gating noise.
@@ -155,7 +153,6 @@ class GatingConfig:
     """
     gating_type: Literal['linear', 'cosine', 'softmoe'] = 'linear'
     top_k: int = 1
-    capacity_factor: float = 1.25
     add_noise: bool = True
     noise_std: float = 1.0
     temperature: float = 1.0
@@ -195,8 +192,6 @@ class GatingConfig:
             raise ValueError(f"num_slots must be >= 1, got {self.num_slots}")
         if self.embedding_dim < 1:
             raise ValueError(f"embedding_dim must be >= 1, got {self.embedding_dim}")
-        if self.capacity_factor <= 0:
-            raise ValueError(f"capacity_factor must be > 0, got {self.capacity_factor}")
         if self.temperature <= 0:
             raise ValueError(f"temperature must be > 0, got {self.temperature}")
         if self.noise_std < 0:
@@ -242,14 +237,24 @@ class MoEConfig:
         ``add_noise=True``; the two sources stack. Set ``jitter_noise=0`` to
         rely solely on the gating-level noise.
     :type jitter_noise: float
-    :param drop_tokens: Reserved for future capacity-based dispatch (the
-        current hard-routing kernel is dense and does not drop tokens).
+    :param drop_tokens: Diagnostic flag only. It is echoed by
+        :meth:`MixtureOfExperts.get_expert_utilization` and gates **no**
+        forward-path behaviour: neither the dense nor the sparse hard-routing
+        kernel drops a token, so flipping it leaves the layer's output
+        bit-identical (measured: ``max|delta| == 0.0``).
     :type drop_tokens: bool
-    :param use_residual_connection: Reserved for future capacity-based
-        dispatch. Has no effect in the current dense kernel.
+    :param use_residual_connection: Diagnostic flag only, with the same status
+        as ``drop_tokens`` — echoed by
+        :meth:`MixtureOfExperts.get_expert_utilization`, read by no kernel.
+        There are no dropped tokens for a residual to rescue.
     :type use_residual_connection: bool
-    :param routing_dtype: Data type for routing computations.
-    :type routing_dtype: str
+
+    .. note::
+        The capacity-based dispatch these two flags were once described as
+        "reserved for" is **not** planned. ``capacity_factor`` (``GatingConfig``)
+        and ``routing_dtype`` (``MoEConfig``) were removed for that reason. They
+        are **not** tolerated as legacy keys: a payload still naming either one
+        raises ``TypeError`` at construction.
     """
     num_experts: int = 8
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
@@ -259,9 +264,6 @@ class MoEConfig:
     jitter_noise: float = 0.01
     drop_tokens: bool = True
     use_residual_connection: bool = True
-
-    # Advanced features
-    routing_dtype: str = 'float32'
 
     def __post_init__(self):
         """Validate the complete MoE configuration after dataclass creation.
@@ -332,7 +334,6 @@ class MoEConfig:
             'jitter_noise': self.jitter_noise,
             'drop_tokens': self.drop_tokens,
             'use_residual_connection': self.use_residual_connection,
-            'routing_dtype': self.routing_dtype,
         }
 
     @classmethod

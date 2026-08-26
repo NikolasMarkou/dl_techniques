@@ -52,7 +52,11 @@ class MixtureOfExperts(keras.layers.Layer):
        reduced at every size.
 
        ``drop_tokens`` and ``use_residual_connection`` remain inert: neither
-       kernel drops a token.
+       kernel drops a token. They are diagnostic flags echoed by
+       :meth:`get_expert_utilization` and nothing else; the capacity-based
+       dispatch they were once "reserved for" is not planned, and the
+       ``capacity_factor`` / ``routing_dtype`` config fields that belonged to
+       that unbuilt scheme have been removed.
 
     **Architecture Overview:**
 
@@ -107,7 +111,6 @@ class MixtureOfExperts(keras.layers.Layer):
         self.drop_tokens = config.drop_tokens
         self.use_residual_connection = config.use_residual_connection
         self.jitter_noise = config.jitter_noise
-        self.routing_dtype = config.routing_dtype
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.experts: List[FFNExpert] = []
@@ -671,7 +674,7 @@ def create_ffn_moe(
 
     # Create gating configuration
     gating_keys = {
-        'capacity_factor', 'add_noise', 'noise_std', 'temperature',
+        'add_noise', 'noise_std', 'temperature',
         'use_bias', 'embedding_dim', 'learnable_temperature', 'num_slots',
         'z_loss_weight',
     }
@@ -690,7 +693,7 @@ def create_ffn_moe(
     )
 
     # Create complete MoE configuration
-    moe_keys = {'jitter_noise', 'drop_tokens', 'use_residual_connection', 'routing_dtype'}
+    moe_keys = {'jitter_noise', 'drop_tokens', 'use_residual_connection'}
     moe_config = MoEConfig(
         num_experts=num_experts,
         expert_config=expert_config,
