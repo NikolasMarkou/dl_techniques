@@ -32,8 +32,9 @@ References:
     Patterns: Elements of Reusable Object-Oriented Software. Addison-Wesley.
 """
 
+import copy
 import keras
-from typing import Dict, Any, Literal, Optional
+from typing import Dict, Any, Literal, Optional, Sequence, get_args
 
 # ---------------------------------------------------------------------
 # local imports
@@ -134,6 +135,42 @@ MIXTURE_REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _check_registry_literal_consistency(
+        literal_types: Sequence[str],
+        registry_keys: Sequence[str],
+) -> None:
+    """
+    Assert that the ``MixtureType`` Literal and ``MIXTURE_REGISTRY`` name the
+    same set of mixture types.
+
+    :param literal_types: The values of the ``MixtureType`` Literal.
+    :type literal_types: Sequence[str]
+    :param registry_keys: The keys of ``MIXTURE_REGISTRY``.
+    :type registry_keys: Sequence[str]
+    :raises RuntimeError: If either side names a type the other does not.
+    """
+    # DECISION plan-2026-08-26T061816-c515641a/D-011: this must RAISE, and it must
+    # raise a real exception rather than use `assert`. INVARIANT: the Literal and the
+    # registry are two hand-maintained spellings of one set; a type added to one and
+    # not the other is a silent hole (an unregistered Literal value type-checks and
+    # then fails at runtime; an unliteralled registry key works but is invisible to
+    # every caller reading the type). CONSEQUENCE of downgrading it to `assert`: it is
+    # stripped by `python -O`, i.e. absent in exactly the optimized deployment where a
+    # silent hole costs the most. Downgrading it to a warning is no better -- nothing
+    # reads factory warnings at import time.
+    only_in_literal = sorted(set(literal_types) - set(registry_keys))
+    only_in_registry = sorted(set(registry_keys) - set(literal_types))
+    if only_in_literal or only_in_registry:
+        raise RuntimeError(
+            f"MixtureType Literal and MIXTURE_REGISTRY disagree. "
+            f"In the Literal but not the registry: {only_in_literal}. "
+            f"In the registry but not the Literal: {only_in_registry}."
+        )
+
+
+_check_registry_literal_consistency(get_args(MixtureType), tuple(MIXTURE_REGISTRY.keys()))
+
+
 # ---------------------------------------------------------------------
 # Public API functions
 # ---------------------------------------------------------------------
@@ -142,11 +179,26 @@ def get_mixture_info() -> Dict[str, Dict[str, Any]]:
     """
     Get comprehensive information about all available mixture layer types.
 
+    The returned structure is a deep copy: mutating it -- including its nested
+    ``optional_params`` dict -- cannot reach ``MIXTURE_REGISTRY``. The layer
+    classes under ``'class'`` are returned by identity, not cloned.
+
     :return: Dict containing information about each mixture type, including
         description, required_params, optional_params, and use_case.
     :rtype: Dict[str, Dict[str, Any]]
     """
-    return {mixture_type: info.copy() for mixture_type, info in MIXTURE_REGISTRY.items()}
+    # DECISION plan-2026-08-26T061816-c515641a/D-010: deepcopy, never `.copy()`.
+    # INVARIANT: a caller holding the result of this function cannot mutate the
+    # module-global registry. A shallow copy duplicates only the outer dict, so
+    # `info['gmm']['optional_params']` stayed the SAME object -- measured: one
+    # assignment re-defaulted `temperature` to 999.0 for every subsequent
+    # create_mixture_layer call in the process, and leaked across pytest cases.
+    # CONSEQUENCE of "optimizing" this back to a shallow copy: that silent
+    # process-wide corruption returns. deepcopy is safe on this structure because
+    # `copy.deepcopy` returns classes by identity (measured: the copied
+    # `info['gmm']['class'] is GMMLayer`), which `create_mixture_from_config` and
+    # Keras serializable registration both depend on.
+    return copy.deepcopy(MIXTURE_REGISTRY)
 
 
 def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
@@ -267,26 +319,35 @@ def create_mixture_layer(
         # Filter out any unknown parameters to avoid "Unrecognized keyword arguments" error
         final_params = {key: val for key, val in params.items() if key in valid_param_names}
 
+        # DECISION plan-2026-08-26T061816-c515641a/D-009: WARN on the dropped keys --
+        # never raise. INVARIANT: this factory is NON-STRICT by a deliberate cross-plan
+        # decision recorded at `plans/SYSTEM.md:185,253`; `ffn`, `norms`, `embedding` and
+        # `attention` were each hardened to raise only after a real bug was MEASURED at
+        # their call sites, and `mixtures` is one of the five where none was, so a raise
+        # here would carry unmeasured blast radius across the `**dict`-unpack call sites
+        # that sweep left unresolved. CONSEQUENCE of converting this to a raise (under any
+        # name -- `strict=`, a marker constant, a config flag): a previously-working caller
+        # starts failing for a kwarg that has always been inert, and the SYSTEM.md decision
+        # is silently reversed. The silence was the whole defect; the drop is intended.
+        dropped_keys = sorted(set(kwargs) - valid_param_names)
+        if dropped_keys:
+            logger.warning(
+                f"create_mixture_layer('{mixture_type}') is DROPPING unknown parameter(s) "
+                f"{dropped_keys} -- they will have no effect (check for a typo). "
+                f"Accepted parameters for '{mixture_type}': {sorted(valid_param_names)}."
+            )
+
         # Add name if provided
         if name is not None:
             final_params['name'] = name
 
-        logger.info(f"Creating {mixture_type} mixture layer with parameters:")
-        log_params = final_params.copy()
-        for param_name, param_value in sorted(log_params.items()):
-            if param_name == 'name':
-                logger.info(f"  {param_name}: '{param_value}'")
-            elif isinstance(param_value, str):
-                logger.info(f"  {param_name}: '{param_value}'")
-            elif param_value is None:
-                logger.info(f"  {param_name}: None")
-            else:
-                logger.info(f"  {param_name}: {param_value}")
+        for param_name, param_value in sorted(final_params.items()):
+            logger.debug(f"  {param_name}: {param_value!r}")
 
         # Create mixture layer using registry class directly (no if/elif chain)
         mixture_layer = mixture_class(**final_params)
 
-        logger.debug(f"Successfully created {mixture_type} mixture layer: {mixture_layer.name}")
+        logger.info(f"Created {mixture_type} mixture layer: {mixture_layer.name}")
         return mixture_layer
 
     except (TypeError, ValueError) as e:

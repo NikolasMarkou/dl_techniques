@@ -106,3 +106,116 @@ class TestCreateFromConfigAndInfo:
         assert MIXTURE_REGISTRY["rbf"]["class"] is RBFLayer
         assert MIXTURE_REGISTRY["kmeans"]["class"] is KMeansLayer
         assert MIXTURE_REGISTRY["gmm"]["class"] is GMMLayer
+
+
+# ------------------------------------------------------- diagnostics (step 5)
+
+class TestFactoryDiagnostics:
+    """Guards for the factory's diagnostic surface: registry isolation, the
+    dropped-kwarg warning, the `_KERAS_BASE_PARAMS` lockstep pin, and the
+    import-time registry/Literal consistency check.
+    """
+
+    def test_get_mixture_info_cannot_corrupt_the_registry(self) -> None:
+        """A5: `get_mixture_info()` hands out a DEEP copy.
+
+        Pre-fix the outer dict was `.copy()`-ed, so `optional_params` was the
+        SAME object as the module global and a caller reading the "info" dict
+        could silently re-default every subsequent `create_mixture_layer` call
+        in the process.
+        """
+        sentinel = 999.0
+        original = MIXTURE_REGISTRY["gmm"]["optional_params"]["temperature"]
+
+        info = get_mixture_info()
+        info["gmm"]["optional_params"]["temperature"] = sentinel
+
+        assert MIXTURE_REGISTRY["gmm"]["optional_params"]["temperature"] == original, (
+            "get_mixture_info() aliased the module-global MIXTURE_REGISTRY: mutating "
+            "the returned nested dict changed the registry itself."
+        )
+        assert create_mixture_layer("gmm", n_components=4).temperature == original
+
+    def test_get_mixture_info_preserves_class_identity(self) -> None:
+        """A5's counter-risk: the deep copy must NOT clone the layer classes.
+
+        `create_mixture_from_config` and Keras serializable registration both
+        key on class IDENTITY, so a copied class would be a worse bug than the
+        aliasing it fixes.
+        """
+        info = get_mixture_info()
+        assert info["rbf"]["class"] is RBFLayer
+        assert info["kmeans"]["class"] is KMeansLayer
+        assert info["gmm"]["class"] is GMMLayer
+
+    def test_unknown_kwarg_warns_but_still_returns_a_layer(self, caplog) -> None:
+        """B1 + H-2: the drop is ANNOUNCED, never rejected.
+
+        `plans/SYSTEM.md:185,253` record a deliberate cross-plan decision that
+        this factory stays NON-STRICT (unlike `ffn`/`norms`/`embedding`/
+        `attention`). Both halves are load-bearing: a layer comes back, AND one
+        warning names the misspelled key.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            layer = create_mixture_layer("gmm", n_components=8, temperture=0.5)
+
+        assert isinstance(layer, GMMLayer), (
+            "H-2: the mixtures factory must not raise on an unknown kwarg."
+        )
+        assert layer.temperature == 1.0  # the registry default, unchanged
+
+        warnings = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING and "temperture" in record.message
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly one warning naming the dropped key 'temperture', "
+            f"got {len(warnings)}: {[r.message for r in caplog.records]}"
+        )
+
+    def test_keras_base_param_set_matches_the_norms_factory(self) -> None:
+        """E7 (regression pin, GREEN on arrival — not a RED proof).
+
+        `mixtures/factory.py:_KERAS_BASE_PARAMS` is a deliberate copy of the
+        `norms` one (its own comment says so). Zero drift measured today; this
+        pins it, mirroring
+        `tests/test_layers/test_activations/test_activation_factory.py`'s
+        `test_keras_base_param_set_matches_the_norms_factory`.
+        """
+        from dl_techniques.layers.mixtures.factory import _KERAS_BASE_PARAMS
+        from dl_techniques.layers.norms.factory import (
+            _KERAS_BASE_PARAMS as norms_base_params,
+        )
+        assert _KERAS_BASE_PARAMS == norms_base_params
+
+    def test_registry_and_literal_agree(self) -> None:
+        """B5: the shipped `MixtureType` Literal and the registry keys agree."""
+        from typing import get_args
+        from dl_techniques.layers.mixtures.factory import MixtureType
+
+        assert set(get_args(MixtureType)) == set(MIXTURE_REGISTRY.keys())
+
+    @pytest.mark.parametrize("literal_types,registry_keys,fragment", [
+        (("rbf", "kmeans", "gmm", "ghost"), ("rbf", "kmeans", "gmm"), "ghost"),
+        (("rbf", "kmeans"), ("rbf", "kmeans", "gmm"), "gmm"),
+    ])
+    def test_the_consistency_check_actually_fires(
+        self, literal_types, registry_keys, fragment
+    ) -> None:
+        """B5's own RED: the import-time check must reject a real mismatch.
+
+        Exercised through the extracted pure function so no module global is
+        perturbed for the rest of the session. `RuntimeError`, not `assert` --
+        a bare `assert` is stripped by `python -O`, which would make the check
+        silently absent in exactly the deployment that runs optimized.
+        """
+        from dl_techniques.layers.mixtures.factory import (
+            _check_registry_literal_consistency,
+        )
+
+        _check_registry_literal_consistency(("rbf",), ("rbf",))  # no raise
+
+        with pytest.raises(RuntimeError, match=fragment):
+            _check_registry_literal_consistency(literal_types, registry_keys)
