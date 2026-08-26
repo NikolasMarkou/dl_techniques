@@ -1844,3 +1844,57 @@ class TestRBFBoolUnitsRejection:
     def test_a_bool_units_is_rejected_at_construction(self) -> None:
         with pytest.raises(ValueError, match="units must be positive"):
             RBFLayer(units=True)
+
+
+class TestRepulsionMagnitudeBand:
+    """The default-on repulsion loss must stay a small, dimension-stable auxiliary term.
+
+    Pre-fix (`repulsion_strength * feature_dim * mean_over_units**2`) the initial
+    value at stock defaults measured 0.47 at ``D=4``, 6.59 at ``D=128`` and 0.30 at
+    ``D=784`` -- a ~14x swing across D and up to ~3x a cross-entropy-scale task loss
+    in the ``D~64-256`` band, all of it default-on. Post-fix
+    (`repulsion_strength * mean_over_off_diagonal_pairs`, no per-dimension factor):
+    0.126 / 0.054 / 0.0004, a 2.3x swing. See
+    ``# DECISION plan-2026-08-26T061816-c515641a/D-018``.
+    """
+
+    #: Upper bound on the initial auxiliary loss at stock defaults, any D.
+    BAND_MAX = 0.25
+    #: Maximum permitted ratio between the D=4 and D=128 readings.
+    MAX_D_SWING = 5.0
+
+    @staticmethod
+    def _initial_loss(feature_dim: int, seed: int) -> float:
+        keras.utils.set_random_seed(seed)
+        layer = RBFLayer(units=16)
+        layer.build((None, feature_dim))
+        return float(layer._compute_repulsion_loss())
+
+    def _mean_initial_loss(self, feature_dim: int) -> float:
+        return float(np.mean([self._initial_loss(feature_dim, s) for s in range(8)]))
+
+    @pytest.mark.parametrize('feature_dim', [4, 128, 784])
+    def test_the_initial_repulsion_loss_stays_inside_the_band(self, feature_dim: int) -> None:
+        loss = self._mean_initial_loss(feature_dim)
+        assert 0.0 <= loss <= self.BAND_MAX, (
+            f"D={feature_dim}: initial repulsion loss {loss:.4f} outside "
+            f"[0, {self.BAND_MAX}] -- a default-on auxiliary term this large "
+            f"competes with the task loss."
+        )
+
+    def test_the_band_is_dimension_stable(self) -> None:
+        low, high = self._mean_initial_loss(4), self._mean_initial_loss(128)
+        assert low > 0.0 and high > 0.0, (
+            f"repulsion inactive at stock defaults (D=4 -> {low}, D=128 -> {high})"
+        )
+        swing = max(low, high) / min(low, high)
+        assert swing <= self.MAX_D_SWING, (
+            f"initial repulsion loss swings {swing:.1f}x between D=4 ({low:.4f}) and "
+            f"D=128 ({high:.4f}); the strength knob must not be dimension-scaled."
+        )
+
+    def test_a_single_unit_has_no_pairs_and_no_loss(self) -> None:
+        keras.utils.set_random_seed(0)
+        layer = RBFLayer(units=1)
+        layer.build((None, 8))
+        assert float(layer._compute_repulsion_loss()) == 0.0

@@ -32,7 +32,7 @@ Enhanced Center Repulsion:
 
     During training, a penalty term is added to the model's loss:
 
-    V_rep(cᵢ, cⱼ) = α · D · max(0, d_min·(1 + μ) - ||cᵢ - cⱼ||)²
+    V_rep(cᵢ, cⱼ) = α · mean_{i≠j} max(0, d_min·(1 + μ) - ||cᵢ - cⱼ||)²
 
     This force ensures centers maintain a minimum separation, maximizing
     the coverage of the input space.
@@ -81,7 +81,7 @@ class RBFLayer(keras.layers.Layer):
     of the input ``x`` to a learnable center ``c_i``. The width parameter
     ``gamma_i`` is stored in raw (pre-softplus) form to guarantee
     positivity. During training an auxiliary repulsive penalty
-    ``V_rep = alpha * D * max(0, d_min*(1+mu) - ||c_i - c_j||)^2``
+    ``V_rep = alpha * mean_{i!=j} max(0, d_min*(1+mu) - ||c_i - c_j||)^2``
     discourages centre collapse, ensuring broad coverage of the input
     space. Broadcasting-based distance computation supports inputs of
     arbitrary rank (2-D, 3-D, etc.).
@@ -135,28 +135,35 @@ class RBFLayer(keras.layers.Layer):
         default existed, which froze a concrete ``1.0`` -- deserializes to
         exactly its previous numerics.
     :type gamma_init: Optional[float]
-    :param repulsion_strength: Strength of the center repulsion penalty. **Not
-        comparable to ``KMeansLayer.repulsion_strength`` despite the shared name and
-        the shared ``0.1`` default**: this one scales an added scalar LOSS that is
-        additionally multiplied by ``feature_dim`` (``dim_scale``), whereas KMeans
-        scales a centroid displacement VECTOR with no per-dimension factor. The mean
-        is taken over all ``units**2`` entries, including the ``units`` zeroed
-        diagonal ones, so the divisor is not the off-diagonal pair count.
+    :param repulsion_strength: Strength of the center repulsion penalty. It scales an
+        added scalar LOSS -- the mean squared threshold violation over the
+        ``units*(units-1)`` off-diagonal center pairs -- whereas
+        ``KMeansLayer.repulsion_strength`` scales a centroid displacement VECTOR. The
+        two are different quantities, but **the knob now carries no per-dimension
+        factor in either layer**, so a given value means a comparable amount of
+        "repulsion relative to the threshold" in both (this was not true before the
+        ``dim_scale = feature_dim`` multiplier was removed; see
+        ``_compute_repulsion_loss``).
 
         Measured initial value of this loss at the shipped defaults (``units=16``,
         ``center_initializer='uniform'``, ``min_center_distance=1.0``,
         ``safety_margin=0.2``; mean over 8 seeds)::
 
-            D     4    16    32    64    96   128   256   512   784  1024
-            loss  0.47 1.62  2.83  4.60  5.82  6.59  7.22  3.77  0.30  0.00
+            D     4     16    32    64    96    128   256   512   784   1024
+            loss  0.126 0.108 0.094 0.077 0.064 0.054 0.030 0.008 0.000 0.000
 
-        It is **non-monotonic in D** and peaks near ``D=256``, where it can reach ~3x
-        a cross-entropy-scale task loss — check the ratio if you train in the
-        ``D~64-256`` band. It vanishes at large ``D`` because a ``RandomUniform``
-        center's vector norm grows as ``~0.05*sqrt(D/3)``, so centers clear the
-        ``min_center_distance*(1+safety_margin)=1.2`` threshold unaided. The curve
-        was measured at this default initializer only; a different
-        ``center_initializer`` moves it.
+        The curve is a few percent of a cross-entropy-scale task loss across the whole
+        range and decays monotonically: a ``RandomUniform`` center's vector norm grows
+        as ``~0.05*sqrt(D/3)``, so at large ``D`` centers clear the
+        ``min_center_distance*(1+safety_margin)=1.2`` threshold unaided and the loss
+        reaches exactly 0.0. The curve was measured at this default initializer only;
+        a different ``center_initializer`` moves it.
+
+        The default still separates centers. Measured at ``D=128``, ``units=16``,
+        200 Adam steps on a binary task (mean over 3 seeds), MINIMUM pairwise center
+        distance after training: 0.93 with repulsion off, **2.24 at this default**,
+        2.09 at the old ``dim_scale``-inflated effective strength -- i.e. the removed
+        factor bought no extra separation while costing ~250x in loss magnitude.
     :type repulsion_strength: float
     :param min_center_distance: Minimum desired distance between centres.
     :type min_center_distance: float
@@ -441,13 +448,16 @@ class RBFLayer(keras.layers.Layer):
 
         masked_penalty = penalty * off_diag_mask
 
-        # Mean over ALL pairs (not over the units^2 - units off-diagonal ones); the
-        # dim_scale * repulsion_strength product carries the calibration.
-        mean_penalty = keras.ops.mean(masked_penalty)
+        # DECISION plan-2026-08-26T061816-c515641a/D-018: MEAN over the units*(units-1)
+        # off-diagonal pairs, NO per-dimension factor. Do not reintroduce the removed
+        # `dim_scale = feature_dim` multiplier -- it made a default-on aux loss reach ~3x a
+        # cross-entropy task loss at D~256 (7.22 measured at the 0.1 default) and bought no
+        # extra separation -- and do not divide by units**2, which is not the term count.
+        n_pairs = float(self.units * (self.units - 1))
+        if n_pairs == 0.0:
+            return keras.ops.zeros((), dtype=self.variable_dtype)
 
-        dim_scale = keras.ops.cast(self._feature_dim, dtype=self.variable_dtype)
-
-        return self.repulsion_strength * dim_scale * mean_penalty
+        return self.repulsion_strength * keras.ops.sum(masked_penalty) / n_pairs
 
     def call(
         self,
