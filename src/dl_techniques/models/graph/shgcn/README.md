@@ -411,10 +411,10 @@ This operation is what allows the bias $b$ to act as a translation in hyperbolic
 If you use this model, please cite the original paper:
 
 ```bibtex
-@inproceedings{arevalo2021simplified,
-  title={Simplified Graph Convolutional Networks},
-  author={Arevalo, John and Duc, Federico and Rizzo, Stefano and others},
-  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-  year={2021}
+@article{arevalo2025shgcn,
+  title={sHGCN: Simplified hyperbolic graph convolutional neural networks},
+  author={Ar{\'e}valo, Pol and Molina, Alexis and Ciudad, {\'A}lvaro},
+  journal={arXiv preprint arXiv:2506.14438},
+  year={2025}
 }
 ```

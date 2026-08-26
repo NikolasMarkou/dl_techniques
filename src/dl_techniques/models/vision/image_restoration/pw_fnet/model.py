@@ -13,9 +13,9 @@ deraining, deblurring, and dehazing.
 - PW_FNet: Complete model with multi-scale supervision
 
 References:
-    - Jiang et al., 2024. Global Modeling Matters: A Fast, Lightweight and
+    - Jiang et al., 2025. Global Modeling Matters: A Fast, Lightweight and
       Effective Baseline for Efficient Image Restoration (PW-FNet).
-      (https://arxiv.org/abs/2407.13663) -- the architecture this implements.
+      (https://arxiv.org/abs/2507.13663) -- the architecture this implements.
     - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms.
       (https://arxiv.org/abs/2105.03824) -- the replace-attention-with-a-
       Fourier-transform idea the token mixer rests on.

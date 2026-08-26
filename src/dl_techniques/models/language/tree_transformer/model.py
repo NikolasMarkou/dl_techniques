@@ -47,8 +47,8 @@ unavailable checkpoint silently indistinguishable from a successful load. Pass
 a local `.keras` path to `pretrained` instead.
 
 References:
-    - Shen et al., 2019. Tree Transformer: Integrating Tree Structures into
-      Self-Attention. (https://arxiv.org/abs/1904.00035)
+    - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
+      Self-Attention. EMNLP-IJCNLP. (https://arxiv.org/abs/1909.06639)
     - Shen et al., 2019. Ordered Neurons: Integrating Tree Structures into
       Recurrent Neural Networks. (https://arxiv.org/abs/1810.09536)
     - Vaswani et al., 2017. Attention Is All You Need.

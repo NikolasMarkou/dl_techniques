@@ -10,10 +10,12 @@ The model stacks multiple SHGCNLayer instances and provides appropriate output
 layers based on the task.
 
 References:
-    - Arevalo et al., 2024. Simplified Hyperbolic Graph Convolutional Neural
-      Networks. (https://arxiv.org/abs/2411.15266) -- the sHGCN formulation
-      this model stacks; the package README section 16 records the citation as
-      it was taken.
+    - Arevalo et al., 2025. sHGCN: Simplified hyperbolic graph convolutional
+      neural networks. (https://arxiv.org/abs/2506.14438) -- the sHGCN formulation
+      this model stacks; the package README section 16 carries the BibTeX.
+      Both were corrected on 2026-08-26: the id here pointed at an unrelated
+      space-structures paper and the README BibTeX named the wrong title,
+      authors, venue and year.
     - Chami et al., 2019. Hyperbolic Graph Convolutional Neural Networks.
       NeurIPS 2019. (https://arxiv.org/abs/1910.12933) -- HGCN, the model sHGCN
       simplifies: hyperbolic feature transform, aggregation and activation.
