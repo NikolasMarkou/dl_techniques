@@ -1473,3 +1473,30 @@ class TestGMMBatchAxisRejection:
         x = np.random.RandomState(0).normal(size=(4, 6, 8)).astype("float32")
         y = self._layer(cluster_axis)(keras.ops.convert_to_tensor(x))
         assert y.shape[0] == 4, "the batch axis was consumed by a legal cluster_axis"
+
+
+# -------------------------------------------------- build() rank guard (A6)
+
+class TestGMMRankGuard:
+    """A6: a rank-1 input must be reported as a rank error.
+
+    Pre-fix, ``GMMLayer(n_components=3).build((8,))`` raised a ValueError that blamed
+    the *cluster axis* instead: ``cluster_axis resolves to the batch axis (axis 0):
+    cluster_axis=[-1] normalizes to [0] on a rank-1 input ...``
+    """
+
+    def test_a_rank_1_input_reports_the_rank_not_the_cluster_axis(self) -> None:
+        layer = GMMLayer(n_components=3)
+        with pytest.raises(ValueError) as excinfo:
+            layer.build((8,))
+        message = str(excinfo.value)
+        assert "at least 2 dimensions" in message, (
+            f"the rank guard must name the rank requirement; got: {message!r}"
+        )
+        assert "got 1" in message, (
+            f"the rank guard must report the actual rank; got: {message!r}"
+        )
+        assert "cluster_axis" not in message, (
+            "a rank-1 input must not be reported as a cluster-axis problem; "
+            f"got: {message!r}"
+        )

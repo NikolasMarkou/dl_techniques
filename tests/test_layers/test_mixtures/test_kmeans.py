@@ -1092,5 +1092,53 @@ class TestKMeansBatchAxisRejection:
         y = self._layer(cluster_axis)(keras.ops.convert_to_tensor(x))
         assert y.shape[0] == 4, "the batch axis was consumed by a legal cluster_axis"
 
+# ------------------------------------- constructor + rank guards (E5, A4/A6)
+
+class TestKMeansConstructorAndRankGuards:
+    """A4/A6: `n_clusters=True` and a rank-1 input must fail at the right place.
+
+    Pre-fix measurements (recorded verbatim in the plan's RED-Proof Ledger):
+
+    * ``KMeansLayer(n_clusters=True)`` did **not** raise at construction; the layer
+      was returned and ``build((4, 8))`` later died with
+      ``ValueError: Cannot convert '(True, 8)' to a shape.``
+    * ``KMeansLayer(n_clusters=3).build((8,))`` raised a ValueError that blamed the
+      *cluster axis*, never the rank:
+      ``cluster_axis resolves to the batch axis (axis 0): cluster_axis=[-1]
+      normalizes to [0] on a rank-1 input ...`` -- with a degenerate
+      ``Use a non-batch axis (1..0, ...)`` tail, because a rank-1 input has no
+      legal cluster axis at all.
+    """
+
+    def test_a_bool_n_clusters_is_rejected_at_construction(self) -> None:
+        """`isinstance(True, int)` is True, so a config `n_clusters: true` got through."""
+        with pytest.raises(ValueError, match="n_clusters must be a positive integer"):
+            KMeansLayer(n_clusters=True)
+
+    def test_a_rank_1_input_reports_the_rank_not_the_cluster_axis(self) -> None:
+        """The rank guard must fire BEFORE `_setup_cluster_axes` (which blamed axis 0)."""
+        layer = KMeansLayer(n_clusters=3)
+        with pytest.raises(ValueError) as excinfo:
+            layer.build((8,))
+        message = str(excinfo.value)
+        assert "at least 2 dimensions" in message, (
+            f"the rank guard must name the rank requirement; got: {message!r}"
+        )
+        assert "got 1" in message, (
+            f"the rank guard must report the actual rank; got: {message!r}"
+        )
+        assert "cluster_axis" not in message, (
+            "a rank-1 input must not be reported as a cluster-axis problem; "
+            f"got: {message!r}"
+        )
+
+    def test_the_factory_still_rejects_a_bool_count(self) -> None:
+        """Regression pin only -- `factory.py`'s count check was already GREEN pre-fix."""
+        from dl_techniques.layers.mixtures.factory import create_mixture_layer
+
+        with pytest.raises(ValueError, match="n_clusters must be a positive integer"):
+            create_mixture_layer("kmeans", n_clusters=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

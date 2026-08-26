@@ -1831,3 +1831,16 @@ class TestRBFGammaInitResolution:
 if __name__ == '__main__':
     # Run with: python -m pytest test_radial_basis_function.py -v
     pytest.main([__file__, '-v', '--tb=short'])
+
+
+class TestRBFBoolUnitsRejection:
+    """`units=True` is the same defect A4 fixes in `KMeansLayer.n_clusters`.
+
+    Pre-fix, ``RBFLayer(units=True)`` was constructed without complaint and
+    ``build((4, 8))`` died with
+    ``ValueError: Cannot convert '(True, 8)' to a shape.``
+    """
+
+    def test_a_bool_units_is_rejected_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="units must be positive"):
+            RBFLayer(units=True)

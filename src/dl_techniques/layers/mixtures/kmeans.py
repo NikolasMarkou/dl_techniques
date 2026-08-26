@@ -277,7 +277,13 @@ class KMeansLayer(BaseMixtureLayer):
         :type output_mode: str
         :raises ValueError: If any argument is invalid.
         """
-        if not isinstance(n_clusters, int) or n_clusters < 1:
+        # DECISION plan-2026-08-26T061816-c515641a/D-008: the `isinstance(n_clusters, bool)`
+        # clause is NOT redundant with the `isinstance(n_clusters, int)` clause -- in Python
+        # `isinstance(True, int)` is True, so a YAML/JSON config `n_clusters: true` reaches here
+        # as the integer 1. Removing it restores the measured pre-fix failure: construction
+        # succeeds and `build()` dies far away with
+        # `ValueError: Cannot convert '(True, 8)' to a shape`. Mirrors gmm.py's n_components.
+        if not isinstance(n_clusters, int) or isinstance(n_clusters, bool) or n_clusters < 1:
             raise ValueError(f"n_clusters must be a positive integer, got {n_clusters}")
         if not isinstance(temperature, (int, float)) or temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
@@ -314,6 +320,11 @@ class KMeansLayer(BaseMixtureLayer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is invalid or incompatible with cluster_axis.
         """
+        if len(input_shape) < 2:
+            raise ValueError(
+                f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
+            )
+
         # Store input information
         self.input_rank = len(input_shape)
         self.original_shape = list(input_shape)

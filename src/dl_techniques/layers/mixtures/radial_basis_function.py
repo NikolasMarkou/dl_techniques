@@ -293,7 +293,12 @@ class RBFLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        if units <= 0:
+        # `isinstance(units, bool)` is load-bearing, not redundant: `isinstance(True, int)`
+        # is True and `True <= 0` is False, so a config `units: true` would otherwise build a
+        # 1-unit layer or die later with `Cannot convert '(True, 8)' to a shape`. Same defect
+        # and same rationale as kmeans.py's D-008 anchor. No int check is added here on
+        # purpose -- `isinstance(np.int64(4), int)` is False, and numpy counts are accepted.
+        if isinstance(units, bool) or units <= 0:
             raise ValueError(f"units must be positive, got {units}")
         if gamma_init is not None and gamma_init <= 0:
             raise ValueError(f"gamma_init must be positive, got {gamma_init}")

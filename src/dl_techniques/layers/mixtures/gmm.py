@@ -399,6 +399,11 @@ class GMMLayer(BaseMixtureLayer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is invalid or incompatible with cluster_axis.
         """
+        if len(input_shape) < 2:
+            raise ValueError(
+                f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
+            )
+
         # Store input information
         self.input_rank = len(input_shape)
         self.original_shape = list(input_shape)
