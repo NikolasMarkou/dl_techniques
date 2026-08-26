@@ -205,6 +205,30 @@ class MoEConfig:
 > The older `train_capacity_factor` / `eval_capacity_factor` keys are unaffected
 > and remain silently ignored by `MoEConfig.from_dict`.
 
+#### Configuration validation
+
+All three dataclasses validate in `__post_init__`, so an invalid configuration
+raises at construction rather than deep inside layer assembly:
+
+| Rule | Raised by | Notes |
+|---|---|---|
+| `num_experts >= 1` | `MoEConfig` | |
+| `top_k <= num_experts` | `MoEConfig` | **Skipped for `gating_type='softmoe'`**, which ignores `top_k` entirely — an unrelated value there is inert |
+| `jitter_noise >= 0` | `MoEConfig` | Rejected, not silently disabled |
+| `top_k`, `num_slots`, `embedding_dim` are positive ints | `GatingConfig` | |
+| `temperature > 0`, `noise_std >= 0` | `GatingConfig` | |
+| `gating_type in ('linear', 'cosine', 'softmoe')` | `GatingConfig` | |
+| `ffn_config` contains a `'type'` field | `ExpertConfig` | An empty `ffn_config` is replaced by a default `mlp`, not rejected |
+
+`top_k <= num_experts` is a cross-field invariant and `MoEConfig` is the only
+place it can be checked: `GatingConfig` owns `top_k` but does not know
+`num_experts`.
+
+Every int field rejects `bool` **before** the range test, because
+`isinstance(True, int)` is `True` in Python. YAML is the live path for this —
+`yaml.safe_load` turns an unquoted `true` into `True`, and without the check
+`top_k: true` would silently become `top_k=1`.
+
 ## Basic Usage
 
 ### Simple MoE Layer
@@ -525,6 +549,28 @@ def compute_z_loss(
 ) -> keras.KerasTensor
 ```
 
+> **`aux_loss_weight` is not `top_k`-invariant.** The Switch-Transformer
+> formula `N * sum_i(f_i * P_i)` defines `f_i` as the fraction of tokens
+> *dispatched to* expert `i`; at `top_k = k` every token is dispatched `k`
+> times, so `sum_i f_i = k` and the whole loss scales with `top_k`. MEASURED:
+> with perfectly balanced routing the loss sits **exactly** on
+> `aux_loss_weight * top_k` — 0.010 / 0.020 / 0.040 at `top_k` 1 / 2 / 4 —
+> independent of `num_experts` and of the token count. The worst case (every
+> token to the same `k` experts) is `aux_loss_weight * num_experts`, so the
+> regularizer's usable dynamic range is `num_experts / top_k`: raising `top_k`
+> lifts the floor *and* shrinks the headroom. This is deliberate and is **not**
+> normalized away — doing so would rescale the load-balancing term for the
+> shipped Qwen3 (`top_k=8`) and Qwen3-Next (`top_k=10`) presets. Retune
+> `aux_loss_weight` whenever you change `top_k`.
+
+> **Mixed precision.** `compute_z_loss` upcasts `gate_logits` to float32 before
+> `logsumexp`/`square` and **always returns float32**, because under
+> `mixed_float16` the squared log-sum-exp overflows past ~256 logit magnitude
+> (measured `inf` where the float32 reference is `70.707`). `CosineGating`'s
+> temperature floor is likewise derived from the compute dtype (`1e-3` for
+> float16/bfloat16) and the learnable `temperature` variable carries a
+> min-value constraint, so an optimizer cannot drive it into the overflow zone.
+
 ## Training Best Practices
 
 ### Optimizer Configuration
@@ -623,6 +669,11 @@ def monitor_expert_usage(moe_layer):
 # Adjust auxiliary loss weights based on utilization
 # High aux_loss_weight (e.g., 0.1) for better load balancing
 # Low aux_loss_weight (e.g., 0.001) for minimal interference
+#
+# NOTE: the balanced-routing floor of the auxiliary loss is
+# `aux_loss_weight * top_k`, so these numbers are top_k-relative. Changing
+# `top_k` rescales the regularizer even if `aux_loss_weight` is untouched --
+# see "Auxiliary Loss Functions" in the API Reference.
 ```
 
 ## Model Serialization
@@ -740,6 +791,11 @@ def analyze_expert_usage(model):
 #### Validation
 
 ```python
+# TensorFlow backend example -- `GradientTape` is a TF API, not a Keras 3 one,
+# so the import is required for this snippet to run.
+import tensorflow as tf
+
+
 def validate_moe_model(model, sample_input):
     """Validate MoE model functionality."""
     # Test forward pass
@@ -773,6 +829,17 @@ def validate_moe_model(model, sample_input):
 #### "Unsupported gating type"
 - Supported types: `'linear'`, `'cosine'`, `'softmoe'`.
 - Check for spelling errors and case sensitivity.
+
+#### "top_k must be between 1 and num_experts (N)"
+- Raised by `MoEConfig.__post_init__` at construction. Lower `top_k` or raise
+  `num_experts`; `top_k == num_experts` is legal and dispatches to the dense
+  kernel.
+- Not raised for `gating_type='softmoe'`, which ignores `top_k`.
+
+#### "... must be an int, got bool"
+- An int config field received `True`/`False`. Usually a YAML `true`/`false`
+  reaching an int field — quote it or write a number. See *Configuration
+  validation* above.
 
 #### Out-of-memory with many experts
 - Expert activation memory scales with `top_k` and the per-expert FFN size; the
