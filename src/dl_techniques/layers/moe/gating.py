@@ -884,7 +884,7 @@ def compute_auxiliary_loss(
     :type num_experts: int
     :param aux_loss_weight: Weight for the auxiliary loss.
     :type aux_loss_weight: float
-    :return: Auxiliary load balancing loss scalar.
+    :return: Auxiliary load balancing loss scalar, always ``float32``.
     :rtype: keras.KerasTensor
     """
     # DECISION plan-2026-08-26T100331-f3744602/D-017
@@ -899,14 +899,43 @@ def compute_auxiliary_loss(
     # tests/test_layers/test_moe/test_gating.py::TestAuxiliaryLossTopKScaling.
     # See decisions.md D-017.
     #
-    # NOTE: unlike ``compute_z_loss`` (D-009), this reduction needs NO float32
-    # upcast, and one was deliberately not added. ``f_i`` is a mean of a 0/1 mask
-    # and ``P_i`` a mean of softmax probabilities, so both lie in [0, 1] and
-    # ``sum_i(f_i * P_i) <= max_i(f_i) * sum_i(P_i) = 1``; the loss is therefore
-    # bounded by ``num_experts``, which is representable in float16 for any
-    # plausible expert count. MEASURED under ``mixed_float16``: finite at every
-    # token count up to 2**20 and at ``num_experts`` up to 4096 (worst case,
+    # DECISION plan-2026-08-26T155709-fb07cf4e/D-005
+    # [CORRECTED iter-2 -- amends, does not delete, the D-017 note that stood here]
+    #
+    # The superseded note said: "unlike ``compute_z_loss`` (D-009), this reduction
+    # needs NO float32 upcast, and one was deliberately not added", because ``f_i``
+    # is a mean of a 0/1 mask and ``P_i`` a mean of softmax probabilities, so both
+    # lie in [0, 1] and ``sum_i(f_i * P_i) <= max_i(f_i) * sum_i(P_i) = 1``, making
+    # the loss bounded by ``num_experts`` and finite under ``mixed_float16`` at
+    # every token count up to 2**20 and ``num_experts`` up to 4096 (worst case,
     # fully-imbalanced routing, ``N=512`` -> 5.121 fp16 vs 5.120 float32).
+    #
+    # That OVERFLOW analysis is RIGHT and still holds -- and it answered the wrong
+    # question. The failure mode is not magnitude, it is the DTYPE OF THE RETURNED
+    # TENSOR. `layer.py:278` hands this value to `add_loss`. Keras'
+    # `_aggregate_additional_loss` (`keras/src/trainers/trainer.py:389-400`) casts
+    # only NON-float losses to `floatx()`, so a float16 value passes through
+    # untouched into the list that `compute_loss` reduces at `trainer.py:365`
+    # (`total_loss = ops.sum(losses)`) alongside the float32 compiled loss and the
+    # float32 z-loss. MEASURED at HEAD c38d5f17b, one `model.fit()` step,
+    # `mixed_float16`, 4 experts, linear gating, top_k=2, the shipped default
+    # `aux_loss_weight=0.01`:
+    #   TypeError: Cannot convert a list containing a tensor of dtype
+    #   <dtype: 'float16'> to <dtype: 'float32'>
+    # i.e. `model.fit()` CRASHED for every mixed-precision MoE consumer --
+    # models/language/qwen/qwen3.py (top_k=8) and qwen3_next.py (top_k=10).
+    #
+    # INVARIANT: this function returns float32 under every global dtype policy.
+    # Do NOT remove the cast below as "redundant because the value is bounded";
+    # boundedness is not the property being defended. Reverting it restores the
+    # `model.fit()` crash above, and NO amount of finiteness or overflow testing
+    # can see it -- the value is perfectly finite, it is simply the wrong dtype
+    # for a list Keras reduces without casting. The cast is a no-op under the
+    # default float32 policy (MEASURED: bitwise-identical, 0.0 delta), so it costs
+    # nothing there. Pinned by
+    # tests/test_layers/test_moe/test_the_auxiliary_loss_survives_a_mixed_precision_fit.py.
+    # See decisions.md D-005 (and D-017 of plan-2026-08-26T100331-f3744602, which
+    # this amends).
     # Determine axes for token-wise mean calculation (all but the last axis)
     num_token_axes = len(ops.shape(expert_weights)) - 1
     token_axes = list(range(num_token_axes))
@@ -921,7 +950,7 @@ def compute_auxiliary_loss(
     # Auxiliary loss = N * sum(f_i * P_i) where f_i is fraction, P_i is avg prob
     aux_loss = num_experts * ops.sum(tokens_per_expert * avg_gate_probs)
 
-    return aux_loss_weight * aux_loss
+    return ops.cast(aux_loss_weight * aux_loss, 'float32')
 
 # ---------------------------------------------------------------------
 

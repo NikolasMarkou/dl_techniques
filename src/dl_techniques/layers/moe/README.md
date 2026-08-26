@@ -570,6 +570,22 @@ def compute_z_loss(
 > temperature floor is likewise derived from the compute dtype (`1e-3` for
 > float16/bfloat16) and the learnable `temperature` variable carries a
 > min-value constraint, so an optimizer cannot drive it into the overflow zone.
+>
+> **`compute_auxiliary_loss` also always returns float32, for a different
+> reason.** Its value is bounded by `num_experts` and never overflows, so this is
+> not an overflow guard — it is a dtype-uniformity requirement of Keras' loss
+> aggregation. `_aggregate_additional_loss` (`keras/src/trainers/trainer.py`)
+> casts only *non-float* `add_loss` values to `floatx()`, so a float16 auxiliary
+> loss survives into the list reduced by `ops.sum(self.losses)` next to the
+> float32 compiled loss, and `model.fit()` raises
+> `TypeError: Cannot convert a list containing a tensor of dtype
+> <dtype: 'float16'> to <dtype: 'float32'>`. Measured: this crashed *every*
+> mixed-precision MoE `fit()` at the shipped default `aux_loss_weight=0.01`.
+> **Both half-precision policies are affected** — the same failure reproduces
+> verbatim under `mixed_bfloat16`. Guarded by
+> `tests/test_layers/test_moe/test_the_auxiliary_loss_survives_a_mixed_precision_fit.py`,
+> which runs a real optimizer step: a `training=False` forward pass never calls
+> `add_loss` and cannot see this class of defect.
 
 ## Training Best Practices
 

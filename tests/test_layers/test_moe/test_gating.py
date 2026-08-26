@@ -206,6 +206,90 @@ class TestZLossMixedPrecision:
         assert "float32" in str(z_loss.dtype)
 
 
+class TestAuxiliaryLossReturnDtype:
+    """`compute_auxiliary_loss` must return float32 under every policy (D-005).
+
+    RED against the pre-fix code, MEASURED at c38d5f17b: the function returned
+    the ambient compute dtype, so under `mixed_float16` it handed a float16
+    scalar to `layer.py:278`'s `add_loss` and `model.fit()` raised
+    ``TypeError: Cannot convert a list containing a tensor of dtype
+    <dtype: 'float16'> to <dtype: 'float32'>`` at
+    `keras/src/trainers/trainer.py:365`.
+
+    Unlike `TestZLossMixedPrecision` this class DOES parametrize over policies:
+    the invariant here is a dtype, which is observable at all of them, not an
+    fp16 overflow, which is not.
+    """
+
+    # The exact draw used to capture the pre-fix reference values below. Do not
+    # retune it: changing the seed, the shape or `_EXPERTS` invalidates the hex
+    # literals in `test_the_cast_is_a_no_op_at_float32`, which cannot be
+    # re-derived from the post-fix code.
+    _EXPERTS = 16
+
+    def _inputs(self):
+        rng = np.random.default_rng(1234)
+        weights = np.abs(rng.standard_normal((3, 7, self._EXPERTS))).astype("float32")
+        weights[weights < 0.8] = 0.0
+        probs = rng.random((3, 7, self._EXPERTS)).astype("float32")
+        probs /= probs.sum(-1, keepdims=True)
+        return (
+            keras.ops.convert_to_tensor(weights),
+            keras.ops.convert_to_tensor(probs),
+        )
+
+    def test_returns_float32_under_every_dtype_policy(self, dtype_policy):
+        weights, probs = self._inputs()
+        # Cast the INPUTS to the policy's compute dtype. Without this the cell is
+        # vacuous at every non-float32 policy: `_inputs` builds float32 tensors, so
+        # the reduction stays float32 and the pre-fix code passes too (MEASURED in
+        # the RED worktree — this cell was one of the 7 that did NOT go red).
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        weights = keras.ops.cast(weights, compute_dtype)
+        probs = keras.ops.cast(probs, compute_dtype)
+        loss = compute_auxiliary_loss(weights, probs, self._EXPERTS, 0.01)
+        assert "float32" in str(loss.dtype), (
+            f"aux loss returned {loss.dtype} under policy {dtype_policy}; "
+            "Keras only casts NON-float add_loss values, so anything else "
+            "crashes ops.sum(self.losses)"
+        )
+
+    def test_returns_float32_from_the_production_gating_path(self, mixed_float16_policy):
+        """LinearGating -> aux info -> compute_auxiliary_loss, the `layer.py` path."""
+        layer = LinearGating(num_experts=NUM_EXPERTS, top_k=2, add_noise=False)
+        expert_weights, _, aux = layer(_f32(2, 6, D), training=True)
+        assert "float16" in str(expert_weights.dtype), (
+            "guard is vacuous unless the gate emits fp16 under mixed_float16"
+        )
+        loss = compute_auxiliary_loss(
+            expert_weights, aux["raw_gate_probs"], NUM_EXPERTS, 0.01
+        )
+        assert "float32" in str(loss.dtype)
+
+    def test_the_cast_is_a_no_op_at_float32(self):
+        """I-2: float32 numerics are bitwise unchanged by the cast.
+
+        The pre-fix values were captured at c38d5f17b under the default policy
+        and are pinned here as exact hex float literals — an `assert_allclose`
+        would not be able to tell a no-op from a rounding-sized change.
+        """
+        assert keras.mixed_precision.global_policy().name == "float32"
+        weights, probs = self._inputs()
+        expected = {  # aux_loss_weight -> value MEASURED at HEAD before the fix
+            0.01: float.fromhex("0x1.26a3c00000000p-4"),
+            1.0: float.fromhex("0x1.cc5fde0000000p+2"),
+            0.375: float.fromhex("0x1.5947e60000000p+1"),
+        }
+        for weight, reference in expected.items():
+            measured = float(
+                compute_auxiliary_loss(weights, probs, self._EXPERTS, weight)
+            )
+            assert measured == reference, (
+                f"aux_loss_weight={weight}: {measured.hex()} != {reference.hex()}; "
+                "the float32 cast must be a bitwise no-op at the default policy"
+            )
+
+
 class TestCosineGatingTemperatureFloor:
     """`CosineGating`'s temperature floor must be dtype-aware (D-008)."""
 
