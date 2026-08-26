@@ -257,7 +257,7 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
     # MIXTURE_REGISTRY either -- the registry carries no validation-type metadata, so
     # that is schema design, explicitly cut from that plan's scope (F15).
     #
-    # AMENDMENT, DECISION plan-2026-08-26T061816-c515641a/D-012: each layer class now
+    # DECISION plan-2026-08-26T061816-c515641a/D-012 (AMENDMENT to D-003 above): each layer
     # declares its own `VALID_OUTPUT_MODES` frozenset and the factory reads it off
     # `mixture_info['class']`, so there is no `if mixture_type == 'rbf'` branch here.
     # D-003's invariant is UNCHANGED and now holds by construction: the sets stay SEPARATE,
