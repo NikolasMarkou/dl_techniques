@@ -87,7 +87,7 @@ References:
 
 import keras
 import numpy as np
-from typing import Optional, Union, Literal, List, Any, Tuple, Dict
+from typing import Optional, Union, Literal, Any, Tuple, Dict, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
 # local imports
@@ -95,16 +95,18 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 
 from ...utils.logger import logger
 from ...utils.tensors import resolve_training_factor
-from ...initializers.orthonormal_initializer import OrthonormalInitializer
-from .base import BaseMixtureLayer
+from .base import (
+    Axis,
+    BaseMixtureLayer,
+    OutputMode,
+    resolve_initializer_arg,
+    resolve_prototype_initializer,
+)
 
 # ---------------------------------------------------------------------
 
-# Type aliases for better readability
-OutputMode = Literal['assignments', 'mixture']
+# ``CovarianceType`` is GMM-only; ``OutputMode`` / ``Axis`` come from ``base.py``.
 CovarianceType = Literal['diagonal', 'low_rank']
-TensorShape = Union[Tuple[int, ...], List[int]]
-Axis = Union[int, List[int]]
 
 # DECISION plan-2026-07-21T083606-47dc4421/D-003: upper bound on effective variance
 # (R1). exp(log_variances) is otherwise unbounded above; a large log_variance
@@ -180,6 +182,11 @@ class GMMLayer(BaseMixtureLayer):
         │  Output: assignments or mixture     │
         └─────────────────────────────────────┘
 
+    *Masks are ignored.* The layer declares no ``supports_masking`` and no
+    ``compute_mask``, and nothing in the package does, so padded positions are scored
+    by the density and folded into the responsibilities like real observations. Strip
+    padding before this layer.
+
     :param n_components: Number of mixture components (K). Must be positive.
     :type n_components: int
     :param temperature: Softmax temperature for responsibilities. ``1.0`` yields
@@ -196,6 +203,12 @@ class GMMLayer(BaseMixtureLayer):
     :param output_mode: Output type: ``'assignments'`` for responsibilities or
         ``'mixture'`` for reconstructed inputs using component means. Defaults to
         ``'assignments'``.
+
+        Under ``covariance_type='low_rank'``, ``'mixture'`` still reconstructs as
+        ``responsibilities @ means`` — the factor loadings ``U_k`` never enter the
+        reconstruction directly, and influence the output only through the
+        responsibilities they help compute. Expect no extra reconstruction fidelity
+        from the low-rank factors in this mode.
     :type output_mode: str
     :param cluster_axis: Axis or axes to perform clustering on. Negative values are
         supported. Defaults to -1.
@@ -206,7 +219,11 @@ class GMMLayer(BaseMixtureLayer):
     :param log_variance_initializer: Initializer for per-dimension log-variances.
         Defaults to ``'zeros'`` (unit variance).
     :type log_variance_initializer: Union[str, keras.initializers.Initializer]
-    :param mean_regularizer: Optional regularizer for component means. Defaults to None.
+    :param mean_regularizer: Optional regularizer for component means. Live: ``means``
+        are trainable, so the penalty is collected into ``layer.losses``. Contrast
+        ``KMeansLayer.centroid_regularizer``, which is inert — its centroids are
+        ``trainable=False`` and Keras regularizes trainable weights only.
+        Defaults to None.
     :type mean_regularizer: Optional[keras.regularizers.Regularizer]
     :param random_seed: Random seed for initialization. Defaults to None.
     :type random_seed: Optional[int]
@@ -240,6 +257,10 @@ class GMMLayer(BaseMixtureLayer):
     :raises ValueError: If covariance_rank is not a positive integer.
     """
 
+    #: Legal ``output_mode`` values, declared once on the owning class.
+    #: ``factory.validate_mixture_config`` reads it off ``MIXTURE_REGISTRY[type]['class']``.
+    VALID_OUTPUT_MODES: ClassVar[FrozenSet[str]] = frozenset({'assignments', 'mixture'})
+
     def __init__(
         self,
         n_components: int,
@@ -259,13 +280,11 @@ class GMMLayer(BaseMixtureLayer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Input validation
         self._validate_init_args(
             n_components, temperature, isometric_regularizer_strength,
             variance_floor, output_mode, covariance_type, covariance_rank
         )
 
-        # Store ALL configuration parameters
         self.n_components = n_components
         self.temperature = temperature
         self.isometric_regularizer_strength = isometric_regularizer_strength
@@ -273,22 +292,8 @@ class GMMLayer(BaseMixtureLayer):
         self.output_mode = output_mode
         self.covariance_type = covariance_type
         self.covariance_rank = covariance_rank
-        self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else list(cluster_axis)
-        # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the ORIGINAL (pre-build)
-        # cluster_axis, not the build()-mutated positive form. build() rewrites negative
-        # axes to positive against input_rank (_setup_cluster_axes), so serializing
-        # self.cluster_axis would bake in a rank-specific value -> cross-rank reload picks
-        # the wrong logical axis. Stash the constructor value here and emit it in get_config.
-        self._cluster_axis_arg = list(self.cluster_axis)
-        # DECISION plan_2026-06-08_57a975d1/D-002: do NOT replace this with a bare
-        # keras.initializers.get(mean_initializer). 'orthonormal' is not a registered
-        # keras alias (OrthonormalInitializer registers as Custom>OrthonormalInitializer),
-        # so get('orthonormal') raises. Keep the string and let build() resolve it
-        # (build handles both the string and an Initializer instance). See D-001.
-        if isinstance(mean_initializer, str) and mean_initializer.lower() == 'orthonormal':
-            self.mean_initializer = mean_initializer
-        else:
-            self.mean_initializer = keras.initializers.get(mean_initializer)
+        self._init_cluster_axis(cluster_axis)
+        self.mean_initializer = resolve_initializer_arg(mean_initializer)
         self.log_variance_initializer = keras.initializers.get(log_variance_initializer)
         self.factor_initializer = keras.initializers.get(factor_initializer)
         self.mean_regularizer = keras.regularizers.get(mean_regularizer)
@@ -316,7 +321,7 @@ class GMMLayer(BaseMixtureLayer):
                 "Pass isometric_regularizer_strength=0.0 to disable it entirely."
             )
 
-        # Initialize weight placeholders - weights created in build().
+        # Weight placeholders; the weights themselves are created in build().
         # R6: input_rank/feature_dims/non_feature_dims/original_shape are set by
         # BaseMixtureLayer.__init__ (called via super() above) — not re-declared here.
         self.means: Optional[keras.Variable] = None
@@ -365,9 +370,10 @@ class GMMLayer(BaseMixtureLayer):
             )
         if not isinstance(variance_floor, (int, float)) or variance_floor <= 0:
             raise ValueError(f"variance_floor must be positive, got {variance_floor}")
-        if output_mode not in ['assignments', 'mixture']:
+        if output_mode not in self.VALID_OUTPUT_MODES:
             raise ValueError(
-                f"output_mode must be 'assignments' or 'mixture', got {output_mode}"
+                f"output_mode must be one of {sorted(self.VALID_OUTPUT_MODES)}, "
+                f"got '{output_mode}'"
             )
         if covariance_type not in ['diagonal', 'low_rank']:
             raise ValueError(
@@ -399,21 +405,21 @@ class GMMLayer(BaseMixtureLayer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is invalid or incompatible with cluster_axis.
         """
-        # Store input information
+        if len(input_shape) < 2:
+            raise ValueError(
+                f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
+            )
+
         self.input_rank = len(input_shape)
         self.original_shape = list(input_shape)
 
-        # Normalize and validate cluster axes
         self._setup_cluster_axes()
-
-        # Compute dimensions
         self.feature_dims = self._compute_feature_dims(input_shape)
         self.non_feature_dims = self._compute_non_feature_dims()
 
-        # Initialize component means using add_weight
         self._initialize_means()
 
-        # Initialize per-dimension log-variances (diagonal covariance, log-space)
+        # Per-dimension log-variances (diagonal covariance, log-space).
         self.log_variances = self.add_weight(
             name="log_variances",
             shape=(self.n_components, self.feature_dims),
@@ -423,7 +429,7 @@ class GMMLayer(BaseMixtureLayer):
             autocast=False  # mixed-precision: keep float32 for the density math
         )
 
-        # Initialize mixing logits (uniform mixture at start)
+        # Mixing logits; 'zeros' makes the initial mixture uniform.
         self.mixture_logits = self.add_weight(
             name="mixture_logits",
             shape=(self.n_components,),
@@ -453,40 +459,19 @@ class GMMLayer(BaseMixtureLayer):
                 autocast=False  # mixed-precision: matrix solves are MORE fp16-fragile
             )
 
-        # Call parent build at the end
         super().build(input_shape)
 
     def _initialize_means(self) -> None:
         """Initialize component-mean variables with the appropriate initializer."""
-        # Handle orthonormal initialization specially
-        initializer_name = getattr(
+        initializer = resolve_prototype_initializer(
             self.mean_initializer,
-            '__class__',
-            type(self.mean_initializer)
-        ).__name__
+            count=self.n_components,
+            count_name='n_components',
+            feature_dims=self.feature_dims,
+            seed=self.random_seed,
+        )
 
-        if (initializer_name == 'OrthonormalInitializer' or
-            (isinstance(self.mean_initializer, str) and
-             self.mean_initializer.lower() == 'orthonormal')):
-
-            if self.n_components <= self.feature_dims:
-                initializer = OrthonormalInitializer(seed=self.random_seed)
-            else:
-                logger.warning(
-                    f"n_components ({self.n_components}) > feature_dims ({self.feature_dims}), "
-                    "falling back to glorot_normal initializer"
-                )
-                initializer = keras.initializers.GlorotNormal(seed=self.random_seed)
-        else:
-            initializer = self.mean_initializer
-
-        # Create means weight.
-        # Mixed-precision: autocast=False keeps the parameter in variable_dtype (float32)
-        # inside call() under a mixed_float16 policy. The diagonal-Gaussian density
-        # (exp/log/softmax/division) is numerically unsafe in float16, so the forward is
-        # computed in float32 and the OUTPUT is cast to compute_dtype on return. Without
-        # this, the autocast float16 weight mismatches the float32 inputs
-        # (InvalidArgumentError: Sub half vs float).
+        # autocast=False / explicit dtype: see BaseMixtureLayer's mixed-precision contract.
         self.means = self.add_weight(
             name="means",
             shape=(self.n_components, self.feature_dims),
@@ -764,28 +749,20 @@ class GMMLayer(BaseMixtureLayer):
         :return: Output tensor based on output_mode.
         :rtype: keras.KerasTensor
         """
-        # Cast inputs to variable_dtype (float32) so the density math runs in full
-        # precision and matches the autocast=False weights under a mixed_float16 policy.
-        # The output is cast back to compute_dtype before returning. Under the default
-        # float32 policy this is a no-op.
+        # Cast in / cast out: see BaseMixtureLayer's mixed-precision contract.
         inputs = keras.ops.cast(inputs, self.variable_dtype)
 
-        # Reshape input for clustering
-        reshaped_inputs = self._reshape_for_clustering(inputs)
-
-        # Compute log-densities and posterior responsibilities
+        reshaped_inputs, leading_dims = self._reshape_for_clustering(inputs)
         log_density = self._log_gaussian_density(reshaped_inputs)
         responsibilities = self._responsibilities(log_density)
 
-        # Register isometric-kernel regularization during training.
-        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
-        # the loss fires for a symbolic training=True tensor (custom @tf.function loop) and
-        # is a zero contribution under symbolic-False, never coercing a tensor to a bool.
-        # python-True keeps the exact unmasked add_loss; the symbolic path multiplies by the
-        # 0/1 factor.
+        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate the isometric-kernel loss on a
+        # graph-safe training factor so it fires for a symbolic training=True tensor
+        # (custom @tf.function loop) and is a zero contribution under symbolic-False,
+        # never coercing a tensor to a bool. python-True keeps the exact unmasked
+        # add_loss; the symbolic path multiplies by the 0/1 factor, built in
+        # variable_dtype per the mixed-precision contract.
         if self.isometric_regularizer_strength > 0:
-            # variable_dtype factor so the masked loss term stays float32-consistent
-            # under a mixed_float16 policy.
             training_factor = resolve_training_factor(training, self.variable_dtype)
             if training_factor is not None:
                 loss = self._isometric_regularization_loss()
@@ -794,16 +771,13 @@ class GMMLayer(BaseMixtureLayer):
                     else training_factor * loss
                 )
 
-        # Compute output based on mode
         if self.output_mode == 'assignments':
             output = responsibilities
         else:  # output_mode == 'mixture'
             # Reconstruct inputs as responsibility-weighted component means
             output = keras.ops.matmul(responsibilities, self.means)
 
-        # Reshape, then cast to compute_dtype so the layer emits the policy's compute
-        # dtype (float16 under mixed precision; no-op under float32).
-        return keras.ops.cast(self._reshape_output(output), self.compute_dtype)
+        return keras.ops.cast(self._reshape_output(output, leading_dims), self.compute_dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -932,10 +906,8 @@ class GMMLayer(BaseMixtureLayer):
             # here. keras.random.normal(seed=<int>) is stateless, so a fixed seed makes
             # every reset_parameters() call redraw BIT-IDENTICAL means, defeating the
             # purpose of the no-arg reset (escaping a collapsed/degenerate mixture by
-            # drawing genuinely fresh means). Mirrors the sibling fix in
-            # KMeansLayer.reset_centroids (D-009 of plan-2026-07-20T160907-7de371a1).
-            # Build-time initialization (in build()) legitimately keeps the seed; only
-            # this reset call must omit it.
+            # drawing genuinely fresh means). Build-time initialization legitimately
+            # keeps the seed; only this reset call must omit it.
             new_values = keras.random.normal(
                 shape=(self.n_components, self.feature_dims),
                 dtype=self.dtype

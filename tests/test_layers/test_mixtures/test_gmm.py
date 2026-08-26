@@ -16,7 +16,11 @@ from keras import ops
 from typing import Dict, Any, List, Tuple
 
 from dl_techniques.layers.mixtures.gmm import GMMLayer
-from .cluster_axis_oracle import build_cluster_axis_oracle, flat_twin_forward
+from .cluster_axis_oracle import (
+    build_cluster_axis_oracle,
+    flat_twin_forward,
+    leading_dims as _leading_dims,
+)
 
 
 # --------------------------------------------------------------------- fixtures
@@ -1335,7 +1339,7 @@ class TestGMMClusterAxisLayout:
         declared = list(shape)
         declared[-1] = width
         np.testing.assert_array_equal(
-            np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer))),
+            np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer, _leading_dims(layer, shape)))),
             buffer.reshape(declared),
             err_msg=(
                 "the fast-path permutation is NOT the identity -- backward "
@@ -1352,7 +1356,7 @@ class TestGMMClusterAxisLayout:
         m_buffer = np.arange(
             m_rows * m_width, dtype="float32"
         ).reshape(m_rows, m_width)
-        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer)))
+        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer, _leading_dims(multi, shape))))
         assert not np.array_equal(m_got.reshape(-1), m_buffer.reshape(-1)), (
             "multi-axis _reshape_output returned the raw buffer order, i.e. it "
             "performed a bare reshape -- the transpose is missing"
@@ -1398,3 +1402,101 @@ class TestGMMClusterAxisLayout:
                 y, expected, rtol=1e-3, atol=1e-4,
                 err_msg=f"dynamic-batch predict wrong at batch={batch}",
             )
+
+
+# ------------------------------------------------- batch-axis rejection (E2)
+
+class TestGMMBatchAxisRejection:
+    """``cluster_axis`` must never resolve to the batch axis.
+
+    Guards A2 / ``plan-2026-08-26T061816-c515641a/D-007``. Pre-fix, the STATIC
+    batch spelling built and ran, leaking 0.787 max abs across samples, and the
+    DYNAMIC batch spelling raised a shape-blaming message that never named
+    axis 0. Both are asserted here on the MESSAGE, not merely on the class.
+    """
+
+    @staticmethod
+    def _layer(cluster_axis: Any) -> GMMLayer:
+        return GMMLayer(
+            n_components=3,
+            cluster_axis=cluster_axis,
+            output_mode="assignments",
+            mean_initializer="glorot_normal",
+        )
+
+    @staticmethod
+    def _assert_names_the_batch_axis(message: str, as_passed: str) -> None:
+        assert "batch axis" in message, (
+            f"the rejection must NAME the batch axis; got: {message!r}"
+        )
+        assert "batch independence" in message, (
+            f"the rejection must state the consequence; got: {message!r}"
+        )
+        assert as_passed in message, (
+            f"the rejection must echo the as-passed cluster_axis {as_passed}; "
+            f"got: {message!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "cluster_axis,as_passed",
+        [
+            (0, "[0]"),        # the plain spelling
+            (-3, "[-3]"),      # normalizes to 0 on rank 3 -- a positive-only guard misses it
+            ([0, 2], "[0, 2]"),  # multi-axis spelling that INCLUDES the batch axis
+        ],
+    )
+    def test_static_batch_rejects_the_batch_axis(
+        self, cluster_axis: Any, as_passed: str
+    ) -> None:
+        """Pre-fix this BUILT AND RAN (0.787 max abs cross-sample leakage)."""
+        inputs = keras.Input(batch_shape=(4, 6, 8))
+        with pytest.raises(ValueError) as excinfo:
+            self._layer(cluster_axis)(inputs)
+        self._assert_names_the_batch_axis(str(excinfo.value), as_passed)
+
+    @pytest.mark.parametrize(
+        "cluster_axis,as_passed",
+        [(0, "[0]"), (-3, "[-3]"), ([0, 2], "[0, 2]")],
+    )
+    def test_dynamic_batch_rejects_the_batch_axis(
+        self, cluster_axis: Any, as_passed: str
+    ) -> None:
+        """Pre-fix this raised, but blamed the SHAPE and never named axis 0."""
+        inputs = keras.Input(shape=(6, 8))
+        with pytest.raises(ValueError) as excinfo:
+            self._layer(cluster_axis)(inputs)
+        self._assert_names_the_batch_axis(str(excinfo.value), as_passed)
+
+    @pytest.mark.parametrize("cluster_axis", [-1, 1, [1, 2]])
+    def test_a_legal_axis_still_builds_and_runs(self, cluster_axis: Any) -> None:
+        """The guard must not pass by rejecting everything."""
+        x = np.random.RandomState(0).normal(size=(4, 6, 8)).astype("float32")
+        y = self._layer(cluster_axis)(keras.ops.convert_to_tensor(x))
+        assert y.shape[0] == 4, "the batch axis was consumed by a legal cluster_axis"
+
+
+# -------------------------------------------------- build() rank guard (A6)
+
+class TestGMMRankGuard:
+    """A6: a rank-1 input must be reported as a rank error.
+
+    Pre-fix, ``GMMLayer(n_components=3).build((8,))`` raised a ValueError that blamed
+    the *cluster axis* instead: ``cluster_axis resolves to the batch axis (axis 0):
+    cluster_axis=[-1] normalizes to [0] on a rank-1 input ...``
+    """
+
+    def test_a_rank_1_input_reports_the_rank_not_the_cluster_axis(self) -> None:
+        layer = GMMLayer(n_components=3)
+        with pytest.raises(ValueError) as excinfo:
+            layer.build((8,))
+        message = str(excinfo.value)
+        assert "at least 2 dimensions" in message, (
+            f"the rank guard must name the rank requirement; got: {message!r}"
+        )
+        assert "got 1" in message, (
+            f"the rank guard must report the actual rank; got: {message!r}"
+        )
+        assert "cluster_axis" not in message, (
+            "a rank-1 input must not be reported as a cluster-axis problem; "
+            f"got: {message!r}"
+        )

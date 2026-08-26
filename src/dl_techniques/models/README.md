@@ -68,7 +68,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `fastvit/` | FastViT MCi image backbone, the assembled tower over `layers/fastvit/` |
 | `fractalnet/` | FractalNet |
 | `image_restoration/darkir/` | DarkIR low-light restoration |
-| `image_restoration/pw_fnet/` | 2-level U-Net, FFT token mixing, multi-scale supervision. Name misattributes |
+| `image_restoration/pw_fnet/` | 2-level U-Net, FFT token mixing, multi-scale supervision. No wavelet op despite the paper's pyramid-wavelet design |
 | `image_restoration/scunet/` | SCUNet denoiser |
 | `keypoints/superpoint/` | SuperPoint keypoint detector + descriptor |
 | `lewm/` | latent-energy world model |
@@ -175,14 +175,26 @@ shared `Forecast` / `ForecastMixin` — and the only one that re-exports its chi
 
 ## Names that misattribute
 
-Four packages are named for something they are not. The full table, with the measurement
-behind each correction, is in [`CLAUDE.md`](CLAUDE.md) § Names that misattribute; it is not
-duplicated here. In short:
+Three packages are named for something they are not. This is the full list; the evidence for
+each correction is in the named package's own source, cited below, so nothing is duplicated
+into `CLAUDE.md`.
 
-- `vision_language/fastvlm/` is **vision-only** — no text tower, no tokenizer.
-- `vision/vit_siglip/` is **not SigLIP** — SigLIP is a loss, and none of it is here.
-- `neural_computer/nam/` is Neural Arithmetic **Module**, not Neural *Additive* Model.
-- `vision/image_restoration/pw_fnet/` is neither patchwise, nor FNet, nor wavelet.
+| Package | Reads as | Actually is | Where the evidence sits |
+|---|---|---|---|
+| `vision_language/fastvlm/` | a vision-*language* model | **vision-only** — the package is `model.py` + `components.py`, with no text tower, no tokenizer and no vocabulary anywhere in it | `ls` the package; the only `token` hits in `model.py` are "token-mixing" and the stage-3 patch grid |
+| `vision/vit_siglip/` | SigLIP | **a ViT with a two-stage conv patch-embedding stem**. SigLIP's contribution is a *loss* — the pairwise sigmoid objective — and this package contains no text tower and no loss at all, so nothing in it can be sigmoid-contrastive | `model.py` lines 5-12 and 75-76 say so at the site |
+| `neural_computer/nam/` | Neural *Additive* Model | Neural Arithmetic **Module** — a differentiable-computer cell, not a GAM | `__init__.py` line 1 |
+
+`vision/image_restoration/pw_fnet/` was listed here until 2026-08-26 and has been **removed:
+the name does not misattribute.** PW-FNet is the architecture's own name in Jiang et al.,
+*Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image
+Restoration* — the paper builds a pyramid wavelet MIMO structure between blocks and uses
+Fourier transforms in place of self-attention inside them, which is what this package
+implements. What is true is narrower and is an implementation gap, not a naming one: **there
+is no wavelet or DWT operation in `model.py`** (`grep -niE 'wavelet|dwt|haar|pywt'` matches
+only the three prose occurrences of the model's name), so the pyramid is built from the
+encoder/decoder resolution ladder and multi-scale supervision alone. `README.md` line 485
+already explains that reading of the name.
 
 ## What you may claim in these docs
 

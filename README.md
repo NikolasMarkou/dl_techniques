@@ -43,25 +43,25 @@ We bridge the chasm between theoretical innovation and practical application, pr
 This library is a comprehensive suite of tools organized into five key pillars, developed through rigorous research and validated in real-world enterprise applications:
 
 <details>
-<summary><b>1. State-of-the-Art Architectures & Models (79 Model Packages)</b></summary>
+<summary><b>1. State-of-the-Art Architectures & Models (80 Model Packages)</b></summary>
 <p>
 
-- **Next-Generation Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`**, **`Mamba`**, **`ModernBERT`**, **`DistilBERT`** and **`GPT-2`**, alongside the **`Byte Latent Transformer`** (BLT) and the **`Hierarchical Reasoning Model`** (HRM).
-- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`MobileCLIP`** and **`MobileCLIP2`** (on a faithful **`FastViT`** image tower), **`FastVLM`** (vision-only despite the name), **`NanoVLM`**, **`DINOv1/v2/v3`**, **`ViT-SigLIP`** (a ViT with a two-stage conv patch stem, not SigLIP's sigmoid contrastive objective), **`BEiT`**, **`Swin Transformer`**, **`Video-JEPA`**, object detection with **`DETR`** and **`YOLOv12`**, keypoints with **`SuperPoint`**, and **`Segment Anything`** (SAM 1, 2 and 3). Four packages are named for something they are not; each is listed with its measured correction in [`src/dl_techniques/models/CLAUDE.md`](./src/dl_techniques/models/CLAUDE.md) § *Names that misattribute*.
-- **Advanced CNNs**: A rich collection of advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`ConvUNeXt`**, **`MobileNetV1-V4`**, **`ResNet`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, and the ultra-efficient **`SqueezeNet`** family.
+- **Next-Generation Language Models**: Production-ready implementations of **`BERT`**, **`Gemma 3`**, **`Qwen3`** (dense, `Qwen3Next` and embeddings), **`Mamba`**, **`ModernBERT`**, **`DistilBERT`** and **`GPT-2`**, alongside the **`Byte Latent Transformer`** (BLT), the **`Hierarchical Reasoning Model`** (HRM), the **`Tiny Recursive Model`**, **`Tree Transformer`**, late-interaction retrieval with **`ColBERT`** (v1 and v2), and Fourier token mixing in **`FNet`** and **`FFTNet`**.
+- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`MobileCLIP`** v1 and v2 in one package (v2 is the faithful port, on a faithful **`FastViT`** image tower; v1 is deliberately non-faithful on the image side and is kept, not deprecated), **`FastVLM`** (vision-only despite the name), **`NanoVLM`**, **`DINOv1/v2/v3`**, **`ViT-SigLIP`** (a ViT with a two-stage conv patch stem, not SigLIP's sigmoid contrastive objective), **`BEiT`**, **`Swin Transformer`**, **`MAE`**, **`Video-JEPA`**, the latent-energy world model **`LEWM`**, object detection with **`DETR`** and **`YOLOv12`**, keypoints with **`SuperPoint`**, and **`Segment Anything`** (SAM 1, 2 and 3). Three packages are named for something they are not; each is listed with its measured correction in [`src/dl_techniques/models/README.md`](./src/dl_techniques/models/README.md) § *Names that misattribute*.
+- **Advanced CNNs**: A rich collection of advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`ConvUNeXt`**, **`MobileNetV1-V4`**, **`ResNet`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, attention-augmented **`CBAM`**, and the ultra-efficient **`SqueezeNet`** family.
 - **Time Series & Forecasting**: State-of-the-art forecasting models including the probabilistic **`TiRex`** with quantile prediction, an enhanced implementation of **`N-BEATS`**, autoregressive **`DeepAR`**, **`PRISM`**, and the novel **`xLSTM`**.
-- **Generative Modeling & Image Restoration**: Diffusion and flow-matching transformers (**`SD3 MMDiT`**, **`Ideogram4`**), a complete **`Variational Autoencoder (VAE)`** framework with **`VQ-VAE`** variants, arbitrary-scale super-resolution (**`THERA`**, **`PFT-SR`**), and restoration/denoising backbones (**`DarkIR`**, **`SCUNet`**, **`ACC-UNet`**, and a family of bias-free denoisers).
-- **Specialized Models**: Task-specific models like **`DepthAnything`** for monocular depth estimation, full **`Capsule Networks`** (CapsNet) with dynamic routing, **`TabM`** for tabular data, and unsupervised aligners like `Mini-Vec2Vec`.
-- **Experimental Frontiers**: Explore novel concepts including a wide range of **`Graph Neural Networks`** (GNNs) in `RELGT`, the **`Energy Transformer`** family (image and graph domains), geometric-algebra networks in **`CliffordNet`**, Kolmogorov-Arnold Networks (**`KAN`**), Neural Turing Machines (**`NTM`**), and bio-mimetic models like `MothNet`.
+- **Generative Modeling & Image Restoration**: Diffusion and flow-matching transformers (**`SD3 MMDiT`**, **`Ideogram4`**), a complete **`Variational Autoencoder (VAE)`** framework with **`VQ-VAE`** variants (including rotation-based codebook updates), arbitrary-scale super-resolution (**`THERA`**, **`PFT-SR`**), and restoration/denoising backbones (**`DarkIR`**, **`SCUNet`**, **`ACC-UNet`**, `PW-FNet`, and a family of bias-free denoisers).
+- **Specialized Models**: Task-specific models like **`DepthAnything`** for monocular depth estimation, full **`Capsule Networks`** (CapsNet) with dynamic routing, **`TabM`** for tabular data, model-agnostic inference-time `power_sampling` for any causal LM/VLM, and unsupervised aligners like `Mini-Vec2Vec`.
+- **Experimental Frontiers**: Explore novel concepts including a wide range of **`Graph Neural Networks`** (GNNs) in `RELGT` and the Simplified Hyperbolic GCN `SHGCN`, the **`Energy Transformer`** family (image and graph domains), geometric-algebra networks in **`CliffordNet`**, Kolmogorov-Arnold Networks (**`KAN`**) and `PowerMLP`, external-memory computers (**`NTM`**, the Neural Arithmetic **Module** `NAM`), **`Self-Organizing Maps`**, point-cloud `latent_gmm_registration`, and bio-mimetic models like `MothNet`.
 </p>
 </details>
 
 <details>
-<summary><b>2. A Modular Arsenal of Advanced Layers (290+ Components)</b></summary>
+<summary><b>2. A Modular Arsenal of Advanced Layers (275 modules, 21 subpackages)</b></summary>
 <p>
 
 - **Pioneering Attention Mechanisms**: Go beyond standard attention with **`DifferentialMultiHeadAttention`**, modern **`HopfieldAttention`**, **`GroupQueryAttention`**, `CapsuleRoutingAttention`, and efficient alternatives like `FNetFourierTransform` and `RingAttention`.
-- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating **32 attention mechanisms**, **18 normalization variants** (including `BandRMS`, `LogitNorm`), and **21 Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code — plus registries for **22 activations**, **13 embeddings**, and task heads dispatched by domain via `create_head`.
+- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating **33 attention mechanisms**, **18 normalization variants** (including `BandRMS`, `LogitNorm`), and **21 Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code — plus registries for **22 activations**, **13 embeddings**, and task heads dispatched by domain via `create_head`.
 - **Graph & Structural Primitives**: Configurable **GNN layers** with multiple aggregation strategies (`GCN`, `GAT`, `GraphSAGE`), **`Relational Graph Transformer`** (RELGT) blocks, and **`Entity-Graph Refinement`** for learning hierarchical relationships.
 - **Mixture of Experts (MoE) System**: A complete MoE implementation with configurable FFN experts, multiple gating strategies (including **SoftMoE** and Cosine Gating), and integrated training utilities.
 - **Probabilistic & Statistical Layers**: Build models that reason about uncertainty with **`Mixture Density Networks`** (MDN), **`Normalizing Flows`**, and time series analysis layers for residual autocorrelation (`ResidualACFLayer`).
@@ -81,7 +81,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 </details>
 
 <details>
-<summary><b>4. Next-Generation Loss Functions & Optimization (40+ Specialized Losses)</b></summary>
+<summary><b>4. Next-Generation Loss Functions & Optimization (42 Loss Modules)</b></summary>
 <p>
 
 - **Optimize What Matters with `AnyLoss`**: A groundbreaking framework that transforms any confusion-matrix-based metric (e.g., F1-score, Balanced Accuracy, Matthews Correlation Coefficient) into a differentiable loss function for direct optimization on imbalanced data.
@@ -97,7 +97,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 
 - **Accelerated Development with Training Pipelines**: **70 ready-to-use `train_*.py` entry points across 47 trainer directories** (`src/train/`, plus the shared `src/train/common/` library), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
-- **Assured Reliability**: An extensive **600+ module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions.
+- **Assured Reliability**: An extensive **895-module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions. It mirrors `src/dl_techniques/` directory-for-directory, with the deliberate exception of `tests/test_models/`, which stays flat rather than following the model family nesting.
 - **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/fastvit/reference.py`) rather than asserting parity in prose.
 </p>
 </details>
@@ -138,7 +138,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
     This installs additional tools such as `pytest`, `pytest-cov`, `pylint`, and `pre-commit`.
 
 4.  **Optional Extras:**
-    The Streamlit applications under `src/applications/` need an extra that is *not* part of a core install:
+    The Streamlit front-end under `src/applications/bias_free_denoiser/` needs an extra that is *not* part of a core install:
     ```bash
     pip install ".[apps]"
     ```
@@ -147,6 +147,27 @@ This library is a comprehensive suite of tools organized into five key pillars, 
     ```bash
     python -c "import dl_techniques; print('Installation successful!')"
     ```
+
+### Development Commands
+
+```bash
+make test       # full pytest suite (~1.5 hours; also the pre-push hook)
+make clean      # remove build artifacts and __pycache__
+make structure  # print the src/ tree
+make docs       # generate per-module docs (output is NOT committed)
+```
+
+Scope pytest to what you changed rather than running the whole suite as a regression check:
+
+```bash
+pytest tests/test_layers/test_norms/ -vvv
+```
+
+Training scripts need a non-interactive matplotlib backend on headless machines:
+
+```bash
+MPLBACKEND=Agg python -m train.<pipeline>.train_<script> [args]
+```
 
 > **No trained weights ship with this repository.** Training outputs live under `results/`, which is gitignored, so a fresh clone contains source, tests and prose only. Any `results/<run>/final_model.keras` path quoted in a trainer default, a paper or an application is a local artifact — you train it yourself first. See `REPO_MAP.md` § *What a fresh clone actually contains*.
 
@@ -339,7 +360,7 @@ Our `research/` directory contains over 120 articles providing the theoretical f
 Five LaTeX manuscripts written against this codebase live under [`research/papers/`](./research/papers), several with built PDFs: `band_rms` (band-constrained RMS normalization), `bfunet` (bias-free denoisers as image priors), `cliffordnet_extensions`, `correlations`, and `logical_net`.
 
 ### API Reference (per-module docs)
-For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. The `research/` guides above complement these with the underlying theory.
+There is **no committed documentation directory** — `make docs` generates one on demand and the output is not checked in. For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. Every one of the 80 leaf model packages carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
 
 ---
 
@@ -357,7 +378,7 @@ dl_techniques/
 │   │   ├── vision/            # 35 — resnet, convnext, vit, dino, swin_transformer, beit,
 │   │   │                      #      yolo12, detr, vae, vq_vae, depth_anything, and the
 │   │   │                      #      nested image_restoration/, super_resolution/, keypoints/
-│   │   ├── language/          # 16 — bert, gemma, qwen, mamba, modern_bert, gpt2,
+│   │   ├── language/          # 17 — bert, gemma, qwen, mamba, modern_bert, gpt2, colbert,
 │   │   │                      #      byte_latent_transformer, hierarchical_reasoning_model, ...
 │   │   ├── vision_language/   #  9 — clip, mobile_clip, fastvlm, nano_vlm, sd3_mmdit,
 │   │   │                      #      ideogram4, and the nested sam/{sam1,sam2,sam3}
@@ -369,19 +390,26 @@ dl_techniques/
 │   │   ├── memory/            #  1 — som
 │   │   ├── point_cloud/       #  1 — latent_gmm_registration
 │   │   └── tabular/           #  1 — tabm
-│   ├── layers/                # 290+ modules across 21 themed subpackages
-│   │   ├── attention/         # 32 modern attention mechanisms with factory
-│   │   ├── norms/             # 18 advanced normalization layers with factory
-│   │   ├── ffn/               # 21 feed-forward networks with factory
-│   │   ├── embedding/         # 13 positional/semantic embeddings with factory
+│   ├── layers/                # 275 modules — 200 in 21 themed subpackages,
+│   │   │                      # 75 loose at the top level
+│   │   ├── attention/         # 33 registered attention mechanisms (factory)
+│   │   ├── ffn/               # 21 registered feed-forward networks (factory)
+│   │   ├── activations/       # 22 registered activations (factory)
+│   │   ├── norms/             # 18 registered normalization layers (factory)
+│   │   ├── embedding/         # 13 registered positional/semantic embeddings (factory)
+│   │   ├── transformers/      # Assembled transformer/encoder/decoder blocks
 │   │   ├── heads/             # Task heads dispatched by domain (nlp/vision/vlm)
+│   │   ├── time_series/       # Forecasting-specific layers
+│   │   ├── fastvit/           # FastViT primitives (+ a committed reference impl)
 │   │   ├── graphs/            # Graph neural network components
 │   │   ├── moe/               # Mixture of Experts (MoE) system
+│   │   ├── memory/            # External / associative memory layers
 │   │   ├── statistics/        # Statistical and probabilistic layers (MDN, Flows)
-│   │   └── ...
-│   ├── losses/                # 40+ specialized loss modules (AnyLoss, Goodhart, etc.)
+│   │   └── ...                # fusion, geometric, logic, mixtures, physics,
+│   │                          # reasoning, sequence_pooling, tokenizers
+│   ├── losses/                # 42 specialized loss modules (AnyLoss, Goodhart, etc.)
 │   ├── metrics/               # Custom Keras metrics (PSNR, SSIM, perplexity, Brier)
-│   ├── optimization/          # Optimizers (Muon, VSGD, SGLD), LR schedules
+│   ├── optimization/          # Optimizers (Muon, VSGD, SGLD, Gefen, WW-PGD), LR schedules
 │   ├── analyzer/              # Comprehensive model analysis toolkit and visualizers
 │   ├── visualization/         # Plotting helpers for training and evaluation
 │   ├── datasets/              # Dataset loaders and synthetic generators
@@ -391,9 +419,9 @@ dl_techniques/
 │   ├── constraints/           # Weight constraints
 │   └── utils/                 # Core utilities, loggers, masking, and data handlers
 ├── src/train/                 # 70 train_*.py entry points across 47 trainer directories
-├── src/applications/          # Deployable applications built on the library
+├── src/applications/          # Deployable apps (today: bias_free_denoiser, Streamlit)
 ├── research/                  # 120+ in-depth articles, guides, and LaTeX papers
-├── tests/                     # 600+ test modules ensuring component reliability
+├── tests/                     # 895 test modules mirroring src/dl_techniques/
 └── REPO_MAP.md                # Path-verified router — read this first
 ```
 
@@ -475,6 +503,9 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **Byte Latent Transformer: Patches Scale Better Than Tokens**: Pagnoni, A., et al. (2024).
 -   **ModernBERT: Smarter, Better, Faster, Longer**: Warner, B., et al. (2024).
 -   **DistilBERT, a distilled version of BERT**: Sanh, V., et al. (2019).
+-   **ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT**: Khattab, O., & Zaharia, M. (2020). *SIGIR*.
+-   **ColBERTv2: Effective and Efficient Retrieval via Lightweight Late Interaction**: Santhanam, K., et al. (2022). *NAACL*.
+-   **Tree Transformer: Integrating Tree Structures into Self-Attention**: Wang, Y.-S., Lee, H.-Y., & Chen, Y.-N. (2019). *EMNLP-IJCNLP*.
 </details>
 
 <details>
@@ -499,6 +530,8 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **SuperPoint: Self-Supervised Interest Point Detection and Description**: DeTone, D., et al. (2018). *CVPR Workshops*.
 -   **V-JEPA: Revisiting Feature Prediction for Learning Visual Representations from Video**: Bardes, A., et al. (2024).
 -   **Masked Autoencoders Are Scalable Vision Learners** (MAE): He, K., et al. (2022). *CVPR*.
+-   **CBAM: Convolutional Block Attention Module**: Woo, S., et al. (2018). *ECCV*.
+-   **Depth Anything: Unleashing the Power of Large-Scale Unlabeled Data**: Yang, L., et al. (2024). *CVPR*.
 </details>
 
 <details>
@@ -511,6 +544,7 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **Robust and Interpretable Blind Image Denoising via Bias-Free Convolutional Neural Networks**: Mohan, S., et al. (2020). *ICLR*.
 -   **Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields**: Becker, A., et al. (2025). *CVPR*.
 -   **DarkIR: Robust Low-Light Image Restoration**: Feijoo, D., et al. (2025). *CVPR*.
+-   **Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration** (PW-FNet): Jiang, X., et al. (2025).
 </details>
 
 <details>
@@ -538,6 +572,9 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **Energy Transformer**: Hoover, B., et al. (2023). *NeurIPS*.
 -   **Neural Turing Machines**: Graves, A., et al. (2014).
 -   **Geometric Clifford Algebra Networks**: Ruhe, D., et al. (2023). *ICML*.
+-   **Hyperbolic Graph Convolutional Neural Networks**: Chami, I., et al. (2019). *NeurIPS*.
+-   **sHGCN: Simplified hyperbolic graph convolutional neural networks**: Arevalo, P., Molina, A., & Ciudad, A. (2025).
+-   **The Self-Organizing Map**: Kohonen, T. (1990). *Proceedings of the IEEE*, 78(9).
 </details>
 
 <details>
@@ -548,6 +585,15 @@ This library stands on the shoulders of giants. Our implementations are grounded
 -   **DeepAR: Probabilistic forecasting with autoregressive recurrent networks**: Salinas, D., et al. (2020).
 -   **xLSTM: Extended Long Short-Term Memory**: Beck, M., et al. (2024). *NeurIPS*.
 -   **Reversible Instance Normalization for Accurate Time-Series Forecasting against Distribution Shift**: Kim, T., et al. (2021). *ICLR*.
+-   **TiRex: Zero-Shot Forecasting Across Long and Short Horizons with Enhanced In-Context Learning**: Auer, A., et al. (2025).
+-   **PRISM: A hierarchical multiscale approach for time series forecasting**: Chen, Z., et al. (2025).
+</details>
+
+<details>
+<summary><b>Tabular & Inference-Time Methods</b></summary>
+
+-   **TabM: Advancing Tabular Deep Learning with Parameter-Efficient Ensembling**: Gorishniy, Y., et al. (2024).
+-   **Reasoning with Sampling: Your Base Model is Smarter Than You Think**: Karan, A., et al. (2025).
 </details>
 
 <details>
