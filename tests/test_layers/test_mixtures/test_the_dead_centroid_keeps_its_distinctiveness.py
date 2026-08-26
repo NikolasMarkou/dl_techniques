@@ -48,6 +48,14 @@ every cluster owns real mass, the masked update must be a **strict no-op**. Its
 expected values were captured from the UNMODIFIED module before the fix was
 written and are transcribed here verbatim -- the post-fix code is never compared
 against itself.
+
+The third and fourth tests guard the two ways the mask itself can go wrong, both
+found by adversarial review of the first shipped threshold (``1e-3``):
+
+* the threshold is high enough to call an ordinary VQ codebook dead wholesale
+  (mass is ``N/K`` under near-uniform assignments), and
+* "the data-driven pull is zeroed" is read as "the centroid is held still", which
+  is false the moment the momentum buffer is non-zero at the instant of death.
 """
 
 from typing import Tuple
@@ -144,7 +152,10 @@ def test_the_dead_centroid_keeps_its_distinctiveness() -> None:
     # test could go green because the fixture never produced a dead cluster.
     responsibilities = np.array(layer(x, training=False))
     dead_mass = float(responsibilities[:, 3].sum())
-    assert dead_mass < 1e-6, (
+    # Measured exactly 0.0 (softmax underflow). The bound is deliberately three
+    # orders below `_MIN_CLUSTER_MASS` so the precondition does not merely restate
+    # the threshold under test.
+    assert dead_mass < 1e-9, (
         f"fixture is not a dead-cluster fixture: centroid 3 owns mass {dead_mass}"
     )
 
@@ -254,4 +265,157 @@ def test_the_mass_mask_is_a_strict_no_op_when_every_cluster_is_alive() -> None:
     assert max_abs_diff == 0.0, (
         f"the mass mask changed the all-alive update: max |c_new - c_prefix| = "
         f"{max_abs_diff!r} (must be exactly 0.0)"
+    )
+
+
+# ---------------------------------------------------------------------
+# The threshold must not be so high that an ordinary VQ codebook is all "dead"
+# ---------------------------------------------------------------------
+
+
+def test_a_large_codebook_with_one_point_is_not_frozen_wholesale() -> None:
+    """At a VQ-realistic ``K`` with a small ``N``, the data term must still move centroids.
+
+    ``_MIN_CLUSTER_MASS`` is an ABSOLUTE floor, so the regime it must clear is the
+    one where every cluster's mass is small for a structural reason rather than a
+    dead-cluster reason: near-uniform assignments give every cluster exactly
+    ``N / K``. Measured here (``K=1024``, ``N=1``, ``temperature=1e6``): every mass
+    is ``9.766e-04``. At the originally-shipped ``1e-3`` that is **1024 of 1024
+    clusters judged dead**, the EMA data term is switched off for the whole
+    codebook, and with ``repulsion_strength=0.0`` the update is exactly zero -- a
+    regression against the pre-mask code, which trained fine here. Measured at
+    ``K=2048/8192/65536`` the freeze is likewise total.
+
+    RED-proof: restoring ``_MIN_CLUSTER_MASS = 1e-3`` makes ``max |dc| == 0.0`` and
+    the mean-distance assertion below fails with no movement at all.
+    """
+    n_clusters, features = 1024, 16
+    layer = KMeansLayer(
+        n_clusters=n_clusters,
+        cluster_axis=-1,
+        temperature=1e6,          # near-uniform responsibilities
+        repulsion_strength=0.0,   # so the ONLY remaining force is the data term
+        random_seed=0,
+    )
+    layer.build((None, features))
+
+    point = np.full((1, features), 2.0, dtype="float32")
+    x = keras.ops.convert_to_tensor(point)
+
+    # Precondition: this really is the small-mass regime the threshold must clear.
+    masses = np.array(layer(x, training=False)).sum(axis=0)
+    assert float(masses.max()) < 1e-3, (
+        f"fixture is not in the N/K regime: max mass {float(masses.max())}"
+    )
+
+    before = np.array(layer.centroids)
+    distance_before = float(np.mean(np.linalg.norm(before - point, axis=-1)))
+
+    for _ in range(5):
+        layer(x, training=True)
+
+    after = np.array(layer.centroids)
+    moved = float(np.max(np.abs(after - before)))
+    distance_after = float(np.mean(np.linalg.norm(after - point, axis=-1)))
+
+    assert moved > 0.0, (
+        f"the EMA data term is switched off for the entire {n_clusters}-entry codebook: "
+        f"max |dc| = {moved} after 5 training steps at mass {float(masses.max()):.4e} "
+        f"per cluster. _MIN_CLUSTER_MASS must stay below the N/K floor of a real codebook"
+    )
+    # Measured post-fix: 8.0017 -> 6.9746 in 5 steps (max |dc| = 0.2695).
+    assert distance_after < distance_before, (
+        f"the codebook did not move toward the data: mean distance "
+        f"{distance_before:.6f} -> {distance_after:.6f}"
+    )
+
+
+# ---------------------------------------------------------------------
+# A masked centroid is NOT "frozen" -- pin what it actually does
+# ---------------------------------------------------------------------
+
+
+def test_a_centroid_that_dies_after_moving_coasts_on_its_momentum() -> None:
+    """A centroid that goes dead with a non-zero momentum buffer keeps coasting.
+
+    The E3 fixture above starts dead, so its momentum buffer is zero and "the data
+    term is masked" and "the centroid does not move" coincide. They are not the
+    same statement. Here the centroid is alive for 20 steps (momentum buffer norm
+    reaches ``0.118``), then the data moves far away and its mass collapses to
+    ``2.05e-21``. Measured displacement over the next 10 steps:
+    ``0.01062, 0.02018, 0.02878, 0.03652, 0.04349, 0.04976, 0.05541, 0.06049,
+    0.06506, 0.06917`` -- strictly increasing, with per-step increments decaying
+    geometrically by the ``momentum`` factor (``0.01062, 0.00956, 0.00860, ...``).
+
+    What the mask DOES buy is direction: the centroid does not set off toward the
+    data cloud it owns no mass in. Measured distance to that cloud over the same
+    10 steps: ``119.745 -> 119.711``, i.e. 0.03 out of 119.7.
+    """
+    features = 4
+    rng = np.random.default_rng(3)
+    near_data = np.concatenate(
+        [
+            np.array([1.0, 0.0, 0.0, 0.0]) + 0.05 * rng.standard_normal((32, features)),
+            np.array([-1.0, 0.0, 0.0, 0.0]) + 0.05 * rng.standard_normal((32, features)),
+        ],
+        axis=0,
+    ).astype("float32")
+
+    layer = KMeansLayer(
+        n_clusters=3, cluster_axis=-1, temperature=1.0, repulsion_strength=0.0
+    )
+    layer.build((None, features))
+    layer.centroids.assign(
+        np.array(
+            [[1.0, 0.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.35, 0.0, 0.0, 0.0]],
+            dtype="float32",
+        )
+    )
+
+    x_near = keras.ops.convert_to_tensor(near_data)
+    for _ in range(20):
+        layer(x_near, training=True)
+
+    momentum_norm = float(np.linalg.norm(np.array(layer.centroid_momentum)[2]))
+    assert momentum_norm > 1e-3, (
+        f"fixture did not accumulate momentum on centroid 2: {momentum_norm}"
+    )
+
+    far_point = np.full((1, features), 60.0, dtype="float32")
+    x_far = keras.ops.convert_to_tensor(np.repeat(far_point, 64, axis=0))
+
+    mass = float(np.array(layer(x_far, training=False))[:, 2].sum())
+    assert mass < 1e-6, f"centroid 2 did not go dead under the far data: mass {mass}"
+
+    start = np.array(layer.centroids)[2].copy()
+    distance_before = float(np.linalg.norm(start - far_point[0]))
+    displacements = []
+    for _ in range(10):
+        layer(x_far, training=True)
+        displacements.append(
+            float(np.linalg.norm(np.array(layer.centroids)[2] - start))
+        )
+    distance_after = float(np.linalg.norm(np.array(layer.centroids)[2] - far_point[0]))
+
+    # The module docstring must NOT claim a dead centroid is held still: it is not.
+    assert displacements[0] > 0.0, (
+        "a dead centroid with a non-zero momentum buffer did not move at all; if this "
+        "is now true, the momentum term changed and the docstring needs revisiting"
+    )
+    assert all(
+        displacements[i] > displacements[i - 1] for i in range(1, len(displacements))
+    ), f"residual momentum motion was expected to be monotone: {displacements}"
+
+    increments = [
+        displacements[i] - (displacements[i - 1] if i else 0.0)
+        for i in range(len(displacements))
+    ]
+    assert all(
+        increments[i] < increments[i - 1] for i in range(1, len(increments))
+    ), f"the momentum tail was expected to decay: {increments}"
+
+    # What the mask buys: the centroid is not pulled toward data it owns no mass in.
+    assert abs(distance_after - distance_before) < 0.01 * distance_before, (
+        f"the masked centroid travelled toward the cloud it owns no mass in: distance "
+        f"{distance_before:.5f} -> {distance_after:.5f}"
     )

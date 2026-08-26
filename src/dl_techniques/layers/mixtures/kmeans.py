@@ -34,8 +34,10 @@ Key mechanisms include:
     the assignment-weighted average of the batch's input vectors, via an
     exponential moving average applied in-place inside ``call``. This is a
     stochastic, gradient-free stand-in for the discrete re-averaging step of
-    standard K-means; it is not backpropagated through, and a centroid that
-    owns no mass in the batch is held still (see ``_MIN_CLUSTER_MASS``).
+    standard K-means; it is not backpropagated through, and for a centroid that
+    owns no mass in the batch the data-driven pull is zeroed (see
+    ``_MIN_CLUSTER_MASS``). It is not held still: residual motion from the
+    momentum buffer and from repulsion still applies.
 
 3.  **Momentum and Repulsion:** To stabilize training, the layer includes two
     additional forces. A momentum term smooths the centroid updates over
@@ -99,12 +101,14 @@ from .base import (
 
 # ``OutputMode`` and ``Axis`` are imported from ``base.py`` above.
 
-# Soft assignments never give a cluster EXACTLY zero mass, so "dead" needs a threshold.
-# Mass is a sum of responsibilities in units of whole data points, so 1e-3 reads as
-# "this cluster owns less than a thousandth of one point's vote" -- an absolute floor,
-# deliberately NOT scaled by batch size, so the same centroid is judged alive or dead
-# identically at batch 8 and at batch 8192.
-_MIN_CLUSTER_MASS = 1e-3
+# Soft assignments never give a cluster EXACTLY zero mass, so "dead" needs a threshold,
+# set by the mechanism and not by a semantic story. The EMA target below is
+# `mean * m/(m + keras.backend.epsilon())`; at eps=1e-7 that factor is a smooth sigmoid
+# in log-mass with no knee (measured 0.469 at m=8.8e-8, 0.500 at 1e-7, 0.909 at 1e-6,
+# 0.999 at 1e-4). NOT 1e-3: uniform mass is `N/K`, and 1e-3 measurably freezes 1024/1024
+# and 65536/65536 of a VQ codebook at batch 1. 1e-6 clears eps by 11.4x and the worst of
+# those (K=65536, N=1 -> 1.526e-5) by 15.3x.
+_MIN_CLUSTER_MASS = 1e-6
 
 # Scale of the fresh normal draw used by `reset_centroids()` when no explicit
 # centroids are supplied. Small on purpose: a reset seeds centroids near the origin
@@ -510,18 +514,20 @@ class KMeansLayer(BaseMixtureLayer):
             cluster_mass + keras.backend.epsilon()
         )
 
-        # DECISION plan-2026-08-26T061816-c515641a/D-006: gate the DATA-DRIVEN pull by
-        # cluster mass. `target_centroids` is 0/epsilon -> the ORIGIN for a centroid that
-        # owns no responsibility, so an ungated update drags every dead centroid toward
-        # the data manifold and it merges with the live ones (measured: separation
-        # 56.46 -> 0.34 in 60 steps, ending closer to a live centroid than the live
-        # centroids are to each other). Multiplying by `alive` makes a zero-mass
-        # centroid's data term exactly zero, leaving it to repulsion alone. Do NOT gate
-        # `repulsion_forces` as well -- repulsion is what separates two centroids that
-        # are BOTH alive and coincident, and masking it would reinstate the collapse this
-        # layer's repulsion term exists to prevent. Do NOT fold the mask into
-        # `target_centroids` (e.g. `alive * target`) either: that pulls a dead centroid
-        # to the origin via the `- self.centroids` term instead of freezing it.
+        # DECISION plan-2026-08-26T061816-c515641a/D-006 (threshold superseded by D-017):
+        # gate the DATA-DRIVEN pull by cluster mass. The mechanism is the division above:
+        # `target_centroids` is `mean * m/(m+epsilon)`, which for a centroid owning no
+        # responsibility is 0/epsilon -> the ORIGIN, so an ungated update drags every dead
+        # centroid toward the data manifold until it merges with the live ones (measured:
+        # separation 56.46 -> 0.34 in 60 steps). Multiplying by `alive` makes a zero-mass
+        # centroid's data term exactly zero. Do NOT raise `_MIN_CLUSTER_MASS` back toward
+        # a "semantically nice" value like 1e-3: uniform mass is `N/K`, so 1e-3 freezes an
+        # ENTIRE VQ codebook at K>=1024, batch 1 -- a regression against the unmasked code.
+        # Do NOT gate `repulsion_forces` too: repulsion is what separates two centroids
+        # that are BOTH alive and coincident. Do NOT fold the mask into `target_centroids`
+        # (e.g. `alive * target`) either -- that pulls a dead centroid to the origin via
+        # the `- self.centroids` term instead of zeroing the pull. A masked centroid is
+        # NOT frozen: momentum and repulsion still move it (measured 0.011 -> 0.069/10 steps).
         # (n_clusters, 1), exactly 1.0 for every cluster with real mass, so this is a
         # bit-exact no-op on the all-alive path (pinned by SC-6).
         alive = keras.ops.cast(cluster_mass > _MIN_CLUSTER_MASS, cluster_mass.dtype)
