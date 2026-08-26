@@ -143,6 +143,10 @@ class RBFLayer(keras.layers.Layer):
         └──────────────────────────────────┘
         (+ center repulsion loss during training)
 
+    *Masks are ignored.* The layer declares no ``supports_masking`` and no
+    ``compute_mask``, and nothing in the package does, so padded positions produce
+    ordinary activations that flow downstream. Strip padding before this layer.
+
     :param units: Number of RBF units. Must be positive.
     :type units: int
     :param gamma_init: Initial value for the width parameter. ``None`` (the
@@ -199,7 +203,28 @@ class RBFLayer(keras.layers.Layer):
         default existed, which froze a concrete ``1.0`` -- deserializes to
         exactly its previous numerics.
     :type gamma_init: Optional[float]
-    :param repulsion_strength: Strength of the center repulsion penalty.
+    :param repulsion_strength: Strength of the center repulsion penalty. **Not
+        comparable to ``KMeansLayer.repulsion_strength`` despite the shared name and
+        the shared ``0.1`` default**: this one scales an added scalar LOSS that is
+        additionally multiplied by ``feature_dim`` (``dim_scale``), whereas KMeans
+        scales a centroid displacement VECTOR with no per-dimension factor. The mean
+        is taken over all ``units**2`` entries, including the ``units`` zeroed
+        diagonal ones, so the divisor is not the off-diagonal pair count.
+
+        Measured initial value of this loss at the shipped defaults (``units=16``,
+        ``center_initializer='uniform'``, ``min_center_distance=1.0``,
+        ``safety_margin=0.2``; mean over 8 seeds)::
+
+            D     4    16    32    64    96   128   256   512   784  1024
+            loss  0.47 1.62  2.83  4.60  5.82  6.59  7.22  3.77  0.30  0.00
+
+        It is **non-monotonic in D** and peaks near ``D=256``, where it can reach ~3x
+        a cross-entropy-scale task loss — check the ratio if you train in the
+        ``D~64-256`` band. It vanishes at large ``D`` because a ``RandomUniform``
+        center's vector norm grows as ``~0.05*sqrt(D/3)``, so centers clear the
+        ``min_center_distance*(1+safety_margin)=1.2`` threshold unaided. The curve
+        was measured at this default initializer only; a different
+        ``center_initializer`` moves it.
     :type repulsion_strength: float
     :param min_center_distance: Minimum desired distance between centres.
     :type min_center_distance: float

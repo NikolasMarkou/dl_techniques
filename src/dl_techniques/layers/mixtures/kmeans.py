@@ -1,11 +1,13 @@
 """
 A differentiable K-means clustering layer for deep networks.
 
-This layer embeds a clustering mechanism directly into a neural network,
-enabling end-to-end training of cluster centroids. It provides a
-differentiable alternative to the traditional K-means algorithm by
-substituting its discrete, non-differentiable operations (hard assignment,
-centroid recalculation) with continuous, gradient-based approximations.
+This layer embeds a clustering mechanism directly into a neural network as an
+**EMA codebook with differentiable assignments** — the VQ-VAE-EMA scheme. Hard
+assignment is replaced by a temperature-softmax, so the layer's OUTPUT is
+differentiable and gradients flow back into the inputs (and thus into the
+encoder before it). The centroids themselves are NOT gradient-trained: they are
+``trainable=False`` and are moved only by the in-``call`` momentum/EMA update,
+which no optimizer and no ``add_loss`` term touches.
 
 The design incorporates several modern techniques to ensure stable and
 effective training within a deep learning context, such as soft assignments,
@@ -28,12 +30,12 @@ Key mechanisms include:
     one-hot encoding), while higher temperatures result in smoother, more
     uncertain assignments.
 
-2.  **Differentiable Centroid Updates:** During training, the centroids are
-    updated based on these soft assignments. The new position for each
-    centroid is calculated as a weighted average of all input vectors, where
-    the weights are the assignment probabilities. This replaces the discrete
-    re-averaging step in standard K-means with a smooth, differentiable
-    operation.
+2.  **EMA Centroid Updates:** During training the centroids are moved toward
+    the assignment-weighted average of the batch's input vectors, via an
+    exponential moving average applied in-place inside ``call``. This is a
+    stochastic, gradient-free stand-in for the discrete re-averaging step of
+    standard K-means; it is not backpropagated through, and a centroid that
+    owns no mass in the batch is held still (see ``_MIN_CLUSTER_MASS``).
 
 3.  **Momentum and Repulsion:** To stabilize training, the layer includes two
     additional forces. A momentum term smooths the centroid updates over
@@ -51,11 +53,12 @@ Mathematical Foundation:
     `a_ij = softmax(-||x_i - c_j||² / τ)_j`
     where `τ` is the temperature.
 
-    The update to a centroid `c_j` is conceptually a combination of a data-driven
-    pull, a repulsive push from other centroids, and momentum:
-    `Δc_j ∝ ( (Σ_i a_ij * x_i) / (Σ_i a_ij) - c_j ) + Σ_{k≠j} Repel(c_j, c_k)`
-    This update is then smoothed using a momentum buffer before being applied,
-    ensuring stable convergence.
+    The per-step delta for a centroid `c_j` combines a mass-gated data pull with a
+    repulsive push from the other centroids:
+    `u_j = alive_j * ( (Σ_i a_ij * x_i) / (Σ_i a_ij) - c_j ) + Σ_{k≠j} Repel(c_j, c_k)`
+    The COMBINED delta — repulsion included — is then smoothed by the momentum
+    buffer, and only the smoothed value is applied. See the class docstring for the
+    exact three-line form.
 
 References:
 
@@ -82,6 +85,7 @@ from typing import Optional, Union, Any, Tuple, Dict, ClassVar, FrozenSet
 # local imports
 # ---------------------------------------------------------------------
 
+from ...utils.logger import logger
 from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
 from .base import (
     Axis,
@@ -116,12 +120,20 @@ _RESET_CENTROID_SCALE = 0.1
 class KMeansLayer(BaseMixtureLayer):
     """Differentiable K-means layer with momentum and centroid repulsion.
 
-    This layer implements a differentiable version of K-means clustering using
-    soft assignments via temperature-controlled softmax, momentum-based centroid
-    updates, and repulsive forces between centroids to prevent collapse. The
-    soft assignment probability of input ``x_i`` to centroid ``c_j`` is
-    ``a_ij = softmax(-||x_i - c_j||^2 / tau)_j``. Centroids are updated as
-    ``c_new = c + alpha * (momentum_update + repulsion_forces)``.
+    An EMA codebook with differentiable assignments. The soft assignment
+    probability of input ``x_i`` to centroid ``c_j`` is
+    ``a_ij = softmax(-||x_i - c_j||^2 / tau)_j`` — differentiable, so gradients
+    reach the inputs through the output. The centroids are ``trainable=False``
+    and are moved only by this in-place update, run inside ``call`` when
+    training (``target_j`` is the assignment-weighted mean of the batch,
+    ``alive_j`` is 0 for a centroid with no mass)::
+
+        u   = alive * (target - c) + repulsion(c)
+        m   = momentum * m + (1 - momentum) * u
+        c  += centroid_lr * m
+
+    Note the nesting: repulsion enters ``u`` and is therefore smoothed INSIDE the
+    momentum EMA, not added on top of it.
 
     **Architecture Overview:**
 
@@ -160,6 +172,17 @@ class KMeansLayer(BaseMixtureLayer):
         │  Output: assignments or mixture     │
         └─────────────────────────────────────┘
 
+    **Two limitations, both measured by reading the shipped code:**
+
+    * *Masks are ignored.* The layer declares no ``supports_masking`` and no
+      ``compute_mask``, and nothing in the package does. A padded timestep is a
+      real point to the assignment softmax and contributes its full weight to the
+      EMA target, so padding drags the centroids. Strip padding before this layer.
+    * *Single replica only.* ``_update_centroids`` writes the codebook with
+      ``assign``/``assign_add`` inside ``call``, which under ``tf.distribute`` is
+      replica-local: each replica sees only its own shard, and the centroids
+      diverge across replicas with no all-reduce to reconcile them.
+
     :param n_clusters: Number of clusters (K). Must be positive.
     :type n_clusters: int
     :param temperature: Softmax temperature for assignments. Lower values create
@@ -186,7 +209,14 @@ class KMeansLayer(BaseMixtureLayer):
     :param centroid_initializer: Initializer for centroids. Supports ``'orthonormal'``.
         Defaults to ``'orthonormal'``.
     :type centroid_initializer: Union[str, keras.initializers.Initializer]
-    :param centroid_regularizer: Optional regularizer for centroids. Defaults to None.
+    :param centroid_regularizer: **Inert — accepted, serialized, and never applied.**
+        Centroids are ``trainable=False`` and Keras collects regularizer losses from
+        trainable weights only, so ``layer.losses`` stays empty however this is set
+        (measured on Keras 3.8.0: an ``L2(1.0)`` evaluating to 4.02 on the centroids
+        contributes 0 terms). Setting it emits a warning. It is kept so existing
+        configs still deserialize. Contrast ``GMMLayer.mean_regularizer``, which is
+        live: GMM's ``means`` are trainable, so its penalty does reach ``layer.losses``.
+        Defaults to None.
     :type centroid_regularizer: Optional[keras.regularizers.Regularizer]
     :param random_seed: Random seed for initialization. Defaults to None.
     :type random_seed: Optional[int]
@@ -240,6 +270,22 @@ class KMeansLayer(BaseMixtureLayer):
         self._init_cluster_axis(cluster_axis)
         self.centroid_initializer = resolve_initializer_arg(centroid_initializer)
         self.centroid_regularizer = keras.regularizers.get(centroid_regularizer)
+        # DECISION plan-2026-08-26T061816-c515641a/D-015: keep the inert parameter, warn
+        # once. Do NOT delete `centroid_regularizer` -- it is in `get_config()`, so every
+        # saved config carrying it would fail to deserialize. Do NOT flip `centroids` to
+        # trainable to "make it work" (H-4 / D-002: an optimizer would then double-update
+        # them alongside the EMA). Re-measured on Keras 3.8.0: `layer.losses == []` while
+        # the same regularizer evaluates to 4.02 on those centroids -- the penalty is
+        # never collected, so removing this warning restores a silent no-op.
+        if self.centroid_regularizer is not None:
+            logger.warning(
+                "centroid_regularizer has no effect: centroids are trainable=False "
+                "(they are updated by the internal EMA, not by an optimizer), and Keras "
+                "collects regularizer losses from trainable weights only, so this "
+                "penalty never reaches layer.losses. It is kept for serialization "
+                "compatibility. GMMLayer's mean_regularizer IS live, because its means "
+                "are trainable."
+            )
         self.random_seed = random_seed
 
         # Initialize attribute placeholders - weights created in build()

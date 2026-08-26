@@ -1143,5 +1143,75 @@ class TestKMeansConstructorAndRankGuards:
             create_mixture_layer("kmeans", n_clusters=True)
 
 
+class TestKMeansCentroidRegularizerIsInert:
+    """B3: `centroid_regularizer` is dead config, and setting it must SAY so.
+
+    Measured on Keras 3.8.0 with a control probe: regularizer penalties are
+    collected from trainable weights only. `centroids` is `trainable=False`
+    (D-002), so `KMeansLayer(centroid_regularizer=L2(1.0)).losses == []` while the
+    regularizer object itself evaluates to 4.0175 on those same centroids. The
+    review's claim that it INFLATES the loss is refuted; it contributes nothing.
+    """
+
+    def test_setting_a_centroid_regularizer_warns_that_it_has_no_effect(self, caplog) -> None:
+        """RED pre-fix: `got 0 warnings: []` -- the no-op was completely silent."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            KMeansLayer(n_clusters=4, centroid_regularizer=keras.regularizers.L2(1.0))
+
+        records = caplog.records
+        warnings = [
+            r for r in records
+            if r.levelno == logging.WARNING and "centroid_regularizer" in r.message
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly one warning naming centroid_regularizer, "
+            f"got {len(warnings)}: {[r.message for r in records]}"
+        )
+        assert "no effect" in warnings[0].message
+
+    def test_no_warning_when_the_regularizer_is_left_unset(self, caplog) -> None:
+        """The default path must stay quiet -- a per-construction warning is noise."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            KMeansLayer(n_clusters=4)
+
+        records = caplog.records
+        assert not [
+            r for r in records
+            if r.levelno == logging.WARNING and "centroid_regularizer" in r.message
+        ], f"the default construction must not warn; got {[r.message for r in records]}"
+
+    def test_the_regularizer_contributes_nothing_to_layer_losses(self) -> None:
+        """Regression pin (green pre-fix): the inertness itself, plus a live control.
+
+        Without the GMM half this asserts nothing -- an empty `losses` list is also
+        what a blind instrument returns.
+        """
+        from dl_techniques.layers.mixtures.gmm import GMMLayer
+
+        inputs = np.random.RandomState(0).randn(8, 6).astype("float32")
+
+        kmeans = KMeansLayer(n_clusters=4, centroid_regularizer=keras.regularizers.L2(1.0))
+        kmeans(inputs, training=True)
+        assert kmeans.centroids.trainable is False
+        assert kmeans.losses == [], (
+            f"centroids are trainable=False, so Keras collects nothing; got {kmeans.losses}"
+        )
+        assert float(keras.regularizers.L2(1.0)(kmeans.centroids)) > 0.0, (
+            "control: the regularizer OBJECT does compute a real penalty -- it is "
+            "Keras that never collects it"
+        )
+
+        gmm = GMMLayer(n_components=4, mean_regularizer=keras.regularizers.L2(1.0))
+        gmm(inputs, training=True)
+        assert gmm.means.trainable is True
+        assert any(float(loss) > 0.0 for loss in gmm.losses), (
+            "control: GMM's means ARE trainable, so its mean_regularizer is live -- "
+            f"the asymmetry the docstrings record; got {[float(l) for l in gmm.losses]}"
+        )
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

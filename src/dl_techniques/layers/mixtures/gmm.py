@@ -183,6 +183,11 @@ class GMMLayer(BaseMixtureLayer):
         │  Output: assignments or mixture     │
         └─────────────────────────────────────┘
 
+    *Masks are ignored.* The layer declares no ``supports_masking`` and no
+    ``compute_mask``, and nothing in the package does, so padded positions are scored
+    by the density and folded into the responsibilities like real observations. Strip
+    padding before this layer.
+
     :param n_components: Number of mixture components (K). Must be positive.
     :type n_components: int
     :param temperature: Softmax temperature for responsibilities. ``1.0`` yields
@@ -199,6 +204,12 @@ class GMMLayer(BaseMixtureLayer):
     :param output_mode: Output type: ``'assignments'`` for responsibilities or
         ``'mixture'`` for reconstructed inputs using component means. Defaults to
         ``'assignments'``.
+
+        Under ``covariance_type='low_rank'``, ``'mixture'`` still reconstructs as
+        ``responsibilities @ means`` — the factor loadings ``U_k`` never enter the
+        reconstruction directly, and influence the output only through the
+        responsibilities they help compute. Expect no extra reconstruction fidelity
+        from the low-rank factors in this mode.
     :type output_mode: str
     :param cluster_axis: Axis or axes to perform clustering on. Negative values are
         supported. Defaults to -1.
@@ -209,7 +220,11 @@ class GMMLayer(BaseMixtureLayer):
     :param log_variance_initializer: Initializer for per-dimension log-variances.
         Defaults to ``'zeros'`` (unit variance).
     :type log_variance_initializer: Union[str, keras.initializers.Initializer]
-    :param mean_regularizer: Optional regularizer for component means. Defaults to None.
+    :param mean_regularizer: Optional regularizer for component means. Live: ``means``
+        are trainable, so the penalty is collected into ``layer.losses``. Contrast
+        ``KMeansLayer.centroid_regularizer``, which is inert — its centroids are
+        ``trainable=False`` and Keras regularizes trainable weights only.
+        Defaults to None.
     :type mean_regularizer: Optional[keras.regularizers.Regularizer]
     :param random_seed: Random seed for initialization. Defaults to None.
     :type random_seed: Optional[int]
