@@ -25,6 +25,8 @@ from dl_techniques.layers.moe.gating import (
     _min_temperature,
 )
 from dl_techniques.layers.moe.experts import FFNExpert
+from dl_techniques.layers.moe.config import ExpertConfig, GatingConfig, MoEConfig
+from dl_techniques.layers.moe.layer import MixtureOfExperts
 
 B, D = 4, 16
 NUM_EXPERTS = 4
@@ -428,3 +430,265 @@ class TestAuxiliaryLossTopKScaling:
             )
             assert measured >= self.AUX_WEIGHT * top_k * (1 - 1e-5)
             assert measured <= self.AUX_WEIGHT * 8 * (1 + 1e-5)
+
+
+# ---------------------------------------------------------------------
+# SoftMoE dispatch / combine, against an independent numpy reference
+# ---------------------------------------------------------------------
+
+
+def _np_softmax(x, axis):
+    """Numerically stable softmax, written here so the oracle shares no code
+    with the implementation under test (``keras.ops.softmax``)."""
+    shifted = x - np.max(x, axis=axis, keepdims=True)
+    e = np.exp(shifted)
+    return e / np.sum(e, axis=axis, keepdims=True)
+
+
+def _softmoe_reference(x, kernel, bias, num_experts, num_slots):
+    """Independent numpy implementation of Puigcerver et al. (2023) SoftMoE.
+
+    Derived from the paper's definition, not from ``SoftMoEGating.call``:
+
+    * ``phi = x W + b``, reshaped to ``[b, s, e, l]``.
+    * dispatch ``D = softmax(phi)`` over the **token** axis; ``slot_{e,l} =
+      sum_t D_{t,e,l} x_t``.
+    * combine ``C = softmax(phi)`` over the flattened **(expert, slot)** axis,
+      per token.
+    * the per-token/per-expert routing weight is the slot marginal of ``C``.
+
+    :param x: Input tokens, ``[batch, seq, hidden]``.
+    :type x: numpy.ndarray
+    :param kernel: ``phi_dense`` kernel, ``[hidden, experts * slots]``.
+    :type kernel: numpy.ndarray
+    :param bias: ``phi_dense`` bias, ``[experts * slots]``.
+    :type bias: numpy.ndarray
+    :param num_experts: Number of experts.
+    :type num_experts: int
+    :param num_slots: Slots per expert.
+    :type num_slots: int
+    :return: Dict of the five tensors ``SoftMoEGating`` exposes.
+    :rtype: Dict[str, numpy.ndarray]
+    """
+    b, s, h = x.shape
+    phi = (x.reshape(b * s, h) @ kernel + bias).reshape(b, s, num_experts, num_slots)
+
+    dispatch = _np_softmax(phi, axis=1)
+    combine = _np_softmax(
+        phi.reshape(b, s, num_experts * num_slots), axis=-1
+    ).reshape(b, s, num_experts, num_slots)
+
+    slots = np.einsum('bsel,bsh->belh', dispatch, x)
+
+    return {
+        'phi_logits': phi,
+        'dispatch_weights': dispatch,
+        'combine_weights': combine,
+        'soft_slots': slots,
+        'expert_inputs': slots.reshape(b, num_experts, num_slots * h),
+        'expert_weights': combine.sum(axis=-1),
+        'raw_gate_probs': _np_softmax(phi, axis=2).mean(axis=-1),
+    }
+
+
+@pytest.mark.usefixtures("tf32_disabled")
+class TestSoftMoEAgainstANumpyReference:
+    """Value verification for SoftMoE's two-softmax dispatch/combine.
+
+    Before this class the whole mechanism was covered by ``assert out is not
+    None`` plus two shape/row-sum checks -- neither of which can see a
+    transposed softmax axis, and both of which a swapped dispatch/combine pair
+    passes unchanged.
+
+    All dimensions are mutually distinct (batch 2, seq 5, hidden 6, experts 3,
+    slots 4) so that no axis confusion can be masked by a coincidental match.
+    """
+
+    B, S, H, E, L = 2, 5, 6, 3, 4
+
+    def _layer_and_inputs(self, seed=0):
+        rng = np.random.default_rng(seed)
+        x = rng.standard_normal((self.B, self.S, self.H)).astype('float32')
+        layer = SoftMoEGating(num_experts=self.E, num_slots=self.L)
+        layer(keras.ops.convert_to_tensor(x))  # build
+        kernel, bias = [
+            keras.ops.convert_to_numpy(w) for w in layer.phi_dense.weights
+        ]
+        return layer, x, _softmoe_reference(x, kernel, bias, self.E, self.L)
+
+    def test_the_reference_dimensions_are_mutually_distinct(self):
+        """Guard the guard: equal axes would hide a transposition."""
+        assert len({self.B, self.S, self.H, self.E, self.L}) == 5
+
+    @pytest.mark.parametrize(
+        "name",
+        ['dispatch_weights', 'combine_weights', 'soft_slots', 'expert_inputs',
+         'raw_gate_probs'],
+    )
+    def test_aux_tensor_matches_the_reference(self, name):
+        layer, x, ref = self._layer_and_inputs()
+        _, _, aux = layer(keras.ops.convert_to_tensor(x))
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(aux[name]), ref[name],
+            rtol=1e-5, atol=1e-6,
+        )
+
+    def test_expert_weights_match_the_reference(self):
+        layer, x, ref = self._layer_and_inputs()
+        weights, _, _ = layer(keras.ops.convert_to_tensor(x))
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(weights), ref['expert_weights'],
+            rtol=1e-5, atol=1e-6,
+        )
+
+    def test_the_two_softmaxes_normalize_over_different_axes(self):
+        """The distinguishing property of SoftMoE: dispatch sums to 1 over the
+        token axis, combine sums to 1 over the (expert, slot) axes. A single
+        softmax reused for both cannot satisfy both."""
+        layer, x, ref = self._layer_and_inputs()
+        _, _, aux = layer(keras.ops.convert_to_tensor(x))
+        dispatch = keras.ops.convert_to_numpy(aux['dispatch_weights'])
+        combine = keras.ops.convert_to_numpy(aux['combine_weights'])
+        np.testing.assert_allclose(
+            dispatch.sum(axis=1), np.ones((self.B, self.E, self.L)), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            combine.sum(axis=(2, 3)), np.ones((self.B, self.S)), atol=1e-5
+        )
+        assert not np.allclose(dispatch, combine, atol=1e-4)
+
+    def test_a_transposed_dispatch_softmax_would_disagree(self):
+        """Prove the reference is an oracle and not a tautology: recomputing it
+        with the dispatch softmax taken over the expert axis instead of the
+        token axis must move the numbers well outside the assertion tolerance."""
+        layer, x, ref = self._layer_and_inputs()
+        phi = ref['phi_logits']
+        mutant_slots = np.einsum('bsel,bsh->belh', _np_softmax(phi, axis=2), x)
+        assert np.max(np.abs(mutant_slots - ref['soft_slots'])) > 1e-2
+
+    def test_swapping_dispatch_and_combine_would_disagree(self):
+        """The other half of the same argument, for the combine weights."""
+        layer, x, ref = self._layer_and_inputs()
+        assert np.max(
+            np.abs(ref['combine_weights'] - ref['dispatch_weights'])
+        ) > 1e-2
+
+    def test_a_second_seed_agrees_too(self):
+        """One agreement could be a fixed point; two independent draws is not."""
+        for seed in (1, 2, 3):
+            layer, x, ref = self._layer_and_inputs(seed=seed)
+            _, _, aux = layer(keras.ops.convert_to_tensor(x))
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(aux['soft_slots']), ref['soft_slots'],
+                rtol=1e-5, atol=1e-6,
+            )
+
+
+@pytest.mark.usefixtures("tf32_disabled")
+class TestSoftMoELayerCombineAgainstTheReference:
+    """The other half of SoftMoE lives in ``MixtureOfExperts._process_softmoe``:
+    it runs each expert on its slots and combines the results back to token
+    positions. That combine was equally unverified.
+
+    The reference below treats each ``FFNExpert`` as a black box -- it
+    reimplements the slot construction, the per-expert slot batching and the
+    combine contraction, which is where an axis error would live.
+    """
+
+    B, S, H, E, L, OUT = 2, 5, 6, 3, 4, 7
+
+    def _build(self, seed=0):
+        moe_config = MoEConfig(
+            num_experts=self.E,
+            expert_config=ExpertConfig(
+                ffn_config={'type': 'mlp', 'hidden_dim': 9, 'output_dim': self.OUT}
+            ),
+            gating_config=GatingConfig(gating_type='softmoe', num_slots=self.L),
+            jitter_noise=0.0,
+        )
+        layer = MixtureOfExperts(config=moe_config)
+        rng = np.random.default_rng(seed)
+        x = rng.standard_normal((self.B, self.S, self.H)).astype('float32')
+        layer(keras.ops.convert_to_tensor(x))  # build
+        return layer, x
+
+    def _reference_output(self, layer, x):
+        kernel, bias = [
+            keras.ops.convert_to_numpy(w)
+            for w in layer.gating_network.phi_dense.weights
+        ]
+        ref = _softmoe_reference(x, kernel, bias, self.E, self.L)
+        slots = ref['soft_slots']  # [b, e, l, h]
+
+        expert_out = np.stack(
+            [
+                keras.ops.convert_to_numpy(
+                    layer.experts[e](
+                        keras.ops.convert_to_tensor(
+                            slots[:, e].reshape(self.B * self.L, self.H)
+                        )
+                    )
+                ).reshape(self.B, self.L, self.OUT)
+                for e in range(self.E)
+            ],
+            axis=1,
+        )  # [b, e, l, out]
+
+        return np.einsum('bsel,belo->bso', ref['combine_weights'], expert_out)
+
+    def test_forward_output_matches_the_reference(self):
+        layer, x = self._build()
+        actual = keras.ops.convert_to_numpy(
+            layer(keras.ops.convert_to_tensor(x), training=False)
+        )
+        np.testing.assert_allclose(
+            actual, self._reference_output(layer, x), rtol=1e-4, atol=1e-5
+        )
+
+    def test_output_shape_is_the_expert_width_not_the_input_width(self):
+        layer, x = self._build()
+        out = layer(keras.ops.convert_to_tensor(x), training=False)
+        assert tuple(out.shape) == (self.B, self.S, self.OUT)
+        assert self.OUT != self.H  # the assertion above would be vacuous otherwise
+
+    def test_the_reference_disagrees_with_a_transposed_combine(self):
+        """Combining with the *dispatch* weights instead of the combine weights
+        -- the shape-preserving confusion of the two softmaxes, and the exact
+        error the old smoke test could not see -- must produce a materially
+        different output. That is what gives the equality test above teeth."""
+        layer, x = self._build()
+        kernel, bias = [
+            keras.ops.convert_to_numpy(w)
+            for w in layer.gating_network.phi_dense.weights
+        ]
+        ref = _softmoe_reference(x, kernel, bias, self.E, self.L)
+        slots = ref['soft_slots']
+        expert_out = np.stack(
+            [
+                keras.ops.convert_to_numpy(
+                    layer.experts[e](
+                        keras.ops.convert_to_tensor(
+                            slots[:, e].reshape(self.B * self.L, self.H)
+                        )
+                    )
+                ).reshape(self.B, self.L, self.OUT)
+                for e in range(self.E)
+            ],
+            axis=1,
+        )
+        # Mutant: use the DISPATCH weights (wrong softmax) to combine.
+        mutant = np.einsum('bsel,belo->bso', ref['dispatch_weights'], expert_out)
+        good = np.einsum('bsel,belo->bso', ref['combine_weights'], expert_out)
+        assert np.max(np.abs(mutant - good)) > 1e-3
+
+    def test_a_second_seed_agrees_too(self):
+        for seed in (4, 5):
+            layer, x = self._build(seed=seed)
+            actual = keras.ops.convert_to_numpy(
+                layer(keras.ops.convert_to_tensor(x), training=False)
+            )
+            np.testing.assert_allclose(
+                actual, self._reference_output(layer, x), rtol=1e-4, atol=1e-5
+            )
+
+# ---------------------------------------------------------------------
