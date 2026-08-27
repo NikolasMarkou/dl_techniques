@@ -123,7 +123,15 @@ def _cached_cosine_basis(
 
     Column ``k`` (0-based) holds ``cos(2*pi * (k+1) * i / input_dim)`` for
     ``i`` in ``0 .. input_dim-1``, divided by its own L2 norm. Built in
-    float64 and returned as float32.
+    float64 and returned in float64. It used to be narrowed to float32 on
+    the way out, which pinned the initializer to float32 precision even
+    under a float64 policy: the realised kernel then differed from the
+    float64 basis by 1.371915e-08. Keeping float64 drops that to exactly
+    0.0 against a hand-recomputed float64 basis, and cannot move a float32
+    or mixed_float16 layer, because rounding float64 to float32 once inside
+    ``add_weight`` is bit-identical to rounding it twice: the realised
+    float32 kernel is byte-for-byte the same before and after this change
+    (measured, both policies, delta exactly 0.0).
 
     Columns are orthonormal whenever ``input_dim >= 2 * num_decisions``: two
     columns ``k1 != k2`` can only overlap when ``k1 + k2 == input_dim``, and
@@ -142,7 +150,7 @@ def _cached_cosine_basis(
     :param norm_eps: Added to each column norm before dividing, so a
         zero-norm column cannot divide by zero.
     :type norm_eps: float
-    :return: Basis of shape ``(input_dim, num_decisions)``, dtype float32.
+    :return: Basis of shape ``(input_dim, num_decisions)``, dtype float64.
     :rtype: np.ndarray
     """
     i = np.arange(input_dim, dtype=np.float64)
@@ -150,7 +158,7 @@ def _cached_cosine_basis(
     basis = np.cos(2.0 * np.pi * np.outer(i, k) / input_dim)
     col_norms = np.sqrt(np.sum(np.square(basis), axis=0, keepdims=True))
     basis = basis / (col_norms + norm_eps)
-    return basis.astype(np.float32)
+    return basis
 
 
 # ---------------------------------------------------------------------
