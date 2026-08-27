@@ -85,7 +85,12 @@ class HardSigmoid(keras.layers.Layer):
         :param kwargs: Arguments for the Layer base class.
         """
         super().__init__(**kwargs)
-        self.activation = keras.layers.ReLU(max_value=6.0)
+        # Name the sub-layer explicitly. Without name=, Keras draws from a
+        # process-global counter, so the same layer gets re_lu / re_lu_1 /
+        # re_lu_2 across constructions and a reloaded model's sub-layer names
+        # do not match the saved ones. ReLU is stateless, so nothing depends
+        # on the name today; this keeps a stable serialized path anyway.
+        self.activation = keras.layers.ReLU(max_value=6.0, name="relu6")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the wrapped ReLU6 sub-layer.
