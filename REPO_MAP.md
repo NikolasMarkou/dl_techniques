@@ -160,7 +160,7 @@ There are 9 dicts named `*_REGISTRY`:
 
 | Registry | File | Keys | Dispatcher |
 |---|---|---|---|
-| `ATTENTION_REGISTRY` | `src/dl_techniques/layers/attention/factory.py` | 32 | `create_attention_layer` |
+| `ATTENTION_REGISTRY` | `src/dl_techniques/layers/attention/factory.py` | 33 | `create_attention_layer` |
 | `ACTIVATION_REGISTRY` | `src/dl_techniques/layers/activations/factory.py` | 22 | `create_activation_layer` |
 | `FFN_REGISTRY` | `src/dl_techniques/layers/ffn/factory.py` | 21 | `create_ffn_layer` |
 | `ANYLOSS_REGISTRY` | `src/dl_techniques/losses/any_loss.py` | 16 | dispatched by the `AnyLoss` class |
@@ -892,7 +892,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1025 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1073 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1086 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 299 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |

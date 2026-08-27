@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports thirty-two different attention mechanisms, from standard multi-head attention
+The factory supports thirty-three different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -56,7 +56,7 @@ consistency" — that grows the frozen surface above.
 Known shape of `validate_attention_config` (documented, not a defect to fix here)
 --------------------------------------------------------------------------------
 The numeric checks in `validate_attention_config` below are a single flat allowlist of
-parameter NAMES ('dim', 'num_heads', 'dropout_rate', ...) applied uniformly to all 32
+parameter NAMES ('dim', 'num_heads', 'dropout_rate', ...) applied uniformly to all 33
 types, not per-type schemas. A parameter therefore gets range-checked purely because of
 what it is called, and a type-specific constraint (e.g. one type's `window_size` upper
 bound, or a parameter two types interpret differently) cannot be expressed. The one

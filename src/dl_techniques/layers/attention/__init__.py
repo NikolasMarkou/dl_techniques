@@ -10,7 +10,7 @@ and direct access to all layer classes.
 
 Factory coverage of the names exported here
 -------------------------------------------
-`factory.py` registers **32** keys. Of the 36 layer classes re-exported below, 30 are
+`factory.py` registers **33** keys. Of the 36 layer classes re-exported below, 30 are
 reachable through `create_attention_layer(type=...)` and 6 are **direct-import only**:
 
     ProgressiveFocusedAttention, Ideogram4Attention, MMDiTJointAttention,

@@ -61,9 +61,16 @@ number you see in a sibling module came from here:
         grep -rlE '(^|[^._[:alnum:]])apply_attention_mask\(' \
             src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
 
-        # 8 of them derive the axis from their own probability_config:
+        # 8 of them derive the axis from their own probability_config.
+        # The `grep -v '/common.py$'` is REQUIRED and was missing until
+        # 2026-08-27: the search string appears in this very docstring as the
+        # example being discussed, so without the exclusion the command
+        # SELF-MATCHES and returns 9, not 8. The pytest guard below has always
+        # excluded this file programmatically, so the enforced number was right
+        # while the copy-pasteable command beside it was not -- a maintainer
+        # following the docstring literally would have "fixed" a correct number.
         grep -rl 'rescue_axis=(self.probability_config' \
-            src/dl_techniques/layers/attention/*.py | wc -l
+            src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
 
     These two numbers previously drifted THREE ways at once across this docstring, the
     D-009 anchor below and the plan's own records, so they are now stated ONCE (here)
