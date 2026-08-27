@@ -1,10 +1,28 @@
 """
-Activation Layer Factory for dl_techniques Framework
+Build any activation layer in this package from a short string key.
 
-Provides a centralized factory for creating activation layers with a unified
-interface, type safety, and comprehensive parameter validation. This utility
-simplifies the instantiation of both standard and custom activation functions,
-ensuring consistent configuration across the framework.
+``create_activation_layer('mish')`` returns a ``Mish`` layer.
+``ACTIVATION_REGISTRY`` maps each key to the class, the parameters that key
+requires, and the optional parameters with their factory defaults. The
+registry is the source of truth for what exists; ``README.md`` keeps a
+derived table of the same keys.
+
+Three entry points:
+
+- :func:`create_activation_layer` -- the builder. String key plus kwargs.
+- :func:`resolve_activation_layer` -- the same, but falls back to
+  ``keras.layers.Activation`` for plain Keras names such as ``'sigmoid'``
+  that are not registry keys.
+- :func:`create_activation_from_config` -- the same, from a dict carrying a
+  ``'type'`` key.
+
+Two keys share one class. ``'routing_probabilities'`` and
+``'hierarchical_routing'`` both build ``RoutingProbabilitiesLayer``; the
+first is the deterministic door, the second the trainable one.
+
+Unknown parameters are rejected, never ignored. Every failure inside
+:func:`create_activation_layer` surfaces as a ``ValueError`` naming the
+activation type, the class, and the keys you passed.
 """
 
 import keras
@@ -98,9 +116,12 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'axis': -1,
             'slope_initializer': 'ones',
             'shift_initializer': 'zeros',
-            # shift_regularizer / shift_constraint intentionally omitted: the class
-            # supplies sensible defaults (L2(1e-3), ValueRangeConstraint(-1, +1)).
-            # Listing them here would override the class defaults at factory call time.
+            # shift_regularizer / shift_constraint are listed above with the
+            # value None so the strict kwarg check accepts them. None does NOT
+            # override the class defaults: DifferentiableStep reads None as
+            # "use mine". Measured -- a factory-built layer and a directly
+            # constructed one both end up with L2(1e-3) and
+            # ValueRangeConstraint(-1, +1).
         },
         'use_case': 'Learnable binary gates, soft thresholding, or feature selection.'
     },
@@ -143,8 +164,8 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'use_case': 'High-performance activation for mobile-optimized models like MobileNetV3.'
     },
     'hierarchical_routing': {
-        # Unified RoutingProbabilitiesLayer in trainable mode (formerly the
-        # standalone HierarchicalRoutingLayer).
+        # RoutingProbabilitiesLayer in trainable mode. This key replaced the
+        # standalone HierarchicalRoutingLayer.
         'class': RoutingProbabilitiesLayer,
         'description': 'Trainable hierarchical probability tree for O(log N) classification.',
         'required_params': ['output_dim'],
@@ -156,12 +177,13 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_constraint': None,
             'axis': -1,
             'epsilon': 1e-7,
-            # DELIBERATE divergence from RoutingProbabilitiesLayer's own ctor default
-            # ('deterministic'): this key is the TRAINABLE door onto that class, and the sibling
-            # key 'routing_probabilities' below is the deterministic one. Do not "correct" this to
-            # match the ctor -- see README.md:23 and the machine-checked reason in
-            # INTENTIONAL_OVERRIDES (tests/test_layers/test_factory_registry_drift.py), which
-            # pins this value and will fail if it is edited.
+            # This diverges from RoutingProbabilitiesLayer's own constructor
+            # default ('deterministic') on purpose. This key is the trainable
+            # door onto that class; the sibling key 'routing_probabilities'
+            # below is the deterministic one. Do not "correct" it to match the
+            # constructor. INTENTIONAL_OVERRIDES in
+            # tests/test_layers/test_factory_registry_drift.py pins this value
+            # and fails if it is edited.
             'mode': 'trainable',
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
@@ -290,8 +312,11 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'epsilon': 1e-12,
             'trainable_slope': False,
             'slope_initializer': 'ones',
-            # slope_regularizer / slope_constraint intentionally omitted: the class
-            # supplies defaults (L2_custom(-1e-4), ValueRangeConstraint(1.0, 50.0)).
+            # slope_regularizer / slope_constraint are listed above with the
+            # value None so the strict kwarg check accepts them. None does NOT
+            # override the class defaults: ThreshMax reads None as "use mine".
+            # Measured -- a factory-built layer and a directly constructed one
+            # both end up with L2_custom and ValueRangeConstraint(1.0, 50.0).
         },
         'use_case': 'Creates sparse, confident probability distributions as an alternative to softmax.'
     },
@@ -340,10 +365,18 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
 # Public API functions
 def get_activation_info() -> Dict[str, Dict[str, Any]]:
     """
-    Get comprehensive information about all available activation layer types.
+    Return the registry contents, one entry per activation type.
 
-    :return: Dict containing information about each activation type, including
-        description, required_params, optional_params, and use_case.
+    Each entry carries ``description``, ``required_params``,
+    ``optional_params`` and ``use_case``.
+
+    Treat the result as read-only. The copy is one level deep, so the nested
+    ``optional_params`` dict is the same object the registry holds. Measured:
+    after ``get_activation_info()['relu_k']['optional_params']['k'] = 99``,
+    ``ACTIVATION_REGISTRY['relu_k']['optional_params']['k']`` is 99 and the
+    factory builds ``ReLUK(k=99)``.
+
+    :return: One entry per activation type, keyed by type name.
     :rtype: Dict[str, Dict[str, Any]]
     """
     return {
@@ -353,13 +386,31 @@ def get_activation_info() -> Dict[str, Dict[str, Any]]:
 
 def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
     """
-    Validate activation layer configuration parameters.
+    Check that ``activation_type`` exists and its parameters make sense.
 
-    :param activation_type: Type of activation to validate.
+    Two checks run for every type: the key is in ``ACTIVATION_REGISTRY``, and
+    every name in that entry's ``required_params`` is present in ``kwargs``.
+    After that, ten types get a hand-written value check
+    (``adaptive_softmax``, ``differentiable_step``, ``golu``,
+    ``hierarchical_routing``, ``monotonicity``, ``relu``, ``relu_k``,
+    ``routing_probabilities``, ``saturated_mish``, ``thresh_max``), and the
+    three expanded activations get their initializer / regularizer /
+    constraint strings resolved to catch typos. Every other type passes
+    through on the two generic checks alone.
+
+    Returns ``None`` on success; it raises or it says nothing.
+
+    :func:`create_activation_layer` calls this. Called directly, it raises
+    ``TypeError`` for a wrong type; called through the factory, that
+    ``TypeError`` comes back re-wrapped as a ``ValueError``.
+
+    :param activation_type: Registry key to validate.
     :type activation_type: str
-    :param kwargs: Parameters to validate.
-    :raises ValueError: If activation_type is invalid or parameters have invalid values.
-    :raises TypeError: If parameter types are incorrect.
+    :param kwargs: Parameters to validate against that key.
+    :raises ValueError: If ``activation_type`` is not a registry key, a
+        required parameter is missing, or a value is out of range.
+    :raises TypeError: If a parameter has the wrong type (``axis`` for
+        ``differentiable_step``, ``max_value`` for ``relu``).
     """
     if activation_type not in ACTIVATION_REGISTRY:
         available_types = sorted(list(ACTIVATION_REGISTRY.keys()))
@@ -491,10 +542,10 @@ if any copy drifts.
 """
 
 # Base `keras.layers.Layer` kwargs. Every registered activation class takes
-# `**kwargs` and forwards them to `Layer.__init__`, so these genuinely build and
-# are NOT rejected by the strict check below. Mirrors `_KERAS_BASE_PARAMS` in
-# `layers/norms/factory.py`; kept local for the same import-graph reason as the
-# marker above, and pinned identical by the same test class.
+# `**kwargs` and forwards them to `Layer.__init__`, so these five build and are
+# NOT rejected by the strict check below. `layers/norms/factory.py` holds the
+# same frozenset under the same name, copied for the same import-graph reason as
+# the marker above and pinned identical by the same test class.
 _KERAS_BASE_PARAMS = frozenset(
     {'name', 'dtype', 'trainable', 'activity_regularizer', 'autocast'}
 )
@@ -506,49 +557,75 @@ def create_activation_layer(
     **kwargs: Any
 ) -> keras.layers.Layer:
     """
-    Factory function for creating activation layers with a unified interface.
+    Build one activation layer from its registry key.
 
-    This function provides a centralized way to create any activation layer
-    supported by dl_techniques, with comprehensive parameter validation.
+    Registry defaults are applied first, then your ``kwargs`` override them.
+    A name passed as ``name=`` wins over one passed inside ``kwargs``.
 
-    :param activation_type: Type of activation layer to create.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        activation_type, name, **kwargs
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │ registry lookup (.get)       │
+        └──────────────┬───────────────┘
+                       ▼  entry, or None if unknown
+        ┌──────────────────────────────┐
+        │ reject undeclared kwargs     │──► ValueError
+        └──────────────┬───────────────┘     (carries the marker)
+                       ▼
+        ┌──────────────────────────────┐
+        │ validate_activation_config   │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ defaults, then kwargs        │
+        │ keep declared names only     │
+        │ apply name=                  │
+        └──────────────┬───────────────┘
+                       ▼  final_params
+        ┌──────────────────────────────┐
+        │ act_class(**final_params)    │
+        └──────────────┬───────────────┘
+                       ▼
+              keras.layers.Layer
+
+    Only the undeclared-kwarg rejection escapes as itself. Everything from
+    ``validate_activation_config`` down sits inside a ``try`` that catches
+    ``TypeError`` and ``ValueError`` and re-raises one ``ValueError`` naming
+    the type, the class and the keys you passed.
+
+    :param activation_type: Registry key, e.g. ``'mish'`` or ``'sparsemax'``.
     :type activation_type: ActivationType
-    :param name: Optional name for the layer.
+    :param name: Layer name. Overrides any ``name`` in ``kwargs``.
     :type name: Optional[str]
-    :param kwargs: Parameters specific to the activation type.
-    :return: A configured activation layer instance.
+    :param kwargs: Parameters for that activation type, plus any of
+        ``name``, ``dtype``, ``trainable``, ``activity_regularizer``,
+        ``autocast``.
+    :return: A built activation layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: If activation_type is invalid, parameters are incorrect, or
-        an undeclared parameter is passed (the message then carries
-        :data:`STRICT_DROPPED_KEY_MARKER`).
-    :raises TypeError: If parameter types are incorrect.
+    :raises ValueError: Every failure path. An undeclared parameter gives a
+        message carrying :data:`STRICT_DROPPED_KEY_MARKER`; an unknown type,
+        a bad value or a constructor error gives a message beginning
+        ``Failed to create <type> layer``.
+
+    Note:
+        ``TypeError`` never escapes this function, even though
+        :func:`validate_activation_config` raises one. Measured:
+        ``create_activation_layer('relu', max_value='big')`` and
+        ``create_activation_layer('differentiable_step', axis='x')`` both
+        come back as ``ValueError``, because the ``except`` clause below
+        catches ``TypeError`` and re-raises it as ``ValueError``. Catch
+        ``ValueError`` alone.
     """
     # DECISION plan-2026-08-18T140459-7991552f/D-017
-    # The INVERSE direction -- an undeclared kwarg -- was hardened in
-    # `attention`/`ffn`/`embedding` by an earlier plan's D-011/D-023
-    # (STRICT_DROPPED_KEY_MARKER). This factory was left open: its filter below
-    # read `if k in valid_param_names or k in kwargs`, and the `or k in kwargs`
-    # clause makes the registry side of that test unreachable -- every caller kwarg
-    # survives it by construction.
-    #
-    # WHAT THAT DOES *NOT* MEAN, and what a plan premise got wrong here: the
-    # unreachable filter is NOT a silent-drop. MEASURED at HEAD, before this
-    # change, Keras 3's own `Layer.__init__` already rejected the undeclared key,
-    # e.g. `create_activation_layer('mish', bogus_param=1)` raised
-    # "Unrecognized keyword arguments passed to Mish". So this change buys a
-    # NAMED, factory-level diagnostic (which activation type, which keys, what the
-    # accepted set is) and closes the registry-drift door -- it does not repair a
-    # silently-wrong layer. Do not re-file this as a silent-drop defect.
-    #
-    # `_KERAS_BASE_PARAMS` is exempted ON PURPOSE: `trainable=` and `dtype=` build
-    # today (measured), and rejecting them would be a regression introduced by a
-    # hardening step. DO NOT tighten this to registry keys only.
-    #
-    # Pre-flight cost, measured before this edit (decisions.md D-016): 28 call
-    # sites repo-wide, ZERO of which pass an undeclared kwarg, under both a static
-    # AST sweep and a runtime recorder over the 11,031 tests of
-    # tests/test_layers/. The check runs BEFORE the try so the
-    # `except (TypeError, ValueError)` re-wrapper below cannot bury the marker.
+    # Reject undeclared kwargs HERE, before the try, so the re-wrapper below cannot bury the marker.
+    # Do NOT restore the old `or k in kwargs` clause (it made the registry side of the filter below
+    # unreachable) or drop the _KERAS_BASE_PARAMS exemption (`trainable=`/`dtype=` build today).
+    # Not a silent-drop fix -- Keras 3 already rejected the key. See decisions.md D-017.
     _info = ACTIVATION_REGISTRY.get(activation_type)
     if _info is not None:
         _valid_param_names = (
@@ -587,18 +664,15 @@ def create_activation_layer(
         # Update with remaining kwargs
         params.update(kwargs)
 
-        # Filter out parameters that are not accepted by the class constructor
-        # This is a safety measure, though typically classes accept **kwargs
+        # Names the class constructor accepts: the registry's own, plus the
+        # base Layer kwargs. The strict check at the top of this function has
+        # already rejected everything outside this set, so by here the filter
+        # below drops nothing. It stays as a second line of defence.
         valid_param_names = (
             set(act_info['required_params']) |
             set(act_info['optional_params'].keys())
         )
 
-        # The `or k in kwargs` clause that used to be here made this filter
-        # unreachable on its registry side. It is gone: the strict check at the
-        # top of this function has already rejected anything outside
-        # `valid_param_names | _KERAS_BASE_PARAMS`, so the only kwargs that reach
-        # here are ones the registry or `keras.layers.Layer` declares.
         valid_param_names |= _KERAS_BASE_PARAMS
 
         final_params = {
@@ -640,24 +714,32 @@ def resolve_activation_layer(
     **kwargs: Any
 ) -> keras.layers.Layer:
     """
-    Create an activation layer from the factory, falling back to ``keras.layers.Activation``
-    for standard Keras activation strings (e.g. ``'sigmoid'``, ``'tanh'``, ``'linear'``,
-    ``'softmax'``) that are not part of the dl_techniques activation registry.
+    Build an activation layer from either a registry key or a Keras name.
 
-    Use this when a layer wants to accept either a dl_techniques factory type
-    (e.g. ``'mish'``, ``'gelu'``, ``'sparsemax'``, ``'hard_sigmoid'``) or a plain
-    Keras activation string (e.g. ``'sigmoid'``).
+    A registry key goes to :func:`create_activation_layer`. Anything else is
+    handed to ``keras.layers.Activation``, which covers the standard Keras
+    strings such as ``'sigmoid'``, ``'tanh'``, ``'linear'`` and ``'softmax'``.
 
-    :param activation_type: Activation identifier. Either a key in
-        ``ACTIVATION_REGISTRY`` or any string accepted by
-        ``keras.activations.get``.
+    Use this when a layer's ``activation`` argument should accept both, so a
+    caller can write ``'mish'`` or ``'sigmoid'`` without knowing which side
+    of the line it falls on.
+
+    ``kwargs`` are dropped on the Keras fallback path. Measured:
+    ``resolve_activation_layer('sigmoid')`` returns an ``Activation`` layer;
+    ``resolve_activation_layer('mish')`` returns a ``Mish`` layer.
+
+    :param activation_type: Either a key in ``ACTIVATION_REGISTRY`` or any
+        string ``keras.activations.get`` accepts.
     :type activation_type: str
-    :param name: Optional layer name.
+    :param name: Layer name, applied on both paths.
     :type name: Optional[str]
-    :param kwargs: Forwarded to ``create_activation_layer`` when the type is
-        a factory entry. Ignored for plain Keras activations.
-    :return: A configured activation layer instance.
+    :param kwargs: Forwarded to :func:`create_activation_layer` for a registry
+        key. Ignored for a plain Keras activation.
+    :return: A built activation layer.
     :rtype: keras.layers.Layer
+    :raises ValueError: If ``activation_type`` is neither a registry key nor a
+        name Keras recognises. The message then comes from
+        ``keras.activations.get``, not from this factory.
     """
     if activation_type in ACTIVATION_REGISTRY:
         return create_activation_layer(activation_type, name=name, **kwargs)
@@ -668,13 +750,22 @@ def resolve_activation_layer(
 
 def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
-    Create an activation layer from a configuration dictionary.
+    Build an activation layer from a config dict.
 
-    :param config: Configuration dictionary containing a 'type' key and parameters.
+    ``config['type']`` is the registry key. Every other entry is passed to
+    :func:`create_activation_layer` as a keyword argument, so
+    ``{'type': 'relu_k', 'k': 2}`` builds ``ReLUK(k=2)``. The dict is copied
+    before ``'type'`` is popped, so the caller's dict is left alone.
+
+    There is no ``name`` shortcut here. Put ``name`` in the dict like any
+    other parameter.
+
+    :param config: Dict with a ``'type'`` key plus that type's parameters.
     :type config: Dict[str, Any]
-    :return: A configured activation layer instance.
+    :return: A built activation layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: If 'type' key is missing or config is invalid.
+    :raises ValueError: If ``config`` is not a dict, has no ``'type'`` key, or
+        :func:`create_activation_layer` rejects the rest.
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dictionary, got {type(config)}")
