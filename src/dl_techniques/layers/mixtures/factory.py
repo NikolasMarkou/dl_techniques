@@ -80,12 +80,12 @@ MIXTURE_REGISTRY: Dict[str, Dict[str, Any]] = {
             # this registry advertises constructor defaults, not resolved values.
             'gamma_init': None,
             'repulsion_strength': 0.1,
-            'min_center_distance': 1.0,
+            'min_distance': 1.0,
             'center_initializer': 'uniform',
             'center_constraint': None,
             'trainable_gamma': True,
             'safety_margin': 0.2,
-            'kernel_regularizer': None,
+            'center_regularizer': None,
             'gamma_regularizer': None,
             # Must mirror RBFLayer.__init__'s default exactly. Omitting it here would
             # make create_mixture_layer's valid_param_names filter SILENTLY DROP a
@@ -236,7 +236,7 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{count_param} must be a positive integer, got {value}")
 
-    positive_floats = ['temperature', 'gamma_init', 'min_center_distance', 'min_distance', 'variance_floor']
+    positive_floats = ['temperature', 'gamma_init', 'min_distance', 'variance_floor']
     for float_param in positive_floats:
         if float_param in kwargs and kwargs[float_param] is not None:
             if kwargs[float_param] <= 0:

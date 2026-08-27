@@ -146,7 +146,7 @@ class RBFLayer(keras.layers.Layer):
         ``_compute_repulsion_loss``).
 
         Measured initial value of this loss at the shipped defaults (``units=16``,
-        ``center_initializer='uniform'``, ``min_center_distance=1.0``,
+        ``center_initializer='uniform'``, ``min_distance=1.0``,
         ``safety_margin=0.2``; mean over 8 seeds)::
 
             D     4     16    32    64    96    128   256   512   784   1024
@@ -155,7 +155,7 @@ class RBFLayer(keras.layers.Layer):
         The curve is a few percent of a cross-entropy-scale task loss across the whole
         range and decays monotonically: a ``RandomUniform`` center's vector norm grows
         as ``~0.05*sqrt(D/3)``, so at large ``D`` centers clear the
-        ``min_center_distance*(1+safety_margin)=1.2`` threshold unaided and the loss
+        ``min_distance*(1+safety_margin)=1.2`` threshold unaided and the loss
         reaches exactly 0.0. The curve was measured at this default initializer only;
         a different ``center_initializer`` moves it.
 
@@ -165,8 +165,8 @@ class RBFLayer(keras.layers.Layer):
         2.09 at the old ``dim_scale``-inflated effective strength -- i.e. the removed
         factor bought no extra separation while costing ~250x in loss magnitude.
     :type repulsion_strength: float
-    :param min_center_distance: Minimum desired distance between centres.
-    :type min_center_distance: float
+    :param min_distance: Minimum desired distance between centres.
+    :type min_distance: float
     :param center_initializer: Initializer for RBF center positions.
     :type center_initializer: Union[str, keras.initializers.Initializer]
     :param center_constraint: Optional constraint for center positions.
@@ -175,8 +175,8 @@ class RBFLayer(keras.layers.Layer):
     :type trainable_gamma: bool
     :param safety_margin: Margin added to minimum distance threshold.
     :type safety_margin: float
-    :param kernel_regularizer: Optional regularizer for center weights.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param center_regularizer: Optional regularizer for center weights.
+    :type center_regularizer: Optional[keras.regularizers.Regularizer]
     :param gamma_regularizer: Optional regularizer for width parameters.
     :type gamma_regularizer: Optional[keras.regularizers.Regularizer]
     :param output_mode: Output normalization mode. ``'basis'`` (the default)
@@ -275,12 +275,12 @@ class RBFLayer(keras.layers.Layer):
         units: int,
         gamma_init: Optional[float] = None,
         repulsion_strength: float = 0.1,
-        min_center_distance: float = 1.0,
+        min_distance: float = 1.0,
         center_initializer: Union[str, keras.initializers.Initializer] = 'uniform',
         center_constraint: Optional[keras.constraints.Constraint] = None,
         trainable_gamma: bool = True,
         safety_margin: float = 0.2,
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        center_regularizer: Optional[keras.regularizers.Regularizer] = None,
         gamma_regularizer: Optional[keras.regularizers.Regularizer] = None,
         output_mode: Literal['basis', 'normalized'] = 'basis',
         **kwargs: Any
@@ -298,8 +298,8 @@ class RBFLayer(keras.layers.Layer):
             raise ValueError(f"gamma_init must be positive, got {gamma_init}")
         if repulsion_strength < 0:
             raise ValueError(f"repulsion_strength must be non-negative, got {repulsion_strength}")
-        if min_center_distance <= 0:
-            raise ValueError(f"min_center_distance must be positive, got {min_center_distance}")
+        if min_distance <= 0:
+            raise ValueError(f"min_distance must be positive, got {min_distance}")
         if safety_margin < 0:
             raise ValueError(f"safety_margin must be non-negative, got {safety_margin}")
         if output_mode not in self.VALID_OUTPUT_MODES:
@@ -312,13 +312,13 @@ class RBFLayer(keras.layers.Layer):
         self.output_mode = output_mode
         self.gamma_init = gamma_init
         self.repulsion_strength = repulsion_strength
-        self.min_center_distance = min_center_distance
+        self.min_distance = min_distance
         self.safety_margin = safety_margin
         self.trainable_gamma = trainable_gamma
 
         self.center_initializer = keras.initializers.get(center_initializer)
         self.center_constraint = keras.constraints.get(center_constraint)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.center_regularizer = keras.regularizers.get(center_regularizer)
         self.gamma_regularizer = keras.regularizers.get(gamma_regularizer)
 
         self.centers: Optional[keras.Variable] = None
@@ -391,7 +391,7 @@ class RBFLayer(keras.layers.Layer):
             shape=(self.units, self._feature_dim),
             initializer=self.center_initializer,
             constraint=self.center_constraint,
-            regularizer=self.kernel_regularizer,
+            regularizer=self.center_regularizer,
             trainable=True,
             dtype=self.dtype,  # R5: explicit, matches kmeans/gmm (autocast=False already)
             autocast=False,
@@ -436,7 +436,7 @@ class RBFLayer(keras.layers.Layer):
         # Safe sqrt for gradient stability (avoid sqrt(0))
         dist = keras.ops.sqrt(dist_sq + _REPULSION_SQRT_EPSILON)
 
-        threshold = self.min_center_distance * (1.0 + self.safety_margin)
+        threshold = self.min_distance * (1.0 + self.safety_margin)
 
         # Penalty: max(0, threshold - distance)^2
         penalty = keras.ops.square(keras.ops.maximum(0.0, threshold - dist))
@@ -579,12 +579,12 @@ class RBFLayer(keras.layers.Layer):
             'units': self.units,
             'gamma_init': self.gamma_init,
             'repulsion_strength': self.repulsion_strength,
-            'min_center_distance': self.min_center_distance,
+            'min_distance': self.min_distance,
             'center_initializer': keras.initializers.serialize(self.center_initializer),
             'center_constraint': keras.constraints.serialize(self.center_constraint),
             'trainable_gamma': self.trainable_gamma,
             'safety_margin': self.safety_margin,
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'center_regularizer': keras.regularizers.serialize(self.center_regularizer),
             'gamma_regularizer': keras.regularizers.serialize(self.gamma_regularizer),
             'output_mode': self.output_mode,
         })
@@ -606,9 +606,9 @@ class RBFLayer(keras.layers.Layer):
             )
         if "center_constraint" in config:
             config["center_constraint"] = keras.constraints.deserialize(config["center_constraint"])
-        if "kernel_regularizer" in config:
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
+        if "center_regularizer" in config:
+            config["center_regularizer"] = keras.regularizers.deserialize(
+                config["center_regularizer"]
             )
         if "gamma_regularizer" in config:
             config["gamma_regularizer"] = keras.regularizers.deserialize(
