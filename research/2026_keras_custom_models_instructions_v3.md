@@ -3,48 +3,6 @@
 A single reference for writing Keras 3 custom layers and models that are correct, serializable,
 documented in one house style, and verifiably do what they claim.
 
-## Scope
-
-Making a layer construct and serialize is the easy half, and it is not where the defects are. Three
-successive library-wide audits of a large Keras 3 codebase found the same pattern every time:
-
-| Defect | Symptom to the author |
-|---|---|
-| A parameter validated, stored, serialized, documented, and read by no code path | `max\|dy\| = 0.000e+00` across every legal value |
-| A rotary embedding fed the head axis instead of the sequence axis | an **exact algebraic no-op**: `(Rq)·(Rk) = q·k` |
-| `add_weight(zeros)` + `.assign()` in `build()` | table stays all zeros in every real model |
-| A decoder-only LM with no causal mask | bidirectional attention under a next-token objective |
-| A reloaded model that restored **zero** weights | round-trip test passed |
-| A "spline" convolution that was a plain linear convolution | 83 tests green; `\|f(2x) − 2f(x)\| = 0.0` exactly |
-| A model reloading its optimizer from **zeroed** moments | training resumed, loss curve looked normal |
-| A save that wrote every weight **twice** | round-trip delta exactly `0.0`; the file was 2× |
-| A seed guarded by a truthiness test | `seed=0` silently unseeded, at the seed the tests used |
-| A shipped variant table half its reference's width | every shape assertion passed |
-
-Every one shipped behind a green suite: shapes matched, parameter counts matched, gradients existed,
-serialization round-tripped, loss curves looked normal.
-
-**Construction correctness and behavioural correctness are different properties, and only the first
-is easy to test.** Sections 1 to 13 are what to write. Section 14 is how to document it. Sections 15
-and 16 are how to prove it. The proving sections are not optional polish. A guard that cannot fail is
-the most likely outcome of writing a new test, and the audits measured that outcome repeatedly,
-including in tests written *during* the audits.
-
-### The four surfaces where the defects actually are
-
-Most Keras guidance covers construction and serialization. These four are where the audits found
-shipped, green-suite defects, and they are the reason this document is as long as it is:
-
-- **§7 The Save/Load Path**: archive layout, optimizer state, unbuilt saves, and why a symmetric
-  override pair is usually two independent decisions wearing one name.
-- **§13 Reachability and Provenance**: a knob nothing can reach, a variant table nobody checked
-  against its own reference, a weight nothing reads, a layer that computes something simpler than
-  its name.
-- **§16 Warnings as a Defect Channel**: the framework is already telling you, the default instrument
-  under-reports by 5×, and most teams never turn it on.
-- **§15.6 Pin the property, not the sample**: five of nine long-standing RED tests in one audit were
-  a single defect class, an exact literal pinned against a seed-dealt or sub-ULP quantity.
-
 ## How to read this
 
 | You are | Read |
