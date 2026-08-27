@@ -1,15 +1,13 @@
-"""
-Energy Layer Normalization for Keras 3.x.
+"""Energy Transformer layer normalization for Keras 3.
 
-Implements the layer normalization of the Energy Transformer (ET), Hoover, Liang, Pham,
-Panda, Strobelt, Zaki, Chau, Krotov, "Energy Transformer", NeurIPS 2023
-(https://arxiv.org/abs/2302.07253), equations (1)-(2).
+Implements equations (1)-(2) of Hoover, Liang, Pham, Panda, Strobelt, Zaki, Chau and
+Krotov, "Energy Transformer", NeurIPS 2023 (https://arxiv.org/abs/2302.07253).
 
-The distinguishing feature versus ``keras.layers.LayerNormalization`` is the
-parameterization: the scale ``gamma`` is a **SCALAR** and the offset ``delta`` is a
-**VECTOR** of dimension ``D``. Stock ``LayerNormalization`` has a per-feature (vector)
-gamma, which does NOT correspond to the ET Lagrangian and therefore does NOT yield the
-positive-semi-definite Hessian that makes the ET energy-descent guarantee provable.
+The difference from ``keras.layers.LayerNormalization`` is the parameterization. Here
+the scale ``gamma`` is a SCALAR and the offset ``delta`` is a VECTOR of dimension ``D``.
+Stock ``LayerNormalization`` has a per-feature vector gamma. That form does not match
+the Energy Transformer Lagrangian, so it does not give the positive-semi-definite
+Hessian the block's energy-descent guarantee rests on.
 """
 
 import keras
@@ -26,38 +24,37 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 # ---------------------------------------------------------------------
 
 # DECISION plan_2026-07-13_57c9833e/D-010
-# The DEFAULT lower bound on `gamma`. `gamma > 0` is not a style preference — it is the
-# PRECONDITION for the PSD Hessian of the Lagrangian, i.e. the precondition for the ENTIRE
-# energy-descent guarantee of the Energy Transformer:
-#     dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0   requires  dg/dx  PSD  requires  gamma > 0.
-# Iteration 1 stated this as a plan invariant and enforced it NOWHERE: an adversarial
-# reviewer set `gamma = -1.0` and the block silently performed energy ASCENT (max diff(E) =
-# +1.3e4) with no error and no failing test.
-#
-# WHY A STRICTLY POSITIVE FLOOR AND NOT `keras.constraints.NonNeg()`:
-# NonNeg permits gamma == 0 EXACTLY. At gamma == 0 the Hessian is the ZERO matrix — still
-# technically PSD, so the guarantee is not violated, but it becomes VACUOUS: `g` collapses
-# to the constant `delta`, the update stops depending on the token state, and dE/dt == 0.
-# The descent test would stay green on a dead layer. A small strictly-positive floor keeps
-# the Hessian PD on the mean-zero subspace and keeps the guarantee non-vacuous, and it also
-# means gradient descent cannot park gamma at an exactly-degenerate value.
-#
-# WHAT NOT TO DO: do not remove this default to "match the paper" (the paper does not
-# constrain gamma because it never trains gamma negative; we ship a layer other people
-# train). The constraint IS overridable — pass `gamma_constraint=None` — but that must be a
-# DELIBERATE act, never a silent one. See decisions.md D-010.
+# The default lower bound on `gamma`. `gamma > 0` is the precondition for the PSD
+# Hessian dg/dx, which is in turn the precondition for the Energy Transformer's
+# descent guarantee: dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0.
+# Keep the floor STRICTLY positive. Do NOT swap it for keras.constraints.NonNeg().
+# NonNeg permits gamma == 0 exactly (measured: NonNeg()(0.0) == 0.0, while
+# ValueRangeConstraint(1e-3)(0.0) == 0.001), and at gamma == 0 the Hessian is the ZERO
+# matrix (measured). That is still PSD, so the guarantee is not violated - it just
+# stops saying anything, because g collapses to the constant delta and the descent
+# test stays green on a dead layer.
+# Do NOT remove this default to "match the paper". The paper never trains gamma
+# negative; this layer is trainable and ships to people who will. Measured at HEAD with
+# the constraint overridden: gamma = -1.0 puts the eigenvalues of dg/dx in
+# [-1.4319, 0.0], and an EnergyTransformer block then RISES in energy over 12 steps,
+# max diff(E) = +2.478e-02, against -2.197e-02 at gamma = +1.0.
+# The constraint is overridable - pass gamma_constraint=None - but that must be an
+# explicit choice, never a silent one.
+# The originating plan directory is gone; this comment is the record.
 _GAMMA_FLOOR = 1e-3
 
 
 @keras.saving.register_keras_serializable()
 class EnergyLayerNorm(keras.layers.Layer):
-    """Energy Transformer layer normalization (scalar gamma, vector delta).
+    """Energy Transformer layer normalization, with a scalar gamma and a vector delta.
 
-    **Intent**: provide the ``g = dL/dx`` "activation function" of the Energy Transformer,
-    whose Lagrangian ``L`` has a PSD Hessian and therefore turns the block's hand-coded
-    closed-form update into a *provable* descent direction on the block's scalar energy.
+    The layer produces the ``g = dL/dx`` "activation function" of the Energy
+    Transformer. Its Lagrangian ``L`` has a PSD Hessian, which is what turns the
+    block's closed-form update into a provable descent direction on the block's
+    scalar energy.
 
-    **Mathematics** (over the LAST axis ``d``, per token, per sample — no token mixing):
+    Statistics are taken over the LAST axis only, per token and per sample. No
+    token is mixed with another.
 
     .. code-block:: text
 
@@ -65,7 +62,7 @@ class EnergyLayerNorm(keras.layers.Layer):
         var  = mean_j((x_j - xbar)^2)                       # scalar per token
         g_i  = gamma * (x_i - xbar) / sqrt(var + eps) + delta_i
 
-    This ``g`` is exactly the gradient of the Lagrangian
+    This ``g`` is the gradient of the Lagrangian
 
     .. code-block:: text
 
@@ -78,64 +75,153 @@ class EnergyLayerNorm(keras.layers.Layer):
 
         dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0
 
-    which is the whole reason this parameterization (scalar gamma, vector delta) exists.
+    That inequality is why the parameterization is a scalar gamma and a vector
+    delta. Measured on a rank-3 input with ``D = 8``: at ``gamma = 1.7`` the
+    eigenvalues of ``dg/dx`` are in ``[0.0000, 2.4343]``; at ``gamma = 0.0`` they
+    are all exactly ``0.0``; at ``gamma = -1.0`` they are in
+    ``[-1.4319, 0.0000]``, so the Hessian is no longer PSD. The Jacobian is also
+    symmetric, measured ``max|J - J.T| = 2.980e-08``.
 
     **Shape contract**: gamma is a SCALAR (``shape=()``); delta is a VECTOR
-    (``shape=(D,)``). A per-feature gamma would break the Lagrangian identity above.
+    (``shape=(D,)``). A per-feature gamma would break the ``g = dL/dx`` identity.
 
-    **Numerical note: the constant-token cliff.** ``eps`` sits INSIDE the ``sqrt``, so as a
-    token approaches CONSTANT (``var -> 0``) the Jacobian ``dg/dx`` does not merely grow — it
-    saturates at a hard ceiling set by ``eps``:
+    **Architecture Overview:**
 
     .. code-block:: text
 
-        var >> eps :  eigenvalues of dg/dx  ~  1.4 .. 3.8         (a normal token)
-        var == 0   :  eigenvalues of dg/dx  ->  gamma / sqrt(eps)
-                                            ~  1.7 / sqrt(1e-5)  ~  538
+                      inputs: x   (..., D)
+                                │
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │ x_bar = mean(x, axis=-1)        (..., 1)       │
+        └───────────────────────┬────────────────────────┘
+                                │
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │ centered = x - x_bar            (..., D)       │
+        └───────────┬───────────────────────┬────────────┘
+                    │                       │
+                    │                       ▼
+                    │           ┌───────────────────────────────────┐
+                    │           │ variance = mean(centered^2,       │
+                    │           │            axis=-1)   (..., 1)    │
+                    │           └───────────┬───────────────────────┘
+                    │                       │
+                    │                       ▼
+                    │           ┌───────────────────────────────────┐
+                    │           │ inv_std = rsqrt(variance + eps)   │
+                    │           └───────────┬───────────────────────┘
+                    │                       │
+                    ▼                       ▼
+        ┌───────────────────────────────────────────────────────────┐
+        │ gamma * centered * inv_std + delta                        │
+        │ gamma is a SCALAR ()   delta is a VECTOR (D,)             │
+        └───────────────────────┬───────────────────────────────────┘
+                                │
+                                ▼
+                      output: g   (..., D)   SAME shape as x
 
-    i.e. a **140-350x amplification** of the local gain, reached at ``var == 0`` (all measured;
-    the numbers above are at ``gamma = 1.7``, ``eps = 1e-5``). A constant token is not exotic:
-    an ``Embedding`` PAD row, an all-zero conv cell, and a collapsed early-training activation
-    are all exactly ``var = 0``.
+    **Numerical note: the constant-token cliff.** ``eps`` sits inside the
+    ``sqrt``, so as a token approaches constant (``var -> 0``) the Jacobian
+    ``dg/dx`` does not merely grow. It saturates at a ceiling set by ``eps``:
 
-    Two things this is **NOT** (both VERIFIED numerically, do not "fix" either):
+    .. code-block:: text
 
-    * **It is not a broken guarantee.** ``dg/dx`` stays **PSD** across the cliff — the energy
-      descent still holds. This is a CONDITIONING problem, not a correctness one.
-    * **It is not an fp16 flush-to-zero bug.** Under ``mixed_float16``, ``eps = 1e-5`` is
-      SUBNORMAL but REPRESENTABLE (fp16 min subnormal ~ ``6e-8``); it does not flush to zero,
-      so ``sqrt(0 + eps)`` does not become ``sqrt(0)``. There is no division by zero here.
+        var >> eps :  nonzero eigenvalues of dg/dx  ~  1.52 .. 2.38
+        var == 0   :  eigenvalues of dg/dx          ->  gamma / sqrt(eps)
+                                                    =  1.7 / sqrt(1e-5)  =  537.6
 
-    **Mitigation for a caller who sees a training-stability cliff** (loss spikes on a batch
-    with heavy padding, or in the first steps before activations spread out): raise
-    ``norm_epsilon`` / ``epsilon``. The ceiling is ``gamma / sqrt(eps)``, so eps ``1e-5 ->
-    1e-3`` cuts the worst-case gain 10x. The alternative — masking PAD tokens so they never
-    reach the norm — is what ``EnergyTransformer`` already does for the Hopfield energy.
+    That is a **226x to 355x amplification** of the local gain, reached at
+    ``var == 0``. All figures measured at ``D = 64``, ``gamma = 1.7``,
+    ``eps = 1e-5``, over 20 random tokens; the exact eigenvalue at the cliff is
+    ``537.5872``, matching ``gamma / sqrt(eps)`` to all printed digits. The range
+    narrows as ``D`` grows: at ``D = 8`` the same protocol gives nonzero
+    eigenvalues from ``0.0001`` to ``5.2968``. Every draw also has exactly one
+    zero eigenvalue, the constant direction that mean-subtraction removes.
 
-    :param epsilon: Small positive constant for numerical stability inside the sqrt.
-        Defaults to ``1e-5``.
+    A constant token is not exotic. An ``Embedding`` PAD row, an all-zero conv
+    cell, and a collapsed early-training activation are all exactly ``var = 0``.
+
+    Two things the cliff is NOT:
+
+    * **It is not a broken guarantee.** ``dg/dx`` stays PSD across the cliff
+      (measured minimum eigenvalue ``7.629e-06`` at ``var == 0``). The energy
+      descent still holds. This is a conditioning problem, not a correctness one.
+    * **It is not a forward flush-to-zero bug.** Under ``mixed_float16``,
+      ``eps = 1e-5`` is subnormal but representable (``float16(1e-5)`` measures
+      ``1.001358e-05``, and the fp16 minimum subnormal is about ``6e-8``), so
+      ``sqrt(0 + eps)`` does not become ``sqrt(0)``. The forward pass is finite.
+
+    .. warning::
+        **The BACKWARD pass is a different matter under** ``mixed_float16``.
+        The gradient of ``rsqrt`` carries ``(var + eps)^(-3/2)``, which overflows
+        fp16 for a near-constant token. Measured on a ``(1, 1, 8)`` input filled
+        with ``3.0`` and one element raised by ``1e-3`` (fp16 variance
+        ``4.172e-07``): the forward output is finite at every epsilon tried, but
+        the gradient is **NaN** for ``epsilon <= 1.481e-05`` and finite for
+        ``epsilon >= 1.482e-05``. The shipped default ``epsilon=1e-5`` is inside
+        the NaN region. The float32 control on the same input is finite at
+        ``epsilon=1e-6`` (``max|grad| = 1.4219e+03``), so this is an fp16 range
+        limit, not a mathematical singularity. An ordinary token is unaffected:
+        a standard-normal ``(2, 4, 8)`` input at ``epsilon=1e-5`` gives a finite
+        gradient with ``max|grad| = 7.5684e-03``, and the threshold moves with
+        the token's variance -- the same probe with variance ``1.085e-03`` is
+        finite at ``epsilon=1e-5``.
+
+    **Mitigation for a caller who sees a training-stability cliff** (loss spikes
+    on a batch with heavy padding, or in the first steps before activations
+    spread out): raise ``norm_epsilon`` / ``epsilon``. The ceiling is
+    ``gamma / sqrt(eps)``, so moving eps from ``1e-5`` to ``1e-3`` cuts the
+    worst-case gain 10x and also leaves the fp16 NaN region above. The
+    alternative is to mask PAD tokens so they never reach the norm, which is what
+    ``EnergyTransformer`` already does for the Hopfield energy.
+
+    :param epsilon: Positive constant added inside the sqrt. Defaults to ``1e-5``.
+        See the warning above before running this layer under ``mixed_float16``.
     :type epsilon: float
-    :param gamma_initializer: Initializer for the scalar ``gamma``. Defaults to ``'ones'``
-        (the paper requires ``gamma > 0`` for the PSD Hessian).
+    :param gamma_initializer: Initializer for the scalar ``gamma``. Defaults to
+        ``'ones'``. The paper requires ``gamma > 0`` for the PSD Hessian.
     :type gamma_initializer: Union[str, initializers.Initializer]
     :param delta_initializer: Initializer for the ``(D,)`` offset ``delta``.
         Defaults to ``'zeros'``.
     :type delta_initializer: Union[str, initializers.Initializer]
-    :param gamma_constraint: Constraint applied to ``gamma`` after every optimizer step.
-        **Defaults to a strictly-positive floor** (``ValueRangeConstraint(min_value=1e-3)``)
-        because ``gamma > 0`` is the PRECONDITION for the PSD Hessian that makes the Energy
-        Transformer's descent guarantee true. **Without it the guarantee is silently FALSE**:
-        a trained ``gamma < 0`` makes ``dg/dx`` negative-definite and the block performs
-        energy **ASCENT** — no error, no NaN, no failing test (measured: max ``diff(E)`` =
-        ``+1.3e4`` at ``gamma = -1.0``). Pass ``None`` to disable it — which is a legitimate
-        thing to want, but it must be a DELIBERATE choice. See the D-010 anchor above.
+    :param gamma_constraint: Constraint applied to ``gamma`` after every optimizer
+        step. Defaults to a strictly-positive floor,
+        ``ValueRangeConstraint(min_value=1e-3)``, because ``gamma > 0`` is the
+        precondition for the PSD Hessian that makes the descent guarantee true.
+        Without it the guarantee is silently false: a trained ``gamma < 0`` makes
+        ``dg/dx`` negative-definite and the block performs energy ASCENT, with no
+        error, no NaN and no failing test. Measured at ``gamma = -1.0`` on a
+        12-step ``EnergyTransformer`` block: ``max diff(E) = +2.478e-02``, against
+        ``-2.197e-02`` at ``gamma = +1.0``. Pass ``None`` to disable it, which is
+        a legitimate thing to want but must be an explicit choice. See the D-010
+        anchor above.
     :type gamma_constraint: Optional[constraints.Constraint]
+    :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+    :type kwargs: Any
 
-    :raises ValueError: If ``epsilon <= 0``.
+    :ivar epsilon: The configured epsilon, stored as a float.
+    :vartype epsilon: float
+    :ivar gamma_initializer: The resolved initializer object for ``gamma``.
+    :vartype gamma_initializer: initializers.Initializer
+    :ivar delta_initializer: The resolved initializer object for ``delta``.
+    :vartype delta_initializer: initializers.Initializer
+    :ivar gamma_constraint: The resolved constraint, or ``None`` if the caller
+        passed ``None`` explicitly.
+    :vartype gamma_constraint: Optional[constraints.Constraint]
+    :ivar gamma: The scalar scale, or ``None`` until ``build()`` runs.
+    :vartype gamma: Optional[keras.Variable]
+    :ivar delta: The ``(D,)`` offset, or ``None`` until ``build()`` runs.
+    :vartype delta: Optional[keras.Variable]
+
+    :raises ValueError: If ``epsilon`` is not a positive number. Raised in
+        ``__init__``.
+    :raises ValueError: If the last axis of the input shape is undefined. Raised
+        in ``build()``.
 
     Input shape:
-        Tensor of shape ``(..., D)``; normalization is over the last axis. Typically
-        ``(batch, num_tokens, embed_dim)``.
+        Tensor of shape ``(..., D)``; normalization is over the last axis.
+        Typically ``(batch, num_tokens, embed_dim)``.
 
     Output shape:
         Identical to the input shape.
@@ -151,18 +237,18 @@ class EnergyLayerNorm(keras.layers.Layer):
     """
 
     # DECISION plan_2026-07-13_57c9833e/D-005
-    # Do NOT add a `lagrangian()` / `energy()` method to this class. It is tempting
-    # (the Lagrangian L is written out above, and the sibling ET layers DO expose an
-    # `energy()`/`update()` pair) — but it would have ZERO call sites: the ET block's
-    # reported energy is `E_ATT + E_HN` only; the LayerNorm Lagrangian is NOT a term in
-    # E. Adding it, and then summing it into the block's reported energy, would make the
-    # energy-descent test assert on the WRONG quantity and silently invalidate the
-    # headline guarantee. Omitted per the use-before-reuse / earned-abstraction rule.
-    # See decisions.md D-005.
+    # Do NOT add a `lagrangian()` or an `energy()` method here. It looks like an omission:
+    # the Lagrangian L is written out in the docstring above, and the sibling ET layers
+    # (energy_attention.py, energy_transformer.py) both expose an energy()/update() pair.
+    # It is not. The ET block's reported energy is E_ATT + E_HN only, and the LayerNorm
+    # Lagrangian is not a term in it, so a method here would have zero call sites. Summing
+    # it into the block's energy would make the descent test assert on the wrong quantity.
+    # Omitted per the use-before-reuse / earned-abstraction rule.
+    # The originating plan directory is gone; this comment is the record.
 
     # Sentinel: distinguishes "caller said nothing" (-> apply the default positivity floor)
-    # from "caller explicitly said None" (-> deliberately UNCONSTRAINED gamma). Without it,
-    # `gamma_constraint=None` could not turn the constraint OFF.
+    # from "caller explicitly said None" (-> an unconstrained gamma, chosen on purpose).
+    # Without it, `gamma_constraint=None` could not turn the constraint OFF.
     _DEFAULT_CONSTRAINT = "__default__"
 
     def __init__(
@@ -173,6 +259,25 @@ class EnergyLayerNorm(keras.layers.Layer):
         gamma_constraint: Any = _DEFAULT_CONSTRAINT,
         **kwargs: Any
     ) -> None:
+        """Validate ``epsilon``, resolve the initializers and the constraint, and store them.
+
+        No weight is created here. ``gamma`` and ``delta`` need the feature
+        dimension, so they are created in ``build()``.
+
+        :param epsilon: Positive constant added inside the sqrt.
+        :type epsilon: float
+        :param gamma_initializer: Initializer for the scalar ``gamma``.
+        :type gamma_initializer: Union[str, initializers.Initializer]
+        :param delta_initializer: Initializer for the ``(D,)`` offset ``delta``.
+        :type delta_initializer: Union[str, initializers.Initializer]
+        :param gamma_constraint: Constraint for ``gamma``. Leave it unset for the
+            positivity floor; pass ``None`` to run without any constraint.
+        :type gamma_constraint: Any
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If ``epsilon`` is not a positive number.
+        """
         super().__init__(**kwargs)
 
         # ----- validation -----
@@ -185,12 +290,13 @@ class EnergyLayerNorm(keras.layers.Layer):
         self.delta_initializer = initializers.get(delta_initializer)
 
         # DECISION plan_2026-07-13_57c9833e/D-010
-        # ON BY DEFAULT. Do NOT flip this default to `None` "because the paper doesn't
-        # constrain gamma": the paper never trains gamma negative, and we ship a trainable
-        # layer to people who will. `gamma < 0` => the Lagrangian's Hessian dg/dx is NOT PSD
-        # => the block silently performs energy ASCENT while still running, still training
-        # and still emitting finite output. Reused (not re-implemented) from
-        # `dl_techniques.constraints.value_range_constraint`. See decisions.md D-010.
+        # ON BY DEFAULT. Do NOT flip this default to `None` "because the paper does not
+        # constrain gamma": the paper never trains gamma negative, and this layer is
+        # trainable. `gamma < 0` makes the Hessian dg/dx negative-definite (measured
+        # eigenvalues in [-1.4319, 0.0] at gamma = -1.0), so the block performs energy
+        # ASCENT while still running, still training and still emitting finite output.
+        # Reused, not re-written, from `dl_techniques.constraints.value_range_constraint`.
+        # The originating plan directory is gone; this comment is the record.
         self.gamma_constraint = (
             ValueRangeConstraint(min_value=_GAMMA_FLOOR)
             if gamma_constraint is self._DEFAULT_CONSTRAINT
@@ -231,17 +337,20 @@ class EnergyLayerNorm(keras.layers.Layer):
                 f"input_shape={input_shape}"
             )
 
-        # gamma is a SCALAR (paper eq. 1). This is NOT a bug and must NOT be
-        # "fixed" to a per-feature vector: a vector gamma breaks g = dL/dx. A vector gamma
-        # is not merely "different" — it makes the Jacobian dg/dx ASYMMETRIC, so it is no
-        # longer the Hessian of ANY scalar Lagrangian and the descent guarantee evaporates.
-        # That is guarded BEHAVIORALLY by `test_jacobian_is_symmetric` (S16), not just by
-        # the shape assertion below it.
+        # gamma is a SCALAR (paper eq. 1). This is not a bug and must NOT be "fixed" to a
+        # per-feature vector: a vector gamma breaks g = dL/dx. It is not merely a different
+        # parameterization - it makes the Jacobian dg/dx ASYMMETRIC, so dg/dx stops being
+        # the Hessian of any scalar Lagrangian and the descent guarantee goes away. That is
+        # guarded behaviourally by test_jacobian_is_symmetric in
+        # tests/test_layers/test_norms/test_energy_layer_norm.py, not only by the shape
+        # assertion below.
+        #
+        # The constraint below applies the positivity floor by default (D-010).
         self.gamma = self.add_weight(
             name="gamma",
             shape=(),
             initializer=self.gamma_initializer,
-            constraint=self.gamma_constraint,   # positivity floor by default (D-010)
+            constraint=self.gamma_constraint,
             trainable=True,
             dtype=self.dtype,
         )
@@ -265,6 +374,10 @@ class EnergyLayerNorm(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Apply the ET layer norm: ``gamma * (x - xbar) / sqrt(var + eps) + delta``.
+
+        Measured against the closed form on a ``(2, 16, 64)`` input at
+        ``gamma = 1.7`` and ``eps = 1e-5``: ``max|layer - closed form| =
+        9.537e-07``.
 
         :param inputs: Input tensor of shape ``(..., D)``.
         :type inputs: keras.KerasTensor
@@ -291,7 +404,7 @@ class EnergyLayerNorm(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Return the output shape (identity — the layer is shape-preserving).
+        """Return the output shape. The layer is shape-preserving, so this is the identity.
 
         Uses only the passed shape and stored config, never a weight shape, so it is
         valid on an UNBUILT layer.
@@ -309,6 +422,18 @@ class EnergyLayerNorm(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the full constructor configuration for serialization.
 
+        ``gamma_constraint`` is serialized EXPLICITLY (D-010). If it were dropped
+        here, a saved model would reload with an unconstrained gamma and could
+        then train itself into energy ascent, which is the defect the constraint
+        exists to stop. ``constraints.get()`` in ``__init__`` accepts the
+        serialized dict as-is, so the base ``Layer.from_config`` (a plain
+        ``cls(**config)``) rebuilds it exactly; this class does not override
+        ``from_config``. A serialized ``None`` reloads as an explicit ``None``,
+        meaning an unconstrained gamma, and NOT as the default floor. The
+        ``_DEFAULT_CONSTRAINT`` sentinel only covers a caller who never mentioned
+        the argument. Both facts are pinned by
+        ``tests/test_layers/test_norms/test_the_base_from_config_round_trips.py``.
+
         :return: Dictionary containing every ``__init__`` argument.
         :rtype: Dict[str, Any]
         """
@@ -317,16 +442,6 @@ class EnergyLayerNorm(keras.layers.Layer):
             'epsilon': self.epsilon,
             'gamma_initializer': initializers.serialize(self.gamma_initializer),
             'delta_initializer': initializers.serialize(self.delta_initializer),
-            # Serialized EXPLICITLY (D-010). If it were dropped from get_config, a saved
-            # model would silently reload with an UNCONSTRAINED gamma and could then train
-            # itself into energy ascent — the exact defect this constraint exists to stop.
-            # `constraints.get()` in `__init__` accepts this serialized dict as-is, so the
-            # BASE `Layer.from_config` (a plain `cls(**config)`) rebuilds it exactly — this
-            # class deliberately does NOT override `from_config`. A serialized `None`
-            # reloads as an explicit `None` (deliberately unconstrained), NOT as the default
-            # floor; the `_DEFAULT_CONSTRAINT` sentinel is only for a caller who never
-            # mentioned the argument at all. Both facts are pinned by
-            # `tests/test_layers/test_norms/test_the_base_from_config_round_trips.py`.
             'gamma_constraint': constraints.serialize(self.gamma_constraint),
         })
         return config
