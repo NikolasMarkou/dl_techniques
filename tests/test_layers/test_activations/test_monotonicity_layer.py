@@ -12,6 +12,7 @@ import os
 import numpy as np
 import pytest
 import keras
+import tensorflow as tf
 
 from dl_techniques.layers.activations.monotonicity_layer import MonotonicityLayer
 
@@ -132,4 +133,62 @@ class TestMonotonicityBasics:
 
         np.testing.assert_allclose(
             np.array(y_before), np.array(y_after), rtol=1e-6, atol=1e-6
+        )
+
+
+# ---------------------------------------------------------------------
+# XLA / graph equivalence (guide rule L-39)
+#
+# Flagged by this plan's step-11 criterion for a DYNAMIC SHAPE READ inside
+# `call()`: `_sigmoid_monotonic` does
+# `axis_size = keras.ops.shape(inputs)[self.axis_normalized]` and then feeds that
+# straight into `keras.ops.arange(axis_size, ...)`. An `arange` whose LENGTH comes
+# from a traced tensor is the classic shape that XLA cannot lower, because XLA
+# requires static output shapes; whether it works here depends on the shape being
+# statically known at trace time, which is a property of the caller, not of this
+# layer. Nothing in this file ran the layer under `tf.function` before.
+#
+# Tolerance derived from measurement: `max|eager - xla|` is at most 1.53e-05 over
+# the six methods on a (8, 64) N(0,1) input -- but these outputs are NOT bounded
+# by 1 (`cumulative_exp` reaches ~148), so that is a RELATIVE 1e-07, i.e. float32
+# round-off. `1e-03` leaves ~65x headroom and sits far below the step-8 mutation
+# of this layer (bypassing the whole dispatcher moved the output by 15.0).
+# ---------------------------------------------------------------------
+
+
+class TestMonotonicityLayerXLAEquivalence:
+    """`jit_compile=True` must lower every method AND agree with eager."""
+
+    @pytest.mark.parametrize("method", ALL_METHODS)
+    def test_jit_compiled_matches_eager(
+        self, method, assert_xla_matches_eager
+    ) -> None:
+        """Each of the six methods compiles under XLA and returns the eager answer.
+
+        Parametrized over `ALL_METHODS` -- the module's own list -- rather than a
+        hand-copied one, so a seventh method cannot be added with no XLA arm.
+        `sigmoid` and `normalized_softmax` are the two that reach the dynamic
+        `arange`; the others are included as controls that share the dispatcher
+        but not the shape read.
+        """
+        keras.utils.set_random_seed(0)
+        x = np.random.default_rng(0).standard_normal((8, 64)).astype("float32")
+
+        layer = _make_layer(method)
+        assert_xla_matches_eager(layer, x, 1e-03, f"monotonicity[{method}]")
+
+        # The layer's defining property, re-asserted under the TRACED graph.
+        # Unlike the tolerance above this is scale-free and TF32-insensitive.
+        @tf.function(jit_compile=True)
+        def _traced(t):
+            return layer(t)
+
+        y = np.asarray(
+            keras.ops.convert_to_numpy(_traced(keras.ops.convert_to_tensor(x))),
+            dtype=np.float64,
+        )
+        diffs = np.diff(y, axis=-1)
+        assert np.all(diffs >= -1e-05), (
+            f"the traced graph of method {method!r} is NOT non-decreasing along "
+            f"axis -1: most negative step is {float(diffs.min()):.6e}"
         )

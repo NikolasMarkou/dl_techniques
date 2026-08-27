@@ -1110,5 +1110,145 @@ class TestOutputDimValidation:
             RoutingProbabilitiesLayer(output_dim=True, mode="deterministic")
 
 
+
+
+# ---------------------------------------------------------------------
+# XLA / graph equivalence (guide rule L-39)
+#
+# This layer is the package's clear graph-hazard candidate, and it is the only
+# one that trips ALL THREE parts of the step-11 criterion at once:
+#
+#   * a Python `for i in range(self.num_decisions)` in `call()`, which unrolls at
+#     TRACE time -- so what XLA compiles is a different program from what the
+#     eager reader sees;
+#   * two dynamic `keras.ops.shape(...)` reads (the batch size that seeds
+#     `padded_probs`, and the trailing reshape back to the input's rank);
+#   * a policy-dependent `if inputs.dtype == "float16"` branch (D-005) that
+#     returns float32 instead of the compute dtype.
+#
+# A trace-time decision that is right in eager and wrong under `tf.function` is
+# invisible to every other test in this file, all of which run eagerly.
+#
+# MEASURED TF32 ATTRIBUTION, so the tolerance below is not mistaken for slack.
+# On `output_dim=5, mode='deterministic'`, one fixed input, `max|eager - xla|` is
+#   3.28e-04  GPU, TF32 ON  (the default regime)
+#   5.96e-08  GPU, TF32 OFF
+#   8.94e-08  CPU
+# i.e. the entire gap is TensorFloat-32 in the projection matmul, which eager and
+# XLA do not apply identically -- not an XLA lowering defect. `1e-03` sits just
+# above the measured TF32 artifact and roughly 190x BELOW the step-8 mutation of
+# this same layer (pinning every decision to 0.5 moved the output by 0.187), so
+# it still rejects a broken tree by two orders of magnitude.
+# ---------------------------------------------------------------------
+
+_XLA_ATOL = 1e-03
+
+
+class TestRoutingProbabilitiesXLAEquivalence:
+    """`jit_compile=True` must lower this layer AND agree with eager."""
+
+    @pytest.mark.parametrize(
+        "output_dim,mode",
+        [
+            (8, "trainable"),
+            (5, "trainable"),
+            (8, "deterministic"),
+            (5, "deterministic"),
+        ],
+    )
+    def test_jit_compiled_matches_eager(
+        self, output_dim, mode, assert_xla_matches_eager
+    ):
+        """The unrolled tree compiles under XLA and returns the eager answer.
+
+        `output_dim=5` is deliberately NOT a power of two: it is the case where
+        `padded_output_dim` (8) exceeds it and the structural mask / slice /
+        renormalize path is live. A tree that unrolled to the wrong depth, or a
+        mask that was constant-folded away, changes the output by O(0.1).
+        """
+        keras.utils.set_random_seed(0)
+        x = np.random.default_rng(0).standard_normal((64, 16)).astype("float32")
+
+        layer = RoutingProbabilitiesLayer(output_dim=output_dim, mode=mode)
+        assert_xla_matches_eager(
+            layer, x, _XLA_ATOL, f"routing[{output_dim},{mode}]"
+        )
+
+        # Structural checks under the TRACED graph specifically. These are
+        # TF32-insensitive, so they carry the load the tolerance above cannot.
+        @tf.function(jit_compile=True)
+        def _traced(t):
+            return layer(t)
+
+        y = np.asarray(
+            keras.ops.convert_to_numpy(
+                _traced(keras.ops.convert_to_tensor(x))
+            ),
+            dtype=np.float64,
+        )
+        assert y.shape == (64, output_dim), (
+            f"XLA returned {y.shape}, expected (64, {output_dim}): the trailing "
+            f"dynamic-shape reshape did not survive tracing"
+        )
+        assert np.all(y >= 0.0), "XLA path produced negative probability mass"
+        rowsum_err = float(np.max(np.abs(y.sum(axis=-1) - 1.0)))
+        assert rowsum_err < 1e-05, (
+            f"max|rowsum-1| is {rowsum_err:.6e} under jit_compile=True; the "
+            f"traced tree is no longer a distribution"
+        )
+
+    def test_the_float16_output_fork_survives_tracing(
+        self, assert_xla_matches_eager, mixed_float16_policy
+    ):
+        """The D-005 `if inputs.dtype == 'float16'` branch is a TRACE-time decision.
+
+        Under `mixed_float16` this layer deliberately returns **float32** rather
+        than the compute dtype, because at a large `output_dim` most leaf masses
+        fall below fp16's smallest normal and casting back would flush them to
+        zero. That fork is resolved while the graph is being traced; if it were
+        ever rewritten as something XLA folds differently, the traced graph would
+        silently emit float16 and this arm is the only thing that would notice.
+
+        The tolerance here is deliberately loose: this arm's claims are the
+        output DTYPE and the absence of zeroed leaves, not precision. On a
+        saturating fp16 input the eager/XLA gap is 4.45e-03 (measured), which is
+        half-precision noise in a saturated sigmoid, not a lowering defect.
+        """
+        keras.utils.set_random_seed(0)
+        # Clamped well inside fp16's 65504 ceiling: an input that has already
+        # overflowed is itself non-finite and produces a false all-NaN reading.
+        x = np.clip(
+            np.random.default_rng(0).standard_normal((64, 16)) * 1e3, -6.0e4, 6.0e4
+        ).astype("float16")
+        assert np.all(np.isfinite(x)), (
+            "premise violated: the fp16 INPUT is already non-finite"
+        )
+
+        layer = RoutingProbabilitiesLayer(output_dim=8, mode="trainable")
+        x_t = keras.ops.convert_to_tensor(x)
+        eager = layer(x_t)
+        assert keras.backend.standardize_dtype(eager.dtype) == "float32", (
+            "premise: the D-005 fp16 fork should already return float32 eagerly"
+        )
+
+        @tf.function(jit_compile=True)
+        def _traced(t):
+            return layer(t)
+
+        traced = _traced(x_t)
+        assert keras.backend.standardize_dtype(traced.dtype) == "float32", (
+            f"under jit_compile=True the layer returned "
+            f"{keras.backend.standardize_dtype(traced.dtype)!r} on a float16 "
+            f"input; the D-005 output fork did not survive tracing"
+        )
+
+        y = np.asarray(keras.ops.convert_to_numpy(traced), dtype=np.float64)
+        assert int(np.sum(y == 0.0)) == 0, (
+            "the traced fp16 path has exactly-zero leaf mass: the float32 "
+            "widening inside call() was constant-folded away"
+        )
+        assert_xla_matches_eager(layer, x, 1e-01, "routing[fp16-fork]")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

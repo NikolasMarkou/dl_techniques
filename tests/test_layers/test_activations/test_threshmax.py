@@ -691,5 +691,59 @@ def test_compute_output_shape() -> None:
         assert output_shape == shape
 
 
+# ---------------------------------------------------------------------
+# XLA / graph equivalence (guide rule L-39)
+#
+# Flagged by this plan's step-11 criterion for a DYNAMIC SHAPE READ inside
+# `call()`: `num_classes = keras.ops.shape(x)[self.axis]`, which then sets the
+# `1/N` reference the whole gate is measured against. Read from the TENSOR rather
+# than from the build-time shape, deliberately, so N may vary between calls -- and
+# therefore the value XLA constant-folds at trace time is the thing to check.
+#
+# Tolerance derived from measurement: `max|eager - xla|` is 7.45e-09 on a
+# (64, 512) N(0,1) input (outputs bounded by ~0.09), i.e. below float32 epsilon.
+# `1e-06` leaves ~134x headroom and sits 28,000x below the step-8 mutation of
+# this layer (replacing the gate with a constant moved the output by 0.208).
+# ---------------------------------------------------------------------
+
+
+class TestThreshMaxXLAEquivalence:
+    """`jit_compile=True` must lower the gate AND agree with eager."""
+
+    @pytest.mark.parametrize("width", [8, 512])
+    def test_jit_compiled_matches_eager(
+        self, width, assert_xla_matches_eager
+    ) -> None:
+        """The `1/N` reference read from the tensor survives tracing.
+
+        Two widths, because the quantity read dynamically IS the width: a
+        trace-time fold that captured the wrong N would still agree with eager at
+        whichever width happened to be traced first, and only disagree at the
+        other. `1/8` and `1/512` are 64x apart.
+        """
+        keras.utils.set_random_seed(0)
+        x = np.random.default_rng(0).standard_normal((64, width)).astype("float32")
+
+        layer = ThreshMax()
+        assert_xla_matches_eager(layer, x, 1e-06, f"threshmax[N={width}]")
+
+        # Scale-free, TF32-insensitive companion: the traced output is still a
+        # distribution over the axis whose length was read from the tensor.
+        @tf.function(jit_compile=True)
+        def _traced(t):
+            return layer(t)
+
+        y = np.asarray(
+            keras.ops.convert_to_numpy(_traced(keras.ops.convert_to_tensor(x))),
+            dtype=np.float64,
+        )
+        assert y.shape == (64, width)
+        rowsum_err = float(np.max(np.abs(y.sum(axis=-1) - 1.0)))
+        assert rowsum_err < 1e-05, (
+            f"max|rowsum-1| is {rowsum_err:.6e} under jit_compile=True at N="
+            f"{width}; the traced gate is no longer normalized"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

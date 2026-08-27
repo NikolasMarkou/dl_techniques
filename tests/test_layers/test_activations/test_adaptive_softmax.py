@@ -654,3 +654,55 @@ class TestAdaptiveTemperatureSoftmaxAgainstANumpyReference:
             keras.ops.softmax(keras.ops.convert_to_tensor(logits), axis=-1)
         )
         np.testing.assert_allclose(y, plain, atol=1e-6, rtol=0.0)
+
+
+# ---------------------------------------------------------------------
+# XLA / graph equivalence (guide rule L-39)
+#
+# Flagged by this plan's step-11 criterion for a PYTHON-LEVEL LOOP reachable from
+# `call()`: `_polynomial_eval`'s `for coeff in coeffs[1:]` Horner evaluation,
+# used by the entropy path. The loop is over a Python list of float constants, so
+# it unrolls at trace time into a fixed chain of fused multiply-adds -- which is
+# exactly the situation where the traced program and the eager program can drift
+# apart without any test noticing, since every other test in this file is eager.
+#
+# Tolerance derived from measurement, not tuned: `max|eager - xla|` is 3.58e-07
+# on a (64, 512) N(0, 0.5) input whose outputs are bounded by 1, i.e. float32
+# round-off. `1e-05` leaves ~28x headroom and still sits 2,400x below the step-8
+# mutation of this layer (pinning the temperature to 1.0 moved the output by
+# 0.847).
+# ---------------------------------------------------------------------
+
+
+class TestAdaptiveSoftmaxXLAEquivalence:
+    """`jit_compile=True` must lower the entropy path AND agree with eager."""
+
+    def test_jit_compiled_matches_eager(self, assert_xla_matches_eager) -> None:
+        """The unrolled Horner loop compiles under XLA and returns the eager answer.
+
+        The input scale is 0.5 on purpose. At a larger scale every row falls into
+        the `entropy <= entropy_threshold` bypass branch, where the temperature is
+        already exactly 1.0 and the polynomial is never evaluated -- an input that
+        makes this arm vacuous. (That exact vacuity was measured during this
+        plan's step-8 mutation probe, where a first attempt read a delta of
+        exactly 0.0 for the same reason.)
+        """
+        keras.utils.set_random_seed(0)
+        x = (
+            np.random.default_rng(0).standard_normal((64, 512)) * 0.5
+        ).astype("float32")
+
+        layer = AdaptiveTemperatureSoftmax()
+        assert_xla_matches_eager(layer, x, 1e-05, "adaptive_softmax")
+
+        # Non-vacuity: at least one row must actually take the polynomial path,
+        # or this arm compares two copies of a plain softmax.
+        probs = keras.ops.convert_to_numpy(
+            keras.ops.softmax(keras.ops.convert_to_tensor(x), axis=-1)
+        ).astype(np.float64)
+        entropy = -np.sum(probs * np.log(np.maximum(probs, 1e-12)), axis=-1)
+        assert np.any(entropy > layer.entropy_threshold), (
+            f"premise violated: every row has entropy <= "
+            f"{layer.entropy_threshold} and takes the bypass branch, so the "
+            f"polynomial loop this arm exists to trace is never evaluated"
+        )
