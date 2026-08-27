@@ -25,8 +25,9 @@ normalized axis, so the band constraint means the same thing in a 64-wide and a
 ``band_param`` is a single scalar weight, so ``s`` is one number for the whole
 tensor. At the "zeros" initializer ``sigmoid(0) = 0.5``, so the output RMS starts
 at exactly ``1 - alpha / 2`` with no spread across rows to six decimals
-(measured spread ``5.960e-08``, which is float32 rounding): measured ``0.950000``
-at ``alpha=0.1`` and ``0.750000`` at ``alpha=0.5``. Both ends of the band are
+(measured spread at most ``4.83e-07`` over shapes ``(4, 32)`` to ``(64, 128)``,
+which is float32 rounding): measured ``0.950000`` at ``alpha=0.1`` and
+``0.750000`` at ``alpha=0.5``. Both ends of the band are
 reachable during training: ``band_param = -5`` gives RMS ``0.900000`` and
 ``band_param = +5`` gives ``1.000000`` at ``alpha=0.1``.
 
@@ -79,8 +80,9 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
 
     At the default "zeros" initializer ``sigmoid(0) = 0.5``, so the output RMS
     starts at exactly ``1 - alpha / 2`` with no spread across rows to six
-    decimals (measured spread ``5.960e-08``, float32 rounding): measured
-    ``0.950000`` at ``alpha=0.1`` and ``0.750000`` at ``alpha=0.5``. Training
+    decimals (measured spread at most ``4.83e-07`` over shapes ``(4, 32)`` to
+    ``(64, 128)``, float32 rounding): measured ``0.950000`` at ``alpha=0.1`` and
+    ``0.750000`` at ``alpha=0.5``. Training
     reaches both ends of the band: ``band_param = -5`` gives ``0.900000`` and
     ``band_param = +5`` gives ``1.000000`` at ``alpha=0.1``.
 

@@ -27,9 +27,10 @@ Step 3 normalizes a tensor whose last axis has length 1, which always yields 0.
 So ``tanh(4 * 0) = 0`` and the scale collapses to ``1 - 0.5 * max_band_width``
 for every input. Measured: with ``max_band_width`` of 0.01, 0.5 and 0.9 the
 output L2 norm is exactly 0.995, 0.75 and 0.55, with no spread across rows to
-six decimals (measured spread ``0.0`` to ``1.192e-07``, float32 rounding).
-The layer is L2 normalization times a constant; the input-adaptive part is
-inert. It is kept as-is for backward compatibility, because callers exist in
+six decimals (measured spread at most ``1.51e-07`` over shapes ``(4, 32)`` to
+``(64, 128)``, float32 rounding). The layer is L2 normalization times a
+constant; the input-adaptive part is inert. It is kept as-is for backward
+compatibility, because callers exist in
 ``train/rms_variants_train/``.
 """
 
@@ -76,9 +77,9 @@ class BandLogitNorm(keras.layers.Layer):
         and the scale collapses to the constant ``1 - 0.5 * max_band_width``.
         Measured output L2 norms: 0.995, 0.75 and 0.55 for ``max_band_width`` of
         0.01, 0.5 and 0.9, with no spread across rows to six decimals
-        (measured spread ``0.0`` to ``1.192e-07``). Treat this layer as L2
-        normalization times a constant. It is kept as-is because callers exist in
-        ``train/rms_variants_train/``.
+        (measured spread at most ``1.51e-07`` over shapes ``(4, 32)`` to
+        ``(64, 128)``). Treat this layer as L2 normalization times a constant.
+        It is kept as-is because callers exist in ``train/rms_variants_train/``.
 
     **Architecture Overview:**
 

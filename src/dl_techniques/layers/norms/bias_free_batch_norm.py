@@ -55,7 +55,10 @@ far the input mean is from zero, so their digits move with the draw: over seeds
 0, 1 and 2 the ``a = 2`` entry ranges ``1.590e-03`` to ``2.029e-03``. What holds
 at every draw is the STRUCTURE -- the two BiasFreeBatchNorm rows and the
 UNPRIMED row at float32 zero, the two primed BatchNorm rows equal to each other,
-and the LayerNormalization row at the exact ``|1 - a| / a``.
+and the LayerNormalization row at ``|1 - a| / a`` to three digits. It is not
+exact there: LayerNorm's own epsilon puts ``a = 2`` at ``4.998e-01`` against
+``5.0000e-01`` and ``a = 3`` at ``6.665e-01`` against ``6.6667e-01``, while
+``a = 1000`` matches ``9.9900e-01`` to every printed digit.
 
 Two of those rows are controls, and they identify the mechanism rather than just
 observing an effect:

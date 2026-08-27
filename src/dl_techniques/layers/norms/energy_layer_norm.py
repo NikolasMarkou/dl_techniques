@@ -82,10 +82,12 @@ class EnergyLayerNorm(keras.layers.Layer):
         dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0
 
     That inequality is why the parameterization is a scalar gamma and a vector
-    delta. The nonzero eigenvalues of ``dg/dx`` all equal
-    ``gamma / sqrt(var + eps)``, so their magnitude moves with the DRAW's
-    variance and is not a function of ``gamma`` and ``D`` alone. Measured on
-    rank-3 inputs with ``D = 8``, ``eps = 1e-5``, ``keras.random.normal((1, 1, 8),
+    delta. The BULK eigenvalues of ``dg/dx`` -- ``D - 2`` of them, degenerate --
+    equal ``gamma / sqrt(var + eps)``, so their magnitude moves with the DRAW's
+    variance and is not a function of ``gamma`` and ``D`` alone. The other two
+    are one float32-zero eigenvalue and one small RADIAL eigenvalue; the
+    three-part spectrum is stated in full further down. Measured on rank-3
+    inputs with ``D = 8``, ``eps = 1e-5``, ``keras.random.normal((1, 1, 8),
     seed=s)`` for ``s`` in 0-4: at ``gamma = 1.7`` the eigenvalues span
     ``[0.0000, 5.6069]`` across those five draws; at ``gamma = 0.0`` they are all
     exactly ``0.0``; at ``gamma = -1.0`` they span ``[-3.2982, 0.0000]``, so the
@@ -138,16 +140,17 @@ class EnergyLayerNorm(keras.layers.Layer):
 
     .. code-block:: text
 
-        var >> eps :  BULK eigenvalues of dg/dx      ~  1.52 .. 2.03
-        var == 0   :  eigenvalues of dg/dx          ->  gamma / sqrt(eps)
-                                                    =  1.7 / sqrt(1e-5)  =  537.6
+        var >> eps :  BULK eigenvalues of dg/dx  ~   1.52 .. 2.03
+        var == 0   :  BULK eigenvalues of dg/dx  ->  gamma / sqrt(eps)
+                                                 =   1.7 / sqrt(1e-5) = 537.6
 
     The spectrum has THREE parts at every draw, not two. One eigenvalue sits at
     float32 zero (measured ``|lambda| <= 8e-08``): the constant direction that
     mean-subtraction removes. One is a small RADIAL eigenvalue
     ``gamma * eps / (var + eps)^(3/2)``. The remaining ``D - 2`` are degenerate
-    BULK eigenvalues at ``gamma / sqrt(var + eps)``. The line above quotes the
-    BULK part, and the amplification below is the bulk-to-cliff ratio.
+    BULK eigenvalues at ``gamma / sqrt(var + eps)``. Both lines of the block
+    above quote the BULK part, and the amplification below is the bulk-to-cliff
+    ratio.
 
     All figures measured at ``gamma = 1.7``, ``eps = 1e-5``, over 20 tokens
     drawn as ``keras.random.normal((1, 1, D), seed=s)`` for ``s`` in 0-19:
@@ -190,11 +193,16 @@ class EnergyLayerNorm(keras.layers.Layer):
         ``epsilon=1e-6`` (``max|grad| = 1.4219e+03``), so this is an fp16 range
         limit, not a mathematical singularity. An ordinary token is unaffected:
         a standard-normal ``(2, 4, 8)`` input at ``epsilon=1e-5`` gives a finite
-        gradient at 6 of 6 seeds. No magnitude is quoted for it -- the value is
-        draw-dependent and two protocols disagreed; finiteness is the claim. The
-        threshold moves with the token's variance: the same ``(1, 1, 8)`` probe
-        with the perturbation raised to ``0.1`` (fp16 variance ``1.085e-03``) is
-        finite at ``epsilon=1e-5``.
+        gradient at 20 of 20 ``keras.random.normal`` seeds, with ``max|grad|``
+        in ``[3.876e-03, 1.523e-02]`` under the same ``sum(y ** 2)`` loss as the
+        float32 control above; at ``numpy.random.default_rng(0)`` it measures
+        ``7.5684e-03``, and so does ``seed=11``. The loss is part of the claim:
+        a plain ``sum(y)`` loss makes the input gradient cancel and reads
+        ``0.0`` at ``seed=2``, and it does not reproduce the ``1.4219e+03``
+        float32 control above. The magnitude is draw-dependent; the finiteness
+        is not. The threshold moves with the token's variance: the same
+        ``(1, 1, 8)`` probe with the perturbation raised to ``0.1`` (fp16
+        variance ``1.085e-03``) is finite at ``epsilon=1e-5``.
 
     **Mitigation for a caller who sees a training-stability cliff** (loss spikes
     on a batch with heavy padding, or in the first steps before activations

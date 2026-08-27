@@ -24,9 +24,10 @@ The default ``band_initializer="zeros"`` makes the ``Dense`` output zero, and
 ``sigmoid(0) = 0.5``, so the initial scale is the MIDPOINT of the band, not its
 top. Measured output RMS on a ``(4, 32)`` input: ``0.95`` at ``alpha=0.1`` and
 ``0.75`` at ``alpha=0.5``, with no spread across rows to six decimals (measured
-spread ``5.960e-08``, which is float32 rounding). Both ends of the band
-are reachable during training: assigning the ``Dense`` bias ``-5`` gives an
-output RMS of ``0.900000`` and ``+5`` gives ``1.000000`` at ``alpha=0.1``.
+spread at most ``4.83e-07`` over shapes ``(4, 32)`` to ``(64, 128)``, which is
+float32 rounding). Both ends of the band are reachable during training:
+assigning the ``Dense`` bias ``-5`` gives an output RMS of ``0.900000`` and
+``+5`` gives ``1.000000`` at ``alpha=0.1``.
 
 Centering is what makes the statistics dtype matter here. Statistics run in
 ``keras.backend.result_type(input_dtype, "float32")``, which is float64 under a
@@ -80,9 +81,10 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     ``sigmoid(0) = 0.5``, so the scale starts at the middle of the band. Measured
     output RMS on a ``(4, 32)`` input: ``0.95`` at ``alpha=0.1`` and ``0.75`` at
     ``alpha=0.5``, with no spread across rows to six decimals (measured spread
-    ``5.960e-08``, float32 rounding). Assigning the ``Dense`` bias
-    ``-5`` gives ``0.900000`` and ``+5`` gives ``1.000000`` at ``alpha=0.1``, so
-    training reaches both ends of the band.
+    at most ``4.83e-07`` over shapes ``(4, 32)`` to ``(64, 128)``, float32
+    rounding). Assigning the ``Dense`` bias ``-5`` gives ``0.900000`` and ``+5``
+    gives ``1.000000`` at ``alpha=0.1``, so training reaches both ends of the
+    band.
 
     Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
     float32 at minimum, float64 under a float64 policy. The result is cast back

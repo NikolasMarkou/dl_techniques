@@ -89,9 +89,9 @@ level against ``pi / 4 = 0.78540``::
     level 5:  mean +0.78693   std 0.12505
     level 6:  mean +0.78568   std 0.08754
 
-Another seed moves the trailing digits: the level-6 std alone moves by about 2%
-between draws. The concentration toward ``pi / 4``, and the narrowing with each
-level, are what hold at every draw.
+Another seed moves the trailing digits: over seeds 0-9 the level-6 std alone
+runs ``0.08730`` to ``0.08979``, a spread of about 3%. The concentration toward
+``pi / 4``, and the narrowing with each level, are what hold at every draw.
 
 Level 1 is the exception and is why the prior is scoped to level 2 and above. Its
 angles come from ``atan2`` on signed coordinates and spread over ``[-pi, pi]``.
@@ -210,7 +210,9 @@ def polar_encode(
     span ``[-pi, pi]``: measured ``[-3.14158, +3.14158]`` on
     ``keras.random.normal((20000, 64), seed=0)``. Every later level pairs
     magnitudes, which are non-negative, so its angles land in ``[0, pi / 2]``:
-    measured ``[+0.00043, +1.56912]`` at level 2.
+    measured ``[+0.00294, +1.56986]`` at level 2 on that same seed-0 draw. The
+    endpoints are sample extrema and do not reproduce across draws (``seed=7``
+    gives ``[+0.00043, +1.56912]``); the ``[0, pi / 2]`` containment does.
 
     :param x: 2-D tensor ``(N, d)`` whose last dimension is a power of two and is
         statically known.
