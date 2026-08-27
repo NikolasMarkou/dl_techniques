@@ -34,6 +34,13 @@ from typing import Dict, Any, Literal, Optional
 
 from dl_techniques.utils.logger import logger
 
+# DECISION plan-2026-08-27T103353-60745fe0/D-011
+# Every class imported below registers BARE (no `package=`), giving a
+# module-independent key. Do NOT add `package=` for guide-v2 s14 Pitfall 3:
+# measured 697 bare registrations across src/, 0 colliding keys, and a changed
+# key breaks load_model for every stored .keras holding these layers (34/34
+# exact round-trip today). Repo-wide migration, not a local edit. See D-011.
+
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
 from .basis_function import BasisFunction
 from .differentiable_step import DifferentiableStep
