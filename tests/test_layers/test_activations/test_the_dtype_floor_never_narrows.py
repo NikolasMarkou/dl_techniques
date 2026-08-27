@@ -31,6 +31,10 @@ fixture deliberately does NOT touch `floatx`, which guard A requires (without it
 "float64" arm silently agrees with float32 to eight digits and the guard cannot
 fail). Keeping these two in their own module keeps the extra `floatx` teardown
 away from the several hundred default-policy parametrizations next door.
+
+The `float64_policy` fixture guard A uses is NOT defined here: it lives in this
+directory's `conftest.py`, which is also where its second consumer
+(`test_the_gelu_constant_follows_the_input_dtype.py`) reads it from.
 """
 
 import keras
@@ -72,28 +76,6 @@ FLOAT64_AGREEMENT_ATOL = 1e-12
 # residual under a float64 policy. Pre-fix measurement 8.381903e-08 (which is
 # float32's floor, the whole point), post-fix 2.220446e-16.
 FLOAT64_ROWSUM_ATOL = 1e-13
-
-
-@pytest.fixture
-def float64_policy():
-    """Force a genuine float64 policy for one test, then ALWAYS restore both globals.
-
-    Sets `floatx` IN ADDITION to the policy. The policy alone leaves
-    `keras.Input`/`convert_to_tensor` producing float32, so the arm agrees with
-    float32 to eight digits and a float64 precision guard becomes unfailable.
-
-    :yield: the literal string ``'float64'``.
-    :rtype: str
-    """
-    previous_policy = keras.mixed_precision.global_policy().name
-    previous_floatx = keras.backend.floatx()
-    keras.backend.set_floatx("float64")
-    keras.mixed_precision.set_global_policy("float64")
-    try:
-        yield "float64"
-    finally:
-        keras.mixed_precision.set_global_policy(previous_policy)
-        keras.backend.set_floatx(previous_floatx)
 
 
 def _stable_sigmoid(z):
