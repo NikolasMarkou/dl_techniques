@@ -1,53 +1,26 @@
 """
-Mish self-regularized, non-monotonic activation function.
+Mish, a smooth non-monotonic activation, plus a saturating variant.
 
-This layer implements the Mish activation function, designed to improve the
-performance and training stability of deep neural networks. It serves as a
-smooth, continuously differentiable alternative to functions like ReLU and
-Swish, combining their benefits while mitigating some of their drawbacks,
-such as the dying ReLU problem and the less smooth gradient landscape.
+Mish is ``f(x) = x * tanh(softplus(x))``, where ``softplus(x) = log(1 + e^x)``.
+Like Swish it is a self-gate: the input is multiplied by a smooth function of
+itself rather than passed through a hard threshold. ``softplus`` maps every
+input to a positive number with no kink at zero, and ``tanh`` squashes that
+into ``[0, 1)``, giving a smooth saturating gate.
 
-Architectural Overview:
-    Mish is architecturally a self-gated activation function, similar in
-    principle to Swish (``x * sigmoid(x)``). The core idea is that the
-    activation's output is a product of the input itself and a non-linear
-    gating function derived from the input. In Mish, this gate is more
-    complex than in Swish, aiming for a more favorable functional landscape.
+What that buys you:
 
-    The function can be deconstructed into two main parts:
-    1.  **Identity Path (x):** The input is passed through directly,
-        preserving an unobstructed path for gradient flow, especially for
-        large positive values.
-    2.  **Gating Mechanism (tanh(softplus(x))):**
-        -   ``softplus(x)`` acts as a smooth approximation of the ReLU
-            function, mapping all inputs to positive values without the
-            abrupt change at zero.
-        -   ``tanh(y)`` takes this positive output and maps it to the range
-            (0, 1), creating a smooth, saturating gate.
+- **Unbounded above.** As ``x`` grows, ``tanh(softplus(x)) -> 1`` and
+  ``f(x) ~ x``, so positive inputs do not saturate, as with ReLU.
+- **Bounded below.** Measured minimum: ``f(-1.19243) = -0.30884``. It never
+  goes lower.
+- **Smooth everywhere.** Infinitely differentiable, so no kink at zero.
+- **Non-monotonic.** It dips negative for small negative inputs before
+  climbing back toward its lower bound.
 
-    The multiplication of these two components results in a function that
-    is unbounded above (like ReLU) but smooth and non-monotonic (unlike
-    ReLU), allowing it to capture more complex dependencies in the data.
-
-Mathematical Foundation:
-    The Mish activation function is formally defined as:
-        ``f(x) = x * tanh(softplus(x))``
-    where ``softplus(x) = log(1 + exp(x))``.
-
-    This formulation gives rise to several key mathematical properties that
-    contribute to its empirical success:
-    -   **Unbounded Above**: As x -> infinity, ``softplus(x) -> x`` and
-        ``tanh(softplus(x)) -> 1``, so ``f(x) ~ x``. This prevents gradient
-        saturation for positive inputs, similar to ReLU.
-    -   **Bounded Below**: As x -> -infinity, the function has a finite lower
-        bound, which can contribute to regularization.
-    -   **C-infinity Smoothness**: The function is infinitely
-        differentiable, providing a very smooth gradient landscape that can
-        stabilize and accelerate gradient-based optimization.
-    -   **Non-Monotonicity**: Mish has a slight negative dip for small
-        negative inputs before asymptotically approaching its lower bound.
-        This property is believed to increase the expressiveness of the
-        network.
+This module also ships :class:`SaturatedMish`, which caps large positive
+outputs by blending Mish toward a constant. Read its class docstring before
+using it: it overshoots before it settles, and the module-level
+:func:`saturated_mish` function has a default that does not match the layer.
 
 References:
     - Misra, D. (2019). "Mish: A Self Regularized Non-Monotonic Neural
@@ -66,18 +39,20 @@ from typing import Any, Dict, Optional, Tuple
 
 
 def mish(inputs: keras.KerasTensor) -> keras.KerasTensor:
-    """Compute the Mish activation function: ``f(x) = x * tanh(softplus(x))``.
+    """Compute Mish: ``f(x) = x * tanh(softplus(x))``.
+
+    The gate ``tanh(softplus(x))`` lies in ``[0, 1)``. Measured minimum of
+    the whole function: ``f(-1.19243) = -0.30884``. At large negative inputs
+    ``softplus`` underflows in float32 and the gate hits exactly 0: measured,
+    ``mish(-100.0)`` returns ``-0.0``, not ``NaN``.
 
     :param inputs: Input tensor of any shape.
     :type inputs: keras.KerasTensor
-    :return: Output tensor with same shape as inputs, after applying Mish activation.
+    :return: Tensor of the same shape as ``inputs``.
     :rtype: keras.KerasTensor
     """
-    # Calculate softplus: log(1 + exp(x))
     softplus = keras.ops.softplus(inputs)
-    # Calculate tanh of softplus
     tanh_softplus = keras.ops.tanh(softplus)
-    # Return x * tanh(softplus(x))
     return inputs * tanh_softplus
 
 
@@ -87,27 +62,37 @@ def saturated_mish(
         beta: float = 0.5,
         mish_at_alpha: float = 1.0
 ) -> keras.KerasTensor:
-    """Compute the Saturated Mish activation function.
+    """Blend Mish toward a constant above a threshold.
+
+    Computes ``mish(x) * (1 - blend) + mish_at_alpha * blend``, where
+    ``blend = sigmoid((x - alpha) / beta)``. Below ``alpha`` the blend is near
+    0 and the result is nearly plain Mish. Above it the blend goes to 1 and
+    the result settles at ``mish_at_alpha``.
+
+    Pass ``mish_at_alpha=mish(alpha)`` if you want the two regions to meet
+    smoothly. The default of 1.0 does **not** do that: with the other
+    defaults, ``mish(3.0) = 2.986535``, so calling this function with only
+    ``inputs`` saturates toward 1.0 while :class:`SaturatedMish` saturates
+    toward 2.986535. The two are different functions. The layer computes the
+    right value for you; the bare function does not.
 
     :param inputs: Input tensor of any shape.
     :type inputs: keras.KerasTensor
-    :param alpha: Saturation threshold.
+    :param alpha: Input value at which the blend factor is 0.5.
     :type alpha: float
-    :param beta: Controls transition steepness.
+    :param beta: Transition width. Smaller means a sharper handover.
     :type beta: float
-    :param mish_at_alpha: Pre-computed Mish value at alpha for efficiency.
+    :param mish_at_alpha: The value the output settles at for large inputs.
+        Meant to be ``mish(alpha)``, precomputed so it is not recomputed per
+        call.
     :type mish_at_alpha: float
-    :return: Output tensor with same shape as inputs, after applying Saturated Mish.
+    :return: Tensor of the same shape as ``inputs``.
     :rtype: keras.KerasTensor
     """
     tmp_mish = mish(inputs)
 
-    # Create a smooth sigmoid-based blending factor
     blend_factor = keras.ops.sigmoid((inputs - alpha) / beta)
 
-    # Combine both regions with smooth blending
-    # For x <= alpha: mostly standard Mish
-    # For x > alpha: gradually approach mish_at_alpha
     return tmp_mish * (1.0 - blend_factor) + mish_at_alpha * blend_factor
 
 
@@ -118,28 +103,38 @@ def saturated_mish(
 
 @keras.saving.register_keras_serializable()
 class Mish(keras.layers.Layer):
-    """Mish activation function layer.
+    """Mish activation: ``f(x) = x * tanh(softplus(x))``.
 
-    Implementation of the Mish activation function from the paper "Mish: A Self
-    Regularized Non-Monotonic Neural Activation Function" by Diganta Misra.
-    The function is defined as ``f(x) = x * tanh(softplus(x))`` where
-    ``softplus(x) = log(1 + exp(x))``. Mish is smooth, non-monotonic,
-    self-regularizing, unbounded above (approximately x for large positive x),
-    and bounded below (approximately -0.31 for large negative x).
+    A self-gate. The input is multiplied by ``tanh(softplus(x))``, a smooth
+    gate in ``[0, 1)``. The result is smooth everywhere, non-monotonic,
+    unbounded above (``f(x) ~ x`` for large positive ``x``) and bounded below
+    at a measured minimum of ``-0.30884``, reached at ``x = -1.19243``. Output
+    shape equals input shape.
+
+    The layer owns no weights and takes no arguments. It calls the
+    module-level :func:`mish` function.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ▼
-        ┌───────────────────────────────────┐
-        │  Mish(x) = x * tanh(softplus(x))  │
-        └───────────────┬───────────────────┘
-                        │
-                        ▼
-        Output: (batch, ..., features)
+                             x  [B, ..., F]
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │ identity: x           │       │ tanh(softplus(x))     │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │ in [0, 1)
+                    └───────────────┬───────────────┘
+                                    │  x * gate
+                                    ▼
+                             y  [B, ..., F]
+
+    The left branch is the tensor itself, not a weight or a sub-layer. The
+    gate reaches exactly 0 in float32 once ``softplus`` underflows: measured,
+    ``Mish()(-100.0)`` returns ``-0.0``.
 
     :param kwargs: Additional keyword arguments passed to the Layer base class,
         such as ``name``, ``dtype``, ``trainable``, etc.
@@ -151,26 +146,25 @@ class Mish(keras.layers.Layer):
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize the Mish activation layer.
+        """Create the layer. There is nothing to configure.
 
         :param kwargs: Additional keyword arguments for the Layer base class.
         """
         super().__init__(**kwargs)
-        # This layer has no parameters to store
 
     def call(
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply the Mish activation function: ``f(x) = x * tanh(softplus(x))``.
+        """Apply ``x * tanh(softplus(x))`` element-wise.
 
         :param inputs: Input tensor of any shape.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training or inference mode. Not used
-            in this activation layer but kept for API consistency.
+        :param training: Training or inference mode. Unused here; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Tensor with the same shape as input after applying Mish.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         return mish(inputs)
@@ -179,27 +173,27 @@ class Mish(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple, identical to input_shape.
+        :return: The same shape tuple, unchanged.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
+        """Return the config needed to rebuild the layer.
 
-        :return: Dictionary containing the layer configuration.
+        :return: The base Layer config. This layer adds nothing to it.
         :rtype: Dict[str, Any]
         """
         return super().get_config()
 
     def __repr__(self) -> str:
-        """Return string representation of the layer.
+        """Return a short representation showing the layer name.
 
-        :return: String representation including the layer name.
+        :return: A string such as ``Mish(name='mish')``.
         :rtype: str
         """
         return f"Mish(name='{self.name}')"
@@ -208,49 +202,66 @@ class Mish(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class SaturatedMish(keras.layers.Layer):
-    """SaturatedMish activation function with continuous transition at alpha.
+    """Mish that flattens out above a threshold, with a smooth handover.
 
-    A variant of the Mish activation that includes a saturation mechanism
-    to prevent extremely large activations. The function behaves like standard
-    Mish for values below the threshold alpha, then smoothly transitions to a
-    saturated region for larger values via a sigmoid-based blending factor.
-    This is defined as: for ``x <= alpha``, ``f(x) ~ x * tanh(softplus(x))``
-    (standard Mish); for ``x > alpha``, ``f(x)`` smoothly blends toward a
-    saturated value.
+    Plain Mish grows without bound. This variant blends it toward a constant
+    so large positive inputs stop growing. The blend is
+    ``sigmoid((x - alpha) / beta)``, so below ``alpha`` the output is close to
+    Mish and well above ``alpha`` it settles at ``mish_at_alpha``. At exactly
+    ``x = alpha`` the blend is 0.5 and, because ``mish_at_alpha`` is computed
+    as ``mish(alpha)``, the two blended terms are the same number, so the
+    output matches plain Mish there. Measured at the defaults: both read
+    2.986535. Output shape equals input shape.
+
+    The layer owns no weights. ``alpha`` and ``beta`` are validated in
+    ``__init__``, and ``mish_at_alpha`` is computed there once in numpy.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ├──────────────────────────┐
-                │                          │
-                ▼                          ▼
-        ┌───────────────┐   ┌──────────────────────────┐
-        │   Mish(x) =   │   │  blend = sigmoid(        │
-        │ x*tanh(sp(x)) │   │    (x - alpha) / beta )  │
-        └───────┬───────┘   └─────────────┬────────────┘
-                │                         │
-                ▼                         ▼
-        ┌─────────────────────────────────────────────┐
-        │ Mish(x)*(1-blend) + mish_at_alpha * blend   │
-        └──────────────────┬──────────────────────────┘
-                           │
-                           ▼
-        Output: (batch, ..., features)
+                             x  [B, ..., F]
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │ Mish(x)               │       │ blend = sigmoid(      │
+        │ = x*tanh(softplus(x)) │       │   (x - alpha) / beta )│
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │ in (0, 1)
+                    └───────────────┬───────────────┘
+                                    │
+                                    ▼
+            ┌───────────────────────────────────────────────┐
+            │ Mish(x) * (1 - blend)                         │
+            │     + mish_at_alpha * blend                   │
+            └───────────────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                             y  [B, ..., F]
 
-    :param alpha: The saturation threshold where the transition begins.
-        Must be greater than 0. Defaults to 3.0.
+    Both branches read the same ``x``. ``mish_at_alpha`` is a stored constant,
+    not a tensor.
+
+    :param alpha: Input value at which the blend factor is 0.5, so roughly
+        where saturation starts. Must be greater than 0. Defaults to 3.0.
     :type alpha: float
-    :param beta: Controls the steepness of the transition from standard Mish
-        to saturated behavior. Smaller values create sharper transitions.
-        Must be greater than 0. Defaults to 0.5.
+    :param beta: Transition width. Smaller means a sharper handover from Mish
+        to the flat region. Must be greater than 0. Defaults to 0.5.
     :type beta: float
     :param kwargs: Additional keyword arguments passed to the Layer base class,
         such as ``name``, ``dtype``, ``trainable``, etc.
 
-    :raises ValueError: If alpha or beta is not greater than 0.
+    :raises ValueError: If ``alpha`` or ``beta`` is not greater than 0.
+
+    Note:
+        The output overshoots its own plateau before settling. Measured at the
+        defaults ``alpha=3.0``, ``beta=0.5``: the plateau is 2.986535, but the
+        maximum output is 3.127664 at ``x = 3.6365``, then it decays back to
+        2.986535 by ``x = 10``. So this caps activations, but it is not
+        monotonic and its bound is 3.127664, not 2.986535. Measured minimum
+        over the same settings: -0.308095.
     """
 
     def __init__(
@@ -259,29 +270,29 @@ class SaturatedMish(keras.layers.Layer):
             beta: float = 0.5,
             **kwargs: Any
     ) -> None:
-        """Initialize the SaturatedMish activation layer.
+        """Validate ``alpha`` and ``beta``, then precompute ``mish(alpha)``.
 
-        :param alpha: The saturation threshold. Must be greater than 0.
+        :param alpha: Input value at which the blend factor is 0.5. Must be
+            greater than 0.
         :type alpha: float
-        :param beta: Controls the steepness of the transition. Must be greater than 0.
+        :param beta: Transition width. Must be greater than 0.
         :type beta: float
         :param kwargs: Additional keyword arguments for the Layer base class.
-        :raises ValueError: If alpha or beta is not greater than 0.
+        :raises ValueError: If ``alpha`` or ``beta`` is not greater than 0.
         """
         super().__init__(**kwargs)
 
-        # Validate parameters
         if alpha <= 0.0:
             raise ValueError(f"alpha must be greater than 0, got {alpha}")
         if beta <= 0.0:
             raise ValueError(f"beta must be greater than 0, got {beta}")
 
-        # Store configuration parameters
         self.alpha = float(alpha)
         self.beta = float(beta)
 
-        # Pre-compute mish value at alpha for efficiency
-        # This is a constant that doesn't require gradients
+        # mish(alpha) is a constant, so compute it once here in numpy rather
+        # than rebuilding it in the graph on every call. float32 is used so
+        # the stored value matches what the float32 forward path would give.
         alpha_np = np.float32(self.alpha)
         softplus_alpha = np.log(1.0 + np.exp(alpha_np))
         tanh_softplus_alpha = np.tanh(softplus_alpha)
@@ -292,14 +303,14 @@ class SaturatedMish(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply the SaturatedMish activation function with smooth transition.
+        """Apply Mish blended toward ``mish_at_alpha`` above ``alpha``.
 
         :param inputs: Input tensor of any shape.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training or inference mode. Not used
-            in this activation layer but kept for API consistency.
+        :param training: Training or inference mode. Unused here; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Tensor with the same shape as input after applying SaturatedMish.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         return saturated_mish(
@@ -313,20 +324,22 @@ class SaturatedMish(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple, identical to input_shape.
+        :return: The same shape tuple, unchanged.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
+        """Return the config needed to rebuild the layer.
 
-        :return: Dictionary containing the layer configuration including
-            alpha and beta parameters along with parent class configuration.
+        ``mish_at_alpha`` is not stored: ``__init__`` recomputes it from
+        ``alpha``, so saving it would be a second copy of the same fact.
+
+        :return: The base Layer config plus ``alpha`` and ``beta``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -337,9 +350,10 @@ class SaturatedMish(keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        """Return string representation of the layer.
+        """Return a short representation showing the config and layer name.
 
-        :return: String representation including the layer name and key parameters.
+        :return: A string such as
+            ``SaturatedMish(alpha=3.0, beta=0.5, name='saturated_mish')``.
         :rtype: str
         """
         return f"SaturatedMish(alpha={self.alpha}, beta={self.beta}, name='{self.name}')"

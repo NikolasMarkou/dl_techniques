@@ -1,43 +1,47 @@
 """
-The Gompertz Linear Unit (GoLU), a self-gated activation whose gate is
-deliberately asymmetric.
+The Gompertz Linear Unit (GoLU), a self-gated activation with an off-centre gate.
 
-Modern activations are gates, not thresholds. ReLU makes a hard binary decision at
-zero; the self-gated family instead multiplies the input by a smooth function of
-itself, ``x * g(x)``, so the network attenuates rather than truncates. The choice of
-``g`` is where the design lives, and there is a pattern to the popular ones: Swish
-uses the logistic CDF, GELU the Gaussian CDF. Both are the cumulative distribution
-of a SYMMETRIC distribution, so both gates are symmetric about their midpoint.
+Modern activations gate rather than threshold. ReLU makes a hard yes/no
+decision at zero. The self-gated family instead multiplies the input by a
+smooth function of itself, ``x * g(x)``, so the network attenuates instead of
+truncating. The design choice is ``g``. Swish uses the logistic CDF, GELU the
+Gaussian CDF. Both are the CDF of a symmetric distribution, so both gates pass
+through 0.5 at ``x = 0``.
 
-GoLU asks what changes when that symmetry is dropped. Its gate is the Gompertz
-function ``exp(-exp(-x))``, which is the CDF of the standard Gumbel distribution —
-a right-skewed distribution, so the resulting S-curve is right-skewed too. The
-consequence that matters is local: an asymmetric CDF has a gentler slope near the
-origin than a symmetric one of comparable range, which is precisely the region most
-pre-activations occupy.
+GoLU drops that symmetry. Its gate is the Gompertz function ``exp(-exp(-x))``,
+the CDF of the standard Gumbel distribution, which is right-skewed. The direct
+consequence is measurable: the gate reads 0.3679 at ``x = 0``, not 0.5. At the
+origin the unit passes about a third of its input rather than half.
 
-Three effects are hypothesized to follow from that gentler slope. A less steep gate
-makes the output less sensitive to small input perturbations, so activation variance
-shrinks and less noise propagates forward. Smaller gate derivatives smooth the loss
-surface, mitigating the sharp variations that trap optimizers and biasing
-convergence toward flatter minima, which generalize better. And by not rewarding
-sharp responses to individual features, the gate spreads learned weight mass more
-broadly, acting as an implicit regularizer. These are the paper's claims about
-training dynamics, not properties provable from the formula.
+Measured gate slopes, all three of which peak at ``x = 0``:
 
-For large negative inputs the gate approaches zero and the unit is effectively
-pruned; for large positive inputs it approaches ``alpha`` and the signal passes
-through near-linearly. The three parameters generalize the standard function —
-``alpha`` sets the upper asymptote, ``beta`` the displacement, ``gamma`` the growth
-rate — and all default to 1.0, which recovers the plain Gumbel CDF. They are stored
+- Gompertz ``exp(-exp(-x))``: slope 0.3679 at the origin.
+- Logistic ``sigmoid(x)`` (Swish): slope 0.2500.
+- Gaussian ``Phi(x)`` (GELU): slope 0.3989.
+
+So GoLU's gate is steeper than Swish's at the origin and shallower than
+GELU's. Do not describe it as "the gentler gate" -- that ordering is wrong
+against Swish.
+
+The paper argues the asymmetry reduces activation variance, smooths the loss
+surface and acts as an implicit regularizer. Those are claims about training
+dynamics from the paper, not properties you can read off the formula.
+
+For large negative inputs the gate goes to zero and the unit is effectively
+pruned. In float32, ``GoLU(-50.0)`` is exactly ``-0.0``: the inner
+``exp(-gamma*x)`` overflows to ``inf`` and the outer exponential takes it to
+0.0. For large positive inputs the gate approaches ``alpha`` and the signal
+passes through near-linearly.
+
+The three parameters generalize the standard function. ``alpha`` sets the
+upper asymptote, ``beta`` the displacement, ``gamma`` the growth rate. All
+default to 1.0, which recovers the plain Gumbel CDF. They are stored
 constants, not trainable weights: this layer creates no variables.
 
 Foundational mathematics::
 
     GoLU(x)     = x * Gompertz(x)
     Gompertz(x) = alpha * exp(-beta * exp(-gamma * x))
-
-At ``alpha = beta = gamma = 1`` the gate is exactly the standard Gumbel CDF.
 
 References:
     - Anonymous, 2025. GoLU: Gompertz Linear Units. (the activation this
@@ -66,58 +70,54 @@ class GoLU(keras.layers.Layer):
 
     Multiplies the input by a Gompertz function of itself,
     ``GoLU(x) = x * alpha * exp(-beta * exp(-gamma * x))``. At the defaults
-    ``alpha = beta = gamma = 1.0`` the gate is the standard Gumbel distribution's
-    CDF — asymmetric, unlike Swish's logistic CDF or GELU's Gaussian CDF, and
-    therefore gentler in slope near the origin.
+    ``alpha = beta = gamma = 1.0`` the gate is the standard Gumbel CDF. That
+    gate is asymmetric, so it reads 0.3679 at ``x = 0`` rather than the 0.5 a
+    symmetric gate gives. Output shape equals input shape.
 
-    Stateless: the three parameters are stored constants, so this layer creates no
-    weights and needs no ``build``.
+    The layer owns no weights. The three parameters are stored constants, so
+    there is no ``build``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────┐
-        │  Input x [batch, …, features]        │
-        └───────────────┬──────────────────────┘
-                        ├──────────────────────────────┐
-                        ▼                              │
-        ┌──────────────────────────────────────┐       │
-        │  Gompertz(x)                         │       │  identity
-        │    = alpha · exp(−beta · exp(−γ·x))  │       │
-        │                                      │       │
-        │    x → −∞ :  gate → 0   (pruned)     │       │
-        │    x → +∞ :  gate → alpha (linear)   │       │
-        │    the CDF of a Gumbel — RIGHT-      │       │
-        │    SKEWED, so the slope near 0 is    │       │
-        │    gentler than a symmetric gate's   │       │
-        └───────────────┬──────────────────────┘       │
-                        ▼                              │
-                       (×)◄─────────────────────────---┘
-                        │
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Output [batch, …, features]         │
-        └──────────────────────────────────────┘
+                             x  [B, ..., F]
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │ identity: x           │       │ gate = Gompertz(x)    │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │ in (0, alpha)
+                    └───────────────┬───────────────┘
+                                    │  x * gate
+                                    ▼
+                             y  [B, ..., F]
 
-    **Gate family:**
+    ``Gompertz(x) = alpha * exp(-beta * exp(-gamma * x))``. The left branch is
+    the tensor itself, not a weight or a sub-layer. The stated ``(0, alpha)``
+    range holds for positive ``alpha``, ``beta`` and ``gamma``.
+
+    **Gate family, measured:**
 
     .. code-block:: text
 
-        activation   gate g(x)          underlying distribution   symmetric?
-        Swish        sigmoid(x)         logistic                  yes
-        GELU         Phi(x)             Gaussian                  yes
-        GoLU         exp(−exp(−x))      Gumbel                    NO — right-skew
+        activation  gate g(x)       g(0)    slope at 0   distribution
+        Swish       sigmoid(x)      0.5000  0.2500       logistic
+        GELU        Phi(x)          0.5000  0.3989       Gaussian
+        GoLU        exp(-exp(-x))   0.3679  0.3679       Gumbel
 
-        The asymmetry IS the design: it is what produces the shallower slope near
-        the origin, and with it the reduced activation variance and smoother loss
-        landscape the method is motivated by.
+        All three gates reach their steepest point at x = 0. GoLU's is
+        steeper than Swish's there and shallower than GELU's, so it is not
+        "the gentle gate". What sets it apart is g(0): it is not 0.5, because
+        a Gumbel is not symmetric.
 
-    :param alpha: Controls the upper asymptote or scale of the gate.
+    :param alpha: Upper asymptote, or scale, of the gate.
     :type alpha: float
-    :param beta: Controls the gate displacement along the input-axis.
+    :param beta: Displacement of the gate along the input axis.
     :type beta: float
-    :param gamma: Controls the growth rate of the gate.
+    :param gamma: Growth rate of the gate.
     :type gamma: float
     :param kwargs: Additional arguments for the ``Layer`` base class (e.g., ``name``).
 
@@ -142,8 +142,8 @@ class GoLU(keras.layers.Layer):
 
     Note:
         ``alpha``, ``beta`` and ``gamma`` are fixed hyperparameters, not learned.
-        A trainable variant would need them created as weights in ``build``, which
-        this layer deliberately does not do.
+        Making them trainable would mean creating them as weights in ``build``,
+        which this layer does not do.
     """
 
     def __init__(
@@ -156,9 +156,8 @@ class GoLU(keras.layers.Layer):
         """
         Store the three gate parameters.
 
-        No sub-layers and no weights are created: at the defaults this is exactly
-        the Gumbel CDF gate, and every parameter is a constant folded into the
-        expression in :meth:`call`.
+        No sub-layers and no weights are created. Each parameter is a plain
+        constant folded into the expression in :meth:`call`.
 
         :param alpha: Upper asymptote or scale of the Gompertz gate.
         :type alpha: float
@@ -170,51 +169,49 @@ class GoLU(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Store all configuration parameters. This is crucial for serialization.
+        # get_config() reads these back, so all three must be stored.
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Apply the GoLU activation: ``x * alpha * exp(-beta * exp(-gamma * x))``.
+        Apply ``x * alpha * exp(-beta * exp(-gamma * x))`` element-wise.
 
-        The double exponential is evaluated as written; note that the inner
-        ``exp(-gamma * x)`` grows without bound as ``x`` goes negative, so the
-        outer exponential is what keeps the gate finite and drives it to zero
-        there.
+        The double exponential is evaluated as written. The inner
+        ``exp(-gamma * x)`` grows without bound as ``x`` goes negative and
+        overflows to ``inf`` in float32; the outer exponential then takes the
+        gate to 0.0. Measured: ``GoLU(-50.0)`` returns ``-0.0``, not ``NaN``.
 
         :param inputs: Input tensor of any shape.
         :type inputs: keras.KerasTensor
-        :return: Activated tensor with the same shape as inputs.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
-        # Gompertz(x) = alpha * exp(-beta * exp(-gamma * x))
         gompertz_gate = self.alpha * keras.ops.exp(
             -self.beta * keras.ops.exp(-self.gamma * inputs)
         )
-        # GoLU(x) = x * Gompertz(x)
         return inputs * gompertz_gate
 
     def compute_output_shape(self, input_shape: tuple) -> tuple:
         """
-        Return the output shape, which is identical to the input shape.
+        Return the output shape, which equals the input shape.
 
         The activation is element-wise, so nothing about the shape changes.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: tuple
-        :return: Output shape tuple, identical to input_shape.
+        :return: The same shape tuple, unchanged.
         :rtype: tuple
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return the configuration of the layer for serialization.
+        Return the config needed to rebuild the layer.
 
-        :return: Dictionary containing the layer configuration — every
-            constructor argument, which for a stateless layer is its entire state.
+        :return: The base Layer config plus ``alpha``, ``beta`` and ``gamma``.
+            With no weights, that is the layer's entire state.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

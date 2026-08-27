@@ -1,41 +1,26 @@
 """
-Vector squashing non-linearity for Capsule Networks.
+Vector squashing, the activation of a Capsule Network.
 
-This layer applies a specific non-linear function designed to operate on
-vectors (capsules) rather than scalars. Its primary architectural purpose
-in a Capsule Network is to normalize the length of a capsule's output
-vector to lie within the range [0, 1), making the length interpretable as
-the probability that the entity represented by the capsule exists. Crucially,
-this is achieved while preserving the vector's orientation, which encodes
-the instantiation parameters (e.g., pose, texture) of the detected entity.
+This activation works on vectors, not scalars. It rescales each vector's
+length into [0, 1) and leaves its direction alone. In a capsule network the
+length is read as "does this entity exist" and the direction as "what are its
+pose and other properties", so the two have to be decoupled: squashing changes
+the first and never touches the second.
 
-The "squashing" operation serves as the activation function for a capsule
-layer. It ensures that the outputs from different capsules are on a
-comparable scale before they are used in routing algorithms, such as
-"dynamic routing." This decouples the "what" (existence probability, encoded
-in the length) from the "how" (properties, encoded in the direction). Short
-input vectors, representing low certainty, are shrunk almost to zero, while
-long vectors, representing high certainty, are shrunk to a length just
-below one.
+The function is::
 
-Mathematical Foundation:
-    The squashing function is defined as:
-        ``v_squashed = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)``
+    squash(v) = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)
 
-    This formula can be understood as the product of two components:
-    1.  **Directional Unit Vector (v / ||v||):** This term isolates the
-        orientation of the input vector ``v``, ensuring that the direction of
-        the output is identical to the input. This preserves the learned
-        instantiation parameters.
-    2.  **Scalar Scaling Factor (||v||^2 / (1 + ||v||^2)):** This term
-        non-linearly scales the magnitude. It is a monotonic function of
-        the squared norm ``||v||^2``.
-        -   As the input vector's norm approaches zero (``||v|| -> 0``), the
-            scaling factor also approaches zero, effectively nullifying
-            low-confidence capsules.
-        -   As the input vector's norm becomes very large (``||v|| -> inf``),
-            the scaling factor asymptotically approaches one, ensuring the
-            output length is always bounded.
+The right factor is the unit vector, which carries the direction. The left
+factor is a scalar in [0, 1) that depends only on the squared norm. It rises
+monotonically: near zero for a short vector, close to one for a long one. So
+short vectors are almost annihilated and long ones are capped just under
+length 1.
+
+Measured with the default ``epsilon`` of 1e-7: an input vector of norm 0.1
+comes out at 0.0099, norm 1.0 comes out at 0.5000, norm 10.0 at 0.9901, and
+norm 1000.0 at 0.999999. Putting every capsule on the same bounded scale is
+what makes the routing step downstream comparable across capsules.
 
 References:
     - Sabour, S., Frosst, N., & Hinton, G. E. (2017). "Dynamic routing
@@ -62,54 +47,58 @@ from dl_techniques.utils.logger import logger
 class SquashLayer(keras.layers.Layer):
     """Squashing non-linearity for Capsule Network vectors.
 
-    Applies the squashing function
-    ``squash(v) = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)`` along a specified
-    axis, normalizing capsule vector lengths to the range [0, 1) while
-    preserving their directional information. Short vectors are shrunk toward
-    zero and long vectors are shrunk to just below one.
+    Applies ``squash(v) = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)`` along one
+    axis. Vectors along that axis come out with the same direction and a
+    length in [0, 1). Output shape equals input shape.
+
+    The layer owns no weights. ``axis`` and ``epsilon`` are validated in
+    ``__init__``, so a bad value fails at construction, not at the first call.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: v (batch, num_capsules, dim)
-                │
-                ├──────────────────────────────┐
-                │                              │
-                ▼                              ▼
-        ┌───────────────────┐   ┌──────────────────────────┐
-        │  Squared L2 Norm  │   │   Unit Vector:           │
-        │  ||v||^2 along    │   │   v / (||v|| + epsilon)  │
-        │  specified axis   │   │                          │
-        └───────┬───────────┘   └─────────────┬────────────┘
-                │                             │
-                ▼                             │
-        ┌───────────────────┐                 │
-        │  Scale Factor:    │                 │
-        │  ||v||^2          │                 │
-        │  ───────────      │                 │
-        │  1 + ||v||^2      │                 │
-        └───────┬───────────┘                 │
-                │                             │
-                └──────────┬──────────────────┘
-                           │
-                           ▼
-                ┌──────────────────┐
-                │ scale * unit_vec │
-                └────────┬─────────┘
-                         │
-                         ▼
-        Output: (batch, num_capsules, dim)
-                norms in [0, 1)
+                            v  [..., D, ...]
+                                    │
+                                    ▼
+                ┌───────────────────────────────────────┐
+                │ s = sum(v*v) over axis, keepdims=True │
+                └───────────────────┬───────────────────┘
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │ scale = s / (1 + s)   │       │ unit = v/sqrt(s+eps)  │
+        │ in [0, 1)             │       │ same direction as v   │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │
+                    └───────────────┬───────────────┘
+                                    │  scale * unit
+                                    ▼
+                             y  [same shape]
+                                ||y|| < 1
 
-    :param axis: Axis along which to compute the vector norm for squashing.
-        Defaults to -1 (last axis).
+    ``D`` is the size of the axis given by ``axis``; every other axis is
+    untouched. Both branches read the same ``s``, computed once.
+
+    :param axis: Axis holding each capsule vector. The norm is reduced over
+        it. Defaults to -1, the last axis.
     :type axis: int
-    :param epsilon: Small constant for numerical stability to prevent division
-        by zero. If None, uses ``keras.backend.epsilon()`` (typically 1e-7).
+    :param epsilon: Small constant added under the square root so a zero
+        vector does not divide by zero. If None, ``keras.backend.epsilon()``
+        is used, which is 1e-7. Must be positive.
     :type epsilon: Optional[float]
     :param kwargs: Additional keyword arguments passed to the Layer base class,
         such as ``name``, ``dtype``, ``trainable``, etc.
+
+    :raises ValueError: If ``axis`` is not an ``int``, or if ``epsilon`` is
+        given and is not positive.
+
+    Note:
+        The epsilon sits inside the square root, as ``sqrt(s + epsilon)``, not
+        beside the norm as ``||v|| + epsilon``. An all-zero input vector
+        therefore comes out exactly zero rather than ``NaN``, because the
+        ``scale`` factor is zero too.
 
     References:
         - Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
@@ -124,25 +113,27 @@ class SquashLayer(keras.layers.Layer):
             epsilon: Optional[float] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the Squash layer.
+        """Validate and store ``axis`` and ``epsilon``.
 
-        :param axis: Axis along which to compute vector norms for squashing.
+        :param axis: Axis holding each capsule vector.
         :type axis: int
-        :param epsilon: Small constant for numerical stability. If None, uses
-            ``keras.backend.epsilon()``.
+        :param epsilon: Small constant for numerical stability. If None,
+            ``keras.backend.epsilon()`` (1e-7) is used. Must be positive.
         :type epsilon: Optional[float]
         :param kwargs: Additional keyword arguments for the Layer base class.
+        :raises ValueError: If ``axis`` is not an ``int``, or if ``epsilon``
+            is given and is not positive.
         """
         super().__init__(**kwargs)
 
-        # Validate configuration
         if not isinstance(axis, int):
             raise ValueError(f"axis must be an integer, got {type(axis).__name__}")
         if epsilon is not None and epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
-        # Store configuration
         self.axis = axis
+        # Resolve None to a number here rather than at call time, so
+        # get_config() records the value the layer was actually built with.
         self.epsilon = epsilon if epsilon is not None else keras.backend.epsilon()
 
         logger.debug(f"Initialized SquashLayer with axis={axis}, epsilon={self.epsilon}")
@@ -152,61 +143,59 @@ class SquashLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply squashing non-linearity to input vectors.
+        """Squash the vectors lying along ``self.axis``.
 
         Computes ``squash(v) = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)``.
 
-        :param inputs: Input tensor to be squashed. Vectors are identified along
-            the specified axis.
+        :param inputs: Input tensor. Vectors are read along ``self.axis``.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training or inference mode. Not used
-            in this layer but kept for API consistency.
+        :param training: Training or inference mode. Unused here; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Tensor with same shape as inputs, containing squashed vectors with
-            norms bounded in [0, 1).
+        :return: Tensor of the same shape as ``inputs``, whose vectors along
+            ``self.axis`` have length in [0, 1).
         :rtype: keras.KerasTensor
         """
-        # Compute squared L2 norm along specified axis
-        # Shape: input_shape with axis dimension reduced to 1
+        # Squared L2 norm. keepdims=True keeps the reduced axis at size 1,
+        # which is what lets scale and safe_norm broadcast back over inputs.
         squared_norm = keras.ops.sum(
             keras.ops.square(inputs),
             axis=self.axis,
             keepdims=True
         )
 
-        # Compute safe norm to avoid division by zero
-        # Add epsilon for numerical stability
+        # epsilon goes INSIDE the sqrt, so a zero vector gives a finite
+        # denominator instead of a division by zero.
         safe_norm = keras.ops.sqrt(squared_norm + self.epsilon)
 
-        # Compute scale factor: ||v||^2 / (1 + ||v||^2)
-        # This ensures output norm is in [0, 1)
+        # Bounded scale factor, always in [0, 1).
         scale = squared_norm / (1.0 + squared_norm)
 
-        # Compute unit vector: v / ||v||
         unit_vector = inputs / safe_norm
 
-        # Apply squashing: scale * unit_vector
-        # Final result: (||v||^2 / (1 + ||v||^2)) * (v / ||v||)
         return scale * unit_vector
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple, identical to input_shape.
+        :return: The same shape tuple, unchanged.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
+        """Return the config needed to rebuild the layer.
 
-        :return: Dictionary containing the layer configuration including
-            axis and epsilon parameters along with parent class configuration.
+        ``epsilon`` is stored as a resolved number, never as ``None``, so a
+        reloaded layer keeps the value it was built with even if the backend
+        epsilon changes.
+
+        :return: The base Layer config plus ``axis`` and ``epsilon``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -217,9 +206,10 @@ class SquashLayer(keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        """Return string representation of the layer.
+        """Return a short representation showing the config and layer name.
 
-        :return: String representation including the layer name and key parameters.
+        :return: A string such as
+            ``SquashLayer(axis=-1, epsilon=1e-07, name='squash')``.
         :rtype: str
         """
         return f"SquashLayer(axis={self.axis}, epsilon={self.epsilon}, name='{self.name}')"
