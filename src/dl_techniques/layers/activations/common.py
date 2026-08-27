@@ -1,4 +1,7 @@
 """
+Shared helpers for this package: activation-argument handling, and the
+axis-vs-rank arithmetic that several layers need in more than one method.
+
 Three helpers for handling a layer's ``activation`` argument.
 
 A layer that takes an ``activation`` argument has to cope with four input
@@ -23,6 +26,14 @@ There is a name clash inside this package. ``gelu_tanh.py`` also defines a
 are different functions: this one rejects ``keras.layers.Layer`` instances,
 the other extends ``keras.activations.get`` with the tanh-GELU spellings.
 Import this one explicitly, ``from .common import resolve_activation``.
+
+Two further helpers, :func:`axis_is_in_range` and :func:`normalize_axis`,
+carry the ``axis``/rank arithmetic that ``build``, ``call`` and
+``compute_output_shape`` each have to redo. They are pure functions of their
+two arguments -- they read no layer state -- so a
+``compute_output_shape`` on an UNBUILT layer can call them, and a method can
+resolve an axis against the rank of the shape it was HANDED rather than
+against a rank cached at build time.
 """
 
 import keras
@@ -144,6 +155,63 @@ def serialize_activation(activation: Any) -> Any:
     if activation is None or isinstance(activation, str):
         return activation
     return keras.saving.serialize_keras_object(activation)
+
+# ---------------------------------------------------------------------------
+
+def axis_is_in_range(axis: int, rank: int) -> bool:
+    """
+    Report whether ``axis`` addresses a real dimension of a rank-``rank`` tensor.
+
+    The legal range is ``[-rank, rank - 1]``: ``rank`` distinct dimensions,
+    each reachable by one non-negative and one negative index.
+
+    This is the single predicate behind every axis range check in the package
+    that has to run in more than one method. Both call sites in a layer must
+    use THIS function rather than re-typing the comparison, so that the two
+    cannot drift apart; that drift is the defect the helper exists to prevent.
+
+    Pure function of its arguments. It reads no layer state, so it is safe to
+    call from ``compute_output_shape`` on an unbuilt layer.
+
+    Failure mode: none. It raises nothing and never returns anything but a
+    ``bool``. Callers own the error message, because the two current callers
+    raise deliberately different texts and both texts are asserted by tests.
+
+    :param axis: The configured axis, negative or non-negative.
+    :type axis: int
+    :param rank: Number of dimensions of the tensor or shape in hand. Must be
+        the rank of the shape the CALLER was given, not one cached earlier.
+    :type rank: int
+    :return: ``True`` if ``-rank <= axis < rank``, else ``False``.
+    :rtype: bool
+    """
+    return -rank <= axis < rank
+
+
+def normalize_axis(axis: int, rank: int) -> int:
+    """
+    Convert a possibly-negative ``axis`` to its non-negative equivalent.
+
+    ``-1`` becomes ``rank - 1``, ``-rank`` becomes ``0``, and a non-negative
+    axis passes through unchanged.
+
+    Pure function of its arguments, for the same reason as
+    :func:`axis_is_in_range`: resolving against the rank actually in hand is
+    what makes it correct to call from a method that may see a different rank
+    than ``build`` did.
+
+    Failure mode: none, and **no range check**. Out of range in gives out of
+    range out (``normalize_axis(5, 3) == 5``). Gate it with
+    :func:`axis_is_in_range` first if the value is not already trusted.
+
+    :param axis: The configured axis, negative or non-negative.
+    :type axis: int
+    :param rank: Number of dimensions of the tensor or shape in hand.
+    :type rank: int
+    :return: ``axis + rank`` when ``axis < 0``, otherwise ``axis``.
+    :rtype: int
+    """
+    return rank + axis if axis < 0 else axis
 
 # ---------------------------------------------------------------------------
 

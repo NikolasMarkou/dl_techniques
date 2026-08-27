@@ -33,6 +33,12 @@ import keras
 from typing import Optional, Dict, Any
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .common import axis_is_in_range, normalize_axis
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class Sparsemax(keras.layers.Layer):
@@ -161,9 +167,9 @@ class Sparsemax(keras.layers.Layer):
         # pre-fix bytes, writing `norm = ndim + axis`: list.pop accepts negatives, so
         # `norm == -1` returned right numbers in a wrong layout ((2,4,5) in, (2,5,4)
         # out) and `norm in [-ndim, -2]` aborted the process (SIGABRT, exit 134,
-        # uncatchable). In-range axes are unaffected: axis -ndim..ndim-1 all work.
+        # uncatchable). Predicate = `common.axis_is_in_range`, SHARED with D-022.
         # Guard: TestSparsemax::test_out_of_range_axis_raises_value_error. See D-014.
-        if not -ndim <= self.axis < ndim:
+        if not axis_is_in_range(self.axis, ndim):
             raise ValueError(
                 f"axis={self.axis} is out of range for an input of rank "
                 f"{ndim} (shape {tuple(input_shape)}); axis must be in "
@@ -171,7 +177,7 @@ class Sparsemax(keras.layers.Layer):
             )
 
         # Normalize axis to positive index (e.g., -1 -> 2 for rank 3)
-        axis = self.axis if self.axis >= 0 else ndim + self.axis
+        axis = normalize_axis(self.axis, ndim)
 
         # Step 1: move the target axis to the end.
         # `sort` and `cumsum` want the last, contiguous axis. If `axis` is not
@@ -319,17 +325,17 @@ class Sparsemax(keras.layers.Layer):
         :return: Output shape tuple, identical to input.
         :rtype: tuple
         :raises ValueError: If ``axis`` is out of range for ``input_shape``'s
-            rank. The range is the same one :meth:`call` enforces, and the two
-            MUST agree -- see the DECISION anchor below.
+            rank. The range is the same one :meth:`call` enforces, because both
+            call ``common.axis_is_in_range`` -- see the DECISION anchor below.
         """
         # DECISION plan-2026-07-29T110112-09832856/D-022
-        # This predicate must stay IDENTICAL to `call`'s (D-014); change both in the
-        # same edit. Do NOT delete it as defensive: without it a symbolic build was
-        # told the output shape was the input shape, a lie for axis == -(ndim+1)
-        # (measured: (2,4,5) declared, (2,5,4) produced). See decisions.md D-022;
-        # guard TestSparsemax::test_compute_output_shape_rejects_the_same_axes_as_call.
+        # Predicate = `common.axis_is_in_range`, the SAME function `call` uses
+        # (D-014); do NOT re-type the comparison here, and do NOT delete the check
+        # as defensive: without it a symbolic build was told the output shape was
+        # the input shape, a lie for axis == -(ndim+1) ((2,4,5) declared, (2,5,4)
+        # produced). D-022; TestSparsemax::test_compute_output_shape_rejects_*.
         ndim = len(input_shape)
-        if not -ndim <= self.axis < ndim:
+        if not axis_is_in_range(self.axis, ndim):
             raise ValueError(
                 f"axis={self.axis} is out of range for an input of rank "
                 f"{ndim} (shape {tuple(input_shape)}); axis must be in "

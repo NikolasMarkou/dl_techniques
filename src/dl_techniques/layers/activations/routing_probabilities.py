@@ -107,6 +107,8 @@ from typing import Optional, Tuple, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 
+from .common import axis_is_in_range, normalize_axis
+
 
 # ---------------------------------------------------------------------
 # Cosine basis (module-level, cached)
@@ -621,18 +623,19 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # Stash shape so get_build_config() can return it for save/load.
         self._build_input_shape = tuple(input_shape)
 
-        # Normalize axis
+        # Normalize axis. The range predicate is `common.axis_is_in_range`,
+        # the SAME function compute_output_shape uses, so the two range checks
+        # cannot drift apart. Only the message differs, and deliberately: this
+        # one's wording is asserted by
+        # TestRoutingProbabilitiesLayer::test_invalid_axis_out_of_bounds.
         input_rank = len(input_shape)
-        if self.axis < 0:
-            self._normalized_axis = input_rank + self.axis
-        else:
-            self._normalized_axis = self.axis
-
-        if self._normalized_axis < 0 or self._normalized_axis >= input_rank:
+        if not axis_is_in_range(self.axis, input_rank):
             raise ValueError(
                 f"axis {self.axis} is out of bounds for input shape "
                 f"{input_shape}"
             )
+
+        self._normalized_axis = normalize_axis(self.axis, input_rank)
 
         input_dim = input_shape[self._normalized_axis]
 
@@ -975,15 +978,16 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # build() time, so a later call with a different-rank shape -- from a
         # wrapper layer or an outer model -- would resolve to the wrong axis.
         # ``self.axis`` is the configured value and the source of truth.
-        normalized_axis = (
-            input_rank + self.axis if self.axis < 0 else self.axis
-        )
-
-        if normalized_axis < 0 or normalized_axis >= input_rank:
+        # ``common.normalize_axis`` / ``axis_is_in_range`` are pure functions of
+        # ``(axis, rank)`` and read no layer state, so sharing them with
+        # ``build`` preserves that property instead of undoing it.
+        if not axis_is_in_range(self.axis, input_rank):
             raise ValueError(
                 f"axis {self.axis} is out of bounds for input shape "
                 f"{input_shape}"
             )
+
+        normalized_axis = normalize_axis(self.axis, input_rank)
 
         if self.output_dim is not None:
             output_shape[normalized_axis] = self.output_dim
