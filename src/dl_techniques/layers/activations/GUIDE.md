@@ -1,6 +1,3 @@
-Here is the `GUIDE.md` for the activations module, structured to match the Attention module guide while addressing the specific requirements of activation functions (stateless math vs. stateful layers, numerical stability, and broadcasting).
-
-```markdown
 # Activation Layer Implementation Guide
 
 This guide establishes the architectural standards, coding conventions, and best practices for implementing new activation layers within the `dl_techniques` framework.
@@ -209,4 +206,3 @@ If refactoring older activation functions:
 2.  **Standardize Axes:** Ensure `axis` defaults to -1 and handles negative indexing.
 3.  **Clean Configs:** Ensure `get_config` returns serialized initializers/regularizers, not the objects themselves (use `keras.initializers.serialize`).
 4.  **Add Type Hints:** Ensure `call` takes `keras.KerasTensor` and returns `keras.KerasTensor`.
-```
