@@ -1,15 +1,19 @@
 """Shared honesty rule for ``supports_masking`` across ``layers/norms/``.
 
-``supports_masking = True`` is a PROMISE that each ``(sample, position)`` slot of
-the output depends only on the SAME slot of the input, so a Keras mask that was
-valid on the input is still valid on the output. For a normalization layer that
-promise is a property of the *normalized axis*, not of the class: ``RMSNorm``
-honours it at the default ``axis=-1`` and breaks it at ``axis=1``, where one
-token's magnitude enters every other token's statistic (measured cross-token leak
-on a ``(3, 5, 8)`` input: ``2.063``).
+``supports_masking = True`` is a promise. It says every ``(sample, position)``
+slot of the output depends only on the SAME slot of the input. A Keras mask that
+was valid on the input is then still valid on the output.
 
-The rule therefore lives here once and is consulted by all seven flag-carrying
-classes rather than being re-derived per file.
+For a normalization layer that promise belongs to the normalized AXIS, not to the
+class. ``RMSNorm`` keeps it at the default ``axis=-1`` and breaks it at
+``axis=1``. Normalizing the token axis puts one token's magnitude into every
+other token's statistic. Measured cross-token leak on a ``(3, 5, 8)`` input at
+``axis=1``: ``2.063`` for ``RMSNorm``, and ``0.914`` to ``23.068`` across the
+seven classes that carry the flag.
+
+So the rule lives here once. All seven flag-carrying classes call it instead of
+re-deriving the test per file. Measured: exactly seven modules in this package
+import it, and each one calls it twice, in ``__init__`` and again in ``build()``.
 
 See ``decisions.md`` D-012 of plan ``plan-2026-08-25T195813-d5a035ab``.
 """
@@ -19,15 +23,11 @@ from typing import Optional, Sequence, Union
 __all__ = ["normalizes_only_the_feature_axis"]
 
 # DECISION plan-2026-08-25T195813-d5a035ab/D-012
-# Do NOT go back to `self.supports_masking = True` in __init__. That is what shipped
-# first, and it advertised token-independence for `axis=1`, where the measured
-# cross-token leak is 0.914-23.068 on a (3, 5, 8) input. Do NOT replace this with a
-# spelling-only test (`axis == -1`) either: `axis=2` on a rank-3 input IS the feature
-# axis and measures a 0.0 leak, so refusing the flag there would be timid rather than
-# honest, and `tests/test_layers/test_norms/test_the_norms_propagate_masks.py::
-# test_the_feature_axis_configurations_still_claim_masking` fails if you do.
-# The rank-aware answer is only available in build(), which is why every caller
-# refines the flag there. See decisions.md D-012.
+# Decide supports_masking in build(), from the axis resolved against the rank.
+# Do NOT set it True in __init__: at axis=1 the leak is 0.914-23.068 on (3, 5, 8).
+# Do NOT test the spelling `axis == -1` instead: axis=2 at rank 3 IS the feature
+# axis and leaks 0.0, so test_the_norms_propagate_masks.py::
+# test_the_feature_axis_configurations_still_claim_masking fails. See decisions.md D-012.
 
 
 def normalizes_only_the_feature_axis(
@@ -36,25 +36,64 @@ def normalizes_only_the_feature_axis(
 ) -> bool:
     """Decide whether an ``axis`` spec names the trailing (feature) axis and nothing else.
 
-    Two modes, matching the two moments at which the question can be asked:
+    The function answers at two different moments, and the two answers differ on
+    purpose.
 
-    * ``rank is None`` - the ``__init__`` moment, where the input rank is unknown.
-      Only the spelling ``-1`` (or a one-element container holding it) is accepted,
-      because ``-1`` names the trailing axis at every rank. A non-negative spelling
-      such as ``2`` is undecidable here and returns ``False``; ``build()`` then
-      upgrades it if the rank turns out to make it the feature axis.
-    * ``rank`` given - the ``build()`` moment. Every axis is resolved against the
-      rank and the answer is exact.
+    **Decision path:**
 
-    A rank below 2 returns ``False``: on a rank-1 input the trailing axis IS the
+    .. code-block:: text
+
+              axis spec (int or sequence)
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │ empty sequence?       │──── yes ──► False
+              └───────────┬───────────┘
+                          │ no
+                          ▼
+              ┌───────────────────────┐
+              │ rank is None?         │──── yes ──► every entry == -1
+              │ (the __init__ moment) │
+              └───────────┬───────────┘
+                          │ no (the build() moment)
+                          ▼
+              ┌───────────────────────┐
+              │ rank < 2?             │──── yes ──► False
+              └───────────┬───────────┘
+                          │ no
+                          ▼
+              ┌───────────────────────────────────────┐
+              │ resolve negatives against rank, then  │
+              │ answer resolved == {rank - 1}         │
+              └───────────────────────────────────────┘
+
+    In the ``__init__`` moment the input rank is unknown, so only the spelling
+    ``-1`` is accepted. ``-1`` names the trailing axis at every rank. A
+    non-negative spelling such as ``2`` cannot be decided yet and returns
+    ``False``. ``build()`` then upgrades it if the rank makes it the feature
+    axis. Measured on a rank-3 input: ``axis=2`` returns ``False`` before
+    ``build()`` and ``True`` after it.
+
+    A rank below 2 returns ``False``. On a rank-1 input the trailing axis IS the
     batch axis, so normalizing it mixes samples.
 
     :param axis: A single axis index, or a sequence of them.
     :type axis: Union[int, Sequence[int]]
     :param rank: Rank of the input tensor, or ``None`` if not yet known.
     :type rank: Optional[int]
+
     :return: ``True`` only when every normalized axis is the trailing axis.
     :rtype: bool
+
+    Example:
+
+    .. code-block:: python
+
+        normalizes_only_the_feature_axis(-1)          # True
+        normalizes_only_the_feature_axis(2)           # False, rank unknown
+        normalizes_only_the_feature_axis(2, rank=3)   # True
+        normalizes_only_the_feature_axis(1, rank=3)   # False
+        normalizes_only_the_feature_axis(-1, rank=1)  # False
     """
     axes = list(axis) if isinstance(axis, (list, tuple)) else [axis]
     if not axes:

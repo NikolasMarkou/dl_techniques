@@ -1,20 +1,19 @@
-"""
-Dynamic Tanh (DyT) Layer Implementation for Keras 3.x
+"""DynamicTanh (DyT): a normalization-free replacement for LayerNormalization.
 
-Based on "Transformers without Normalization" by Zhu et al., CVPR 2025.
-Paper: https://arxiv.org/abs/2503.10622
+``DynamicTanh`` computes ``weight * tanh(alpha * x) + bias``, where ``alpha`` is
+a single learnable scalar and ``weight`` and ``bias`` are per-feature learnable
+vectors. There is no mean, no variance and no reduction of any kind.
 
-Key innovation: Replace LayerNormalization with learnable scaled hyperbolic tangent
-plus affine transformation for improved computational efficiency in Transformers.
+The layer comes from "Transformers without Normalization" (Zhu et al., CVPR
+2025), https://arxiv.org/abs/2503.10622. The paper's claim is that a saturating
+scalar nonlinearity reproduces what LayerNormalization does for a Transformer
+without computing statistics.
 
-The transformation is: DyT(x) = weight * tanh(alpha * x) + bias
-where alpha is a learnable scalar parameter.
-
-Benefits:
-- Simpler computation than LayerNormalization
-- No batch statistics required
-- Improved training stability
-- Competitive performance with LayerNorm
+Because the transform is elementwise, one position's value never reaches another
+position's output. Measured cross-token leak on ``(3, 5, 8)`` and ``(4, 5, 8)``
+inputs, at ``axis=-1``, ``axis=1`` and ``axis=2``: exactly ``0.0`` in every case.
+That is why ``supports_masking`` is set ``True`` unconditionally here, while the
+RMS-family layers in this package have to decide it from the axis.
 """
 
 import keras
@@ -32,88 +31,120 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class DynamicTanh(keras.layers.Layer):
-    """Dynamic Tanh (DyT) normalization layer.
+    """Apply ``weight * tanh(alpha * x) + bias`` with a learnable scalar ``alpha``.
 
-    A drop-in replacement for LayerNormalization in Transformers, applying a
-    learnable scaled hyperbolic tangent followed by an affine transformation:
-    ``output = weight * tanh(alpha * input) + bias``, where ``alpha`` is a
-    learnable scalar. This provides normalization-like benefits without batch
-    statistics computation, as described in "Transformers without Normalization"
-    (Zhu et al., CVPR 2025).
+    A drop-in replacement for ``LayerNormalization`` in Transformers. ``alpha``
+    is one scalar weight for the whole layer; ``weight`` and ``bias`` have the
+    shape of the axes named by ``axis``. The output has the same shape as the
+    input.
+
+    The transform is elementwise, so the layer computes no statistics and mixes
+    no positions. Measured cross-token leak on ``(3, 5, 8)`` and ``(4, 5, 8)``
+    inputs, at ``axis=-1``, ``axis=1`` and ``axis=2``: exactly ``0.0`` in every
+    case. ``supports_masking`` is therefore ``True`` for every axis spelling.
+
+    ``axis`` does not choose a reduction, because there is no reduction. It
+    chooses which dimensions get their own ``weight`` and ``bias`` entry.
+    Measured on a ``(2, 4, 8)`` input: ``axis=-1`` gives ``weight.shape=(8,)``
+    broadcast as ``(1, 1, 8)``, and ``axis=1`` gives ``(4,)`` broadcast as
+    ``(1, 4, 1)``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐
-        │       Input (x)              │
-        │       shape: (B, ..., D)     │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Scale by alpha:             │
-        │  scaled = α × x              │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Hyperbolic tangent:         │
-        │  tanh(scaled)                │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Affine transform:           │
-        │  weight × tanh(...) + bias   │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │       Output                 │
-        │       shape: (B, ..., D)     │
-        └──────────────────────────────┘
+                      input: x  (batch, ..., D)
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────────┐
+          │ scaled = alpha * x                                │
+          │ alpha is one scalar weight                        │
+          └───────────────────────┬───────────────────────────┘
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────────┐
+          │ tanh_outputs = tanh(scaled)                       │
+          └───────────────────────┬───────────────────────────┘
+                                  │ in (-1, 1)
+                                  ▼
+          ┌───────────────────────────────────────────────────┐
+          │ weight and bias reshaped to                       │
+          │ _broadcast_shape, fixed in build()                │
+          └───────────────────────┬───────────────────────────┘
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────────┐
+          │ output = tanh_outputs * weight                    │
+          │          + bias                                   │
+          └───────────────────────┬───────────────────────────┘
+                                  │
+                                  ▼
+                      output: (batch, ..., D)
 
-    :param axis: Integer or list of integers specifying normalization axes.
-        Typically -1 (features axis). Defaults to -1.
+    :param axis: Axis or axes that get their own ``weight`` and ``bias`` entry.
+        Defaults to -1, the feature axis. A list is accepted; the entries are
+        checked against the input rank in ``build()``.
     :type axis: Union[int, List[int]]
-    :param alpha_init_value: Initial value for learnable alpha parameter. Must be a
-        strictly positive number: a non-positive alpha flips the transform's sign and
-        ``alpha == 0`` makes the layer the constant-zero map ``tanh(0 * x)``, so both
-        are rejected (matching ``validate_normalization_config``'s ``dynamic_tanh``
-        branch, which has always refused them).
-        Paper suggests 0.6-0.8 for attention normalization, 0.1-0.2 for FFN
-        and final decoder normalization. Defaults to 0.5.
+    :param alpha_init_value: Initial value of the learnable ``alpha``. Must be
+        strictly positive; see the ``:raises:`` note below, which explains why
+        this check is checkpoint-visible. The paper suggests 0.6-0.8 for
+        attention normalization and 0.1-0.2 for FFN and final decoder
+        normalization. Defaults to 0.5.
     :type alpha_init_value: float
-    :param kernel_initializer: Initializer for weight parameters. Defaults to ``'ones'``.
+    :param kernel_initializer: Initializer for ``weight``. Defaults to
+        ``'ones'``.
     :type kernel_initializer: Union[str, initializers.Initializer]
-    :param bias_initializer: Initializer for bias parameters. Defaults to ``'zeros'``.
+    :param bias_initializer: Initializer for ``bias``. Defaults to ``'zeros'``.
     :type bias_initializer: Union[str, initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for weight parameters.
+    :param kernel_regularizer: Optional regularizer for ``weight``.
     :type kernel_regularizer: Optional[regularizers.Regularizer]
-    :param bias_regularizer: Optional regularizer for bias parameters.
+    :param bias_regularizer: Optional regularizer for ``bias``.
     :type bias_regularizer: Optional[regularizers.Regularizer]
-    :param kernel_constraint: Optional constraint for weight parameters.
+    :param kernel_constraint: Optional constraint for ``weight``.
     :type kernel_constraint: Optional[constraints.Constraint]
-    :param bias_constraint: Optional constraint for bias parameters.
+    :param bias_constraint: Optional constraint for ``bias``.
     :type bias_constraint: Optional[constraints.Constraint]
+    :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+    :type kwargs: Any
 
-    :raises ValueError: If alpha_init_value is not a number.
-    :raises ValueError: If alpha_init_value is not strictly positive. **This check is
-        checkpoint-visible**: ``get_config()`` writes ``alpha_init_value``, so a ``.keras``
-        model serialized by a version that accepted a non-positive value no longer
-        deserializes. Measured - a functional model containing
-        ``DynamicTanh(alpha_init_value=-0.5)``, saved at commit ``a8a042f53``, now fails
-        with ``TypeError: <class 'keras.src.models.functional.Functional'> could not be
-        deserialized properly``, whose root cause is this very
-        ``ValueError: alpha_init_value must be a positive number``. The exposure is narrow
-        and was accepted deliberately (see ``decisions.md`` D-014 of
-        ``plan-2026-08-25T195813-d5a035ab``): the repo-wide grep found zero call sites
-        passing a non-positive value, the same model saved with the default ``0.5`` reloads
-        fine, and - measured - a checkpoint whose LEARNED ``alpha`` weight is negative also
-        still loads and reproduces its outputs exactly, because only the config's INIT
-        value is validated, never the restored weight.
-    :raises ValueError: If axis is out of bounds for input tensor.
+    :ivar axis: The axis list built in ``__init__``. A scalar ``axis`` becomes a
+        one-element list. ``build()`` never mutates it.
+    :vartype axis: List[int]
+    :ivar alpha_init_value: The configured initial alpha, stored as a float.
+    :vartype alpha_init_value: float
+    :ivar alpha: The scalar learnable weight, or None until ``build()`` runs.
+    :vartype alpha: Optional[keras.Variable]
+    :ivar weight: The per-feature scale, or None until ``build()`` runs.
+    :vartype weight: Optional[keras.Variable]
+    :ivar bias: The per-feature offset, or None until ``build()`` runs.
+    :vartype bias: Optional[keras.Variable]
+
+    :raises ValueError: If ``alpha_init_value`` is not an int or a float.
+    :raises ValueError: If ``alpha_init_value`` is not strictly positive. **This
+        check is checkpoint-visible.** ``get_config()`` writes
+        ``alpha_init_value``, so a ``.keras`` model saved by a version that
+        accepted a non-positive value no longer deserializes. Measured: a
+        functional model holding ``DynamicTanh(alpha_init_value=-0.5)``, saved at
+        commit ``a8a042f53``, now fails with a ``TypeError`` from the
+        deserializer whose root cause is this ``ValueError``. The break was
+        accepted after measuring how narrow it is: a repo-wide grep finds zero
+        call sites passing a non-positive value, and only the CONFIG value is
+        checked. A checkpoint whose LEARNED ``alpha`` weight is negative still
+        loads and reproduces its outputs exactly (measured: restored
+        ``alpha = -0.5``, ``max|delta| = 0.0``). See ``decisions.md`` D-014 of
+        ``plan-2026-08-25T195813-d5a035ab``.
+    :raises ValueError: If an entry of ``axis`` is out of bounds for the input
+        rank. Raised in ``build()``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.norms import DynamicTanh
+
+        x = keras.random.normal((4, 16, 64))
+        y = DynamicTanh(alpha_init_value=0.5)(x)
     """
 
     def __init__(
@@ -128,6 +159,33 @@ class DynamicTanh(keras.layers.Layer):
         bias_constraint: Optional[constraints.Constraint] = None,
         **kwargs: Any
     ) -> None:
+        """Validate ``alpha_init_value`` and store the configuration.
+
+        No weight is created here. ``alpha``, ``weight`` and ``bias`` need the
+        input rank, so they are created in ``build()``.
+
+        :param axis: Axis or axes that get their own ``weight`` and ``bias``.
+        :type axis: Union[int, List[int]]
+        :param alpha_init_value: Strictly positive initial alpha.
+        :type alpha_init_value: float
+        :param kernel_initializer: Initializer for ``weight``.
+        :type kernel_initializer: Union[str, initializers.Initializer]
+        :param bias_initializer: Initializer for ``bias``.
+        :type bias_initializer: Union[str, initializers.Initializer]
+        :param kernel_regularizer: Optional regularizer for ``weight``.
+        :type kernel_regularizer: Optional[regularizers.Regularizer]
+        :param bias_regularizer: Optional regularizer for ``bias``.
+        :type bias_regularizer: Optional[regularizers.Regularizer]
+        :param kernel_constraint: Optional constraint for ``weight``.
+        :type kernel_constraint: Optional[constraints.Constraint]
+        :param bias_constraint: Optional constraint for ``bias``.
+        :type bias_constraint: Optional[constraints.Constraint]
+        :param kwargs: Forwarded to ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If ``alpha_init_value`` is not a number.
+        :raises ValueError: If ``alpha_init_value`` is not strictly positive.
+        """
         super().__init__(**kwargs)
 
         # Validate alpha initialization value
@@ -139,18 +197,11 @@ class DynamicTanh(keras.layers.Layer):
         # tanh(0 * x); the factory has always refused both.
         #
         # DECISION plan-2026-08-25T195813-d5a035ab/D-014
-        # This guard is CHECKPOINT-VISIBLE and the break was accepted knowingly.
-        # `get_config()` writes `alpha_init_value`, so a `.keras` archive written by a
-        # version that accepted a non-positive value can no longer be loaded (MEASURED:
-        # `DynamicTanh(alpha_init_value=-0.5)` saved at a8a042f53 -> TypeError at HEAD,
-        # root cause this ValueError). Do NOT "fix" a failing load by loosening this
-        # check back to construction-only or by special-casing `from_config`: the same
-        # plan DROPPED review-finding B14 precisely because it broke checkpoints, and
-        # the asymmetry only holds while the exposure stays this narrow (zero call sites
-        # repo-wide; only the INIT value is validated, never the restored `alpha`
-        # weight, so a trained-negative alpha still loads - measured). If a real
-        # checkpoint ever turns up, delete this guard, do not weaken it silently.
-        # See decisions.md D-014 and
+        # Checkpoint-visible, accepted knowingly: get_config() writes alpha_init_value,
+        # so an archive holding a non-positive one fails to LOAD with a TypeError whose
+        # root cause is this ValueError (measured at a8a042f53). Do NOT loosen it to
+        # construction-only or special-case from_config; only the INIT value is checked,
+        # so a trained-negative alpha WEIGHT still loads. See decisions.md D-014 and
         # tests/test_layers/test_norms/test_the_negative_alpha_init_is_checkpoint_visible.py
         if alpha_init_value <= 0:
             raise ValueError("alpha_init_value must be a positive number")
@@ -179,7 +230,10 @@ class DynamicTanh(keras.layers.Layer):
         self.weight = None
         self.bias = None
 
-        # Enable masking support
+        # The transform is elementwise, so every output slot depends only on the
+        # same input slot. Measured leak at axis -1, 1 and 2 on a rank-3 input:
+        # exactly 0.0. The flag is honest at every axis, so unlike the RMS family
+        # this layer does not have to refine it in build().
         self.supports_masking = True
 
         logger.debug(
@@ -189,13 +243,18 @@ class DynamicTanh(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the layer's learnable parameters.
+        """Create ``alpha``, ``weight`` and ``bias``, and fix the broadcast shape.
 
-        Creates alpha (scalar), weight, and bias parameters based on input
-        shape and configured normalization axes.
+        Resolves every entry of ``axis`` against the input rank, sizes ``weight``
+        and ``bias`` from the resolved axes, and precomputes the broadcast tuple
+        ``call()`` reshapes them to.
 
-        :param input_shape: Shape of the input tensor.
+        :param input_shape: Shape tuple of the input tensor. The batch dimension
+            may be None.
         :type input_shape: Tuple[Optional[int], ...]
+
+        :raises ValueError: If an entry of ``axis`` is out of bounds for the
+            input rank.
         """
         if self.built:
             return
@@ -219,10 +278,10 @@ class DynamicTanh(keras.layers.Layer):
         param_shape = tuple(input_shape[ax] for ax in self._norm_axis)
 
         # Create layer's own weights
-        # Alpha: learnable scalar parameter
+        # Alpha: one learnable scalar for the whole layer, hence shape=().
         self.alpha = self.add_weight(
             name="alpha",
-            shape=(),  # Scalar shape
+            shape=(),
             initializer=lambda shape, dtype: ops.cast(self.alpha_init_value, dtype),
             trainable=True,
             dtype=self.dtype
@@ -266,15 +325,16 @@ class DynamicTanh(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply dynamic tanh transformation: weight * tanh(alpha * inputs) + bias.
+        """Apply ``weight * tanh(alpha * inputs) + bias``.
 
-        :param inputs: Input tensor.
+        :param inputs: Input tensor. Any shape whose rank matches the one the
+            layer was built on.
         :type inputs: keras.KerasTensor
-        :param training: Training mode flag (unused but kept for interface
-            consistency).
+        :param training: Training-mode flag. Unused; the layer behaves the same
+            in both modes and the argument is kept for API compatibility.
         :type training: Optional[bool]
 
-        :return: Transformed tensor with same shape as input.
+        :return: Transformed tensor, same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         # Step 1: Scale inputs by learnable alpha
@@ -284,10 +344,12 @@ class DynamicTanh(keras.layers.Layer):
         tanh_outputs = ops.tanh(scaled_inputs)
 
         # Step 3: Apply affine transformation with proper broadcasting.
-        # The reshape is required: a naive `tanh_outputs * self.weight` raises
-        # for any non-trailing axis (measured: InvalidArgumentError,
-        # Incompatible shapes [2,8,16] vs [8] at axis=1). Its target shape is
-        # the static tuple computed in build().
+        # The reshape is required. A naive `tanh_outputs * self.weight` raises
+        # InvalidArgumentError for any non-trailing axis: measured at axis=1 on a
+        # (2, 8, 16) input, where weight has shape (8,). On CPU the message is
+        # `Incompatible shapes: [2,8,16] vs. [8]`; on GPU the same op reports
+        # `required broadcastable shapes`. The reshape target is the static tuple
+        # computed in build().
         weight_broadcasted = ops.reshape(self.weight, self._broadcast_shape)
         bias_broadcasted = ops.reshape(self.bias, self._broadcast_shape)
 
@@ -300,20 +362,24 @@ class DynamicTanh(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape (same as input shape).
+        """Return the output shape, which equals the input shape.
 
-        :param input_shape: Shape of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
 
-        :return: Output shape (identical to input shape).
+        :return: The same shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization.
+        """Return the constructor arguments needed to rebuild this layer.
 
-        :return: Dictionary containing all constructor arguments.
+        ``axis`` is returned as the normalized list built in ``__init__``, which
+        never changes after construction, so the config does not depend on
+        whether ``build()`` has run.
+
+        :return: Serializable configuration dictionary.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
