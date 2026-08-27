@@ -1,3 +1,49 @@
+"""Normalization layers for ``dl_techniques``.
+
+This package collects the library's normalization layers and the factory that
+builds them from a string key. Importing from here gives the public surface;
+the modules behind it are implementation detail.
+
+What is exported
+----------------
+
+* **RMS family** - :class:`RMSNorm`, :class:`ZeroCenteredRMSNorm`,
+  :class:`BandRMS`, :class:`ZeroCenteredBandRMSNorm`,
+  :class:`AdaptiveBandRMS`, :class:`ZeroCenteredAdaptiveBandRMS`.
+* **Logit family** - :class:`LogitNorm`, :class:`BandLogitNorm`,
+  :class:`MaxLogitNorm`, :class:`DecoupledMaxLogit`, :class:`DMLPlus`.
+* **Others** - :class:`BiasFreeBatchNorm`, :class:`GlobalResponseNormalization`,
+  :class:`DynamicTanh`, :class:`EnergyLayerNorm`, :class:`PolarWeightNorm`,
+  plus the module-level helpers :func:`polar_encode` and :func:`polar_decode`.
+* **Factory** - :func:`create_normalization_layer`,
+  :func:`create_normalization_from_config`, :func:`get_normalization_info`,
+  :func:`validate_normalization_config` and the ``NormalizationType`` alias.
+
+``__all__`` names 16 classes, 2 module-level functions, 4 factory functions and
+1 type alias: 23 names in total.
+
+Choosing a layer
+----------------
+
+Prefer the factory when the layer type comes from a config::
+
+    from dl_techniques.layers.norms import create_normalization_layer
+
+    layer = create_normalization_layer("rms_norm", axis=-1)
+
+``NormalizationType`` lists the 18 accepted string keys. Import a class directly
+when the type is fixed at authoring time.
+
+Note
+----
+
+Most of these layers preserve the input shape. Four factory keys do not.
+``max_logit_norm``, ``decoupled_max_logit``, ``dml_plus_center`` and
+``dml_plus_focal`` all reduce the feature axis away. The first two also return a
+tuple of tensors rather than one tensor. Read the class docstring before
+dropping any of them into a shape-sensitive position.
+"""
+
 from .rms_norm import RMSNorm
 from .bias_free_batch_norm import BiasFreeBatchNorm
 from .zero_centered_rms_norm import ZeroCenteredRMSNorm

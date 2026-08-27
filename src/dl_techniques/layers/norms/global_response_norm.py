@@ -1,45 +1,45 @@
-"""
-Global Response Normalization (GRN) Layer Implementation
-=======================================================
+"""Global Response Normalization (GRN), generalized to rank 2, 3 and 4 inputs.
 
-Theory and Background:
----------------------
-Global Response Normalization (GRN) is a normalization technique introduced in ConvNeXt V2
-that enhances inter-channel feature competition by normalizing features across spatial
-dimensions and applying learnable scale and bias parameters.
+GRN comes from ConvNeXt V2. It makes channels compete. Each channel is scored by
+its own magnitude. That score is divided by the mean score across channels, and
+the input is reweighted by the result. Weak channels are damped and strong ones
+are amplified.
 
-This implementation is generalized to handle 2D, 3D, and 4D tensors.
+Computation
+-----------
 
-## Key Concepts:
-1. **Inter-channel Competition**: GRN promotes competition between channels by normalizing
-   based on the global response across all other dimensions for each channel.
-2. **Feature Normalization**: Computes L2 norms across spatial/sequence dimensions (for 3D/4D)
-   or uses the feature's own value (for 2D) for each channel.
-3. **Global Scaling**: Normalizes by the mean norm across all channels.
-4. **Learnable Parameters**: Applies trainable gamma (scale) and beta (bias) parameters.
-5. **Residual Connection**: Adds the normalized response to the original input.
+For an input ``X`` of rank ``N``, with the channel axis last:
 
-## Mathematical Formulation:
-For an input X with rank N:
-1. Compute feature norm: N_c = sqrt(sum(X_c^2) + eps) over axes (1, ..., N-2) for each
-   channel c (a small ``eps`` is added inside the sqrt for numerical stability, so N_c
-   is an eps-floored L2 norm rather than the exact ||X_c||_2).
-2. Compute global mean: μ = mean(N_c) across all channels.
-3. Normalize: N'_c = N_c / (μ + ε).
-4. Apply learnable parameters: Y = X + γ * (X ⊙ N') + β,
-   where ⊙ denotes element-wise multiplication with broadcasting.
+1. Per-channel score, reduced over axes ``1 .. N - 2``::
 
-## Benefits:
-- **Improved Feature Selectivity**: Enhances the most informative channels.
-- **Better Gradient Flow**: Maintains residual connections for stable training.
-- **Computational Efficiency**: Lightweight normalization with minimal overhead.
-- **Versatility**: Handles 2D, 3D, and 4D data seamlessly.
+       norm_c = sqrt(sum(X_c ** 2) + eps)
 
-## References:
-[1] Woo, S., et al. (2023). "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders"
-    arXiv:2301.00808
-[2] Liu, Z., et al. (2022). "A ConvNet for the 2020s"
-    arXiv:2201.03545
+   ``eps`` is added INSIDE the square root, not outside it. So ``norm_c`` is
+   never below ``sqrt(eps)``, and it is slightly above the exact ``||X_c||_2``.
+2. Mean across channels: ``mu = mean(norm_c)``.
+3. Normalized score: ``norm'_c = norm_c / (mu + eps)``.
+4. Output: ``Y = X + gamma * (X * norm') + beta``, with ``gamma`` and ``beta``
+   broadcast over the reduced axes.
+
+Rank 2 is a degenerate case. The reduction axes are ``range(1, 1)``, an empty
+tuple, and summing over no axis is the identity. ``norm_c`` therefore becomes
+``sqrt(x ** 2 + eps)``, which is each element's own absolute value. Measured at
+float32: an input of ``[[3.0, -4.0]]`` gives ``[[3.0, 4.0]]``.
+
+Weights
+-------
+
+``gamma`` and ``beta`` have shape ``(1,) * (rank - 1) + (channels,)``. Measured:
+a ``(2, 4, 5, 6)`` input gives ``(1, 1, 1, 6)``. Passing ``use_beta=False``
+creates no ``beta`` weight at all, leaving the layer with one weight instead of
+two.
+
+References
+----------
+
+[1] Woo, S., et al. (2023). "ConvNeXt V2: Co-designing and Scaling ConvNets with
+    Masked Autoencoders". arXiv:2301.00808
+[2] Liu, Z., et al. (2022). "A ConvNet for the 2020s". arXiv:2201.03545
 """
 
 import keras
@@ -56,95 +56,105 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class GlobalResponseNormalization(keras.layers.Layer):
-    """Global Response Normalization (GRN) layer for 2D, 3D, and 4D inputs.
+    """Global Response Normalization for rank 2, 3 and 4 inputs.
 
-    Implements the GRN operation from ConvNeXt V2, enhancing inter-channel feature
-    competition. For each channel, computes the L2 norm across spatial/sequence
-    dimensions, normalizes by the mean norm across channels, then applies learnable
-    gamma and beta with a residual connection:
-    ``Y = X + γ * (X ⊙ (norm_c / (mean(norm) + ε))) + β``.
-    Generalizes to 2D (MLP), 3D (sequence), and 4D (image) inputs.
+    Scores each channel by its L2 magnitude over the spatial or sequence axes.
+    That score is divided by the mean score across channels, and the input is
+    reweighted by the result. A learnable ``gamma`` scales the reweighted term,
+    an optional ``beta`` offsets it, and the input is added back as a residual::
 
-    .. note::
-        **No masking support, deliberately.** ``supports_masking`` is left ``False``
-        because the per-channel L2 norm is reduced over the spatial/sequence axes:
-        perturbing a single ``(sample, token)`` slot moves the other positions of
-        that sample by up to ``2.971e+00`` (measured on a ``(3, 5, 8)`` input). A
-        propagated Keras mask would claim padding-independent outputs that were in
-        fact computed from the padding, which is worse than no mask at all.
+        Y = X + gamma * (X * (norm_c / (mean(norm) + eps))) + beta
+
+    The output has the same shape as the input.
+
+    .. warning::
+        **This layer does not support masking.** ``supports_masking`` is left
+        ``False``, because the per-channel score is reduced over the spatial or
+        sequence axes. Changing one ``(sample, token)`` slot moves the other
+        positions of that sample by up to ``2.971`` (measured on a ``(3, 5, 8)``
+        input). A propagated Keras mask would claim the output is independent of
+        the padding when it is not, which is worse than having no mask.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────┐
-        │         Input (X)                │
-        │  shape: (B, [spatial...], C)     │
-        └──────────────┬───────────────────┘
-                       │
-                       ├──────────────────────┐
-                       │                      │
-                       ▼                      │
-        ┌──────────────────────────────┐      │
-        │  L2 Norm per channel over    │      │
-        │  spatial dims: norm_c        │      │
-        └──────────────┬───────────────┘      │
-                       │                      │
-                       ▼                      │
-        ┌──────────────────────────────┐      │
-        │  Mean norm across channels:  │      │
-        │  μ = mean(norm_c)            │      │
-        └──────────────┬───────────────┘      │
-                       │                      │
-                       ▼                      │
-        ┌──────────────────────────────┐      │
-        │  Normalize: norm_c / (μ + ε) │      │
-        └──────────────┬───────────────┘      │
-                       │                      │
-                       ▼                      │
-        ┌──────────────────────────────┐      │
-        │  γ × (X ⊙ norm') + β         │      │
-        └──────────────┬───────────────┘      │
-                       │                      │
-                       ▼                      ▼
-        ┌──────────────────────────────────────┐
-        │  Residual: X + transformed           │
-        └──────────────┬───────────────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────────┐
-        │         Output (Y)               │
-        │  shape: (B, [spatial...], C)     │
-        └──────────────────────────────────┘
+            inputs (X): (B, ..., C)
+                            │
+                            ├─────────────────────────────────┐
+                            │                                 │
+                            │                           ┌─────┤
+                            │                           │     │
+                            ▼                           │     │
+           ┌─────────────────────────────────┐          │     │
+           │ per-channel L2 over spatial     │          │     │
+           │ axes: sqrt(sum(X^2) + eps)      │          │     │
+           └────────────────┬────────────────┘          │     │
+                            │ norm: (B, 1..., C)        │     │
+                            ▼                           │     │
+           ┌─────────────────────────────────┐          │     │
+           │ mean over channels, then        │          │     │
+           │ divide: norm / (mean + eps)     │          │     │
+           └────────────────┬────────────────┘          │     │
+                            │ norm': (B, 1..., C)       │     │
+                            ▼                           ▼     │
+           ┌────────────────────────────────────────────────┐ │
+           │ gamma * (X * norm')                            │ │
+           │ plus beta, when use_beta=True (optional)       │ │
+           └───────────────────────┬────────────────────────┘ │
+                                   │                          │
+                                   ▼                          ▼
+           ┌──────────────────────────────────────────────────────┐
+           │ residual add: Y = X + transformed                    │
+           └──────────────────────────┬───────────────────────────┘
+                                      │
+                                      ▼
+                          output (Y): (B, ..., C)
 
-    :param eps: Small constant for numerical stability. Must be positive.
-        Defaults to 1e-6.
+    :param eps: Constant added inside the square root and to the mean before
+        dividing. Must be positive. Defaults to 1e-6.
     :type eps: float
-    :param gamma_initializer: Initializer for gamma (scale) weights.
-        Defaults to ``'ones'``. NOTE: the ConvNeXt V2 paper initializes gamma to
-        zero (with beta zero) so GRN is an identity at init; this implementation
-        defaults to ``'ones'``. Pass ``gamma_initializer='zeros'`` to reproduce
-        the paper's identity-at-init behavior.
+    :param gamma_initializer: Initializer for the ``gamma`` scale weight.
+        Defaults to ``'ones'``. The ConvNeXt V2 paper initializes gamma to zero,
+        which makes GRN an identity at initialization; pass ``'zeros'`` to
+        reproduce that.
     :type gamma_initializer: Union[str, keras.initializers.Initializer]
-    :param beta_initializer: Initializer for beta (bias) weights.
-        Defaults to ``'zeros'``. Ignored when ``use_beta=False``.
+    :param beta_initializer: Initializer for the ``beta`` offset weight. Defaults
+        to ``'zeros'``. Ignored when ``use_beta=False``.
     :type beta_initializer: Union[str, keras.initializers.Initializer]
-    :param use_beta: Whether to create the trainable additive offset ``beta``.
-        Defaults to ``True``, which keeps every existing ConvNeXt V2 checkpoint
-        byte-identical. Pass ``False`` for a bias-free layer: no ``beta`` weight is
-        created at all (``layer.beta is None``) and the additive term is dropped
-        from the output, giving ``Y = X + γ * (X ⊙ norm')``.
-    :type use_beta: bool
-    :param gamma_regularizer: Optional regularizer for gamma weights.
+    :param gamma_regularizer: Optional regularizer for ``gamma``.
     :type gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param beta_regularizer: Optional regularizer for beta weights.
+    :param beta_regularizer: Optional regularizer for ``beta``.
     :type beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param activity_regularizer: Optional regularizer for the layer output.
     :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_beta: Whether to create the trainable offset ``beta``. Defaults to
+        ``True``, which keeps existing ConvNeXt V2 checkpoints loadable. Pass
+        ``False`` for a bias-free layer: no ``beta`` weight is created
+        (``layer.beta is None``) and the output becomes
+        ``Y = X + gamma * (X * norm')``.
+    :type use_beta: bool
 
-    :raises ValueError: If eps <= 0.
-    :raises ValueError: If input rank is not 2, 3, or 4.
-    :raises ValueError: If the feature/channel dimension is not defined.
+    :ivar gamma: Scale weight of shape ``(1,) * (rank - 1) + (channels,)``.
+        ``None`` until ``build()`` runs.
+    :vartype gamma: Optional[keras.Variable]
+    :ivar beta: Offset weight of the same shape as ``gamma``, or ``None`` when
+        ``use_beta=False``.
+    :vartype beta: Optional[keras.Variable]
+
+    :raises ValueError: If eps is not positive.
+    :raises ValueError: If the input rank is not 2, 3 or 4.
+    :raises ValueError: If the channel dimension is undefined.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.norms import GlobalResponseNormalization
+
+        x = keras.random.normal((2, 8, 8, 16))
+        y = GlobalResponseNormalization()(x)
     """
 
     def __init__(
@@ -158,31 +168,33 @@ class GlobalResponseNormalization(keras.layers.Layer):
         use_beta: bool = True,
         **kwargs: Any
     ) -> None:
-        """Initialize the GlobalResponseNormalization layer.
+        """Initialize the layer.
 
-        :param eps: Small constant for numerical stability. Must be positive.
+        :param eps: Constant used for numerical stability. Must be positive.
         :type eps: float
-        :param gamma_initializer: Initializer for gamma (scale) weights.
+        :param gamma_initializer: Initializer for the ``gamma`` scale weight.
         :type gamma_initializer: Union[str, keras.initializers.Initializer]
-        :param beta_initializer: Initializer for beta (bias) weights. Ignored when
-            ``use_beta=False``.
+        :param beta_initializer: Initializer for the ``beta`` offset weight.
+            Ignored when ``use_beta=False``.
         :type beta_initializer: Union[str, keras.initializers.Initializer]
-        :param gamma_regularizer: Regularizer for gamma weights.
+        :param gamma_regularizer: Regularizer for ``gamma``.
         :type gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param beta_regularizer: Regularizer for beta weights.
+        :param beta_regularizer: Regularizer for ``beta``.
         :type beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
         :param activity_regularizer: Regularizer for the layer output.
         :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param use_beta: Whether to create the trainable additive offset ``beta``.
+        :param use_beta: Whether to create the trainable offset ``beta``.
             ``False`` creates no ``beta`` weight and drops the additive term.
         :type use_beta: bool
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :type kwargs: Any
 
-        :raises ValueError: If eps <= 0.
+        :raises ValueError: If eps is not positive.
         """
-        # activity_regularizer is a base-Layer constructor argument: forward it
-        # rather than assigning it afterwards. Plain assignment also works (it
-        # goes through the inherited property setter), but the forwarded form is
-        # the idiom the rest of this package uses.
+        # activity_regularizer is a base-Layer constructor argument, so it is
+        # forwarded rather than assigned afterwards. Plain assignment also works,
+        # through the inherited property setter, but forwarding is the idiom the
+        # rest of this package uses.
         super().__init__(activity_regularizer=activity_regularizer, **kwargs)
 
         if eps <= 0:
@@ -201,13 +213,13 @@ class GlobalResponseNormalization(keras.layers.Layer):
         logger.debug(f"Initialized GlobalResponseNormalization with eps={eps}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the layer's weights, adapted for 2D, 3D, or 4D inputs.
+        """Create ``gamma``, and ``beta`` when ``use_beta`` is set.
 
-        :param input_shape: Tuple of integers defining the input shape.
+        :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
 
-        :raises ValueError: If input rank is not 2, 3, or 4, or if the
-            channel dimension is not defined.
+        :raises ValueError: If the input rank is not 2, 3 or 4.
+        :raises ValueError: If the channel dimension is undefined.
         """
         if self.built:
             return
@@ -225,7 +237,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         logger.debug(f"Building GlobalResponseNormalization for rank {rank} with {channels} channels")
 
-        # Define shape for gamma and beta to allow broadcasting
+        # Leading axes are 1 so the weights broadcast over the reduced axes.
         param_shape = (1,) * (rank - 1) + (channels,)
 
         self.gamma = self.add_weight(
@@ -235,9 +247,9 @@ class GlobalResponseNormalization(keras.layers.Layer):
             regularizer=self.gamma_regularizer,
             trainable=True,
         )
-        # `use_beta=False` drops the trainable bias-like offset entirely so the
-        # layer carries no additive term (bias-free option). Default True keeps
-        # every existing ConvNeXt V2 checkpoint byte-identical.
+        # use_beta=False drops the trainable offset entirely, leaving the layer
+        # with no additive term. The default True keeps existing ConvNeXt V2
+        # checkpoints loadable.
         if self.use_beta:
             self.beta = self.add_weight(
                 name="beta",
@@ -258,26 +270,25 @@ class GlobalResponseNormalization(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply global response normalization to the input tensor.
-
-        Implements the core GRN algorithm for 2D, 3D, or 4D inputs.
+        """Apply global response normalization.
 
         :param inputs: Input tensor of shape ``(batch, ..., channels)``.
         :type inputs: keras.KerasTensor
-        :param training: Whether in training mode (unused, for API compatibility).
+        :param training: Training-mode flag. Unused; the layer behaves the same
+            in both modes and the argument is kept for API compatibility.
         :type training: Optional[bool]
 
-        :return: Normalized tensor of the same shape as input.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         rank = keras.ops.ndim(inputs)
 
-        # Step 1: Compute the L2 norm over spatial/sequence dimensions.
-        # For rank 2 (batch, features), axes is empty, so sum is identity,
-        # and norm becomes the absolute value.
-        # For rank 3 (batch, seq, features), axis is (1,).
-        # For rank 4 (batch, h, w, channels), axis is (1, 2).
+        # Step 1: L2 norm over the spatial or sequence axes.
+        # Rank 3 (batch, seq, features) reduces axis (1,).
+        # Rank 4 (batch, h, w, channels) reduces axes (1, 2).
+        # Rank 2 (batch, features) reduces an EMPTY tuple. Summing over no axis
+        # is the identity, so norm becomes sqrt(x ** 2 + eps), the element's own
+        # absolute value.
         axes_to_reduce = tuple(range(1, rank - 1))
         norm = keras.ops.sqrt(
             keras.ops.sum(
@@ -286,12 +297,12 @@ class GlobalResponseNormalization(keras.layers.Layer):
                 keepdims=True) + self.eps
         )
 
-        # Step 2: Normalize by the mean norm across channels.
+        # Step 2: divide by the mean norm across channels.
         mean_norm = keras.ops.mean(norm, axis=-1, keepdims=True)
         normalized_norm = norm / (mean_norm + self.eps)
 
-        # Step 3: Apply GRN transformation with residual connection.
-        # The shapes of norm, gamma, and beta are broadcastable to the input shape.
+        # Step 3: reweight, then add the input back. norm, gamma and beta all
+        # broadcast against the input shape.
         transformed = self.gamma * (inputs * normalized_norm)
         if self.beta is not None:
             transformed = transformed + self.beta
@@ -303,20 +314,20 @@ class GlobalResponseNormalization(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
 
-        :return: Output shape tuple (same as input shape).
+        :return: The same shape tuple that was passed in.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization.
+        """Return the configuration needed to rebuild this layer.
 
-        :return: Dictionary containing all constructor arguments.
+        :return: Dictionary holding every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

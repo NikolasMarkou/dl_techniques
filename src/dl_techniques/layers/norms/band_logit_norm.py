@@ -1,23 +1,35 @@
-"""
-BandLogitNorm Layer Implementation
+"""BandLogitNorm: L2 normalization followed by a band-limited rescale.
 
-This module implements a custom Keras layer that applies constrained L2 normalization
-with a band-bounded scale. The layer normalizes input tensors to unit L2 norm and then
-applies a scaling factor bounded within a specified band around 1.0.
+``BandLogitNorm`` normalizes an input to unit L2 length and then multiplies it by
+a scale drawn from the band ``[1 - max_band_width, 1]``. Direction is preserved
+exactly; only the magnitude is changed.
 
-Note on terminology: the norm used here is an L2 norm, ``sqrt(max(sum(x**2), eps))`` -
-a SUM over the axis, not a mean - so this layer does NOT perform RMS normalization
-(``sqrt(mean(x**2))``). Its output magnitude therefore depends on the size of the
-normalized axis, unlike the RMS-based layers in this package.
+The norm is ``sqrt(max(sum(x ** 2), epsilon))``. It SUMS over ``axis``, so this
+is an L2 norm, not an RMS (``sqrt(mean(x ** 2))``). The output magnitude
+therefore depends on the length of the normalized axis, unlike the RMS-based
+layers that sit beside this one in the package.
 
-Mathematical Operation:
-1. Normalize input to unit L2 norm: x_norm = x / ||x||_2
-2. Apply LayerNormalization to the L2 norms: norm_scaled = LayerNorm(||x||_2)
-3. Apply tanh activation to bound the normalized norms: bounded = tanh(4 * norm_scaled)
-4. Scale to [1-max_band_width, 1]: scale = max_band_width * (bounded + 1)/2 + (1 - max_band_width)
-5. Apply scaling: output = x_norm * scale
+Steps
+-----
 
-This ensures the output has L2 norm in the range [1-max_band_width, 1].
+1. L2 length: ``x_length = sqrt(max(sum(x ** 2), epsilon))``, ``keepdims=True``.
+2. Unit norm: ``x_normalized = x / x_length``.
+3. ``LayerNormalization`` applied to ``x_length``.
+4. Bound it: ``tanh(4 * layer_norm_output)``.
+5. Map to the band: ``scale = (1 - w) + w * (tanh_output + 1) / 2``, where ``w``
+   is ``max_band_width``.
+6. Output: ``x_normalized * scale``.
+
+The scale is constant in practice
+---------------------------------
+
+Step 3 normalizes a tensor whose last axis has length 1, which always yields 0.
+So ``tanh(4 * 0) = 0`` and the scale collapses to ``1 - 0.5 * max_band_width``
+for every input. Measured: with ``max_band_width`` of 0.01, 0.5 and 0.9 the
+output L2 norm is exactly 0.995, 0.75 and 0.55, with no spread across rows.
+The layer is L2 normalization times a constant; the input-adaptive part is
+inert. It is kept as-is for backward compatibility, because callers exist in
+``train/rms_variants_train/``.
 """
 
 import keras
@@ -37,90 +49,112 @@ from dl_techniques.layers.norms._masking import (
 
 @keras.saving.register_keras_serializable()
 class BandLogitNorm(keras.layers.Layer):
-    """Band-constrained logit normalization layer.
+    """L2-normalize the input, then rescale it into a narrow band.
 
-    Applies L2 normalization to input tensors and constrains the resulting L2
-    norm to lie within a specified band around 1.0. First normalizes to unit L2
-    norm, then applies a LayerNormalization-based learned scaling factor bounded
-    via ``tanh`` to the range ``[1 - max_band_width, 1]``. This provides
-    controlled normalization strength while preserving directional information.
+    Divides the input by its own L2 length, then multiplies by a scale taken from
+    ``[1 - max_band_width, 1]``. Direction is preserved exactly. The output shape
+    equals the input shape.
 
-    The norm is ``sqrt(max(sum(x**2), epsilon))`` - a SUM over ``axis``, i.e. an
-    L2 norm. This layer does not compute an RMS (``sqrt(mean(x**2))``) despite
-    sitting beside the RMS family in this package.
+    The norm sums over ``axis``, so it is an L2 norm and not an RMS
+    (``sqrt(mean(x ** 2))``), despite this layer sitting beside the RMS family.
 
-    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
-    unconditionally: it is ``True`` only while every normalized axis is the trailing
-    (feature) axis of the input. At ``axis=-1`` the output at one position is a function of
-    that position only (measured cross-position leak exactly ``0.0`` on a
-    ``(3, 5, 8)`` input, both training regimes).
-    Normalizing over the TOKEN axis instead couples positions - measured leak
-    ``0.914`` at ``axis=1`` on the same input - and there the flag is ``False``, so
-    Keras drops the mask and says so. The decision is made in ``__init__`` from the
-    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
+    ``supports_masking`` is a promise about the AXIS, not about the class. It is
+    ``True`` only while the normalized axis is the trailing (feature) axis. At
+    ``axis=-1`` the output at one position depends on that position alone: the
+    measured cross-position leak on a ``(3, 5, 8)`` input is exactly ``0.0``, in
+    both training modes. Normalizing the token axis couples positions instead;
+    the measured leak at ``axis=1`` on the same input is ``0.914``. The flag is
+    ``False`` there, so Keras drops the mask and says so. ``__init__`` decides
+    from the spelling alone, because only ``-1`` names the trailing axis at every
+    rank. ``build()`` then makes it exact.
 
-    .. note::
-        **Degenerate adaptive component (known limitation).** The "learned scaling"
-        is produced by a ``LayerNormalization`` applied to the L2-norm tensor, which
-        has shape ``(..., 1)`` (``keepdims=True``). Normalizing a single-element axis
-        yields 0, so ``tanh(4 * 0) = 0`` and the band scale collapses to the constant
-        ``1 - 0.5 * max_band_width`` regardless of input. In practice this layer
-        therefore behaves as L2-normalization followed by a constant band-floor scale;
-        the input-adaptive component is inert. Retained as-is for backward
-        compatibility (callers exist in ``train/rms_variants_train/``).
+    .. warning::
+        **The adaptive scale is inert.** ``LayerNormalization`` is applied to the
+        L2-length tensor, whose last axis has length 1 (``keepdims=True``).
+        Normalizing a single-element axis always gives 0, so ``tanh(4 * 0) = 0``
+        and the scale collapses to the constant ``1 - 0.5 * max_band_width``.
+        Measured output L2 norms: 0.995, 0.75 and 0.55 for ``max_band_width`` of
+        0.01, 0.5 and 0.9, with no spread across rows. Treat this layer as L2
+        normalization times a constant. It is kept as-is because callers exist in
+        ``train/rms_variants_train/``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐
-        │       Input (x)              │
-        │       shape: (..., D)        │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  L2 Norm: √(max(Σ(x²), ε))   │
-        └──────┬───────────────┬───────┘
-               │               │
-               ▼               ▼
-        ┌──────────────┐ ┌─────────────┐
-        │ Unit Norm:   │ │ LayerNorm   │
-        │ x / ||x||_2  │ │ on ||x||_2  │
-        └──────┬───────┘ └──────┬──────┘
-               │                │
-               │                ▼
-               │         ┌─────────────┐
-               │         │ tanh(4·LN)  │
-               │         └──────┬──────┘
-               │                │
-               │                ▼
-               │         ┌─────────────┐
-               │         │ Scale to    │
-               │         │ [1-bw, 1]   │
-               │         └──────┬──────┘
-               │                │
-               ▼                ▼
-        ┌──────────────────────────────┐
-        │  Multiply: x_norm × scale    │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Output: band-constrained    │
-        │  shape: (..., D)             │
-        └──────────────────────────────┘
+                              inputs: (..., D)
+                                  │
+            ┌─────────────────────┤
+            │                     │
+            │                     ▼
+            │        ┌─────────────────────────┐
+            │        │ square, sum over axis,  │
+            │        │ floor at epsilon, sqrt  │
+            │        └────────────┬────────────┘
+            │                     │ x_length: (..., 1)
+            │           ┌─────────┴──────────────────┐
+            │           │                            │
+            ▼           ▼                            │
+          ┌───────────────────────────┐              │
+          │ unit norm:                │              │
+          │ inputs / x_length         │              │
+          └─────────────┬─────────────┘              │
+                        │                            ▼
+                        │               ┌─────────────────────────┐
+                        │               │ LayerNormalization      │
+                        │               │ (owns weights)          │
+                        │               └────────────┬────────────┘
+                        │                            │
+                        │                            ▼
+                        │               ┌─────────────────────────┐
+                        │               │ tanh(4 * .)             │
+                        │               └────────────┬────────────┘
+                        │                            │
+                        │                            ▼
+                        │               ┌─────────────────────────┐
+                        │               │ map into the band       │
+                        │               │ [1 - max_band_width, 1] │
+                        │               └────────────┬────────────┘
+                        │ x_normalized               │ scale: (..., 1)
+                        ▼                            ▼
+              ┌───────────────────────────────────────────────────┐
+              │ multiply: x_normalized * scale                    │
+              └───────────────────────┬───────────────────────────┘
+                                      │
+                                      ▼
+                              output: (..., D)
 
-    :param max_band_width: Maximum allowed deviation from unit norm
-        (must satisfy ``0 < max_band_width < 1``). Defaults to 0.01.
+    :param max_band_width: Width of the band below unit norm. Must satisfy
+        ``0 < max_band_width < 1``. Defaults to 0.01.
     :type max_band_width: float
-    :param axis: Axis along which to compute the L2 norm. Defaults to -1.
+    :param axis: Axis reduced by the L2 norm. Defaults to -1.
     :type axis: int
-    :param epsilon: Small constant for numerical stability. Must be positive.
-        Defaults to 1e-7.
+    :param epsilon: Floor applied to the squared norm, and the epsilon passed to
+        the internal ``LayerNormalization``. Must be positive. Defaults to 1e-7.
     :type epsilon: float
 
-    :raises ValueError: If max_band_width is not in (0, 1) or epsilon is not positive.
+    :ivar max_band_width: The configured band width.
+    :vartype max_band_width: float
+    :ivar axis: The configured normalization axis.
+    :vartype axis: int
+    :ivar epsilon: The configured numerical floor.
+    :vartype epsilon: float
+    :ivar norm: The internal ``LayerNormalization`` sublayer applied to the
+        L2-length tensor.
+    :vartype norm: keras.layers.LayerNormalization
+
+    :raises ValueError: If max_band_width is not in (0, 1).
+    :raises ValueError: If epsilon is not positive.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.norms import BandLogitNorm
+
+        x = keras.random.normal((4, 16))
+        y = BandLogitNorm(max_band_width=0.01)(x)
     """
 
     def __init__(
@@ -130,42 +164,44 @@ class BandLogitNorm(keras.layers.Layer):
             epsilon: float = 1e-7,
             **kwargs: Any
     ):
-        """Initialize the BandLogitNorm layer.
+        """Initialize the layer.
 
-        :param max_band_width: Maximum allowed deviation from unit norm.
+        :param max_band_width: Width of the band below unit norm. Must be in
+            ``(0, 1)``.
         :type max_band_width: float
-        :param axis: Axis along which to compute the L2 norm.
+        :param axis: Axis reduced by the L2 norm.
         :type axis: int
-        :param epsilon: Small constant for numerical stability.
+        :param epsilon: Floor applied to the squared norm. Must be positive.
         :type epsilon: float
-        :param kwargs: Additional keyword arguments.
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
         :type kwargs: Any
 
-        :raises ValueError: If max_band_width is not in (0, 1) or epsilon is not positive.
+        :raises ValueError: If max_band_width is not in (0, 1).
+        :raises ValueError: If epsilon is not positive.
         """
         super().__init__(**kwargs)
 
-        # Validate inputs before storing
         self._validate_inputs(max_band_width, epsilon)
 
-        # Store configuration parameters
+        # Every constructor argument is stored, because get_config() must return
+        # all of them.
         self.axis = axis
         self.epsilon = epsilon
         self.max_band_width = max_band_width
 
-        # Create the normalization sublayer here (construction is input-independent;
-        # canonical Keras-3 pattern). It is built against the norm-tensor shape in
-        # build(). See the class-docstring note re: its degenerate (..., 1) input.
+        # Creating the sublayer here is the Keras 3 pattern: construction does not
+        # need the input shape. build() builds it against the L2-length shape.
+        # See the class docstring for why that (..., 1) input makes it inert.
         self.norm = keras.layers.LayerNormalization(
             axis=-1,
             epsilon=self.epsilon,
             name=f"{self.name}_layer_norm",
         )
 
-        # supports_masking is a promise about the AXIS, not about the class: it holds
-        # only while the normalized axis is the trailing (feature) axis. Decided here
-        # from the spelling alone - `-1` names the trailing axis at every rank - and
-        # made exact in build(), where the input rank is finally known.
+        # supports_masking is a promise about the AXIS, not about the class. It
+        # holds only while the normalized axis is the trailing (feature) axis.
+        # Only the spelling `-1` names that axis at every rank, so that is all
+        # __init__ can decide. build() makes the answer exact.
         self.supports_masking = normalizes_only_the_feature_axis(axis)
 
         logger.debug(
@@ -176,14 +212,15 @@ class BandLogitNorm(keras.layers.Layer):
         )
 
     def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
-        """Validate initialization parameters.
+        """Reject out-of-range constructor arguments.
 
-        :param max_band_width: Maximum allowed deviation from unit norm.
+        :param max_band_width: Band width to validate.
         :type max_band_width: float
-        :param epsilon: Small constant for numerical stability.
+        :param epsilon: Epsilon to validate.
         :type epsilon: float
 
-        :raises ValueError: If parameters are invalid.
+        :raises ValueError: If max_band_width is not in (0, 1).
+        :raises ValueError: If epsilon is not positive.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -193,7 +230,7 @@ class BandLogitNorm(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     def build(self, input_shape) -> None:
-        """Build the LayerNormalization sublayer against the norm-tensor shape.
+        """Build the ``LayerNormalization`` sublayer and finalize the mask flag.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple
@@ -202,13 +239,14 @@ class BandLogitNorm(keras.layers.Layer):
             return
 
         # Refine the __init__ estimate now that the rank is known. Keras reads
-        # supports_masking inside __call__, which runs build() first, so this is the
-        # value that decides whether the mask actually survives.
+        # supports_masking inside __call__, which runs build() first, so this is
+        # the value that decides whether the mask survives.
         self.supports_masking = normalizes_only_the_feature_axis(
             self.axis, rank=len(input_shape)
         )
 
-        # The norm tensor fed to self.norm has shape [..., 1] (keepdims=True).
+        # The L2-length tensor fed to self.norm has a length-1 axis, because the
+        # reduction uses keepdims=True.
         norm_shape = list(input_shape)
         norm_shape[self.axis] = 1
         self.norm.build(norm_shape)
@@ -220,61 +258,59 @@ class BandLogitNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply constrained L2 normalization.
+        """Apply band-limited L2 normalization.
 
         :param inputs: Input tensor to normalize.
         :type inputs: keras.KerasTensor
-        :param training: Whether the layer is in training mode.
+        :param training: Forwarded to the internal ``LayerNormalization``.
         :type training: Optional[bool]
 
-        :return: Normalized tensor with L2 norm in [1-max_band_width, 1].
+        :return: Normalized tensor, same shape as ``inputs``. Its L2 norm over
+            ``axis`` is ``1 - 0.5 * max_band_width``. See the class docstring for
+            why that value is constant rather than input-dependent.
         :rtype: keras.KerasTensor
         """
         x = inputs
 
-        # Step 1: Compute L2 norm along the specified axis
-        # Shape: [..., specified_axis, ...] -> [..., 1, ...] (with keepdims=True)
+        # Step 1: L2 length along axis. maximum() floors the squared sum, so
+        # sqrt never sees a value below epsilon. keepdims=True keeps the rank.
         x_squared = keras.ops.square(x)
         x_sum_squared = keras.ops.maximum(keras.ops.sum(x_squared, axis=self.axis, keepdims=True), self.epsilon)
-        x_length = keras.ops.sqrt(x_sum_squared)  # Add epsilon for numerical stability
+        x_length = keras.ops.sqrt(x_sum_squared)
 
-        # Step 2: Normalize to unit L2 norm
-        # This gives us a tensor with ||x||_2 = 1
+        # Step 2: unit L2 norm.
         x_normalized = x / x_length
 
-        # Step 3: Apply LayerNormalization to the L2 norms
-        # This centers the norms around 0 with unit standard deviation
+        # Step 3: normalize the length tensor. Its last axis has length 1, so the
+        # result is always 0. See the class docstring.
         x_length_normalized = self.norm(x_length, training=training)
 
-        # Step 4: Apply tanh activation to bound the normalized norms to [-1, +1]
-        # This ensures the scaling factor will be well-behaved
+        # Step 4: bound the result to [-1, +1].
         x_length_normalized = keras.activations.tanh(4 * x_length_normalized)
 
-        # Step 5: Transform from [-1, +1] to [1-max_band_width, 1]
-        # First scale to [0, 1]: (tanh_output + 1) / 2
-        # Then scale to [1-max_band_width, 1]: max_band_width * [0,1] + (1 - max_band_width)
+        # Step 5: map [-1, +1] to [1 - max_band_width, 1]. The first line moves
+        # it to [0, 1]; the second scales and offsets it into the band.
         scale = (x_length_normalized + 1.0) / 2.0
         scale = (1.0 - self.max_band_width) + self.max_band_width * scale
 
-        # Step 6: Apply the learned scaling to the unit-normalized tensor
-        # Final output has L2 norm in [1-max_band_width, 1]
+        # Step 6: rescale the unit-normalized tensor.
         return x_normalized * scale
 
     def compute_output_shape(self, input_shape) -> tuple:
-        """Compute the shape of the output tensor.
+        """Return the output shape, which equals the input shape.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple
 
-        :return: Shape of the output tensor (same as input).
+        :return: The same shape tuple that was passed in.
         :rtype: tuple
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
+        """Return the configuration needed to rebuild this layer.
 
-        :return: Dictionary containing the layer configuration.
+        :return: Dictionary holding every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
