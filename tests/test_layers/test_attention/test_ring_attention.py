@@ -334,7 +334,24 @@ _MP_SEED = 1234
 # `tf32_disabled` fixture in `tests/test_layers/conftest.py`, so this file runs at
 # the ambient default in both file-scoped and directory-scoped runs. The bounds are
 # unchanged because they were already sized for the WORSE (TF32-on) regime.
-_MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.05, "float64": 0.05}
+# TF32 must be OFF for this module. The float32 row below is now a genuine
+# blockwise-vs-dense comparison (see `_float32_reference`), and on Ampere+ the
+# TF32 tensor-core matmul carries ~1e-3 relative precision: measured 6.2e-03 and
+# 4.5e-03 deviations on an RTX 4070 against a bound that has to stay near 1e-5 to
+# retain its six orders of headroom over the rescale mutation. Disabling TF32 --
+# the same opt-in `test_linear_attention.py` uses -- keeps the bound tight instead
+# of widening it by three orders and losing the sensitivity the fix just bought.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
+# The float32 entry is 1e-5, not 1e-6, and the reason is load-bearing. The
+# reference is now computed with a SINGLE block (see `_float32_reference`), so the
+# float32 row is a genuine blockwise-vs-dense comparison rather than a value
+# against itself. Correct code differs by 2.1e-06 to 2.6e-06 across the five mask
+# kinds -- real floating-point reassociation from the accumulation loop, not a
+# defect. Measured headroom: forcing the running-max rescale to 1.0 moves this
+# same comparison by 3.77 (all_ones), 4.18 (causal) and 7.33 (left_padding), six
+# orders of magnitude above the bound, so the loosening costs no sensitivity.
+_MP_ATOL = {"float32": 1e-5, "mixed_float16": 0.05, "float64": 0.05}
 
 
 def _mp_input():
@@ -407,15 +424,38 @@ _F32_REFERENCE = {}
 
 
 def _float32_reference(kind):
-    """Masked float32 output for ``kind``, memoized, under an explicit policy."""
+    """Masked float32 output for ``kind``, memoized, under an explicit policy.
+
+    The reference is computed with ``block_size == _MP_N``, i.e. a SINGLE block,
+    and that is the whole point of this function rather than an incidental
+    detail.
+
+    It used to build the reference with the same ``_MP_BLOCK`` as the layer under
+    test, which made it SELF-REFERENTIAL: any defect in the blockwise
+    online-softmax accumulation moved the reference and the measurement together,
+    so the comparison could not see it. Measured: forcing the running-max rescale
+    to 1.0 -- so a new block's maximum never rescales the accumulator -- is caught
+    by only 2 of 71 tests, and 11 of the 12 mixed-precision cases below were blind
+    to it for exactly this reason.
+
+    With one block the accumulation loop runs a single iteration, so the rescale
+    is inert by construction (``running_max`` starts at ``-inf``) and the
+    reference exercises none of the machinery it is meant to check. Measured
+    agreement between the single-block and multi-block paths on correct code, all
+    five mask kinds: 2.1e-06 to 2.6e-06, comfortably inside the tolerances these
+    tests use.
+    """
     if kind not in _F32_REFERENCE:
         previous = keras.mixed_precision.global_policy().name
+        previous_block = globals()["_MP_BLOCK"]
         keras.mixed_precision.set_global_policy("float32")
+        globals()["_MP_BLOCK"] = _MP_N
         try:
             _F32_REFERENCE[kind] = _mp_forward(
                 _mp_layer(), _mp_input(), _mp_mask(kind)
             )
         finally:
+            globals()["_MP_BLOCK"] = previous_block
             keras.mixed_precision.set_global_policy(previous)
     return _F32_REFERENCE[kind]
 

@@ -230,9 +230,25 @@ class TestRPCAttention:
         out_fast = layer_fast(input_tensor, training=False)
         out_deep = layer_deep(input_tensor, training=False)
 
-        # Outputs should be slightly different due to more refinement steps
-        diff = tf.reduce_mean(tf.abs(out_fast - out_deep))
-        assert diff > 0.0, "More PCP iterations should change the result"
+        # A MAGNITUDE, not `> 0.0`. The bare positivity check this replaces was
+        # satisfied by float32 rounding noise alone: replacing `_soft_threshold`
+        # with the identity -- which makes L + S == A exactly and renders the
+        # whole alternating-minimisation loop inert, so `max_pcp_iter`,
+        # `svd_threshold` and `lambda_sparse` all stop mattering at once -- still
+        # produced a diff of 5.96e-08 and the assertion passed.
+        #
+        # Measured on correct code: mean|delta| = 2.48e-03 between 1 and 10
+        # iterations, and exactly 0.0 for two layers built with the SAME
+        # iteration count and the same weights (the layer is deterministic).
+        # 1e-4 sits four orders above the noise the mutant produced and more than
+        # an order below the real signal.
+        diff = float(
+            keras.ops.mean(keras.ops.abs(out_fast - out_deep))
+        )
+        assert diff > 1e-4, (
+            f"10 PCP iterations differ from 1 by only {diff}; the "
+            f"alternating-minimisation loop is not refining anything"
+        )
 
     # ==================== Masking Tests ====================
 
