@@ -1,60 +1,30 @@
 """
-A powered ReLU activation function, ``f(x) = max(0, x)^k``.
+ReLU raised to a power: ``f(x) = max(0, x)^k``.
 
-This layer generalizes the standard Rectified Linear Unit (ReLU) by
-introducing a power exponent ``k``, creating a higher-order non-linearity.
-The primary architectural purpose is to allow a network to model more
-complex polynomial relationships within a single activation, potentially
-increasing the model's expressive power compared to the purely linear
-positive region of a standard ReLU.
+Standard ReLU passes positive values through unchanged. This one raises them
+to an integer power ``k``, so the positive half is a polynomial curve instead
+of a straight line. ``k=1`` gives back plain ReLU. The exponent is a
+hyperparameter, not a learned weight.
 
-Architectural Overview:
-    While standard ReLU (``k=1``) introduces a piecewise linear activation,
-    ReLUK with ``k > 1`` introduces a piecewise polynomial activation. This
-    changes the activation landscape significantly. For positive inputs,
-    the function is no longer a simple linear pass-through but a convex
-    polynomial curve. This allows a single neuron to learn a more complex,
-    non-linear response to its inputs. The exponent ``k`` serves as a
-    hyperparameter that controls the "aggressiveness" of this non-linearity;
-    higher values of ``k`` create a function that is very flat near zero
-    but grows extremely rapidly for larger inputs.
+The interesting part is the gradient. For ``x > 0`` it is ``k * x^(k-1)``,
+which depends on how large ``x`` is. Plain ReLU has gradient 1 everywhere on
+the positive side. Two consequences with ``k > 1``:
 
-Mathematical Foundation:
-    The function is defined as:
-        ``f(x) = max(0, x)^k``
+- Small activations are damped. At ``0 < x < 1`` the factor ``x^(k-1)``
+  shrinks the gradient.
+- Large activations are amplified. At ``x > 1`` the gradient grows
+  polynomially with ``x``.
 
-    The most critical difference from standard ReLU lies in its derivative,
-    which directly impacts gradient flow during backpropagation. The
-    derivative for positive inputs is:
-        ``f'(x) = k * x^(k-1) for x > 0``
-
-    Unlike standard ReLU, which has a constant gradient of 1 for all
-    positive inputs, the gradient of ReLUK is dependent on the magnitude of
-    the pre-activation ``x``. This has two major implications:
-    1.  **Suppression of Small Signals**: For ``0 < x < 1``, the gradient
-        ``k * x^(k-1)`` is less than ``k`` and can be smaller than 1 (for k>1),
-        effectively dampening the gradient for small positive activations.
-    2.  **Amplification of Large Signals**: For ``x > 1``, the gradient grows
-        polynomially, strongly amplifying the gradient for large positive
-        activations. This can accelerate learning for strong features but
-        also carries a risk of exploding gradients.
-
-    This input-dependent gradient scaling introduces a dynamic that can
-    help the network focus on stronger signals, but requires careful
-    initialization and potentially gradient clipping to ensure stability.
+That amplification is the failure mode to watch: with ``k=3`` an activation
+of 10 already carries a gradient factor of 300. Use gradient clipping or a
+careful initialization if you raise ``k``.
 
 References:
-    This function is a member of the broader class of polynomial-like
-    activations explored as alternatives to linear rectifiers. Its
-    conceptual roots lie in works that investigate the representation
-    power of networks with higher-order activation functions.
     -   Ramachandran, P., Zoph, B., & Le, Q. V. (2017). "Searching for
-        Activation Functions." (Exemplifies the search for non-linear
-        activations beyond ReLU).
+        Activation Functions."
     -   Gouk, H., et al. (2021). "Regularisation of Neural Networks by
-        Enforcing Lipschitz Continuity." (Discusses the role of activation
-        functions in controlling network properties like Lipschitz
-        constants).
+        Enforcing Lipschitz Continuity." (On how the activation controls
+        network properties such as the Lipschitz constant.)
 
 """
 
@@ -72,47 +42,48 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class ReLUK(keras.layers.Layer):
-    """ReLU-k activation layer implementing ``f(x) = max(0, x)^k``.
+    """ReLU-k activation: ``f(x) = max(0, x)^k``.
 
-    This layer applies a powered ReLU activation function which provides
-    more expressiveness than standard ReLU while maintaining computational
-    efficiency. When ``k=1``, this reduces to the standard ReLU activation.
-    Higher values of ``k`` create more aggressive non-linearities with
-    input-dependent gradient scaling: small signals (``0 < x < 1``) are
-    suppressed while large signals (``x > 1``) are amplified polynomially.
+    Applies a ReLU, then raises the result to the integer power ``k``. With
+    ``k=1`` the power step is skipped and this is plain ReLU. With ``k > 1``
+    the positive half becomes a polynomial curve, which damps small
+    activations and amplifies large ones. Output shape equals input shape and
+    every output is non-negative.
+
+    The layer owns no weights. ``k`` is validated once in ``__init__`` and
+    stored, so an invalid value fails at construction, not at the first call.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ▼
-        ┌───────────────────────┐
-        │  ReLU: max(0, x)      │
-        └───────────┬───────────┘
-                    │
-                    ▼
-        ┌───────────────────────┐
-        │  Power: result ^ k    │
-        └───────────┬───────────┘
-                    │
-                    ▼
-        Output: (batch, ..., features)
+               x  [B, ..., F]
+                      │
+                      ▼
+        ┌───────────────────────────┐
+        │ ReLU: max(0.0, x)         │
+        └─────────────┬─────────────┘
+                      │
+              ┌───────┴───────┐
+              │ k == 1        │ k > 1
+              ▼               ▼
+        ┌───────────┐   ┌───────────┐
+        │ relu_out  │   │ relu_out^k│
+        └─────┬─────┘   └─────┬─────┘
+              └───────┬───────┘
+                      │
+                      ▼
+          y  [B, ..., F]  >= 0
 
-    :param k: Power exponent for the ReLU function. Must be a positive integer.
-        Default is 3. When k=1, equivalent to standard ReLU.
+    The fork is decided at construction time from ``self.k``, not per batch.
+
+    :param k: Power exponent. Must be a positive integer. Default is 3.
     :type k: int
-    :param kwargs: Additional keyword arguments passed to the Layer base class,
-        such as ``name``, ``dtype``, ``trainable``, etc.
+    :param kwargs: Arguments for the Layer base class (``name``, ``dtype``,
+        ``trainable``, and so on).
 
-    :raises ValueError: If k is not a positive integer.
-    :raises TypeError: If k is not an integer.
-
-    References:
-        The ReLU-k activation is inspired by various works on alternative
-        activation functions that provide more flexibility than standard ReLU
-        while maintaining computational efficiency.
+    :raises TypeError: If ``k`` is not an ``int``.
+    :raises ValueError: If ``k`` is an ``int`` but not positive.
     """
 
     def __init__(
@@ -120,24 +91,21 @@ class ReLUK(keras.layers.Layer):
             k: int = 3,
             **kwargs: Any
     ) -> None:
-        """Initialize the ReLU-k activation layer.
+        """Validate ``k`` and store it.
 
-        :param k: Power exponent for the ReLU function. Must be a positive integer.
-            Default is 3.
+        :param k: Power exponent. Must be a positive integer. Default is 3.
         :type k: int
-        :param kwargs: Additional keyword arguments for the Layer parent class.
-        :raises ValueError: If k is not a positive integer.
-        :raises TypeError: If k is not an integer.
+        :param kwargs: Arguments for the Layer base class.
+        :raises TypeError: If ``k`` is not an ``int``.
+        :raises ValueError: If ``k`` is an ``int`` but not positive.
         """
         super().__init__(**kwargs)
 
-        # Validate k parameter
         if not isinstance(k, int):
             raise TypeError(f"k must be an integer, got type {type(k).__name__}")
         if k <= 0:
             raise ValueError(f"k must be a positive integer, got {k}")
 
-        # Store configuration
         self.k = k
 
         logger.info(f"Initialized ReLUK layer with k={k}")
@@ -147,45 +115,42 @@ class ReLUK(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply the ReLU-k activation: ``f(x) = max(0, x)^k``.
+        """Apply ``max(0, x)^k`` element-wise.
 
         :param inputs: Input tensor of any shape.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training or inference mode. Not used
-            in this activation layer but kept for API consistency.
+        :param training: Training or inference mode. Unused here; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Output tensor with the same shape as inputs.
+        :return: Tensor of the same shape as ``inputs``, all values >= 0.
         :rtype: keras.KerasTensor
         """
-        # Apply ReLU to get non-negative values: max(0, x)
         relu_output = keras.ops.maximum(0.0, inputs)
 
-        # Apply power transformation
+        # k == 1 is plain ReLU, so skip the power op entirely.
         if self.k == 1:
-            # Optimization: avoid unnecessary power operation for standard ReLU
             return relu_output
         else:
-            # Apply power: max(0, x)^k
+            # power() wants a float exponent, hence the cast.
             return keras.ops.power(relu_output, float(self.k))
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple, identical to input_shape.
+        :return: The same shape tuple, unchanged.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
+        """Return the config needed to rebuild the layer.
 
-        :return: Dictionary containing the layer configuration including
-            the power parameter k and parent class configuration.
+        :return: The base Layer config plus ``k``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -195,9 +160,9 @@ class ReLUK(keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        """Return string representation of the layer.
+        """Return a short representation showing ``k`` and the layer name.
 
-        :return: String representation including the layer name and key parameters.
+        :return: A string such as ``ReLUK(k=3, name='relu_k')``.
         :rtype: str
         """
         return f"ReLUK(k={self.k}, name='{self.name}')"

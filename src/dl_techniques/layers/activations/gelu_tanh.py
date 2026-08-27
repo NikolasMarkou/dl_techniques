@@ -3,13 +3,11 @@ Tanh-approximate GELU as a serializable, registered activation *function*.
 
 Motivation
 ----------
-``keras.activations.gelu`` defaults to ``approximate=False`` — the exact
-error-function form ``0.5 * x * (1 + erf(x / sqrt(2)))``
-(``keras/src/activations/activations.py:339`` in the pinned Keras 3.8.0). Every
-bare ``"gelu"`` string in this repository therefore resolves to the *exact*
-form, because ``keras.activations.get`` looks the string up in
-``ALL_OBJECTS_DICT`` and Keras registers **no** alias for the approximation
-(no ``"gelu_approximate"``, no ``"gelu_pytorch_tanh"``).
+``keras.activations.gelu`` defaults to ``approximate=False``, the exact
+error-function form ``0.5 * x * (1 + erf(x / sqrt(2)))``. In the pinned Keras
+3.8.0, ``"gelu"`` is the only gelu key in ``ALL_OBJECTS_DICT`` — there is no
+``"gelu_approximate"`` and no ``"gelu_pytorch_tanh"``. So every bare
+``"gelu"`` string in this repository resolves to the exact form.
 
 Several reference implementations this repository ports specify the **tanh
 approximation** instead:
@@ -23,19 +21,20 @@ approximation** instead:
   ``"gelu_pytorch_tanh"``, i.e. ``partial(nn.functional.gelu, approximate="tanh")``.
   https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/configuration_gemma3.py
 
-The two forms differ by up to ``max|exact - tanh| = 4.732e-04`` (attained at
-``x ~= 2.699``, interior to the realistic post-LayerNorm activation range), so
-the choice is **inference-changing**, not a training-only detail: it changes the
-function every token passes through in every forward pass.
+The two forms are not interchangeable. They differ by up to
+``max|exact - tanh| = 4.732e-04``, attained at ``x ~= 2.699`` — squarely
+inside the range a post-LayerNorm activation lives in. Picking the wrong one
+changes the function every token passes through on every forward pass, so it
+is an inference-time difference, not a training-only detail.
 
 Why a registered function rather than a lambda
 ----------------------------------------------
-A bare ``lambda`` or a ``functools.partial`` cannot be serialized by
-``keras.activations.serialize``, which is what every FFN layer in this package
-calls from ``get_config()``. A module-level function decorated with
-``@keras.saving.register_keras_serializable`` serializes to its registered name
-and deserializes back to the identical object, so ``.keras`` round-trips are
-bit-exact.
+``keras.activations.serialize`` cannot serialize a ``lambda`` or a
+``functools.partial``, and that is what every FFN layer in this package calls
+from ``get_config()``. A module-level function decorated with
+``@keras.saving.register_keras_serializable`` serializes to its registered
+name and deserializes back to the identical object, so ``.keras`` round-trips
+are bit-exact.
 """
 
 import keras
@@ -48,9 +47,14 @@ from typing import Any, Callable, Dict, Union
 def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
     """Tanh-approximate GELU.
 
-    Computes ``0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3)))`` by
-    delegating to ``keras.ops.gelu(x, approximate=True)``, which is the backend's
-    own implementation of exactly that expression.
+    Computes ``0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3)))``. It
+    delegates to ``keras.ops.gelu(x, approximate=True)``, which is the
+    backend's own implementation of that expression.
+
+    The decorator registers this function under its own name, which is what
+    makes it survive a ``.keras`` round-trip. Do not replace a use of it with
+    ``lambda x: keras.ops.gelu(x, approximate=True)``: that lambda computes
+    the same values but cannot be serialized.
 
     Reference: https://github.com/google-research/bert/blob/master/modeling.py
 
@@ -65,12 +69,14 @@ def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
 # ---------------------------------------------------------------------
 
 #: Extra activation identifiers understood by :func:`resolve_activation` on top
-#: of the stock Keras vocabulary. The keys are the spellings the upstream
-#: references use, so a port can name its reference's activation verbatim.
+#: of the stock Keras vocabulary. All three keys map to the same function. The
+#: keys are the spellings the upstream references use, so a port can name its
+#: reference's activation verbatim.
 _EXTENDED_ACTIVATIONS: Dict[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = {
     "gelu_tanh": gelu_tanh,
     "gelu_approximate": gelu_tanh,
-    "gelu_pytorch_tanh": gelu_tanh,  # HuggingFace's spelling
+    # "gelu_pytorch_tanh" is HuggingFace's spelling.
+    "gelu_pytorch_tanh": gelu_tanh,
 }
 
 
@@ -90,6 +96,29 @@ def resolve_activation(
       ``get_config()`` round-trips through ``.keras`` unchanged.
     - **Fails** exactly as ``keras.activations.get`` does — ``ValueError`` for an
       unknown identifier. It never silently falls back to a different function.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+                   identifier
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │ str in _EXTENDED_ACTIVATIONS? │
+        └───────────────┬───────────────┘
+                        │
+             ┌──────────┴──────────┐
+             │ yes                 │ no
+             ▼                     ▼
+         gelu_tanh                keras.activations.get
+         (registered,             (str, callable, dict
+          serializes               or None; ValueError
+          by name)                 on an unknown
+                                   identifier)
+
+    Only a ``str`` can take the left branch. Everything else goes right,
+    including a callable that happens to be ``gelu_tanh`` itself.
 
     :param identifier: Activation name, callable, or serialized config.
     :type identifier: Union[str, Callable, Dict[str, Any], None]

@@ -1,47 +1,28 @@
 """
-A computationally efficient, piecewise linear sigmoid approximation.
+Hard sigmoid: a piecewise-linear stand-in for the logistic sigmoid.
 
-This layer provides a hardware-friendly approximation of the standard
-logistic sigmoid function. Its primary purpose is to replace the
-computationally expensive exponential operation in the standard sigmoid
-with simple arithmetic, making it ideal for deployment on resource-
-constrained environments like mobile or edge devices, and for quantized
-models. It is a core component in modern efficient architectures such as
-MobileNetV3.
+The logistic sigmoid ``1 / (1 + exp(-x))`` needs an exponential. This module
+replaces it with an add, a clamp and a divide: ``ReLU6(x + 3) / 6``. There is
+no transcendental call, so it is cheap on mobile and edge hardware and it
+quantizes cleanly. MobileNetV3 uses it as the gate in its
+squeeze-and-excitation blocks.
 
-Architectural Design:
-    The HardSigmoid is constructed as a piecewise linear function composed
-    of three segments: a zero region, a linear ramp, and a saturation
-    region at one. This structure mimics the S-shape of the true sigmoid
-    while being implementable with basic, fast operations. The function is
-    built by applying a linear transformation (``x + 3``), clamping the
-    result to a fixed range ``[0, 6]`` (the ReLU6 operation), and finally
-    scaling the output to ``[0, 1]``. This avoids any transcendental
-    function calls, significantly reducing latency.
+The result is three straight segments:
 
-Mathematical Foundation:
-    The standard logistic sigmoid is defined as:
-        ``sigma(x) = 1 / (1 + exp(-x))``
+- ``h(x) = 0`` for ``x <= -3``
+- ``h(x) = x / 6 + 0.5`` for ``-3 < x < 3``
+- ``h(x) = 1`` for ``x >= 3``
 
-    The HardSigmoid approximates this with the piecewise linear function:
-        ``h(x) = ReLU6(x + 3) / 6 = max(0, min(6, x + 3)) / 6``
-
-    This can be expressed in three parts:
-        - ``h(x) = 0``              if x <= -3
-        - ``h(x) = (x / 6) + 0.5`` if -3 < x < 3
-        - ``h(x) = 1``              if x >= 3
-
-    The linear segment ``(x/6) + 0.5`` serves as a first-order Taylor
-    approximation of the sigmoid function around x=0, but shifted and
-    scaled. The key insight is that this simple linear ramp is a
-    "good enough" approximation for the gating and activation purposes
-    served by the sigmoid in many neural network components.
+The middle segment is a straight line through ``(0, 0.5)`` with slope
+``1/6``. The true sigmoid has slope ``1/4`` at zero, so this is a shape
+match, not a tangent line. It is close enough for gating, which is what a
+sigmoid is usually doing in these blocks.
 
 References:
     - Howard, A., et al. (2019). "Searching for MobileNetV3."
     - Courbariaux, M., et al. (2015). "BinaryConnect: Training Deep
-      Neural Networks with binary weights during propagations." (Introduced
-      an early version of the hard sigmoid).
+      Neural Networks with binary weights during propagations." (An early
+      version of the hard sigmoid.)
 
 """
 
@@ -52,40 +33,45 @@ from typing import Optional, Tuple, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class HardSigmoid(keras.layers.Layer):
-    """Hard-sigmoid activation function for efficient sigmoid approximation.
+    """Hard-sigmoid activation: ``ReLU6(x + 3) / 6``.
 
-    This layer implements a piecewise linear approximation of the sigmoid
-    function: ``hard_sigmoid(x) = max(0, min(6, x + 3)) / 6 = ReLU6(x + 3) / 6``.
-    It is computationally more efficient than the standard sigmoid, making it
-    particularly suitable for mobile and edge computing applications. It is
-    commonly used in squeeze-and-excitation modules and other attention
-    mechanisms where computational efficiency is critical.
+    A piecewise-linear approximation of the logistic sigmoid that avoids the
+    exponential. The output has the same shape as the input and lies in
+    ``[0, 1]``. Use it wherever a sigmoid is only being used to squash a
+    value into ``[0, 1]``, such as the gate in a squeeze-and-excitation block.
+
+    The layer owns no weights. It wraps a ``keras.layers.ReLU`` with
+    ``max_value=6.0`` and does the shift and the divide around it.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ▼
-        ┌───────────────────┐
-        │   Add Bias: x + 3 │
-        └───────┬───────────┘
-                │
-                ▼
+               x  [B, ..., F]
+                      │
+                      ▼
+        ┌───────────────────────────┐
+        │ x + 3.0                   │
+        └─────────────┬─────────────┘
+                      │  [B, ..., F]
+                      ▼
         ┌───────────────────────────┐
         │ ReLU6: max(0, min(6, x))  │
-        └───────────┬───────────────┘
-                    │
-                    ▼
-        ┌───────────────────┐
-        │  Scale: x / 6     │
-        └───────┬───────────┘
-                │
-                ▼
-        Output: (batch, ..., features) in [0, 1]
+        └─────────────┬─────────────┘
+                      │  in [0, 6]
+                      ▼
+        ┌───────────────────────────┐
+        │ divide by 6.0             │
+        └─────────────┬─────────────┘
+                      │
+                      ▼
+          y  [B, ..., F]  in [0, 1]
 
-    :param kwargs: Additional arguments for Layer base class (``name``, ``trainable``, etc.).
+    The ReLU6 box is the wrapped sub-layer; the other two boxes are
+    plain arithmetic in ``call()``.
+
+    :param kwargs: Arguments for the Layer base class (``name``,
+        ``trainable``, ``dtype``, and so on).
 
     References:
         - MobileNets: https://arxiv.org/abs/1704.04861
@@ -94,9 +80,9 @@ class HardSigmoid(keras.layers.Layer):
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize the HardSigmoid layer.
+        """Create the layer and its ReLU6 sub-layer.
 
-        :param kwargs: Additional keyword arguments for the Layer base class.
+        :param kwargs: Arguments for the Layer base class.
         """
         super().__init__(**kwargs)
         self.activation = keras.layers.ReLU(max_value=6.0)
@@ -105,6 +91,7 @@ class HardSigmoid(keras.layers.Layer):
         """Build the wrapped ReLU6 sub-layer.
 
         :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         self.activation.build(input_shape)
         super().build(input_shape)
@@ -114,41 +101,39 @@ class HardSigmoid(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply hard-sigmoid activation: ``ReLU6(x + 3) / 6``.
+        """Apply ``ReLU6(x + 3) / 6`` element-wise.
 
         :param inputs: Input tensor of any shape.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training or inference mode. Not used
-            in this layer but included for API consistency.
+        :param training: Training or inference mode. Unused here; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Tensor with same shape as inputs, values clamped to [0, 1].
+        :return: Tensor of the same shape as ``inputs``, with values in
+            ``[0, 1]``.
         :rtype: keras.KerasTensor
         """
-        # Apply hard-sigmoid: ReLU6(x + 3) / 6
-        # This is equivalent to: max(0, min(6, x + 3)) / 6
         return self.activation(inputs + 3.0) / 6.0
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape given input shape.
+        """Return the output shape, which equals the input shape.
 
-        :param input_shape: Shape tuple representing the input shape.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple, identical to input shape.
+        :return: The same shape tuple, unchanged.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
+        """Return the config needed to rebuild the layer.
 
-        :return: Dictionary containing the layer configuration.
+        :return: The base Layer config. This layer adds nothing to it.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
-        # No additional parameters to add for this simple activation
         return config
 
 # ---------------------------------------------------------------------
