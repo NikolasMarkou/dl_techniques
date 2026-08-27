@@ -39,6 +39,36 @@ a scalar. The default is `0.0`, so at default settings even that multiply is
 skipped. The projection is also redrawn on every call, so two forward passes on the
 same input do not agree exactly.
 
+A second, larger gap: **`nb_features` is a variance knob, not an accuracy knob.**
+Standard Performer semantics are that approximation error falls toward zero as
+`nb_features` grows. This feature map is BIASED and does not converge. Measured
+against an independent `softmax(QK^T/sqrt(d))V` reference at `head_dim=16`,
+`seq_len=64`, mean relative Frobenius error over 20 independent redraws::
+
+    features m :      8       32      128      512     2048     8192
+    rel. error : 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
+
+The per-redraw VARIANCE does shrink with `m` as a Monte-Carlo estimator should; the
+BIAS plateaus at ~0.78 and does not move. Three things cause it: the norm-correction
+factor carries `exp(-||x||^2/2)` where the trigonometric random-feature identity
+`exp(q.k) = exp(||q||^2/2) exp(||k||^2/2) E_w[cos(w.(q-k))]` calls for `+`; it is
+applied to queries only rather than symmetrized across queries and keys; and the
+`ops.maximum(features, 0)` clamp at the end of `_create_kernel_features` discards the
+sign information a cos/sin feature map carries.
+
+Do NOT "correct" those three without re-measuring. It was tried and rejected
+(decisions.md D-013): the corrected trigonometric map and a textbook positive FAVOR+
+map both DO converge under the symmetric `d^(-1/4)` scaling FAVOR+ assumes
+(`309.97 -> 0.21` and `1.54 -> 0.49` across `m = 8 .. 32768`), but they cross below
+this map's error only past `m ~ 10^4`, and at every feature count anyone actually
+sets they are two to three orders of magnitude WORSE -- at `m = 128`, `82.7` and
+`2.08` against this map's `0.78`. The clamp buys a large variance reduction at the
+price of a bias floor, and removing it makes real configurations worse. Symmetric
+scaling alone does not move the floor either (`0.7826 -> 0.7736` at `m = 128`).
+
+Use this layer for its linear `O(N)` cost. Do not use it where the answer must
+approach softmax attention, and do not read `nb_features` as a quality dial.
+
 Foundational mathematics::
 
     exp(q . k) ~ E[ <phi(q), phi(k)> ]
@@ -333,11 +363,14 @@ class PerformerAttention(keras.layers.Layer):
             name='output_projection'
         )
 
-        # Dropout layer
-        if dropout_rate > 0.0:
-            self.dropout = keras.layers.Dropout(dropout_rate)
-        else:
-            self.dropout = None
+        # DECISION plan-2026-08-27T040114-580f8b63/D-014
+        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
+        # ("Create Unconditionally, Use Conditionally") and Pitfall 1. The
+        # conditional spelling this replaces made the object graph and the
+        # auto-generated sub-layer names depend on `dropout_rate`, which is the
+        # documented anti-pattern; an unused Dropout owns no weights, so creating
+        # it always costs nothing in the checkpoint.
+        self.dropout = keras.layers.Dropout(dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and its two projection sub-layers.
@@ -384,11 +417,24 @@ class PerformerAttention(keras.layers.Layer):
         # Generate random Gaussian matrix
         # Shape: (num_heads, nb_features//2, head_dim)
         shape = (self.num_heads, self.nb_features // 2, self.head_dim)
+        # DECISION plan-2026-08-27T040114-580f8b63/D-014
+        # `dtype=self.compute_dtype` is load-bearing, not tidiness. Without it
+        # `keras.random.normal` follows the GLOBAL float policy and returns
+        # float32, while `q`/`k` arrive in the layer's compute dtype. Under
+        # `keras.mixed_precision.set_global_policy('mixed_float16')` the einsum
+        # and the `features * self._feature_scale` multiply below then mixed a
+        # half tensor with a float tensor and the layer raised
+        # `InvalidArgumentError: cannot compute Mul as input #1 was expected to be
+        # a float tensor but is a half tensor` -- i.e. PerformerAttention could
+        # not run at all under the project's standard mixed-precision policy.
+        # The file's test suite had zero mixed-precision coverage, so nothing
+        # caught it.
         projection = keras.random.normal(
             shape=shape,
             mean=0.0,
             stddev=1.0,
-            seed=None
+            seed=None,
+            dtype=self.compute_dtype
         )
 
         # Optionally apply orthogonalization for better approximation
@@ -598,7 +644,7 @@ class PerformerAttention(keras.layers.Layer):
         out = self.to_out(out)
 
         # Apply dropout if specified
-        if self.dropout is not None:
+        if self.dropout_rate > 0.0:
             out = self.dropout(out, training=training)
 
         if return_attention_scores:
