@@ -174,7 +174,7 @@ class GELU(BaseActivation):
         # it met the float16 autocast input here and the divide raised TypeError on
         # ANY mixed-precision forward. Cast the constant, not `inputs`: casting
         # `inputs` to float32 opts every consumer out of mixed precision. See D-017.
-        root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
+        root_two = keras.ops.sqrt(keras.ops.cast(2.0, inputs.dtype))
         return 0.5 * inputs * (1 + keras.ops.erf(inputs / root_two))
 
 
@@ -479,7 +479,7 @@ class xGELU(ExpandedActivation):
         # DECISION plan-2026-08-23T203721-009b7ccf/D-017
         # Same policy-blind float32 constant as `GELU.call` above, same repair. Do
         # NOT revert to the bare `keras.ops.sqrt(2.0)`. See decisions.md D-017.
-        root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
+        root_two = keras.ops.sqrt(keras.ops.cast(2.0, inputs.dtype))
         gate = 0.5 * (1 + keras.ops.erf(inputs / root_two))
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
 
