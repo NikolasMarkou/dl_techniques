@@ -34,7 +34,35 @@ Do not weaken any of those four axes -- dropping the graph axis, the functional
 axis, or the inside-the-regime `N` each independently makes this module green
 against the very defect it exists to catch.
 
-See decisions.md D-015 (plan-2026-08-25T053412-0f1fa04f).
+Tolerance
+---------
+These comparisons ran at ``atol=1e-6`` and, in one case, at exact ``== 0.0``.
+Both were miscalibrated on GPU and made this module RED at HEAD -- 8 of the
+package's 14 baseline failures came from here.
+
+The cause is XLA, not a defect. ``Model.predict`` defaults to
+``jit_compile="auto"``, which selects XLA on GPU and not on CPU, and XLA fuses and
+reassociates reductions. Measured on the exact models below: with
+``jit_compile=True`` the graph-vs-eager deltas are 4.7e-04 .. 1.0e-03, and with
+``jit_compile=False`` they fall to 1.5e-07 (grid) and exactly 0.0 (band). The
+deltas SURVIVE ``NVIDIA_TF32_OVERRIDE=0``, so this is reassociation rather than
+tensor-core precision, and disabling TF32 does not help.
+
+The exact-equality assertion also carried an unsound inference. Its message read
+"they took different branches", but the short-circuit and padding paths are
+mathematically equivalent, so a genuine branch divergence produces a delta near
+ZERO, not a large one. Exact equality was never the detector for that. The real
+detector in this module is that the graph path RUNS AT ALL: the defect it was
+written for (`NotImplementedError: Cannot convert a symbolic tf.Tensor`) raises,
+and a raise fails every assertion here regardless of tolerance.
+
+``_GRAPH_ATOL`` is therefore 5e-3, five times the measured worst case, and the
+message now states what a failure actually means. XLA is deliberately left ON:
+forcing ``jit_compile=False`` would keep exact equality but would stop exercising
+the compiled path that real ``predict()`` calls take on GPU.
+
+See decisions.md D-015 (plan-2026-08-25T053412-0f1fa04f) and
+plan-2026-08-27T040114-580f8b63/D-023.
 """
 
 import keras
@@ -45,6 +73,10 @@ import tensorflow as tf
 from dl_techniques.layers.attention.window_attention import WindowAttention
 
 # ---------------------------------------------------------------------
+
+#: Bound for graph-vs-eager agreement. See the module docstring: XLA
+#: reassociation measures 4.7e-04..1.0e-03 here, so 5e-3 is 5x the worst case.
+_GRAPH_ATOL = 5e-3
 
 DIM = 32
 NUM_HEADS = 4
@@ -125,7 +157,7 @@ class TestTheGraphPathWorksInEveryPartitionMode:
         eager = keras.ops.convert_to_numpy(model(x, training=False))
         graph = model.predict(x, verbose=0)
 
-        np.testing.assert_allclose(graph, eager, atol=1e-6, rtol=0)
+        np.testing.assert_allclose(graph, eager, atol=_GRAPH_ATOL, rtol=0)
 
     @pytest.mark.parametrize("partition_mode", PARTITION_MODES)
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
@@ -259,9 +291,16 @@ class TestAStaticallyUnknownSequenceLength:
 
         assert graph.shape == (2, 20, DIM)
         assert np.all(np.isfinite(graph))
-        assert np.abs(graph - eager).max() == 0.0, (
-            f"partition_mode={partition_mode!r} at a dynamic sequence length: the "
-            "traced and eager calls disagree, so they took different branches"
+        np.testing.assert_allclose(
+            graph,
+            eager,
+            atol=_GRAPH_ATOL,
+            rtol=0,
+            err_msg=(
+                f"partition_mode={partition_mode!r} at a dynamic sequence "
+                "length: the traced and eager calls disagree by more than "
+                "floating-point reassociation can explain"
+            ),
         )
 
     def test_band_serves_two_different_lengths_from_one_model(self):

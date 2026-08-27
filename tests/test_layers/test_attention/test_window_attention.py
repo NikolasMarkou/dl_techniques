@@ -1373,6 +1373,16 @@ class TestTheShortCircuitIsCorrectAtWindowSize128:
     ``rpb=False`` cells at 2.086e-07 exactly as they should be.
     """
 
+    # TF32 OFF for this class. `ATOL` below is 5e-7 against a float64 reference,
+    # and on Ampere+ the TF32 tensor-core matmul carries ~1e-3 relative precision:
+    # measured, these six cells fail on an RTX 4070 with TF32 on and pass with
+    # `NVIDIA_TF32_OVERRIDE=0`. The bound must NOT be widened to accommodate that
+    # -- see the note on `ATOL` -- so the precision regime is fixed instead, the
+    # same opt-in `test_linear_attention.py` uses. Scoped to this class rather than
+    # the module so the other ~250 tests in this file keep running in the default
+    # regime.
+    pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
     WINDOW_SIZE = 128
     #: float32 reduction noise against a float64 reference. MEASURED worst case
     #: over all six cells: 2.682e-07. Do NOT widen it -- the RED injection above
