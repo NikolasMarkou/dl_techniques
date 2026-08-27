@@ -296,10 +296,11 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         )
 
         # Conditionally create dropout layer
-        if self.dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
-        else:
-            self.dropout_layer = None
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016
+        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
+        # and Pitfall 1: a Dropout owns no weights, so always creating it keeps
+        # the object graph independent of `dropout_rate` at no checkpoint cost.
+        self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
 
         # Shared probability activation reused across all five attention sites.
         # The call() of ProbabilityOutput is purely functional on the score
@@ -347,10 +348,17 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qkv_dense.build(input_shape)
         self.proj_dense.build(input_shape)
 
-        if self.dropout_layer is not None:
-            # Dropout layer needs to be built with attention weights shape
-            # For simplicity, we'll let it build automatically during call
-            pass
+        # DECISION plan-2026-08-27T040114-580f8b63/D-018
+        # Built EXPLICITLY, like every other sub-layer in this method. The
+        # `pass` this replaces was a Guide v2 section 3.2 / Pitfall 6 violation
+        # ("build exactly what call() runs") that opted out with a comment saying
+        # so. It was harmless only because Dropout owns no weights, so there was
+        # nothing for a `.keras` reload to restore into; that is a property of
+        # Dropout, not of this method, and it would stop holding the moment the
+        # sub-layer became stateful.
+        self.dropout_layer.build(
+            (input_shape[0], self.num_heads, input_shape[1], input_shape[1])
+        )
 
         # Build probability layer with a representative per-stream attention
         # score shape: (batch, num_heads, q_len, k_len). Concrete lengths vary
@@ -479,7 +487,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             scores = keras.ops.matmul(q_combined, keras.ops.transpose(k_swapped, (0, 1, 3, 2))) * self.scale
             attn_weights = self.attn_prob(scores)
 
-            if self.dropout_layer is not None:
+            if self.dropout_rate > 0.0:
                 attn_weights = self.dropout_layer(attn_weights, training=training)
 
             attn_out = keras.ops.matmul(attn_weights, v_swapped)
@@ -492,14 +500,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             # Modality A attends to Modality B
             scores_a = keras.ops.matmul(q_splits[0], keras.ops.transpose(k_splits[1], (0, 1, 3, 2))) * self.scale
             attn_weights_a = self.attn_prob(scores_a)
-            if self.dropout_layer is not None:
+            if self.dropout_rate > 0.0:
                 attn_weights_a = self.dropout_layer(attn_weights_a, training=training)
             attn_out_a = keras.ops.matmul(attn_weights_a, v_splits[1])
 
             # Modality B attends to Modality A
             scores_b = keras.ops.matmul(q_splits[1], keras.ops.transpose(k_splits[0], (0, 1, 3, 2))) * self.scale
             attn_weights_b = self.attn_prob(scores_b)
-            if self.dropout_layer is not None:
+            if self.dropout_rate > 0.0:
                 attn_weights_b = self.dropout_layer(attn_weights_b, training=training)
             attn_out_b = keras.ops.matmul(attn_weights_b, v_splits[0])
 
@@ -558,14 +566,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         # Modality A (anchors + queries) attends to Modality B anchors
         scores_a = keras.ops.matmul(q_mod_a, keras.ops.transpose(k_mod_b_anchor, (0, 1, 3, 2))) * self.scale
         attn_weights_a = self.attn_prob(scores_a)
-        if self.dropout_layer is not None:
+        if self.dropout_rate > 0.0:
             attn_weights_a = self.dropout_layer(attn_weights_a, training=training)
         attn_out_a = keras.ops.matmul(attn_weights_a, v_mod_b_anchor)
 
         # Modality B (anchors + queries) attends to Modality A anchors
         scores_b = keras.ops.matmul(q_mod_b, keras.ops.transpose(k_mod_a_anchor, (0, 1, 3, 2))) * self.scale
         attn_weights_b = self.attn_prob(scores_b)
-        if self.dropout_layer is not None:
+        if self.dropout_rate > 0.0:
             attn_weights_b = self.dropout_layer(attn_weights_b, training=training)
         attn_out_b = keras.ops.matmul(attn_weights_b, v_mod_a_anchor)
 
