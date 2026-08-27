@@ -221,6 +221,22 @@ class NonLocalAttention(keras.layers.Layer):
     :param dropout_rate: Dropout rate between 0.0 and 1.0.
     :type dropout_rate: float
     :param attention_mode: Attention type (``'gaussian'`` or ``'dot_product'``).
+
+        Both names are inherited and BOTH ARE IMPRECISE against Wang et al. 2018,
+        which defines four pairwise functions (gaussian, embedded gaussian, dot
+        product, concatenation). Only two exist here, and neither is the variant
+        its name suggests:
+
+        * ``'gaussian'`` is really the paper's **Embedded Gaussian** -- the scores
+          are computed on LEARNED theta/phi embeddings, not on raw features, and
+          are softmax-normalized.
+        * ``'dot_product'`` is a **softmax-normalized** scaled dot product, not
+          the paper's ``1/N``-normalized dot-product variant.
+
+        Measured 2026-08-27: both modes route through the same default softmax
+        ``ProbabilityOutput``, so the only difference between them is the scaling.
+        The names are kept because they are public registry-adjacent surface; this
+        note records what they actually mean.
         ``'dot_product'`` scales scores by ``1/sqrt(d_k)``; ``'gaussian'`` does
         not scale and uses reduced key/value channels.
     :type attention_mode: Literal['gaussian', 'dot_product']

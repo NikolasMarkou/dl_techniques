@@ -113,6 +113,32 @@ class TransformerDecoderLayer(keras.layers.Layer):
     :param self_attention_type: Factory key for the self-attention sub-block.
         Default ``'multi_head'``. Non-default keys must be self-attention
         compatible and may require ``attention_args``.
+
+        **The annotation is wider than what works.** It is the full 33-key
+        ``AttentionType`` literal; measured 2026-08-27, one decoder per registry
+        key on a ``(2, 16, 32)`` input with ``encoder_output`` supplied, THIRTEEN
+        are usable: ``anchor``, ``differential``, ``energy``, ``fnet``, ``gated``,
+        ``group_query``, ``lighthouse``, ``multi_head``, ``multi_head_cross``,
+        ``multi_head_latent``, ``perceiver``, ``ring``, ``window_band``.
+
+        The other 20 fail in three different ways, and only the first is a clean
+        refusal:
+
+        * 12 raise ``ValueError: Failed to create self-attention layer of type
+          '<k>'`` -- the layer does not take ``dim``/``num_heads``
+          (``capsule_routing``, ``cbam``, ``channel``, ``hopfield``,
+          ``non_local``, ``single_window``, ``spatial``, ``tripse1..4``);
+        * 4 raise a bare ``TypeError`` from deep inside ``call`` because the
+          sub-layer's ``call`` does not accept the ``attention_mask`` this block
+          passes when ``use_causal_mask=True`` (``linear``, ``performer``,
+          ``rpc``, ``shared_weights_cross``). Nothing pre-checks that, so the
+          traceback comes from Keras internals rather than a named error;
+        * 4 fail on shape or dtype inside the sub-layer (``beit``,
+          ``mobile_mqa``, ``wave_field``, ``window``, ``window_zigzag``).
+
+        The maskless types ARE handled loudly: selecting ``anchor``, ``fnet`` or
+        ``lighthouse`` emits a named warning that ``use_causal_mask=True`` cannot
+        be honoured and the block is not causal.
     :param cross_attention_type: Factory key for the cross-attention sub-block.
         Default ``'multi_head_cross'`` (the canonical cross-attention primitive).
     :param attention_args: Extra args forwarded to the self-attention factory

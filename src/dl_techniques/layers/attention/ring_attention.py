@@ -10,6 +10,15 @@ in fixed-size tiles while a small running state per query row carries everything
 the normalizer needs. Peak memory then depends on ``block_size``, not on ``N``, and
 the sequence length becomes a time cost instead of a memory wall.
 
+**That holds for INFERENCE only.** This layer does no gradient checkpointing, so
+under a ``GradientTape`` every block's intermediates are retained for the backward
+pass and peak memory grows with ``N`` again. Measured 2026-08-27 at a fixed
+``block_size`` (``ru_maxrss`` under a tape): **12 MB at N=256 rising to 547 MB at
+N=2048**, against a flat ~1-1.7 MB across the same range at inference. Read the
+claim above as "the FORWARD pass no longer materialises an ``N x N`` score
+matrix", which is what the streaming softmax buys, and not as a training-time
+memory bound.
+
 The running state is the triple ``(m, l, O)``: the largest score seen so far, the
 accumulated normalizer, and the accumulated weighted values. After absorbing
 key/value block ``j``::
@@ -109,7 +118,10 @@ class RingAttention(keras.layers.Layer):
     ``O_new = O * exp(m - m_new) + exp(S_ij - m_new) V_j``,
     ``l_new = l * exp(m - m_new) + sum(exp(S_ij - m_new))``. The block output
     ``O / l`` is mathematically identical to standard attention; memory is
-    ``O(block_size^2)`` rather than ``O(N^2)``.
+    ``O(block_size^2)`` rather than ``O(N^2)`` -- for the FORWARD pass. There is no
+    gradient checkpointing here, so a backward pass retains per-block
+    intermediates and training-time peak memory still grows with ``N``; see the
+    measured figures in the module docstring.
 
     **[NO PROBABILITY HOOK — intentional constraint, not an omission]** Unlike most
     siblings in this package, this layer exposes no ``probability_type`` /

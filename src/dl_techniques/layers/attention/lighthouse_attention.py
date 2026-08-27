@@ -63,11 +63,25 @@ Architecture:
         needs no floating-point atomics.
 
     .. warning::
-       This layer is currently **BROKEN**: perturbing the last input token
-       changes outputs at positions ``< N // 2``. The MECHANISM IS NOT
-       DIAGNOSED. This description states the DESIGN, not the measured
-       behavior. See the ``D-009`` anchor above the class for the known-red
-       tests.
+       Causality is **BLOCK-GRANULAR, not per-position.** A perturbation at token
+       ``T`` can move outputs inside ``T``'s own causal block, so a query at
+       position ``i`` may respond to position ``i + 1`` when both fall in the same
+       block. Measured at ``N=32, L=2, p=2, top_k=16``: 8 violating ``(i, j)``
+       cells in the 32x32 support matrix, every one of them ``j == i + 1``. This
+       is pinned by the strict-xfail ``test_causality_is_per_position`` so it can
+       be neither forgotten nor quietly fixed, and the per-block guarantee is
+       pinned by ``test_causality_no_cross_block_leakage``.
+
+       If you need strict per-position causality -- autoregressive decoding, for
+       instance -- this layer does not provide it.
+
+       This block replaced a ``currently BROKEN`` warning that said perturbing the
+       last token "changes outputs at positions ``< N // 2``" with the mechanism
+       "NOT DIAGNOSED", citing D-009 (2026-07-27). D-023 (2026-07-29) fixed
+       exactly that by partitioning ``top_k`` per causal block, two days after the
+       warning was written, and it then sat stale for a month. Re-measured
+       2026-08-27: the described symptom is **exactly 0.0**, and all four tests
+       D-009 named as red now pass (`12 passed, 1 xfailed`).
 
     A ``full_attention`` flag (set at construction, or toggled at runtime via
     ``set_full_attention``) bypasses the pyramid entirely and runs plain causal
@@ -275,6 +289,21 @@ def _compute_mandatory_indices(
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-07-27T130643-38c5646a/D-009
+# SUPERSEDED by D-023 of the same plan, and re-verified 2026-08-27 by
+# plan-2026-08-27T040114-580f8b63/step-20. Kept for provenance; do NOT read the
+# paragraph below as current.
+#
+# WHAT IS TRUE NOW: the cross-block defect described here is FIXED. D-023
+# partitioned `top_k` per causal block two days after this anchor was written.
+# Re-measured 2026-08-27 at N=32, L=2, p=2, top_k=16: perturbing the LAST input
+# token moves positions `< N // 2` by EXACTLY 0.0, and all four tests named below
+# as the red baseline PASS (the file is `12 passed, 1 xfailed`). The residual is
+# narrower and block-local -- 8 violating cells, every one `j == i + 1` -- and is
+# pinned by the strict-xfail `test_causality_is_per_position`.
+#
+# The stale text stood for a month, in this anchor and in two docstrings, and is
+# the reason step-20 of the 2026-08-27 plan re-derives claims rather than reading
+# them. HISTORICAL, as written 2026-07-27:
 # THIS LAYER IS KNOWN-RED. It ships with a real, reproduced causality defect:
 # perturbing the LAST input token changes outputs at positions `< N // 2` by up to
 # 2.58 absolute. Four tests fail on that defect and are the authoritative red
@@ -467,14 +496,35 @@ class LighthouseAttention(keras.layers.Layer):
         needs.
 
     .. warning::
-        **Known causality defect — this layer is not currently causal.**
-        Perturbing the last input token changes outputs at positions ``< N // 2``.
-        The MECHANISM IS NOT DIAGNOSED.
-        Do **not** use this layer where causality is load-bearing (autoregressive
-        decoding, next-token training) until the defect is fixed. See the
-        ``# DECISION plan-2026-07-27T130643-38c5646a/D-009`` anchor above the class
-        for the known-red tests and for why the fix is sequenced into a separate
-        plan rather than applied here.
+        **Causality is block-granular, not per-position.** Cross-block causality
+        holds: a perturbation cannot reach an EARLIER causal block. Within a
+        block it can, so a query at position ``i`` may respond to ``i + 1`` when
+        both fall in the same block. Measured at ``N=32, L=2, p=2, top_k=16``:
+        8 violating cells, all ``j == i + 1``.
+
+        Do **not** use this layer where STRICT per-position causality is
+        load-bearing (autoregressive decoding, next-token training). The
+        block-level guarantee is pinned by
+        ``test_causality_no_cross_block_leakage`` and the residual by the
+        strict-xfail ``test_causality_is_per_position``.
+
+        This replaced a "not currently causal / MECHANISM IS NOT DIAGNOSED"
+        warning that was stale: see the D-009 anchor above the class.
+
+    .. warning::
+        **This layer accepts NO attention mask.** ``call(inputs, training=None)``
+        has no ``attention_mask`` parameter, which is why
+        ``TransformerLayer`` lists it in ``_MASKLESS_ATTENTION_TYPES`` and
+        SILENTLY DISCARDS a caller's mask for this type.
+
+        The cost is severity-asymmetric, measured 2026-08-27:
+
+        * **right-padding: exactly 0.0.** The causal design already isolates
+          trailing padding, so the missing mask costs nothing.
+        * **left-padding: 21.61 absolute.** This is the convention causal-LM
+          decoding actually uses, and padded positions contaminate real ones.
+
+        If your batch is left-padded, do not use this layer.
     """
 
     def __init__(

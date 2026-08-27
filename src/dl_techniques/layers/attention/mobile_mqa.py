@@ -269,6 +269,13 @@ class MobileMQA(GroupedQueryAttention):
             general token mask cannot be applied unambiguously. Passing a mask
             has no effect on the output — do not rely on masking with this
             layer (this is a documented limitation, like ``spatial``).
+
+            Quantified 2026-08-27, because "no effect" understates it: padding is
+            not merely unmasked, it CONTAMINATES real positions. Unit-scale
+            padding moves a real position's output by roughly 100% of its own
+            magnitude (2.77 against a 2.72 baseline), and adversarial padding
+            moves it by 318 against a baseline scale of 1-4. Do not feed this
+            layer a padded batch.
         :type attention_mask: keras.KerasTensor or None
         :param return_attention_weights: Whether to return attention
             weights alongside the output.

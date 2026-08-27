@@ -417,6 +417,32 @@ class TransformerLayer(keras.layers.Layer):
         expert type is not one of those six).
     :type intermediate_size: int
     :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
+
+        **The annotation is wider than the implementation.** ``AttentionType`` is
+        the full 33-key ``ATTENTION_REGISTRY`` literal, but ``_build_attention``
+        implements TEN branches and its ``else`` raises
+        ``ValueError: Unknown attention type``. Measured 2026-08-27, one
+        ``TransformerLayer`` per registry key on a ``(2, 16, 32)`` input:
+
+        * **usable (10):** ``anchor``, ``differential``, ``fnet``,
+          ``group_query``, ``lighthouse``, ``multi_head``, ``multi_head_latent``,
+          ``window``, ``window_band``, ``window_zigzag``.
+        * **raise ``Unknown attention type`` (22):** every other key. Some are
+          legitimately inapplicable here -- ``cbam``/``channel``/``spatial`` are
+          4-D convolutional attentions and ``multi_head_cross`` is
+          cross-attention -- but ``linear``, ``performer``, ``gated``, ``ring``,
+          ``rpc``, ``hopfield``, ``energy``, ``single_window`` and ``wave_field``
+          are drop-in self-attention mechanisms that simply have no branch.
+        * ``beit`` constructs but raises on sequence length unless
+          ``seq_len == Wh*Ww + 1``; that is its own documented constraint, not a
+          missing branch.
+
+        Additionally, ``attention_type='anchor'`` runs in STANDARD
+        self-attention mode here. ``AnchorAttention``'s hierarchical bottleneck is
+        selected by ``num_anchor_tokens``, a ``call()`` argument this block does
+        not forward, and ``None`` means standard attention by that layer's own
+        documented contract. Passing it through ``attention_args`` raises, because
+        it is not a constructor parameter.
     :type attention_type: AttentionType
     :param attention_args: Custom arguments forwarded to the attention factory.
     :type attention_args: Optional[Dict[str, Any]]
@@ -1117,6 +1143,21 @@ class TransformerLayer(keras.layers.Layer):
         :param inputs: Input tensor ``(batch, seq_len, hidden_size)``.
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional attention mask.
+
+            **SILENTLY DISCARDED for three attention types.**
+            ``_MASKLESS_ATTENTION_TYPES`` is ``{'fnet', 'anchor', 'lighthouse'}``,
+            whose sub-layers accept no mask argument at all, so this parameter is
+            dropped for them with no warning. Measured 2026-08-27,
+            ``max|y_masked - y_unmasked|`` with a ``(B, T)`` keep-mask zeroing the
+            tail half:
+
+            * ``anchor``, ``fnet``, ``lighthouse``: **exactly 0.0** -- the mask
+              does nothing;
+            * every other usable type: 0.165 to 1.679.
+
+            Padding a batch and passing a mask therefore produces silently wrong
+            results for those three. See each layer's own docstring for the
+            measured cost of its missing mask.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Layer index (used by differential attention).
         :type layer_idx: int

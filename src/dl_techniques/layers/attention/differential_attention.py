@@ -32,6 +32,18 @@ operator's rows sum to zero and the residual stream loses its DC component. The
 learned scalar multiplies the schedule rather than replacing it, so a layer can
 soften its own cancellation but not escape the depth trend.
 
+TWO STEPS OF THE PAPER ARE NOT IMPLEMENTED HERE, and neither was disclosed
+anywhere until 2026-08-27. Ye et al.'s Differential Transformer also applies a
+per-head GroupNorm to each head's differential output, and rescales that output
+by ``(1 - lambda_init)`` to align the residual-stream magnitude with a standard
+attention block. Verified absent: ``grep -rn "GroupNorm" ``
+over ``src/dl_techniques/layers/attention/`` returns nothing, and nothing in this
+file rescales by ``(1 - lambda_init)``. The single-scalar reparameterization is a
+separate, already-disclosed simplification (the paper learns per-head
+``exp(lam_q1 . lam_k1) - exp(lam_q2 . lam_k2) + lambda_init``); these two are
+omissions rather than simplifications, so a caller comparing against published
+numbers should expect a different output scale.
+
 Attention is computed manually rather than by delegating to two
 `keras.layers.MultiHeadAttention` instances. That is what makes the per-stream
 probability normalization pluggable — each stream owns its own
@@ -186,8 +198,14 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     .. code-block:: text
 
         layer_idx    0      1      2      4      8     16     ∞
-        lambda    0.200  0.200  0.356  0.530  0.720  0.797  0.800
+        lambda    0.200  0.200  0.356  0.556  0.727  0.793  0.800
                   (times the learned scalar, then clipped to [0.1, 0.9])
+
+        Re-derived 2026-08-27 from the schedule itself,
+        ``0.8 - 0.6 * exp(-0.3 * max(l - 1, 0))``. Three entries were wrong:
+        layer_idx 4 read 0.530 (true 0.556), 8 read 0.720 (true 0.727) and
+        16 read 0.797 (true 0.793) -- the last of which was above its own
+        asymptote, which the table states as 0.800 on the same line.
 
     :param dim: Integer, input and output dimension. Must be positive and should be
         divisible by num_heads for optimal performance.

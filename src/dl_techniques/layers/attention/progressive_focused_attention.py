@@ -211,6 +211,17 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :type projection_dropout_rate: float
     :param use_lepe: Whether to use Locally-Enhanced Positional Encoding via
         depthwise convolution on value vectors.
+
+        **LePE bypasses the SW-MSA mask.** It is a depthwise convolution applied
+        to V INSIDE the window, so after the cyclic shift it mixes neighbouring
+        shifted-space positions and carries information across a region boundary
+        that the additive mask blocks for the ATTENTION path. Measured
+        2026-08-27 at ``window_size=4, shift_size=2, H=W=8``: perturbing a
+        masked-out key moves its guarded query from ``-0.803`` to ``-5.616`` with
+        ``use_lepe=True``, and leaves it bit-unchanged with ``use_lepe=False``.
+        This is faithful to CSWin -- LePE is a positional encoding on V, not an
+        attention term -- but it means the mask's isolation guarantee covers the
+        attention path only.
     :type use_lepe: bool
     :param lepe_kernel_size: Kernel size for LePE depthwise convolution.
     :type lepe_kernel_size: int
