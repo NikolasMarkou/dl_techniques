@@ -44,11 +44,12 @@ Caveats:
   masks force every discarded leaf to exactly zero mass before the slice, so
   the slice throws nothing away. Measured at ``output_dim=10``,
   ``padded_dim=16``: the six padded leaves are 0.0 exactly, and the row sum
-  before renormalizing is 1.0 to within 3e-08. What remains is a shape cost.
-  Six of the fifteen internal nodes are forced left and ignore their logit.
-  Every one of the ``d`` decisions still receives gradient (measured
-  per-decision kernel gradient 1.91-3.04 at ``output_dim=10``, against
-  2.42-2.88 at 16). Prefer an ``output_dim`` at or near a power of two.
+  before renormalizing is 1.0 to within 2e-07 over 50 random inputs. What
+  remains is a shape cost. Six of the fifteen internal nodes are forced left
+  and ignore their logit. Every one of the ``d`` decisions still receives a
+  non-zero gradient, which is the invariant that reproduces; the magnitudes
+  depend entirely on the loss, the batch and the input, so no range for them
+  is quoted here. Prefer an ``output_dim`` at or near a power of two.
 
 - **Input scale matters in deterministic mode.** Every basis column has
   ``||w_k|| = 1`` (measured 1.0) but nothing constrains ``||x||``, so logits
@@ -59,9 +60,11 @@ Caveats:
 
 - **Under fp16 the output stays float32.** The tree multiplies up to ``d``
   clipped sigmoids together, so leaf masses get small fast. At
-  ``output_dim=50000`` the mean leaf mass is 2.0e-05 and 92,618 of 100,000
-  leaves fall below the smallest fp16 normal (6.104e-05); a final cast to
-  fp16 would flush most of the distribution to zero and break the
+  ``output_dim=50000`` the mean leaf mass is 2.0e-05 (that is 1/50000, so it
+  is exact, not sampled) and well over 90% of the leaves fall below the
+  smallest fp16 normal, 6.104e-05. The exact count depends on the input;
+  measured 92.4% to 95.6% across six N(0,1) inputs of shape (2, 64). A final
+  cast to fp16 would flush most of the distribution to zero and break the
   sum-to-one invariant. The layer casts the decision logits to float32 before
   the sigmoid, runs the whole tree in float32, and skips the cast back under
   fp16. Measured output dtype on the same float32 input: ``float32`` gives
@@ -307,13 +310,15 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     normalization box runs only when ``input_normalization`` is set. The
     ``divide by row sum`` step runs only when ``normalize=True``; it corrects
     floating-point drift and nothing else, since the structural masks already
-    force the padded leaves to exactly zero (measured max difference between
-    ``normalize=True`` and ``normalize=False`` at ``output_dim=10``: 3.0e-08).
+    force the padded leaves to exactly zero. Measured over 50 random inputs at
+    ``output_dim=10``: turning it on changes the output by less than 1e-07
+    (largest single difference seen 5.960e-08, one float32 ulp at 1.0).
 
     Exact zeros appear in the padded leaf array, not in the output. The
     padded leaves at index ``>= output_dim`` are 0.0 exactly, and the slice
-    then discards them (measured at ``output_dim=10``: the smallest surviving
-    output entry was 3.1e-03, and no output entry was 0.0).
+    then discards them. Over the same 50 inputs no output entry was ever 0.0;
+    the smallest one seen was 4.7e-04, but that figure is a property of those
+    inputs, not of the layer.
 
     :param output_dim: Number of classes. Required and greater than 1 in
         ``"trainable"`` mode. May be ``None`` in ``"deterministic"`` mode, in
@@ -810,10 +815,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         if self.bias is not None:
             decision_logits = decision_logits + self.bias
 
-        # Cast to float32 BEFORE the sigmoid and the clip. Under fp16 the
-        # clip floor (epsilon=1e-7) sits below the smallest fp16 normal
-        # (6.104e-05), so clipping in fp16 would round the floor to zero. The
-        # sigmoid, the clip and the whole tree therefore run in float32.
+        # Cast to float32 BEFORE the sigmoid and the clip, because in fp16 the
+        # clip stops working at the top end. np.float16(1 - 1e-7) is exactly
+        # 1.0, so the upper clip is a no-op and a saturated sigmoid leaves
+        # p_go_left = 1 - 1.0 = 0.0, zeroing a whole subtree. (The floor is
+        # not the problem: np.float16(1e-7) is a subnormal 1e-07, not zero.)
+        # The sigmoid, the clip and the whole tree therefore run in float32.
         decision_logits = keras.ops.cast(decision_logits, "float32")
 
         decision_probs = keras.ops.sigmoid(decision_logits)
@@ -861,7 +868,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # >= output_dim, so the slice discards no mass and the row already
         # sums to 1 up to roundoff. The divide only cleans up that drift:
         # measured max difference with and without it at output_dim=10 is
-        # 3.0e-08.
+        # below 1e-07 over 50 random inputs.
         if self.output_dim == self.padded_output_dim:
             unnormalized_probs = padded_probs
         else:
@@ -876,8 +883,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # Under fp16 ONLY, return float32 instead of the compute dtype. This
         # is a scoped override of the mixed-precision contract, kept so the
         # output still sums to 1. Measured at output_dim=50000: mean leaf mass
-        # 2.0e-05, and 92,618 of 100,000 leaves below the smallest fp16 normal
-        # (6.104e-05), so casting back would flush most of them to zero.
+        # 2.0e-05, and over 90% of leaves below the smallest fp16 normal
+        # (6.104e-05) at every input tried, so casting back would flush most
+        # of them to zero.
         # bfloat16 has fp32's exponent range, so bf16 and fp32 callers keep
         # the usual behaviour of output dtype == input dtype.
         # ``compute_output_spec`` declares the same fork; the two must agree.

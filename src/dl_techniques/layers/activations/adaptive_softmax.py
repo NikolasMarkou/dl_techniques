@@ -95,17 +95,26 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
     logits: the final softmax reads ``x``, not ``p``. ``H`` has shape
     ``[B, ..., 1]``, so ``T`` broadcasts back over the class axis.
 
-    **Temperature by entropy, measured at the defaults**
-    (``coeffs = [-1.791, 4.917, -2.3, 0.481, -0.037]``, ``min_temp=0.1``,
-    ``max_temp=1.0``, ``entropy_threshold=0.5``):
+    **Temperature by entropy, measured at the defaults.** Every number below
+    holds only for ``polynomial_coeffs = [-1.791, 4.917, -2.3, 0.481,
+    -0.037]``, ``min_temp=0.1``, ``max_temp=1.0`` and
+    ``entropy_threshold=0.5``. Change any of them and the whole table moves.
+    The three ``H`` values are the roots of the clipped polynomial, found by
+    bisection on ``_compute_adaptive_temperature``:
 
     .. code-block:: text
 
-        H range                  T             effect
-        H <= 0.5                 1.0           bypassed, plain softmax
-        0.5 < H < 0.9186         0.218 .. 1.0  sharpens, less as H rises
-        0.9186 <= H <= 2.2194    1.0           no sharpening
-        H > 2.2194               0.1           maximum sharpening
+        H range                    T             effect
+        H <= 0.5                   1.0           bypassed, plain softmax
+        0.5 < H < 0.91856          0.218 .. 1.0  sharpens, less as H rises
+        0.91856 <= H <= 2.14702    1.0           no sharpening
+        2.14702 < H < 2.21940      1.0 .. 0.1    sharpens, more as H rises
+        H >= 2.21940               0.1           maximum sharpening
+
+    The fourth row is the one to watch. It is narrow, it is at the top of the
+    reachable entropy range, and ``T`` falls fast across it. Measured: a
+    uniform 9-class input has ``H = log(9) = 2.19722`` and gets
+    ``T = 0.39728``, not 1.0.
 
     Three things follow from that table, and none of them is obvious from the
     formula:
@@ -117,11 +126,13 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
     - ``T`` jumps at ``H = entropy_threshold``. Just below it ``T`` is 1.0;
       just above it ``T`` is 0.21807. That is a discontinuity, not a smooth
       handover, and it is a discontinuity in the sample's output.
-    - With fewer than 10 classes the ``T = min_temp`` branch is unreachable.
-      A 9-class distribution tops out at ``H = log(9) = 2.19722``, below the
-      2.2194 crossing. Measured: uniform over 10 classes (``H = 2.30259``)
-      gives ``T = 0.1``; uniform over 5 classes (``H = 1.60944``) gives
-      ``T = 1.0`` and passes through unchanged.
+    - With fewer than 10 classes the ``T = min_temp`` branch is unreachable,
+      but sharpening is not. A 9-class distribution tops out at
+      ``H = log(9) = 2.19722``, short of the 2.21940 crossing that would give
+      ``T = 0.1``, yet already inside the fourth row: measured ``T = 0.39728``
+      for a uniform 9-class input. Measured elsewhere: uniform over 10 classes
+      (``H = 2.30259``) gives ``T = 0.1``; uniform over 5 classes
+      (``H = 1.60944``) gives ``T = 1.0`` and passes through unchanged.
 
     So the layer sharpens hard at the diffuse extreme, which is the
     out-of-distribution case the paper targets and needs at least 10 classes,

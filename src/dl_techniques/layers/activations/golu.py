@@ -28,10 +28,13 @@ surface and acts as an implicit regularizer. Those are claims about training
 dynamics from the paper, not properties you can read off the formula.
 
 For large negative inputs the gate goes to zero and the unit is effectively
-pruned. In float32, ``GoLU(-50.0)`` is exactly ``-0.0``: the inner
-``exp(-gamma*x)`` overflows to ``inf`` and the outer exponential takes it to
-0.0. For large positive inputs the gate approaches ``alpha`` and the signal
-passes through near-linearly.
+pruned. In float32 at the defaults, ``GoLU(-50.0)`` is exactly ``-0.0``, but
+not because anything overflowed: the inner ``exp(-gamma*x)`` reaches
+5.1847055e+21 there, which is finite, and the outer ``exp`` of that number
+underflows to 0.0. The inner term itself only overflows to ``inf`` below about
+``x = -88.723``, and the output has already been exactly ``-0.0`` since about
+``x = -4.47``. For large positive inputs the gate approaches ``alpha`` and the
+signal passes through near-linearly.
 
 The three parameters generalize the standard function. ``alpha`` sets the
 upper asymptote, ``beta`` the displacement, ``gamma`` the growth rate. All
@@ -179,9 +182,12 @@ class GoLU(keras.layers.Layer):
         Apply ``x * alpha * exp(-beta * exp(-gamma * x))`` element-wise.
 
         The double exponential is evaluated as written. The inner
-        ``exp(-gamma * x)`` grows without bound as ``x`` goes negative and
-        overflows to ``inf`` in float32; the outer exponential then takes the
-        gate to 0.0. Measured: ``GoLU(-50.0)`` returns ``-0.0``, not ``NaN``.
+        ``exp(-gamma * x)`` grows as ``x`` goes negative, and the outer
+        exponential of that large number underflows to 0.0 long before the
+        inner one overflows: in float32 the inner term is still finite
+        (5.1847055e+21) at ``x = -50`` and only reaches ``inf`` below about
+        ``x = -88.723``. Either way the gate is 0.0, never ``NaN``. Measured:
+        ``GoLU(-50.0)`` and ``GoLU(-100.0)`` both return ``-0.0``.
 
         :param inputs: Input tensor of any shape.
         :type inputs: keras.KerasTensor

@@ -258,10 +258,12 @@ class SaturatedMish(keras.layers.Layer):
     Note:
         The output overshoots its own plateau before settling. Measured at the
         defaults ``alpha=3.0``, ``beta=0.5``: the plateau is 2.986535, but the
-        maximum output is 3.127664 at ``x = 3.6365``, then it decays back to
-        2.986535 by ``x = 10``. So this caps activations, but it is not
-        monotonic and its bound is 3.127664, not 2.986535. Measured minimum
-        over the same settings: -0.308095.
+        maximum output is 3.127664 at ``x = 3.636457``, then it decays back
+        toward 2.986535 without ever crossing it: in float64 the gap is still
+        5.8e-06 at ``x = 10`` and closes to 3e-09 only by ``x = 14``. So this
+        caps activations, but it is not monotonic and its bound is 3.127664,
+        not 2.986535. Measured minimum over the same settings: -0.308095 at
+        ``x = -1.198``.
     """
 
     def __init__(

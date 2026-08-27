@@ -27,11 +27,17 @@ exactly 0.5, and renormalization divides the constant back out. Measured on
 7 equal logits: the output is 7 copies of 0.14285715. ThreshMax cannot
 sparsify a maximum-entropy distribution.
 
-There is no special case for that in the code and none is needed. The gated
-sum before renormalization is bounded below: measured minimum 0.500000 over
-120,000 random logit draws (``N`` from 2 to 200, logit scale 0.01 to 5,
-``slope=10``), hit exactly at uniform input. The denominator therefore never
-approaches ``epsilon``.
+There is no special case for that in the code and none is needed, but the
+bound depends on ``slope``. At ``slope=10``, the default, the gated sum before
+renormalization bottoms out at 0.500000, hit exactly at uniform input
+(measured minimum over 120,000 random logit draws, ``N`` from 2 to 200, logit
+scale 0.01 to 5). A larger slope goes lower. At ``slope=50``, the top of the
+default ``ValueRangeConstraint(1.0, 50.0)`` and the direction the negative
+``L2_custom(-1e-4)`` pushes a trainable slope, a grid search over
+``k``-elevated logit families for ``N`` in 2 to 59 bottoms out at 0.34528
+(``N=6``, one logit raised by 0.74). That is still twelve orders of magnitude
+above the default ``epsilon=1e-12``, so the denominator never approaches it at
+any slope the constraint allows.
 
 References:
     - Sparse softmax variants, of which ``Sparsemax`` is the L2-projection
@@ -328,9 +334,10 @@ class ThreshMax(keras.layers.Layer):
         # class ORDER survives. Ratios between classes do not.
         y_stepped = y_soft * gate
 
-        # No degenerate-case branch needed: the gated sum bottoms out at
-        # exactly 0.5, at uniform input (measured minimum 0.500000 over
-        # 120,000 random draws), so it never approaches epsilon.
+        # No degenerate-case branch needed. The gated sum's floor depends on
+        # slope: measured 0.500000 at slope=10 (uniform input) and 0.34528 at
+        # slope=50, the top of the default constraint. Both are far above the
+        # default epsilon=1e-12. See the module docstring for the sweeps.
         total_sum = keras.ops.sum(y_stepped, axis=self.axis, keepdims=True)
         return y_stepped / (total_sum + self.epsilon)
 

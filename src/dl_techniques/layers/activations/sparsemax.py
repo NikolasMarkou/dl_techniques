@@ -157,9 +157,11 @@ class Sparsemax(keras.layers.Layer):
 
         # DECISION plan-2026-07-29T110112-09832856/D-014
         # Range-check `axis` before any list.pop / ops.transpose. Do NOT move it to
-        # __init__ (rank unknown there) or delete it as defensive: list.pop accepts
-        # negatives, so axis == -(ndim+1) returned right numbers in a wrong layout and
-        # axis in [-ndim,-2] aborted the process (SIGABRT, exit 134, uncatchable).
+        # __init__ (rank unknown there) or delete it as defensive. Measured on the
+        # pre-fix bytes, writing `norm = ndim + axis`: list.pop accepts negatives, so
+        # `norm == -1` returned right numbers in a wrong layout ((2,4,5) in, (2,5,4)
+        # out) and `norm in [-ndim, -2]` aborted the process (SIGABRT, exit 134,
+        # uncatchable). In-range axes are unaffected: axis -ndim..ndim-1 all work.
         # Guard: TestSparsemax::test_out_of_range_axis_raises_value_error. See D-014.
         if not -ndim <= self.axis < ndim:
             raise ValueError(

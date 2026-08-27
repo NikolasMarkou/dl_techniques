@@ -131,7 +131,7 @@ class ReLUK(keras.layers.Layer):
         if self.k == 1:
             return relu_output
         else:
-            # power() wants a float exponent, hence the cast.
+            # k > 1: raise the ReLU output to the power k.
             return keras.ops.power(relu_output, float(self.k))
 
     def compute_output_shape(
