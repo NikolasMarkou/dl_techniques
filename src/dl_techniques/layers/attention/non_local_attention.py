@@ -93,6 +93,7 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
+import numpy as np
 from typing import Any, Dict, Tuple, Optional, Literal, Union
 
 # ---------------------------------------------------------------------
@@ -106,7 +107,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 
-from .common import compute_attention_scale
+from .common import compute_attention_scale, mask_dtype
 
 # ---------------------------------------------------------------------
 
@@ -220,6 +221,22 @@ class NonLocalAttention(keras.layers.Layer):
     :param dropout_rate: Dropout rate between 0.0 and 1.0.
     :type dropout_rate: float
     :param attention_mode: Attention type (``'gaussian'`` or ``'dot_product'``).
+
+        Both names are inherited and BOTH ARE IMPRECISE against Wang et al. 2018,
+        which defines four pairwise functions (gaussian, embedded gaussian, dot
+        product, concatenation). Only two exist here, and neither is the variant
+        its name suggests:
+
+        * ``'gaussian'`` is really the paper's **Embedded Gaussian** -- the scores
+          are computed on LEARNED theta/phi embeddings, not on raw features, and
+          are softmax-normalized.
+        * ``'dot_product'`` is a **softmax-normalized** scaled dot product, not
+          the paper's ``1/N``-normalized dot-product variant.
+
+        Measured 2026-08-27: both modes route through the same default softmax
+        ``ProbabilityOutput``, so the only difference between them is the scaling.
+        The names are kept because they are public registry-adjacent surface; this
+        note records what they actually mean.
         ``'dot_product'`` scales scores by ``1/sqrt(d_k)``; ``'gaussian'`` does
         not scale and uses reduced key/value channels.
     :type attention_mode: Literal['gaussian', 'dot_product']
@@ -619,7 +636,34 @@ class NonLocalAttention(keras.layers.Layer):
 
         # Optional additive attention mask
         if attention_mask is not None:
-            scores = scores + keras.ops.cast(attention_mask, scores.dtype)
+            # DECISION plan-2026-08-27T040114-580f8b63/D-015
+            # The mask is CLAMPED into the finite range of the compute dtype
+            # before it is cast down, and the clamp is done in `mask_dtype`
+            # (>= float32) where the caller's sentinel is still finite.
+            #
+            # Casting straight to `scores.dtype` was a NaN generator under
+            # `mixed_float16`: the documented `-1e9` sentinel becomes `-inf` in
+            # float16 (max magnitude 65504), and a row that is FULLY masked then
+            # softmaxes `all -inf` to `0/0`. Measured on a 16x16 feature map with
+            # one fully-masked query row: 32 NaNs in the output.
+            #
+            # Clamping rather than routing through `common.apply_attention_mask`
+            # is deliberate: that helper takes a KEEP PREDICATE, while this
+            # layer's public contract -- stated in `call()`'s docstring and in the
+            # ASCII diagram at the top of this module -- is an ADDITIVE mask where
+            # 0 keeps and a large negative masks. Converting would mean inferring
+            # polarity from magnitudes, which that helper explicitly refuses to do,
+            # and would silently break every caller passing an additive mask.
+            #
+            # A fully-masked row therefore ends up with every logit at the same
+            # floor, so its softmax is finite and uniform rather than NaN -- the
+            # same rescue semantics `apply_attention_mask` gives by default.
+            compute_floor = float(
+                np.finfo(np.dtype(self.compute_dtype)).min
+            ) / 2.0
+            mask = keras.ops.cast(attention_mask, mask_dtype(self.compute_dtype))
+            mask = keras.ops.maximum(mask, compute_floor)
+            scores = scores + keras.ops.cast(mask, scores.dtype)
 
         # Convert scores to attention probabilities
         attn = self.attn_prob(scores, training=training)

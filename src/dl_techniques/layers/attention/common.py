@@ -61,9 +61,16 @@ number you see in a sibling module came from here:
         grep -rlE '(^|[^._[:alnum:]])apply_attention_mask\(' \
             src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
 
-        # 8 of them derive the axis from their own probability_config:
+        # 8 of them derive the axis from their own probability_config.
+        # The `grep -v '/common.py$'` is REQUIRED and was missing until
+        # 2026-08-27: the search string appears in this very docstring as the
+        # example being discussed, so without the exclusion the command
+        # SELF-MATCHES and returns 9, not 8. The pytest guard below has always
+        # excluded this file programmatically, so the enforced number was right
+        # while the copy-pasteable command beside it was not -- a maintainer
+        # following the docstring literally would have "fixed" a correct number.
         grep -rl 'rescue_axis=(self.probability_config' \
-            src/dl_techniques/layers/attention/*.py | wc -l
+            src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
 
     These two numbers previously drifted THREE ways at once across this docstring, the
     D-009 anchor below and the plan's own records, so they are now stated ONCE (here)
@@ -146,7 +153,6 @@ import math
 from typing import Any, Optional, Sequence, Union
 
 import keras
-from keras import ops
 
 # ---------------------------------------------------------------------
 
@@ -167,7 +173,7 @@ from keras import ops
 #   * Do NOT use the arithmetic form `mask_bias = (1 - keep) * MASK_BIAS_VALUE`. At
 #     every UNMASKED position that is `0 * -inf = NaN` — which made EnergyAttention and
 #     EnergyTransformer emit 512/512 NaN under mixed_float16 with NO mask supplied. Use
-#     `ops.where(keep > 0, 0.0, MASK_BIAS_VALUE)`, which CANNOT produce `0 * inf` at
+#     `keras.ops.where(keep > 0, 0.0, MASK_BIAS_VALUE)`, which CANNOT produce `0 * inf` at
 #     all: the failure mode is removed structurally, not merely numerically.
 #   * Do NOT "simplify" this into a per-dtype magic constant (e.g. `finfo(dtype).min / 2`).
 #     A dtype-dependent constant is a second thing to get wrong, and fp16's usable range
@@ -205,7 +211,7 @@ def apply_attention_mask(
     Generalizes the one hand-written-correct instance of this pattern in the package
     (``energy_attention.py``, anchor ``plan_2026-07-13_57c9833e/D-009``): the whole
     logits -> bias -> softmax chain is evaluated in :func:`mask_dtype`, and the bias is
-    built with ``ops.where`` rather than arithmetic, so ``0 * -inf = NaN`` is impossible
+    built with ``keras.ops.where`` rather than arithmetic, so ``0 * -inf = NaN`` is impossible
     **structurally** and not merely by virtue of the dtype.
 
     **Degenerate-row semantics (the default).** A slice of ``keep`` that keeps NOTHING
@@ -300,8 +306,8 @@ def apply_attention_mask(
     :rtype: keras.KerasTensor
     """
     md = mask_dtype(keras.backend.standardize_dtype(logits.dtype))
-    x = ops.cast(logits, md)
-    kept = ops.cast(keep, md) > 0.0
+    x = keras.ops.cast(logits, md)
+    kept = keras.ops.cast(keep, md) > 0.0
     if rescue_axis is not None:
         # D-018. `keras.layers.Softmax` accepts a TUPLE axis and `ProbabilityOutput`
         # forwards `type_config` verbatim, so a deriving site (D-017 (b)) can hand us
@@ -348,15 +354,15 @@ def apply_attention_mask(
                 "out of the fully-masked-slice rescue entirely."
             )
         # A row that keeps nothing keeps everything — and for a multi-axis softmax a
-        # "row" is the JOINT block over `axes`, which is what a single `ops.any` over
+        # "row" is the JOINT block over `axes`, which is what a single `keras.ops.any` over
         # the whole tuple computes. Graph-safe: `rescue_axis` is a Python argument
         # fixed at trace time, and the tensor-level expression has no data-dependent
         # control flow. The bare int is passed through unchanged when there is one
         # axis, so the single-axis graph is byte-identical to the pre-D-018 one.
-        kept = ops.logical_or(
+        kept = keras.ops.logical_or(
             kept,
-            ops.logical_not(
-                ops.any(
+            keras.ops.logical_not(
+                keras.ops.any(
                     kept,
                     axis=axes[0] if len(axes) == 1 else axes,
                     keepdims=True,
@@ -365,14 +371,14 @@ def apply_attention_mask(
         )
     # Both `where` branches are tensors IN `md`: a bare Python `0.0` / `-1e9` pair is
     # promoted to float32 and then collides with float64 logits under a float64 policy.
-    bias = ops.where(
+    bias = keras.ops.where(
         kept,
-        ops.zeros_like(x),
-        ops.full_like(x, MASK_BIAS_VALUE),
+        keras.ops.zeros_like(x),
+        keras.ops.full_like(x, MASK_BIAS_VALUE),
     )
     biased = x + bias
     if out_dtype is not None:
-        biased = ops.cast(biased, out_dtype)
+        biased = keras.ops.cast(biased, out_dtype)
     return biased
 
 

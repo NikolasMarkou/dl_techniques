@@ -79,7 +79,7 @@ class TestRBFLayer:
             'units': 8,
             'gamma_init': 1.0,
             'repulsion_strength': 0.1,
-            'min_center_distance': 1.0,
+            'min_distance': 1.0,
             'trainable_gamma': True,
             'safety_margin': 0.2,
         }
@@ -121,7 +121,7 @@ class TestRBFLayer:
         assert layer.units == layer_config['units']
         assert layer.gamma_init == layer_config['gamma_init']
         assert layer.repulsion_strength == layer_config['repulsion_strength']
-        assert layer.min_center_distance == layer_config['min_center_distance']
+        assert layer.min_distance == layer_config['min_distance']
         assert layer.trainable_gamma == layer_config['trainable_gamma']
         assert layer.safety_margin == layer_config['safety_margin']
 
@@ -155,9 +155,9 @@ class TestRBFLayer:
         with pytest.raises(ValueError, match="repulsion_strength must be non-negative"):
             RBFLayer(units=10, repulsion_strength=-0.1)
 
-        # Test invalid min_center_distance
-        with pytest.raises(ValueError, match="min_center_distance must be positive"):
-            RBFLayer(units=10, min_center_distance=0.0)
+        # Test invalid min_distance
+        with pytest.raises(ValueError, match="min_distance must be positive"):
+            RBFLayer(units=10, min_distance=0.0)
 
         # Test invalid safety_margin
         with pytest.raises(ValueError, match="safety_margin must be non-negative"):
@@ -279,9 +279,9 @@ class TestRBFLayer:
 
         # Check all required parameters present
         required_keys = [
-            'units', 'gamma_init', 'repulsion_strength', 'min_center_distance',
+            'units', 'gamma_init', 'repulsion_strength', 'min_distance',
             'safety_margin', 'trainable_gamma', 'center_initializer',
-            'center_constraint', 'kernel_regularizer', 'gamma_regularizer',
+            'center_constraint', 'center_regularizer', 'gamma_regularizer',
             'output_mode',
         ]
 
@@ -291,7 +291,7 @@ class TestRBFLayer:
         # Verify config values match initialization
         for key, value in layer_config.items():
             if key in ['center_initializer', 'center_constraint',
-                       'kernel_regularizer', 'gamma_regularizer']:
+                       'center_regularizer', 'gamma_regularizer']:
                 # These are serialized as dicts, test separately
                 continue
             assert config[key] == value, f"Config mismatch for {key}"
@@ -364,7 +364,7 @@ class TestRBFLayer:
         # Create layer without regularizers for cleaner testing
         clean_config = dict(layer_config)
         clean_config['gamma_regularizer'] = None
-        clean_config['kernel_regularizer'] = None
+        clean_config['center_regularizer'] = None
 
         layer = RBFLayer(**clean_config)
 
@@ -480,7 +480,7 @@ class TestRBFLayer:
         config.update({
             'units': 2,
             'repulsion_strength': 1.0,
-            'min_center_distance': 2.0
+            'min_distance': 2.0
         })
 
         layer = RBFLayer(**config)
@@ -529,7 +529,7 @@ class TestRBFLayer:
         config.update({
             'units': 6,
             'repulsion_strength': 0.5,
-            'min_center_distance': 1.5,
+            'min_distance': 1.5,
             'gamma_init': 0.5
         })
 
@@ -582,17 +582,17 @@ class TestRBFLayer:
 
         # Check center separation
         centers = ops.convert_to_numpy(layer.centers)
-        min_distance = float('inf')
+        observed_min = float('inf')
 
         for i in range(len(centers)):
             for j in range(i + 1, len(centers)):
                 dist = np.linalg.norm(centers[i] - centers[j])
-                min_distance = min(min_distance, dist)
+                observed_min = min(observed_min, dist)
 
         # Centers should maintain reasonable separation
-        expected_min = 0.1 * config['min_center_distance']
-        assert min_distance >= expected_min, \
-            f"Centers too close: {min_distance} < {expected_min}"
+        expected_min = 0.1 * config['min_distance']
+        assert observed_min >= expected_min, \
+            f"Centers too close: {observed_min} < {expected_min}"
 
     def test_numerical_stability(self, layer_config: Dict[str, Any]) -> None:
         """

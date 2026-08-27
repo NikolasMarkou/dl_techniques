@@ -132,7 +132,11 @@ class TestHopfieldAttentionBuild:
         assert layer.output_dense is not None
         assert layer.q_norm is not None  # qk_norm_type='layer_norm' by default
         assert layer.k_norm is not None
-        assert layer.dropout_layer is None  # dropout=0.0 by default
+        # The Dropout sub-layer is created UNCONDITIONALLY (Guide v2 section 1.3
+        # / Pitfall 1, plan-2026-08-27T040114-580f8b63/D-016), so its EXISTENCE no
+        # longer encodes the rate. What must hold is that it is inert at 0.0.
+        assert layer.dropout_layer is not None
+        assert layer.dropout_layer.rate == 0.0  # dropout=0.0 by default
 
         # Check sublayer configurations
         assert layer.query_dense.units == 8 * 64  # num_heads * key_dim

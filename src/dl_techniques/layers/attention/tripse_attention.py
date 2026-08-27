@@ -942,6 +942,15 @@ class _SEWeights(layers.Layer):
     the full ``x * sigmoid(logits)`` product. This allows TripSE4 to fuse
     spatial and channel logits in the logit domain before activation.
 
+    "Mirrors" is not exact, and the difference is in the bottleneck width.
+    :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation` computes
+    ``max(1, int(round(C * reduction_ratio)))``; this class computes
+    ``max(1, int(C * reduction_ratio))``, i.e. it TRUNCATES where the shared layer
+    ROUNDS. They agree on most configurations and diverge when the product lands
+    between integers -- measured 2026-08-27, ``C=24, reduction_ratio=0.0625``
+    gives 1 channel here against 2 there. Recorded rather than changed: aligning
+    them would alter the weight SHAPE of every existing TripSE4 checkpoint.
+
     **Deliberately private.** The leading underscore is load-bearing: this class
     is not exported from ``attention/__init__.py``, not registered in
     ``attention/factory.py``, and has no public consumer outside

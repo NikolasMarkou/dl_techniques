@@ -268,7 +268,21 @@ class TestLighthouseAttention:
         xp[:, perturb_at, :] += 100.0
         y1 = m(tf.constant(xp)).numpy()
         d = np.abs(y0 - y1).max(axis=-1)[0]
-        return layer._sel_block_span, np.nonzero(d > 1e-5)[0], d
+        # The causal block span is derived INDEPENDENTLY from the configuration,
+        # not read back from `layer._sel_block_span`.
+        #
+        # Reading it from the layer made this a self-referential oracle: a
+        # mutation that reverts to a single global block also sets
+        # `_sel_block_span` to the whole sequence, so "no leak into an earlier
+        # block" became vacuously true -- there were no earlier blocks left. The
+        # mutation was caught only by the older, narrower `test_causality`.
+        #
+        # `block_span == pooling_factor ** (num_levels - 1)` is the layer's
+        # documented fanout, stated in `_compute_mandatory_indices`' own
+        # docstring, so computing it here from `p` and `L` keeps the oracle
+        # outside the implementation.
+        block_span = p ** (L - 1)
+        return block_span, np.nonzero(d > 1e-5)[0], d
 
     def test_causality_no_cross_block_leakage(self):
         """The guarantee D-023 actually buys: no leak into an EARLIER block.

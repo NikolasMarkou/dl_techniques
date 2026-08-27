@@ -42,8 +42,9 @@ found **27** silently-droppable parameters across 9 types in 4 factories.
 The inverse direction (PHANTOM: a registry key the class does not accept) raises TypeError
 at construction, so it is loud; it is still checked here, cheaply.
 
-WRAPPER ENTRIES: two entries (`attention:window`, `attention:window_zigzag`) register a factory
-FUNCTION rather than a class. All three directions resolve such a target through ONE shared
+WRAPPER ENTRIES: THREE entries (`attention:window`, `attention:window_zigzag`,
+`attention:window_band`) register a factory FUNCTION rather than a class. `window_band` was added
+2026-08-25 and this text said "two" until 2026-08-27. All three directions resolve such a target through ONE shared
 helper, `_wrapper_probe`, which obtains ground truth EMPIRICALLY -- it builds the layer and
 observes what happened:
 
@@ -211,7 +212,8 @@ BASE_PARAMS = {
 # ---------------------------------------------------------------------
 # Wrapper resolution -- BY CONSTRUCTION, NOT BY STATIC ANALYSIS
 #
-# Two registry entries (attention:window, attention:window_zigzag) map a FACTORY FUNCTION,
+# Three registry entries (attention:window, attention:window_zigzag,
+# attention:window_band) map a FACTORY FUNCTION,
 # not a class. Everything below establishes what such a wrapper really does to its caller's
 # arguments, and it is used by ALL THREE drift directions -- MISSING, PHANTOM and VALUE.
 # Wiring it into only some of them was a real defect (decisions.md D-008); the resolution
@@ -1431,7 +1433,14 @@ def test_name_guard_is_live_for_wrapper_entries():
     runs the guard's own `named - declared` computation against the REAL registry entry with one
     declared param withheld, which is the mutation `create_attention_layer` callers would feel.
     """
-    for type_name in ("window", "window_zigzag"):
+    # All THREE wrapper entries. `window_band` is registered against
+    # `create_band_window_attention` exactly as the other two are against their
+    # wrappers, and it was absent from this tuple until 2026-08-27 -- so the
+    # liveness of the resolver was asserted for two thirds of the entries it
+    # exists to cover. Measured before adding it: the guard IS live for
+    # `window_band` (n_named=20, clean=True, withholding `qkv_bias` makes it red),
+    # so this closes an unasserted case rather than a live hole.
+    for type_name in ("window", "window_zigzag", "window_band"):
         info = dict(ATTENTION_REGISTRY[type_name])
         target = info["class"]
         named = _signature_params(target).named

@@ -397,11 +397,13 @@ class LinearAttention(keras.layers.Layer):
             name='output_proj'
         )
 
-        # Dropout layer (optional).
-        if dropout_rate > 0.0:
-            self.dropout = layers.Dropout(dropout_rate)
-        else:
-            self.dropout = None
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016
+        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
+        # ("Create Unconditionally, Use Conditionally") and Pitfall 1. The
+        # conditional spelling this replaces made the object graph and the
+        # auto-generated sub-layer names depend on `dropout_rate`; a Dropout owns
+        # no weights, so always creating it costs nothing in the checkpoint.
+        self.dropout = layers.Dropout(dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and its sub-layers.
@@ -557,7 +559,7 @@ class LinearAttention(keras.layers.Layer):
         )
         out = self.output_proj(out)
 
-        if self.dropout is not None:
+        if self.dropout_rate > 0.0:
             out = self.dropout(out, training=training)
 
         return out

@@ -257,9 +257,9 @@ scores = apply_attention_mask(scores, mask, out_dtype=scores_dtype)
     predicate*: any tensor broadcastable to `logits` whose nonzero/True entries mean "attend
     here". Pass your site's own spelling **verbatim**. `rpc_attention.py` spells it
     `ops.not_equal(mask, 0)` because its native convention is `mask == 0` means masked;
-    `capsule_routing_attention.py` passes a raw boolean straight through; the other eight pass
+    `capsule_routing_attention.py` passes a raw boolean straight through; the other nine pass
     their `1 = keep` float mask. A uniform `mask > 0` rewrite **inverts** masking at two of the
-    ten sites with **no shape error and no exception** — the layer then attends only to padding
+    eleven sites with **no shape error and no exception** — the layer then attends only to padding
     and a finiteness test happily passes. That is why the predicate is an argument.
 *   **`out_dtype=None` (the default) returns in `mask_dtype(...)`,** keeping the whole
     logits → bias → softmax chain at ≥ float32. Pass the compute dtype explicitly only where the

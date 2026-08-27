@@ -445,6 +445,16 @@ class AnchorAttention(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
+        .. warning::
+           **This layer accepts no attention mask.** ``call`` takes
+           ``(x, num_anchor_tokens, training)`` and no ``attention_mask``, which
+           is why ``TransformerLayer`` lists it in
+           ``_MASKLESS_ATTENTION_TYPES`` and silently discards a caller's mask.
+           Measured 2026-08-27: perturbing a PADDED token moves real-token
+           outputs by 0.458 absolute, about 12.9% of their magnitude, against a
+           45.01 control for perturbing a real token. Small relative to genuine
+           token influence, but not zero -- do not feed a padded batch.
+
         Apply anchor-based attention to the input tensor.
 
         Routes to either standard self-attention or hierarchical anchor attention

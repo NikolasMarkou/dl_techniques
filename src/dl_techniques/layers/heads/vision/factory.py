@@ -145,10 +145,12 @@ class BaseVisionHead(keras.layers.Layer):
             else:
                 # DECISION plan-2026-08-17T183311-79c63e38/D-023
                 # `dim` is THIS head's own convenience, not the caller's
-                # expressed intent, and 8 of the 32 registered attention types
+                # expressed intent, and 11 of the 33 registered attention types
                 # do not declare it ('cbam' is handled above; 'channel',
-                # 'spatial', the four 'tripseN', 'capsule_routing', 'hopfield',
-                # 'non_local' are not). Since `create_attention_layer` RAISES on
+                # 'spatial', the four 'tripseN', 'capsule_routing', 'fnet',
+                # 'hopfield', 'non_local' are not). Re-derived 2026-08-27; this
+                # sentence previously said "8 of the 32" and omitted 'fnet'.
+                # Since `create_attention_layer` RAISES on
                 # an undeclared key (D-011), passing it unconditionally is a hard
                 # construction failure for those types. Pre-filter, exactly as
                 # `layers/transformers/free_transformer.py` does.

@@ -198,7 +198,7 @@ class BaseNLPHead(keras.layers.Layer):
             # `attention_type` accepts, the same shape as
             # `layers/transformers/free_transformer.py` (D-011). `dim` and
             # `dropout_rate` used to be injected UNCONDITIONALLY for every
-            # attention type, and 14 of the 32 registered types declare neither
+            # attention type, and 14 of the 33 registered types declare neither
             # or one of them ('fnet', 'cbam', 'channel', 'spatial', the four
             # 'tripseN', 'capsule_routing', 'hopfield', 'non_local', 'beit',
             # 'energy', 'mobile_mqa'). Since `create_attention_layer` RAISES on
@@ -207,9 +207,15 @@ class BaseNLPHead(keras.layers.Layer):
             # the tree sets one today. Do NOT "fix" it by declaring `dim` on
             # those registry entries: their classes do not accept it either.
             attn_defaults = {'dim': self.hidden_size}
-            if self.attention_type in ('multi_head', 'window', 'sliding_window'):
+            # 'sliding_window' was dropped from both tuples on 2026-08-27: it is
+            # NOT an ATTENTION_REGISTRY key and never has been, so
+            # `create_attention_layer` raises `Unknown attention type` before
+            # either branch can matter. The 1-D banded variant is 'window_band'.
+            # Adding that here would be a feature, not a fix, so the dead name is
+            # simply removed.
+            if self.attention_type in ('multi_head', 'window'):
                 attn_defaults['num_heads'] = 8
-            if self.attention_type in ('window', 'sliding_window'):
+            if self.attention_type == 'window':
                 attn_defaults['window_size'] = 7
             attn_defaults['dropout_rate'] = self.task_config.dropout_rate
 

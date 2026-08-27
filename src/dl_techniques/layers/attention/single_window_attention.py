@@ -440,6 +440,14 @@ class SingleWindowAttention(keras.layers.Layer):
         # See decisions.md D-015 (plan-2026-08-25T053412-0f1fa04f).
         self._window_slots: Optional[np.ndarray] = None
 
+        # DECISION plan-2026-08-27T040114-580f8b63/D-012
+        # One entry per sequence length: the slot map this instance has already
+        # committed to at that length. Used by `set_window_slots()` to refuse a
+        # second, different layout at the same length, which a reused trace would
+        # silently ignore. Not serialized -- it is derived, and a fresh instance
+        # legitimately starts empty.
+        self._slot_layout_by_length: Dict[int, bytes] = {}
+
     def set_window_slots(
             self, window_slots: Optional[np.ndarray]
     ) -> None:
@@ -451,18 +459,70 @@ class SingleWindowAttention(keras.layers.Layer):
         Off the ``call()`` argument channel on purpose -- see the D-015 anchor in
         ``__init__``.
 
+        .. warning::
+
+           The slot map is read as PYTHON state inside ``call()``, so it is baked
+           into a ``tf.function`` trace at trace time and a graph is NOT retraced
+           when it changes. Setting a DIFFERENT slot map at the SAME sequence
+           length therefore returns the FIRST trace's answer, silently. Measured
+           at ``window_size=4``, ``N=6``, two slot maps A and B::
+
+               eager   |A - B|            = 1.624966e-02
+               traced  |A - B|            = 0.0            <- stale
+               traced B vs eager A        = 0.0            <- returns A's answer
+               traced B vs eager B        = 1.624966e-02
+
+           This is why the raise below exists rather than a docstring note.
+
         :param window_slots: ``(N_actual,)`` int32-coercible array naming, for
             each input token, its row-major slot inside the ``window_size x
             window_size`` tile, or ``None`` for the pad-to-``window_size ** 2``
             behaviour. Validated on use, not here.
         :type window_slots: Optional[np.ndarray]
+        :raises ValueError: If a slot map is set that differs from one already
+            used at the SAME length on this instance. See the note above.
         :return: ``None``.
         :rtype: None
         """
-        self._window_slots = (
-            None if window_slots is None
-            else np.asarray(window_slots, dtype=np.int32)
-        )
+        if window_slots is None:
+            self._window_slots = None
+            return
+
+        slots = np.asarray(window_slots, dtype=np.int32)
+
+        # DECISION plan-2026-08-27T040114-580f8b63/D-012
+        # Enforce the invariant this class already documents: the slot map is a
+        # static LAYOUT CONSTANT "fully determined by (partition_mode,
+        # window_size, N)" (D-015). For one instance at one N there is therefore
+        # exactly ONE legal slot map, and two different maps at the same length
+        # can only mean misuse.
+        #
+        # Keyed by LENGTH, deliberately. A different length changes the input
+        # shape, which retraces the graph, so the layout genuinely may differ
+        # there -- `partition_mode='band'` is length-polymorphic by design and a
+        # length-agnostic guard would reject it wrongly. Same length is the exact
+        # and only case where one trace is reused with a changed layout, which is
+        # the silent-staleness regime measured in the warning above.
+        #
+        # The alternative fixes are both closed off: putting `window_slots` back
+        # on the `call()` signature is D-015's measured NO (it broke every
+        # functional Keras consumer), and comparing the map inside `call()`
+        # cannot work because `call()` does not re-run per graph invocation --
+        # not re-running is the defect.
+        previous = self._slot_layout_by_length.get(int(slots.shape[0]))
+        if previous is not None and previous != slots.tobytes():
+            raise ValueError(
+                f"set_window_slots() was given a different slot map for length "
+                f"{int(slots.shape[0])} than the one this layer has already used. "
+                "The slot map is read as Python state inside call(), so it is "
+                "baked into a tf.function trace; a graph traced with the earlier "
+                "map is reused unchanged and would silently return that map's "
+                "answer. The slot map is fully determined by (partition_mode, "
+                "window_size, N), so one instance at one length has exactly one "
+                "legal map -- use a separate layer instance per layout."
+            )
+        self._slot_layout_by_length[int(slots.shape[0])] = slots.tobytes()
+        self._window_slots = slots
 
     def _relative_position_index(
             self, window_slots: Optional[np.ndarray] = None

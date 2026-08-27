@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes thirty-two different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes thirty-three different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -67,7 +67,7 @@ registry entries, no Keras serialization registration**:
 |------|---------|
 | `MASK_BIAS_VALUE` | The additive `-1e9` bias applied to masked attention logits. |
 | `mask_dtype(compute_dtype)` | The dtype a masked softmax/logsumexp chain must run in (at least `float32`), so the bias stays finite under `mixed_float16`. |
-| `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)` | **The prescribed way to apply an attention mask.** Applies the bias with `ops.where` inside `mask_dtype(...)`, so the `0 * -inf = NaN` product cannot be formed. `rescue_axis` accepts an `int`, a tuple of ints, or `None` (opt out); a `keep` that is statically broadcast across every named axis raises `ValueError` because it provably cannot mask (D-017/D-018). Ten layers use it — that count is derived mechanically in `common.py`'s module docstring. |
+| `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)` | **The prescribed way to apply an attention mask.** Applies the bias with `ops.where` inside `mask_dtype(...)`, so the `0 * -inf = NaN` product cannot be formed. `rescue_axis` accepts an `int`, a tuple of ints, or `None` (opt out); a `keep` that is statically broadcast across every named axis raises `ValueError` because it provably cannot mask (D-017/D-018). Eleven layers use it — that count is derived mechanically in `common.py`'s module docstring. |
 | `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)` | The `dim % num_heads` constructor precondition, with per-call-site argument naming in the error message. |
 | `compute_attention_scale(head_dim) -> float` | The softmax temperature `1 / sqrt(head_dim)` as a plain Python `float`, to be computed in `__init__`/`build` and never in `call()`. |
 
@@ -77,7 +77,7 @@ Two things about `apply_attention_mask` that are easy to get wrong, and that it 
 - **Polarity is per call site.** `keep` is the *keep predicate*; the helper performs no polarity
   inference. Pass your site's own spelling verbatim (`rpc_attention` passes
   `ops.not_equal(mask, 0)`, `capsule_routing_attention` passes a raw boolean, the rest pass their
-  `1 = keep` float mask). A uniform `mask > 0` rewrite inverts masking at two of the ten sites
+  `1 = keep` float mask). A uniform `mask > 0` rewrite inverts masking at two of the eleven sites
   with no shape error and no exception.
 - **`rescue_axis` is the axis YOUR softmax reduces over.** It defaults to `-1`, which turns on the
   degenerate-row rescue (a slice that keeps nothing is treated as keeping everything, so no
@@ -123,6 +123,8 @@ Most softmax-based attention layers expose two unified customization hooks (defa
 - `qk_norm_type` / `qk_norm_kwargs` — optional Q/K normalization routed through `create_normalization_layer` (from `dl_techniques.layers.norms.factory`). Set to one of `rms_norm`, `layer_norm`, `zero_centered_rms_norm`, etc., or `None` (default for most layers) for no normalization.
 
 ```python
+from dl_techniques.layers.attention import create_attention_layer
+
 mha = create_attention_layer(
     'multi_head', dim=256, num_heads=8,
     probability_type='sparsemax',          # sparse attention

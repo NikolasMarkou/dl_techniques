@@ -242,6 +242,9 @@ class GatedAttention(keras.layers.Layer):
     :raises ValueError: If ``max_seq_len`` is not positive.
     :raises ValueError: If ``probability_type`` is one of the four disallowed
         score-level routing/hierarchical strategies listed above.
+    :raises ValueError: If ``num_kv_heads`` is not positive.
+    :raises ValueError: If ``num_kv_heads`` exceeds ``num_heads``.
+    :raises ValueError: If ``num_heads`` is not divisible by ``num_kv_heads``.
     """
 
     def __init__(
