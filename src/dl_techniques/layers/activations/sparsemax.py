@@ -1,44 +1,27 @@
 """
-Projects a vector of logits onto the probability simplex for sparse outputs.
+Sparsemax: the Euclidean projection of logits onto the probability simplex.
 
-This layer implements the Sparsemax activation function, a sparse alternative
-to the conventional softmax function. While softmax maps logits to a dense
-probability distribution where all elements are positive, Sparsemax projects
-the logits onto the probability simplex using a Euclidean (L2) projection.
+Softmax gives every class a non-zero share. Sparsemax solves
+``argmin_p ||p - z||^2`` over the simplex instead, which sets everything
+outside a support set to exactly zero. The result still sums to 1, so it is a
+drop-in replacement for softmax wherever you want an attention or class
+distribution that can genuinely ignore options.
 
---------------------------------------------------------------------------
-ARCHITECTURAL DECISIONS & XLA COMPATIBILITY NOTES
---------------------------------------------------------------------------
-This implementation is heavily "opinionated" to ensure stability with XLA
-(Accelerated Linear Algebra) compilation, which is used by TensorFlow and JAX.
-Standard Python/Numpy idioms often fail during graph compilation due to
-dynamic shape inference issues.
+The support size is not a knob; it follows from how spread out the row is.
+Measured over 5000 rows of 20 logits: drawn from N(0, 1) the mean support is
+2.77 of 20 classes, so 17.23 outputs are exactly 0.0; scaled down to N(0,
+0.01) the support is 20.0 of 20 and nothing is zero at all. On the single row
+``[3, 1, 2, 0.5, -1]`` sparsemax returns ``[1, 0, 0, 0, 0]`` where softmax
+returns ``[0.624, 0.084, 0.229, 0.051, 0.011]``. A near-uniform row gets a
+near-uniform answer.
 
-1.  **Flattening vs. N-D Broadcasting**:
-    *   *Attempt*: Operating directly on N-D tensors (e.g., [Batch, Seq, Heads, K]).
-    *   *Failure*: XLA often fails to infer broadcast shapes dynamically when
-        mixing Rank-1 support vectors with Rank-N inputs inside ``where`` or
-        boolean masking keras.ops.
-    *   *Decision*: We flatten all inputs to 2D ``(N, K)`` before processing.
-        This reduces the problem to a canonical Rank-2 vs Rank-1 operation,
-        which compilers can optimize reliably without shape ambiguity.
-
-2.  **Masking vs. Gathering (take_along_axis)**:
-    *   *Attempt*: Using ``ops.take_along_axis`` to select the cumulative sum
-        value at the threshold index ``k(z)``.
-    *   *Failure*: ``take_along_axis`` with dynamic indices forces the compiler
-        to generate dynamic slice operations. If the compiler cannot prove the
-        bounds are valid at compile-time, it often throws errors.
-    *   *Decision*: We use ``one_hot`` encoding + multiplication (``sum(vals * mask)``).
-        While computationally slightly heavier (O(K) vs O(1) fetch), it relies
-        purely on matrix arithmetic, which is shape-static and universally
-        supported by all hardware accelerators.
-
-3.  **Explicit Reshaping**:
-    *   *Decision*: We explicitly reshape support vectors to ``(1, K)`` rather
-        than relying on implicit NumPy-style broadcasting. This removes any
-        ambiguity in the computation graph regarding which dimension is being
-        broadcasted.
+The implementation is shaped by XLA, which TensorFlow and JAX both compile
+through. Three habits carry the weight, and each is marked in ``call``:
+flatten to rank 2 before doing anything, because XLA fails to infer broadcast
+shapes when a rank-1 support vector meets a rank-5 tensor; select with a
+one-hot product rather than ``take_along_axis``, because a dynamic index
+blocks graph fusion; and reshape support vectors explicitly to ``(1, K)``
+rather than leaning on NumPy-style broadcasting.
 
 References:
     - Martins & Astudillo, 2016. "From Softmax to Sparsemax: A Sparse
@@ -53,63 +36,79 @@ from typing import Optional, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class Sparsemax(keras.layers.Layer):
-    """Sparsemax activation function layer for sparse probability distributions.
+    """Projects logits onto the probability simplex, producing exact zeros.
 
-    Sparsemax projects logits onto the probability simplex using an L2
-    projection, producing distributions with many exact zeros. Unlike softmax,
-    which always assigns non-zero probabilities to all classes, Sparsemax
-    encourages sparsity. This XLA-safe implementation employs a
-    "Flatten-Mask-Restore" strategy to avoid dynamic tensor slicing and
-    ambiguous broadcasting.
+    Each row along ``axis`` is mapped to the closest point on the simplex in
+    Euclidean distance. Outputs are non-negative and sum to 1, and classes
+    outside the support come out as exactly 0.0. Output shape and dtype equal
+    the input's. The layer owns no weights.
+
+    Internally it is a flatten-mask-restore pipeline: move ``axis`` to the
+    end, collapse everything else into one batch dimension, do the projection
+    on a rank-2 tensor, then undo both moves. That shape discipline is what
+    keeps the layer XLA-compilable.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: logits (batch, ..., K)
-                │
-                ▼
+        z  logits  [..., K]   `axis` selects the K dimension
+                      ▼
         ┌───────────────────────────┐
-        │  Permute axis to last dim │
-        └───────────┬───────────────┘
-                    │
-                    ▼
+        │ transpose axis -> last    │  (optional)
+        └─────────────┬─────────────┘
+                      ▼  [..., K]
         ┌───────────────────────────┐
-        │  Flatten to 2D: (N, K)    │
-        └───────────┬───────────────┘
-                    │
-                    ▼
+        │ reshape to (N, K)         │
+        └─────────────┬─────────────┘
+                      ▼  [N, K]
         ┌───────────────────────────┐
-        │  Sort descending          │
-        │  Cumulative sum           │
-        │  Find support set k(z)    │
-        └───────────┬───────────────┘
-                    │
-                    ▼
+        │ s = z - rowmax(z)         │
+        │ cast to reduction dtype   │
+        └─────────────┬─────────────┘
+                      ▼
         ┌───────────────────────────┐
-        │  Compute threshold tau    │
-        │  tau = (cumsum - 1) / k   │
-        └───────────┬───────────────┘
-                    │
-                    ▼
+        │ sort desc, cumsum         │
+        │ k_z = support size        │
+        │ tau = (cum[k_z] - 1)/k_z  │
+        └─────────────┬─────────────┘
+                      ▼  s [N, K], tau [N, 1]
         ┌───────────────────────────┐
-        │  Project: max(z - tau, 0) │
-        └───────────┬───────────────┘
-                    │
-                    ▼
+        │ p = max(s - tau, 0)       │
+        └─────────────┬─────────────┘
+                      ▼  [N, K]
         ┌───────────────────────────┐
-        │  Restore original shape   │
-        └───────────┬───────────────┘
-                    │
-                    ▼
-        Output: (batch, ..., K) sparse probabilities
+        │ reshape back              │
+        │ inverse transpose (opt.)  │
+        └─────────────┬─────────────┘
+                      ▼
+        p  [..., K]   sums to 1, zeros outside the support
 
-    :param axis: Axis along which to compute sparsemax normalization.
-        Typically -1. Defaults to -1. Must be in ``[-ndim, ndim - 1]`` for the
-        rank of the tensor the layer is called on; that range can only be
-        checked at call time, so an out-of-range value is rejected there.
+    ``K`` is the size of ``axis`` and ``N`` is the product of every other
+    dimension. The transpose pair only runs when ``axis`` is not already the
+    last dimension. Subtracting the row max is exact, because sparsemax is
+    shift-invariant, and it moves the cancellation in ``s - tau`` down from
+    the scale of ``max|z|`` to the scale of the row's spread.
+
+    :param axis: Axis to project along. Defaults to -1. The valid range,
+        ``[-ndim, ndim - 1]``, depends on the rank of the tensor the layer is
+        called on, so it can only be checked at call time. ``__init__``
+        checks the type; ``call`` and ``compute_output_shape`` check the
+        range, with identical predicates.
     :type axis: int
-    :param kwargs: Additional keyword arguments passed to the Layer base class.
+    :param kwargs: Additional keyword arguments passed to the Layer base
+        class.
+
+    :raises ValueError: If ``axis`` is not an ``int``, or is a ``bool``.
+        Raised from ``__init__``.
+
+    Note:
+        The output dtype follows the layer's compute dtype, not the dtype of
+        the array you pass in, because Keras autocasts inputs first. Measured
+        on the same float32 array: ``Sparsemax(dtype="float64")`` returns
+        float64, ``Sparsemax(dtype="mixed_float16")`` returns float16. The
+        reduction that finds the support runs wider than float16 either way;
+        see the D-007 anchor in ``call``.
     """
 
     def __init__(
@@ -117,14 +116,14 @@ class Sparsemax(keras.layers.Layer):
             axis: int = -1,
             **kwargs: Any
     ) -> None:
-        """Initialize the Sparsemax layer.
+        """Validate the type of ``axis`` and store it.
 
-        :param axis: Axis along which to compute sparsemax normalization.
+        :param axis: Axis to project along.
         :type axis: int
         :param kwargs: Additional keyword arguments for the Layer base class.
-        :raises ValueError: If axis is not an integer, or is a bool. The RANGE
-            of ``axis`` depends on the input rank and is therefore validated in
-            :meth:`call`, not here.
+        :raises ValueError: If ``axis`` is not an integer, or is a bool. The
+            RANGE of ``axis`` depends on the input rank and is therefore
+            validated in :meth:`call`, not here.
         """
         super().__init__(**kwargs)
         # `bool` is a subclass of `int`, so `isinstance(True, int)` is True and
@@ -139,13 +138,15 @@ class Sparsemax(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply sparsemax activation to input logits.
+        """Project each row along ``axis`` onto the probability simplex.
 
-        :param inputs: Input tensor of logits, arbitrary shape.
+        :param inputs: Logits, any shape and rank.
         :type inputs: keras.KerasTensor
-        :param training: Unused.
+        :param training: Training or inference mode. Unused; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Sparse probability distribution with same shape as inputs.
+        :return: Non-negative tensor of the same shape as ``inputs``, summing
+            to 1 along ``axis``, with exact zeros outside the support.
         :rtype: keras.KerasTensor
         :raises ValueError: If ``axis`` is out of range for the rank of
             ``inputs``, i.e. outside ``[-ndim, ndim - 1]``.
@@ -155,37 +156,11 @@ class Sparsemax(keras.layers.Layer):
         ndim = len(input_shape)
 
         # DECISION plan-2026-07-29T110112-09832856/D-014
-        # ---------------------------------------------------------------
-        # RANGE-CHECK `axis` HERE, BEFORE ANY `list.pop` / `ops.transpose`.
-        # DO NOT move this to `__init__` (the rank is not known there) and DO
-        # NOT delete it as "defensive programming" — it is the only thing
-        # standing between a public constructor argument and an UNCATCHABLE
-        # PROCESS ABORT. Measured on the pre-fix bytes, one case per process
-        # (a shared process cannot survive the second band), with
-        # `norm = ndim + axis`:
-        #   * `norm == -1` (i.e. `axis == -(ndim + 1)`): SILENT WRONG ANSWER.
-        #     `perm_order.pop(-1)` + `append(-1)` makes the forward transpose a
-        #     no-op, so the projection itself is numerically correct, but
-        #     `inv_perm_order.insert(-1, ndim - 1)` builds a NON-INVERSE
-        #     permutation and the right answer is returned in the wrong layout.
-        #     Input `(2, 4, 5)` -> output `(2, 5, 4)`, last-axis sums
-        #     `[0.1687, 1.3085, 1.0049, 0.7024]` — not a distribution — while
-        #     `compute_output_shape` still declares `(2, 4, 5)`, so the
-        #     functional shape contract is violated too.
-        #   * `norm in [-ndim, -2]`: TF C++ `LOG(FATAL)` in
-        #     `tensor_shape.cc:356 Check failed: d >= 0`, SIGABRT, exit 134.
-        #     NO PYTHON `except` CAN CATCH IT. It kills the interpreter.
-        #   * `norm < -ndim` or `axis >= ndim`: `IndexError` from `list.pop`,
-        #     loud but naming neither the axis nor the rank.
-        # Python's `list.pop` / `list.insert` accept negative indices silently,
-        # which is precisely what converts a user error into a wrong answer
-        # instead of a raise. `keras.layers.Softmax` is rejected at the op
-        # level; this layer's transpose shim intercepts before the op is ever
-        # reached, so the shim has to do the rejecting itself.
-        # Guarded by `TestSparsemax::test_out_of_range_axis_raises_value_error`
-        # (both bands) and `::test_every_in_range_axis_is_accepted_at_ranks_1_to_4`
-        # (the over-rejection control). See decisions.md D-014 / D-004.
-        # ---------------------------------------------------------------
+        # Range-check `axis` before any list.pop / ops.transpose. Do NOT move it to
+        # __init__ (rank unknown there) or delete it as defensive: list.pop accepts
+        # negatives, so axis == -(ndim+1) returned right numbers in a wrong layout and
+        # axis in [-ndim,-2] aborted the process (SIGABRT, exit 134, uncatchable).
+        # Guard: TestSparsemax::test_out_of_range_axis_raises_value_error. See D-014.
         if not -ndim <= self.axis < ndim:
             raise ValueError(
                 f"axis={self.axis} is out of range for an input of rank "
@@ -196,12 +171,10 @@ class Sparsemax(keras.layers.Layer):
         # Normalize axis to positive index (e.g., -1 -> 2 for rank 3)
         axis = self.axis if self.axis >= 0 else ndim + self.axis
 
-        # =====================================================================
-        # DECISION 1: Standardize Memory Layout (Permutation)
-        # =====================================================================
-        # Operations like `sort` and `cumsum` are most efficient on the last
-        # contiguous dimension in memory. If the user wants to normalize a
-        # middle dimension (e.g., axis=1), we transpose it to the end.
+        # Step 1: move the target axis to the end.
+        # `sort` and `cumsum` want the last, contiguous axis. If `axis` is not
+        # already last, transpose it there and keep the inverse permutation so
+        # step 4 can undo it.
         if axis != ndim - 1:
             # Create permutation: [0, ..., axis-1, axis+1, ..., axis]
             perm_order = list(range(ndim))
@@ -217,27 +190,22 @@ class Sparsemax(keras.layers.Layer):
             inputs_permuted = inputs
             inv_perm_order = None
 
-        # =====================================================================
-        # DECISION 2: Flatten to 2D (The "Anti-Broadcast" Strategy)
-        # =====================================================================
-        # XLA struggles to broadcast a computed 1D support vector against a
-        # dynamic ND tensor (e.g., 5D tensor in video transformers).
-        # By collapsing all batch dimensions into one 'N', we guarantee the
-        # operation is always (N, K) vs (1, K) or (N, 1).
-        # This makes the graph topology static and predictable.
+        # Step 2: flatten to 2D.
+        # XLA cannot reliably broadcast a computed 1-D support vector against a
+        # rank-5 tensor. Collapsing every leading dimension into one N makes
+        # each op an (N, K) against (1, K) or (N, 1) pairing, so the graph
+        # topology is static.
 
-        # Use symbolic shape to handle dynamic batch sizes (None)
+        # Symbolic shape, so a dynamic (None) batch size still works.
         permuted_shape = keras.ops.shape(inputs_permuted)
 
-        # Determine K (the feature dimension size)
-        # We prefer the static shape if available for compile-time optimization
+        # Prefer the static K when it is known; the compiler can use it.
         if input_shape[axis] is not None:
             k = int(input_shape[axis])
         else:
             k = permuted_shape[-1]
 
-        # Reshape to (-1, K)
-        # -1 infers the total batch size dynamically
+        # -1 infers the collapsed batch size at run time.
         inputs_2d = keras.ops.reshape(inputs_permuted, (-1, k))
 
         # =====================================================================
@@ -253,77 +221,43 @@ class Sparsemax(keras.layers.Layer):
         shifted = inputs_2d - row_max
 
         # DECISION plan-2026-07-29T070705-9bfc04c5/D-007
-        # ---------------------------------------------------------------
-        # The reduction dtype WIDENS; it must never NARROW. Only float16 and
-        # bfloat16 lack the range and integer precision the reduction needs,
-        # so only they are promoted to float32. float32 is unchanged (the
-        # expression is a no-op there) and float64 KEEPS float64.
-        # DO NOT hard-code "float32" here. That was tried: it silently
-        # narrowed the float64 policy, moving corpus worst-case error from
-        # 1.31e-15 to 1.99e-08, with every test still green. Degrading the
-        # most precise policy without an alarm is the same species of defect
-        # this reduction was widened to remove.
-        # Spelled off `inputs.dtype` (the bits actually received), NOT
-        # `self.compute_dtype`, and normalised through
-        # `standardize_dtype` so the membership test cannot silently miss a
-        # backend dtype object and re-narrow float64.
-        # ---------------------------------------------------------------
+        # The reduction dtype only WIDENS: float16/bfloat16 -> float32, all else
+        # unchanged, read off `inputs.dtype` (not `self.compute_dtype`). Do NOT
+        # hard-code "float32": that silently narrowed float64 and moved worst-case
+        # error 1.31e-15 -> 1.99e-08 with every test green. See decisions.md D-007.
         input_dtype = keras.backend.standardize_dtype(inputs.dtype)
         reduction_dtype = (
             "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
         )
         shifted_f32 = keras.ops.cast(shifted, reduction_dtype)
 
-        # 1. Sort logits (descending)
-        # Necessary to find the "elbow" where probabilities drop to zero.
+        # 1. Sort descending, to find the elbow where the tail drops to zero.
         sorted_logits = keras.ops.sort(shifted_f32, axis=-1)
         sorted_logits = keras.ops.flip(sorted_logits, axis=-1)
 
-        # 2. Cumulative Sum
-        # Used to check the condition: 1 + k * z_k > sum(z_1..z_k)
+        # 2. Running total, for the support test 1 + k*z_k > sum(z_1..z_k).
         z_cumsum = keras.ops.cumsum(sorted_logits, axis=-1)
 
-        # 3. Create range vector [1, 2, ..., K]
+        # 3. Range vector [1, 2, ..., K], reshaped to (1, K) so XLA sees an
+        # explicit rank-2 broadcast rather than an implicit NumPy one.
         k_values = keras.ops.arange(1, k + 1, dtype=reduction_dtype)
 
-        # Explicit Reshape: (K,) -> (1, K)
-        # "Attempt": Just use k_values.
-        # "Fix": Reshape to (1, K) so XLA sees explicit Rank-2 broadcasting.
         k_values = keras.ops.reshape(k_values, (1, k))
 
-        # 4. Support Identification
-        # Calculate the condition for every element.
-        # support > 0 means that element is part of the active set.
+        # 4. Support test, elementwise. A positive value means the element is
+        # in the active set.
         support = 1.0 + k_values * sorted_logits - z_cumsum
         support_mask = keras.ops.cast(support > 0, reduction_dtype)
 
-        # k_z is the count of active elements (the "support size")
-        # Shape: (N, 1) - One value per sample in the flattened batch
+        # k_z is the support size, one value per flattened row: (N, 1).
         k_z = keras.ops.sum(support_mask, axis=-1, keepdims=True)
 
-        # =====================================================================
-        # DECISION 3: One-Hot Selection vs. Index Gathering
-        # =====================================================================
-        # This block has TWO properties. Both are load-bearing; neither may be
-        # dropped in favour of the other.
-        #
-        # (1) XLA-SAFE (the original reason, unchanged).
-        #     "Attempt": `ops.take_along_axis(z_cumsum, k_z - 1, axis=-1)`
-        #     "Problem": XLA treats `k_z - 1` as a dynamic index. Slicing with
-        #                dynamic indices requires the compiler to support
-        #                dynamic memory access patterns, which often fails
-        #                graph fusion.
-        #     "Fix": Use One-Hot Encoding + selection over the last axis. This
-        #            converts an Index lookup (Gather) into shape-static math,
-        #            which is universally supported by all accelerators.
-        #
-        # (2) NON-FINITE-SAFE (new; see the D-017 anchor below).
-        #     The selection is spelled with `ops.where`, NOT with the
-        #     `z_cumsum * gather_mask` product it replaced. A product forms
-        #     `-inf * 0.0 = NaN` at every masked position, and the reduction
-        #     then propagates that NaN into `tau` and hence into EVERY element
-        #     of the row. `ops.where` never evaluates the non-selected operand
-        #     arithmetically, so no such product is ever formed.
+        # Step 3: pick cumsum[k_z] with a one-hot, not a gather.
+        # Do NOT use ops.take_along_axis: `k_z - 1` is a dynamic index, and
+        # slicing with one defeats XLA graph fusion. Do NOT use the
+        # `z_cumsum * gather_mask` product either: `-inf * 0.0` is NaN at every
+        # masked position and the reduction spreads it across the whole row.
+        # `ops.where` never evaluates the operand it does not select.
 
         # Cast k_z to int32 for indexing/one-hot operations
         support_indices = keras.ops.cast(k_z - 1, "int32")
@@ -331,8 +265,7 @@ class Sparsemax(keras.layers.Layer):
         # Reshape to 1D to satisfy one_hot requirements
         support_indices = keras.ops.reshape(support_indices, (-1,))
 
-        # Create One-Hot Mask: (N, K)
-        # Only the position corresponding to k(z) will be 1.0, others 0.0
+        # One-hot mask (N, K): 1.0 only at the threshold index k(z).
         gather_mask = keras.ops.one_hot(support_indices, k, dtype=reduction_dtype)
 
         # Select the cumulative sum at the threshold boundary: keep `z_cumsum`
@@ -347,26 +280,20 @@ class Sparsemax(keras.layers.Layer):
         # Final Projection
         # =====================================================================
 
-        # Calculate Tau (Threshold)
-        # tau = (sum(z_support) - 1) / |support|
+        # The threshold tau = (sum over the support - 1) / |support|.
         # `tau` is the ONLY value cast back: it is (N, 1), and casting it here
         # keeps the observable output dtype equal to the compute dtype, so
         # `compute_output_shape` stays truthful and no `compute_output_spec`
         # override is needed.
         tau = keras.ops.cast((z_cumsum_at_k - 1.0) / k_z, inputs.dtype)
 
-        # Projection: P = max(0, z - tau)
-        # This naturally sets elements outside the support to exactly zero.
+        # The projection itself. Everything below tau lands on exactly zero.
         # MUST read `shifted`, NOT `inputs_2d`: `tau` was derived from the
         # SHIFTED row, and it is this line's cancellation being at scale
         # `spread` rather than `max|z|` that closes the D-017(d) plateau route.
         output_2d = keras.ops.maximum(shifted - tau, 0.0)
 
-        # =====================================================================
-        # DECISION 4: Restore Structure
-        # =====================================================================
-        # Un-flatten and un-permute to return a tensor indistinguishable
-        # from the input structure.
+        # Step 4: restore the original layout.
 
         # Reshape back to permuted shape (e.g., [Batch, Seq, Heads, K])
         output_permuted = keras.ops.reshape(output_2d, permuted_shape)
@@ -383,7 +310,7 @@ class Sparsemax(keras.layers.Layer):
             self,
             input_shape: tuple
     ) -> tuple:
-        """Compute output shape (same as input shape).
+        """Return the input shape unchanged, after the same axis check.
 
         :param input_shape: Shape tuple of input tensor.
         :type input_shape: tuple
@@ -391,26 +318,14 @@ class Sparsemax(keras.layers.Layer):
         :rtype: tuple
         :raises ValueError: If ``axis`` is out of range for ``input_shape``'s
             rank. The range is the same one :meth:`call` enforces, and the two
-            MUST agree — see the DECISION anchor below.
+            MUST agree -- see the DECISION anchor below.
         """
-        # ---------------------------------------------------------------
         # DECISION plan-2026-07-29T110112-09832856/D-022
-        # THIS CHECK IS NOT DEFENSIVE PROGRAMMING; DO NOT DELETE IT AS SUCH.
-        # `call()` rejects an out-of-range `axis` (D-014). Before this check
-        # existed, `compute_output_shape` did NOT, so the two disagreed: a
-        # functional/symbolic build reached `compute_output_shape`, was told
-        # the output shape was the input shape, and wired a graph that could
-        # only fail later at call time. Worse, for `axis == -(ndim+1)` the
-        # declared shape was a LIE about what the pre-D-014 layer actually
-        # emitted (measured: `(2,4,5)` declared, `(2,5,4)` produced).
-        # A shape function that accepts a configuration `call()` rejects
-        # moves the error from build time to run time, which is the wrong
-        # direction. The two predicates must stay identical; if the one in
-        # `call()` changes, change this one in the same edit.
-        # Guarded by `TestSparsemax::test_compute_output_shape_rejects_the_
-        # same_axes_as_call` (it asserts the two predicates AGREE on a swept
-        # band, not merely that each raises somewhere).
-        # ---------------------------------------------------------------
+        # This predicate must stay IDENTICAL to `call`'s (D-014); change both in the
+        # same edit. Do NOT delete it as defensive: without it a symbolic build was
+        # told the output shape was the input shape, a lie for axis == -(ndim+1)
+        # (measured: (2,4,5) declared, (2,5,4) produced). See decisions.md D-022;
+        # guard TestSparsemax::test_compute_output_shape_rejects_the_same_axes_as_call.
         ndim = len(input_shape)
         if not -ndim <= self.axis < ndim:
             raise ValueError(

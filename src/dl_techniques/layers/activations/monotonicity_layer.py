@@ -1,38 +1,30 @@
 """
-Monotonicity enforcement layer for neural networks.
+Turns unconstrained predictions into a non-decreasing sequence.
 
-This module provides a flexible layer for enforcing monotonic constraints on
-neural network outputs. It's particularly useful for applications requiring
-ordered predictions, such as quantile regression, dose-response modeling,
-survival analysis, and ranking.
+Given raw scores ``[r_0, r_1, ..., r_n]`` along one axis, this module returns
+values that satisfy ``y[i] <= y[i+1]``. That is what quantile regression,
+dose-response curves, survival curves and ranking heads need: the network is
+free to predict anything, and the layer enforces the ordering.
 
-The layer transforms unconstrained network outputs into monotonically
-non-decreasing values along a specified axis using various mathematical
-strategies, each with different properties regarding gradient flow,
-spacing control, and computational efficiency.
+Five of the six methods work the same way. The first score is kept as an
+anchor. The remaining scores are pushed through a function that cannot go
+negative -- softplus, ``exp``, or a square -- and the running sum of those
+non-negative deltas is added to the anchor. The sixth method, ``"sigmoid"``,
+does not accumulate anything: it maps each score independently into a bounded
+window around a fixed target position.
 
-Given raw predictions ``[r_0, r_1, r_2, ..., r_n]``, we want to ensure:
-``output[i] <= output[i+1]`` for all i
-
-Different strategies achieve this through:
-
-1. **Cumulative Softplus**: ``Q_i = Q_0 + Sigma(softplus(r_j))`` for j=1..i
-2. **Exponential**: ``Q_i = Q_{i-1} + exp(r_i)``
-3. **Sigmoid**: ``Q_i = sigmoid(r_i)`` scaled and shifted
-4. **Normalized Softmax**: Uses softmax weights for controlled spacing
-5. **Squared**: ``Q_i = Q_{i-1} + r_i^2``
-
-Use cases include quantile regression (ensuring ``Q(0.1) <= Q(0.5) <= Q(0.9)``),
-survival analysis with monotonic hazard/survival functions, dose-response
-modeling, ranking with proper ordering, and monotonic utility or demand
-functions in economics.
+The ordering is non-strict, and it really can be flat. Two adjacent outputs
+come out exactly equal whenever a delta is zero (``squared`` on a zero input)
+or whenever a delta is too small to register against the accumulated total in
+float32. Measured over 2000 random rows of 7 values drawn from N(0, 3): zero
+negative adjacent differences for every method, but a minimum adjacent
+difference of exactly 0.0 for ``exponential``, ``cumulative_exp``,
+``squared`` and ``normalized_softmax``.
 
 References:
     - Koenker, R. (2005). Quantile Regression. Cambridge University Press.
     - Cannon, A. J. (2011). Quantile regression neural networks.
       Journal of Computational and Graphical Statistics.
-    - Weiss, K., et al. (2013). A survey of transfer learning.
-      Journal of Big Data.
 """
 
 import keras
@@ -54,119 +46,138 @@ MonotonicityMethod = Literal[
 
 @keras.saving.register_keras_serializable()
 class MonotonicityLayer(keras.layers.Layer):
-    """
-    Enforces monotonic (non-decreasing) constraints on predictions.
+    """Enforces a non-decreasing ordering along one axis.
 
-    This layer transforms unconstrained predictions into monotonically
-    non-decreasing values along a specified axis. It supports multiple
-    strategies with different properties for gradient flow, spacing control,
-    and computational efficiency.
+    Reads raw scores and returns values with ``y[..., i] <= y[..., i+1]``.
+    Output shape equals input shape. The layer owns no weights; every
+    argument is validated in ``__init__`` or ``build``, so a bad
+    configuration fails before the first forward pass.
 
-    Given raw predictions ``[r_0, r_1, r_2, ...]``, the layer ensures:
-    ``output[..., i] <= output[..., i+1]``. This is achieved by predicting
-    the first value directly and modeling subsequent values as cumulative
-    positive increments.
-
-    Strategies:
-
-    1. **cumulative_softplus** (Default):
-       ``Q_i = Q_0 + Sigma(softplus(r_j))`` for j=1..i.
-       Smooth gradients, numerically stable. Best for general quantile regression.
-
-    2. **exponential**:
-       ``Q_i = Q_{i-1} + exp(r_i)``.
-       Strong monotonicity, fast growth. Best when large spacing is natural.
-
-    3. **cumulative_exp** (Safer exponential):
-       ``Q_i = Q_0 + Sigma(exp(clip(r_j, -10, 10)))`` for j=1..i.
-       Like exponential but with overflow protection.
-
-    4. **sigmoid**:
-       ``Q_i = sigmoid(r_i) * (max_val - min_val) + min_val``.
-       Bounded output. Best when output range is known.
-
-    5. **squared**:
-       ``Q_i = Q_{i-1} + r_i^2``.
-       Simple, differentiable, no exponential growth.
-
-    6. **normalized_softmax**:
-       ``deltas = softmax(r_1:n), Q_i = Q_0 + Sigma(delta_j * range)`` for j=1..i.
-       Controlled total spacing summing to defined range.
+    Five methods keep ``r_0`` as an anchor, turn ``r_1..r_n`` into
+    non-negative deltas, and add the running sum of those deltas to the
+    anchor. For those five the first output is the raw first input,
+    unchanged. The ``"sigmoid"`` method is different: it ignores the anchor,
+    places each position at a fixed target inside ``value_range``, and lets
+    the sigmoid move it by a bounded amount around that target.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │  Raw Predictions [..., num_values]  │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │  Split Along Monotonicity Axis      │
-        │  ┌───────────┐  ┌────────────────┐  │
-        │  │ First (r0)│  │ Rest (r1..rN)  │  │
-        │  │  (anchor) │  │                │  │
-        │  └─────┬─────┘  └───────┬────────┘  │
-        └────────┼────────────────┼───────────┘
-                 │                │
-                 │                ▼
-                 │  ┌─────────────────────────┐
-                 │  │  Strategy Transform     │
-                 │  │  (softplus/exp/sig/...) │
-                 │  │  -> positive deltas     │
-                 │  └────────────┬────────────┘
-                 │               │
-                 │               ▼
-                 │  ┌─────────────────────────┐
-                 │  │  Spacing Constraints    │
-                 │  │  min_spacing / max      │
-                 │  └────────────┬────────────┘
-                 │               │
-                 │               ▼
-                 │  ┌─────────────────────────┐
-                 │  │  Cumulative Sum         │
-                 │  │  accumulated = cumsum() │
-                 │  └────────────┬────────────┘
-                 │               │
-                 ▼               ▼
-        ┌─────────────────────────────────────┐
-        │  Concatenate: [r0, r0 + cumsum]     │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │  Monotonic Output [..., num_values] │
-        └─────────────────────────────────────┘
+                   r  raw scores  [..., n]  (n >= 2)
+                                │
+                   ┌────────────┴────────────┐
+                   ▼ 5 delta methods         ▼ sigmoid
+        ┌─────────────────────┐   ┌─────────────────────┐
+        │ split: r0 | r1..rn  │   │ p = sigmoid(r)      │
+        └──────────┬──────────┘   │ t = lo + span*i/m   │
+                   ▼              │ y = t + span        │
+        ┌─────────────────────┐   │     *(p-0.5)/m      │
+        │ d = f(r1..rn) >= 0  │   │ clip to [lo, hi]    │
+        └──────────┬──────────┘   └──────────┬──────────┘
+                   ▼                         │
+        ┌─────────────────────┐              │
+        │ d += min_spacing    │              │
+        │ d = min(d, max_sp)  │              │
+        └──────────┬──────────┘              │
+                   ▼                         │
+        ┌─────────────────────┐              │
+        │ c = cumsum(d)       │              │
+        └──────────┬──────────┘              │
+                   ▼                         │
+        ┌─────────────────────┐              │
+        │ concat[r0, r0 + c]  │              │
+        └──────────┬──────────┘              │
+                   └────────────┬────────────┘
+                                ▼
+                   y  [..., n]   y[i] <= y[i+1]
 
-    :param method: Monotonicity enforcement method. One of:
-        ``"cumulative_softplus"`` (default), ``"exponential"``,
-        ``"cumulative_exp"``, ``"sigmoid"``, ``"squared"``,
-        ``"normalized_softmax"``.
+    ``n`` is the size of the axis given by ``axis``, ``m = n - 1``,
+    ``lo, hi = value_range`` and ``span = hi - lo``. ``i`` is the position
+    along the axis. The spacing box is skipped when both spacing arguments
+    are ``None``, which is the default.
+
+    **Methods and which arguments reach them:**
+
+    .. code-block:: text
+
+        method               min_sp  max_sp  clip_inputs  value_range
+        -------------------  ------  ------  -----------  -----------
+        cumulative_softplus  yes     yes     honoured     ignored
+        exponential          yes     yes     honoured     ignored
+        cumulative_exp       yes     yes     forced on    ignored
+        squared              yes     yes     ignored      ignored
+        normalized_softmax   yes     no      ignored      required
+        sigmoid              no      no      ignored      required
+
+    The delta functions are ``softplus(r)`` for ``cumulative_softplus``,
+    ``exp(r)`` for ``exponential`` and ``cumulative_exp``, ``r * r`` for
+    ``squared``, and ``softmax(r) * span`` for ``normalized_softmax``.
+
+    Every "ignored" and "no" cell above was measured, not read off the code:
+    the same input was run with and without the argument and the outputs
+    compared. Do not assume an argument reaches a method because it is
+    accepted by the constructor.
+
+    ``value_range`` means two different things. Under ``"sigmoid"`` it bounds
+    the output, because the last step clips to it. Under
+    ``"normalized_softmax"`` it only sets the total spread ``hi - lo``; the
+    sequence still starts at the raw first input, so outputs fall outside
+    ``value_range`` routinely. Measured on 5 rows of 6 scores from N(0, 3)
+    with ``value_range=(0.0, 10.0)``: spread 10.000 on every row, but the
+    observed values ran from -0.865 to 14.901.
+
+    :param method: Which strategy to use. One of ``"cumulative_softplus"``
+        (default), ``"exponential"``, ``"cumulative_exp"``, ``"sigmoid"``,
+        ``"squared"``, ``"normalized_softmax"``.
     :type method: MonotonicityMethod
-    :param axis: Axis along which to enforce monotonicity.
+    :param axis: Axis to enforce the ordering along. Defaults to -1. It is
+        normalized against the input rank in ``build``.
     :type axis: int
-    :param min_spacing: Minimum spacing between consecutive values.
-        If provided, adds this constant to all deltas.
+    :param min_spacing: Constant added to every delta, so consecutive outputs
+        are at least this far apart. Must be non-negative. ``None`` (default)
+        adds nothing. Ignored by ``"sigmoid"``.
     :type min_spacing: Optional[float]
-    :param max_spacing: Maximum spacing between consecutive values.
-        Clips deltas to this value. Only applicable to delta-based methods.
+    :param max_spacing: Ceiling applied to every delta. Must be positive.
+        ``None`` (default) applies no ceiling. Ignored by ``"sigmoid"`` and
+        ``"normalized_softmax"``.
     :type max_spacing: Optional[float]
-    :param value_range: Tuple (min_val, max_val). Required for ``"sigmoid"``
-        and ``"normalized_softmax"`` methods. Defines the output value range.
+    :param value_range: ``(min_val, max_val)`` with ``min_val < max_val``.
+        Required by ``"sigmoid"`` and ``"normalized_softmax"``; never read by
+        the other four.
     :type value_range: Optional[Tuple[float, float]]
-    :param clip_inputs: Whether to clip raw inputs before transformation.
-        Helps prevent numerical overflow. Defaults to True for exponential methods.
+    :param clip_inputs: Whether to clip raw scores to ``input_clip_range``
+        before transforming them. ``None`` (default) means True for
+        ``"exponential"`` and ``"cumulative_exp"`` and False otherwise.
+        ``"cumulative_exp"`` clips regardless of this flag; ``"squared"``,
+        ``"sigmoid"`` and ``"normalized_softmax"`` never clip.
     :type clip_inputs: Optional[bool]
-    :param input_clip_range: Tuple (min, max) for input clipping when
-        clip_inputs=True.
+    :param input_clip_range: ``(min, max)`` used when clipping is active.
+        Defaults to ``(-20.0, 20.0)``.
     :type input_clip_range: Tuple[float, float]
-    :param epsilon: Small constant for numerical stability.
+    :param epsilon: Floor for the ``n - 1`` divisor in ``"sigmoid"``.
+        Defaults to 1e-7. ``build`` already rejects ``n < 2``, so with a
+        static axis size this floor is never the binding term.
     :type epsilon: float
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: If method is unknown, value_range is required but not
-        provided, or if input has insufficient size along the monotonicity axis.
+    :raises ValueError: If ``method`` is unknown, if a required
+        ``value_range`` is missing or not increasing, if a spacing argument
+        has the wrong sign, or if ``min_spacing > max_spacing``. Raised from
+        ``__init__``. ``build`` raises for an out-of-bounds ``axis`` or an
+        axis shorter than 2.
+
+    :ivar axis_normalized: ``axis`` converted to a non-negative index against
+        the input rank. Set in ``build``, so it does not exist before the
+        first call.
+    :vartype axis_normalized: int
+
+    Note:
+        ``exponential`` with ``clip_inputs=False`` overflows, and the
+        constructor warns about it. Measured on three scores of 100.0:
+        unclipped output ``[100.0, inf, inf]``; the clipped default gives
+        ``[1.0000000e+02, 4.8516531e+08, 9.7033056e+08]``. Prefer
+        ``"cumulative_exp"``, which cannot be talked out of clipping.
     """
 
     def __init__(
@@ -181,6 +192,35 @@ class MonotonicityLayer(keras.layers.Layer):
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and store it.
+
+        No weight is created and ``axis`` is not resolved here; ``build``
+        does that once the input rank is known.
+
+        :param method: Which strategy to use.
+        :type method: MonotonicityMethod
+        :param axis: Axis to enforce the ordering along.
+        :type axis: int
+        :param min_spacing: Constant added to every delta, or ``None``.
+        :type min_spacing: Optional[float]
+        :param max_spacing: Ceiling applied to every delta, or ``None``.
+        :type max_spacing: Optional[float]
+        :param value_range: ``(min_val, max_val)``, required by ``"sigmoid"``
+            and ``"normalized_softmax"``.
+        :type value_range: Optional[Tuple[float, float]]
+        :param clip_inputs: Whether to clip raw scores. ``None`` picks the
+            per-method default.
+        :type clip_inputs: Optional[bool]
+        :param input_clip_range: ``(min, max)`` used when clipping is active.
+        :type input_clip_range: Tuple[float, float]
+        :param epsilon: Floor for the ``n - 1`` divisor in ``"sigmoid"``.
+        :type epsilon: float
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :raises ValueError: If ``method`` is unknown, if a required
+            ``value_range`` is missing or not increasing, if a spacing
+            argument has the wrong sign, or if ``min_spacing`` exceeds
+            ``max_spacing``.
+        """
         super().__init__(**kwargs)
 
         # Validate method
@@ -194,7 +234,7 @@ class MonotonicityLayer(keras.layers.Layer):
                 f"Must be one of {valid_methods}"
             )
 
-        # Validate value_range for methods that require it
+        # These two methods read value_range; the other four never do.
         if method in ["sigmoid", "normalized_softmax"]:
             if value_range is None:
                 raise ValueError(
@@ -225,13 +265,14 @@ class MonotonicityLayer(keras.layers.Layer):
         self.epsilon = epsilon
         self.input_clip_range = input_clip_range
 
-        # Auto-enable clipping for exponential methods if not specified
+        # The two exponential methods overflow easily, so clip by default.
         if clip_inputs is None:
             self.clip_inputs = method in ["exponential", "cumulative_exp"]
         else:
             self.clip_inputs = clip_inputs
 
-        # Issue warnings for potentially problematic configurations
+        # `cumulative_exp` clips regardless, so only `exponential` can be
+        # talked into an unclipped exp().
         if method == "exponential" and not self.clip_inputs:
             warnings.warn(
                 "Using exponential method without input clipping can cause numerical "
@@ -240,12 +281,15 @@ class MonotonicityLayer(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
+        """Resolve ``axis`` against the input rank and check the axis size.
+
+        Creates no weights. Sets ``self.axis_normalized``, which every method
+        below relies on.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If the size along monotonicity axis is less than 2.
+        :raises ValueError: If ``axis`` is out of bounds for the input rank,
+            or if the axis is statically known and shorter than 2.
         """
         if self.built:
             return
@@ -263,7 +307,8 @@ class MonotonicityLayer(keras.layers.Layer):
                 f"axis {self.axis} is out of bounds for input with {ndim} dimensions"
             )
 
-        # Check size along monotonicity axis
+        # An ordering needs at least two values. A dynamic (None) axis size
+        # cannot be checked here and is left to the ops.
         axis_size = input_shape[self.axis_normalized]
         if axis_size is not None and axis_size < 2:
             raise ValueError(
@@ -278,15 +323,18 @@ class MonotonicityLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply monotonicity constraint to inputs.
+        """Dispatch to the configured method.
 
-        :param inputs: Input tensor with shape where ``inputs.shape[axis] >= 2``.
+        :param inputs: Raw scores. ``inputs.shape[axis]`` must be at least 2.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training mode (unused, for API compatibility).
+        :param training: Training or inference mode. Unused; the layer
+            behaves the same either way. Kept for API consistency.
         :type training: Optional[bool]
-        :return: Monotonically non-decreasing tensor with same shape as inputs.
+        :return: Non-decreasing tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``self.method`` is unknown. ``__init__``
+            already rejects that, so this branch is unreachable through the
+            public API.
         """
         # Apply the selected monotonicity method
         if self.method == "cumulative_softplus":
@@ -302,23 +350,24 @@ class MonotonicityLayer(keras.layers.Layer):
         elif self.method == "normalized_softmax":
             return self._normalized_softmax(inputs)
         else:
-            # Should never reach here due to __init__ validation
+            # Unreachable: __init__ rejects any other method.
             raise ValueError(f"Unknown method: {self.method}")
 
     def _split_first_and_rest(
             self,
             inputs: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Split inputs into first value (anchor) and rest along monotonicity axis.
+        """Split off the anchor value from the rest along the axis.
 
-        :param inputs: Input tensor.
+        Both parts keep the input rank. ``first`` has size 1 along the axis
+        so it broadcasts against the accumulated deltas.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Tuple of (first_value, remaining_values).
+        :return: ``(first, rest)``, of sizes 1 and ``n - 1`` along the axis.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Get slices for first value and rest
-        # First value along axis
+        # Slice the anchor: everything on the other axes, index 0 on this one.
         indices_first = [slice(None)] * len(inputs.shape)
         indices_first[self.axis_normalized] = slice(0, 1)
         first = inputs[tuple(indices_first)]
@@ -334,12 +383,14 @@ class MonotonicityLayer(keras.layers.Layer):
             self,
             deltas: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Apply min/max spacing constraints to deltas.
+        """Add ``min_spacing`` and cap at ``max_spacing``.
 
-        :param deltas: Positive increments between consecutive values.
+        A no-op when both are ``None``. Only the four accumulating methods
+        call this; ``_sigmoid`` and ``_normalized_softmax`` do not.
+
+        :param deltas: Non-negative increments between consecutive values.
         :type deltas: keras.KerasTensor
-        :return: Constrained deltas.
+        :return: Constrained deltas, same shape.
         :rtype: keras.KerasTensor
         """
         if self.min_spacing is not None:
@@ -351,12 +402,15 @@ class MonotonicityLayer(keras.layers.Layer):
         return deltas
 
     def _cumulative_softplus(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Cumulative softplus method: ``Q_i = Q_0 + Sigma(softplus(r_j))``.
+        """Accumulate ``softplus`` deltas: ``Q_i = Q_0 + sum(softplus(r_j))``.
 
-        :param inputs: Raw predictions.
+        The default. ``softplus`` is strictly positive and its gradient never
+        saturates to zero, so deltas stay strictly positive and the ordering
+        is strict up to float rounding.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Monotonic predictions.
+        :return: Non-decreasing predictions, same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         first, rest = self._split_first_and_rest(inputs)
@@ -381,12 +435,14 @@ class MonotonicityLayer(keras.layers.Layer):
         return keras.ops.concatenate([first, subsequent_values], axis=self.axis_normalized)
 
     def _exponential(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Exponential method: ``Q_i = Q_{i-1} + exp(r_i)``.
+        """Accumulate ``exp`` deltas: ``Q_i = Q_{i-1} + exp(r_i)``.
 
-        :param inputs: Raw predictions.
+        Gives large spacing for large scores. Honours ``clip_inputs``, which
+        defaults to True here; with clipping off this overflows to ``inf``.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Monotonic predictions.
+        :return: Non-decreasing predictions, same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         first, rest = self._split_first_and_rest(inputs)
@@ -410,12 +466,15 @@ class MonotonicityLayer(keras.layers.Layer):
         return keras.ops.concatenate([first, subsequent_values], axis=self.axis_normalized)
 
     def _cumulative_exp(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Cumulative exponential with guaranteed clipping (safer exponential).
+        """``exponential`` with clipping that cannot be switched off.
 
-        :param inputs: Raw predictions.
+        Identical to :meth:`_exponential` except that ``input_clip_range`` is
+        applied whatever ``clip_inputs`` says. Use this instead of
+        ``"exponential"`` unless you need the unclipped behaviour.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Monotonic predictions.
+        :return: Non-decreasing predictions, same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         first, rest = self._split_first_and_rest(inputs)
@@ -437,12 +496,16 @@ class MonotonicityLayer(keras.layers.Layer):
         return keras.ops.concatenate([first, subsequent_values], axis=self.axis_normalized)
 
     def _squared(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Squared method: ``Q_i = Q_{i-1} + r_i^2``.
+        """Accumulate squared deltas: ``Q_i = Q_{i-1} + r_i^2``.
 
-        :param inputs: Raw predictions.
+        Cheap and free of exponential blow-up, but the delta is exactly zero
+        at ``r_i = 0``, so adjacent outputs can be equal. Measured: a row of
+        four zeros comes back as ``[0., 0., 0., 0.]``. The gradient also
+        vanishes there. Does not clip, whatever ``clip_inputs`` says.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Monotonic predictions.
+        :return: Non-decreasing predictions, same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         first, rest = self._split_first_and_rest(inputs)
@@ -461,15 +524,27 @@ class MonotonicityLayer(keras.layers.Layer):
         return keras.ops.concatenate([first, subsequent_values], axis=self.axis_normalized)
 
     def _sigmoid(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Sigmoid method: each value independently mapped to range via sigmoid.
+        """Place each position at a fixed target, then nudge it by a sigmoid.
 
-        This method doesn't use cumulative logic -- each output is independently
-        computed and naturally monotonic due to the way we construct indices.
+        The only method that does not accumulate. Position ``i`` of ``n``
+        gets target ``min_val + span * i / (n - 1)``, and the sigmoid moves
+        it by at most ``span * 0.5 / (n - 1)`` either way. Adjacent targets
+        are ``span / (n - 1)`` apart, so two nudges can never close the gap.
+        The result is then clipped into ``value_range``, which preserves the
+        ordering. ``min_spacing``, ``max_spacing`` and ``clip_inputs`` are
+        all ignored here.
 
-        :param inputs: Raw predictions.
+        Measured on ``[-2, 0, 1, 3, -1]`` with ``value_range=(0.0, 10.0)``:
+        output ``[0.0, 2.5, 5.5776463, 8.631435, 9.422354]``. Note the last
+        two: the scores fall from 3 to -1 while the outputs still rise,
+        because the target dominates the nudge. Do not read this method as
+        ``sigmoid(r) * span + min_val`` -- that formula is not what runs and
+        is not monotonic.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Monotonic predictions bounded by value_range.
+        :return: Non-decreasing predictions inside ``value_range``, same
+            shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         min_val, max_val = self.value_range
@@ -477,8 +552,8 @@ class MonotonicityLayer(keras.layers.Layer):
         # Apply sigmoid to map to [0, 1]
         normalized = keras.ops.sigmoid(inputs)
 
-        # Create linearly spaced target positions for each index along axis
-        # This ensures monotonicity: each position gets a higher target
+        # Each position gets its own target, so the targets alone are already
+        # ordered before the sigmoid moves anything.
         axis_size = keras.ops.shape(inputs)[self.axis_normalized]
 
         # Generate indices: [0, 1, 2, ..., n-1]
@@ -493,24 +568,21 @@ class MonotonicityLayer(keras.layers.Layer):
             self.epsilon
         )
 
-        # Reshape to broadcast along the monotonicity axis
-        # Create shape with 1s everywhere except the monotonicity axis
+        # Reshape to broadcast along the monotonicity axis: 1 everywhere
+        # except the axis being ordered.
         broadcast_shape = [1] * len(inputs.shape)
         broadcast_shape[self.axis_normalized] = axis_size
         normalized_indices = keras.ops.reshape(normalized_indices, broadcast_shape)
 
-        # Blend between target positions: target = min + (max - min) * index_position
-        # Then blend with sigmoid output: final = target + (max - min) * (sigmoid - 0.5) * flexibility
+        # The ordered backbone: evenly spaced positions across value_range.
         target_values = min_val + (max_val - min_val) * normalized_indices
 
-        # Use sigmoid to allow deviation from target while maintaining order.
-        # The 0.5 centering means sigmoid < 0.5 pulls down, > 0.5 pulls up.
-        # The per-element deviation magnitude is bounded by
-        #   (max-min) * 0.5 * flexibility,
-        # while adjacent target positions are spaced (max-min)/(n-1) apart.
-        # Setting flexibility = 1/(n-1) keeps the worst-case adjacent difference
-        # strictly non-negative (gap - 2*max_dev = 0), so the output is guaranteed
-        # non-decreasing along the axis -- which is what this layer advertises.
+        # The sigmoid lets each position deviate from its target. Centering
+        # on 0.5 means sigmoid < 0.5 pulls down and > 0.5 pulls up. The
+        # deviation is bounded by (max-min) * 0.5 * flexibility while
+        # adjacent targets sit (max-min)/(n-1) apart, so flexibility =
+        # 1/(n-1) makes the worst-case adjacent difference exactly zero.
+        # Raising flexibility would break the ordering this layer promises.
         flexibility = 1.0 / keras.ops.maximum(
             keras.ops.cast(axis_size - 1, inputs.dtype), self.epsilon
         )
@@ -522,12 +594,20 @@ class MonotonicityLayer(keras.layers.Layer):
         return output
 
     def _normalized_softmax(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Normalized softmax: deltas sum to a controlled total range.
+        """Split a fixed total spread across the deltas with a softmax.
 
-        :param inputs: Raw predictions.
+        The deltas are ``softmax(r_1..r_n) * (max_val - min_val)``, so they
+        sum to exactly the width of ``value_range``. The sequence still
+        starts at the raw first input, so ``value_range`` fixes the spread,
+        not the output bounds -- measured spread 10.000 per row with
+        ``value_range=(0.0, 10.0)`` while the values themselves ran -0.865 to
+        14.901. ``min_spacing`` is added afterwards and pushes the spread
+        past that width; ``max_spacing`` and ``clip_inputs`` are ignored.
+
+        :param inputs: Raw scores.
         :type inputs: keras.KerasTensor
-        :return: Monotonic predictions with controlled total spread.
+        :return: Non-decreasing predictions with a controlled total spread,
+            same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         first, rest = self._split_first_and_rest(inputs)
@@ -553,19 +633,23 @@ class MonotonicityLayer(keras.layers.Layer):
         return keras.ops.concatenate([first, subsequent_values], axis=self.axis_normalized)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (same as input shape).
+        """Return the input shape unchanged.
+
+        The split and the concatenate cancel: 1 plus ``n - 1`` is ``n``.
 
         :param input_shape: Input tensor shape.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output tensor shape (same as input).
+        :return: Output tensor shape, identical to ``input_shape``.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the layer configuration for serialization.
+
+        ``clip_inputs`` is written out as the resolved boolean, not the
+        ``None`` that may have been passed in, so a reloaded layer keeps the
+        clipping behaviour it had.
 
         :return: Configuration dictionary.
         :rtype: dict[str, Any]

@@ -1,42 +1,28 @@
 """
-Expanded Gating Range Activation Functions.
+Gated activations, plus expanded-range variants with a trainable gate width.
 
-This module provides a set of activation functions, including standard ones
-(GELU, SiLU) and their expanded gating range variants (xATLU, xGELU, xSiLU).
-The expanded versions introduce a trainable parameter alpha that broadens
-(or contracts) the effective gating range of each underlying function, potentially
-improving performance and flexibility in deep neural networks.
+Every activation here has the shape ``f(x) = x * gate(x)``. The gate is a
+squashing function -- ``erf``, ``sigmoid`` or ``arctan`` -- mapped into
+``(0, 1)``. GELU and SiLU are the plain versions. The three ``x``-prefixed
+variants add one trainable scalar ``alpha`` and widen the gate to
+``g * (1 + 2*alpha) - alpha``, which stretches its range from ``(0, 1)`` to
+``(-alpha, 1 + alpha)``. Negative ``alpha`` narrows it instead. ``EluPlusOne``
+is the odd one out: a strictly positive activation for rate parameters, with
+no gate at all.
 
-Activation Functions:
+``alpha`` initializes to zeros, so an untrained ``xGELU`` is bit-for-bit
+``GELU`` and an untrained ``xSiLU`` is bit-for-bit ``SiLU`` (measured
+elementwise maximum difference 0.0 on both). The variants cost nothing until
+the optimizer moves ``alpha``.
 
-1. **GELU** (Gaussian Error Linear Unit):
-   ``GELU(x) = x * 0.5 * (1 + erf(x / sqrt(2)))``
-   Combines linear and Gaussian functions for smooth, non-monotonic activation.
+The three gates behave differently in the tail, which is what to pick on.
+Measured at ``x = 10``, the distance from full saturation ``1 - gate(x)`` is
+0.0 for ``erf`` (saturated exactly, in float64), 4.540e-05 for ``sigmoid``
+and 3.173e-02 for ``arctan``. The arctan gate decays polynomially rather than
+exponentially, so it never really saturates.
 
-2. **SiLU** (Sigmoid Linear Unit / Swish):
-   ``SiLU(x) = x * sigmoid(x)``
-   Blends linear and sigmoid behaviors for smoother gradients than ReLU.
-
-3. **xATLU** (Expanded ArcTan Linear Unit):
-   ``gate(x) = (arctan(x) + pi/2) / pi``
-   ``xATLU(x) = x * (gate(x) * (1 + 2*alpha) - alpha)``
-   Uses arctan-based gating expanded by trainable alpha.
-
-4. **xGELU** (Expanded Gaussian Error Linear Unit):
-   ``gate(x) = 0.5 * (1 + erf(x / sqrt(2)))``
-   ``xGELU(x) = x * (gate(x) * (1 + 2*alpha) - alpha)``
-   Extends GELU gating with trainable alpha for adjustable range.
-
-5. **xSiLU** (Expanded Sigmoid Linear Unit):
-   ``gate(x) = sigmoid(x)``
-   ``xSiLU(x) = x * (gate(x) * (1 + 2*alpha) - alpha)``
-   Extends SiLU gating with trainable alpha.
-
-6. **EluPlusOne**: ``ELU(x) + 1 + epsilon`` ensuring strictly positive outputs.
-
-All activation classes inherit from a common ``BaseActivation`` layer, ensuring
-they can be used seamlessly in Keras models. A ``get_activation`` factory
-function provides name-based instantiation.
+All layers subclass ``BaseActivation``, are element-wise, and preserve input
+shape. ``get_activation`` builds one by name.
 
 Reference:
     Huang, A. H. (2023). Expanded Gating Ranges Improve Activation Functions.
@@ -52,39 +38,34 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class BaseActivation(keras.layers.Layer):
-    """
-    Base class for all custom activation functions.
+    """Common base for the activation layers in this module.
 
-    This class provides a common interface and functionality for custom
-    activation layers, including the standard Keras Layer configurations
-    such as ``trainable``, ``dtype``, and ``name``. All activations in this
-    module inherit from this base and apply element-wise transformations
-    that preserve the input shape.
+    Forwards ``trainable``, ``name`` and ``dtype`` to ``keras.layers.Layer``
+    and fixes ``compute_output_shape`` to the identity, which is correct for
+    every element-wise activation below. It owns no weights and defines no
+    ``call``; a subclass supplies that.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │      Input x [..., features]        │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │   Element-wise Activation f(x)      │
-        │   (defined by subclass)             │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │     Output f(x) [..., features]     │
-        └─────────────────────────────────────┘
+                x  [..., F]
+                      ▼
+        ┌───────────────────────────┐
+        │ f(x), defined by subclass │
+        └─────────────┬─────────────┘
+                      ▼
+                y  [..., F]
 
-    :param trainable: Whether the layer's variables are trainable.
+    ``F`` stands for the trailing feature dimension, but nothing here reads
+    the shape: the transform is element-wise over the whole tensor.
+
+    :param trainable: Whether the layer's variables are trainable. Defaults
+        to True. Only the ``ExpandedActivation`` subclasses own a variable.
     :type trainable: bool
-    :param name: Name of the layer.
+    :param name: Name of the layer. ``None`` lets Keras generate one.
     :type name: Optional[str]
-    :param dtype: Data type for the layer's computations and variables.
+    :param dtype: Dtype or dtype policy for the layer.
     :type dtype: Optional[Union[str, keras.ops.dtype]]
     :param kwargs: Additional keyword arguments passed to the parent class.
     """
@@ -96,6 +77,17 @@ class BaseActivation(keras.layers.Layer):
         dtype: Optional[Union[str, keras.ops.dtype]] = None,
         **kwargs: Any
     ) -> None:
+        """Forward the standard Layer arguments to the base class.
+
+        :param trainable: Whether the layer's variables are trainable.
+        :type trainable: bool
+        :param name: Name of the layer.
+        :type name: Optional[str]
+        :param dtype: Dtype or dtype policy for the layer.
+        :type dtype: Optional[Union[str, keras.ops.dtype]]
+        :param kwargs: Additional keyword arguments passed to the parent
+            class.
+        """
         super().__init__(
             trainable=trainable,
             name=name,
@@ -107,8 +99,10 @@ class BaseActivation(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape -- element-wise activation preserves shape.
+        """Return the input shape unchanged.
+
+        Every activation in this module is element-wise, so the shape never
+        moves.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -118,8 +112,10 @@ class BaseActivation(keras.layers.Layer):
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+        """Return the layer configuration for serialization.
+
+        Adds nothing to the base class config; this layer stores no
+        configuration of its own.
 
         :return: Dictionary containing the layer configuration.
         :rtype: Dict[str, Any]
@@ -133,65 +129,51 @@ class BaseActivation(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class GELU(BaseActivation):
-    """
-    Gaussian Error Linear Unit (GELU) activation function.
+    """Exact GELU: ``x * 0.5 * (1 + erf(x / sqrt(2)))``.
 
-    The GELU activation combines linear and Gaussian distributions to provide
-    smooth, non-monotonic activation that often yields better performance than
-    ReLU-based activations. It is defined as:
-    ``GELU(x) = x * 0.5 * (1 + erf(x / sqrt(2)))``
+    The gate is the standard normal CDF, so the output is ``x`` weighted by
+    the probability that a standard normal draw falls below ``x``. It is
+    smooth everywhere and non-monotonic: it dips slightly below zero for
+    small negative inputs before returning to zero.
+
+    This is the exact form, not the tanh approximation. Measured on
+    ``[-3, -1, 0, 1, 3]``, it matches
+    ``keras.activations.gelu(x, approximate=False)`` elementwise, output
+    ``[-0.00404978, -0.15865526, 0.0, 0.8413447, 2.9959502]``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │  GELU(x) = x * 0.5 * (1 + erf(x/    │
-        │                          sqrt(2)))  │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │         Output [...]                │
-        └─────────────────────────────────────┘
+                x  [..., F]
+                      ▼
+        ┌───────────────────────────┐
+        │ GELU(x) = 0.5 * x         │
+        │   * (1 + erf(x/sqrt(2)))  │
+        └─────────────┬─────────────┘
+                      ▼
+                y  [..., F]
+
+    The erf gate saturates hard: measured at ``x = 10`` it reaches exactly
+    1.0 in float64, so the gradient through the gate is gone there.
 
     References:
         Hendrycks, D., & Gimpel, K. (2016). Gaussian Error Linear Units (GELUs).
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply the GELU activation function to the inputs.
+        """Apply exact GELU element-wise.
 
-        :param inputs: The input tensor.
+        :param inputs: The input tensor, any shape.
         :type inputs: keras.KerasTensor
-        :return: Output tensor after applying the GELU activation.
+        :return: Tensor of the same shape and dtype as ``inputs``.
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-23T203721-009b7ccf/D-017
-        # ``sqrt(2)`` is cast to the INPUT's dtype. ``keras.ops.sqrt(2.0)``
-        # returns a float32 TENSOR regardless of the active dtype policy
-        # (MEASURED under both ``mixed_float16`` and ``mixed_bfloat16``), so it
-        # met the float16 autocast tensor here and the divide raised
-        # ``TypeError: `x` and `y` must have the same dtype, got tf.float16 !=
-        # tf.float32`` on ANY mixed-precision forward through this layer --
-        # found via ``create_bert_with_head``, whose float32 control was green.
-        #
-        # WHAT NOT TO DO:
-        #   * Do NOT write the bare ``keras.ops.sqrt(2.0)``. A Python float
-        #     would be fine (weak-typed, promotes to the tensor's dtype); the
-        #     op's RESULT is a strongly-typed float32 tensor and is not.
-        #   * Do NOT cast ``inputs`` to float32 instead. That opts every
-        #     consumer of this activation out of mixed precision, which is the
-        #     defect this repairs, not a repair.
-        # Same defect class as D-064 (``ops.one_hot`` in ``layers/moe/``), and
-        # the same idiom: cast the policy-blind constant, not the tensor.
-        # See decisions.md D-017.
+        # `keras.ops.sqrt(2.0)` returns a float32 TENSOR under every dtype policy, so
+        # it met the float16 autocast input here and the divide raised TypeError on
+        # ANY mixed-precision forward. Cast the constant, not `inputs`: casting
+        # `inputs` to float32 opts every consumer out of mixed precision. See D-017.
         root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
         return 0.5 * inputs * (1 + keras.ops.erf(inputs / root_two))
 
@@ -201,39 +183,34 @@ class GELU(BaseActivation):
 
 @keras.saving.register_keras_serializable()
 class SiLU(BaseActivation):
-    """
-    Sigmoid Linear Unit (SiLU) activation function.
+    """SiLU, also called Swish: ``x * sigmoid(x)``.
 
-    Also known as Swish, SiLU blends linear and sigmoid behaviors for smoother
-    gradients compared to piecewise functions like ReLU. It is defined as:
-    ``SiLU(x) = x * sigmoid(x)``
+    Smooth everywhere, unlike ReLU, which has no derivative at zero. Like
+    GELU it dips below zero for small negative inputs. Measured on
+    ``[-3, -1, 0, 1, 3]`` it matches ``keras.activations.silu`` elementwise.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │  SiLU(x) = x * sigmoid(x)           │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │         Output [...]                │
-        └─────────────────────────────────────┘
+                x  [..., F]
+                      ▼
+        ┌───────────────────────────┐
+        │ SiLU(x) = x * sigmoid(x)  │
+        └─────────────┬─────────────┘
+                      ▼
+                y  [..., F]
+
+    The sigmoid gate saturates more slowly than GELU's erf gate: measured at
+    ``x = 10``, ``1 - gate(x)`` is 4.540e-05 here against 0.0 for erf.
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply the SiLU activation function to the inputs.
+        """Apply SiLU element-wise.
 
-        :param inputs: The input tensor.
+        :param inputs: The input tensor, any shape.
         :type inputs: keras.KerasTensor
-        :return: Output tensor after applying the SiLU activation.
+        :return: Tensor of the same shape and dtype as ``inputs``.
         :rtype: keras.KerasTensor
         """
         return inputs * keras.ops.sigmoid(inputs)
@@ -244,46 +221,65 @@ class SiLU(BaseActivation):
 
 @keras.saving.register_keras_serializable()
 class ExpandedActivation(BaseActivation):
-    """
-    Base class for expanded gating range activation functions.
+    """Base for the gate-widening variants; owns the trainable ``alpha``.
 
-    This class introduces a trainable scalar parameter ``alpha`` that
-    modifies the gating range of the activation function. Child classes
-    use this parameter to expand or contract the range through which
-    the gating function (e.g., sigmoid, erf, arctan) operates. The
-    expanded activation formula is:
-    ``f(x) = x * (gate(x) * (1 + 2*alpha) - alpha)``
+    Adds one scalar weight, ``alpha``, and defines the shared formula
+    ``f(x) = x * (gate(x) * (1 + 2*alpha) - alpha)``. A subclass supplies
+    ``gate`` and the ``call`` that uses it; this class supplies only the
+    weight, the config and the build.
+
+    ``alpha`` widens the gate. Where ``gate(x)`` lives in ``(0, 1)``, the
+    expanded gate lives in ``(-alpha, 1 + alpha)``. Measured on
+    ``xSiLU(alpha=0.5)`` against ``[-3, -1, 0, 1, 3]``, the expanded gate runs
+    ``[-0.405, 0.038, 0.5, 0.962, 1.405]``, so the activation can flip the
+    sign of its own input where the plain version could only shrink it. A
+    negative ``alpha`` narrows instead: at ``alpha = -0.25`` the gate is
+    confined to ``(0.25, 0.75)``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ├───────────────────┐
-                       │                   │
-                       ▼                   ▼
-        ┌──────────────────────┐  ┌────────────────────────┐
-        │   Identity: x        │  │ Expanded Gate:         │
-        │                      │  │ g(x)*(1+2*alpha)-alpha │
-        └──────────┬───────────┘  └───────┬────────────────┘
-                   │                      │
-                   └──────────┬───────────┘
-                              │ element-wise multiply
-                              ▼
-               ┌──────────────────────────────┐
-               │     Output [...]             │
-               └──────────────────────────────┘
+                       x  [..., F]
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+        ┌───────────┐        ┌─────────────────────┐
+        │ identity  │        │ g = subclass gate(x)│
+        │     x     │        │ e = g*(1+2a) - a    │
+        └─────┬─────┘        └──────────┬──────────┘
+              │                         │
+              └────────────┬────────────┘
+                           ▼  x * e
+                       y  [..., F]
 
-    :param alpha_initializer: Initializer for the alpha parameter.
+    ``a`` is the ``alpha`` weight. The left branch is the input tensor
+    itself, not a sub-layer. ``alpha`` is a scalar of shape ``()``, one per
+    layer, shared across every element -- it is not per-feature.
+
+    :param alpha_initializer: Initializer for ``alpha``. Defaults to
+        ``'zeros'``, which makes each variant start out identical to its
+        plain counterpart.
     :type alpha_initializer: Union[str, keras.initializers.Initializer]
-    :param alpha_regularizer: Regularizer for the alpha parameter.
+    :param alpha_regularizer: Regularizer for ``alpha``. Defaults to
+        ``None``.
     :type alpha_regularizer: Optional[keras.regularizers.Regularizer]
-    :param alpha_constraint: Constraint for the alpha parameter.
+    :param alpha_constraint: Constraint for ``alpha``. Defaults to ``None``,
+        so nothing stops training from driving ``alpha`` negative and
+        narrowing the gate.
     :type alpha_constraint: Optional[keras.constraints.Constraint]
     :param kwargs: Additional keyword arguments passed to the parent class.
+
+    :ivar alpha: The scalar gate-width weight. ``None`` until ``build`` runs.
+    :vartype alpha: Optional[keras.Variable]
+
+    Note:
+        ``alpha`` is created with ``dtype=self.dtype``, which is the layer's
+        variable dtype. Measured under ``dtype="mixed_float16"``:
+        ``variable_dtype`` is float32 and ``alpha.dtype`` is float32 while
+        ``compute_dtype`` is float16, so the weight itself stays in full
+        precision. Passing ``dtype="float16"`` outright does put ``alpha`` in
+        float16.
     """
 
     def __init__(
@@ -293,6 +289,20 @@ class ExpandedActivation(BaseActivation):
         alpha_constraint: Optional[keras.constraints.Constraint] = None,
         **kwargs: Any
     ) -> None:
+        """Resolve the ``alpha`` initializer, regularizer and constraint.
+
+        The weight itself is created in ``build``.
+
+        :param alpha_initializer: Initializer for ``alpha``. Defaults to
+            ``'zeros'``.
+        :type alpha_initializer: Union[str, keras.initializers.Initializer]
+        :param alpha_regularizer: Regularizer for ``alpha``.
+        :type alpha_regularizer: Optional[keras.regularizers.Regularizer]
+        :param alpha_constraint: Constraint for ``alpha``.
+        :type alpha_constraint: Optional[keras.constraints.Constraint]
+        :param kwargs: Additional keyword arguments passed to the parent
+            class.
+        """
         super().__init__(**kwargs)
 
         # Store configuration parameters
@@ -304,8 +314,10 @@ class ExpandedActivation(BaseActivation):
         self.alpha = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the trainable parameter ``alpha`` for the expanded activation.
+        """Create the scalar ``alpha`` weight.
+
+        The shape is ``()``, so ``alpha`` does not depend on
+        ``input_shape``; the argument is only forwarded to the base class.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -325,8 +337,11 @@ class ExpandedActivation(BaseActivation):
         super().build(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the expanded activation layer.
+        """Return the layer configuration for serialization.
+
+        Serializes how ``alpha`` is set up, not its value; the value travels
+        with the weights. Measured on a saved and reloaded ``xGELU``: an
+        ``alpha`` of 0.37 comes back as 0.37.
 
         :return: Dictionary containing the layer configuration including
             alpha parameter configuration.
@@ -346,57 +361,60 @@ class ExpandedActivation(BaseActivation):
 
 @keras.saving.register_keras_serializable()
 class xATLU(ExpandedActivation):
-    """
-    Expanded ArcTan Linear Unit activation function.
+    """Expanded ArcTan Linear Unit: an arctan gate with trainable width.
 
-    This variant uses an arctan-based gating function, further expanded
-    by a trainable parameter ``alpha``. The activation is computed as:
-    ``gate(x) = (arctan(x) + pi/2) / pi``
-    ``xATLU(x) = x * (gate(x) * (1 + 2 * alpha) - alpha)``
+    Computes ``gate(x) = (arctan(x) + pi/2) / pi`` and then
+    ``x * (gate(x) * (1 + 2*alpha) - alpha)``.
 
-    The arctan-based gating provides smoother transitions for moderate input
-    values compared to sigmoid-based gates.
+    The arctan gate is the one that does not saturate. Measured ``1 -
+    gate(x)`` at ``x = 10``: 3.173e-02 here, against 4.540e-05 for the
+    sigmoid gate and 0.0 for the erf gate. Its tail decays like ``1/x``, not
+    exponentially, so far-out inputs still carry gradient through the gate.
+    It is not the gentler gate near the origin -- its slope at zero is
+    0.318310, steeper than sigmoid's 0.250000 and shallower than erf's
+    0.398942.
+
+    Note that this module ships no plain ``ATLU``; the arctan gate appears
+    only in this expanded form.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ├───────────────────┐
-                       │                   │
-                       ▼                   ▼
-        ┌──────────────────────┐  ┌────────────────────────┐
-        │   Identity: x        │  │ Gate: (arctan(x)+pi/2) │
-        │                      │  │       / pi             │
-        │                      │  │ Expand: g*(1+2a) - a   │
-        └──────────┬───────────┘  └───────┬────────────────┘
-                   │                      │
-                   └──────────┬───────────┘
-                              │ multiply
-                              ▼
-               ┌──────────────────────────────┐
-               │     Output [...]             │
-               └──────────────────────────────┘
+                       x  [..., F]
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+        ┌───────────┐        ┌─────────────────────┐
+        │ identity  │        │ g = (atan(x) + pi/2)│
+        │     x     │        │     / pi            │
+        │           │        │ e = g*(1+2a) - a    │
+        └─────┬─────┘        └──────────┬──────────┘
+              │                         │
+              └────────────┬────────────┘
+                           ▼  x * e
+                       y  [..., F]
 
-    :param alpha_initializer: Initializer for the alpha parameter.
+    ``a`` is the ``alpha`` weight, and ``pi`` is ``numpy.pi`` -- a Python
+    float, so it promotes to the input's dtype and needs no cast.
+
+    :param alpha_initializer: Initializer for ``alpha``. Defaults to
+        ``'zeros'``.
     :type alpha_initializer: Union[str, keras.initializers.Initializer]
-    :param alpha_regularizer: Regularizer for the alpha parameter.
+    :param alpha_regularizer: Regularizer for ``alpha``. Defaults to
+        ``None``.
     :type alpha_regularizer: Optional[keras.regularizers.Regularizer]
-    :param alpha_constraint: Constraint for the alpha parameter.
+    :param alpha_constraint: Constraint for ``alpha``. Defaults to ``None``.
     :type alpha_constraint: Optional[keras.constraints.Constraint]
     :param kwargs: Additional keyword arguments passed to the parent class.
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply the xATLU activation function to the inputs.
+        """Apply xATLU element-wise.
 
-        :param inputs: The input tensor.
+        :param inputs: The input tensor, any shape.
         :type inputs: keras.KerasTensor
-        :return: The output tensor after applying xATLU activation.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         gate = (keras.ops.arctan(inputs) + np.pi / 2) / np.pi
@@ -408,64 +426,59 @@ class xATLU(ExpandedActivation):
 
 @keras.saving.register_keras_serializable()
 class xGELU(ExpandedActivation):
-    """
-    Expanded Gaussian Error Linear Unit (xGELU) activation function.
+    """Expanded GELU: the erf gate with trainable width.
 
-    This variant uses the GELU gating function, expanded by a trainable
-    parameter ``alpha``. The activation is computed as:
-    ``gate(x) = 0.5 * (1 + erf(x / sqrt(2)))``
-    ``xGELU(x) = x * (gate(x) * (1 + 2 * alpha) - alpha)``
+    Computes ``gate(x) = 0.5 * (1 + erf(x / sqrt(2)))`` and then
+    ``x * (gate(x) * (1 + 2*alpha) - alpha)``.
 
-    Maintains the smooth, non-monotonic properties of GELU while adding
-    adaptability through the learnable gating range parameter.
+    With the default ``alpha_initializer='zeros'`` this is exactly ``GELU``
+    at initialization -- measured elementwise maximum difference 0.0 against
+    ``GELU`` on ``[-3, -1, 0, 1, 3]``. Training then moves ``alpha`` and the
+    two diverge.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ├───────────────────┐
-                       │                   │
-                       ▼                   ▼
-        ┌──────────────────────┐  ┌────────────────────────┐
-        │   Identity: x        │  │ Gate: 0.5*(1+erf(x/    │
-        │                      │  │            sqrt(2)))   │
-        │                      │  │ Expand: g*(1+2a) - a   │
-        └──────────┬───────────┘  └───────┬────────────────┘
-                   │                      │
-                   └──────────┬───────────┘
-                              │ multiply
-                              ▼
-               ┌──────────────────────────────┐
-               │     Output [...]             │
-               └──────────────────────────────┘
+                       x  [..., F]
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+        ┌───────────┐        ┌─────────────────────┐
+        │ identity  │        │ g = 0.5*(1 +        │
+        │     x     │        │     erf(x/sqrt(2))) │
+        │           │        │ e = g*(1+2a) - a    │
+        └─────┬─────┘        └──────────┬──────────┘
+              │                         │
+              └────────────┬────────────┘
+                           ▼  x * e
+                       y  [..., F]
 
-    :param alpha_initializer: Initializer for the alpha parameter.
+    ``a`` is the ``alpha`` weight. The ``sqrt(2)`` constant is cast to the
+    input's dtype; see the anchor in ``call``.
+
+    :param alpha_initializer: Initializer for ``alpha``. Defaults to
+        ``'zeros'``.
     :type alpha_initializer: Union[str, keras.initializers.Initializer]
-    :param alpha_regularizer: Regularizer for the alpha parameter.
+    :param alpha_regularizer: Regularizer for ``alpha``. Defaults to
+        ``None``.
     :type alpha_regularizer: Optional[keras.regularizers.Regularizer]
-    :param alpha_constraint: Constraint for the alpha parameter.
+    :param alpha_constraint: Constraint for ``alpha``. Defaults to ``None``.
     :type alpha_constraint: Optional[keras.constraints.Constraint]
     :param kwargs: Additional keyword arguments passed to the parent class.
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply the xGELU activation function to the inputs.
+        """Apply xGELU element-wise.
 
-        :param inputs: The input tensor.
+        :param inputs: The input tensor, any shape.
         :type inputs: keras.KerasTensor
-        :return: The output tensor after applying xGELU activation.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-23T203721-009b7ccf/D-017
-        # Same policy-blind constant as ``GELU.call`` above, same repair: the
-        # float32 tensor returned by ``keras.ops.sqrt(2.0)`` must adopt the
-        # input's dtype or this divide raises under any mixed-precision policy.
-        # Do NOT revert to the bare ``keras.ops.sqrt(2.0)``. See decisions.md D-017.
+        # Same policy-blind float32 constant as `GELU.call` above, same repair. Do
+        # NOT revert to the bare `keras.ops.sqrt(2.0)`. See decisions.md D-017.
         root_two = keras.ops.cast(keras.ops.sqrt(2.0), inputs.dtype)
         gate = 0.5 * (1 + keras.ops.erf(inputs / root_two))
         return inputs * (gate * (1 + 2 * self.alpha) - self.alpha)
@@ -476,56 +489,53 @@ class xGELU(ExpandedActivation):
 
 @keras.saving.register_keras_serializable()
 class xSiLU(ExpandedActivation):
-    """
-    Expanded Sigmoid Linear Unit (xSiLU) activation function.
+    """Expanded SiLU: the sigmoid gate with trainable width.
 
-    This variant uses the sigmoid gating function, expanded by a trainable
-    parameter ``alpha``. The activation is computed as:
-    ``gate(x) = sigmoid(x)``
-    ``xSiLU(x) = x * (gate(x) * (1 + 2 * alpha) - alpha)``
+    Computes ``gate(x) = sigmoid(x)`` and then
+    ``x * (gate(x) * (1 + 2*alpha) - alpha)``.
 
-    Combines the smoothness of SiLU with an adaptable gating range for
-    task-specific activation characteristics.
+    With the default ``alpha_initializer='zeros'`` this is exactly ``SiLU``
+    at initialization -- measured elementwise maximum difference 0.0 against
+    ``SiLU`` on ``[-3, -1, 0, 1, 3]``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ├───────────────────┐
-                       │                   │
-                       ▼                   ▼
-        ┌──────────────────────┐  ┌────────────────────────┐
-        │   Identity: x        │  │ Gate: sigmoid(x)       │
-        │                      │  │ Expand: g*(1+2a) - a   │
-        └──────────┬───────────┘  └───────┬────────────────┘
-                   │                      │
-                   └──────────┬───────────┘
-                              │ multiply
-                              ▼
-               ┌──────────────────────────────┐
-               │     Output [...]             │
-               └──────────────────────────────┘
+                       x  [..., F]
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+        ┌───────────┐        ┌─────────────────────┐
+        │ identity  │        │ g = sigmoid(x)      │
+        │     x     │        │ e = g*(1+2a) - a    │
+        └─────┬─────┘        └──────────┬──────────┘
+              │                         │
+              └────────────┬────────────┘
+                           ▼  x * e
+                       y  [..., F]
 
-    :param alpha_initializer: Initializer for the alpha parameter.
+    ``a`` is the ``alpha`` weight. No constant is created here, so this
+    variant has no dtype-policy hazard of the kind ``GELU`` and ``xGELU``
+    carry.
+
+    :param alpha_initializer: Initializer for ``alpha``. Defaults to
+        ``'zeros'``.
     :type alpha_initializer: Union[str, keras.initializers.Initializer]
-    :param alpha_regularizer: Regularizer for the alpha parameter.
+    :param alpha_regularizer: Regularizer for ``alpha``. Defaults to
+        ``None``.
     :type alpha_regularizer: Optional[keras.regularizers.Regularizer]
-    :param alpha_constraint: Constraint for the alpha parameter.
+    :param alpha_constraint: Constraint for ``alpha``. Defaults to ``None``.
     :type alpha_constraint: Optional[keras.constraints.Constraint]
     :param kwargs: Additional keyword arguments passed to the parent class.
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply the xSiLU activation function to the inputs.
+        """Apply xSiLU element-wise.
 
-        :param inputs: The input tensor.
+        :param inputs: The input tensor, any shape.
         :type inputs: keras.KerasTensor
-        :return: The output tensor after applying xSiLU activation.
+        :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         gate = keras.ops.sigmoid(inputs)
@@ -536,17 +546,21 @@ class xSiLU(ExpandedActivation):
 
 
 def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
-    """
-    Enhanced ELU activation to ensure positive values for rate parameters.
+    """Return ``ELU(x) + 1 + epsilon``, which is strictly positive.
 
-    This activation ensures that the output is always positive and greater than
-    a small epsilon value, which is important for numerical stability as the
-    rate parameter (lambda) of an Exponential distribution must be positive.
-    Mathematical form: ``ELU(x) + 1 + epsilon``
+    ``ELU`` is bounded below by -1, so adding 1 gives a non-negative result
+    and adding ``keras.backend.epsilon()`` lifts it clear of zero. Use it for
+    a rate or scale parameter that has to stay positive, such as the lambda
+    of an exponential distribution.
+
+    Measured over 20001 points spanning ``x`` in ``[-100, 5]``: the minimum
+    output is 1e-07, exactly ``keras.backend.epsilon()``, and no output is
+    zero or negative. That floor is the whole guarantee -- it does not stay
+    ahead of zero by any margin larger than ``epsilon``.
 
     :param x: Input tensor.
     :type x: keras.KerasTensor
-    :return: Tensor with ELU activation plus one plus a small epsilon.
+    :return: Tensor of the same shape as ``x``, every element greater than 0.
     :rtype: keras.KerasTensor
     """
     return keras.ops.elu(x) + 1.0 + keras.backend.epsilon()
@@ -554,41 +568,36 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
 
 @keras.saving.register_keras_serializable()
 class EluPlusOne(BaseActivation):
-    """
-    Enhanced ELU activation layer to ensure positive values.
+    """Layer wrapper around :func:`elu_plus_one_plus_epsilon`.
 
-    This activation ensures that the output is always positive and greater than
-    a small epsilon value, which is important for numerical stability when used
-    as rate parameters in probability distributions. Mathematical form:
-    ``ELU(x) + 1 + epsilon``
+    Computes ``ELU(x) + 1 + epsilon``, so every output is strictly positive.
+    Intended for heads that emit a rate or scale parameter. Owns no weights
+    and takes no arguments of its own beyond the ``BaseActivation`` ones.
+
+    Measured minimum output over ``x`` in ``[-100, 5]``: 1.0000000116860974e-07.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────┐
-        │         Input x [...]               │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │  ELU(x) + 1 + epsilon               │
-        │  Guarantees output > 0              │
-        └──────────────┬──────────────────────┘
-                       │
-                       ▼
-        ┌─────────────────────────────────────┐
-        │   Positive Output [...]             │
-        └─────────────────────────────────────┘
+                x  [..., F]
+                      ▼
+        ┌───────────────────────────┐
+        │ ELU(x) + 1 + epsilon      │
+        └─────────────┬─────────────┘
+                      ▼
+                y  [..., F],  y > 0
+
+    ``epsilon`` is ``keras.backend.epsilon()``, read at call time, so
+    changing it globally changes this layer's floor.
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply the ELU+1+epsilon activation function to the inputs.
+        """Apply ``ELU(x) + 1 + epsilon`` element-wise.
 
-        :param inputs: The input tensor.
+        :param inputs: The input tensor, any shape.
         :type inputs: keras.KerasTensor
-        :return: Output tensor after applying ELU+1+epsilon activation.
+        :return: Strictly positive tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
         return elu_plus_one_plus_epsilon(inputs)
@@ -598,17 +607,24 @@ class EluPlusOne(BaseActivation):
 
 
 def get_activation(activation_name: str) -> BaseActivation:
-    """
-    Factory function to create an activation layer by name.
+    """Build one of this module's activation layers by name.
+
+    The name is lowercased and stripped first, so ``'  xAtLu  '`` resolves to
+    ``xATLU``. The layer is constructed with its defaults; there is no way to
+    pass an initializer or a constraint through this function. This is a
+    module-local convenience, separate from the package-level
+    ``create_activation_layer`` factory.
 
     Supported activation names: ``'gelu'``, ``'silu'``, ``'xatlu'``,
     ``'xgelu'``, ``'xsilu'``, ``'elu_plus_one'``.
 
-    :param activation_name: Name of the desired activation function (case-insensitive).
+    :param activation_name: Name of the desired activation function
+        (case-insensitive, surrounding whitespace ignored).
     :type activation_name: str
-    :return: An instance of the specified activation class.
+    :return: A new, default-constructed instance of the named class.
     :rtype: BaseActivation
-    :raises ValueError: If ``activation_name`` is not recognized.
+    :raises ValueError: If ``activation_name`` is not one of the six names
+        above. The message lists them.
     """
     activations = {
         'gelu': GELU,
