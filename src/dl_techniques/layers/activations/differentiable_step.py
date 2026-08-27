@@ -156,14 +156,40 @@ class DifferentiableStep(keras.layers.Layer):
             shift_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Validate ``axis`` and store the initializers, regularizer and
+        constraint. No weight is created here; ``build`` does that once the
+        input shape is known.
+
+        ``shift_regularizer`` and ``shift_constraint`` default to ``None`` in
+        the signature and are resolved to real objects in the body. A mutable
+        default in the signature is evaluated once at import, so every layer
+        in the process would share one regularizer and one constraint object.
+
+        :param axis: Axis to learn per-index parameters over. ``None`` gives
+            a single scalar ``slope`` and ``shift``. Defaults to ``-1``.
+        :type axis: Optional[int]
+        :param slope_initializer: Initializer for the ``slope`` weight.
+            Defaults to ``'ones'``.
+        :type slope_initializer: Union[str, keras.initializers.Initializer]
+        :param shift_initializer: Initializer for the ``shift`` weight.
+            Defaults to ``'zeros'``.
+        :type shift_initializer: Union[str, keras.initializers.Initializer]
+        :param shift_regularizer: Regularizer for the ``shift`` weight.
+            ``None`` resolves to ``keras.regularizers.L2(1e-3)``.
+        :type shift_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param shift_constraint: Constraint on the ``shift`` weight. ``None``
+            resolves to ``ValueRangeConstraint(-1, +1)``.
+        :type shift_constraint: Optional[Union[str, keras.constraints.Constraint]]
+        :param kwargs: Additional arguments for the Layer base class.
+        :raises TypeError: If ``axis`` is neither an ``int`` nor ``None``.
+        """
         super().__init__(**kwargs)
 
         if axis is not None and not isinstance(axis, int):
             raise TypeError(f"Expected `axis` to be an int or None, but got: {axis}")
 
-        # Defaults are built here, not in the signature. A signature default
-        # is evaluated once at import, so every layer would share one
-        # regularizer and one constraint object.
+        # Built here, not in the signature: see this method's docstring.
         if shift_regularizer is None:
             shift_regularizer = keras.regularizers.L2(1e-3)
         if shift_constraint is None:

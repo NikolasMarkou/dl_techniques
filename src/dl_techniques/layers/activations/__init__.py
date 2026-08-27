@@ -1,3 +1,34 @@
+"""
+Public surface of ``dl_techniques.layers.activations``.
+
+Re-exports every activation layer in the package, the two serializable
+activation functions, and the six factory helpers. Import from here rather
+than from the individual modules::
+
+    from dl_techniques.layers.activations import GoLU, create_activation_layer
+
+Three groups, matching the sections of ``__all__`` below:
+
+- **Factory utilities** (``factory.py``). Build a layer from a registry key
+  or from a config dict. ``ActivationType`` is the ``Literal`` alias listing
+  every valid key.
+- **Activation functions** (``gelu_tanh.py``). Plain callables, registered
+  with Keras so they survive a ``.keras`` round-trip. Everything else
+  exported here is a Layer.
+- **Layer classes**. One entry per activation module.
+
+Watch the name ``resolve_activation``. Two different functions in this
+package carry it. The one exported here is ``gelu_tanh.resolve_activation``,
+which extends ``keras.activations.get`` with the tanh-GELU spellings.
+``common.resolve_activation``, which turns an activation spec into a
+callable and rejects Layer instances, is **not** exported and must be
+imported as ``from .common import resolve_activation``.
+
+``__all__`` is a contract: 29 names. Every name in it must also appear in an
+import above, or ``from ... import *`` raises ``AttributeError`` on that
+name. Add the import and the ``__all__`` entry in the same change.
+"""
+
 from .factory import (
     create_activation_from_config,
     create_activation_layer,

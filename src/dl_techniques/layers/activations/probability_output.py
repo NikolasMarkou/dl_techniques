@@ -1,24 +1,27 @@
 """
-Unified Probability Output Layer.
+One wrapper over six ways to turn a tensor into a probability distribution.
 
-This module provides a wrapper layer that consolidates various probability
-distribution mechanisms (Softmax, Sparsemax, Adaptive Softmax, Routing, ThreshMax)
-into a single, configuration-driven component.
+``ProbabilityOutput`` picks a strategy from a string and delegates to it, so
+swapping softmax for sparsemax is a config change rather than a model edit.
+Every strategy returns rows that sum to 1 over the chosen axis.
 
-It allows for seamless experimentation with different output strategies by
-changing a configuration string rather than rewriting model architecture code.
+The six strategies, and what they eat:
 
-Supported Strategies:
-    - **softmax**: Standard exponential normalization.
-    - **sparsemax**: Euclidean projection onto simplex (sparse outputs).
-    - **threshmax**: Differentiable confidence thresholding (sparse, rank-preserving).
-    - **adaptive**: Entropy-based temperature scaling (sharpens uncertain predictions).
-    - **routing**: Deterministic, parameter-free tree (input: features, not logits).
-    - **hierarchical**: Learnable tree (input: features, not logits).
+- **softmax** -- ``keras.layers.Softmax``. Standard exponential
+  normalization. Takes logits.
+- **sparsemax** -- Euclidean projection onto the simplex. Produces exact
+  zeros. Takes logits.
+- **threshmax** -- confidence gating against ``1/N``, then renormalization.
+  Suppresses low-confidence classes but does not zero them. Takes logits.
+- **adaptive** -- entropy-driven temperature. Takes logits.
+- **routing** -- deterministic, parameter-free hierarchical tree. Takes
+  **features**, not logits, and does its own projection.
+- **hierarchical** -- the same tree with a learned projection. Takes
+  **features**.
 
-Usage Note:
-    - ``softmax``, ``sparsemax``, ``threshmax``, and ``adaptive`` expect input **logits**.
-    - ``routing`` and ``hierarchical`` expect input **features** (they replace the final Dense layer).
+``routing`` and ``hierarchical`` replace your final Dense layer, so the last
+dimension of the output is ``output_dim``, not the input width. The other
+four preserve the input shape.
 """
 
 import keras
@@ -52,69 +55,98 @@ ProbabilityType = Literal[
 
 @keras.saving.register_keras_serializable()
 class ProbabilityOutput(keras.layers.Layer):
-    """
-    Unified wrapper for probability output layers.
+    """Config-driven wrapper that delegates to one probability layer.
 
-    This layer serves as a factory and container for various activation and
-    classification heads. It instantiates the specific strategy based on the
-    ``probability_type`` argument.
-
-    Strategy logic:
-
-    - **"softmax"**: Standard ``keras.layers.Softmax``.
-      Input: Logits. Config: ``{"axis": -1}``.
-    - **"sparsemax"**: ``Sparsemax`` (L2 projection).
-      Input: Logits. Config: ``{"axis": -1}``.
-    - **"threshmax"**: ``ThreshMax`` (Differentiable confidence thresholding).
-      Input: Logits. Config: ``{"axis": -1, "slope": 10.0, "trainable_slope": False}``.
-    - **"adaptive"**: ``AdaptiveTemperatureSoftmax``.
-      Input: Logits. Config: ``{"min_temp": 0.1, "max_temp": 1.0, "entropy_threshold": 0.5}``.
-    - **"routing"**: ``RoutingProbabilitiesLayer`` (Deterministic).
-      Input: **Features** (Not logits). Config: ``{"output_dim": int, "axis": -1}``.
-    - **"hierarchical"**: ``RoutingProbabilitiesLayer(mode="trainable")``.
-      Input: **Features** (Not logits). Config: ``{"output_dim": int, "axis": -1}``.
-
-    For ``routing`` and ``hierarchical`` types, the input should be features
-    (e.g., from a hidden layer), not class logits, as these strategies
-    perform their own internal projection.
+    Instantiates the strategy named by ``probability_type`` in ``__init__``
+    and stores it as ``self.strategy_layer``. ``call`` forwards to it and
+    nothing else. The wrapper owns no weights of its own; the strategy layer
+    may own some (``hierarchical`` does, the rest do not).
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────┐
-        │  Input [..., logits_or_features]          │
-        └──────────────────┬────────────────────────┘
-                           │
-                           ▼
-        ┌───────────────────────────────────────────┐
-        │        Strategy Dispatch                  │
-        │  ┌─────────┬─────────┬─────────┐          │
-        │  │ softmax │sparsemax│threshmax│          │
-        │  ├─────────┼─────────┼─────────┤          │
-        │  │adaptive │ routing │hierarchi│          │
-        │  └─────────┴─────────┴─────────┘          │
-        └──────────────────┬────────────────────────┘
-                           │
-                           ▼
-        ┌───────────────────────────────────────────┐
-        │  Output [..., output_dim or same]         │
-        │  (valid probability distribution)         │
-        └───────────────────────────────────────────┘
+                         x  [B, ..., D]
+                                │
+                                ▼
+                  ┌───────────────────────────┐
+                  │ strategy_layer            │
+                  │ (built once in __init__)  │
+                  └─────────────┬─────────────┘
+                                │
+                   ┌────────────┴────────────┐
+                   │ logit strategies        │ routing strategies
+                   ▼                         ▼
+        ┌─────────────────────┐   ┌─────────────────────┐
+        │ Softmax             │   │ RoutingProbabili-   │
+        │ Sparsemax           │   │ tiesLayer, mode     │
+        │ ThreshMax           │   │ deterministic or    │
+        │ AdaptiveTempSoftmax │   │ trainable           │
+        └──────────┬──────────┘   └──────────┬──────────┘
+                   │ [B, ..., D]             │ [B, ..., output_dim]
+                   └────────────┬────────────┘
+                                ▼
+                        y  rows sum to 1
 
-    :param probability_type: String identifier for the output strategy.
-        One of ``"softmax"``, ``"sparsemax"``, ``"threshmax"``, ``"adaptive"``,
-        ``"routing"``, ``"hierarchical"``. Aliases ``"thresh_max"``,
-        ``"adaptive_softmax"``, ``"deterministic_routing"``, and
-        ``"hierarchical_routing"`` are also accepted.
+    Only one branch exists in any given instance: the fork is resolved in
+    ``__init__``, not per batch.
+
+    **Accepted ``probability_type`` values and the layer each builds:**
+
+    .. code-block:: text
+
+        key                     builds
+        softmax                 keras.layers.Softmax
+        sparsemax               Sparsemax
+        threshmax               ThreshMax
+        thresh_max              ThreshMax
+        adaptive                AdaptiveTemperatureSoftmax
+        adaptive_softmax        AdaptiveTemperatureSoftmax
+        routing                 RoutingProbabilitiesLayer
+        deterministic_routing   RoutingProbabilitiesLayer
+        hierarchical            RoutingProbabilitiesLayer(mode="trainable")
+        hierarchical_routing    RoutingProbabilitiesLayer(mode="trainable")
+
+    The value is lowercased before the lookup, so ``"SOFTMAX"`` is accepted
+    and ``get_config`` writes back the lowercase spelling.
+
+    Everything in ``type_config`` is forwarded to the strategy's constructor
+    unchanged, except for ``softmax``, where only ``axis`` is read and any
+    other key is dropped.
+
+    Three behaviours to know before you rely on them, all measured:
+
+    - **``mask`` reaches the softmax strategy only.** For every other type
+      ``call`` drops it silently -- no warning, no error. Measured: a
+      ``sparsemax`` instance returns bit-identical output with and without a
+      mask.
+    - **Only ``hierarchical`` validates ``output_dim``.** Constructing
+      ``routing`` without it raises nothing; ``RoutingProbabilitiesLayer``
+      defaults ``output_dim`` to the input width, so a ``(4, 16)`` input
+      gives a ``(4, 16)`` output instead of the class count you meant.
+    - **Routing strategies change the last dimension.** Measured with
+      ``type_config={"output_dim": 5}``, a ``(4, 16)`` input gives ``(4, 5)``
+      for both ``routing`` and ``hierarchical``, while all four logit
+      strategies give ``(4, 16)``.
+
+    :param probability_type: Which strategy to build. One of the ten keys in
+        the table above. Defaults to ``"softmax"``.
     :type probability_type: ProbabilityType
-    :param type_config: Optional dictionary containing arguments specific to the
-        chosen strategy. Keys depend on the selected ``probability_type``.
+    :param type_config: Constructor arguments for the chosen strategy.
+        ``None`` means an empty dict. The valid keys are the chosen layer's
+        own constructor arguments; consult that layer.
     :type type_config: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
+
+    :raises ValueError: If ``probability_type`` is not one of the ten keys,
+        or if it is ``"hierarchical"`` / ``"hierarchical_routing"`` and
+        ``type_config`` has no ``"output_dim"``.
+
+    :ivar strategy_layer: The delegate, created in ``__init__``.
+    :vartype strategy_layer: keras.layers.Layer
     """
 
-    # Supported probability types for validation
+    #: Every accepted ``probability_type`` spelling, checked in ``__init__``.
     _SUPPORTED_TYPES: tuple[str, ...] = (
         "softmax",
         "sparsemax",
@@ -134,31 +166,35 @@ class ProbabilityOutput(keras.layers.Layer):
             type_config: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the ProbabilityOutput layer.
+        """Validate the type string and build the strategy layer.
 
-        :param probability_type: String identifier for the output strategy.
+        The strategy layer is created here rather than in ``build`` so that
+        Keras 3 sees it as a sublayer from the start and tracks its weights.
+
+        :param probability_type: Which strategy to build. Lowercased before
+            the lookup. Defaults to ``"softmax"``.
         :type probability_type: ProbabilityType
-        :param type_config: Optional dictionary containing strategy-specific arguments.
+        :param type_config: Constructor arguments for the chosen strategy.
+            ``None`` means an empty dict.
         :type type_config: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for the Layer base class.
 
-        :raises ValueError: If ``probability_type`` is not supported or if required
-            configuration is missing for certain types.
+        :raises ValueError: If ``probability_type`` is not one of the ten
+            accepted keys, or if a hierarchical type is asked for without
+            ``"output_dim"`` in ``type_config``. Note that ``routing`` is
+            **not** checked for ``output_dim``.
         """
         super().__init__(**kwargs)
 
         self._probability_type = probability_type.lower()
         self._type_config = type_config if type_config is not None else {}
 
-        # Validate probability type
         if self._probability_type not in self._SUPPORTED_TYPES:
             raise ValueError(
                 f"Unknown probability_type '{self._probability_type}'. "
                 f"Supported types: {list(self._SUPPORTED_TYPES)}"
             )
 
-        # Validate required config for hierarchical routing
         if self._probability_type in ("hierarchical", "hierarchical_routing"):
             if "output_dim" not in self._type_config:
                 raise ValueError(
@@ -166,15 +202,22 @@ class ProbabilityOutput(keras.layers.Layer):
                     "'output_dim' in type_config."
                 )
 
-        # Create the strategy layer in __init__ (per Keras 3 best practices)
         self.strategy_layer: keras.layers.Layer = self._create_strategy_layer()
 
     def _create_strategy_layer(self) -> keras.layers.Layer:
-        """
-        Instantiate the internal layer based on configuration.
+        """Build the delegate named by ``self._probability_type``.
 
-        :return: The instantiated strategy layer.
+        Every branch forwards ``self._type_config`` verbatim, so an unknown
+        key raises from the strategy's own constructor, not from here. The
+        ``softmax`` branch is the exception: it reads only ``axis`` and
+        ignores the rest.
+
+        :return: The strategy layer.
         :rtype: keras.layers.Layer
+        :raises ValueError: Never in practice -- the trailing raise is
+            unreachable because ``__init__`` validates the type first. It is
+            kept so a new key added to ``_SUPPORTED_TYPES`` without a branch
+            here fails loudly instead of returning ``None``.
         """
         if self._probability_type == "softmax":
             axis = self._type_config.get("axis", -1)
@@ -205,14 +248,12 @@ class ProbabilityOutput(keras.layers.Layer):
                 **self._type_config
             )
 
-        # Should never reach here due to validation in __init__
         raise ValueError(f"Unhandled probability_type: {self._probability_type}")
 
     def build(self, input_shape: tuple) -> None:
-        """
-        Build the internal strategy layer.
+        """Build the strategy layer against the same input shape.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape of the input tensor.
         :type input_shape: tuple
         """
         if self.built:
@@ -227,19 +268,23 @@ class ProbabilityOutput(keras.layers.Layer):
             training: Optional[bool] = None,
             mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass delegating to the selected strategy.
+        """Forward to the strategy layer.
 
-        :param inputs: Input tensor. Shape depends on strategy type:
-            for logit-based strategies ``(batch_size, ..., num_classes)``,
-            for routing strategies ``(batch_size, ..., features_dim)``.
+        :param inputs: Logits shaped ``(B, ..., C)`` for the four logit
+            strategies, or features shaped ``(B, ..., D)`` for ``routing``
+            and ``hierarchical``.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating training mode. Passed to strategy layer
-            if it supports training-specific behavior.
+        :param training: Training or inference mode. Forwarded to every
+            strategy except ``softmax``.
         :type training: Optional[bool]
-        :param mask: Optional mask tensor. Currently only supported by softmax.
+        :param mask: Mask tensor. Forwarded to ``softmax`` only. For any
+            other strategy it is **dropped without a warning** -- measured,
+            a ``sparsemax`` instance returns identical values with and
+            without it.
         :type mask: Optional[keras.KerasTensor]
-        :return: Probability distribution tensor with same batch dimensions as input.
+        :return: Probabilities summing to 1 over the strategy's axis. Same
+            shape as ``inputs``, except for the routing strategies, which
+            return ``output_dim`` on the last axis.
         :rtype: keras.KerasTensor
         """
         if self._probability_type == "softmax":
@@ -248,41 +293,49 @@ class ProbabilityOutput(keras.layers.Layer):
         return self.strategy_layer(inputs, training=training)
 
     def compute_output_shape(self, input_shape: tuple) -> tuple:
-        """
-        Compute output shape based on strategy.
+        """Return the strategy layer's output shape.
 
-        :param input_shape: Shape tuple of the input tensor.
+        Delegated, because the routing strategies change the last dimension
+        and the other four do not.
+
+        :param input_shape: Shape of the input tensor.
         :type input_shape: tuple
-        :return: Shape tuple of the output tensor.
+        :return: Shape of the output tensor.
         :rtype: tuple
         """
         return self.strategy_layer.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the config needed to rebuild the layer.
 
-        :return: Configuration dictionary containing all constructor arguments.
+        ``probability_type`` is written back lowercased, which is what
+        ``__init__`` stored, not necessarily what the caller passed.
+
+        :return: The base Layer config plus ``probability_type`` and
+            ``type_config``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
             "probability_type": self._probability_type,
-            # Serialize via keras so that any nested keras objects in type_config
-            # (e.g. a kernel_regularizer for hierarchical routing) survive
-            # save/load. Identity for plain primitive dicts.
+            # Through keras, so a nested keras object in type_config (say a
+            # kernel_regularizer for hierarchical routing) survives the round
+            # trip. A plain primitive dict comes back unchanged.
             "type_config": keras.saving.serialize_keras_object(self._type_config),
         })
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ProbabilityOutput":
-        """
-        Reconstruct the layer from configuration.
+        """Rebuild the layer from a config dict.
 
-        :param config: Configuration dictionary from ``get_config()``.
+        Overridden because ``get_config`` ran ``type_config`` through
+        ``serialize_keras_object``; this undoes that before calling the
+        constructor. The input ``config`` is copied, not mutated.
+
+        :param config: Config dictionary from ``get_config()``.
         :type config: Dict[str, Any]
-        :return: New instance of ProbabilityOutput.
+        :return: A new ``ProbabilityOutput``.
         :rtype: ProbabilityOutput
         """
         config = dict(config)
@@ -294,12 +347,23 @@ class ProbabilityOutput(keras.layers.Layer):
 
     @property
     def probability_type(self) -> str:
-        """Return the configured probability type."""
+        """Return the strategy name, lowercased.
+
+        :return: The resolved ``probability_type``.
+        :rtype: str
+        """
         return self._probability_type
 
     @property
     def type_config(self) -> Dict[str, Any]:
-        """Return the type-specific configuration."""
+        """Return a copy of the strategy configuration.
+
+        A copy, so a caller mutating the result cannot change what this
+        layer will serialize.
+
+        :return: The ``type_config`` dict.
+        :rtype: Dict[str, Any]
+        """
         return self._type_config.copy()
 
 # ---------------------------------------------------------------------
