@@ -12,7 +12,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 from typing import Dict, Any
 
@@ -222,8 +221,8 @@ class TestMixtureOfExperts:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="MLP MoE predictions differ after serialization"
             )
@@ -251,8 +250,8 @@ class TestMixtureOfExperts:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="SwiGLU MoE predictions differ after serialization"
             )
@@ -279,8 +278,8 @@ class TestMixtureOfExperts:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="SoftMoE predictions differ after serialization"
             )
@@ -311,7 +310,7 @@ class TestMixtureOfExperts:
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(sample_input_2d)
             output = layer(sample_input_2d, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         # Check gradients with respect to layer parameters
         gradients = tape.gradient(loss, layer.trainable_variables)
@@ -403,10 +402,18 @@ class TestMixtureOfExperts:
     def test_edge_cases(self):
         """Test error conditions and edge cases."""
 
-        # Test invalid num_experts
+        # Test invalid num_experts. Since step 4 (B1) this is rejected by
+        # ``MoEConfig.__post_init__`` itself, before ``MixtureOfExperts`` ever
+        # sees it -- the config object can no longer be constructed at all.
+        with pytest.raises(ValueError, match="num_experts must be >= 1"):
+            MoEConfig(num_experts=0)
+
+        # ``MixtureOfExperts``'s own guard is retained as defence in depth and
+        # still fires when the (mutable) dataclass is mutated after construction.
+        mutated = MoEConfig(num_experts=2)
+        mutated.num_experts = 0
         with pytest.raises(ValueError, match="num_experts must be positive"):
-            invalid_config = MoEConfig(num_experts=0)
-            MixtureOfExperts(config=invalid_config)
+            MixtureOfExperts(config=mutated)
 
         # Test invalid FFN config
         with pytest.raises(ValueError, match="Invalid FFN configuration"):
@@ -485,7 +492,7 @@ class TestMixtureOfExperts:
             expert_config=ExpertConfig(
                 ffn_config={'type': 'mlp', 'hidden_dim': 64, 'output_dim': 32}
             ),
-            gating_config=GatingConfig(top_k=1, capacity_factor=0.5),  # Low capacity
+            gating_config=GatingConfig(top_k=1),
             drop_tokens=True,
             use_residual_connection=True
         )
@@ -506,7 +513,7 @@ class TestMixtureOfExperts:
         outputs = []
         for _ in range(3):
             output = layer(sample_input_2d, training=True)
-            outputs.append(ops.convert_to_numpy(output))
+            outputs.append(keras.ops.convert_to_numpy(output))
 
         # With jitter noise, outputs should vary slightly
         # (This is probabilistic, but very likely with reasonable noise)
@@ -535,8 +542,8 @@ class TestMixtureOfExperts:
         output2 = layer(sample_input_2d, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output1),
-            ops.convert_to_numpy(output2),
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
             rtol=1e-7, atol=1e-7,
             err_msg="Expected deterministic behavior without noise"
         )
@@ -621,7 +628,6 @@ class TestMoEConfigurations:
         config = GatingConfig()
         assert config.gating_type == 'linear'
         assert config.top_k == 1
-        assert config.capacity_factor == 1.25
         assert config.add_noise is True
         assert config.aux_loss_weight == 0.01
 
@@ -737,8 +743,8 @@ class TestFFNExpert:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Expert predictions differ after serialization"
             )
@@ -803,7 +809,7 @@ class TestGatingNetworks:
         # Weights should sum to approximately 1 for top-k selections
         selected_weights = keras.ops.sum(weights, axis=-1)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(selected_weights),
+            keras.ops.convert_to_numpy(selected_weights),
             np.ones(6),
             rtol=1e-5, atol=1e-5
         )
@@ -829,7 +835,7 @@ class TestGatingNetworks:
         assert cosine_sims.shape == (6, 4)
 
         # Cosine similarities should be in [-1, 1] range
-        cosine_values = ops.convert_to_numpy(cosine_sims)
+        cosine_values = keras.ops.convert_to_numpy(cosine_sims)
         assert np.all(cosine_values >= -1.0) and np.all(cosine_values <= 1.0)
 
     def test_softmoe_gating(self):
@@ -858,15 +864,15 @@ class TestGatingNetworks:
         assert expert_inputs.shape == (4, 6, 4 * 256)  # (batch, experts, slots * hidden)
 
         # Dispatch weights sum to 1 over the sequence axis for each (expert, slot).
-        dispatch_sum = ops.convert_to_numpy(ops.sum(info['dispatch_weights'], axis=1))
+        dispatch_sum = keras.ops.convert_to_numpy(keras.ops.sum(info['dispatch_weights'], axis=1))
         np.testing.assert_allclose(dispatch_sum, np.ones_like(dispatch_sum), atol=1e-5)
 
         # Combine weights sum to 1 over (experts * slots) for each token.
-        combine_sum = ops.convert_to_numpy(ops.sum(info['combine_weights'], axis=(-2, -1)))
+        combine_sum = keras.ops.convert_to_numpy(keras.ops.sum(info['combine_weights'], axis=(-2, -1)))
         np.testing.assert_allclose(combine_sum, np.ones_like(combine_sum), atol=1e-5)
 
         # Marginalized expert_weights are now non-uniform (no longer 1/N).
-        ew = ops.convert_to_numpy(weights)
+        ew = keras.ops.convert_to_numpy(weights)
         assert ew.std() > 1e-4, "Expected non-uniform per-expert weights after A2 fix"
 
     def test_gating_factory(self, sample_input):
@@ -911,8 +917,8 @@ class TestGatingNetworks:
 
             # Verify identical outputs
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Gating outputs differ after serialization"
             )
@@ -1063,8 +1069,8 @@ class TestMoEPerformance:
         output2 = layer(sample_input, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output1),
-            ops.convert_to_numpy(output2),
+            keras.ops.convert_to_numpy(output1),
+            keras.ops.convert_to_numpy(output2),
             rtol=1e-7, atol=1e-7,
             err_msg="Expected deterministic inference behavior"
         )
@@ -1086,7 +1092,7 @@ class TestMoEPerformance:
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(sample_input)
             output = layer(sample_input, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         # Gradients should flow to gating network
         gating_gradients = tape.gradient(loss, layer.gating_network.trainable_variables)
@@ -1153,7 +1159,7 @@ class TestReviewFixes:
     def test_cosine_temperature_divides_softmax(self):
         """Larger ``temperature`` should produce a flatter softmax (A3)."""
         rng = np.random.default_rng(0)
-        x = ops.convert_to_tensor(rng.standard_normal((32, 64)).astype(np.float32))
+        x = keras.ops.convert_to_tensor(rng.standard_normal((32, 64)).astype(np.float32))
 
         # Same kernel init seeds so the only varying factor is temperature.
         keras.utils.set_random_seed(123)
@@ -1168,7 +1174,7 @@ class TestReviewFixes:
 
         # Entropy of weights: higher temperature -> flatter -> larger entropy.
         def entropy(p):
-            p = ops.convert_to_numpy(p)
+            p = keras.ops.convert_to_numpy(p)
             p = np.clip(p, 1e-12, 1.0)
             return float((-p * np.log(p)).sum(axis=-1).mean())
 
@@ -1183,8 +1189,8 @@ class TestReviewFixes:
         gating = SoftMoEGating(num_experts=4, num_slots=3)
         _, _, info = gating(x, training=False)
 
-        dispatch = ops.convert_to_numpy(info['dispatch_weights'])  # [b, s, e, l]
-        combine = ops.convert_to_numpy(info['combine_weights'])    # [b, s, e, l]
+        dispatch = keras.ops.convert_to_numpy(info['dispatch_weights'])  # [b, s, e, l]
+        combine = keras.ops.convert_to_numpy(info['combine_weights'])    # [b, s, e, l]
 
         # Dispatch sums to 1 over seq axis (axis=1) for each (expert, slot).
         np.testing.assert_allclose(dispatch.sum(axis=1),
@@ -1207,6 +1213,57 @@ class TestReviewFixes:
         legacy['eval_capacity_factor'] = 1.0
         restored = MoEConfig.from_dict(legacy)
         assert restored.num_experts == 2
+
+    # --- C1 (F-6): routing_dtype / capacity_factor removed ----------------
+
+    def test_dead_fields_removed_from_config_surface(self):
+        """C1: `routing_dtype` and `capacity_factor` are gone from the dataclasses.
+
+        Both were accepted, validated and serialized while gating no behaviour;
+        `routing_dtype` additionally accepted any string. Neither may be
+        constructible or serialized any more.
+        """
+        moe = MoEConfig(num_experts=2)
+        gating = GatingConfig()
+        assert not hasattr(moe, 'routing_dtype')
+        assert not hasattr(gating, 'capacity_factor')
+        assert 'routing_dtype' not in moe.to_dict()
+        assert 'capacity_factor' not in moe.to_dict()['gating_config']
+
+        with pytest.raises(TypeError):
+            MoEConfig(num_experts=2, routing_dtype='float32')
+        with pytest.raises(TypeError):
+            GatingConfig(capacity_factor=1.25)
+
+    def test_diagnostic_flags_gate_no_forward_behaviour(self):
+        """C1/5c: `drop_tokens`/`use_residual_connection` are diagnostic-only.
+
+        Pins the claim the rewritten docstrings now make. Flipping both must
+        leave the forward output bit-identical while still being echoed by
+        ``get_expert_utilization()``.
+        """
+        def build(flag):
+            keras.utils.set_random_seed(11)
+            return MixtureOfExperts(MoEConfig(
+                num_experts=4,
+                expert_config=ExpertConfig(
+                    ffn_config={'type': 'mlp', 'hidden_dim': 16, 'output_dim': 10}
+                ),
+                gating_config=GatingConfig(top_k=2, add_noise=False),
+                jitter_noise=0.0,
+                drop_tokens=flag,
+                use_residual_connection=flag,
+            ))
+
+        x = keras.ops.convert_to_tensor(
+            np.arange(2 * 5 * 10, dtype='float32').reshape(2, 5, 10) / 100.0)
+        on, off = build(True), build(False)
+        y_on = keras.ops.convert_to_numpy(on(x, training=False))
+        y_off = keras.ops.convert_to_numpy(off(x, training=False))
+
+        np.testing.assert_array_equal(y_on, y_off)
+        assert on.get_expert_utilization()['drop_tokens'] is True
+        assert off.get_expert_utilization()['use_residual_connection'] is False
 
     def test_gating_pre_norm_via_factory(self):
         """B2: GatingConfig.norm_type wires pre-gating norm via the factory."""
@@ -1269,8 +1326,8 @@ class TestReviewFixes:
 
         y_new = restored(x, training=False)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(y_ref),
-            ops.convert_to_numpy(y_new),
+            keras.ops.convert_to_numpy(y_ref),
+            keras.ops.convert_to_numpy(y_new),
             atol=1e-5,
         )
 
@@ -1329,12 +1386,12 @@ class TestMoEReviewRegressions:
         assert tuple(rgp.shape) == (2, 5, num_experts)
 
         # marginal over experts is a probability distribution
-        sums = ops.convert_to_numpy(ops.sum(rgp, axis=-1))
+        sums = keras.ops.convert_to_numpy(keras.ops.sum(rgp, axis=-1))
         np.testing.assert_allclose(sums, np.ones_like(sums), atol=1e-4)
 
         # accepted by compute_auxiliary_loss without shape error
         loss = compute_auxiliary_loss(weights, rgp, num_experts=num_experts)
-        assert np.isfinite(float(ops.convert_to_numpy(loss)))
+        assert np.isfinite(float(keras.ops.convert_to_numpy(loss)))
 
     # --- F5: GatingConfig validation symmetry ----------------------------
 
@@ -1343,7 +1400,6 @@ class TestMoEReviewRegressions:
         {'top_k': 0},
         {'num_slots': 0},
         {'embedding_dim': 0},
-        {'capacity_factor': 0.0},
         {'temperature': 0.0},
         {'noise_std': -1.0},
     ])
@@ -1366,9 +1422,273 @@ class TestMoEReviewRegressions:
         x = np.random.randn(2, 5, 16).astype('float32')
         for bad in (0.0, -0.5):
             g.temperature_param.assign(bad)
-            w = ops.convert_to_numpy(g(x, training=False)[0])
+            w = keras.ops.convert_to_numpy(g(x, training=False)[0])
             assert np.isfinite(w).all()
             np.testing.assert_allclose(w.sum(-1), np.ones(w.shape[:-1]), atol=1e-4)
+
+
+class TestMoEConfigValidation:
+    """F-3 / B1 + B3: the config layer owns ``num_experts``, ``top_k`` and ``jitter_noise``.
+
+    Before step 4 these invariants were enforced *only* inside
+    ``LinearGating.__init__`` / ``CosineGating.__init__``, two classes away from the
+    object every real consumer constructs. The measured consequence: deleting the
+    upper bound at both ``gating.py`` sites left 83 of 84 tests passing, and
+    ``CosineGating``'s copy of the guard had zero coverage.
+
+    The tests below split deliberately into two groups:
+
+    * config-level -- reject at ``MoEConfig`` construction;
+    * layer-level -- the retained ``gating.py`` guards, reached by mutating an
+      already-constructed config, which is the only way past the config guard.
+      These are the ones that must go RED under the F-3 mutation.
+    """
+
+    @staticmethod
+    def _small_expert() -> ExpertConfig:
+        """A cheap, valid expert configuration.
+
+        :return: An ``ExpertConfig`` whose FFN is small enough to construct fast.
+        :rtype: ExpertConfig
+        """
+        return ExpertConfig(
+            ffn_config={'type': 'mlp', 'hidden_dim': 16, 'output_dim': 8}
+        )
+
+    # --- config-level rejection ------------------------------------------
+
+    @pytest.mark.parametrize("gating_type", ['linear', 'cosine'])
+    def test_top_k_above_num_experts_rejected_by_moe_config(self, gating_type):
+        """``top_k > num_experts`` must fail at ``MoEConfig`` construction."""
+        with pytest.raises(ValueError, match="top_k must be between 1 and num_experts"):
+            MoEConfig(
+                num_experts=4,
+                gating_config=GatingConfig(gating_type=gating_type, top_k=8),
+            )
+
+    @pytest.mark.parametrize("bad", [0, -3])
+    def test_num_experts_below_one_rejected_by_moe_config(self, bad):
+        """``num_experts < 1`` must fail at ``MoEConfig`` construction."""
+        with pytest.raises(ValueError, match="num_experts must be >= 1"):
+            MoEConfig(num_experts=bad)
+
+    def test_negative_jitter_noise_rejected_by_moe_config(self):
+        """B3: a negative ``jitter_noise`` is REJECTED, not silently disabled."""
+        with pytest.raises(ValueError, match="jitter_noise must be >= 0"):
+            MoEConfig(num_experts=4, jitter_noise=-1.0)
+
+    def test_zero_jitter_noise_is_accepted(self):
+        """``jitter_noise=0`` is the documented way to disable input jitter."""
+        assert MoEConfig(num_experts=4, jitter_noise=0.0).jitter_noise == 0.0
+
+    def test_top_k_equal_to_num_experts_is_accepted(self):
+        """``top_k == num_experts`` is the legal "all experts" boundary."""
+        cfg = MoEConfig(num_experts=4, gating_config=GatingConfig(top_k=4))
+        assert cfg.gating_config.top_k == 4
+
+    def test_softmoe_top_k_is_not_cross_checked(self):
+        """SoftMoE ignores ``top_k`` by design, so it is exempt from the check.
+
+        ``MixtureOfExperts.__init__``'s gating allow-list forwards only
+        ``num_slots`` to ``SoftMoEGating``; ``top_k`` never reaches routing. This
+        test pins the exemption so a future reader does not "fix" it into a
+        rejection of configurations that construct and run correctly.
+        """
+        cfg = MoEConfig(
+            num_experts=4,
+            expert_config=self._small_expert(),
+            gating_config=GatingConfig(gating_type='softmoe', top_k=999, num_slots=2),
+        )
+        assert cfg.gating_config.top_k == 999
+        # And it really does build -- the field is inert, not merely tolerated.
+        MixtureOfExperts(config=cfg)
+
+    def test_valid_config_still_constructs(self):
+        """The new guard must not reject the configurations consumers ship."""
+        MoEConfig(
+            num_experts=8,
+            expert_config=self._small_expert(),
+            gating_config=GatingConfig(top_k=2),
+        )
+
+    # --- layer-level rejection (the retained gating.py guards) ------------
+    #
+    # These three are the F-3 mutation detectors. Deleting the `top_k > num_experts`
+    # upper bound at gating.py's LinearGating and CosineGating sites must turn all
+    # three RED; the config-level tests above cannot see that mutation at all.
+
+    @pytest.mark.parametrize("gating_type", ['linear', 'cosine'])
+    def test_mixture_of_experts_rejects_top_k_above_num_experts(self, gating_type):
+        """``MixtureOfExperts`` still rejects a bad ``top_k`` reaching it.
+
+        The config guard makes this unreachable through normal construction, so the
+        config is mutated after the fact -- exercising the ``gating.py`` guards that
+        are deliberately retained as defence in depth.
+        """
+        config = MoEConfig(
+            num_experts=4,
+            expert_config=self._small_expert(),
+            gating_config=GatingConfig(
+                gating_type=gating_type, top_k=2, embedding_dim=8
+            ),
+        )
+        config.gating_config.top_k = 8  # post-construction mutation
+        with pytest.raises(ValueError, match="top_k must be between 1 and 4"):
+            MixtureOfExperts(config=config)
+
+    def test_cosine_gating_rejects_top_k_above_num_experts(self):
+        """``CosineGating``'s own guard -- measured to have ZERO coverage before."""
+        with pytest.raises(ValueError, match="top_k must be between 1 and 4"):
+            CosineGating(num_experts=4, top_k=8, embedding_dim=8)
+
+
+
+class TestFactoryAndShapeContract:
+    """D1 + D2: `compute_output_shape` honesty and `create_ffn_moe`'s keyword contract."""
+
+    @pytest.mark.parametrize("ffn_type", ["swin_mlp", "gelu_tanh"])
+    def test_explicit_none_output_dim_reports_the_input_width(self, ffn_type):
+        """RED before the fix: symbolic (None, 5, None) vs a measured runtime (2, 5, 10).
+
+        `output_dim: None` is the FFN factory's "same width as the input" spelling,
+        not a declared width. Membership-testing the key propagated the None.
+        """
+        config = MoEConfig(
+            num_experts=4,
+            expert_config=ExpertConfig(
+                ffn_config={"type": ffn_type, "hidden_dim": 8, "output_dim": None}
+            ),
+            gating_config=GatingConfig(gating_type="linear", top_k=2),
+        )
+        layer = MixtureOfExperts(config=config)
+
+        symbolic = layer.compute_output_shape((None, 5, 10))
+        runtime = tuple(layer(np.random.rand(2, 5, 10).astype("float32")).shape)
+
+        assert symbolic[-1] == 10, f"last dim went symbolic-None: {symbolic}"
+        assert symbolic == (None, 5, 10)
+        assert symbolic[1:] == runtime[1:]
+
+    def test_explicit_output_dim_still_overrides_the_input_width(self):
+        """The None-tolerant test must not become blind to a real declared width."""
+        config = MoEConfig(
+            num_experts=4,
+            expert_config=ExpertConfig(
+                ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6}
+            ),
+            gating_config=GatingConfig(gating_type="linear", top_k=2),
+        )
+        layer = MixtureOfExperts(config=config)
+        assert layer.compute_output_shape((None, 5, 10)) == (None, 5, 6)
+
+    def test_gate_use_bias_reaches_the_router(self):
+        """The renamed key routes where its name says: the gating Dense bias.
+
+        Asserted at ``True``, against a ``GatingConfig.use_bias`` default of
+        ``False`` -- at the default the assertion cannot fail and would have
+        passed against pre-fix code that dropped the key entirely.
+        """
+        assert GatingConfig.use_bias is False, "test is vacuous unless the default is False"
+        layer = create_ffn_moe(
+            num_experts=4,
+            ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+            top_k=2,
+            gate_use_bias=True,
+        )
+        assert layer.config.gating_config.use_bias is True
+        # and it must not leak into the expert FFN, which is the other real route
+        assert "use_bias" not in layer.config.expert_config.ffn_config
+
+    def test_bare_use_bias_is_rejected_and_names_both_routes(self):
+        """RED before the fix: `use_bias=False` was silently applied to the GATE.
+
+        A caller passing it alongside an `ffn_config` means the expert FFN's bias,
+        and got the router's instead with no error.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            create_ffn_moe(
+                num_experts=4,
+                ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+                use_bias=False,
+            )
+        message = str(excinfo.value)
+        assert "use_bias" in message
+        assert "gate_use_bias" in message
+        assert "ffn_config['use_bias']" in message
+
+    def test_undeclared_keyword_raises_instead_of_being_dropped(self):
+        """The repo factory contract (layers/CLAUDE.md rule 1): never filter-and-drop."""
+        with pytest.raises(ValueError, match="undeclared keyword"):
+            create_ffn_moe(
+                num_experts=4,
+                ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+                bogus_key=1,
+            )
+
+    def test_keras_layer_keywords_are_forwarded(self):
+        """`name=` was among the silently dropped keys; the README's example used it."""
+        layer = create_ffn_moe(
+            num_experts=4,
+            ffn_config={"type": "mlp", "hidden_dim": 8, "output_dim": 6},
+            top_k=2,
+            name="moe_ffn",
+        )
+        assert layer.name == "moe_ffn"
+
+
+
+class TestIntegerFieldsRejectBool:
+    """B2 / F-13: `bool` is an `int` subclass, so every int field silently took it.
+
+    RED-proven at 1ac2908e7: `GatingConfig(top_k=True)` constructed with
+    `top_k=True` (arithmetic value 1), `GatingConfig(embedding_dim=True)` gave a
+    one-dimensional expert embedding, and `MoEConfig(num_experts=True)` gave a
+    one-expert MoE. YAML is the live path -- `yaml.safe_load("top_k: true")`
+    returns Python `True`.
+    """
+
+    @pytest.mark.parametrize("value", [True, False])
+    @pytest.mark.parametrize("field", ["top_k", "num_slots", "embedding_dim"])
+    def test_gating_config_int_fields_reject_bool(self, field, value):
+        with pytest.raises(ValueError, match=f"{field} must be an int, got bool"):
+            GatingConfig(**{field: value})
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_moe_config_num_experts_rejects_bool(self, value):
+        with pytest.raises(ValueError, match="num_experts must be an int, got bool"):
+            MoEConfig(num_experts=value)
+
+    def test_yaml_true_is_the_live_path(self):
+        """The value a config-driven caller actually gets from an unquoted `true`."""
+        yaml = pytest.importorskip("yaml")
+        loaded = yaml.safe_load("top_k: true")["top_k"]
+        assert loaded is True
+        with pytest.raises(ValueError, match="must be an int, got bool"):
+            GatingConfig(top_k=loaded)
+
+    @pytest.mark.parametrize("field", ["top_k", "num_slots", "embedding_dim"])
+    def test_non_int_types_are_rejected(self, field):
+        with pytest.raises(ValueError, match=f"{field} must be an int, got"):
+            GatingConfig(**{field: 2.5})
+
+    def test_real_ints_still_construct(self):
+        """The bool branch must not have swallowed the ordinary path."""
+        gating = GatingConfig(top_k=3, num_slots=5, embedding_dim=64)
+        assert (gating.top_k, gating.num_slots, gating.embedding_dim) == (3, 5, 64)
+        assert MoEConfig(num_experts=4).num_experts == 4
+
+    @pytest.mark.parametrize(
+        "field,message",
+        [
+            ("top_k", "top_k must be >= 1, got 0"),
+            ("num_slots", "num_slots must be >= 1, got 0"),
+            ("embedding_dim", "embedding_dim must be >= 1, got 0"),
+        ],
+    )
+    def test_range_messages_are_unchanged(self, field, message):
+        """The bool check is inserted ahead of the range check, not in place of it."""
+        with pytest.raises(ValueError, match=message):
+            GatingConfig(**{field: 0})
 
 
 # Run tests with: pytest test_mixture_of_experts.py -v

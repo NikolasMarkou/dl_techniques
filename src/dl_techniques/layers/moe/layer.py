@@ -32,12 +32,35 @@ class MixtureOfExperts(keras.layers.Layer):
     experts have non-zero contribution per token.
 
     .. important::
-       **Computation model.** The current hard-routing kernel runs *all*
-       experts on *all* tokens and masks contributions using the top-k routing
-       weights. This is O(N) in FLOPs (not O(k/N)) and is chosen for
-       graph-mode friendliness — no scatter/gather. The sparsity is realized
-       in the *gradient pattern* and *expert specialization*, not in FLOPs.
-       A capacity-based sparse dispatch is planned as a follow-up.
+       **Computation model.** Hard routing is sparse in FLOPs. Each expert
+       runs only on the tokens routed to it (gather → FFN → scatter-add), so
+       expert cost scales with ``top_k``, not ``num_experts`` — MEASURED as an
+       exact ``num_experts / top_k`` reduction in expert-token pairs. The
+       equivalent dense kernel (every expert on every token, masked) is
+       retained as the numerical oracle and is what runs when
+       ``top_k >= num_experts``, where there is no sparsity to exploit.
+
+       Wall-clock does *not* track FLOPs at every size, because both kernels
+       issue one FFN call per expert and the sparse one adds a gather/scatter
+       to each. Measured on an RTX 4070 in the traced (graph) regime at
+       ``d_model=512``, ``hidden=1024``: at 2048 tokens sparse is ``0.913x``
+       (``num_experts=64``) and ``0.871x`` (``128``) — i.e. slightly slower;
+       at 8192 tokens with ``num_experts=64`` it is ``2.108x`` faster; and at
+       the shipped ``qwen3_next`` preset's expert COUNT (``num_experts=512``,
+       ``top_k=10``, 2048 tokens, still at ``d_model=512``/``hidden=1024``) the
+       sparse kernel completes in 179 ms while the dense kernel exhausts the
+       12 GB device. At the preset's REAL feature dims (``hidden_size=2048``,
+       ``moe_intermediate_size=512``), measured EAGER on an idle RTX 4070,
+       sparse takes 11.808 s and dense raises ``ResourceExhaustedError``
+       (``OOM ... shape[2048,2048] ... [Op:BiasAdd]``) — a different regime, same
+       verdict. Memory, unlike time, is reduced at every size.
+
+       ``drop_tokens`` and ``use_residual_connection`` remain inert: neither
+       kernel drops a token. They are diagnostic flags echoed by
+       :meth:`get_expert_utilization` and nothing else; the capacity-based
+       dispatch they were once "reserved for" is not planned, and the
+       ``capacity_factor`` / ``routing_dtype`` config fields that belonged to
+       that unbuilt scheme have been removed.
 
     **Architecture Overview:**
 
@@ -92,7 +115,6 @@ class MixtureOfExperts(keras.layers.Layer):
         self.drop_tokens = config.drop_tokens
         self.use_residual_connection = config.use_residual_connection
         self.jitter_noise = config.jitter_noise
-        self.routing_dtype = config.routing_dtype
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.experts: List[FFNExpert] = []
@@ -277,16 +299,37 @@ class MixtureOfExperts(keras.layers.Layer):
             input_ndim: int,
             training: bool
     ) -> keras.KerasTensor:
-        """Process inputs through FFN experts using hard routing.
+        """Route tokens to experts, then restore the caller's tensor structure.
 
-        All tokens pass through all experts, then outputs are masked by the
-        routing decision.  This is computationally O(N) not O(k) but avoids
-        scatter/gather ops that are problematic in graph mode.
+        Owns the parts of hard routing that are identical for both kernels --
+        flattening the routing tables and reshaping the combined result -- and
+        delegates the expert computation itself to one of two interchangeable
+        kernels. Selection is by routing structure, not by preference:
+
+        * ``top_k >= num_experts`` -- every token selects every expert, so there
+          is no sparsity to exploit and a gather/scatter would be pure overhead.
+          :meth:`_process_hard_routing_dense` runs.
+        * otherwise -- :meth:`_process_hard_routing_sparse` runs.
+
+        The two kernels are numerically equivalent, gated at ``atol=1e-5``,
+        ``rtol=0`` by
+        ``tests/test_layers/test_moe/test_the_sparse_kernel_matches_the_dense_oracle.py``.
+
+        :param inputs_flat: Tokens flattened to ``(num_tokens, features)``.
+        :type inputs_flat: keras.KerasTensor
+        :param expert_weights: Routing weights, ``(..., num_experts)``.
+        :type expert_weights: keras.KerasTensor
+        :param expert_indices: Selected expert ids, ``(..., top_k)``.
+        :type expert_indices: keras.KerasTensor
+        :param original_shape: Runtime shape of the layer's input.
+        :type original_shape: Tuple[int, ...]
+        :param input_ndim: Static rank of the layer's input.
+        :type input_ndim: int
+        :param training: Whether the layer is in training mode.
+        :type training: bool
+        :return: Combined expert output, reshaped to the input's structure.
+        :rtype: keras.KerasTensor
         """
-        # Determine output dimension from expert config
-        ffn_config = self.expert_config.ffn_config
-        output_dim = ffn_config.get('output_dim', None) or ffn_config.get('d_model', None)
-
         # Flatten weights to (num_tokens, num_experts)
         weights_ndim = len(expert_weights.shape)
         if weights_ndim > 2:
@@ -310,6 +353,70 @@ class MixtureOfExperts(keras.layers.Layer):
             # All experts selected
             expert_assignment = keras.ops.ones_like(weights_flat)
 
+        kernel = (
+            self._process_hard_routing_dense
+            if self.gating_config.top_k >= self.num_experts
+            else self._process_hard_routing_sparse
+        )
+        outputs = kernel(
+            inputs_flat=inputs_flat,
+            weights_flat=weights_flat,
+            expert_assignment=expert_assignment,
+            training=training,
+        )
+
+        # NOTE: residual-for-dropped-tokens is intentionally not applied. Neither
+        # kernel drops a token -- the sparse kernel computes strictly the routed
+        # (token, expert) pairs and the dense kernel computes all of them, so the
+        # set of tokens with a contribution is the same. ``drop_tokens`` and
+        # ``use_residual_connection`` are reported by ``get_expert_utilization()``
+        # and gate no forward-path behaviour.
+
+        # Reshape back to original structure
+        if input_ndim == 2:
+            return outputs
+        else:
+            # Infer output_dim from actual output
+            actual_output_dim = keras.ops.shape(outputs)[-1]
+            new_shape = list(original_shape[:-1]) + [actual_output_dim]
+            return keras.ops.reshape(outputs, new_shape)
+
+    def _process_hard_routing_dense(
+            self,
+            inputs_flat: keras.KerasTensor,
+            weights_flat: keras.KerasTensor,
+            expert_assignment: keras.KerasTensor,
+            training: bool
+    ) -> keras.KerasTensor:
+        """Run every expert on every token, then mask by the routing decision.
+
+        O(``num_experts``) in expert FLOPs, not O(``top_k``). Correct for any
+        routing table, and the only sensible kernel when ``top_k == num_experts``.
+
+        # DECISION plan-2026-08-26T100331-f3744602/D-010
+        This kernel is the NUMERICAL ORACLE for
+        :meth:`_process_hard_routing_sparse` and must stay permanently
+        reachable. It is NOT scaffolding to delete once the sparse kernel is
+        trusted, and its dispatch condition (``top_k >= num_experts``) must stay
+        satisfiable. It was measured against an INDEPENDENT dense numpy
+        reference at max abs diff ~2e-7 across five configurations; the sparse
+        kernel has no independent reference and is checked only against this
+        one. Delete it, or render its branch unreachable, and a wrong
+        gather/scatter index in the sparse kernel produces silently wrong
+        values that no shape assertion and no finiteness check can see. See
+        decisions.md D-010.
+
+        :param inputs_flat: Tokens flattened to ``(num_tokens, features)``.
+        :type inputs_flat: keras.KerasTensor
+        :param weights_flat: Routing weights, ``(num_tokens, num_experts)``.
+        :type weights_flat: keras.KerasTensor
+        :param expert_assignment: 0/1 selection mask, ``(num_tokens, num_experts)``.
+        :type expert_assignment: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: bool
+        :return: Combined output, ``(num_tokens, output_dim)``.
+        :rtype: keras.KerasTensor
+        """
         # Process all experts and combine
         expert_outputs = []
         for expert_id in range(self.num_experts):
@@ -338,21 +445,88 @@ class MixtureOfExperts(keras.layers.Layer):
             expert_outputs.append(weighted_output)
 
         # Sum outputs from all experts
-        outputs = keras.ops.sum(keras.ops.stack(expert_outputs, axis=0), axis=0)
+        return keras.ops.sum(keras.ops.stack(expert_outputs, axis=0), axis=0)
 
-        # NOTE: residual-for-dropped-tokens is intentionally not applied. The
-        # current kernel is dense (all experts process all tokens) so no
-        # tokens are ever dropped. ``drop_tokens`` and ``use_residual_connection``
-        # are reserved for a future capacity-based sparse dispatch.
+    def _process_hard_routing_sparse(
+            self,
+            inputs_flat: keras.KerasTensor,
+            weights_flat: keras.KerasTensor,
+            expert_assignment: keras.KerasTensor,
+            training: bool
+    ) -> keras.KerasTensor:
+        """Run each expert only on the tokens routed to it, then scatter-add.
 
-        # Reshape back to original structure
-        if input_ndim == 2:
-            return outputs
-        else:
-            # Infer output_dim from actual output
-            actual_output_dim = keras.ops.shape(outputs)[-1]
-            new_shape = list(original_shape[:-1]) + [actual_output_dim]
-            return keras.ops.reshape(outputs, new_shape)
+        For expert ``e``: take the row indices where ``expert_assignment[:, e]``
+        is non-zero, gather those token rows, run expert ``e``'s FFN on the
+        gather alone, scale by the routing weight, and scatter-add the result
+        back into a zero tensor of the full token shape. Summing the per-expert
+        scatters reproduces the dense kernel's masked sum exactly, because a
+        masked-out ``(token, expert)`` pair contributes an exact zero in the
+        dense kernel and is simply absent here.
+
+        Expert FLOPs are O(``top_k``) rather than O(``num_experts``) -- the
+        ``num_experts / top_k`` factor the architecture's name implies. Every
+        primitive is a ``keras.ops`` call, and dynamic-shape gathers were
+        verified to trace in the graph regime ``fit()`` uses, not only in eager.
+
+        # DECISION plan-2026-08-26T100331-f3744602/D-010
+        A zero-token expert is a length-0 gather. Do NOT "guard" it with a
+        Python-level ``if`` on the gather's size: the length is a runtime value,
+        so the branch cannot be taken in graph mode, and the length-0 path is
+        exactly the case that was measured to work (FFN on a ``(0, d)`` batch,
+        ``scatter`` with no indices returning zeros). Do NOT replace the
+        ``scatter``-and-sum with an in-place update either -- duplicate indices
+        cannot occur per expert, but an update would silently overwrite rather
+        than accumulate if that ever changed.
+
+        :param inputs_flat: Tokens flattened to ``(num_tokens, features)``.
+        :type inputs_flat: keras.KerasTensor
+        :param weights_flat: Routing weights, ``(num_tokens, num_experts)``.
+        :type weights_flat: keras.KerasTensor
+        :param expert_assignment: 0/1 selection mask, ``(num_tokens, num_experts)``.
+        :type expert_assignment: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: bool
+        :return: Combined output, ``(num_tokens, output_dim)``.
+        :rtype: keras.KerasTensor
+        """
+        num_tokens = keras.ops.cast(keras.ops.shape(inputs_flat)[0], 'int32')
+
+        outputs = None
+        for expert_id in range(self.num_experts):
+            # Row indices of the tokens routed to this expert. Dynamic length,
+            # possibly 0.
+            token_ids = keras.ops.cast(
+                keras.ops.nonzero(expert_assignment[:, expert_id])[0], 'int32')
+
+            expert_input = keras.ops.take(inputs_flat, token_ids, axis=0)
+            expert_output = self.experts[expert_id](expert_input, training=training)
+
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-064
+            # The routing weight is cast to the EXPERT OUTPUT's dtype, never the
+            # expert output down to the gate's. Same invariant, same reason as
+            # the dense kernel above: the weights are a convex combination in
+            # [0, 1], so half precision costs nothing there, while downcasting
+            # the output would discard the policy's compute dtype. See
+            # decisions.md D-064.
+            expert_weight = keras.ops.cast(
+                keras.ops.take(weights_flat[:, expert_id], token_ids, axis=0),
+                expert_output.dtype)
+            weighted_output = expert_output * expert_weight[:, None]
+
+            target_shape = keras.ops.stack([
+                num_tokens,
+                keras.ops.convert_to_tensor(
+                    keras.ops.shape(expert_output)[-1], dtype='int32'),
+            ])
+            scattered = keras.ops.scatter(
+                keras.ops.expand_dims(token_ids, axis=-1),
+                weighted_output,
+                target_shape,
+            )
+            outputs = scattered if outputs is None else outputs + scattered
+
+        return outputs
 
     def _process_softmoe(
             self,
@@ -407,9 +581,13 @@ class MixtureOfExperts(keras.layers.Layer):
 
         # Determine output dimension from FFN configuration
         ffn_config = self.expert_config.ffn_config
-        if 'output_dim' in ffn_config:
+        # A key that is *present but None* is not a declared output width -- it is
+        # the FFN factory's "same as input" spelling, legal for `swin_mlp` and
+        # `gelu_tanh`. Testing membership alone reported (None, 5, None) against a
+        # measured runtime (2, 5, 10). Test the value, not the key.
+        if ffn_config.get('output_dim') is not None:
             output_shape[-1] = ffn_config['output_dim']
-        elif 'd_model' in ffn_config:
+        elif ffn_config.get('d_model') is not None:
             output_shape[-1] = ffn_config['d_model']
         # Otherwise keep input dimension
 
@@ -460,6 +638,51 @@ class MixtureOfExperts(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+# Keyword routing for :func:`create_ffn_moe`. Declared here, once, so that the
+# filters below and the undeclared-keyword check cannot drift apart -- a factory
+# whose validator is a hand-copied second list is the failure mode this data
+# structure exists to prevent.
+_FFN_MOE_EXPERT_KEYS = frozenset({'norm_type', 'norm_config', 'pre_norm', 'post_norm'})
+_FFN_MOE_EXPERT_ALIASES = {
+    'expert_norm_type': 'norm_type',
+    'expert_norm_config': 'norm_config',
+}
+_FFN_MOE_GATING_KEYS = frozenset({
+    'add_noise', 'noise_std', 'temperature', 'embedding_dim',
+    'learnable_temperature', 'num_slots', 'z_loss_weight',
+})
+_FFN_MOE_GATING_ALIASES = {
+    'gate_use_bias': 'use_bias',
+    'gating_norm_type': 'norm_type',
+    'gating_norm_config': 'norm_config',
+}
+_FFN_MOE_MOE_KEYS = frozenset({'jitter_noise', 'drop_tokens', 'use_residual_connection'})
+# Standard Keras layer keywords, forwarded to the constructed layer.
+_FFN_MOE_LAYER_KEYS = frozenset({'name', 'dtype', 'trainable'})
+
+_FFN_MOE_DECLARED_KEYS = (
+    _FFN_MOE_EXPERT_KEYS
+    | frozenset(_FFN_MOE_EXPERT_ALIASES)
+    | _FFN_MOE_GATING_KEYS
+    | frozenset(_FFN_MOE_GATING_ALIASES)
+    | _FFN_MOE_MOE_KEYS
+    | _FFN_MOE_LAYER_KEYS
+)
+
+# Keywords a caller plausibly reaches for that this factory deliberately does not
+# declare, mapped to the routes that actually exist. Naming the real route is the
+# whole point: an unadorned "unexpected keyword" message sends the caller looking
+# for a typo they did not make.
+_FFN_MOE_MISROUTED_KEYS = {
+    'use_bias': (
+        "'use_bias' is ambiguous here and is deliberately not declared: it could "
+        "mean the router's Dense bias or the expert FFN's. Name the one you mean "
+        "-- gate_use_bias=... for the router, or ffn_config['use_bias'] for the "
+        "expert FFN."
+    ),
+}
+
+
 def create_ffn_moe(
     num_experts: int,
     ffn_config: Dict[str, Any],
@@ -471,6 +694,22 @@ def create_ffn_moe(
     """
     Convenience function to create FFN-based MoE layers.
 
+    Every accepted keyword is declared. An undeclared keyword raises
+    ``ValueError`` rather than being filtered out -- see the factory contract in
+    ``src/dl_techniques/layers/CLAUDE.md``. In particular ``use_bias=`` is *not*
+    accepted: it names a bias that exists in two different sub-components, so the
+    caller must say which (``gate_use_bias=`` or ``ffn_config['use_bias']``).
+
+    Accepted ``kwargs``:
+
+    * Expert norm -- ``norm_type``, ``norm_config``, ``pre_norm``, ``post_norm``,
+      or the unambiguous spellings ``expert_norm_type`` / ``expert_norm_config``.
+    * Gating -- ``add_noise``, ``noise_std``, ``temperature``, ``embedding_dim``,
+      ``learnable_temperature``, ``num_slots``, ``z_loss_weight``,
+      ``gate_use_bias``, ``gating_norm_type``, ``gating_norm_config``.
+    * MoE -- ``jitter_noise``, ``drop_tokens``, ``use_residual_connection``.
+    * Keras layer -- ``name``, ``dtype``, ``trainable``.
+
     :param num_experts: Number of FFN expert networks.
     :type num_experts: int
     :param ffn_config: FFN configuration dictionary (passed to FFN factory).
@@ -481,39 +720,47 @@ def create_ffn_moe(
     :type gating_type: str
     :param aux_loss_weight: Weight for auxiliary load balancing loss.
     :type aux_loss_weight: float
-    :param kwargs: Additional configuration parameters.
+    :param kwargs: Additional configuration parameters, as listed above.
     :type kwargs: Any
     :return: Configured MixtureOfExperts layer with FFN experts.
     :rtype: MixtureOfExperts
+    :raises ValueError: If any keyword is not declared by this factory.
     """
+    # DECISION plan-2026-08-26T100331-f3744602/D-016
+    # Do NOT re-add `use_bias` as a declared key, in either direction. It used to
+    # be declared and routed to the GATE's Dense bias while sitting in the same
+    # call as an `ffn_config`, so a caller who meant the expert FFN got the
+    # opposite of what they asked for, silently. Re-routing it to the FFN instead
+    # would only reverse who gets the silent wrong answer. Two named keys and a
+    # raise is the only spelling that cannot be misread. See decisions.md D-016.
+    unknown = sorted(set(kwargs) - _FFN_MOE_DECLARED_KEYS)
+    if unknown:
+        hints = [_FFN_MOE_MISROUTED_KEYS[k] for k in unknown if k in _FFN_MOE_MISROUTED_KEYS]
+        message = (
+            f"create_ffn_moe() got undeclared keyword(s): {unknown}. "
+            f"Declared keywords: {sorted(_FFN_MOE_DECLARED_KEYS)}."
+        )
+        if hints:
+            message += " " + " ".join(hints)
+        raise ValueError(message)
 
     # Create expert configuration using FFN factory
-    expert_kwargs = {
-        k: v
-        for k, v in kwargs.items()
-        if k in {'norm_type', 'norm_config', 'pre_norm', 'post_norm'}
-    }
+    expert_kwargs = {k: v for k, v in kwargs.items() if k in _FFN_MOE_EXPERT_KEYS}
     # When forwarded under the expert namespace, rename to avoid collision with
     # gating's norm_type/norm_config (callers can use ``expert_norm_type`` for
     # the per-expert norm explicitly).
-    if 'expert_norm_type' in kwargs:
-        expert_kwargs['norm_type'] = kwargs['expert_norm_type']
-    if 'expert_norm_config' in kwargs:
-        expert_kwargs['norm_config'] = kwargs['expert_norm_config']
+    for alias, target in _FFN_MOE_EXPERT_ALIASES.items():
+        if alias in kwargs:
+            expert_kwargs[target] = kwargs[alias]
     expert_config = ExpertConfig(ffn_config=ffn_config, **expert_kwargs)
 
     # Create gating configuration
-    gating_keys = {
-        'capacity_factor', 'add_noise', 'noise_std', 'temperature',
-        'use_bias', 'embedding_dim', 'learnable_temperature', 'num_slots',
-        'z_loss_weight',
-    }
-    gating_init = {k: v for k, v in kwargs.items() if k in gating_keys}
-    # Optional pre-gating norm via dedicated keys to disambiguate from expert norm.
-    if 'gating_norm_type' in kwargs:
-        gating_init['norm_type'] = kwargs['gating_norm_type']
-    if 'gating_norm_config' in kwargs:
-        gating_init['norm_config'] = kwargs['gating_norm_config']
+    gating_init = {k: v for k, v in kwargs.items() if k in _FFN_MOE_GATING_KEYS}
+    # Dedicated keys disambiguate the gating norm and the gating bias from their
+    # expert-side namesakes.
+    for alias, target in _FFN_MOE_GATING_ALIASES.items():
+        if alias in kwargs:
+            gating_init[target] = kwargs[alias]
 
     gating_config = GatingConfig(
         gating_type=gating_type,
@@ -523,14 +770,15 @@ def create_ffn_moe(
     )
 
     # Create complete MoE configuration
-    moe_keys = {'jitter_noise', 'drop_tokens', 'use_residual_connection', 'routing_dtype'}
     moe_config = MoEConfig(
         num_experts=num_experts,
         expert_config=expert_config,
         gating_config=gating_config,
-        **{k: v for k, v in kwargs.items() if k in moe_keys}
+        **{k: v for k, v in kwargs.items() if k in _FFN_MOE_MOE_KEYS}
     )
 
-    return MixtureOfExperts(config=moe_config)
+    layer_kwargs = {k: v for k, v in kwargs.items() if k in _FFN_MOE_LAYER_KEYS}
+    return MixtureOfExperts(config=moe_config, **layer_kwargs)
+
 
 # ---------------------------------------------------------------------

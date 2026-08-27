@@ -46,6 +46,27 @@ def dtype_policy(request):
         keras.mixed_precision.set_global_policy(previous)
 
 
+@pytest.fixture
+def mixed_float16_policy():
+    """Force ``mixed_float16`` for one test, then ALWAYS restore the previous policy.
+
+    The unparametrized sibling of :func:`dtype_policy`, for guards that are only
+    meaningful under half precision (an fp16 overflow cannot be observed at
+    float32, so parametrizing over all three policies would yield two tests that
+    cannot fail). The restore lives here, with :func:`dtype_policy`'s, for the
+    reason given in this module's docstring.
+
+    :yield: the literal string ``'mixed_float16'``.
+    :rtype: str
+    """
+    previous = keras.mixed_precision.global_policy().name
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        yield "mixed_float16"
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
 # ---------------------------------------------------------------------
 # TensorFloat-32
 # ---------------------------------------------------------------------

@@ -123,7 +123,13 @@ class FFNExpert(BaseExpert):
         with a pre-normalization layer.
     :type pre_norm: bool
     :param post_norm: If True, append a post-normalization layer after the FFN.
-        Defaults to False. Only valid when the FFN preserves the last-dim size.
+        Defaults to False. A dimension-changing FFN is supported: :meth:`build`
+        builds the post-norm against ``ffn_block.compute_output_shape(...)``,
+        not against the expert's input shape, so the two norms carry
+        independently sized weights. MEASURED: ``{'type': 'mlp',
+        'hidden_dim': 16, 'output_dim': 7}`` on a ``(3, 10)`` input builds
+        ``pre_norm`` at ``(10,)`` and ``post_norm`` at ``(7,)`` and returns a
+        finite ``(3, 7)``.
     :type post_norm: bool
     :param kwargs: Additional keyword arguments for the base Layer class.
     :type kwargs: Any

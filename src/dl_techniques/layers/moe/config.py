@@ -6,8 +6,92 @@ focused exclusively on FFN experts and leveraging the dl_techniques FFN factory.
 """
 
 import keras
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Union, Dict, Any, Literal
+
+# ---------------------------------------------------------------------
+
+
+# The largest value an int32 tensor dimension can hold. Every field routed
+# through ``_validate_positive_int`` (``num_experts``, ``top_k``, ``num_slots``,
+# ``embedding_dim``) ends up as a tensor dimension or a one-hot depth, all of
+# which TensorFlow represents in int32.
+_MAX_TENSOR_DIM = 2 ** 31 - 1
+
+
+def _validate_positive_int(name: str, value: Any, minimum: int = 1,
+                           maximum: int = _MAX_TENSOR_DIM) -> int:
+    """Reject anything that is not a true integer within ``[minimum, maximum]``.
+
+    Returns the value **coerced to a Python ``int``**; callers must assign the
+    return value back to the field (see ``__post_init__`` below).
+
+    ``bool`` and ``numpy.bool_`` are tested **first** and rejected, because
+    ``isinstance(True, int)`` is ``True`` in Python: without this branch,
+    ``top_k=True`` silently becomes ``top_k=1`` and ``embedding_dim=True``
+    silently becomes a one-dimensional expert embedding. YAML is the live path
+    for this -- ``yaml.safe_load`` turns an unquoted ``true`` into ``True``, and
+    a config-driven caller never sees it.
+
+    Integral **numpy** scalars (``np.int64``, ``np.int32``, ``np.uint8``, ...)
+    are accepted: arriving here from ``some_array.shape[-1]`` or from
+    ``np.argmax`` is legitimate and used to raise.
+
+    # DECISION plan-2026-08-26T155709-fb07cf4e/D-008
+    Three properties of this function are load-bearing and each looks removable:
+
+    1. **The bool branch names ``np.bool_`` EXPLICITLY.** Do not delete it on the
+       grounds that the ``np.integer`` test below already rejects it. That is
+       true today and was MEASURED (numpy 2.0.2:
+       ``issubclass(np.bool_, np.integer)`` is ``False``), but it is a property
+       of numpy's type hierarchy, not of this module. Relying on it implicitly
+       means a numpy that ever re-parents ``np.bool_`` under an integer type
+       silently reopens the exact hole the bool branch exists to close, with no
+       test to notice. The explicit branch also gives ``np.bool_`` the same
+       YAML-flavoured error message a Python ``bool`` gets.
+    2. **The predicate is ``(int, np.integer)``, not ``int``.** ``np.int64(4)``
+       is NOT an instance of ``int`` (measured), so the narrow check rejected
+       every integral numpy scalar.
+    3. **The return value is coerced with ``int(...)`` and MUST be assigned back
+       by the caller.** Accepting a ``np.int64`` and storing it verbatim only
+       moves the failure downstream to ``model.save()``:
+       ``json.dumps({"n": np.int64(4)})`` raises
+       ``TypeError: Object of type int64 is not JSON serializable`` (measured) --
+       i.e. after training, at the worst possible moment. Widening the check
+       without coercing would trade a loud constructor error for a silent one.
+
+    :param name: Field name, used in the error message.
+    :type name: str
+    :param value: The value to validate.
+    :type value: Any
+    :param minimum: Smallest accepted value, inclusive.
+    :type minimum: int
+    :param maximum: Largest accepted value, inclusive. Defaults to the int32
+        tensor-dimension ceiling; see ``_MAX_TENSOR_DIM``.
+    :type maximum: int
+    :return: ``value`` as a Python ``int``.
+    :rtype: int
+    :raises ValueError: If ``value`` is a ``bool``/``np.bool_``, is not integral,
+        or lies outside ``[minimum, maximum]``.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"{name} must be an int, got bool ({value!r}). Note that YAML's "
+            f"unquoted `true`/`false` load as Python bools; quote the value or "
+            f"write a number."
+        )
+    if not isinstance(value, (int, np.integer)):
+        raise ValueError(
+            f"{name} must be an int, got {type(value).__name__} ({value!r})"
+        )
+    value = int(value)
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    if value > maximum:
+        raise ValueError(
+            f"{name} must be <= {maximum} (int32 tensor-dimension ceiling), got {value}")
+    return value
 
 # ---------------------------------------------------------------------
 
@@ -132,8 +216,6 @@ class GatingConfig:
     :type gating_type: Literal['linear', 'cosine', 'softmoe']
     :param top_k: Number of experts to select per token.
     :type top_k: int
-    :param capacity_factor: Multiplier for expert capacity calculation.
-    :type capacity_factor: float
     :param add_noise: Whether to add noise to gating logits for exploration.
     :type add_noise: bool
     :param noise_std: Standard deviation of gating noise.
@@ -148,14 +230,38 @@ class GatingConfig:
     :type learnable_temperature: bool
     :param num_slots: Number of input slots per expert in SoftMoE.
     :type num_slots: int
-    :param aux_loss_weight: Weight for auxiliary load balancing loss.
+    :param aux_loss_weight: Weight for the auxiliary load-balancing loss.
+
+        **Its effective strength scales with** ``top_k``. The loss uses the
+        Switch Transformer formula, which is calibrated for ``top_k = 1``, and
+        it is deliberately not normalized (see the anchored decision in
+        :func:`~dl_techniques.layers.moe.gating.compute_auxiliary_loss`).
+        Perfectly balanced routing therefore does not reach zero but a floor of
+        exactly ``aux_loss_weight * top_k``. MEASURED 2026-08-26 at
+        ``aux_loss_weight=0.01``, exact uniform gate probabilities and
+        round-robin balanced dispatch over 4096 tokens:
+
+        .. code-block:: text
+
+            num_experts   top_k=1    top_k=2    top_k=4
+            -----------   --------   --------   --------
+                      4   0.010000   0.020000   0.040000
+                      8   0.010000   0.020000   0.040000
+                     16   0.010000   0.020000   0.040000
+                     64   0.010000   0.020000   0.040000
+
+        The floor is independent of ``num_experts`` and of the token count. The
+        worst case -- every token to the same ``k`` experts -- is
+        ``aux_loss_weight * num_experts`` regardless of ``top_k``, so the
+        regularizer's dynamic range is ``num_experts / top_k``. To hold the
+        regularization strength fixed across ``top_k``, divide your intended
+        weight by ``top_k`` yourself.
     :type aux_loss_weight: float
     :param z_loss_weight: Weight for router z-loss (entropy regularization).
     :type z_loss_weight: float
     """
     gating_type: Literal['linear', 'cosine', 'softmoe'] = 'linear'
     top_k: int = 1
-    capacity_factor: float = 1.25
     add_noise: bool = True
     noise_std: float = 1.0
     temperature: float = 1.0
@@ -183,20 +289,22 @@ class GatingConfig:
 
         Mirrors ``ExpertConfig.__post_init__`` so both sub-configs fail loud at
         construction time rather than deep inside layer assembly.
+
+        Integer fields (``top_k``, ``num_slots``, ``embedding_dim``) go through
+        :func:`_validate_positive_int`, which rejects ``bool``/``np.bool_``
+        before it applies the range test, accepts integral numpy scalars, and
+        returns a Python ``int`` -- the return value is assigned BACK to the
+        field, so a ``np.int64`` supplied by a caller never reaches
+        ``get_config``/``json.dumps``.
         """
         valid_types = ('linear', 'cosine', 'softmoe')
         if self.gating_type not in valid_types:
             raise ValueError(
                 f"gating_type must be one of {valid_types}, got '{self.gating_type}'"
             )
-        if self.top_k < 1:
-            raise ValueError(f"top_k must be >= 1, got {self.top_k}")
-        if self.num_slots < 1:
-            raise ValueError(f"num_slots must be >= 1, got {self.num_slots}")
-        if self.embedding_dim < 1:
-            raise ValueError(f"embedding_dim must be >= 1, got {self.embedding_dim}")
-        if self.capacity_factor <= 0:
-            raise ValueError(f"capacity_factor must be > 0, got {self.capacity_factor}")
+        self.top_k = _validate_positive_int('top_k', self.top_k)
+        self.num_slots = _validate_positive_int('num_slots', self.num_slots)
+        self.embedding_dim = _validate_positive_int('embedding_dim', self.embedding_dim)
         if self.temperature <= 0:
             raise ValueError(f"temperature must be > 0, got {self.temperature}")
         if self.noise_std < 0:
@@ -242,14 +350,24 @@ class MoEConfig:
         ``add_noise=True``; the two sources stack. Set ``jitter_noise=0`` to
         rely solely on the gating-level noise.
     :type jitter_noise: float
-    :param drop_tokens: Reserved for future capacity-based dispatch (the
-        current hard-routing kernel is dense and does not drop tokens).
+    :param drop_tokens: Diagnostic flag only. It is echoed by
+        :meth:`MixtureOfExperts.get_expert_utilization` and gates **no**
+        forward-path behaviour: neither the dense nor the sparse hard-routing
+        kernel drops a token, so flipping it leaves the layer's output
+        bit-identical (measured: ``max|delta| == 0.0``).
     :type drop_tokens: bool
-    :param use_residual_connection: Reserved for future capacity-based
-        dispatch. Has no effect in the current dense kernel.
+    :param use_residual_connection: Diagnostic flag only, with the same status
+        as ``drop_tokens`` — echoed by
+        :meth:`MixtureOfExperts.get_expert_utilization`, read by no kernel.
+        There are no dropped tokens for a residual to rescue.
     :type use_residual_connection: bool
-    :param routing_dtype: Data type for routing computations.
-    :type routing_dtype: str
+
+    .. note::
+        The capacity-based dispatch these two flags were once described as
+        "reserved for" is **not** planned. ``capacity_factor`` (``GatingConfig``)
+        and ``routing_dtype`` (``MoEConfig``) were removed for that reason. They
+        are **not** tolerated as legacy keys: a payload still naming either one
+        raises ``TypeError`` at construction.
     """
     num_experts: int = 8
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
@@ -260,8 +378,56 @@ class MoEConfig:
     drop_tokens: bool = True
     use_residual_connection: bool = True
 
-    # Advanced features
-    routing_dtype: str = 'float32'
+    def __post_init__(self):
+        """Validate the complete MoE configuration after dataclass creation.
+
+        Mirrors ``ExpertConfig.__post_init__`` and ``GatingConfig.__post_init__`` so
+        the top-level config fails loud at construction time rather than deep inside
+        layer assembly. ``MoEConfig`` is the only place the cross-field invariant
+        ``top_k <= num_experts`` can be checked at all: ``GatingConfig`` owns
+        ``top_k`` but does not know ``num_experts``, which is a sibling field here.
+
+        Validated:
+
+        * ``num_experts`` integral, not a ``bool``/``np.bool_``, and within
+          ``[1, 2**31 - 1]`` -- coerced to a Python ``int`` (see
+          :func:`_validate_positive_int`).
+        * ``top_k <= num_experts``, for ``gating_type`` in ``('linear', 'cosine')``
+          only — see the note below.
+        * ``jitter_noise >= 0`` (rejected, not silently disabled, matching
+          ``GatingConfig``'s ``noise_std >= 0`` precedent).
+
+        .. note::
+            ``gating_type='softmoe'`` is **excluded** from the ``top_k`` cross-check
+            on purpose. SoftMoE does not perform top-k routing: it dispatches every
+            token to every expert through ``num_slots`` learned slots, and
+            ``MixtureOfExperts.__init__`` forwards only ``num_slots`` to
+            ``SoftMoEGating`` (``layer.py``), never ``top_k``. Requiring
+            ``top_k <= num_experts`` there would reject configurations that are
+            perfectly valid because the field is inert for that gating type.
+
+        :raises ValueError: If any of the above invariants is violated.
+        """
+        self.num_experts = _validate_positive_int('num_experts', self.num_experts)
+
+        # DECISION plan-2026-08-26T100331-f3744602/D-012
+        # The `top_k <= num_experts` cross-check is deliberately SKIPPED for
+        # `gating_type='softmoe'`. Do NOT "fix the omission" by dropping the
+        # gating_type test: SoftMoE ignores `top_k` entirely -- `layer.py`'s
+        # gating_kwargs allow-list forwards only `num_slots` to SoftMoEGating --
+        # so an unrelated `top_k` value is inert there, and validating it would
+        # reject working configs (e.g. num_experts=4, top_k=999, softmoe) that
+        # construct and run correctly today.
+        if self.gating_config.gating_type in ('linear', 'cosine'):
+            if self.gating_config.top_k > self.num_experts:
+                raise ValueError(
+                    f"top_k must be between 1 and num_experts ({self.num_experts}), "
+                    f"got {self.gating_config.top_k} "
+                    f"(gating_type='{self.gating_config.gating_type}')"
+                )
+
+        if self.jitter_noise < 0:
+            raise ValueError(f"jitter_noise must be >= 0, got {self.jitter_noise}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary for serialization."""
@@ -282,7 +448,6 @@ class MoEConfig:
             'jitter_noise': self.jitter_noise,
             'drop_tokens': self.drop_tokens,
             'use_residual_connection': self.use_residual_connection,
-            'routing_dtype': self.routing_dtype,
         }
 
     @classmethod
