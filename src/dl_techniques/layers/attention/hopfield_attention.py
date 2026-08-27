@@ -384,14 +384,24 @@ class HopfieldAttention(keras.layers.Layer):
         # guard in build() keeps first-build weights/forward exactly as before.
         self.output_dense = None
 
-        # Dropout layer (conditional creation)
-        if self.dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(
+        # Dropout layer
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016
+        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
+        # and Pitfall 1. A Dropout owns no weights, so creating it always costs
+        # nothing in the checkpoint while keeping the object graph and the
+        # auto-generated sub-layer names independent of `dropout_rate`.
+        #
+        # `q_norm`/`k_norm` below are deliberately NOT given the same treatment:
+        # they come from `create_normalization_layer`, which REJECTS a `None`
+        # type (`ValueError: Unknown normalization type: 'None'`), so when
+        # `qk_norm_type is None` there is simply no object to construct. The
+        # guide's rule applies to a sub-layer that is constructible either way;
+        # satisfying it here would mean inventing an identity-normalization
+        # layer, which is a new abstraction rather than a fix.
+        self.dropout_layer = keras.layers.Dropout(
                 self.dropout_rate,
                 name="attention_dropout"
-            )
-        else:
-            self.dropout_layer = None
+        )
 
         # Q/K normalization (conditional creation via factory)
         if self.qk_norm_type is not None:
@@ -585,7 +595,7 @@ class HopfieldAttention(keras.layers.Layer):
         attention_weights = self.attn_prob(attention_scores, training=training)
 
         # Apply dropout if configured
-        if self.dropout_layer is not None:
+        if self.dropout_rate > 0.0:
             attention_weights = self.dropout_layer(attention_weights, training=training)
 
         output = ops.matmul(attention_weights, value)
