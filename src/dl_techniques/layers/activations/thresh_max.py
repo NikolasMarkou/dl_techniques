@@ -35,9 +35,9 @@ scale 0.01 to 5). A larger slope goes lower. At ``slope=50``, the top of the
 default ``ValueRangeConstraint(1.0, 50.0)`` and the direction the negative
 ``L2_custom(-1e-4)`` pushes a trainable slope, a grid search over
 ``k``-elevated logit families for ``N`` in 2 to 59 bottoms out at 0.34528
-(``N=6``, one logit raised by 0.74). That is still twelve orders of magnitude
-above the default ``epsilon=1e-12``, so the denominator never approaches it at
-any slope the constraint allows.
+(``N=6``, one logit raised by 0.74). That is still more than eleven orders of
+magnitude above the default ``epsilon=1e-12`` (the ratio is 3.45e11), so the
+denominator never approaches it at any slope the constraint allows.
 
 References:
     - Sparse softmax variants, of which ``Sparsemax`` is the L2-projection

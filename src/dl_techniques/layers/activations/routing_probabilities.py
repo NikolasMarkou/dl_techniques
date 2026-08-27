@@ -47,7 +47,9 @@ Caveats:
   before renormalizing is 1.0 to within 2e-07 over 50 random inputs. What
   remains is a shape cost. Six of the fifteen internal nodes are forced left
   and ignore their logit. Every one of the ``d`` decisions still receives a
-  non-zero gradient, which is the invariant that reproduces; the magnitudes
+  non-zero gradient in both modes, which is the invariant that reproduces. In
+  ``deterministic`` mode the kernel is non-trainable, so a tape must
+  ``watch`` it explicitly to see those gradients at all. The magnitudes
   depend entirely on the loss, the batch and the input, so no range for them
   is quoted here. Prefer an ``output_dim`` at or near a power of two.
 

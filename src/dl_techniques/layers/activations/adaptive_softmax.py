@@ -99,8 +99,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
     holds only for ``polynomial_coeffs = [-1.791, 4.917, -2.3, 0.481,
     -0.037]``, ``min_temp=0.1``, ``max_temp=1.0`` and
     ``entropy_threshold=0.5``. Change any of them and the whole table moves.
-    The three ``H`` values are the roots of the clipped polynomial, found by
-    bisection on ``_compute_adaptive_temperature``:
+    The three ``H`` values are where the clip engages, found by bisection on
+    ``_compute_adaptive_temperature``. Only 2.21940 is a root of the
+    polynomial itself; 0.91856 and 2.14702 are the two solutions of
+    ``f(H) = max_temp``:
 
     .. code-block:: text
 
