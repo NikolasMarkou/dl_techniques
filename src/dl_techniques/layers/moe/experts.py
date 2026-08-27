@@ -15,8 +15,8 @@ from typing import Optional, Tuple, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from ..ffn import create_ffn_from_config, validate_ffn_config
-from ..norms import create_normalization_layer
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.ffn import create_ffn_from_config, validate_ffn_config
 
 # ---------------------------------------------------------------------
 
@@ -86,6 +86,7 @@ class BaseExpert(keras.layers.Layer, ABC):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FFNExpert(BaseExpert):

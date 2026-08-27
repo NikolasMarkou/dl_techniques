@@ -575,7 +575,10 @@ class MixtureOfExperts(keras.layers.Layer):
 
         return outputs
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the MoE layer."""
         output_shape = list(input_shape)
 

@@ -14,8 +14,8 @@ from typing import Optional, Union, Tuple, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..norms import create_normalization_layer
-from ...constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
 
@@ -145,6 +145,7 @@ class BaseGating(keras.layers.Layer, ABC):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class LinearGating(BaseGating):
@@ -405,7 +406,7 @@ class CosineGating(BaseGating):
         │              ▼                             │
         │  L2-normalize ──► cosine_sim(x, E_experts) │
         │              │                             │
-        │              ├──► * temperature             │
+        │              ├──► * temperature            │
         │              ▼                             │
         │           Top-K Selection                  │
         │              │                             │
