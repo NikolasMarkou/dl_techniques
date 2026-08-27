@@ -377,8 +377,8 @@ class BandRMS(keras.layers.Layer):
         # Use sigmoid to map the band_param to [0, 1]
         # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
         # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to the statistics
-        # dtype explicitly. Under mixed_float16 a variable auto-casts on read
-        # (LESSONS L136). Measured inside the autocast scope Layer.__call__ opens,
+        # dtype explicitly. Under mixed_float16 a variable auto-casts on read.
+        # Measured inside the autocast scope Layer.__call__ opens,
         # band_param reads float16, so the following `normalized * scale` raises
         # InvalidArgumentError. Do NOT hardcode "float32"; stat_dtype keeps the
         # multiply in the policy's statistics dtype

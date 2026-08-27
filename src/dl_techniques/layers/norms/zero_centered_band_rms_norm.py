@@ -397,8 +397,8 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         # Step 4: Apply learnable band scaling within [1-α, 1] range
         # Use sigmoid to map the band_param to [0, 1] with 5x multiplier for smoothness
         # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to the statistics
-        # dtype explicitly. Under mixed_float16 a variable auto-casts on read
-        # (LESSONS L136). Measured inside the autocast scope Layer.__call__ opens,
+        # dtype explicitly. Under mixed_float16 a variable auto-casts on read.
+        # Measured inside the autocast scope Layer.__call__ opens,
         # `5.0 * self.band_param` returns float16, so the following
         # `normalized * scale` raises InvalidArgumentError. Do NOT hardcode
         # "float32"; stat_dtype keeps the multiply in the policy's statistics dtype

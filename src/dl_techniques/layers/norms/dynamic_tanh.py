@@ -201,7 +201,13 @@ class DynamicTanh(keras.layers.Layer):
         # so an archive holding a non-positive one fails to LOAD with a TypeError whose
         # root cause is this ValueError (measured at a8a042f53). Do NOT loosen it to
         # construction-only or special-case from_config; only the INIT value is checked,
-        # so a trained-negative alpha WEIGHT still loads. See decisions.md D-014 and
+        # so a trained-negative alpha WEIGHT still loads. The break stays acceptable
+        # only while the exposure stays this narrow: measured at HEAD, `src/` builds
+        # this layer at exactly ONE site (factory.py's `DynamicTanh(**layer_kwargs)`,
+        # everything else routes through the factory by string), and no site in `src/`
+        # or `tests/` passes a non-positive alpha_init_value except the two tests that
+        # exist to pin this guard. If a real checkpoint ever turns up, DELETE this
+        # guard - do not weaken it silently. See decisions.md D-014 and
         # tests/test_layers/test_norms/test_the_negative_alpha_init_is_checkpoint_visible.py
         if alpha_init_value <= 0:
             raise ValueError("alpha_init_value must be a positive number")

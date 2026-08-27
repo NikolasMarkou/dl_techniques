@@ -35,9 +35,15 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 # test stays green on a dead layer.
 # Do NOT remove this default to "match the paper". The paper never trains gamma
 # negative; this layer is trainable and ships to people who will. Measured at HEAD with
-# the constraint overridden: gamma = -1.0 puts the eigenvalues of dg/dx in
-# [-1.4319, 0.0], and an EnergyTransformer block then RISES in energy over 12 steps,
-# max diff(E) = +2.478e-02, against -2.197e-02 at gamma = +1.0.
+# the constraint overridden: gamma = -1.0 flips the sign of every NONZERO eigenvalue of
+# dg/dx (see the sibling D-010 anchor in __init__ - the ZERO eigenvalue of the constant
+# direction survives at every gamma), and an EnergyTransformer block then RISES in
+# energy instead of falling. Protocol, since the magnitudes move with the draw:
+# embed_dim 32, 4 heads, head_dim 8, hopfield_dim 64, 12 steps, step_size 0.1,
+# eps 1e-5, weights and input held IDENTICAL across the two gamma arms; at seeds
+# 0/5/42 the energy is non-increasing at gamma = +1.0 and increasing at gamma = -1.0
+# in 3 of 3. The SIGN is the claim; the magnitudes are ~2e-02 either way and are not
+# reproducible to more digits than that.
 # The constraint is overridable - pass gamma_constraint=None - but that must be an
 # explicit choice, never a silent one.
 # The originating plan directory is gone; this comment is the record.
@@ -292,9 +298,17 @@ class EnergyLayerNorm(keras.layers.Layer):
         # DECISION plan_2026-07-13_57c9833e/D-010
         # ON BY DEFAULT. Do NOT flip this default to `None` "because the paper does not
         # constrain gamma": the paper never trains gamma negative, and this layer is
-        # trainable. `gamma < 0` makes the Hessian dg/dx negative-definite (measured
-        # eigenvalues in [-1.4319, 0.0] at gamma = -1.0), so the block performs energy
-        # ASCENT while still running, still training and still emitting finite output.
+        # trainable. `gamma < 0` flips the sign of every NONZERO eigenvalue of the
+        # Hessian dg/dx, so dg/dx stops being PSD and the block performs energy ASCENT
+        # while still running, still training and still emitting finite output. It goes
+        # negative SEMI-definite, NOT negative-definite: dg/dx always has an exact null
+        # direction because the layer subtracts the mean, so g(x + c) == g(x) for any
+        # constant c (measured D=8, eps=1e-5, float64: |J @ 1| = 2.2e-16,
+        # |det J| = 2.3e-20). Do NOT "prove" the sign by asserting all eigenvalues are
+        # negative - that zero eigenvalue lands on either side of 0 at rounding level
+        # and the assertion passes by luck. The sibling D-010 anchor at _GAMMA_FLOOR
+        # turns on the same null direction: at gamma == 0 it is the WHOLE space and
+        # dg/dx is the zero matrix, PSD but vacuous.
         # Reused, not re-written, from `dl_techniques.constraints.value_range_constraint`.
         # The originating plan directory is gone; this comment is the record.
         self.gamma_constraint = (
