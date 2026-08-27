@@ -16,9 +16,12 @@ For an input ``x`` reduced over ``axis``::
 ``mean`` is used rather than ``sum``, so the result does not depend on the
 length of the normalized axis. The output RMS is ``sqrt(m / (m + epsilon))``
 with ``m = mean(x ** 2)``, so it reaches 1 only while ``m`` is far above
-``epsilon``. Measured on a ``(4, 64)`` input at the default ``epsilon=1e-6``:
-the output RMS is ``1.000000`` at input scale 1, and falls to ``[0.679, 0.754]``
-at input scale 1e-3.
+``epsilon``. At input scale 1e-3 on a ``(4, 64)`` input, ``m`` is about ``1e-6``
+-- the same order as the default ``epsilon=1e-6`` -- and the output RMS lands
+near ``1/sqrt(2)``. Measured across 16 draws (``keras.random.normal`` seeds 0-9,
+plus ``numpy.random.default_rng`` and legacy ``numpy.random.seed`` at 0, 1 and
+42): ``[0.999999, 1.000000]`` at input scale 1, and ``[0.620, 0.754]`` at input
+scale 1e-3. The exact interval is draw-dependent; the closed form is not.
 
 Statistics run in ``keras.backend.result_type(input_dtype, "float32")``. That is
 float32 for float16 and float32 inputs, and float64 under a float64 policy. A
@@ -61,8 +64,10 @@ class RMSNorm(keras.layers.Layer):
 
     The output RMS is ``sqrt(m / (m + epsilon))`` with ``m = mean(x ** 2)``, so
     it is 1 only while ``m`` is far above ``epsilon``. Measured on a ``(4, 64)``
-    input at ``epsilon=1e-6``: ``1.000000`` at input scale 1, ``[0.679, 0.754]``
-    at input scale 1e-3.
+    input at ``epsilon=1e-6`` across 16 draws (``keras.random.normal`` seeds 0-9
+    plus ``numpy`` seeds 0, 1 and 42): ``[0.999999, 1.000000]`` at input scale 1,
+    and ``[0.620, 0.754]`` at input scale 1e-3. The interval at low scale is
+    draw-dependent; the closed form above is not.
 
     Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
     float32 at minimum, float64 under a float64 policy. The result is cast back

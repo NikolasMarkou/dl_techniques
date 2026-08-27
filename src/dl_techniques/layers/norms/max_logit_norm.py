@@ -273,10 +273,14 @@ class DecoupledMaxLogit(keras.layers.Layer):
 
     * ``max_cosine`` -- the largest entry of the unit-norm logit vector. It is
       the direction signal and lies in ``[-1, 1]``.
-    * ``max_norm`` -- the L2 norm of the logit vector. It is the magnitude
-      signal. The ``max`` in the code reduces an axis that ``keepdims=True``
-      already left at size 1, so it takes the norm through unchanged; measured
-      ``max|max_norm - ||inputs||_2| = 0.000e+00``.
+    * ``max_norm`` -- ``sqrt(sum(inputs ** 2, axis) + epsilon)``, the L2 norm
+      with ``epsilon`` INSIDE the root. It is the magnitude signal. The ``max``
+      in the code reduces an axis that ``keepdims=True`` already left at size 1,
+      so it takes that quantity through unchanged. It equals ``||inputs||_2``
+      only while ``||inputs||_2 ** 2 >> epsilon``: measured on a ``(4, 16)``
+      ``keras.random.normal(seed=0)`` input scaled by a constant,
+      ``max|max_norm - ||inputs||_2|`` is ``0.000e+00`` at scale 1 and rises to
+      ``1.546e-05`` at scale ``1e-3`` and ``1.292e-04`` at scale ``1e-4``.
     * ``output`` -- ``constant * max_cosine + max_norm``. Measured for
       ``constant`` 0.5, 1.0 and 3.0: ``max|output - (constant * max_cosine +
       max_norm)| = 0.000e+00``.

@@ -37,11 +37,15 @@ when the type is fixed at authoring time.
 Note
 ----
 
-Most of these layers preserve the input shape. Four factory keys do not.
-``max_logit_norm``, ``decoupled_max_logit``, ``dml_plus_center`` and
-``dml_plus_focal`` all reduce the feature axis away. The first two also return a
-tuple of tensors rather than one tensor. Read the class docstring before
-dropping any of them into a shape-sensitive position.
+Most of these layers preserve the input shape. Three factory keys do not.
+``decoupled_max_logit``, ``dml_plus_center`` and ``dml_plus_focal`` all reduce
+the feature axis away; measured on a ``(3, 5, 8)`` input at the default
+``axis=-1`` they give ``(3, 5)``. Two of the three also return a tuple rather
+than one tensor: ``decoupled_max_logit`` a 3-tuple of ``(3, 5)`` tensors, and
+``dml_plus_center`` a 2-tuple shaped ``(3, 5)`` and ``(3, 5, 1)``.
+``max_logit_norm`` IS shape-preserving; ``(3, 5, 8)`` stays ``(3, 5, 8)`` and it
+returns a single tensor. Read the class docstring before dropping any of them
+into a shape-sensitive position.
 """
 
 from .rms_norm import RMSNorm

@@ -82,11 +82,16 @@ class EnergyLayerNorm(keras.layers.Layer):
         dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0
 
     That inequality is why the parameterization is a scalar gamma and a vector
-    delta. Measured on a rank-3 input with ``D = 8``: at ``gamma = 1.7`` the
-    eigenvalues of ``dg/dx`` are in ``[0.0000, 2.4343]``; at ``gamma = 0.0`` they
-    are all exactly ``0.0``; at ``gamma = -1.0`` they are in
-    ``[-1.4319, 0.0000]``, so the Hessian is no longer PSD. The Jacobian is also
-    symmetric, measured ``max|J - J.T| = 2.980e-08``.
+    delta. The nonzero eigenvalues of ``dg/dx`` all equal
+    ``gamma / sqrt(var + eps)``, so their magnitude moves with the DRAW's
+    variance and is not a function of ``gamma`` and ``D`` alone. Measured on
+    rank-3 inputs with ``D = 8``, ``eps = 1e-5``, ``keras.random.normal((1, 1, 8),
+    seed=s)`` for ``s`` in 0-4: at ``gamma = 1.7`` the eigenvalues span
+    ``[0.0000, 5.6069]`` across those five draws; at ``gamma = 0.0`` they are all
+    exactly ``0.0``; at ``gamma = -1.0`` they span ``[-3.2982, 0.0000]``, so the
+    Hessian is no longer PSD. The sign structure holds at every draw; the
+    endpoints do not. The Jacobian is symmetric to float32: measured
+    ``max|J - J.T| <= 1.192e-07`` over the same five draws.
 
     **Shape contract**: gamma is a SCALAR (``shape=()``); delta is a VECTOR
     (``shape=(D,)``). A per-feature gamma would break the ``g = dL/dx`` identity.
@@ -133,17 +138,30 @@ class EnergyLayerNorm(keras.layers.Layer):
 
     .. code-block:: text
 
-        var >> eps :  nonzero eigenvalues of dg/dx  ~  1.52 .. 2.38
+        var >> eps :  BULK eigenvalues of dg/dx      ~  1.52 .. 2.03
         var == 0   :  eigenvalues of dg/dx          ->  gamma / sqrt(eps)
                                                     =  1.7 / sqrt(1e-5)  =  537.6
 
-    That is a **226x to 355x amplification** of the local gain, reached at
-    ``var == 0``. All figures measured at ``D = 64``, ``gamma = 1.7``,
-    ``eps = 1e-5``, over 20 random tokens; the exact eigenvalue at the cliff is
-    ``537.5872``, matching ``gamma / sqrt(eps)`` to all printed digits. The range
-    narrows as ``D`` grows: at ``D = 8`` the same protocol gives nonzero
-    eigenvalues from ``0.0001`` to ``5.2968``. Every draw also has exactly one
-    zero eigenvalue, the constant direction that mean-subtraction removes.
+    The spectrum has THREE parts at every draw, not two. One eigenvalue sits at
+    float32 zero (measured ``|lambda| <= 8e-08``): the constant direction that
+    mean-subtraction removes. One is a small RADIAL eigenvalue
+    ``gamma * eps / (var + eps)^(3/2)``. The remaining ``D - 2`` are degenerate
+    BULK eigenvalues at ``gamma / sqrt(var + eps)``. The line above quotes the
+    BULK part, and the amplification below is the bulk-to-cliff ratio.
+
+    All figures measured at ``gamma = 1.7``, ``eps = 1e-5``, over 20 tokens
+    drawn as ``keras.random.normal((1, 1, D), seed=s)`` for ``s`` in 0-19:
+
+    .. code-block:: text
+
+        D = 64 :  BULK [1.5199, 2.0295]   RADIAL [1.224e-05, 2.882e-05]
+        D =  8 :  BULK [1.2589, 5.6069]   RADIAL [7.055e-06, 6.105e-04]
+
+    So the BULK range narrows as ``D`` grows, because ``var`` concentrates. The
+    cliff eigenvalue at ``var == 0`` is ``537.5872``, matching
+    ``gamma / sqrt(eps)`` to all printed digits, which is a **265x to 354x
+    amplification** of the bulk gain at ``D = 64`` over those 20 draws. The
+    amplification is draw-dependent; the ceiling ``gamma / sqrt(eps)`` is not.
 
     A constant token is not exotic. An ``Embedding`` PAD row, an all-zero conv
     cell, and a collapsed early-training activation are all exactly ``var = 0``.
@@ -151,7 +169,9 @@ class EnergyLayerNorm(keras.layers.Layer):
     Two things the cliff is NOT:
 
     * **It is not a broken guarantee.** ``dg/dx`` stays PSD across the cliff
-      (measured minimum eigenvalue ``7.629e-06`` at ``var == 0``). The energy
+      (at ``var == 0``, ``D = 64``, ``gamma = 1.7`` the smallest eigenvalue
+      measures ``2.003e-05``; it is the numerically-zero constant direction, so
+      the digits are float32 noise and the claim is only its sign). The energy
       descent still holds. This is a conditioning problem, not a correctness one.
     * **It is not a forward flush-to-zero bug.** Under ``mixed_float16``,
       ``eps = 1e-5`` is subnormal but representable (``float16(1e-5)`` measures
@@ -170,8 +190,10 @@ class EnergyLayerNorm(keras.layers.Layer):
         ``epsilon=1e-6`` (``max|grad| = 1.4219e+03``), so this is an fp16 range
         limit, not a mathematical singularity. An ordinary token is unaffected:
         a standard-normal ``(2, 4, 8)`` input at ``epsilon=1e-5`` gives a finite
-        gradient with ``max|grad| = 7.5684e-03``, and the threshold moves with
-        the token's variance -- the same probe with variance ``1.085e-03`` is
+        gradient at 6 of 6 seeds. No magnitude is quoted for it -- the value is
+        draw-dependent and two protocols disagreed; finiteness is the claim. The
+        threshold moves with the token's variance: the same ``(1, 1, 8)`` probe
+        with the perturbation raised to ``0.1`` (fp16 variance ``1.085e-03``) is
         finite at ``epsilon=1e-5``.
 
     **Mitigation for a caller who sees a training-stability cliff** (loss spikes

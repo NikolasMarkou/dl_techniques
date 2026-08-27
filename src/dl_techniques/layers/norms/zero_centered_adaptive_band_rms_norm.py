@@ -23,7 +23,8 @@ For an input ``x`` reduced over ``axis``::
 The default ``band_initializer="zeros"`` makes the ``Dense`` output zero, and
 ``sigmoid(0) = 0.5``, so the initial scale is the MIDPOINT of the band, not its
 top. Measured output RMS on a ``(4, 32)`` input: ``0.95`` at ``alpha=0.1`` and
-``0.75`` at ``alpha=0.5``, with zero spread across rows. Both ends of the band
+``0.75`` at ``alpha=0.5``, with no spread across rows to six decimals (measured
+spread ``5.960e-08``, which is float32 rounding). Both ends of the band
 are reachable during training: assigning the ``Dense`` bias ``-5`` gives an
 output RMS of ``0.900000`` and ``+5`` gives ``1.000000`` at ``alpha=0.1``.
 
@@ -78,7 +79,8 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     At the default ``band_initializer="zeros"`` the ``Dense`` output is zero and
     ``sigmoid(0) = 0.5``, so the scale starts at the middle of the band. Measured
     output RMS on a ``(4, 32)`` input: ``0.95`` at ``alpha=0.1`` and ``0.75`` at
-    ``alpha=0.5``, with zero spread across rows. Assigning the ``Dense`` bias
+    ``alpha=0.5``, with no spread across rows to six decimals (measured spread
+    ``5.960e-08``, float32 rounding). Assigning the ``Dense`` bias
     ``-5`` gives ``0.900000`` and ``+5`` gives ``1.000000`` at ``alpha=0.1``, so
     training reaches both ends of the band.
 

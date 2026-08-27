@@ -36,31 +36,40 @@ Mathematical Formulation
 
 Why variance-only, with no mean and no beta
 -------------------------------------------
-Measured in this repository at inference on a ``(16, 32)`` input with a nonzero
-mean, statistics primed by one ``training=True`` pass. The metric is
-``max|f(a x) - a f(x)| / max|a f(x)|``:
+Measured in this repository at inference on the nonzero-mean input
+``keras.random.normal((16, 32), seed=0) + 1.0``, statistics primed by one
+``training=True`` pass. The metric is ``max|f(a x) - a f(x)| / max|a f(x)|``:
 
 .. code-block:: text
 
     layer                                      a = 2       a = 3    a = 1000
-    BiasFreeBatchNorm(use_scale=True)      0.000e+00   5.860e-08   9.001e-08
-    BiasFreeBatchNorm(use_scale=False)     0.000e+00   5.860e-08   9.001e-08
-    keras BatchNormalization (primed)      2.759e-03   3.678e-03   5.512e-03
-    keras BatchNormalization(center=False) 2.759e-03   3.678e-03   5.512e-03
-    keras BatchNormalization (UNPRIMED)    0.000e+00   1.143e-07   8.777e-08
-    keras LayerNormalization               5.000e-01   6.666e-01   9.990e-01
+    BiasFreeBatchNorm(use_scale=True)      0.000e+00   7.658e-08   1.176e-07
+    BiasFreeBatchNorm(use_scale=False)     0.000e+00   7.658e-08   1.176e-07
+    keras BatchNormalization (primed)      1.590e-03   2.121e-03   3.178e-03
+    keras BatchNormalization(center=False) 1.590e-03   2.121e-03   3.178e-03
+    keras BatchNormalization (UNPRIMED)    0.000e+00   7.654e-08   1.176e-07
+    keras LayerNormalization               4.998e-01   6.665e-01   9.990e-01
+
+The input construction is part of the claim. The BatchNorm rows scale with how
+far the input mean is from zero, so their digits move with the draw: over seeds
+0, 1 and 2 the ``a = 2`` entry ranges ``1.590e-03`` to ``2.029e-03``. What holds
+at every draw is the STRUCTURE -- the two BiasFreeBatchNorm rows and the
+UNPRIMED row at float32 zero, the two primed BatchNorm rows equal to each other,
+and the LayerNormalization row at the exact ``|1 - a| / a``.
 
 Two of those rows are controls, and they identify the mechanism rather than just
 observing an effect:
 
 * ``BatchNormalization(center=False)`` removes ``beta`` but keeps the moving-mean
-  subtraction, and it is non-homogeneous by exactly the same amount. So the mean
+  subtraction, and it is non-homogeneous by exactly the same amount -- measured
+  bit-identical to the primed default at all three seeds. So the mean
   subtraction alone is enough to break the property.
 * An UNPRIMED ``BatchNormalization``, whose ``moving_mean`` is still at its zero
   initializer so the subtraction is a no-op, is as homogeneous as this layer.
-  After one training pass its ``moving_mean`` reaches ``5.982e-02`` and the
-  property is gone. So it is the NONZERO moving mean that breaks it, not the
-  layer's structure.
+  After one training pass its ``moving_mean`` becomes nonzero (measured
+  ``max|moving_mean| = 1.3164e-02`` at seed 0, ``1.32e-02`` to ``1.54e-02`` over
+  seeds 0-2) and the property is gone. So it is the NONZERO moving mean that
+  breaks it, not the layer's structure.
 
 Stock Keras ``BatchNormalization`` creates and subtracts a ``moving_mean``
 whatever ``center`` is set to. This layer therefore creates NO ``moving_mean``

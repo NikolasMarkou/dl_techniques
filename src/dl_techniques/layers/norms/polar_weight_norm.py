@@ -43,23 +43,30 @@ the symmetric expansion ``(r, psi) -> (r cos psi, r sin psi)`` (PolarQuant
 Algorithm 1). Both maps use ``keras.ops`` only, and both operate on 2-D tensors
 shaped ``(N, d)``.
 
-Measured round-trip error of ``polar_decode(*polar_encode(x))`` against ``x``, on
-standard-normal inputs in float32: ``1.490e-07`` at ``d = 2``, ``3.576e-07`` at
-``d = 8``, ``7.153e-07`` at ``d = 64``.
+Measured round-trip error of ``polar_decode(*polar_encode(x))`` against ``x`` in
+float32, on ``keras.random.normal((4, d), seed=0)``: ``1.490e-07`` at ``d = 2``,
+``3.576e-07`` at ``d = 8``, ``7.153e-07`` at ``d = 64``. Those are sample maxima
+over 4 rows, so they grow with the row count: the same three at
+``keras.random.normal((1000, d), seed=0)`` are ``4.768e-07``, ``7.153e-07`` and
+``1.192e-06``. The error stays at float32 rounding scale; the exact digits do
+not reproduce at another row count.
 
 Properties
 ----------
 **Exact per-unit norm.** After build and after every optimizer step,
-``||kernel[:, j]||_2`` equals ``|radius[j]|``. Measured maximum deviation
-``1.192e-07`` in float32 across ``fan_in`` 5, 7, 8 and 16. Magnitude and direction
-are separate parameters, so they can take different regularizers or learning
-rates.
+``||kernel[:, j]||_2`` equals ``|radius[j]|`` to float32 rounding. Measured
+worst deviation ``2.384e-07`` over ``fan_in`` in {5, 7, 8, 16, 32, 64, 128}
+crossed with ``units`` in {1, 2, 4, 6, 16, 64, 128}. The worst case moves around
+that grid, so treat ``2.384e-07`` as the sweep's maximum, not a proven bound.
+Magnitude and direction are separate parameters, so they can take different
+regularizers or learning rates.
 
 **Initialization matches Dense.** ``build()`` samples a seed kernel from
 ``kernel_initializer``, encodes it, and stores the resulting radius and angles. A
 freshly built layer therefore reproduces the ``Dense`` kernel that the same
 initializer and seed would have produced, to within float32 error. Measured
-``max|polar_kernel - dense_kernel| = 1.192e-07`` at ``fan_in`` 8 and 7. It is not
+worst ``max|polar_kernel - dense_kernel| = 1.788e-07`` over ``fan_in`` in
+{5, 7, 8, 16, 32, 64} crossed with ``units`` in {4, 6, 16, 64, 128}. It is not
 bit-identical; do not assert equality.
 
 **Any fan_in.** A non-power-of-two ``fan_in`` is zero-padded to the next power of
@@ -71,15 +78,20 @@ parameters. Measured angles per unit against ``fan_in - 1``: ratio ``1.000`` at
 **Angular prior, optional.** An ``angle_regularizer`` that pulls level 2 and
 higher angles toward ``pi / 4`` imposes a Gaussian-direction prior. PolarQuant
 Lemma 2 says higher-level angles of a random Gaussian concentrate there, and that
-reproduces here. Measured on 20000 standard-normal rows at ``d = 64``, mean angle
-per level against ``pi / 4 = 0.78540``::
+reproduces here. These are Monte-Carlo estimates, so the seed is part of the
+claim. Measured on ``keras.random.normal((20000, 64), seed=0)``, mean angle per
+level against ``pi / 4 = 0.78540``::
 
-    level 1:  mean -0.00250   std 1.81371   range [-3.14157, +3.14159]
-    level 2:  mean +0.78531   std 0.34188
-    level 3:  mean +0.78473   std 0.24762
-    level 4:  mean +0.78609   std 0.17698
-    level 5:  mean +0.78536   std 0.12522
-    level 6:  mean +0.78564   std 0.08979
+    level 1:  mean +0.00166   std 1.81373   range [-3.14158, +3.14158]
+    level 2:  mean +0.78474   std 0.34192
+    level 3:  mean +0.78555   std 0.24722
+    level 4:  mean +0.78619   std 0.17694
+    level 5:  mean +0.78693   std 0.12505
+    level 6:  mean +0.78568   std 0.08754
+
+Another seed moves the trailing digits: the level-6 std alone moves by about 2%
+between draws. The concentration toward ``pi / 4``, and the narrowing with each
+level, are what hold at every draw.
 
 Level 1 is the exception and is why the prior is scoped to level 2 and above. Its
 angles come from ``atan2`` on signed coordinates and spread over ``[-pi, pi]``.
@@ -188,12 +200,15 @@ def polar_encode(
     After ``log2(d)`` levels one radius is left.
 
     :func:`polar_decode` is the exact inverse, up to float32 error. Measured
-    ``max|decode(encode(x)) - x|``: ``1.490e-07`` at ``d = 2``, ``3.576e-07`` at
-    ``d = 8``, ``7.153e-07`` at ``d = 64``.
+    ``max|decode(encode(x)) - x|`` on ``keras.random.normal((4, d), seed=0)``:
+    ``1.490e-07`` at ``d = 2``, ``3.576e-07`` at ``d = 8``, ``7.153e-07`` at
+    ``d = 64``. Each is a maximum over 4 rows and grows with the row count; see
+    the module docstring for the same triple at 1000 rows.
 
     Angle ranges differ by level, and the difference matters when you write an
     ``angle_regularizer``. Level 1 pairs signed input coordinates, so its angles
-    span ``[-pi, pi]``: measured ``[-3.14157, +3.14159]``. Every later level pairs
+    span ``[-pi, pi]``: measured ``[-3.14158, +3.14158]`` on
+    ``keras.random.normal((20000, 64), seed=0)``. Every later level pairs
     magnitudes, which are non-negative, so its angles land in ``[0, pi / 2]``:
     measured ``[+0.00043, +1.56912]`` at level 2.
 
@@ -356,8 +371,9 @@ class PolarWeightNorm(keras.layers.Layer):
 
     ``build()`` samples a seed kernel from ``kernel_initializer`` and encodes it,
     so a fresh layer reproduces the ``Dense`` kernel that the same initializer and
-    seed would give, to within ``1.192e-07`` in float32. Training then moves the
-    radius and angle parameters.
+    seed would give, to float32 rounding: measured worst ``1.788e-07`` over
+    ``fan_in`` in {5, 7, 8, 16, 32, 64} crossed with ``units`` in
+    {4, 6, 16, 64, 128}. Training then moves the radius and angle parameters.
 
     .. note::
         ``build()`` materializes the seed kernel on the host with NumPy to compute
@@ -631,8 +647,9 @@ class PolarWeightNorm(keras.layers.Layer):
 
         Decodes the angles at unit radius, slices the padding off, renormalizes
         the slice, then scales each row by its radius. Every column of the result
-        has L2 norm ``|radius[j]|``; measured maximum deviation ``1.192e-07`` in
-        float32.
+        has L2 norm ``|radius[j]|`` to float32 rounding; measured worst deviation
+        ``2.384e-07`` over ``fan_in`` in {5, 7, 8, 16, 32, 64, 128} crossed with
+        ``units`` in {1, 2, 4, 6, 16, 64, 128}.
 
         Runs on every forward pass. There is no cached kernel. The whole
         computation is done in float32, whatever the compute dtype is.

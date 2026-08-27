@@ -24,7 +24,9 @@ For an input ``X`` of rank ``N``, with the channel axis last:
 Rank 2 is a degenerate case. The reduction axes are ``range(1, 1)``, an empty
 tuple, and summing over no axis is the identity. ``norm_c`` therefore becomes
 ``sqrt(x ** 2 + eps)``, which is each element's own absolute value. Measured at
-float32: an input of ``[[3.0, -4.0]]`` gives ``[[3.0, 4.0]]``.
+float32 on the input ``[[3.0, -4.0]]``: ``norm_c`` is ``[[3.0, 4.0]]``. The
+layer OUTPUT on that input is ``[[5.571428, -8.571427]]``, because ``gamma``
+initializes to ones and the residual ``X`` is added back.
 
 Weights
 -------

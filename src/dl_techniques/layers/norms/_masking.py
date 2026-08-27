@@ -11,6 +11,14 @@ other token's statistic. Measured cross-token leak on a ``(3, 5, 8)`` input at
 ``axis=1``: ``2.063`` for ``RMSNorm``, and ``0.914`` to ``23.068`` across the
 seven classes that carry the flag.
 
+**Every leak figure quoted in this package is measured at batch size 3**, on a
+``(3, 5, 8)`` input built with ``numpy.random.default_rng(0)`` and perturbed at
+one ``(sample, token)`` slot. The guard test that pins the same behaviour,
+``tests/test_layers/test_norms/test_the_norms_propagate_masks.py``, runs at
+``BATCH = 4`` on purpose, so a reader who reruns it gets a NEARBY but different
+number -- ``max_logit_norm`` measures ``0.922736`` at batch 3 and ``0.910089``
+at batch 4. The test asserts the leak is large, never a specific digit.
+
 So the rule lives here once. All seven flag-carrying classes call it instead of
 re-deriving the test per file. Measured: exactly seven modules in this package
 import it, and each one calls it twice, in ``__init__`` and again in ``build()``.
