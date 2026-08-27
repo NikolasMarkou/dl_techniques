@@ -67,9 +67,10 @@ Caveats:
   smallest fp16 normal, 6.104e-05. The exact count depends on the input;
   measured 92.4% to 95.6% across six N(0,1) inputs of shape (2, 64). A final
   cast to fp16 would flush most of the distribution to zero and break the
-  sum-to-one invariant. The layer casts the decision logits to float32 before
-  the sigmoid, runs the whole tree in float32, and skips the cast back under
-  fp16. Measured output dtype on the same float32 input: ``float32`` gives
+  sum-to-one invariant. The layer widens the decision logits to at least
+  float32 before the sigmoid -- a never-narrow floor, so a float64 policy
+  keeps float64 -- runs the whole tree at that dtype, and skips the cast back
+  under fp16. Measured output dtype on the same float32 input: ``float32`` gives
   float32, ``mixed_float16`` gives float32, ``mixed_bfloat16`` gives
   bfloat16, ``float64`` gives float64. bfloat16 has fp32's exponent range so
   it needs no override. Both ``RoutingProbabilitiesLayer.call`` (at the final
@@ -272,7 +273,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                         ▼
         ┌────────────────────────────────┐
         │ z = x @ kernel (+ bias)        │  weights
-        │ cast to float32                │
+        │ widen to >= float32 (floor)    │
         └───────────────┬────────────────┘
                         ▼  z [batch, d]
         ┌────────────────────────────────┐
@@ -401,11 +402,11 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     _VALID_MODES = ("deterministic", "trainable")
     _VALID_INPUT_NORMS = (None, "l2", "rms")
     # Floor on the renormalization denominator, so a zero row sum cannot
-    # divide by zero. The divide always runs in float32 -- the decision
-    # logits are cast to float32 before the sigmoid and the tree accumulates
-    # in float32 -- so 1e-7 is safely above float32's smallest normal
-    # (1.2e-38). Do not tie this constant to the smallest float16 normal;
-    # the divide never runs in float16.
+    # divide by zero. The divide always runs at AT LEAST float32 -- the
+    # decision logits are widened to a float32 floor before the sigmoid and
+    # the tree accumulates at that dtype -- so 1e-7 is safely above float32's
+    # smallest normal (1.2e-38), and above float64's. Do not tie this constant
+    # to the smallest float16 normal; the divide never runs in float16.
     _RENORM_TINY = 1e-7
     # Floor used when L2-normalizing the cosine basis columns, and when
     # normalizing the input in call(). Kept separate from ``self.epsilon``,
@@ -817,13 +818,31 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         if self.bias is not None:
             decision_logits = decision_logits + self.bias
 
-        # Cast to float32 BEFORE the sigmoid and the clip, because in fp16 the
-        # clip stops working at the top end. np.float16(1 - 1e-7) is exactly
-        # 1.0, so the upper clip is a no-op and a saturated sigmoid leaves
-        # p_go_left = 1 - 1.0 = 0.0, zeroing a whole subtree. (The floor is
-        # not the problem: np.float16(1e-7) is a subnormal 1e-07, not zero.)
-        # The sigmoid, the clip and the whole tree therefore run in float32.
-        decision_logits = keras.ops.cast(decision_logits, "float32")
+        # Resolve the dtype the tree runs at: a never-narrow FLOOR, the wider
+        # of the incoming dtype and float32. Never an absolute target.
+        #
+        # Widening is mandatory under fp16, where the clip stops working at
+        # the top end: np.float16(1 - 1e-7) is exactly 1.0, so the upper clip
+        # is a no-op and a saturated sigmoid leaves p_go_left = 1 - 1.0 = 0.0,
+        # zeroing a whole subtree. (The lower end is fine: np.float16(1e-7) is
+        # a subnormal 1e-07, not zero.) bfloat16 has even less mantissa, so it
+        # is widened too.
+        #
+        # Do NOT write this as ``cast(decision_logits, "float32")``. That form
+        # fixes fp16 but NARROWS a float64 policy back to float32 precision,
+        # so a caller who selects float64 to tighten the sum-to-one invariant
+        # gets float32's ~1e-07 floor and no warning. Measured before the fix:
+        # float32 policy 8.0e-08, float64 policy 8.4e-08 -- identical.
+        #
+        # The sigmoid, the clip, the masks and the whole tree accumulation all
+        # run at ``tree_dtype``; they must agree or the widening is undone by
+        # an implicit promotion. Recorded as L-30 in the owning plan.
+        incoming_dtype = keras.backend.standardize_dtype(decision_logits.dtype)
+        tree_dtype = (
+            "float32" if incoming_dtype in ("float16", "bfloat16")
+            else incoming_dtype
+        )
+        decision_logits = keras.ops.cast(decision_logits, tree_dtype)
 
         decision_probs = keras.ops.sigmoid(decision_logits)
         decision_probs = keras.ops.clip(
@@ -831,12 +850,15 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         )
 
         # --- Step 2: Initialize root probability mass = 1.0 ---
-        # decision_probs is already float32 from the cast above; the tree
-        # accumulation continues in float32 regardless of compute dtype.
-        mask_mul = keras.ops.convert_to_tensor(self._mask_mul_np, dtype="float32")
-        mask_add = keras.ops.convert_to_tensor(self._mask_add_np, dtype="float32")
+        # decision_probs is already at ``tree_dtype`` from the cast above.
+        # These three operands take the SAME dtype: if any of them stayed at a
+        # hardcoded float32 the accumulation would be pulled back down to
+        # float32 under a float64 policy and the widening above would buy
+        # nothing.
+        mask_mul = keras.ops.convert_to_tensor(self._mask_mul_np, dtype=tree_dtype)
+        mask_add = keras.ops.convert_to_tensor(self._mask_add_np, dtype=tree_dtype)
         batch_size = keras.ops.shape(inputs_2d)[0]
-        padded_probs = keras.ops.ones((batch_size, 1), dtype="float32")
+        padded_probs = keras.ops.ones((batch_size, 1), dtype=tree_dtype)
 
         # --- Step 3: Iteratively split tree (with per-parent overrides) ---
         # At each level k, p_eff[k, j] = p_decision * mask_mul[k, j]
