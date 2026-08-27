@@ -62,6 +62,7 @@ References:
 # ---------------------------------------------------------------------
 
 import keras
+import numpy as np
 from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
@@ -584,7 +585,7 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _compute_attention_mask(self, height: int, width: int) -> keras.Variable:
+    def _compute_attention_mask(self, height: int, width: int) -> np.ndarray:
         """Compute attention mask for shifted window attention (SW-MSA).
 
         Builds the SW-MSA mask for the ACTUAL static feature-map size
@@ -606,7 +607,7 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         :return: Attention mask of shape ``(num_windows, window_area, window_area)``
             with 0.0 for valid pairs and -100.0 for masked pairs, where
             ``num_windows = (height // ws) * (width // ws)``.
-        :rtype: keras.Variable
+        :rtype: numpy.ndarray
         """
         # Define slice indices for creating region boundaries
         # These create a 3x3 grid of regions after the shift
@@ -621,8 +622,9 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             slice(-self._shift_size, None)
         )
 
-        # Create a mask image with region indices using numpy (for static computation)
-        import numpy as np
+        # Create a mask image with region indices using numpy (for static computation).
+        # `numpy` is imported at module scope so this method's return annotation
+        # (`np.ndarray`) resolves at class-definition time.
 
         # Build the index mask at the ACTUAL feature-map size (general H, W),
         # not a fixed 2x2-window grid.
@@ -655,12 +657,34 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         attn_mask = mask_windows[:, :, np.newaxis] - mask_windows[:, np.newaxis, :]
         attn_mask = np.where(attn_mask != 0, -100.0, 0.0).astype(np.float32)
 
-        # Return as non-trainable Keras Variable
-        return keras.Variable(
-            initializer=attn_mask,
-            trainable=False,
-            name="attention_mask"
-        )
+        # DECISION plan-2026-08-27T040114-580f8b63/D-011
+        # Returned as a CONSTANT TENSOR, not a `keras.Variable`. This mask is a
+        # pure function of `(shift_size, window_size, height, width)` -- all of
+        # which come from the config and the static input shape -- so it carries
+        # no state to track, save or restore.
+        #
+        # It used to be a bare `keras.Variable(...)`. A bare Variable is not
+        # attributed to THIS layer, so Keras charged it to whichever layer was on
+        # the build stack; inside a subclassed `keras.Model` that is the Model,
+        # which is already built by then, and every `shift_size > 0` layer died
+        # with `ValueError: You cannot add new elements of state (variables or
+        # sub-layers) to a layer that is already built.` on the first bare call,
+        # `fit()` and `predict()` alike. No test caught it: the SW-MSA tests call
+        # the bare layer directly, and the only Model-wrapper test uses
+        # `shift_size=0`, which takes the `None` branch above.
+        #
+        # Do NOT "fix" this back into `self.add_weight(...)`. That would make a
+        # derived constant part of the checkpoint, and the zero-init + `.assign()`
+        # spelling of it is silently discarded under `StatelessScope`.
+        #
+        # It is also deliberately kept as a NUMPY array rather than converted here
+        # with `keras.ops.convert_to_tensor`. `build()` runs inside a scratch
+        # FuncGraph, so a tensor materialised here is out of scope by the time
+        # `call()` runs: `ValueError: The tensor ... cannot be accessed from here,
+        # because it was defined in FuncGraph(name=scratch_graph) which is out of
+        # scope.` The conversion belongs at the USE site in `call()`, where a numpy
+        # constant is simply baked into whichever graph is tracing.
+        return attn_mask
 
     def _window_partition(
             self,
@@ -991,7 +1015,9 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             # attn_scores: (B*nW, num_heads, wa, wa). Broadcast mask over batch and heads.
             num_windows_per_image = (height // self._window_size) * (width // self._window_size)
             mask = keras.ops.reshape(
-                self._attn_mask,
+                keras.ops.cast(
+                    keras.ops.convert_to_tensor(self._attn_mask), attn_scores.dtype
+                ),
                 (num_windows_per_image, 1, self._window_area, self._window_area)
             )
             # Tile B times along axis 0 to match the B-major/window-minor
