@@ -55,6 +55,11 @@ from dl_techniques.layers.attention.single_window_attention import (
     SingleWindowAttention,
 )
 
+# The hand-computed oracle below compares a GPU matmul against numpy at
+# atol=1e-5, which Ampere TF32 (~1e-3 relative) breaks: it passes on CPU and
+# fails on an RTX 4070. Same opt-in `test_linear_attention.py` uses.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
 DIM = 32
 HEADS = 4
 HEAD_DIM = DIM // HEADS
@@ -134,6 +139,52 @@ def test_the_stored_scale_is_the_inverse_square_root_of_head_dim(name):
     assert float(getattr(layer, attribute)) == pytest.approx(
         HEAD_DIM ** -0.5, rel=1e-6
     ), f"{name}: stored scale is not head_dim ** -0.5"
+
+
+def test_the_scale_divides_rather_than_multiplies_would_be_caught():
+    """Direction, not just presence.
+
+    The perturbation test below proves the stored scale REACHES the logits. It
+    does not prove the logits are scaled the right WAY: replacing `q * scale`
+    with `q / scale` is a factor-of-head_dim error -- exactly the "logits grow
+    with head_dim, softmax saturates" failure this file exists to prevent -- and
+    an adversarial review measured it leaving 73 tests green.
+
+    So one hand-computed VALUE oracle is pinned here, on
+    `MultiHeadCrossAttention` because `multi_head` and `perceiver` both delegate
+    to it. Every projection is forced to the identity, reducing the layer to
+    plain scaled dot-product attention whose expected values come from numpy.
+    """
+    dim, heads = 4, 1
+    head_dim = dim // heads
+    keras.utils.set_random_seed(0)
+    layer = MultiHeadCrossAttention(dim=dim, num_heads=heads, use_bias=False)
+    tokens = np.random.RandomState(5).randn(1, 3, dim).astype("float32")
+    layer(tokens, training=False)  # build
+
+    # `kv_dense` is FUSED: one (dim, 2*dim) kernel producing K and V, so the
+    # identity for it is [I | I] rather than a square I.
+    identity = np.eye(dim, dtype="float32")
+    layer.q_dense.set_weights([identity])
+    layer.kv_dense.set_weights([np.concatenate([identity, identity], axis=1)])
+    layer.proj_dense.set_weights([identity])
+
+    actual = np.asarray(layer(tokens, training=False))
+
+    logits = (tokens[0] @ tokens[0].T) * (head_dim ** -0.5)
+    shifted = logits - logits.max(axis=-1, keepdims=True)
+    probs = np.exp(shifted)
+    probs = probs / probs.sum(axis=-1, keepdims=True)
+    expected = probs @ tokens[0]
+
+    np.testing.assert_allclose(
+        actual[0], expected, atol=1e-5, rtol=0,
+        err_msg=(
+            "the pre-softmax logits are not scaled by exactly head_dim ** -0.5; "
+            "a dropped scale, an inverted one (`/` instead of `*`) or a wrong "
+            "exponent all land here"
+        ),
+    )
 
 
 @pytest.mark.parametrize("name", sorted(LAYERS))

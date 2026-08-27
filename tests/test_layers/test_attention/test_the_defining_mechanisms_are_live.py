@@ -121,10 +121,83 @@ def test_kv_heads_are_shared_by_contiguous_query_groups():
         "K is as wide as Q, so nothing is being shared and this is not GQA"
     )
 
+    # The shape assertions above catch a COLLAPSE (to MQA) or an EXPANSION (to
+    # full MHA), because both change a projection width. They CANNOT catch the
+    # ORDERING defect -- `repeat` gives [kv0, kv0, kv1, kv1] while `tile` gives
+    # [kv0, kv1, kv0, kv1] -- because both produce identically shaped tensors.
+    #
+    # Measured: swapping to `tile` moves the output by 1.4769 and left all 63
+    # tests in this file and the GQA suite GREEN. This guard shipped with a
+    # docstring promising a perturbation its body did not contain; an adversarial
+    # review caught it. The ordering is now pinned against an EXTERNAL oracle.
+    ordering_layer, tokens, weights_by_name = _gqa_probe()
+    actual = np.asarray(ordering_layer(tokens, training=False))
 
-# --------------------------------------------------------------------------
-# BeitAttention -- the relative-position bias must be PER HEAD
-# --------------------------------------------------------------------------
+    matched = {
+        order: np.abs(actual - _gqa_reference(tokens, weights_by_name, order)).max()
+        for order in ("repeat", "tile")
+    }
+    assert matched["repeat"] < 1e-5, (
+        f"the layer does not match a contiguous (`repeat`) grouping: "
+        f"max|delta| = {matched['repeat']}"
+    )
+    assert matched["tile"] > 1e-2, (
+        f"the layer matches an INTERLEAVED (`tile`) grouping as closely as a "
+        f"contiguous one ({matched['tile']}), so query head i is paired with the "
+        "wrong KV head"
+    )
+
+
+def _gqa_probe():
+    """A RoPE-free GQA layer plus its inputs, for the ordering oracle.
+
+    `rope_percentage=0.0` disables the rotary embedding so the oracle below can
+    be plain scaled dot-product attention; the grouping order is what is under
+    test, and RoPE is orthogonal to it.
+    """
+    keras.utils.set_random_seed(0)
+    layer = GroupedQueryAttention(
+        dim=DIM, num_heads=8, num_kv_heads=2, rope_percentage=0.0
+    )
+    tokens = np.random.default_rng(0).normal(size=(1, 16, DIM)).astype("float32")
+    layer(tokens, training=False)
+    weights = {w.path.split("/")[-2]: np.asarray(w) for w in layer.weights}
+    return layer, tokens, weights
+
+
+def _gqa_reference(tokens, weights, order):
+    """Scaled dot-product attention with the KV heads grouped `order`-wise.
+
+    Built from the layer's own projection weights but never calling the layer's
+    attention math, so it is external to the code path under test.
+    """
+    heads, kv_heads = 8, 2
+    head_dim = DIM // heads
+    groups = heads // kv_heads
+    batch, length = tokens.shape[0], tokens.shape[1]
+
+    def _heads(matrix, count):
+        return (tokens @ matrix).reshape(
+            batch, length, count, head_dim
+        ).transpose(0, 2, 1, 3)
+
+    query = _heads(weights["w_q"], heads)
+    key = _heads(weights["w_k"], kv_heads)
+    value = _heads(weights["w_v"], kv_heads)
+
+    if order == "repeat":
+        key, value = (np.repeat(t, groups, axis=1) for t in (key, value))
+    else:
+        key, value = (np.tile(t, (1, groups, 1, 1)) for t in (key, value))
+
+    scores = (query @ key.transpose(0, 1, 3, 2)) / np.sqrt(head_dim)
+    scores = scores - scores.max(axis=-1, keepdims=True)
+    weights_ = np.exp(scores)
+    attended = (weights_ / weights_.sum(axis=-1, keepdims=True)) @ value
+    merged = attended.transpose(0, 2, 1, 3).reshape(batch, length, DIM)
+    return merged @ weights["w_o"]
+
+
 def test_the_relative_position_bias_differs_across_heads():
     """Collapsing every head's bias onto head 0's passes all 99 tests.
 

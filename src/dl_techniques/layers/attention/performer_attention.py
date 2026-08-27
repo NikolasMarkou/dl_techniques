@@ -49,22 +49,38 @@ against an independent `softmax(QK^T/sqrt(d))V` reference at `head_dim=16`,
     rel. error : 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
 
 The per-redraw VARIANCE does shrink with `m` as a Monte-Carlo estimator should; the
-BIAS plateaus at ~0.78 and does not move. Three things cause it: the norm-correction
-factor carries `exp(-||x||^2/2)` where the trigonometric random-feature identity
-`exp(q.k) = exp(||q||^2/2) exp(||k||^2/2) E_w[cos(w.(q-k))]` calls for `+`; it is
-applied to queries only rather than symmetrized across queries and keys; and the
-`ops.maximum(features, 0)` clamp at the end of `_create_kernel_features` discards the
-sign information a cos/sin feature map carries.
+BIAS plateaus at ~0.78 and does not move.
 
-Do NOT "correct" those three without re-measuring. It was tried and rejected
-(decisions.md D-013): the corrected trigonometric map and a textbook positive FAVOR+
-map both DO converge under the symmetric `d^(-1/4)` scaling FAVOR+ assumes
-(`309.97 -> 0.21` and `1.54 -> 0.49` across `m = 8 .. 32768`), but they cross below
-this map's error only past `m ~ 10^4`, and at every feature count anyone actually
-sets they are two to three orders of magnitude WORSE -- at `m = 128`, `82.7` and
-`2.08` against this map's `0.78`. The clamp buys a large variance reduction at the
-price of a bias floor, and removing it makes real configurations worse. Symmetric
-scaling alone does not move the floor either (`0.7826 -> 0.7736` at `m = 128`).
+WHAT CAUSES THE FLOOR IS NOT ESTABLISHED, and an earlier version of this paragraph
+named three causes that ablation does not support. Measured by ablation, same
+harness, mean of 20 redraws:
+
+    features m :      8       32      128      512     2048     8192
+    as shipped : 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
+    no norm fac: 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
+    no clamp   : 317.5    221.7    160.3    404.7    105.7     11.3
+
+* The query-side `exp(-||x||^2/2)` factor is **INERT**. It multiplies phi(q)
+  uniformly, so it cancels between the numerator and the denominator of
+  `phi(Q)(phi(K)^T V) / phi(Q)(phi(K)^T 1)`. Removing it changes nothing to four
+  decimals. It is neither a cause of the floor nor a defect; it is a no-op.
+* The `ops.maximum(features, 0)` clamp is **load-bearing for variance**, not the
+  cause of the floor. Removing it alone is catastrophic (two to four orders
+  worse), because the unclamped cos/sin features make the denominator pass
+  through zero.
+
+So: the bias is real and reproducible, the estimator does not converge, and the
+mechanism is OPEN. Do not "correct" the feature map on the strength of a story
+about which term is at fault -- ablate first, in this harness, and compare against
+the shipped map AT THE SAME m.
+
+Two corrected maps were tried and rejected (decisions.md D-013): a fixed
+trigonometric map and a textbook positive FAVOR+ map both converge under the
+symmetric `d^(-1/4)` scaling FAVOR+ assumes, but neither beats the shipped map at
+the feature counts anyone sets. At `m = 128` they measured 82.7 and 2.08 against
+this map's 0.78 -- the trigonometric one by two orders, the FAVOR+ one by about
+2.7x. Symmetric scaling alone does not move the floor either
+(`0.7826 -> 0.7736` at `m = 128`).
 
 Use this layer for its linear `O(N)` cost. Do not use it where the answer must
 approach softmax attention, and do not read `nb_features` as a quality dial.
