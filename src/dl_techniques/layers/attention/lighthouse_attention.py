@@ -141,7 +141,10 @@ References:
 import keras
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union, List
-from keras import ops, layers, initializers, regularizers
+# `import keras` only, per the repo convention: this file used
+# `from keras import ops, layers, initializers, regularizers` until 2026-08-27,
+# the last such import in layers/attention/ outside the five legacy files that
+# are deliberately left alone (decisions.md D-026).
 
 # ---------------------------------------------------------------------
 # local imports
@@ -469,11 +472,11 @@ class LighthouseAttention(keras.layers.Layer):
     :type use_bias: bool
     :param kernel_initializer: Initializer for Dense kernels.
         Defaults to ``"glorot_uniform"``.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for biases. Defaults to ``"zeros"``.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional kernel regularizer.
-    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param dropout_rate: Dropout applied to the normalized attention weights in
         both the pyramid and full-attention paths. Defaults to 0.0.
     :type dropout_rate: float
@@ -543,9 +546,9 @@ class LighthouseAttention(keras.layers.Layer):
         probability_type: str = "softmax",
         probability_config: Optional[Dict[str, Any]] = None,
         use_bias: bool = False,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        bias_initializer: Union[str, initializers.Initializer] = "zeros",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+        bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         dropout_rate: float = 0.0,
         **kwargs: Any,
     ) -> None:
@@ -610,9 +613,9 @@ class LighthouseAttention(keras.layers.Layer):
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.dropout_rate = dropout_rate
 
         # Derived static ints.
@@ -622,8 +625,8 @@ class LighthouseAttention(keras.layers.Layer):
         # ---- sub-layers (built in build()) ----
         proj_units = num_heads * head_dim
 
-        def _dense(units: int, name: str) -> layers.Dense:
-            return layers.Dense(
+        def _dense(units: int, name: str) -> keras.layers.Dense:
+            return keras.layers.Dense(
                 units,
                 use_bias=use_bias,
                 kernel_initializer=self.kernel_initializer,
@@ -657,7 +660,7 @@ class LighthouseAttention(keras.layers.Layer):
             name="attn_prob",
         )
         self.attn_dropout = (
-            layers.Dropout(dropout_rate, name="attn_dropout")
+            keras.layers.Dropout(dropout_rate, name="attn_dropout")
             if dropout_rate > 0.0
             else None
         )
@@ -716,9 +719,9 @@ class LighthouseAttention(keras.layers.Layer):
                 "probability_type": self.probability_type,
                 "probability_config": self.probability_config,
                 "use_bias": self.use_bias,
-                "kernel_initializer": initializers.serialize(self.kernel_initializer),
-                "bias_initializer": initializers.serialize(self.bias_initializer),
-                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+                "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+                "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
                 "dropout_rate": self.dropout_rate,
             }
         )
@@ -740,7 +743,7 @@ class LighthouseAttention(keras.layers.Layer):
         as plain numpy arrays — they are pure functions of ``(N, num_levels,
         pooling_factor)`` and are re-derived in a fresh ``build()`` after
         ``from_config()`` restoration. See LESSONS: frozen tensor state must NOT
-        live in plain ``ops.*`` tensors created in ``build()``.
+        live in plain ``keras.ops.*`` tensors created in ``build()``.
 
         :param input_shape: ``(B, N, dim)``.
         :raises ValueError: Non-3D input, or static ``N`` not divisible by
@@ -823,7 +826,7 @@ class LighthouseAttention(keras.layers.Layer):
         # DECISION plan-2026-07-29T110112-09832856/D-023
         # ---------------------------------------------------------------
         # PARTITION THE DISCRETIONARY BUDGET BY CAUSAL TIME. DO NOT REPLACE
-        # THIS WITH A SINGLE GLOBAL `ops.top_k` OVER ALL CANDIDATES — that is
+        # THIS WITH A SINGLE GLOBAL `keras.ops.top_k` OVER ALL CANDIDATES — that is
         # the causality defect this layer shipped with, and it is structural,
         # not a masking slip.
         #
@@ -911,7 +914,14 @@ class LighthouseAttention(keras.layers.Layer):
                 self.top_k, n_cand, n, self._effective_k,
             )
 
-        # DECISION D-001 item 2: segment_sum has no broadcast form, so the
+        # De-anchored 2026-08-27: this read `# DECISION D-001 item 2`, a BARE
+        # anchor with no plan-id prefix, which `validate-plan.mjs` reports as
+        # `anchor-unqualified`. Its owner is `plan_2026-07-26_c41d09b2` (the D-004
+        # block above calls itself a "REVISION of D-001"), but that plan directory
+        # has been sliding-window trimmed and no D-001 entry survives anywhere in
+        # `plans/`, so qualifying it would produce an unresolvable orphan instead.
+        # The reasoning is kept inline, which is what an anchor is for:
+        # segment_sum has no broadcast form, so the
         # scatter materialises one value row per (entry, target) pair.
         tiled = self._S_sel * self._max_fanout
         if tiled > 4 * n:
@@ -939,7 +949,7 @@ class LighthouseAttention(keras.layers.Layer):
         """Return a cached device tensor for a static numpy buffer."""
         cached = self._const_cache.get(name)
         if cached is None:
-            cached = ops.convert_to_tensor(arr.astype(dtype))
+            cached = keras.ops.convert_to_tensor(arr.astype(dtype))
             self._const_cache[name] = cached
         return cached
 
@@ -951,7 +961,7 @@ class LighthouseAttention(keras.layers.Layer):
 
         Level 0 is an identity copy (N entries). Each successive level ``l``
         reshapes the base sequence into ``(B, N/p^l, p^l, H, D)`` and reduces
-        over the window axis with ``ops.mean`` — equivalent to pooling from
+        over the window axis with ``keras.ops.mean`` — equivalent to pooling from
         level ``l-1`` because the windows are equal-sized and nested. Levels are
         concatenated along the sequence axis from level 0 to L-1 (Eq. 3).
         """
@@ -965,9 +975,9 @@ class LighthouseAttention(keras.layers.Layer):
             else:
                 # (B, N, H, D) -> (B, N/p^l, p^l, H, D) -> mean over axis=2.
                 # Batch stays dynamic via -1; every other dim is static.
-                reshaped = ops.reshape(x_heads, (-1, n // fanout, fanout, h, d))
-                parts.append(ops.mean(reshaped, axis=2))
-        return ops.concatenate(parts, axis=1)  # (B, S_pyr, H, D)
+                reshaped = keras.ops.reshape(x_heads, (-1, n // fanout, fanout, h, d))
+                parts.append(keras.ops.mean(reshaped, axis=2))
+        return keras.ops.concatenate(parts, axis=1)  # (B, S_pyr, H, D)
 
     def _norm_scorer(
         self,
@@ -990,8 +1000,8 @@ class LighthouseAttention(keras.layers.Layer):
         n = self._N_static
         h = self.num_heads
 
-        s_q0 = ops.norm(q_raw, axis=-1)  # (B, N, H)
-        s_k0 = ops.norm(k_raw, axis=-1)  # (B, N, H)
+        s_q0 = keras.ops.norm(q_raw, axis=-1)  # (B, N, H)
+        s_k0 = keras.ops.norm(k_raw, axis=-1)  # (B, N, H)
 
         q_parts: List[keras.KerasTensor] = []
         k_parts: List[keras.KerasTensor] = []
@@ -1001,20 +1011,21 @@ class LighthouseAttention(keras.layers.Layer):
                 q_parts.append(s_q0)
                 k_parts.append(s_k0)
             else:
-                q_resh = ops.reshape(s_q0, (-1, n // fanout, fanout, h))
-                k_resh = ops.reshape(s_k0, (-1, n // fanout, fanout, h))
-                q_parts.append(ops.max(q_resh, axis=2))
-                k_parts.append(ops.max(k_resh, axis=2))
+                q_resh = keras.ops.reshape(s_q0, (-1, n // fanout, fanout, h))
+                k_resh = keras.ops.reshape(s_k0, (-1, n // fanout, fanout, h))
+                q_parts.append(keras.ops.max(q_resh, axis=2))
+                k_parts.append(keras.ops.max(k_resh, axis=2))
         return (
-            ops.concatenate(q_parts, axis=1),  # (B, S_pyr, H)
-            ops.concatenate(k_parts, axis=1),  # (B, S_pyr, H)
+            keras.ops.concatenate(q_parts, axis=1),  # (B, S_pyr, H)
+            keras.ops.concatenate(k_parts, axis=1),  # (B, S_pyr, H)
         )
 
     # ------------------------------------------------------------------
     # Selection
     # ------------------------------------------------------------------
     # Top-K is shared across heads (single (B, S) index set, not per-head) —
-    # port simplification, DECISION D-001 item 5. The mandatory set is additive
+    # port simplification, from the same retired D-001 (see the de-anchoring note
+    # in `_scatter_to_base`). The mandatory set is additive
     # to top_k rather than competing with it, and the union is sorted by causal
     # timestamp so that a plain triangular mask over the gathered sub-sequence is
     # exact.
@@ -1026,14 +1037,14 @@ class LighthouseAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Return the (B, S) gathered index set, sorted by causal position."""
         # Per-entry max across the QK / KQ streams, then collapse heads.
-        joint = ops.maximum(s_qk_pyr, s_kq_pyr)  # (B, S_pyr, H)
+        joint = keras.ops.maximum(s_qk_pyr, s_kq_pyr)  # (B, S_pyr, H)
         if self.score_head_reduction == "mean":
-            s_shared = ops.mean(joint, axis=-1)  # (B, S_pyr)
+            s_shared = keras.ops.mean(joint, axis=-1)  # (B, S_pyr)
         else:
-            s_shared = ops.max(joint, axis=-1)
+            s_shared = keras.ops.max(joint, axis=-1)
 
         mand_1d = self._const("mandatory", self._mandatory_indices, "int32")
-        selected = ops.broadcast_to(
+        selected = keras.ops.broadcast_to(
             mand_1d[None, :], (batch_size, int(self._mandatory_indices.size))
         )
 
@@ -1054,36 +1065,36 @@ class LighthouseAttention(keras.layers.Layer):
             # (B, nb, W) scores. Padded slots must never win, so they are
             # pushed below any real score with the dtype-safe sentinel rather
             # than -inf (which NaNs a fully padded row under fp16).
-            flat = ops.reshape(block_cand, (-1,))
-            s_blocks = ops.take(s_shared, flat, axis=1)
-            s_blocks = ops.reshape(
+            flat = keras.ops.reshape(block_cand, (-1,))
+            s_blocks = keras.ops.take(s_shared, flat, axis=1)
+            s_blocks = keras.ops.reshape(
                 s_blocks, (-1, nb, int(self._sel_block_cand.shape[1]))
             )
-            s_blocks = ops.where(
+            s_blocks = keras.ops.where(
                 valid[None, :, :],
                 s_blocks,
-                ops.cast(_mask_value(s_blocks.dtype), s_blocks.dtype),
+                keras.ops.cast(_mask_value(s_blocks.dtype), s_blocks.dtype),
             )
 
-            _, local_idx = ops.top_k(s_blocks, k=per_b)  # (B, nb, per_b)
-            picked = ops.take_along_axis(
-                ops.broadcast_to(
+            _, local_idx = keras.ops.top_k(s_blocks, k=per_b)  # (B, nb, per_b)
+            picked = keras.ops.take_along_axis(
+                keras.ops.broadcast_to(
                     block_cand[None, :, :],
-                    ops.shape(s_blocks),
+                    keras.ops.shape(s_blocks),
                 ),
                 local_idx,
                 axis=-1,
             )  # (B, nb, per_b) pyramid indices
-            fine = ops.reshape(picked, (-1, nb * per_b))
-            selected = ops.concatenate([selected, fine], axis=1)
+            fine = keras.ops.reshape(picked, (-1, nb * per_b))
+            selected = keras.ops.concatenate([selected, fine], axis=1)
 
         # Sort by causal timestamp (last summarised base position). Ordering by
         # the window *start* instead would let a fine entry read a coarse summary
         # spanning its own future — see DECISION D-004(c).
         causal_t = self._const("causal_pos", self._causal_pos, "int32")
-        t_of_selected = ops.take(causal_t, selected, axis=0)  # (B, S)
-        order = ops.argsort(t_of_selected, axis=-1)
-        return ops.take_along_axis(selected, order, axis=-1)
+        t_of_selected = keras.ops.take(causal_t, selected, axis=0)  # (B, S)
+        order = keras.ops.argsort(t_of_selected, axis=-1)
+        return keras.ops.take_along_axis(selected, order, axis=-1)
 
     # ------------------------------------------------------------------
     # Attention
@@ -1097,34 +1108,34 @@ class LighthouseAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Causal scaled dot-product attention over (B, S, H, D) tensors.
 
-        Written out rather than delegated to ``ops.dot_product_attention`` so
+        Written out rather than delegated to ``keras.ops.dot_product_attention`` so
         that ``self.attn_prob`` controls score normalization. Shared by the
         pyramid path (where ``S`` is the gathered sub-sequence, and the mask is
         exact because the gather is sorted by causal timestamp) and the Stage-2
         full-attention path (where ``S = N``).
         """
         # (B, S, H, D) -> (B, H, S, D)
-        q_t = ops.transpose(q_heads, (0, 2, 1, 3))
-        k_t = ops.transpose(k_heads, (0, 2, 1, 3))
-        v_t = ops.transpose(v_heads, (0, 2, 1, 3))
+        q_t = keras.ops.transpose(q_heads, (0, 2, 1, 3))
+        k_t = keras.ops.transpose(k_heads, (0, 2, 1, 3))
+        v_t = keras.ops.transpose(v_heads, (0, 2, 1, 3))
 
-        # DECISION plan_2026-06-14_33b77a7a/D-002: reuse precomputed self._scale (D-002 pattern); ops.cast(self._scale,dt) == 1/ops.sqrt(cast(head_dim,dt)) in float32. Do NOT recompute ops.sqrt per call.
-        scale = ops.cast(self._scale, q_t.dtype)
-        scores = ops.matmul(q_t, ops.transpose(k_t, (0, 1, 3, 2))) * scale
+        # DECISION plan_2026-06-14_33b77a7a/D-002: reuse precomputed self._scale (D-002 pattern); keras.ops.cast(self._scale,dt) == 1/keras.ops.sqrt(cast(head_dim,dt)) in float32. Do NOT recompute keras.ops.sqrt per call.
+        scale = keras.ops.cast(self._scale, q_t.dtype)
+        scores = keras.ops.matmul(q_t, keras.ops.transpose(k_t, (0, 1, 3, 2))) * scale
 
         # Lower-triangular keep-mask, inclusive of the diagonal.
-        i = ops.arange(ops.shape(scores)[-2])
-        j = ops.arange(ops.shape(scores)[-1])
-        keep = ops.expand_dims(j, 0) <= ops.expand_dims(i, -1)
-        scores = ops.where(
-            keep, scores, ops.cast(_mask_value(scores.dtype), scores.dtype)
+        i = keras.ops.arange(keras.ops.shape(scores)[-2])
+        j = keras.ops.arange(keras.ops.shape(scores)[-1])
+        keep = keras.ops.expand_dims(j, 0) <= keras.ops.expand_dims(i, -1)
+        scores = keras.ops.where(
+            keep, scores, keras.ops.cast(_mask_value(scores.dtype), scores.dtype)
         )
 
         attn = self.attn_prob(scores)
         if self.attn_dropout is not None:
             attn = self.attn_dropout(attn, training=training)
-        out_t = ops.matmul(attn, v_t)  # (B, H, S, D)
-        return ops.transpose(out_t, (0, 2, 1, 3))  # (B, S, H, D)
+        out_t = keras.ops.matmul(attn, v_t)  # (B, H, S, D)
+        return keras.ops.transpose(out_t, (0, 2, 1, 3))  # (B, S, H, D)
 
     def _gather_and_attend(
         self,
@@ -1137,9 +1148,9 @@ class LighthouseAttention(keras.layers.Layer):
         """Gather pyramid entries at ``sel_idx`` and run causal SDPA."""
         # sel_idx: (B, S). Expand to (B, S, 1, 1) for gather along axis=1.
         idx_exp = sel_idx[:, :, None, None]
-        q_g = ops.take_along_axis(q_pyr, idx_exp, axis=1)  # (B, S, H, D)
-        k_g = ops.take_along_axis(k_pyr, idx_exp, axis=1)
-        v_g = ops.take_along_axis(v_pyr, idx_exp, axis=1)
+        q_g = keras.ops.take_along_axis(q_pyr, idx_exp, axis=1)  # (B, S, H, D)
+        k_g = keras.ops.take_along_axis(k_pyr, idx_exp, axis=1)
+        v_g = keras.ops.take_along_axis(v_pyr, idx_exp, axis=1)
         return self._causal_sdpa(q_g, k_g, v_g, training)
 
     # ------------------------------------------------------------------
@@ -1164,23 +1175,23 @@ class LighthouseAttention(keras.layers.Layer):
 
         targets_t = self._const("targets", self._scatter_targets, "int32")
         valid_t = self._const("valid", self._scatter_valid_mask, "float32")
-        targets_g = ops.take(targets_t, sel_idx, axis=0)  # (B, S, F)
-        valid_g = ops.cast(ops.take(valid_t, sel_idx, axis=0), out_g.dtype)
+        targets_g = keras.ops.take(targets_t, sel_idx, axis=0)  # (B, S, F)
+        valid_g = keras.ops.cast(keras.ops.take(valid_t, sel_idx, axis=0), out_g.dtype)
 
         # Tile output along fanout: (B, S, F, H, D). segment_sum has no broadcast
         # form, so this F-fold expansion is inherent to the deterministic path;
         # build() warns when it dominates.
-        out_tiled = ops.repeat(out_g[:, :, None, :, :], fanout, axis=2)
+        out_tiled = keras.ops.repeat(out_g[:, :, None, :, :], fanout, axis=2)
         out_tiled = out_tiled * valid_g[..., None, None]
 
-        out_flat = ops.reshape(out_tiled, (-1, h, d))              # (B*S*F, H, D)
-        targets_flat = ops.reshape(targets_g, (-1, s_sel * fanout))  # (B, S*F)
+        out_flat = keras.ops.reshape(out_tiled, (-1, h, d))              # (B*S*F, H, D)
+        targets_flat = keras.ops.reshape(targets_g, (-1, s_sel * fanout))  # (B, S*F)
 
         # Encode (batch, target) into one segment id; N+1 slots per batch with N
         # as the "drop" sentinel.
-        batch_offset = ops.arange(batch_size, dtype="int32") * (n + 1)
-        flat_segments = ops.reshape(
-            ops.cast(targets_flat, "int32") + batch_offset[:, None], (-1,)
+        batch_offset = keras.ops.arange(batch_size, dtype="int32") * (n + 1)
+        flat_segments = keras.ops.reshape(
+            keras.ops.cast(targets_flat, "int32") + batch_offset[:, None], (-1,)
         )
 
         # A static batch lets num_segments be a Python int, which jax.jit needs.
@@ -1189,10 +1200,10 @@ class LighthouseAttention(keras.layers.Layer):
             if self._B_static is not None
             else batch_size * (n + 1)
         )
-        scattered = ops.segment_sum(
+        scattered = keras.ops.segment_sum(
             out_flat, flat_segments, num_segments=num_segments
         )  # (B*(N+1), H, D)
-        scattered = ops.reshape(scattered, (-1, n + 1, h, d))
+        scattered = keras.ops.reshape(scattered, (-1, n + 1, h, d))
         return scattered[:, :n, :, :]  # drop the trailing sentinel row
 
     # ------------------------------------------------------------------
@@ -1210,7 +1221,7 @@ class LighthouseAttention(keras.layers.Layer):
         :return: ``(B, N, dim)``.
         :raises RuntimeError: If the layer was built without a static ``N``.
         """
-        batch_size = ops.shape(inputs)[0]
+        batch_size = keras.ops.shape(inputs)[0]
         if self._N_static is None:
             raise RuntimeError(
                 "LighthouseAttention requires a statically known sequence "
@@ -1220,9 +1231,9 @@ class LighthouseAttention(keras.layers.Layer):
         h, d = self.num_heads, self.head_dim
 
         # Project Q, K, V -> (B, N, H, D). These are the RAW projections.
-        q_raw = ops.reshape(self.wq(inputs), (-1, n, h, d))
-        k_raw = ops.reshape(self.wk(inputs), (-1, n, h, d))
-        v = ops.reshape(self.wv(inputs), (-1, n, h, d))
+        q_raw = keras.ops.reshape(self.wq(inputs), (-1, n, h, d))
+        k_raw = keras.ops.reshape(self.wk(inputs), (-1, n, h, d))
+        v = keras.ops.reshape(self.wv(inputs), (-1, n, h, d))
 
         # Optional QK-norm, applied only to what enters attention — the scorer
         # below reads q_raw / k_raw (DECISION D-004(a)).
@@ -1232,7 +1243,7 @@ class LighthouseAttention(keras.layers.Layer):
         if self.full_attention:
             # Stage-2 SDPA-resume path: plain causal MHA over the full sequence.
             out = self._causal_sdpa(q, k, v, training)  # (B, N, H, D)
-            return self.wo(ops.reshape(out, (-1, n, h * d)))
+            return self.wo(keras.ops.reshape(out, (-1, n, h * d)))
 
         # Lighthouse pyramid path.
         q_pyr = self._pyramid_pool(q)  # (B, S_pyr, H, D)
@@ -1244,6 +1255,6 @@ class LighthouseAttention(keras.layers.Layer):
             q_pyr, k_pyr, v_pyr, sel_idx, training
         )                                                              # (B, S, H, D)
         out_base = self._scatter_back(out_g, sel_idx, batch_size, n)    # (B, N, H, D)
-        return self.wo(ops.reshape(out_base, (-1, n, h * d)))
+        return self.wo(keras.ops.reshape(out_base, (-1, n, h * d)))
 
 # ---------------------------------------------------------------------
