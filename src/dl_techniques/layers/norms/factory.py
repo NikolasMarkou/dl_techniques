@@ -1,13 +1,50 @@
-"""
-Normalization Layer Factory Utility for dl_techniques Framework.
+"""Config-driven construction of the normalization layers in this package.
 
-This module provides a centralized factory function for creating various normalization
-layers supported by the dl_techniques framework. It offers a unified interface for
-instantiating different normalization techniques with customizable parameters.
+``create_normalization_layer(type_string, **kwargs)`` builds one of **18**
+registered types. Two come from Keras (``layer_norm``, ``batch_norm``); the other
+sixteen are classes from this package. The registry is ``_TYPE_TO_CLASS``, and the
+same 18 names are spelled out in the ``NormalizationType`` ``Literal``.
 
-The factory supports both standard Keras normalization layers and specialized
-normalization layers from the dl_techniques framework, enabling easy experimentation
-and architectural flexibility.
+Three things a caller has to know before using this module.
+
+**1. The factory imposes its own epsilon.** Every type that takes an ``epsilon``
+gets ``1e-6`` unless the caller passes one. For 11 of the 16 bare-constructible
+types that is not the class's own default. Rewriting
+``keras.layers.BatchNormalization()`` as ``create_normalization_layer('batch_norm')``
+divides epsilon by 1000. The full measured table and the reasoning are in
+``create_normalization_layer``'s own ``.. warning::``. Instantiate the class
+directly if you want its own default.
+
+**2. Three types are not shape-preserving, and two of those do not return a single
+tensor.** Measured on a ``(3, 5, 8)`` input at the default ``axis=-1``:
+``decoupled_max_logit`` returns a 3-tuple of ``(3, 5)`` tensors,
+``dml_plus_center`` a 2-tuple shaped ``(3, 5)`` and ``(3, 5, 1)``, and
+``dml_plus_focal`` a single ``(3, 5)`` tensor. A config-driven caller that swaps
+``layer_norm`` for one of these does not get a drop-in substitute.
+``max_logit_norm`` IS shape-preserving; ``(3, 5, 8)`` stays ``(3, 5, 8)``.
+
+**3. ``get_normalization_info()[t]['parameters']`` is documentation, not a
+whitelist.** The validator derives its accepted set from the target class's real
+constructor signature, in ``_accepted_params``. Measured at HEAD: for all 18 of 18
+types the curated list omits at least one kwarg the factory accepts, 107 such
+``(type, kwarg)`` pairs in total. Using the curated list as the whitelist is
+exactly the bug that was fixed, twice.
+
+Public surface:
+
+* :func:`create_normalization_layer` -- the builder.
+* :func:`create_normalization_from_config` -- the same builder from a ``dict``
+  carrying a ``'type'`` key.
+* :func:`validate_normalization_config` -- raises on a kwarg the target type does
+  not accept. The builder calls it for every known type.
+* :func:`get_normalization_info` -- per-type description, curated parameter list
+  and use case, for documentation and UI purposes.
+
+The registry key set and the ``NormalizationType`` aliases are public API. Adding,
+renaming or removing one is a breaking change, and
+``tests/test_layers/test_norms/test_factory.py`` plus
+``tests/test_layers/test_norms/test_the_norm_factory_family_is_pinned.py`` assert
+it.
 """
 
 import keras
@@ -47,9 +84,11 @@ NormalizationType = Literal[
 # Validation whitelist — DERIVED from the real constructors, never hand-maintained.
 # ---------------------------------------------------------------------
 
-# The class each type actually instantiates. Single source of truth, kept honest by
-# `test_type_to_class_matches_what_the_builder_returns` (which builds every type and
-# compares `type(layer)` against this map), so it cannot silently drift from the
+# The class each type actually instantiates. 18 keys, matching the 18 names in
+# `NormalizationType`. Single source of truth, kept honest by
+# `test_type_to_class_matches_what_the_builder_returns` in
+# tests/test_layers/test_norms/test_factory.py, which builds every type and compares
+# `type(layer)` against this map. It therefore cannot silently drift from the
 # if/elif chain in `create_normalization_layer`.
 _TYPE_TO_CLASS: Dict[str, type] = {
     'layer_norm': keras.layers.LayerNormalization,
@@ -73,20 +112,21 @@ _TYPE_TO_CLASS: Dict[str, type] = {
 }
 
 # Named parameters of `create_normalization_layer` ITSELF, valid for every type.
-# `epsilon` is deliberately universal: the factory takes it for all types and adapts it
-# per-layer (aliased to `eps` for GRN, dropped for `dynamic_tanh`) — see that function's
-# docstring. Rejecting it for those two types made the validator disagree with the builder.
+# `epsilon` is universal on purpose. The factory takes it for all 18 types and adapts
+# it per layer: aliased to `eps` for global_response_norm, popped for dynamic_tanh.
+# Rejecting it for those two types made the validator disagree with the builder.
 _FACTORY_LEVEL_PARAMS = frozenset({'name', 'epsilon'})
 
 # Base `keras.layers.Layer` kwargs. Every target class takes `**kwargs` and forwards them,
 # so these genuinely build; the validator must not reject what the builder accepts.
 _KERAS_BASE_PARAMS = frozenset({'name', 'dtype', 'trainable', 'activity_regularizer', 'autocast'})
 
-# Parameters the factory IGNORES. The rule below is "the validator must accept whatever
-# the builder accepts" — but *builds without raising* is NOT the same as *has an effect*.
-# These two sets are the params a caller may pass, that construct fine, and that the
-# factory then throws away. Rejecting them is CORRECT and is NOT the drift being fixed:
-# it tells a caller their value is doing nothing, instead of silently ignoring it.
+# Parameters the factory IGNORES. The governing rule is "the validator must accept
+# whatever the builder accepts". But building without raising is not the same as
+# having an effect. These two sets are the params a caller may pass, that construct
+# fine, and that the factory then throws away. Rejecting them is CORRECT and is not
+# the drift that was fixed. It tells a caller their value is doing nothing, instead
+# of ignoring it silently.
 #
 # OVERWRITTEN: `create_normalization_layer` hard-assigns `model_type` for the two DML+
 # variants, so a caller's value is clobbered.
@@ -96,32 +136,43 @@ _FACTORY_OWNED_PARAMS: Dict[str, frozenset] = {
 }
 
 # DISCARDED: `DynamicTanh` has no epsilon, and the factory `pop`s it. A config-driven
-# caller who sets `epsilon=1e-3` here and is not told would reasonably believe it applied.
-# (Contrast `global_response_norm`, which ALIASES `epsilon` -> `eps`: there it is
-# meaningful, so it is accepted — that one WAS drift, and is now fixed.)
+# caller who sets `epsilon=1e-3` here and is not told would reasonably believe it
+# applied. Contrast `global_response_norm`, which ALIASES `epsilon` to `eps`. There the
+# value is meaningful, so it is accepted. Rejecting it there WAS drift, and is fixed.
 _FACTORY_DROPPED_PARAMS: Dict[str, frozenset] = {
     'dynamic_tanh': frozenset({'epsilon'}),
 }
 
 
 def _accepted_params(normalization_type: str) -> Set[str]:
-    """Return every kwarg `create_normalization_layer` genuinely accepts for a type.
+    """Return every kwarg ``create_normalization_layer`` accepts for one type.
 
-    DERIVED from ``inspect.signature`` of the target class, NOT from a hand-maintained
-    list. This is the whole point: a hand-kept whitelist drifts the moment someone adds a
-    constructor argument, and the validator then rejects a parameter the builder happily
-    accepts. That has now happened twice (F1, plan_2026-06-15_2485b951 — band/GRN
-    initializers; and `gamma_constraint` on `energy_layer_norm`,
-    plan_2026-07-14_e5955791/D-004), which is why the mechanism, not the list, was fixed.
+    The set is DERIVED from ``inspect.signature`` of the target class. It is not a
+    hand-maintained list. That distinction is the whole reason this function exists.
+    A hand-kept whitelist drifts the moment someone adds a constructor argument, and
+    the validator then rejects a parameter the builder accepts. That happened twice:
+    once on the band and GRN initializers, and once on ``gamma_constraint`` for
+    ``energy_layer_norm``. Both originating plan directories have been reaped. The
+    second case is still recorded in this file, by the DECISION anchor comment inside
+    ``get_normalization_info``'s ``'energy_layer_norm'`` entry.
 
-    ``get_normalization_info()[t]['parameters']`` remains a DOCUMENTATION surface — a
-    curated list of the parameters people commonly pass. It is deliberately NOT the
-    validation whitelist any more, so it can be incomplete without breaking a caller.
+    The set is built in four steps: the target class's own named constructor
+    parameters, plus ``_FACTORY_LEVEL_PARAMS``, plus ``_KERAS_BASE_PARAMS``, minus
+    ``_FACTORY_OWNED_PARAMS`` and ``_FACTORY_DROPPED_PARAMS`` for that type.
 
-    :param normalization_type: A registered normalization type.
+    ``get_normalization_info()[t]['parameters']`` is a separate, curated
+    DOCUMENTATION list of the parameters people commonly pass. It is no longer the
+    validation whitelist, so it can be incomplete without breaking a caller. Measured
+    at HEAD, it is incomplete for all 18 of 18 types, by 107 ``(type, kwarg)`` pairs.
+
+    :param normalization_type: A registered normalization type. Must be a key of
+        ``_TYPE_TO_CLASS``.
     :type normalization_type: str
     :return: The set of accepted keyword-argument names.
     :rtype: Set[str]
+    :raises KeyError: If ``normalization_type`` is not a registered type. Callers
+        check membership first; ``validate_normalization_config`` raises its own
+        ``ValueError`` before reaching here.
     """
     cls = _TYPE_TO_CLASS[normalization_type]
     signature = inspect.signature(cls.__init__)
@@ -145,12 +196,49 @@ def create_normalization_layer(
         epsilon: float = 1e-6,
         **kwargs: Any
 ) -> keras.layers.Layer:
-    """
-    Create a normalization layer based on the specified type with customizable parameters.
+    """Build one of the 18 registered normalization layers.
 
-    This factory function provides a unified interface for creating various normalization
-    layers, supporting both standard Keras layers and specialized layers from the
-    dl_techniques framework.
+    One entry point for the two Keras normalization layers and the sixteen from this
+    package. Unknown kwargs raise: for every registered type the builder calls
+    :func:`validate_normalization_config` first, and that rejects any keyword the
+    target class does not declare.
+
+    **Dispatch path:**
+
+    .. code-block:: text
+
+        create_normalization_layer(normalization_type, name,
+                                   epsilon, **kwargs)
+                                    │
+                                    ▼
+        ┌─────────────────────────────────────────────────────────┐
+        │ if normalization_type in _TYPE_TO_CLASS:                │
+        │     validate_normalization_config(type, **kwargs)       │
+        │ an UNKNOWN type skips this and reaches the else arm,    │
+        │ which raises with the supported-type list               │
+        └───────────────────────────┬─────────────────────────────┘
+                                    │
+                                    ▼
+        ┌─────────────────────────────────────────────────────────┐
+        │ layer_kwargs = kwargs.copy()                            │
+        │ layer_kwargs['name'] = name   (only when name is given) │
+        └───────────────────────────┬─────────────────────────────┘
+                                    │
+                                    ▼
+              the if/elif chain: one arm per registry type
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+          16 arms:            1 arm:                1 arm:
+          setdefault          global_               dynamic_tanh
+          ('epsilon',         response_norm         pops
+           epsilon)           sets eps =            'epsilon'
+                              epsilon when          (DynamicTanh
+          2 of them           'eps' is not          has none)
+          (dml_plus_*)        already given
+          also force
+          model_type
+
+          Every arm returns <target class>(**layer_kwargs).
 
     .. warning::
 
@@ -178,89 +266,95 @@ def create_normalization_layer(
        ============================================  =========  =========  =========
 
        So **rewriting ``keras.layers.BatchNormalization()`` as
-       ``create_normalization_layer('batch_norm')`` silently divides epsilon by
-       1000** and changes inference on every affected layer. This is not
-       hypothetical: it was proposed for ``mobilenet`` and ``cbam`` (189 layers)
-       and rejected on this measurement. See ``decisions.md`` D-202 and the guard
+       ``create_normalization_layer('batch_norm')`` divides epsilon by 1000**,
+       silently, and changes inference on every affected layer. This is not
+       hypothetical. It was proposed for ``mobilenet`` and ``cbam`` (189 layers)
+       and rejected on this measurement. The record is
+       ``plans/plan-2026-08-22T035419-a11304c8/decisions.md`` D-202. The guard is
        ``tests/test_layers/test_norms/test_the_norm_factory_family_is_pinned.py::
        TestTheFactoryEpsilonIsNotTheLayerDefault``.
 
        If you want a layer's own default, **instantiate the class directly**.
-       There is deliberately no ``epsilon=None`` sentinel meaning "use the class
-       default" — see D-202 for why that was rejected.
+       There is no ``epsilon=None`` sentinel meaning "use the class default". That
+       was proposed and rejected; D-202 records why.
 
-    :param normalization_type: Type of normalization layer to create. Supported types
-        include 'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
+    :param normalization_type: Which of the 18 registered types to build. The names
+        are 'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
         'zero_centered_rms_norm', 'zero_centered_band_rms_norm',
         'zero_centered_adaptive_band_rms_norm', 'band_rms', 'adaptive_band_rms',
         'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
-        'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh',
-        and 'energy_layer_norm'.
-        Use 'bias_free_batch_norm' for the variance-only, fixed-statistic layer that
-        stays degree-1 homogeneous (``f(a*x)=a*f(x)``) at inference — no ``moving_mean``,
-        no ``beta`` — as required by bias-free / Miyasawa denoisers.
+        'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
+        and 'energy_layer_norm'. Use 'bias_free_batch_norm' for the variance-only,
+        fixed-statistic layer that stays degree-1 homogeneous (``f(a*x) = a*f(x)``)
+        at inference, with no ``moving_mean`` and no ``beta``. Bias-free and
+        Miyasawa denoisers need that.
     :type normalization_type: NormalizationType
-    :param name: Optional name for the layer. If None, layer will use default naming.
+    :param name: Layer name. When ``None`` the layer takes Keras' default naming.
     :type name: Optional[str]
-    :param epsilon: Small constant for numerical stability. Defaults to 1e-6.
-        Used by normalization layers that support an epsilon parameter. NOTE: this
-        1e-6 default is imposed by the factory (via ``setdefault``) and may differ
-        from a layer class's own default — the custom RMS-family classes default to
-        1e-7, and Keras ``LayerNormalization``/``BatchNormalization`` default to
-        1e-3. Pass ``epsilon`` explicitly to control it; instantiate the class
-        directly to get its own default.
+    :param epsilon: Constant for numerical stability, defaulting to 1e-6. Applied
+        with ``setdefault``, so an explicit ``epsilon`` in ``kwargs`` wins. This
+        1e-6 is the FACTORY's choice and differs from most classes' own defaults.
+        Read the warning above before relying on it.
     :type epsilon: float
-    :param kwargs: Additional keyword arguments specific to each normalization type.
-        Common kwargs include axis, center, scale, use_scale, momentum (for batch_norm
-        / bias_free_batch_norm), max_band_width, temperature, constant, alpha_init_value,
-        and eps (for GRN).
-    :return: Configured normalization layer instance ready for use in neural networks.
-        **Three types are not shape-preserving and two of them do not return a single
-        tensor**, so a config-driven caller that swaps ``layer_norm`` for one of them will
-        not get a drop-in substitute. Measured on a ``(3, 5, 8)`` input at the default
-        ``axis=-1``: ``decoupled_max_logit`` returns a **3-tuple**
-        ``(combined score, MaxCosine, MaxNorm)`` of ``(3, 5)`` tensors; ``dml_plus_center``
-        returns a **2-tuple** ``(MaxNorm score, norm factor)`` shaped ``(3, 5)`` and
-        ``(3, 5, 1)``; ``dml_plus_focal`` returns a **single** ``(3, 5)`` tensor. All three
-        reduce the normalized axis away. See ``norms/README.md`` for the same table.
+    :param kwargs: Keyword arguments forwarded to the target class. Common ones are
+        ``axis``, ``center``, ``scale``, ``use_scale``, ``momentum`` (batch_norm and
+        bias_free_batch_norm), ``max_band_width``, ``temperature``, ``constant``,
+        ``alpha_init_value`` and ``eps`` (global_response_norm). Any keyword the
+        target class does not declare raises.
+    :return: The configured layer. **Three types are not shape-preserving, and two
+        of those do not return a single tensor.** Measured on a ``(3, 5, 8)`` input
+        at the default ``axis=-1``: ``decoupled_max_logit`` returns a **3-tuple**
+        ``(combined score, MaxCosine, MaxNorm)`` of ``(3, 5)`` tensors;
+        ``dml_plus_center`` returns a **2-tuple** ``(MaxNorm score, norm factor)``
+        shaped ``(3, 5)`` and ``(3, 5, 1)``; ``dml_plus_focal`` returns a
+        **single** ``(3, 5)`` tensor. All three reduce the normalized axis away.
+        ``max_logit_norm`` does NOT: it reduces with ``keepdims=True`` and then
+        divides, so ``(3, 5, 8)`` stays ``(3, 5, 8)``. ``norms/README.md`` carries
+        the same table.
     :rtype: keras.layers.Layer
-    :raises ValueError: If normalization_type is not supported or if invalid parameters
-        are provided for the specific normalization type.
-    :raises TypeError: If kwargs contain invalid parameter types for the chosen layer.
+    :raises ValueError: If ``normalization_type`` is not registered. The message
+        names every supported type. Measured: ``'definitely_not_a_type'`` gives
+        ``Unknown normalization type: 'definitely_not_a_type'. Supported types:
+        layer_norm, batch_norm, ...``.
+    :raises ValueError: If a kwarg is not accepted for this type. Measured:
+        ``create_normalization_layer('layer_norm', bogus=1)`` gives ``Invalid
+        parameters for layer_norm: {'bogus'}. Valid parameters: [...]``, listing the
+        accepted set. Raised by :func:`validate_normalization_config`.
+    :raises ValueError: If a type-specific value is out of range, for example
+        ``max_band_width`` outside ``(0, 1)`` or a non-positive ``temperature``.
+        Raised by :func:`validate_normalization_config`.
+    :raises TypeError: If the target class rejects a kwarg's type.
+
+    Example:
+
+    .. code-block:: python
+
+        from dl_techniques.layers.norms import create_normalization_layer
+
+        norm = create_normalization_layer('rms_norm', epsilon=1e-8, use_scale=True)
+        keras_ln = create_normalization_layer('layer_norm', epsilon=1e-3)
     """
     # DECISION plan-2026-08-18T140459-7991552f/D-017
-    # `validate_normalization_config` has existed in this module for two plans and
-    # was NEVER CALLED by the builder. The INVERSE direction -- an undeclared kwarg
-    # -- was hardened in `attention`/`ffn`/`embedding` by an earlier plan's
-    # D-011/D-023 (STRICT_DROPPED_KEY_MARKER); this factory was left open, so the
-    # only thing standing between a caller and a wrong layer was whatever the
-    # target class happened to do with the key.
-    #
-    # For most keys Keras 3's `Layer.__init__` already raises "Unrecognized keyword
-    # arguments", so the gap is NOT a silent drop for those. The gap that is real
-    # and MEASURED at HEAD is the class of keys the target class accepts and this
-    # factory then throws away:
-    #   create_normalization_layer('dml_plus_focal', model_type='center')
-    #     -> builds, and layer.model_type == 'focal'   (silently clobbered)
-    # `_FACTORY_OWNED_PARAMS` / `_FACTORY_DROPPED_PARAMS` enumerate that class, and
-    # `_accepted_params` already subtracts them -- the validator knew, the builder
-    # did not ask.
-    #
-    # DO NOT "simplify" this to a hand-written whitelist. `_accepted_params` derives
-    # from the target class's real `inspect.signature`; a hand-kept list drifted
-    # twice and produced 19 live validator/builder disagreements (see that
-    # function's docstring). DO NOT move the call inside the if/elif chain either:
-    # it must run for every arm.
-    #
-    # Unknown types deliberately fall through UNVALIDATED to the `else` arm below,
-    # whose error names the supported types; the validator's own unknown-type
-    # message does not, and tests pin the richer one.
-    #
-    # Pre-flight cost, measured before this edit (decisions.md D-016): 200 call
-    # sites repo-wide, ZERO of which pass a kwarg outside `_accepted_params`, under
-    # both a static AST sweep and a runtime recorder over the 11,031 tests of
-    # tests/test_layers/. The single runtime hit was a test deliberately passing
-    # `definitely_not_a_layer_norm_argument` and asserting a raise.
+    # The builder must call the validator. `validate_normalization_config` sat in this
+    # module for two plans with no caller, so the only thing between a caller and a
+    # wrong layer was whatever the target class did with the key. Keras 3 catches most
+    # bad keys itself with "Unrecognized keyword arguments". What it does NOT catch is
+    # the keys the target class accepts and this factory then throws away, enumerated
+    # by `_FACTORY_OWNED_PARAMS` and `_FACTORY_DROPPED_PARAMS`.
+    # WITHOUT the two lines below, `create_normalization_layer('dml_plus_focal',
+    # model_type='center')` built a layer whose `model_type` was 'focal'. WITH them it
+    # raises `ValueError: Invalid parameters for dml_plus_focal: {'model_type'}`, and
+    # that is what HEAD does. The raise is the fix working, not a stale comment.
+    # DO NOT replace `_accepted_params` with a hand-written whitelist. It derives from
+    # the target class's real `inspect.signature`, and a hand-kept list drifted twice.
+    # DO NOT move this call into the if/elif chain; it must run for every arm.
+    # Unknown types skip validation and reach the `else` arm, whose error names the
+    # supported types. The validator's own unknown-type message does not, and tests
+    # pin the richer one. Pre-flight before this edit: 200 call sites repo-wide, zero
+    # passing a kwarg outside `_accepted_params`, under both a static AST sweep and a
+    # runtime recorder over the 11,031 tests of tests/test_layers/. The one runtime hit
+    # was a test feeding garbage and asserting a raise. See that plan's decisions.md
+    # D-016.
     if normalization_type in _TYPE_TO_CLASS:
         validate_normalization_config(normalization_type, **kwargs)
 
@@ -388,24 +482,29 @@ def create_normalization_layer(
 
 
 def get_normalization_info() -> Dict[str, Dict[str, Any]]:
-    """
-    Get information about all supported normalization types and their parameters.
+    """Describe all 18 registered normalization types.
+
+    Each entry carries a ``'description'``, a ``'parameters'`` list and a
+    ``'use_case'`` string. Intended for documentation, help text and configuration
+    UIs.
 
     .. warning::
-       The ``'parameters'`` list is **documentation** — a curated set of the parameters
-       callers commonly pass. It is **NOT** the validation whitelist and is **NOT**
-       guaranteed exhaustive: ``layer_norm`` and ``batch_norm``, for instance, accept
-       every Keras ``LayerNormalization`` / ``BatchNormalization`` kwarg, which this list
-       does not enumerate.
+       The ``'parameters'`` list is **documentation**, a curated set of the
+       parameters callers commonly pass. It is **NOT** the validation whitelist and
+       is **NOT** exhaustive. Measured at HEAD: for all 18 of 18 types it omits at
+       least one kwarg the factory accepts, 107 such ``(type, kwarg)`` pairs in
+       total. ``layer_norm`` alone omits 12 and ``batch_norm`` 14, because both
+       accept every Keras ``LayerNormalization`` / ``BatchNormalization`` kwarg.
+       Nothing in any list is rejected: measured, 0 documented-but-rejected pairs.
 
-       For the authoritative set of accepted kwargs, use
-       :func:`validate_normalization_config`, whose whitelist is DERIVED from the target
-       class's real constructor signature (see ``_accepted_params``). A hand-maintained
-       whitelist drifted twice and made the validator reject parameters the builder
-       accepts; deriving it makes that class of bug unrepresentable.
+       For the accepted set, call :func:`validate_normalization_config`, whose
+       whitelist is DERIVED from the target class's real constructor signature. See
+       ``_accepted_params``. A hand-maintained whitelist drifted twice and made the
+       validator reject parameters the builder accepts. Deriving it makes that bug
+       unrepresentable.
 
-    :return: Dictionary mapping normalization type names to their parameter information,
-        including description, commonly-used parameters, and usage notes.
+    :return: A dict keyed by normalization type name. Each value is a dict with
+        ``'description'``, ``'parameters'`` and ``'use_case'`` keys.
     :rtype: Dict[str, Dict[str, Any]]
     """
     return {
@@ -500,15 +599,17 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         'energy_layer_norm': {
             'description': 'Energy Transformer layer norm (arXiv:2302.07253 eq. 1-2): SCALAR gamma + VECTOR delta; g = dL/dx of a Lagrangian with a PSD Hessian',
             # DECISION plan_2026-07-14_e5955791/D-004 (SUPERSEDED in mechanism, kept for
-            # history): `gamma_constraint` is a REAL ctor kwarg (57c9833e/D-010 — it pins
-            # `gamma > 0`, which is what keeps the Lagrangian's Hessian PSD). It was added
-            # to `EnergyLayerNorm` and NOT to this list, so `validate_normalization_config()`
-            # REJECTED a parameter `create_normalization_layer()` happily accepted.
-            # That was patched by adding the string here — which did NOT fix the mechanism,
-            # and 17 more such disagreements were then found across `layer_norm`,
-            # `batch_norm` and `global_response_norm`. The validator now DERIVES its
-            # whitelist from the real ctor signature (`_accepted_params`), so this list is
-            # documentation only and can no longer break a caller by being incomplete.
+            # history): 'gamma_constraint' looks redundant here. Keep it. It is a real
+            # EnergyLayerNorm ctor kwarg that pins gamma > 0, which is what keeps the
+            # Lagrangian's Hessian PSD (see 57c9833e/D-010, in energy_layer_norm.py). It
+            # was added to the class and not to this list, so the validator REJECTED a
+            # parameter the builder accepted. Adding the string here patched the symptom,
+            # not the mechanism. The validator now derives its whitelist from the real
+            # ctor signature via `_accepted_params`, so this list is documentation only
+            # and cannot break a caller by being incomplete. Measured at HEAD: it is
+            # incomplete for all 18 of 18 types, by 107 (type, kwarg) pairs, and the
+            # validator accepts every one of them anyway.
+            # The originating plan directory is gone; this comment is the record.
             'parameters': ['epsilon', 'gamma_initializer', 'delta_initializer',
                            'gamma_constraint'],
             'use_case': 'Energy Transformer blocks, where the norm must be the derivative of a Lagrangian for the energy-descent guarantee to hold'
@@ -522,15 +623,35 @@ def validate_normalization_config(
         normalization_type: NormalizationType,
         **kwargs: Any
 ) -> bool:
-    """
-    Validate normalization configuration parameters.
+    """Check that a set of kwargs is valid for one normalization type.
 
-    :param normalization_type: Type of normalization to validate.
+    Two stages. First, every provided key must be in ``_accepted_params`` for that
+    type. Second, a handful of types get a value check: ``max_band_width`` must be
+    in ``(0, 1)``, ``temperature`` and ``alpha_init_value`` must be positive,
+    ``constant`` must be a positive number, ``momentum`` must be in ``[0, 1]``, and
+    ``epsilon`` must be positive for the RMS and bias-free families.
+
+    :func:`create_normalization_layer` calls this for every registered type before
+    it builds. Calling it directly is useful for validating a config file before a
+    model is assembled.
+
+    The unknown-type message here is the poorer of the two in this module. Measured:
+    this function gives ``Unknown normalization type: definitely_not_a_type``, while
+    the builder's ``else`` arm gives the same prefix followed by the full supported
+    list. The builder therefore skips this function for unknown types on purpose,
+    and tests pin the richer message.
+
+    :param normalization_type: The type whose kwargs are being validated. Must be a
+        registered type.
     :type normalization_type: NormalizationType
-    :param kwargs: Configuration parameters to validate.
-    :return: True if configuration is valid.
+    :param kwargs: The keyword arguments to check.
+    :return: ``True``. The function reports failure by raising, never by returning
+        ``False``.
     :rtype: bool
-    :raises ValueError: If configuration is invalid.
+    :raises ValueError: If ``normalization_type`` is not registered.
+    :raises ValueError: If any key is outside the accepted set for the type. The
+        message lists both the offending keys and the sorted accepted set.
+    :raises ValueError: If a type-specific value check fails.
     """
     if normalization_type not in _TYPE_TO_CLASS:
         raise ValueError(f"Unknown normalization type: {normalization_type}")
@@ -608,21 +729,33 @@ def validate_normalization_config(
 
 
 def create_normalization_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
-    """
-    Create a normalization layer from a configuration dictionary.
+    """Build a normalization layer from a configuration dictionary.
 
-    This function provides an alternative interface for creating normalization layers
-    when the configuration is stored as a dictionary, commonly used in configuration
-    files or hyperparameter specifications.
+    Pops ``'type'`` from a copy of ``config`` and forwards everything else to
+    :func:`create_normalization_layer` as keyword arguments. The caller's dict is
+    not mutated. Use this when the configuration arrives from a file or a
+    hyperparameter sweep rather than as literal arguments.
 
-    :param config: Configuration dictionary containing a 'type' key (required),
-        and optionally 'name', 'epsilon', and additional parameters specific to the
-        normalization type.
+    :param config: Must contain a ``'type'`` key naming a registered normalization
+        type. Any other key is forwarded, including ``'name'`` and ``'epsilon'``.
     :type config: Dict[str, Any]
-    :return: Configured normalization layer instance.
+    :return: The configured layer, exactly as :func:`create_normalization_layer`
+        would return it. The same three types return reduced or tuple outputs.
     :rtype: keras.layers.Layer
-    :raises KeyError: If 'type' key is missing from config.
-    :raises ValueError: If normalization type or parameters are invalid.
+    :raises KeyError: If ``'type'`` is missing. Measured message:
+        ``Configuration dictionary must contain 'type' key``.
+    :raises ValueError: If the type is not registered, or a forwarded key or value
+        is rejected. Raised downstream by :func:`create_normalization_layer`.
+
+    Example:
+
+    .. code-block:: python
+
+        from dl_techniques.layers.norms import create_normalization_from_config
+
+        norm = create_normalization_from_config(
+            {'type': 'band_rms', 'max_band_width': 0.2, 'epsilon': 1e-7}
+        )
     """
     if 'type' not in config:
         raise KeyError("Configuration dictionary must contain 'type' key")
