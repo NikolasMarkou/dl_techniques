@@ -37,6 +37,36 @@ Foundational Mathematics:
     (2) squash via ``v = squash(s) = ||s||^2 / (1 + ||s||^2) * s / ||s||``,
     (3) update log-priors ``b`` by agreement (dot product of ``v`` and votes).
 
+    **Deliberate deviation from the cited paper -- the coupling axis.** Sabour et
+    al. normalize ``c_ij = softmax_j(b_ij)`` over the OUTPUT capsules, so
+    ``sum_j c_ij == 1`` for each input capsule ``i``: every input capsule
+    distributes a unit of itself across the outputs, and that competition is what
+    makes a vote concentrate where it agrees. This implementation normalizes over
+    the INPUT capsule axis (``axis=-2``) instead, so ``sum_i c_ij == 1`` for each
+    output capsule -- the transpose of the paper's convention. Measured at
+    ``num_heads=4``, ``key_dim=8``, sequence length 8::
+
+        routing_weights shape        : (2, 8, 4, 4)
+        sum over axis -2 (input)     : [1.0, 1.0, 1.0, 1.0]
+        sum over axis -1 (output)    : [0.5405, 0.5022, 0.2400, 2.7173]
+
+    The sibling ``attention_routing_capsule.py`` makes the same choice EXPLICIT
+    and caller-selectable (``softmax_axis="output"`` by default, matching the
+    paper); this class hard-codes the opposite one. Read the citation above as the
+    source of the iterative scheme, not as a claim that the normalization axis
+    matches.
+
+    Do NOT "fix" it by flipping ``_site_config(-2)`` to ``(-1)``. That was tried
+    and rejected by measurement (decisions.md D-008): ``_horizontal_routing``'s
+    positional branch calls ``_dynamic_routing`` with ``num_output_capsules = 1``,
+    where ``axis=-1`` makes the softmax a size-1 no-op, and that produces a
+    reproducible **NaN under mixed_float16** --
+    ``TestCapsuleRoutingMaskPolarity::test_a_masked_token_barely_influences_the_default_routing_config[mixed_float16]``
+    goes red. Making the axis paper-exact AND fp16-safe means reworking that
+    degenerate branch, which is a redesign rather than a repair. The axis is
+    pinned by ``test_the_capsule_coupling_axis_is_pinned.py`` on a NON-SQUARE
+    capsule configuration, so a transpose cannot satisfy it.
+
     The squash non-linearity is norm-only: it rescales a vector without rotating
     it, mapping ``||s|| -> ||s||^2 / (1 + ||s||^2) in [0, 1)``, which is what lets
     a capsule length be read as a probability.
@@ -333,6 +363,14 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # Site 2: dynamic-routing coupling coefficients (axis=-2, normalize
         # over input capsules). Shared between _vertical_routing and
         # _horizontal_routing calls into _dynamic_routing.
+        #
+        # DECISION plan-2026-08-27T040114-580f8b63/D-008
+        # This axis is the TRANSPOSE of Sabour et al. 2017, which the class
+        # docstring cites: the paper normalizes over OUTPUT capsules. Kept
+        # deliberately -- flipping to -1 makes `_horizontal_routing`'s
+        # `num_output_capsules = 1` branch a size-1 softmax no-op and yields a
+        # reproducible NaN under mixed_float16 (64/65). See the docstring's
+        # "Deliberate deviation" note for the measured sums and the full reason.
         self.attn_prob_routing = ProbabilityOutput(
             probability_type=self.probability_type,
             type_config=_site_config(-2),
