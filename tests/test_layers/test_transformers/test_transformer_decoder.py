@@ -590,7 +590,29 @@ class TestMasklessSelfAttentionTypes:
             loaded = keras.models.load_model(path)
         got = np.array(loaded([x, enc], training=False))
         assert float(np.max(np.abs(ref))) > 1e-3, "round-trip compared all-zero values"
-        np.testing.assert_allclose(ref, got, rtol=0, atol=0)
+        # `atol` is 1e-3, not 0, and the zero is what made this test flaky.
+        #
+        # A faithful reload IS bit-exact in isolation -- measured 0.0 on GPU, and
+        # this test passes alone (33/33) and with its whole file (139/139). It
+        # failed only after the wider consumer directory had run first, at
+        # 2.49e-05 over 64 of 4096 elements: GPU kernel selection differing
+        # between the two forward passes, not a value that was lost on load.
+        #
+        # The bound still detects what the test is for. Reinitialising a single
+        # dense sub-layer after load -- the value-loss this guards against --
+        # moves the output by 3.38, more than three orders above 1e-3 and five
+        # above the observed noise.
+        np.testing.assert_allclose(
+            ref,
+            got,
+            rtol=0,
+            atol=1e-3,
+            err_msg=(
+                f"self_attention_type={attention_type!r}: the reloaded model does "
+                "not reproduce the original's values, so weights were lost or "
+                "reinitialised on load"
+            ),
+        )
 
     # --- the DRY guard ---
 
