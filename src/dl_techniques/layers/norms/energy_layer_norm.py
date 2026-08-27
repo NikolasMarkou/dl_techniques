@@ -195,13 +195,20 @@ class EnergyLayerNorm(keras.layers.Layer):
         step. Defaults to a strictly-positive floor,
         ``ValueRangeConstraint(min_value=1e-3)``, because ``gamma > 0`` is the
         precondition for the PSD Hessian that makes the descent guarantee true.
-        Without it the guarantee is silently false: a trained ``gamma < 0`` makes
-        ``dg/dx`` negative-definite and the block performs energy ASCENT, with no
-        error, no NaN and no failing test. Measured at ``gamma = -1.0`` on a
-        12-step ``EnergyTransformer`` block: ``max diff(E) = +2.478e-02``, against
-        ``-2.197e-02`` at ``gamma = +1.0``. Pass ``None`` to disable it, which is
-        a legitimate thing to want but must be an explicit choice. See the D-010
-        anchor above.
+        Without it the guarantee is silently false: a trained ``gamma < 0``
+        flips the sign of every nonzero eigenvalue of ``dg/dx``, so the block
+        performs energy ASCENT with no error, no NaN and no failing test.
+        ``dg/dx`` goes negative SEMI-definite, not negative-definite -- the
+        layer subtracts the mean, so the constant direction stays an exact null
+        direction at every ``gamma``. Measured on a 12-step
+        ``EnergyTransformer`` (embed_dim 32, 4 heads, head_dim 8, hopfield_dim
+        64, step 0.1, eps 1e-5), with weights and input held identical between
+        the two arms: energy ASCENDS at ``gamma = -1.0`` and DESCENDS at
+        ``gamma = +1.0``, 3 of 3 seeds each (0, 5, 42), magnitudes around 2e-02
+        either way. No single figure is quoted because two matched-weight
+        protocols disagree in the third digit; the sign flip is the claim.
+        Pass ``None`` to disable it, which is a legitimate thing to want but
+        must be an explicit choice. See the D-010 anchor above.
     :type gamma_constraint: Optional[constraints.Constraint]
     :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
     :type kwargs: Any
