@@ -500,3 +500,157 @@ class TestAdaptiveTemperatureSoftmaxIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# ---------------------------------------------------------------------
+# Mechanism oracles -- plan-2026-08-27T103353-60745fe0 / iter-2/step-9.
+#
+# The iter-2/step-8 mutation probe pinned the temperature to 1.0
+# (`safe_temperature = keras.ops.maximum(temperature, self.eps)` ->
+# `keras.ops.ones_like(temperature)`), which reduces the layer to a PLAIN
+# SOFTMAX -- the entropy measurement, the polynomial and the whole adaptive
+# mechanism become dead code. That moved the output by max|delta| = 0.846648
+# on all 1024 values and all 22 pre-existing tests still passed: the suite
+# was BLIND.
+#
+# Two oracles below:
+#   1. A NumPy reference for the whole documented pipeline (softmax ->
+#      Shannon entropy -> degree-4 Horner polynomial -> clip -> rescale ->
+#      threshold bypass -> divide -> softmax), written from the class
+#      docstring, not from the implementation.
+#   2. A targeted arm: on an input whose entropy sits ABOVE the flat band,
+#      the layer must NOT behave like a plain softmax. Iteration 1 measured
+#      the band edges -- T is exactly 1.0 for H in [0.91856, 2.14702] at the
+#      default coefficients -- so the input below is chosen to land outside
+#      it, and the measured entropy is asserted, not assumed.
+# ---------------------------------------------------------------------
+
+
+def _adaptive_softmax_reference(
+        logits: np.ndarray,
+        min_temp: float = 0.1,
+        max_temp: float = 1.0,
+        entropy_threshold: float = 0.5,
+        eps: float = 1e-7,
+        polynomial_coeffs=(-1.791, 4.917, -2.3, 0.481, -0.037),
+) -> tuple:
+    """Independent float64 NumPy reference for AdaptiveTemperatureSoftmax.
+
+    Transcribed from the documented pipeline, not from `adaptive_softmax.py`:
+    softmax at T=1, Shannon entropy of the clipped probabilities, the
+    degree-4 polynomial by Horner, clip to [0, 1], rescale into
+    [min_temp, max_temp], bypass to T=1 wherever H <= entropy_threshold,
+    floor at eps, divide the ORIGINAL logits, softmax again.
+
+    :return: ``(probabilities, entropy, temperature)``.
+    """
+    z = logits.astype(np.float64)
+
+    exp_z = np.exp(z - z.max(axis=-1, keepdims=True))
+    first_probs = exp_z / exp_z.sum(axis=-1, keepdims=True)
+
+    safe_probs = np.clip(first_probs, eps, 1.0 - eps)
+    entropy = -(safe_probs * np.log(safe_probs)).sum(axis=-1, keepdims=True)
+
+    poly = np.full_like(entropy, polynomial_coeffs[0])
+    for coeff in polynomial_coeffs[1:]:
+        poly = poly * entropy + coeff
+
+    temperature = min_temp + (max_temp - min_temp) * np.clip(poly, 0.0, 1.0)
+    temperature = np.where(entropy > entropy_threshold, temperature, 1.0)
+    temperature = np.maximum(temperature, eps)
+
+    scaled = z / temperature
+    exp_s = np.exp(scaled - scaled.max(axis=-1, keepdims=True))
+    return exp_s / exp_s.sum(axis=-1, keepdims=True), entropy, temperature
+
+
+class TestAdaptiveTemperatureSoftmaxAgainstANumpyReference:
+    """Reference-formula and non-degeneracy oracles for the temperature path."""
+
+    @staticmethod
+    def _logits() -> np.ndarray:
+        """Fixed logits whose rows all land ABOVE the flat temperature band.
+
+        `(64, 16)` standard normals scaled by 0.5, seed 0. Measured entropy
+        range on this input is [2.53869, 2.73126] nats -- above the upper
+        band edge of 2.14702 -- and every row resolves to T = 0.1 (min_temp).
+        The step-8 probe's FIRST input, `(8, 16) * 3.0`, was rejected for the
+        opposite reason: every row of it fell in the `H <= 0.5` bypass branch,
+        where the temperature is ALREADY exactly 1.0, so pinning it to 1.0
+        measured max|delta| == 0.0. The mutation was right and the input was
+        wrong. Do not shrink the batch or raise the logit scale here without
+        re-measuring the entropy.
+        """
+        rng = np.random.default_rng(0)
+        return (rng.standard_normal((64, 16)) * 0.5).astype("float32")
+
+    def test_the_chosen_logits_really_sit_outside_the_flat_band(self) -> None:
+        """Control for the two tests below: assert the premise, do not assume it.
+
+        If a future edit moves this input back into the `H <= 0.5` bypass or
+        into the flat `T == 1.0` band, the mechanism under test is inert and
+        `test_is_not_a_plain_softmax` becomes a test of nothing. This arm
+        fails first and says so.
+        """
+        _, entropy, temperature = _adaptive_softmax_reference(self._logits())
+        assert entropy.min() > 2.14702, entropy.min()
+        assert np.all(temperature < 0.5), temperature.max()
+
+    def test_matches_the_numpy_reference_pipeline(self) -> None:
+        """Layer output equals the independent float64 reference.
+
+        Tolerance atol=1e-6, rtol=0. Derivation: measured max absolute error
+        is 1.829e-07 on probabilities in [0, 1], about 1.5 float32 ulp of 1.0
+        (1.192e-07). The float32 layer divides by a temperature of 0.1, which
+        multiplies the logits by 10 before the second softmax, so the error is
+        dominated by that amplification and not by the entropy step. rtol is
+        pinned to 0 for a pure absolute bound on a probability.
+        """
+        logits = self._logits()
+        y = keras.ops.convert_to_numpy(AdaptiveTemperatureSoftmax()(logits))
+        reference, _, _ = _adaptive_softmax_reference(logits)
+        np.testing.assert_allclose(y, reference, atol=1e-6, rtol=0.0)
+
+    def test_is_not_a_plain_softmax_outside_the_flat_band(self) -> None:
+        """Above the flat band the layer must sharpen, not pass through.
+
+        This is the direct negative oracle for the step-8 mutation: pinning
+        the temperature to 1.0 makes the layer identical to
+        `keras.ops.softmax`, and this assertion is exactly the difference.
+
+        Threshold 0.1. Derivation: the measured `max|delta|` between the layer
+        and a plain softmax on this input is 0.846648. 0.1 is 8.5x below that
+        and ~6 orders of magnitude above float32 noise, so the arm is neither
+        at the edge of its own measurement nor tracking rounding.
+        """
+        logits = self._logits()
+        y = keras.ops.convert_to_numpy(AdaptiveTemperatureSoftmax()(logits))
+        plain = keras.ops.convert_to_numpy(
+            keras.ops.softmax(keras.ops.convert_to_tensor(logits), axis=-1)
+        )
+        assert np.abs(y - plain).max() > 0.1
+
+    def test_the_entropy_threshold_bypass_is_an_exact_plain_softmax(self) -> None:
+        """Below the threshold the layer IS a plain softmax, exactly.
+
+        The other side of the same mechanism, and the reason the step-8 probe
+        needed a second input. A peaked row has H well under 0.5, takes the
+        bypass branch, and gets T = 1.0 -- so here agreement with a plain
+        softmax is the CORRECT behaviour, and asserting it pins the branch
+        boundary rather than just the sharpening.
+
+        Tolerance atol=1e-6, rtol=0; same derivation as above, and with T=1
+        there is no logit amplification at all.
+        """
+        logits = np.zeros((4, 16), dtype="float32")
+        logits[:, 0] = 12.0
+
+        _, entropy, temperature = _adaptive_softmax_reference(logits)
+        assert entropy.max() < 0.5, entropy.max()
+        assert np.all(temperature == 1.0)
+
+        y = keras.ops.convert_to_numpy(AdaptiveTemperatureSoftmax()(logits))
+        plain = keras.ops.convert_to_numpy(
+            keras.ops.softmax(keras.ops.convert_to_tensor(logits), axis=-1)
+        )
+        np.testing.assert_allclose(y, plain, atol=1e-6, rtol=0.0)

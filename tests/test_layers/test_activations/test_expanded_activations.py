@@ -448,3 +448,178 @@ def debug_layer_serialization(layer_class, layer_config, sample_input):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Mechanism oracles -- plan-2026-08-27T103353-60745fe0 / iter-2/step-9.
+#
+# The iter-2/step-8 mutation probe neutered ALL SIX classes to the identity
+# in one pass (GELU and SiLU returned `inputs`; xATLU/xGELU/xSiLU had their
+# gates replaced by `keras.ops.ones_like(inputs)`, which at the shipped
+# default `alpha_initializer='zeros'` gives `x * (1*1 - 0) == x`; EluPlusOne
+# returned `inputs`). That moved the output by max|delta| = 2.42281 on all
+# 288 values and ALL 67 pre-existing tests in this file still passed: the
+# suite was BLIND. It is the worst result in the whole probe.
+#
+# Two recorded traps this section is written against:
+#
+#   * With `alpha_initializer='zeros'` -- the shipped default -- the alpha
+#     widening `gate*(1 + 2a) - a` is an EXACT no-op. Any alpha-focused arm
+#     run at the default is INERT and proves nothing. Every `x*` oracle below
+#     therefore constructs the layer with `Constant(_ALPHA)`, a non-zero
+#     value, and the knob arm compares against alpha=0.
+#   * `test_elu_plus_one_plus_epsilon_positive_output` above would have caught
+#     the EluPlusOne mutation, except it calls the module-level FUNCTION
+#     `elu_plus_one_plus_epsilon`, which the mutation left intact -- not the
+#     `EluPlusOne.call` that was gutted. The oracle below goes through the
+#     LAYER on purpose.
+#
+# The gate references are transcribed from each class's published definition
+# (SciPy `erf` / `expit` for the exact forms), not from
+# `expanded_activations.py`.
+# ---------------------------------------------------------------------
+
+from scipy.special import erf as _scipy_erf, expit as _scipy_expit
+
+#: Non-zero alpha for the widened variants. Chosen away from 0 (where the
+#: widening is an exact identity) and away from 0.5 (where `1 + 2a == 2`
+#: could hide a factor-of-two error in the widening).
+_ALPHA = 0.3
+
+
+def _oracle_inputs() -> np.ndarray:
+    """`(6, 16)` standard normals scaled by 2.0, seed 7.
+
+    The scale of 2.0 pushes samples into both saturated tails of every gate,
+    so an oracle here is not evaluated only on the near-linear region around
+    zero where all six activations look alike.
+    """
+    rng = np.random.default_rng(7)
+    return (rng.standard_normal((6, 16)) * 2.0).astype("float32")
+
+
+def _gate_reference(name: str, x: np.ndarray) -> np.ndarray:
+    """Published gate of each widened activation, in float64 NumPy."""
+    if name == "xATLU":
+        return (np.arctan(x) + np.pi / 2.0) / np.pi
+    if name == "xGELU":
+        return 0.5 * (1.0 + _scipy_erf(x / np.sqrt(2.0)))
+    if name == "xSiLU":
+        return _scipy_expit(x)
+    raise AssertionError(f"no gate reference for {name}")
+
+
+class TestExpandedActivationsAgainstClosedForms:
+    """Closed-form equality for all six classes, plus a live-alpha proof."""
+
+    def test_gelu_matches_the_exact_erf_form(self) -> None:
+        """`GELU(x) == 0.5 * x * (1 + erf(x / sqrt(2)))`, via SciPy.
+
+        Tolerance atol=1e-6, rtol=0. Derivation: measured max absolute error
+        is 2.036e-07 on outputs of magnitude <= ~6, which is under one float32
+        ulp at that magnitude (ulp(6.0) = 4.77e-07).
+        """
+        x = _oracle_inputs()
+        y = keras.ops.convert_to_numpy(GELU()(x))
+        v = x.astype(np.float64)
+        np.testing.assert_allclose(
+            y, 0.5 * v * (1.0 + _scipy_erf(v / np.sqrt(2.0))), atol=1e-6, rtol=0.0
+        )
+
+    def test_silu_matches_x_times_sigmoid(self) -> None:
+        """`SiLU(x) == x * sigmoid(x)`, with SciPy's `expit` as the sigmoid.
+
+        Tolerance atol=1e-6, rtol=0. Derivation: measured max absolute error
+        is 1.337e-07, about one float32 ulp of 1.0.
+        """
+        x = _oracle_inputs()
+        y = keras.ops.convert_to_numpy(SiLU()(x))
+        v = x.astype(np.float64)
+        np.testing.assert_allclose(y, v * _scipy_expit(v), atol=1e-6, rtol=0.0)
+
+    def test_elu_plus_one_layer_matches_elu_plus_one_plus_epsilon(self) -> None:
+        """`EluPlusOne(x) == ELU(x) + 1 + epsilon`, through the LAYER.
+
+        Deliberately exercises `EluPlusOne.call`, not the module-level
+        function -- see the trap recorded at the top of this section.
+
+        Tolerance atol=1e-6, rtol=0. Derivation: measured max absolute error
+        is 2.192e-07 on outputs of magnitude <= ~7, under one float32 ulp at
+        that magnitude (ulp(7.0) = 4.77e-07).
+        """
+        x = _oracle_inputs()
+        y = keras.ops.convert_to_numpy(EluPlusOne()(x))
+        v = x.astype(np.float64)
+        reference = np.where(v > 0.0, v, np.expm1(v)) + 1.0 + keras.backend.epsilon()
+        np.testing.assert_allclose(y, reference, atol=1e-6, rtol=0.0)
+
+    @pytest.mark.parametrize("cls", [xATLU, xGELU, xSiLU])
+    def test_widened_variant_matches_its_closed_form_at_nonzero_alpha(
+            self, cls: Type[ExpandedActivation]
+    ) -> None:
+        """`f(x) == x * (gate(x) * (1 + 2a) - a)` at a non-zero `a`.
+
+        Tolerance atol=1e-5, rtol=0. Derivation: measured max absolute error
+        is 5.620e-07 (xGELU) on outputs of magnitude <= ~8; one float32 ulp at
+        8.0 is 9.54e-07, so the measurement is already sub-ulp and 1e-5 leaves
+        ~10x headroom for the extra rounding the `(1 + 2a)` scaling adds.
+        It is looser than the 1e-6 used above because these outputs are larger
+        and pass through two more float32 multiplies.
+        """
+        x = _oracle_inputs()
+        layer = cls(alpha_initializer=keras.initializers.Constant(_ALPHA))
+        y = keras.ops.convert_to_numpy(layer(x))
+
+        v = x.astype(np.float64)
+        gate = _gate_reference(cls.__name__, v)
+        reference = v * (gate * (1.0 + 2.0 * _ALPHA) - _ALPHA)
+
+        np.testing.assert_allclose(y, reference, atol=1e-5, rtol=0.0)
+
+    @pytest.mark.parametrize("cls", [xATLU, xGELU, xSiLU])
+    def test_alpha_actually_widens_the_gate(
+            self, cls: Type[ExpandedActivation]
+    ) -> None:
+        """A non-zero `alpha` must change the output relative to `alpha = 0`.
+
+        The knob-effect arm. It is stated against `alpha=0` on purpose,
+        because the default IS zero and an arm that only exercised the default
+        would compare the layer to itself.
+
+        Threshold 0.1. Derivation: the measured `max|delta|` between
+        alpha=0.3 and alpha=0.0 on this input is 1.3215 (xATLU), 1.5101
+        (xGELU) and 1.4905 (xSiLU). 0.1 is >13x below the smallest.
+        """
+        x = _oracle_inputs()
+        at_zero = keras.ops.convert_to_numpy(
+            cls(alpha_initializer="zeros")(x)
+        )
+        at_alpha = keras.ops.convert_to_numpy(
+            cls(alpha_initializer=keras.initializers.Constant(_ALPHA))(x)
+        )
+        assert np.abs(at_alpha - at_zero).max() > 0.1
+
+    @pytest.mark.parametrize("cls", [GELU, SiLU, xATLU, xGELU, xSiLU])
+    def test_is_not_the_identity(self, cls: Type[BaseActivation]) -> None:
+        """None of the five gated activations may pass its input through.
+
+        The cheapest possible non-degeneracy oracle, stated separately from
+        the closed forms so a failure names the failure mode directly: the
+        step-8 mutation reduced every one of these to `f(x) == x`.
+        `EluPlusOne` is excluded -- it is an affine shift of ELU and its
+        positive branch legitimately IS `x + 1 + eps`, so "not the identity"
+        is the wrong claim for it; its closed form above covers it instead.
+
+        Threshold 0.1. Derivation: the measured `max|f(x) - x|` on this input
+        is 5.0335 (GELU), 5.0009 (SiLU), 6.0408 (xATLU), 6.5436 (xGELU) and
+        6.4914 (xSiLU); the smallest is 5.00. 0.1 is 50x below that minimum.
+        Note this arm is RED for GELU and SiLU under the step-8 mutation but
+        NOT for the three `x*` variants: with the gate pinned to 1 they become
+        `x * (1 + 2a) - a*x`, i.e. `1.3 * x` at this alpha, which is not the
+        identity either. The closed-form arm above is what catches those.
+        """
+        x = _oracle_inputs()
+        y = keras.ops.convert_to_numpy(
+            cls(alpha_initializer=keras.initializers.Constant(_ALPHA))(x)
+            if issubclass(cls, ExpandedActivation) else cls()(x)
+        )
+        assert np.abs(y - x).max() > 0.1

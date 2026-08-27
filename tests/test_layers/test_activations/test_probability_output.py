@@ -620,3 +620,204 @@ class TestProbabilityOutputIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# Mechanism oracles -- plan-2026-08-27T103353-60745fe0 / iter-2/step-9.
+#
+# The iter-2/step-8 mutation probe inserted `inputs = keras.ops.zeros_like(
+# inputs)` at the top of `ProbabilityOutput.call`, so every strategy still
+# returned a valid distribution of the right shape while the output became
+# COMPLETELY input-independent. Exactly 1 of the 52 pre-existing tests fired
+# --  `TestProbabilityOutputIntegration::test_gradient_flow` -- and it fired
+# through the weakest oracle class in the probe's ranking, by accident of the
+# mutation's shape rather than by testing the dispatcher's job. The probe's
+# own summary rules this suite EFFECTIVELY BLIND and asks step 9 to treat it
+# as one: a mutation that preserved d(out)/d(in) would have read fully blind.
+#
+# Two oracles below, neither of which needs a reference implementation of
+# ProbabilityOutput itself:
+#
+#   1. Input-dependence, across all ten accepted `probability_type` spellings.
+#      A dispatcher's output MUST depend on the input through the selected
+#      strategy. This is the cheapest oracle in the probe's ranked list and it
+#      kills the zeroed-input mutation on its own.
+#   2. Dispatch identity: for the four deterministic, stateless logit
+#      strategies, the dispatcher's output must equal what the named strategy
+#      layer produces standalone -- and must NOT equal a plain softmax where
+#      the strategy is not softmax. That catches a MIS-dispatch (routing to
+#      the wrong strategy), which input-dependence alone would miss.
+#
+# The two routing strategies are excluded from oracle 2 because they own
+# randomly-initialized projection weights, so a second instance is a
+# different function; oracle 1 covers them.
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.activations.adaptive_softmax import AdaptiveTemperatureSoftmax
+from dl_techniques.layers.activations.sparsemax import Sparsemax
+from dl_techniques.layers.activations.thresh_max import ThreshMax
+
+#: Every spelling `_SUPPORTED_TYPES` accepts. `output_dim` for the routing
+#: strategies goes inside `type_config`, never as a direct kwarg.
+_ALL_TYPES = [
+    "softmax", "sparsemax", "threshmax", "thresh_max",
+    "adaptive", "adaptive_softmax",
+    "routing", "deterministic_routing",
+    "hierarchical", "hierarchical_routing",
+]
+
+_ROUTING_TYPES = frozenset(
+    {"routing", "deterministic_routing", "hierarchical", "hierarchical_routing"}
+)
+
+
+def _type_config_for(probability_type: str) -> dict:
+    """`{'output_dim': 5}` for the routing strategies, `{}` otherwise.
+
+    5 is a non-power-of-two on purpose: the hierarchical strategy's structural
+    padding mask is an exact no-op at a power-of-two `output_dim`, so a test
+    written at `output_dim=4` or `8` would silently stop exercising it.
+    """
+    return {"output_dim": 5} if probability_type in _ROUTING_TYPES else {}
+
+
+def _two_different_inputs() -> tuple:
+    """Two `(4, 16)` float32 batches, seed 11, scaled by 2.0.
+
+    The scale pushes the logits far enough apart that every strategy -- even
+    the flattest -- separates them by well over the assertion threshold.
+    """
+    rng = np.random.default_rng(11)
+    a = (rng.standard_normal((4, 16)) * 2.0).astype("float32")
+    b = (rng.standard_normal((4, 16)) * 2.0).astype("float32")
+    return a, b
+
+
+class TestProbabilityOutputDependsOnItsInput:
+
+    @pytest.mark.parametrize("probability_type", _ALL_TYPES)
+    def test_two_different_inputs_give_two_different_outputs(
+            self, probability_type: str
+    ) -> None:
+        """Materially different inputs must give materially different outputs.
+
+        ONE layer instance is used for both calls, so the routing strategies'
+        random weights are held fixed and the only thing that varies is the
+        input.
+
+        Threshold 0.05. Derivation: the measured `max|f(a) - f(b)|` on this
+        pair is 0.573528 for the flattest strategy (`softmax`) and up to
+        1.000000 (`sparsemax`); across all ten spellings the minimum is
+        0.573528. 0.05 is >11x below that minimum and ~6 orders of magnitude
+        above float32 noise. The step-8 mutation drives this quantity to
+        exactly 0.0 for every strategy.
+        """
+        layer = ProbabilityOutput(
+            probability_type=probability_type,
+            type_config=_type_config_for(probability_type),
+        )
+        a, b = _two_different_inputs()
+        ya = ops.convert_to_numpy(layer(a))
+        yb = ops.convert_to_numpy(layer(b))
+
+        assert np.abs(ya - yb).max() > 0.05
+
+
+class TestProbabilityOutputDispatchesToTheNamedStrategy:
+
+    @staticmethod
+    def _standalone(probability_type: str):
+        """Build the strategy the name promises, directly and independently."""
+        return {
+            "softmax": lambda: None,
+            "sparsemax": Sparsemax,
+            "threshmax": ThreshMax,
+            "thresh_max": ThreshMax,
+            "adaptive": AdaptiveTemperatureSoftmax,
+            "adaptive_softmax": AdaptiveTemperatureSoftmax,
+        }[probability_type]()
+
+    @pytest.mark.parametrize(
+        "probability_type",
+        ["softmax", "sparsemax", "threshmax", "thresh_max",
+         "adaptive", "adaptive_softmax"],
+    )
+    def test_output_equals_the_named_strategy_computed_standalone(
+            self, probability_type: str
+    ) -> None:
+        """The dispatcher reproduces the named strategy BIT-FOR-BIT.
+
+        Tolerance atol=0, rtol=0 -- exact equality. Derivation: this is not a
+        numerical claim but a routing claim. The dispatcher forwards the same
+        tensor to the same op sequence, so the results are identical bit
+        patterns; measured `max|dispatcher - standalone|` is exactly 0.000e+00
+        for all six spellings. A non-zero tolerance here would accept a
+        DIFFERENT strategy that happens to be numerically close.
+
+        These six strategies are deterministic and carry no randomly
+        initialized weights (`ThreshMax`'s `slope_weight` defaults to the
+        constant 10.0 and `trainable_slope=False`), which is what makes a
+        standalone instance a valid oracle for them.
+        """
+        a, _ = _two_different_inputs()
+        dispatched = ops.convert_to_numpy(
+            ProbabilityOutput(probability_type=probability_type)(a)
+        )
+
+        if probability_type == "softmax":
+            expected = ops.convert_to_numpy(
+                ops.softmax(ops.convert_to_tensor(a), axis=-1)
+            )
+        else:
+            expected = ops.convert_to_numpy(self._standalone(probability_type)(a))
+
+        np.testing.assert_array_equal(dispatched, expected)
+
+    @pytest.mark.parametrize(
+        "probability_type",
+        ["sparsemax", "threshmax", "thresh_max", "adaptive", "adaptive_softmax"],
+    )
+    def test_a_non_softmax_strategy_is_not_a_plain_softmax(
+            self, probability_type: str
+    ) -> None:
+        """Every non-softmax strategy must differ from a plain softmax.
+
+        The negative half of the dispatch claim: without it, a dispatcher that
+        collapsed every key onto `softmax` would satisfy the equality arm for
+        `softmax` and be unfalsifiable everywhere else.
+
+        Threshold 0.05. Derivation: the measured `max|strategy - softmax|` on
+        this input is 0.624859 (`sparsemax`), 0.127702 (`threshmax`) and
+        0.694678 (`adaptive`). 0.05 is 2.6x below the SMALLEST of those --
+        `threshmax`, which is the closest of the three to a plain softmax by
+        construction, since it is a softmax with a confidence gate.
+        """
+        a, _ = _two_different_inputs()
+        dispatched = ops.convert_to_numpy(
+            ProbabilityOutput(probability_type=probability_type)(a)
+        )
+        plain = ops.convert_to_numpy(ops.softmax(ops.convert_to_tensor(a), axis=-1))
+
+        assert np.abs(dispatched - plain).max() > 0.05
+
+    def test_sparsemax_alone_produces_exact_zeros_on_a_peaked_input(self) -> None:
+        """A behavioural discriminator that does not read any strategy's code.
+
+        `sparsemax` is the Euclidean projection onto the simplex, so on a
+        peaked input it assigns EXACTLY zero mass outside the support;
+        `softmax` is dense and can never return an exact zero for a finite
+        logit. Measured on the input below: sparsemax gives 15.0 exact zeros
+        per row of 16, softmax gives 0.0. Exact equality with 0.0, no
+        tolerance -- the claim is about which values are identically zero.
+        """
+        peaked = np.zeros((4, 16), dtype="float32")
+        peaked[:, 0] = 8.0
+
+        sparse = ops.convert_to_numpy(
+            ProbabilityOutput(probability_type="sparsemax")(peaked)
+        )
+        dense = ops.convert_to_numpy(
+            ProbabilityOutput(probability_type="softmax")(peaked)
+        )
+
+        assert (sparse == 0.0).sum(axis=-1).min() >= 14
+        assert not np.any(dense == 0.0)
