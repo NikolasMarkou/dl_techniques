@@ -370,7 +370,20 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         :return: Probabilities of the same shape as ``inputs``, summing to 1
             over the last axis.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``inputs`` has fewer than 2 dimensions.
         """
+        # The same rank contract build() enforces, restated here because
+        # Keras does not rebuild an already-built layer: a layer built at
+        # (4, 8) and then called at (8,) never re-enters build(), so without
+        # this line it returned a finite rank-1 result instead of raising.
+        # Reading len(inputs.shape) is a Python-level static-shape read, so
+        # it is evaluated once at trace time and is graph-safe.
+        if len(inputs.shape) < 2:
+            raise ValueError(
+                f"AdaptiveTemperatureSoftmax expects at least 2D input, "
+                f"got shape {inputs.shape}"
+            )
+
         initial_probs = keras.ops.nn.softmax(inputs, axis=-1)
 
         entropy = self._compute_entropy(initial_probs)

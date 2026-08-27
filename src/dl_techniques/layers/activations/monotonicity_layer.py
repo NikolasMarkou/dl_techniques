@@ -332,10 +332,27 @@ class MonotonicityLayer(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Non-decreasing tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
-        :raises ValueError: If ``self.method`` is unknown. ``__init__``
-            already rejects that, so this branch is unreachable through the
-            public API.
+        :raises ValueError: If the axis extent is statically known and
+            smaller than 2, or if ``self.method`` is unknown. ``__init__``
+            already rejects an unknown method, so that branch is
+            unreachable through the public API.
         """
+        # The same minimum-extent contract build() enforces, restated here
+        # because Keras does not rebuild an already-built layer: a layer
+        # built at (4, 8) and then called at (4, 1) never re-enters build(),
+        # so without this it returned a finite (4, 1) -- a monotone ordering
+        # over a single value. A dynamic (None) extent is left to the ops,
+        # and an axis outside the current rank is left to the ops too, so
+        # this check never turns a shape mismatch into an IndexError.
+        shape = inputs.shape
+        if -len(shape) <= self.axis < len(shape):
+            axis_size = shape[self.axis]
+            if axis_size is not None and axis_size < 2:
+                raise ValueError(
+                    f"Monotonicity requires at least 2 values along axis "
+                    f"{self.axis}, but got {axis_size}"
+                )
+
         # Apply the selected monotonicity method
         if self.method == "cumulative_softplus":
             return self._cumulative_softplus(inputs)
