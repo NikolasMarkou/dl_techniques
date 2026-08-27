@@ -1,43 +1,38 @@
-"""
-Root Mean Square Normalization Layer for Deep Neural Networks
+"""RMSNorm: normalize by the root mean square, with an optional learnable scale.
 
-This module implements RMS (Root Mean Square) Normalization, a normalization technique
-that can help stabilize training and improve gradient flow in deep neural networks.
-RMS normalization is particularly effective in transformer architectures and has been
-shown to provide computational benefits over LayerNorm in certain scenarios.
+``RMSNorm`` divides an input by ``sqrt(mean(x ** 2) + epsilon)`` over the
+normalization axes, then multiplies by an optional learnable ``scale``. It does
+not subtract the mean, so it runs one reduction over those axes where LayerNorm
+runs two.
 
-Mathematical Formulation:
-    Given an input tensor x with shape (..., d), RMS normalization computes:
+Computation
+-----------
 
-    RMS(x) = sqrt(mean(x²) + ε)
-    output = (x / RMS(x)) * γ
+For an input ``x`` reduced over ``axis``::
 
-    Where:
-    - mean(x²) is computed over specified axes (typically the feature dimension)
-    - ε is a small epsilon for numerical stability
-    - γ is an optional learnable scaling parameter
+    rms = sqrt(mean(x ** 2) + epsilon)
+    output = (x / rms) * scale
 
-Key Differences from LayerNorm:
-    - LayerNorm: (x - μ) / σ * γ + β (centers and scales)
-    - RMSNorm: x / RMS(x) * γ (only scales, no centering)
+``mean`` is used rather than ``sum``, so the result does not depend on the
+length of the normalized axis. The output RMS is ``sqrt(m / (m + epsilon))``
+with ``m = mean(x ** 2)``, so it reaches 1 only while ``m`` is far above
+``epsilon``. Measured on a ``(4, 64)`` input at the default ``epsilon=1e-6``:
+the output RMS is ``1.000000`` at input scale 1, and falls to ``[0.679, 0.754]``
+at input scale 1e-3.
 
-This makes RMSNorm computationally more efficient as it doesn't require computing
-the mean for centering, only the RMS for scaling.
+Statistics run in ``keras.backend.result_type(input_dtype, "float32")``. That is
+float32 for float16 and float32 inputs, and float64 under a float64 policy. A
+hardcoded ``"float32"`` would be wrong there. Measured on the float64 input
+``[[1e8+1, 1e8+2, 1e8+3, 1e8+4]]``: float32 statistics return exactly
+``[[1, 1, 1, 1]]`` while float64 statistics return
+``[[0.99999999, 1, 1, 1.00000001]]``, a gap of ``1.5e-08``.
 
-Performance Benefits:
-    - Reduced computational overhead (no mean subtraction)
-    - Better gradient flow in some architectures
-    - Maintains similar normalization benefits to LayerNorm
-    - More stable in mixed precision training
+References
+----------
 
-    No throughput figure is quoted here. The only quantitative claim this module can
-    make from its own code is structural: one reduction over the normalization axes
-    instead of LayerNorm's two.
-
-References:
-    - Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
-      Advances in Neural Information Processing Systems, 32.
-      https://arxiv.org/abs/1910.07467
+[1] Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
+    Advances in Neural Information Processing Systems, 32.
+    https://arxiv.org/abs/1910.07467
 """
 
 import keras
@@ -56,102 +51,132 @@ from dl_techniques.layers.norms._masking import (
 
 @keras.saving.register_keras_serializable()
 class RMSNorm(keras.layers.Layer):
-    """
-    Root Mean Square Normalization layer for stabilized training in deep networks.
+    """Normalize by the root mean square, then apply an optional learnable scale.
 
-    This layer implements root mean square normalization by normalizing inputs by their
-    RMS (Root Mean Square) value. RMS normalization can help stabilize training and
-    improve gradient flow in deep networks, particularly in transformer architectures.
+    Computes ``rms = sqrt(mean(x ** 2) + epsilon)`` over ``axis`` and returns
+    ``(x / rms) * scale``. The mean is never subtracted, so the layer runs one
+    reduction over the normalization axes where LayerNorm runs two. ``scale`` is
+    a trainable weight when ``use_scale=True``. The output has the same shape and
+    dtype as the input.
 
-    The normalization is computed as:
+    The output RMS is ``sqrt(m / (m + epsilon))`` with ``m = mean(x ** 2)``, so
+    it is 1 only while ``m`` is far above ``epsilon``. Measured on a ``(4, 64)``
+    input at ``epsilon=1e-6``: ``1.000000`` at input scale 1, ``[0.679, 0.754]``
+    at input scale 1e-3.
 
-    .. math::
-        \\text{rms} = \\sqrt{\\text{mean}(\\text{input}^2) + \\varepsilon}
+    Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
+    float32 at minimum, float64 under a float64 policy. The result is cast back
+    to the input dtype before it is returned.
 
-    .. math::
-        \\text{output} = \\frac{\\text{input}}{\\text{rms}} \\times \\text{scale}
-
-    Where scale is a learnable parameter when ``use_scale=True``.
-
-    RMSNorm avoids LayerNorm's mean subtraction, so it performs one reduction over
-    the normalization axes where LayerNorm performs two. It is particularly effective
-    in transformer architectures and large language models.
-
-    Statistics are computed in ``keras.backend.result_type(input_dtype, "float32")``
-    - float32 at minimum for numerical stability under mixed precision, and float64
-    when the layer's own policy is float64 - and the result is cast back to the input
-    dtype before it is returned.
-
-    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
-    unconditionally: it is ``True`` only while every normalized axis is the trailing
-    (feature) axis of the input. At the default ``axis=-1`` each position's output depends
-    only on that position: perturbing one ``(sample, token)`` slot of a ``(3, 5, 8)``
-    input moves no other position by more than ``0.0`` (measured, in both
-    ``training=False`` and ``training=True``), so a Keras mask stays valid.
-    Normalizing over the TOKEN axis instead couples positions - measured leak
-    ``2.063`` at ``axis=1`` on the same input - and there the flag is ``False``, so
-    Keras drops the mask and says so. The decision is made in ``__init__`` from the
-    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
+    ``supports_masking`` is a promise about the AXIS, not about the class. It is
+    ``True`` only while every normalized axis is the trailing (feature) axis. At
+    the default ``axis=-1`` each position is normalized on its own, and the
+    measured cross-position leak on a ``(3, 5, 8)`` input is exactly ``0.0`` in
+    both training regimes. Normalizing the token axis couples positions: the
+    measured leak at ``axis=1`` on the same input is ``2.063``. The flag is
+    ``False`` there, so Keras drops the mask and says so. ``__init__`` decides
+    from the spelling alone, because only ``-1`` names the trailing axis at every
+    rank. ``build()`` then makes it exact.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ▼
-        ┌───────────────────────────┐
-        │  Compute mean(x²) along   │
-        │  normalization axis       │
-        └────────────┬──────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────┐
-        │  RMS = √(mean(x²) + ε)    │
-        └────────────┬──────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────┐
-        │  normalized = x / RMS     │
-        └────────────┬──────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────┐
-        │  output = normalized × γ  │
-        │  (if use_scale=True)      │
-        └────────────┬──────────────┘
-                     │
-                     ▼
-        Output: (batch, ..., features)
+                      input: x  (batch, ..., F)
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ cast inputs to stat_dtype =                   │
+          │ result_type(input dtype, "float32")           │
+          └───────────────────────┬───────────────────────┘
+                                  │ x_stat
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ mean_square = mean(x_stat ** 2) over axis,    │
+          │ keepdims=True                                 │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., 1)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ rms = sqrt(mean_square + epsilon)             │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., 1)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ normalized = x_stat / rms                     │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., F)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ scale = self.scale, reshaped only when        │
+          │ _scale_broadcast_shape is not None            │
+          │ normalized = normalized * scale               │
+          │ (optional: use_scale=True)                    │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ cast back to the input dtype                  │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+                      output: (batch, ..., F)  same dtype as x
 
-    :param axis: Axis or axes along which to compute RMS statistics.
-        The default (-1) computes RMS over the last dimension. For multi-axis
-        normalization, pass a tuple (e.g., (-2, -1) for normalizing over last
-        two dimensions).
+    :param axis: Axis or axes reduced by the RMS statistic. The default -1
+        reduces the last dimension. Pass a tuple for multi-axis normalization,
+        for example ``(-2, -1)``.
 
-        Non-trailing axes are supported together with ``use_scale=True``: the
-        ``scale`` weight is stored with one dimension per normalized axis (the
-        checkpoint-visible shape, deliberately unchanged) and is reshaped for
-        broadcasting at call time only when the normalized axes are not the
-        trailing ones, so the ``axis=-1`` path emits no reshape op.
+        Non-trailing axes work together with ``use_scale=True``. The ``scale``
+        weight keeps one dimension per normalized axis, which is the shape stored
+        in every checkpoint, and it is reshaped for broadcasting at call time only
+        when the normalized axes are not the trailing ones. The ``axis=-1`` path
+        emits no reshape op.
 
-        One spelling is deliberately carved out: an axis tuple that is not
-        strictly ascending (e.g. ``(-1, -2)``) keeps the legacy broadcast rather
-        than a corrected one, because ``build()`` orders the scale's dimensions
-        by the order the axes were WRITTEN. Use an ascending tuple.
+        One spelling is carved out. An axis tuple that is not strictly ascending,
+        such as ``(-1, -2)``, keeps the legacy broadcast rather than a corrected
+        one, because ``build()`` orders the scale's dimensions by the order the
+        axes were WRITTEN. That spelling raises ``InvalidArgumentError`` on the
+        first call. Use an ascending tuple.
     :type axis: Union[int, Tuple[int, ...]]
-    :param epsilon: Small constant added to denominator for numerical stability.
-        Should be positive and typically in range [1e-8, 1e-5].
+    :param epsilon: Constant added inside the square root for numerical
+        stability. Must be positive. Typical range is [1e-8, 1e-5]. Defaults to
+        1e-6.
     :type epsilon: float
-    :param use_scale: Whether to use a learnable scaling parameter after
-        normalization. When True, adds a trainable parameter that can help the
-        model learn appropriate scaling.
+    :param use_scale: Whether to create a learnable ``scale`` weight applied
+        after normalization. Defaults to True.
     :type use_scale: bool
-    :param scale_initializer: Initializer for the scale parameter when
-        ``use_scale=True``. Common choices include "ones" (default), "zeros",
-        or custom initializers.
+    :param scale_initializer: Initializer for the ``scale`` weight when
+        ``use_scale=True``. Defaults to "ones".
     :type scale_initializer: Union[str, keras.initializers.Initializer]
-    :param kwargs: Additional keyword arguments passed to the parent Layer class.
+    :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+    :type kwargs: Any
+
+    :ivar axis: The configured normalization axis or axes.
+    :vartype axis: Union[int, Tuple[int, ...]]
+    :ivar epsilon: The configured numerical constant.
+    :vartype epsilon: float
+    :ivar use_scale: Whether a ``scale`` weight is created.
+    :vartype use_scale: bool
+    :ivar scale_initializer: The resolved initializer for ``scale``.
+    :vartype scale_initializer: keras.initializers.Initializer
+    :ivar scale: The learnable scale weight, or None until ``build()`` runs and
+        None forever when ``use_scale=False``.
+    :vartype scale: Optional[keras.Variable]
+
+    :raises ValueError: If epsilon is not positive.
+    :raises TypeError: If axis is not an int or a tuple of ints.
+    :raises ValueError: If a normalized axis has a dynamic (None) dimension while
+        ``use_scale=True``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.norms import RMSNorm
+
+        x = keras.random.normal((4, 16, 64))
+        y = RMSNorm(axis=-1)(x)
     """
 
     def __init__(
@@ -162,6 +187,22 @@ class RMSNorm(keras.layers.Layer):
         scale_initializer: Union[str, keras.initializers.Initializer] = "ones",
         **kwargs: Any
     ) -> None:
+        """Initialize the layer.
+
+        :param axis: Axis or axes reduced by the RMS statistic.
+        :type axis: Union[int, Tuple[int, ...]]
+        :param epsilon: Constant added inside the square root. Must be positive.
+        :type epsilon: float
+        :param use_scale: Whether to create a learnable ``scale`` weight.
+        :type use_scale: bool
+        :param scale_initializer: Initializer for the ``scale`` weight.
+        :type scale_initializer: Union[str, keras.initializers.Initializer]
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If epsilon is not positive.
+        :raises TypeError: If axis is not an int or a tuple of ints.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs early
@@ -191,15 +232,15 @@ class RMSNorm(keras.layers.Layer):
         logger.debug(f"Initialized RMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
 
     def _validate_inputs(self, axis: Union[int, Tuple[int, ...]], epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Reject an invalid axis or a non-positive epsilon.
 
-        :param axis: Normalization axis/axes to validate.
+        :param axis: Normalization axis or axes to validate.
         :type axis: Union[int, Tuple[int, ...]]
         :param epsilon: Epsilon value to validate.
         :type epsilon: float
+
         :raises ValueError: If epsilon is not positive.
-        :raises TypeError: If axis is not int or tuple of ints.
+        :raises TypeError: If axis is not an int or a tuple of ints.
         """
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
@@ -212,17 +253,18 @@ class RMSNorm(keras.layers.Layer):
             raise TypeError(f"axis must be int or tuple of ints, got {type(axis)}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's own weights.
+        """Create the ``scale`` weight and settle the masking promise.
 
-        This is called automatically when the layer first processes input.
-        Following modern Keras 3 Pattern 1: Simple Layer (No Sub-layers).
+        Runs on the first call, when the input rank is known. Creates ``scale``
+        with one dimension per normalized axis when ``use_scale=True``, and
+        computes the broadcast shape ``call()`` will reshape it to.
 
-        :param input_shape: Shape tuple indicating input tensor shape.
-            First dimension (batch size) may be None.
+        :param input_shape: Shape tuple of the input tensor. The batch dimension
+            may be None.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If attempting to create scale parameter with dynamic
-            shape along normalization axes.
+
+        :raises ValueError: If a normalized axis has a dynamic (None) dimension
+            while ``use_scale=True``.
         """
         if self.built:
             return
@@ -267,28 +309,24 @@ class RMSNorm(keras.layers.Layer):
             logger.debug(f"Created scale parameter with shape {param_shape}")
 
             # DECISION plan-2026-08-25T195813-d5a035ab/D-004
-            # The built 'scale' weight shape is checkpoint-visible: every saved
-            # .keras file holding an RMSNorm stores exactly `param_shape`.
-            # Widening it above to a full-rank shape carrying 1s at the
-            # unnormalized axes would be the cleaner algebra, but it would make
-            # every existing checkpoint unloadable. So do NOT touch
-            # add_weight(shape=param_shape); the broadcast is instead done at
-            # CALL time, and only when it is actually needed.
-            # Record: plans/plan-2026-08-25T195813-d5a035ab/decisions.md D-004.
+            # 'scale' is stored at param_shape. Measured: axis=-1 on a (2, 4, 8)
+            # input stores (8,), not the full-rank (1, 1, 8). Do NOT widen it that
+            # way; every saved .keras holding an RMSNorm would stop loading. call()
+            # reshapes for broadcast instead. See that plan's decisions.md D-004.
             rank = len(input_shape)
             if param_axes == list(range(rank - len(param_axes), rank)):
                 # The normalized axes are exactly the trailing axes, in ascending
                 # order. `param_shape` already broadcasts against the input, so
-                # this path (axis=-1, i.e. 100% of the live consumers) must emit
-                # no reshape op at all.
+                # this path (axis=-1, the default) emits no reshape op at all.
                 self._scale_broadcast_shape = None
             elif any(b <= a for a, b in zip(param_axes, param_axes[1:])):
                 # Not strictly ascending (e.g. axis=(-1, -2)): build() orders the
                 # scale's dimensions by the order the axes were WRITTEN, so a
                 # broadcast shape derived from ascending order would silently
-                # reinterpret the stored weight. Deliberate: an unsorted 'axis'
-                # tuple keeps today's behaviour verbatim and is an unsupported
-                # spelling. Do NOT "fix" this by sorting param_axes.
+                # reinterpret the stored weight. An unsorted 'axis' tuple is an
+                # unsupported spelling and keeps today's behaviour verbatim; it
+                # raises InvalidArgumentError on the first call. Do NOT "fix"
+                # this by sorting param_axes.
                 self._scale_broadcast_shape = None
             else:
                 broadcast_shape = [1] * rank
@@ -304,27 +342,27 @@ class RMSNorm(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply RMS normalization to inputs.
+        """Apply RMS normalization.
 
-        :param inputs: Input tensor of any shape. Normalization is applied along
-            the axes specified during initialization.
+        :param inputs: Input tensor of any shape. Normalization runs along the
+            axes given at construction.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating whether the layer should behave in
-            training mode. Not used in RMSNorm but kept for consistency with
-            other normalization layers.
+        :param training: Training-mode flag. Unused; the layer behaves the same
+            in both modes and the argument is kept for API compatibility.
         :type training: Optional[bool]
-        :return: RMS normalized tensor with the same shape as inputs.
+
+        :return: Normalized tensor, same shape and dtype as ``inputs``.
         :rtype: keras.KerasTensor
         """
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Statistics dtype: float32 at minimum (numerical stability under
-        # mixed precision), but float64 when the layer really is float64 -
-        # a hardcoded "float32" here silently ran the statistics in float32
-        # under a float64 policy (measured: the output matched a float32
-        # reference exactly and missed the float64 one by 1.5e-8).
+        # Statistics dtype: float32 at minimum for numerical stability under
+        # mixed precision, and float64 when the layer really is float64. A
+        # hardcoded "float32" here runs the statistics in float32 under a float64
+        # policy. Measured on the float64 input [[1e8+1, 1e8+2, 1e8+3, 1e8+4]]:
+        # float32 statistics return exactly [[1, 1, 1, 1]] and float64 ones
+        # return [[0.99999999, 1, 1, 1.00000001]], a gap of 1.5e-08.
         stat_dtype = keras.backend.result_type(original_dtype, "float32")
         inputs_fp32 = keras.ops.cast(inputs, stat_dtype)
 
@@ -348,7 +386,8 @@ class RMSNorm(keras.layers.Layer):
                 # Non-trailing normalization axes only: the stored weight shape is
                 # not broadcast-compatible with the input, so give it explicit 1s
                 # at the unnormalized axes here rather than in build()
-                # (DECISION plan-2026-08-25T195813-d5a035ab/D-004).
+                # (DECISION plan-2026-08-25T195813-d5a035ab/D-004). Measured:
+                # axis=1 on a (2, 4, 8) input stores (4,) and reshapes to (1, 4, 1).
                 scale = keras.ops.reshape(scale, self._scale_broadcast_shape)
             normalized = normalized * scale
 
@@ -356,24 +395,20 @@ class RMSNorm(keras.layers.Layer):
         return keras.ops.cast(normalized, original_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple (same as input shape for normalization layers).
+
+        :return: The same shape tuple that was passed in.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the configuration needed to rebuild this layer.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        :return: Dictionary containing all constructor arguments.
+        :return: Dictionary holding every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

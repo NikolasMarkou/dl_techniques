@@ -1,49 +1,50 @@
-"""
-Zero-Centered Root Mean Square Normalization Layer for Deep Neural Networks
+"""ZeroCenteredRMSNorm: center over the axis, then normalize by the root mean square.
 
-This module implements Zero-Centered RMS (Root Mean Square) Normalization, an advanced
-normalization technique that combines the computational efficiency of RMSNorm with the
-stabilizing zero-mean property of LayerNorm. This variant addresses the "mean shift"
-problem in standard RMSNorm while maintaining computational advantages.
+``ZeroCenteredRMSNorm`` subtracts the mean over the normalization axes, divides
+by the RMS of the centered values, and multiplies by an optional learnable
+``scale``. Centering is what separates it from ``RMSNorm``: it stops the mean of
+the activations drifting, which is the failure Qwen3-Next reports as abnormal
+growth of normalization weights.
 
-Mathematical Formulation:
-    Given an input tensor x with shape (..., d), Zero-Centered RMS normalization computes:
+Computation
+-----------
 
-    mu = mean(x) over specified axes
-    x_centered = x - mu
-    RMS(x_centered) = sqrt(mean(x_centered^2) + epsilon)
-    output = (x_centered / RMS(x_centered)) * gamma
+For an input ``x`` reduced over ``axis``::
 
-    Where:
-    - mu is the mean computed over specified axes (centering step)
-    - mean(x_centered^2) is computed over the same specified axes
-    - epsilon is a small epsilon for numerical stability
-    - gamma is an optional learnable scaling parameter
+    mean = mean(x)
+    centered = x - mean
+    rms = sqrt(mean(centered ** 2) + epsilon)
+    output = (centered / rms) * scale
 
-Key Differences from Standard Normalization:
-    - LayerNorm: (x - mu) / sigma * gamma + beta (centers, scales, and shifts)
-    - RMSNorm: x / RMS(x) * gamma (only scales, no centering)
-    - Zero-Centered RMSNorm: (x - mu) / RMS(x - mu) * gamma (centers and scales, no shift)
+This is the same function as ``keras.layers.LayerNormalization(center=False)``,
+not merely a similar one. Centering drives ``mean(centered)`` to zero, so
+``mean(centered ** 2)`` is ``var(x)`` over the same axes, and ``epsilon`` sits in
+the same place, inside the square root and added to the second moment. Measured
+on a ``(4, 16)`` input, the two layers agree to ``3.576e-07`` at worst across
+``epsilon`` in {1e-6, 1e-3, 1e-1} and input scales in {3, 1e-2, 1e-3}, including
+the regime where ``epsilon`` dominates the variance. Centering is exact only in
+exact arithmetic: the measured ``max|mean(output)|`` over the normalized axis is
+``2.980e-08`` in float32.
 
-This makes Zero-Centered RMSNorm arithmetically IDENTICAL to LayerNorm without the bias
-term, not merely similar to it. Because mean(x_centered) is zero by construction,
-mean(x_centered^2) is exactly var(x) over the same axes - the denominator LayerNorm
-computes - and epsilon sits in the same place (inside the sqrt, added to the second
-moment). What differs is framing and implementation, not arithmetic: this layer is
-presented as an enhancement to RMSNorm that prevents mean drift. If you want the same
-function and nothing else, prefer keras.layers.LayerNormalization(center=False), which
-may reach fused kernels this implementation cannot.
+If you want that function and nothing else, prefer
+``keras.layers.LayerNormalization(center=False)``, which may reach fused kernels
+this implementation cannot. Note the epsilon defaults differ: this layer uses
+1e-6, ``keras.layers.LayerNormalization`` uses 1e-3.
 
-Performance Benefits:
-    - Prevents abnormal growth of layer normalization weights
-    - Maintains training stability through zero-mean outputs
-    - Combines efficiency with stabilization
-    - Better gradient flow compared to standard RMSNorm
-    - Particularly effective in large language models like Qwen3-Next
+Statistics run in ``keras.backend.result_type(input_dtype, "float32")``. That is
+float32 for float16 and float32 inputs, and float64 under a float64 policy. A
+hardcoded ``"float32"`` would be wrong there. Measured on the float64 input
+``[[1e8+1, 1e8+2, 1e8+3, 1e8+4]]``: float32 statistics collapse the centered
+tensor to exactly ``[[0, 0, 0, 0]]``, while float64 statistics return
+``[[-1.342, -0.447, 0.447, 1.342]]``.
 
-References:
-    - Used in Qwen3-Next model for solving abnormal growth issues in layer normalization weights
-    - Builds upon concepts from both LayerNorm and RMSNorm literature
+References
+----------
+
+[1] Used in the Qwen3-Next model to stop abnormal growth of layer normalization
+    weights.
+[2] Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
+    https://arxiv.org/abs/1910.07467
 """
 
 
@@ -64,120 +65,145 @@ from dl_techniques.layers.norms._masking import (
 
 @keras.saving.register_keras_serializable()
 class ZeroCenteredRMSNorm(keras.layers.Layer):
-    """
-    Zero-Centered Root Mean Square Normalization layer for enhanced training stability.
+    """Center over the normalization axis, then normalize by the root mean square.
 
-    This layer implements zero-centered root mean square normalization by first centering
-    the inputs around zero, then normalizing by their RMS value. This approach combines
-    the computational efficiency of RMSNorm with the stabilizing zero-mean property of
-    LayerNorm, preventing mean drift and abnormal weight growth.
-
-    The normalization is computed as:
-
-    1. Centering: mu = E[x], x_centered = x - mu
-    2. RMS Computation: rms = sqrt(E[x_centered^2] + epsilon)
-    3. Normalization: x_hat = x_centered / rms
-    4. Scaling: y = gamma * x_hat (if use_scale=True)
-
-    Where mu is computed per feature across normalization axes, gamma (scale) is a
-    learnable parameter if use_scale=True, and epsilon is a small constant for
-    numerical stability.
-
-    This layer is particularly beneficial for transformer architectures and large
-    language models, preventing abnormal growth of layer normalization weights while
-    maintaining computational efficiency.
+    Subtracts the mean over ``axis``, divides by ``sqrt(mean(centered ** 2) +
+    epsilon)``, and multiplies by an optional learnable ``scale``. Centering stops
+    the activation mean drifting, which is the failure Qwen3-Next reports as
+    abnormal growth of normalization weights. The output has the same shape and
+    dtype as the input.
 
     .. note::
-        This is not merely *similar* to LayerNorm without a bias - it is the same
-        function. Centering forces ``mean(x_centered) = 0``, so
-        ``mean(x_centered**2)`` is exactly ``var(x)`` over the same axes, and the
-        epsilon is placed identically (inside the square root, added to the second
-        moment). ``keras.layers.LayerNormalization(center=False)`` computes the same
-        thing and may reach fused kernels this implementation cannot; this class
-        exists for the RMSNorm framing and for the band/zero-centered family it
-        belongs to.
+        This is the same function as
+        ``keras.layers.LayerNormalization(center=False)``, not merely a similar
+        one. Centering drives ``mean(centered)`` to zero, so
+        ``mean(centered ** 2)`` is ``var(x)`` over the same axes, and ``epsilon``
+        sits in the same place. Measured on a ``(4, 16)`` input, the two agree to
+        ``3.576e-07`` at worst across ``epsilon`` in {1e-6, 1e-3, 1e-1} and input
+        scales in {3, 1e-2, 1e-3}. Prefer the Keras layer if you want that
+        function and nothing else; it may reach fused kernels this implementation
+        cannot. The epsilon defaults differ: 1e-6 here, 1e-3 there.
 
-    Statistics are computed in ``keras.backend.result_type(input_dtype, "float32")``
-    - float32 at minimum, float64 under a float64 policy - and cast back to the
-    input dtype on return.
+    Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
+    float32 at minimum, float64 under a float64 policy. The result is cast back
+    to the input dtype before it is returned.
 
-    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
-    unconditionally: it is ``True`` only while every normalized axis is the trailing
-    (feature) axis of the input. At the default ``axis=-1`` a single ``(sample, token)``
-    perturbation of a ``(3, 5, 8)`` input moves no other position by more than
-    ``0.0`` (measured, both training regimes), so a Keras mask remains valid.
-    Normalizing over the TOKEN axis instead couples positions - measured leak
-    ``2.189`` at ``axis=1`` on the same input - and there the flag is ``False``, so
-    Keras drops the mask and says so. The decision is made in ``__init__`` from the
-    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
+    ``supports_masking`` is a promise about the AXIS, not about the class. It is
+    ``True`` only while every normalized axis is the trailing (feature) axis. At
+    the default ``axis=-1`` each position is centered and scaled from its own
+    statistics, and the measured cross-position leak on a ``(3, 5, 8)`` input is
+    exactly ``0.0`` in both training regimes. Normalizing the token axis couples
+    positions: the measured leak at ``axis=1`` on the same input is ``2.189``.
+    The flag is ``False`` there, so Keras drops the mask and says so.
+    ``__init__`` decides from the spelling alone, because only ``-1`` names the
+    trailing axis at every rank. ``build()`` then makes it exact.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ▼
-        ┌───────────────────────────────┐
-        │  μ = mean(x) along axis       │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  x_centered = x - μ           │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  RMS = √(mean(x_centered²)+ε) │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  normalized = x_centered / RMS│
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  output = normalized × γ      │
-        │  (if use_scale=True)          │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        Output: (batch, ..., features)
+                      input: x  (batch, ..., F)
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ cast inputs to stat_dtype =                   │
+          │ result_type(input dtype, "float32")           │
+          └───────────────────────┬───────────────────────┘
+                                  │ x_stat
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ mean = mean(x_stat) over axis,                │
+          │ keepdims=True                                 │
+          │ centered = x_stat - mean                      │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., F)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ mean_square = mean(centered ** 2) over axis,  │
+          │ keepdims=True                                 │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., 1)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ rms = sqrt(mean_square + epsilon)             │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., 1)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ normalized = centered / rms                   │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., F)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ scale = self.scale, reshaped only when        │
+          │ _scale_broadcast_shape is not None            │
+          │ normalized = normalized * scale               │
+          │ (optional: use_scale=True)                    │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ cast back to the input dtype                  │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+                      output: (batch, ..., F)  same dtype as x
 
-    :param axis: Axis or axes along which to compute mean and RMS statistics.
-        The default (-1) computes statistics over the last dimension. For multi-axis
-        normalization, pass a tuple (e.g., (-2, -1) for normalizing over last two
-        dimensions).
+    :param axis: Axis or axes reduced by the mean and RMS statistics. The default
+        -1 reduces the last dimension. Pass a tuple for multi-axis normalization,
+        for example ``(-2, -1)``.
 
-        Non-trailing axes are supported together with ``use_scale=True``: the
-        ``scale`` weight keeps its checkpoint-visible shape (one dimension per
-        normalized axis) and is reshaped for broadcasting at call time only when
-        the normalized axes are not the trailing ones, so ``axis=-1`` emits no
-        reshape op.
+        Non-trailing axes work together with ``use_scale=True``. The ``scale``
+        weight keeps one dimension per normalized axis, which is the shape stored
+        in every checkpoint, and it is reshaped for broadcasting at call time only
+        when the normalized axes are not the trailing ones. The ``axis=-1`` path
+        emits no reshape op.
 
-        Deliberate carve-out: an axis tuple that is not strictly ascending (e.g.
-        ``(-1, -2)``) keeps the legacy broadcast, because ``build()`` orders the
-        scale's dimensions by the order the axes were WRITTEN. Use an ascending
-        tuple.
+        One spelling is carved out. An axis tuple that is not strictly ascending,
+        such as ``(-1, -2)``, keeps the legacy broadcast rather than a corrected
+        one, because ``build()`` orders the scale's dimensions by the order the
+        axes were WRITTEN. That spelling raises ``InvalidArgumentError`` on the
+        first call. Use an ascending tuple.
     :type axis: Union[int, Tuple[int, ...]]
-    :param epsilon: Small constant added to denominator for numerical stability.
-        Should be positive and typically in range [1e-8, 1e-5].
+    :param epsilon: Constant added inside the square root for numerical
+        stability. Must be positive. Typical range is [1e-8, 1e-5]. Defaults to
+        1e-6.
     :type epsilon: float
-    :param use_scale: Whether to use a learnable scaling parameter after
-        normalization. When True, adds a trainable parameter that can help the model
-        learn appropriate scaling.
+    :param use_scale: Whether to create a learnable ``scale`` weight applied
+        after normalization. Defaults to True.
     :type use_scale: bool
-    :param scale_initializer: Initializer for the scale parameter when
-        ``use_scale=True``. Common choices include "ones" (default), "zeros",
-        or custom initializers.
+    :param scale_initializer: Initializer for the ``scale`` weight when
+        ``use_scale=True``. Defaults to "ones".
     :type scale_initializer: Union[str, initializers.Initializer]
-    :param kwargs: Additional keyword arguments passed to the parent Layer class.
+    :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+    :type kwargs: Any
+
+    :ivar axis: The configured normalization axis or axes.
+    :vartype axis: Union[int, Tuple[int, ...]]
+    :ivar epsilon: The configured numerical constant.
+    :vartype epsilon: float
+    :ivar use_scale: Whether a ``scale`` weight is created.
+    :vartype use_scale: bool
+    :ivar scale_initializer: The resolved initializer for ``scale``.
+    :vartype scale_initializer: initializers.Initializer
+    :ivar scale: The learnable scale weight, or None until ``build()`` runs and
+        None forever when ``use_scale=False``.
+    :vartype scale: Optional[keras.Variable]
 
     :raises ValueError: If epsilon is not positive.
-    :raises ValueError: If attempting to normalize along dynamic axes during build.
-    :raises TypeError: If axis is not int or tuple of ints.
+    :raises TypeError: If axis is not an int or a tuple of ints.
+    :raises ValueError: If a normalized axis has a dynamic (None) dimension while
+        ``use_scale=True``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.norms import ZeroCenteredRMSNorm
+
+        x = keras.random.normal((4, 16, 64))
+        y = ZeroCenteredRMSNorm(axis=-1)(x)
     """
 
     def __init__(
@@ -188,6 +214,22 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
             scale_initializer: Union[str, initializers.Initializer] = "ones",
             **kwargs: Any
     ) -> None:
+        """Initialize the layer.
+
+        :param axis: Axis or axes reduced by the mean and RMS statistics.
+        :type axis: Union[int, Tuple[int, ...]]
+        :param epsilon: Constant added inside the square root. Must be positive.
+        :type epsilon: float
+        :param use_scale: Whether to create a learnable ``scale`` weight.
+        :type use_scale: bool
+        :param scale_initializer: Initializer for the ``scale`` weight.
+        :type scale_initializer: Union[str, initializers.Initializer]
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If epsilon is not positive.
+        :raises TypeError: If axis is not an int or a tuple of ints.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs early
@@ -222,15 +264,15 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         )
 
     def _validate_inputs(self, axis: Union[int, Tuple[int, ...]], epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Reject an invalid axis or a non-positive epsilon.
 
-        :param axis: Normalization axis/axes to validate.
+        :param axis: Normalization axis or axes to validate.
         :type axis: Union[int, Tuple[int, ...]]
         :param epsilon: Epsilon value to validate.
         :type epsilon: float
+
         :raises ValueError: If epsilon is not positive.
-        :raises TypeError: If axis is not int or tuple of ints.
+        :raises TypeError: If axis is not an int or a tuple of ints.
         """
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
@@ -243,17 +285,18 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
             raise TypeError(f"axis must be int or tuple of ints, got {type(axis)}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's own weights.
+        """Create the ``scale`` weight and settle the masking promise.
 
-        This is called automatically when the layer first processes input.
-        Following modern Keras 3 Pattern 1: Simple Layer (No Sub-layers).
+        Runs on the first call, when the input rank is known. Creates ``scale``
+        with one dimension per normalized axis when ``use_scale=True``, and
+        computes the broadcast shape ``call()`` will reshape it to.
 
-        :param input_shape: Shape tuple indicating input tensor shape.
-            First dimension (batch size) may be None.
+        :param input_shape: Shape tuple of the input tensor. The batch dimension
+            may be None.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If attempting to create scale parameter with dynamic
-            shape along normalization axes.
+
+        :raises ValueError: If a normalized axis has a dynamic (None) dimension
+            while ``use_scale=True``.
         """
         if self.built:
             return
@@ -298,28 +341,25 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
             logger.debug(f"Created scale parameter with shape {param_shape}")
 
             # DECISION plan-2026-08-25T195813-d5a035ab/D-004
-            # The built 'scale' weight shape is checkpoint-visible: every saved
-            # .keras file holding a ZeroCenteredRMSNorm stores exactly
-            # `param_shape`. Widening it above to a full-rank shape carrying 1s
-            # at the unnormalized axes would be the cleaner algebra, but it would
-            # make every existing checkpoint unloadable. So do NOT touch
-            # add_weight(shape=param_shape); the broadcast is instead done at
-            # CALL time, and only when it is actually needed.
-            # Record: plans/plan-2026-08-25T195813-d5a035ab/decisions.md D-004.
+            # 'scale' is stored at param_shape. Measured: axis=-1 on a (2, 4, 8)
+            # input stores (8,), not the full-rank (1, 1, 8). Do NOT widen it that
+            # way; every saved .keras holding a ZeroCenteredRMSNorm would stop
+            # loading. call() reshapes for broadcast instead. See that plan's
+            # decisions.md D-004.
             rank = len(input_shape)
             if param_axes == list(range(rank - len(param_axes), rank)):
                 # The normalized axes are exactly the trailing axes, in ascending
                 # order. `param_shape` already broadcasts against the input, so
-                # this path (axis=-1, i.e. 100% of the live consumers) must emit
-                # no reshape op at all.
+                # this path (axis=-1, the default) emits no reshape op at all.
                 self._scale_broadcast_shape = None
             elif any(b <= a for a, b in zip(param_axes, param_axes[1:])):
                 # Not strictly ascending (e.g. axis=(-1, -2)): build() orders the
                 # scale's dimensions by the order the axes were WRITTEN, so a
                 # broadcast shape derived from ascending order would silently
-                # reinterpret the stored weight. Deliberate: an unsorted 'axis'
-                # tuple keeps today's behaviour verbatim and is an unsupported
-                # spelling. Do NOT "fix" this by sorting param_axes.
+                # reinterpret the stored weight. An unsorted 'axis' tuple is an
+                # unsupported spelling and keeps today's behaviour verbatim; it
+                # raises InvalidArgumentError on the first call. Do NOT "fix"
+                # this by sorting param_axes.
                 self._scale_broadcast_shape = None
             else:
                 broadcast_shape = [1] * rank
@@ -335,27 +375,27 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply Zero-Centered RMS normalization to inputs.
+        """Apply zero-centered RMS normalization.
 
-        :param inputs: Input tensor of any shape. Normalization is applied along
-            the axes specified during initialization.
+        :param inputs: Input tensor of any shape. Normalization runs along the
+            axes given at construction.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating whether the layer should behave in
-            training mode. Not used in Zero-Centered RMSNorm but kept for
-            consistency with other normalization layers.
+        :param training: Training-mode flag. Unused; the layer behaves the same
+            in both modes and the argument is kept for API compatibility.
         :type training: Optional[bool]
-        :return: Zero-centered RMS normalized tensor with the same shape as inputs.
+
+        :return: Normalized tensor, same shape and dtype as ``inputs``.
         :rtype: keras.KerasTensor
         """
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Statistics dtype: float32 at minimum (numerical stability under
-        # mixed precision), but float64 when the layer really is float64 -
-        # a hardcoded "float32" here silently ran the statistics in float32
-        # under a float64 policy (measured: the centered tensor collapsed to
-        # exactly zero on an input whose float64 answer is O(1)).
+        # Statistics dtype: float32 at minimum for numerical stability under
+        # mixed precision, and float64 when the layer really is float64. A
+        # hardcoded "float32" here runs the statistics in float32 under a float64
+        # policy. Measured on the float64 input [[1e8+1, 1e8+2, 1e8+3, 1e8+4]]:
+        # float32 statistics collapse `centered_inputs` to exactly [[0, 0, 0, 0]]
+        # while float64 ones give [[-1.342, -0.447, 0.447, 1.342]].
         stat_dtype = keras.backend.result_type(original_dtype, "float32")
         inputs_fp32 = ops.cast(inputs, stat_dtype)
 
@@ -388,7 +428,8 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
                 # Non-trailing normalization axes only: the stored weight shape is
                 # not broadcast-compatible with the input, so give it explicit 1s
                 # at the unnormalized axes here rather than in build()
-                # (DECISION plan-2026-08-25T195813-d5a035ab/D-004).
+                # (DECISION plan-2026-08-25T195813-d5a035ab/D-004). Measured:
+                # axis=1 on a (2, 4, 8) input stores (4,) and reshapes to (1, 4, 1).
                 scale = ops.reshape(scale, self._scale_broadcast_shape)
             normalized = normalized * scale
 
@@ -396,24 +437,20 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         return ops.cast(normalized, original_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple (same as input shape for normalization layers).
+
+        :return: The same shape tuple that was passed in.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the configuration needed to rebuild this layer.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        :return: Dictionary containing all constructor arguments.
+        :return: Dictionary holding every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

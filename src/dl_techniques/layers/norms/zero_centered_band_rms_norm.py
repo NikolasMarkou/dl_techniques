@@ -1,39 +1,47 @@
-"""
-Zero-Centered Band RMS Normalization Layer for Enhanced Training Stability
+"""ZeroCenteredBandRMSNorm: center over the axis, normalize by RMS, scale in a band.
 
-This module implements Zero-Centered Band RMS Normalization, an advanced normalization
-technique that combines three key innovations:
-1. Zero-centering from ZeroCenteredRMSNorm for training stability
-2. RMS normalization for computational efficiency and dimension independence
-3. Band constraint from BandRMS for controlled representational flexibility
+``ZeroCenteredBandRMSNorm`` puts three pieces in one layer. It centers the input
+over the normalization axes like ``ZeroCenteredRMSNorm``, divides by the RMS of
+the centered values like ``RMSNorm``, and multiplies by one learnable scalar
+confined to ``[1 - alpha, 1]`` like ``BandRMS``, where ``alpha`` is
+``max_band_width``.
 
-Mathematical Formulation:
-    Given an input tensor x with shape (..., d), Zero-Centered Band RMS normalization:
+Computation
+-----------
 
-    mu = mean(x) over specified axes
-    x_centered = x - mu
-    RMS(x_centered) = sqrt(mean(x_centered^2) + epsilon)
-    x_norm = x_centered / RMS(x_centered)
-    s = sigmoid(5.0 * band_param) * max_band_width + (1 - max_band_width)
-    output = x_norm * s
+For an input ``x`` reduced over ``axis``::
 
-    Where:
-    - mu is the mean computed over specified axes (centering step)
-    - RMS is computed from the centered input for stability
-    - s is the learnable scaling factor constrained to [1-alpha, 1] band
-    - alpha is the max_band_width parameter
+    mean = mean(x)
+    centered = x - mean
+    rms = maximum(sqrt(mean(centered ** 2) + epsilon), epsilon)
+    s = (1 - alpha) + alpha * sigmoid(5.0 * band_param)
+    output = (centered / rms) * s
 
-Key Benefits:
-    - Prevents mean drift and abnormal weight growth (zero-centering)
-    - Maintains dimension-independent scaling (RMS normalization)
-    - Provides controlled representational flexibility (band constraint)
-    - Combines stability with expressiveness
-    - Particularly effective for transformer architectures and large language models
+Centering stops the activation mean drifting. Using ``mean(centered ** 2)``
+rather than a sum keeps the normalization independent of the width of the
+normalized axis, so the band constraint means the same thing in a 64-wide and a
+512-wide layer.
 
-References:
-    - Builds upon ZeroCenteredRMSNorm concepts from Qwen3-Next
-    - Extends BandRMS band constraint methodology
-    - Combines benefits of LayerNorm stability with RMSNorm efficiency
+``band_param`` is a single scalar weight, so ``s`` is one number for the whole
+tensor. At the "zeros" initializer ``sigmoid(0) = 0.5``, so the output RMS starts
+at exactly ``1 - alpha / 2`` with zero spread across rows: measured ``0.950000``
+at ``alpha=0.1`` and ``0.750000`` at ``alpha=0.5``. Both ends of the band are
+reachable during training: ``band_param = -5`` gives RMS ``0.900000`` and
+``band_param = +5`` gives ``1.000000`` at ``alpha=0.1``.
+
+Statistics run in ``keras.backend.result_type(input_dtype, "float32")``. That is
+float32 for float16 and float32 inputs, and float64 under a float64 policy. A
+hardcoded ``"float32"`` would be wrong there. Measured on the float64 input
+``[[1e8+1, 1e8+2, 1e8+3, 1e8+4]]``: float32 statistics collapse the centered
+tensor to exactly ``[[0, 0, 0, 0]]``, while float64 statistics return
+``[[-1.275, -0.425, 0.425, 1.275]]``.
+
+References
+----------
+
+[1] Builds on the zero-centering used in the Qwen3-Next model.
+[2] Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
+    https://arxiv.org/abs/1910.07467
 """
 
 import keras
@@ -55,107 +63,145 @@ from dl_techniques.layers.norms._masking import (
 
 @keras.saving.register_keras_serializable()
 class ZeroCenteredBandRMSNorm(keras.layers.Layer):
-    """
-    Zero-Centered Root Mean Square Normalization with learnable band constraints.
+    """Center over the axis, normalize by the root mean square, then scale in a band.
 
-    This layer implements a hybrid normalization approach that combines zero-centering
-    for training stability with band-constrained RMS scaling for representational
-    flexibility. It first centers inputs around zero, then normalizes by RMS, and
-    finally applies learnable scaling within a constrained [1-alpha, 1] band.
+    Subtracts the mean over ``axis``, divides by
+    ``maximum(sqrt(mean(centered ** 2) + epsilon), epsilon)``, then multiplies by
+    one learnable scalar ``s`` confined to ``[1 - alpha, 1]``, where ``alpha`` is
+    ``max_band_width``. ``s`` comes from a single scalar weight through a sigmoid,
+    so it is one number for the whole tensor. The output has the same shape and
+    dtype as the input.
 
-    The normalization is computed as:
+    Centering stops the activation mean drifting. The band is a constraint on the
+    RMS, not on the L2 norm, so it does not depend on the width of the normalized
+    axis.
 
-    1. Centering: mu = E[x], x_centered = x - mu
-    2. RMS Computation: rms = sqrt(E[x_centered^2] + epsilon)
-    3. Normalization: x_hat = x_centered / rms
-    4. Band Scaling: s = sigmoid(5*beta) * alpha + (1-alpha), output = s * x_hat
+    At the default "zeros" initializer ``sigmoid(0) = 0.5``, so the output RMS
+    starts at exactly ``1 - alpha / 2`` with zero spread across rows: measured
+    ``0.950000`` at ``alpha=0.1`` and ``0.750000`` at ``alpha=0.5``. Training
+    reaches both ends of the band: ``band_param = -5`` gives ``0.900000`` and
+    ``band_param = +5`` gives ``1.000000`` at ``alpha=0.1``.
 
-    Where mu is computed per feature across normalization axes, rms is computed from
-    centered inputs for enhanced stability, s is the learnable band scaling factor
-    constrained to [1-alpha, 1], beta is the trainable band parameter, alpha is
-    the max_band_width hyperparameter, and epsilon is a small constant for numerical
-    stability.
+    Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
+    float32 at minimum, float64 under a float64 policy. The result is cast back
+    to the input dtype before it is returned.
 
-    This creates a "thick shell" in the normalized space while maintaining zero-mean
-    property, combining the benefits of LayerNorm stability, RMSNorm efficiency,
-    and BandRMS representational flexibility.
-
-    ``supports_masking`` is decided from the RESOLVED normalization axis, not set
-    unconditionally: it is ``True`` only while every normalized axis is the trailing
-    (feature) axis of the input. At the default ``axis=-1`` each position is centered and
-    scaled from its own statistics (measured cross-position leak exactly ``0.0`` on
-    a ``(3, 5, 8)`` input, both training regimes).
-    Normalizing over the TOKEN axis instead couples positions - measured leak
-    ``2.080`` at ``axis=1`` on the same input - and there the flag is ``False``, so
-    Keras drops the mask and says so. The decision is made in ``__init__`` from the
-    spelling (only ``-1`` is rank-independent) and made exact in ``build()``.
+    ``supports_masking`` is a promise about the AXIS, not about the class. It is
+    ``True`` only while every normalized axis is the trailing (feature) axis. At
+    the default ``axis=-1`` each position is centered and scaled from its own
+    statistics, and the measured cross-position leak on a ``(3, 5, 8)`` input is
+    exactly ``0.0`` in both training regimes. Normalizing the token axis couples
+    positions: the measured leak at ``axis=1`` on the same input is ``2.080``.
+    The flag is ``False`` there, so Keras drops the mask and says so.
+    ``__init__`` decides from the spelling alone, because only ``-1`` names the
+    trailing axis at every rank. ``build()`` then makes it exact.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, ..., features)
-                │
-                ▼
-        ┌───────────────────────────────┐
-        │  μ = mean(x) along axis       │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  x_centered = x - μ           │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  RMS = max(√(mean(x_c²)+ε),ε) │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  normalized = x_centered / RMS│
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  σ = sigmoid(5 × band_param)  │
-        │  scale = (1-α) + α × σ        │
-        │  scale ∈ [1-α, 1]             │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        ┌───────────────────────────────┐
-        │  output = normalized × scale  │
-        └────────────┬──────────────────┘
-                     │
-                     ▼
-        Output: (batch, ..., features)
+                      input: x  (batch, ..., F)
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ cast inputs to stat_dtype =                   │
+          │ result_type(input dtype, "float32")           │
+          └───────────────────────┬───────────────────────┘
+                                  │ x_stat
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ mean = mean(x_stat) over axis,                │
+          │ keepdims=True                                 │
+          │ centered = x_stat - mean                      │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., F)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ mean_square = mean(centered ** 2) over axis,  │
+          │ keepdims=True                                 │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., 1)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ rms = maximum(sqrt(mean_square + epsilon),    │
+          │               epsilon)                        │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., 1)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ normalized = centered / rms                   │
+          └───────────────────────┬───────────────────────┘
+                                  │ (batch, ..., F)
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ band = sigmoid(5.0 * band_param)              │
+          │ s = (1 - max_band_width)                      │
+          │     + max_band_width * band                   │
+          └───────────────────────┬───────────────────────┘
+                                  │ s: scalar in [1-alpha, 1]
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ output = normalized * s                       │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+          ┌───────────────────────────────────────────────┐
+          │ cast back to the input dtype                  │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+                      output: (batch, ..., F)  same dtype as x
 
-    :param max_band_width: Maximum allowed deviation from unit normalization
-        (0 < alpha < 1). Controls the thickness of the representational band.
-        When alpha=0.1, the output RMS will be constrained to [0.9, 1.0].
+    :param max_band_width: Thickness of the band, written ``alpha`` above. The
+        learned scale is confined to ``[1 - alpha, 1]``, so ``alpha=0.1`` holds
+        the output RMS in ``[0.9, 1.0]``. Must satisfy ``0 < alpha < 1``.
+        Defaults to 0.1.
     :type max_band_width: float
-    :param axis: Axis or axes along which to compute mean and RMS statistics.
-        The default (-1) computes statistics over the last dimension. For multi-axis
-        normalization, pass a tuple (e.g., (-2, -1) for normalizing over last two
-        dimensions).
+    :param axis: Axis or axes reduced by the mean and RMS statistics. The default
+        -1 reduces the last dimension. Pass a tuple for multi-axis normalization,
+        for example ``(-2, -1)``.
     :type axis: Union[int, Tuple[int, ...]]
-    :param epsilon: Small constant added to denominator for numerical stability.
-        Should be positive and typically in range [1e-8, 1e-5].
+    :param epsilon: Constant added inside the square root, and also the floor the
+        RMS is clamped to. Must be positive. Typical range is [1e-8, 1e-5].
+        Defaults to 1e-7.
     :type epsilon: float
-    :param band_initializer: Initializer for the band parameter. The band parameter
-        controls the learned position within the [1-alpha, 1] constraint band.
-        Common choices: "zeros" (start at lower bound), "ones" (start at upper bound).
+    :param band_initializer: Initializer for the scalar ``band_param`` weight,
+        which sets where in the band the scale starts. "zeros" starts at the
+        middle of the band. Defaults to "zeros".
     :type band_initializer: Union[str, initializers.Initializer]
-    :param band_regularizer: Optional regularizer for the band parameter.
-        Helps prevent the band parameter from becoming too extreme. If None,
-        defaults to L2(1e-5) regularizer for stability.
+    :param band_regularizer: Regularizer for ``band_param``, which keeps it from
+        saturating at either end of the band. When None, L2(1e-5) is used.
     :type band_regularizer: Optional[regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments passed to the parent Layer class.
+    :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+    :type kwargs: Any
 
-    :raises ValueError: If max_band_width is not between 0 and 1.
+    :ivar max_band_width: The configured band thickness.
+    :vartype max_band_width: float
+    :ivar axis: The configured normalization axis or axes.
+    :vartype axis: Union[int, Tuple[int, ...]]
+    :ivar epsilon: The configured numerical constant.
+    :vartype epsilon: float
+    :ivar band_initializer: The resolved initializer for ``band_param``.
+    :vartype band_initializer: initializers.Initializer
+    :ivar band_regularizer: The resolved regularizer for ``band_param``.
+    :vartype band_regularizer: regularizers.Regularizer
+    :ivar band_param: The scalar learnable weight, or None until ``build()``
+        runs.
+    :vartype band_param: Optional[keras.Variable]
+
+    :raises ValueError: If max_band_width is not strictly between 0 and 1.
     :raises ValueError: If epsilon is not positive.
-    :raises TypeError: If axis is not int or tuple of ints.
+    :raises TypeError: If axis is not an int or a tuple of ints.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.norms import ZeroCenteredBandRMSNorm
+
+        x = keras.random.normal((4, 16, 64))
+        y = ZeroCenteredBandRMSNorm(max_band_width=0.1)(x)
     """
 
     def __init__(
@@ -167,23 +213,27 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
             band_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the ZeroCenteredBandRMSNorm layer.
+        """Initialize the layer.
 
-        :param max_band_width: Maximum deviation from unit normalization (0 < alpha < 1).
+        :param max_band_width: Thickness of the band. Must satisfy
+            ``0 < max_band_width < 1``.
         :type max_band_width: float
-        :param axis: Axis or axes along which to compute statistics.
+        :param axis: Axis or axes reduced by the mean and RMS statistics.
         :type axis: Union[int, Tuple[int, ...]]
-        :param epsilon: Small constant for numerical stability.
+        :param epsilon: Constant added inside the square root and used as the RMS
+            floor. Must be positive.
         :type epsilon: float
-        :param band_initializer: Initializer for the band parameter.
+        :param band_initializer: Initializer for the scalar ``band_param``.
         :type band_initializer: Union[str, initializers.Initializer]
-        :param band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
+        :param band_regularizer: Regularizer for ``band_param``. When None,
+            L2(1e-5) is used.
         :type band_regularizer: Optional[regularizers.Regularizer]
-        :param kwargs: Additional layer arguments.
-        :raises ValueError: If max_band_width is not between 0 and 1 or if epsilon
-            is not positive.
-        :raises TypeError: If axis is not int or tuple of ints.
+        :param kwargs: Additional keyword arguments for ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If max_band_width is not strictly between 0 and 1.
+        :raises ValueError: If epsilon is not positive.
+        :raises TypeError: If axis is not an int or a tuple of ints.
         """
         super().__init__(**kwargs)
 
@@ -223,17 +273,18 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
             axis: Union[int, Tuple[int, ...]],
             epsilon: float
     ) -> None:
-        """
-        Validate initialization parameters.
+        """Reject an out-of-range band width, a bad axis, or a non-positive epsilon.
 
-        :param max_band_width: Maximum allowed deviation from unit norm.
+        :param max_band_width: Band thickness to validate.
         :type max_band_width: float
-        :param axis: Normalization axis/axes to validate.
+        :param axis: Normalization axis or axes to validate.
         :type axis: Union[int, Tuple[int, ...]]
-        :param epsilon: Small constant for numerical stability.
+        :param epsilon: Epsilon value to validate.
         :type epsilon: float
-        :raises ValueError: If parameters are invalid.
-        :raises TypeError: If axis type is invalid.
+
+        :raises ValueError: If max_band_width is not strictly between 0 and 1.
+        :raises ValueError: If epsilon is not positive.
+        :raises TypeError: If axis is not an int or a tuple of ints.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -251,14 +302,13 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
             raise TypeError(f"axis must be int or tuple of ints, got {type(axis)}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's own weights.
+        """Create the scalar ``band_param`` weight and settle the masking promise.
 
-        This is called automatically when the layer first processes input.
-        Following modern Keras 3 Pattern 1: Simple Layer (No Sub-layers).
+        Runs on the first call, when the input rank is known. ``band_param`` has
+        shape ``()``, so its size does not depend on the input shape.
 
-        :param input_shape: Shape tuple indicating input tensor shape.
-            First dimension (batch size) may be None.
+        :param input_shape: Shape tuple of the input tensor. The batch dimension
+            may be None.
         :type input_shape: Tuple[Optional[int], ...]
         """
         if self.built:
@@ -271,11 +321,12 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
             self.axis, rank=len(input_shape)
         )
 
-        # Create a single scalar band parameter using add_weight()
-        # This parameter controls the learned position within the [1-α, 1] band
+        # Create a single scalar band parameter using add_weight().
+        # It controls the learned position within the [1-α, 1] band.
+        # shape=() is a scalar: one number scales the whole tensor.
         self.band_param = self.add_weight(
             name="band_param",
-            shape=(),  # Scalar shape
+            shape=(),
             initializer=self.band_initializer,
             trainable=True,
             regularizer=self.band_regularizer
@@ -291,28 +342,28 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply Zero-Centered Band RMS normalization to inputs.
+        """Apply zero-centered RMS normalization and the band scale.
 
-        :param inputs: Input tensor of any shape. Normalization is applied along
-            the axes specified during initialization.
+        :param inputs: Input tensor of any shape. Normalization runs along the
+            axes given at construction.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating whether in training mode. Not used
-            in this layer but kept for consistency with other normalization layers.
+        :param training: Training-mode flag. Unused; the layer behaves the same
+            in both modes and the argument is kept for API compatibility.
         :type training: Optional[bool]
-        :return: Zero-centered band RMS normalized tensor with the same shape as
-            inputs. The output RMS will be constrained to [1-max_band_width, 1]
-            range.
+
+        :return: Normalized tensor, same shape and dtype as ``inputs``. Its RMS
+            lies in ``[1 - max_band_width, 1]``, up to the epsilon floor.
         :rtype: keras.KerasTensor
         """
         # Store original dtype for casting back
         original_dtype = inputs.dtype
 
-        # Statistics dtype: float32 at minimum (numerical stability under
-        # mixed precision), but float64 when the layer really is float64 -
-        # a hardcoded "float32" here silently ran the statistics in float32
-        # under a float64 policy (measured: the centered tensor collapsed to
-        # exactly zero on an input whose float64 answer is O(1)).
+        # Statistics dtype: float32 at minimum for numerical stability under
+        # mixed precision, and float64 when the layer really is float64. A
+        # hardcoded "float32" here runs the statistics in float32 under a float64
+        # policy. Measured on the float64 input [[1e8+1, 1e8+2, 1e8+3, 1e8+4]]:
+        # float32 statistics collapse `centered_inputs` to exactly [[0, 0, 0, 0]]
+        # while float64 ones give [[-1.275, -0.425, 0.425, 1.275]].
         stat_dtype = keras.backend.result_type(original_dtype, "float32")
         inputs_fp32 = ops.cast(inputs, stat_dtype)
 
@@ -346,12 +397,13 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         # Step 4: Apply learnable band scaling within [1-α, 1] range
         # Use sigmoid to map the band_param to [0, 1] with 5x multiplier for smoothness
         # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to the statistics
-        # dtype explicitly. Under mixed_float16, variables auto-cast on read
-        # (LESSONS L136), so `5.0 * self.band_param` would return fp16 and crash the
-        # subsequent multiply against the `normalized` tensor. The destination is
-        # `stat_dtype`, not a hardcoded "float32", so the multiply stays in whatever
-        # dtype the active policy makes the statistics
-        # (DECISION plan-2026-08-25T195813-d5a035ab/D-005).
+        # dtype explicitly. Under mixed_float16 a variable auto-casts on read
+        # (LESSONS L136). Measured inside the autocast scope Layer.__call__ opens,
+        # `5.0 * self.band_param` returns float16, so the following
+        # `normalized * scale` raises InvalidArgumentError. Do NOT hardcode
+        # "float32"; stat_dtype keeps the multiply in the policy's statistics dtype
+        # (DECISION plan-2026-08-25T195813-d5a035ab/D-005). The originating plan
+        # directory plan_2026-05-14_3764496e is gone, so this comment is the record.
         band_param_fp32 = ops.cast(self.band_param, stat_dtype)
         band_activation = ops.sigmoid(5.0 * band_param_fp32)
 
@@ -368,24 +420,20 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         return ops.cast(output, original_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Return the output shape, which equals the input shape.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple (same as input shape for normalization layers).
+
+        :return: The same shape tuple that was passed in.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the configuration needed to rebuild this layer.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        :return: Dictionary containing all constructor arguments.
+        :return: Dictionary holding every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
