@@ -83,61 +83,100 @@ DEFAULT_COMPONENTS_INIT_SCALE: float = 16.0
 class ThermalActivation(keras.layers.Layer):
     """THERA thermal activation: a phase-shifted sine with a heat-decay envelope.
 
-    **Intent**: Provide THERA's aliasing-free nonlinearity -- a SIREN-style
-    sinusoid whose amplitude is attenuated by the closed-form solution of the
-    heat equation. As the diffusion time ``t`` increases, high-frequency hidden
-    units (large ``norm``) are damped faster, yielding an analytically smooth
-    (anti-aliased) field response at any target scale. The layer is the pointwise
-    activation core shared by every query pixel of :class:`HeatField`.
-
-    **Architecture**::
-
-        x ----------> sin(w0 * x + phase) ----+
-                                              (*) --> output  (..., hidden)
-        norm,k,t --> exp(-(w0*norm)^2 * k * t)-+
-
-        output = sin(w0 * x + phase) * exp(-(w0 * ||norm||)^2 * k * t)
-
-    Computes, elementwise over the hidden axis::
-
-        sin(w0 * x + phase) * exp(-(w0 * norm)^2 * k * t)
-
-    The sine term is the SIREN-style oscillation; the exponential is the
-    closed-form heat-equation envelope that smoothly attenuates high-frequency
-    components as the diffusion time ``t`` grows. This layer is **stateless**
-    (it owns no weights): ``phase`` and ``norm`` / ``k`` / ``t`` are all passed
-    in by the caller (:class:`HeatField`), because in THERA ``phase`` is a
+    Provides THERA's aliasing-free nonlinearity: a SIREN-style sinusoid whose
+    amplitude is attenuated by the closed-form solution of the heat equation. As
+    the diffusion time ``t`` increases, high-frequency hidden units (large
+    ``norm``) are damped FASTER, which is what yields an analytically smooth
+    (anti-aliased) field response at any target scale. This layer is the
+    pointwise activation core shared by every query pixel of :class:`HeatField`,
+    and it is **STATELESS**: it owns no weights, because ``phase`` is a
     per-pixel hypernetwork output and ``norm`` / ``k`` are derived from
     :class:`HeatField`'s shared weights.
 
-    Args:
-        w0: The frequency multiplier (``w0_scale`` in the reference). Multiplies
-            both the oscillation argument and the envelope's frequency term.
-            Defaults to 1.0.
-        **kwargs: Forwarded to :class:`keras.layers.Layer`.
+    **Operation:**
 
-    Input/Output:
-        See :meth:`call`. Output has the same shape as ``x`` (broadcast with the
-        envelope), i.e. ``(..., hidden)``.
+    .. code-block:: text
+
+        x     [..., hidden] ──┐
+                              ▼
+        phase [..., hidden] ──► sin(w0·x + phase) ─────┐   SIREN oscillation
+                                                       │
+                                                      (×)──► out [..., hidden]
+                                                       │
+        norm  [hidden]     ──┐                         │
+        k     scalar       ──┼─► exp(−(w0·norm)²·k·t) ─┘   heat envelope
+        t     [..., 1]     ──┘
+
+        out = sin(w0·x + phase) · exp(−(w0·‖norm‖)² · k · t)
+
+    **Why the envelope is the whole point:**
+
+    .. code-block:: text
+
+        amplitude
+            1 ┤████████░░░░░░░░              t = 0   nothing damped
+              │
+              ┤██████░░░░░░░░░░              t small  high freqs fade
+              │
+              ┤███░░░░░░░░░░░░░              t large  only low freqs survive
+            0 ┴──────────────────► norm (per-unit frequency magnitude)
+              low            high
+
+        damping goes as exp(−norm²·k·t), so a unit's decay rate is
+        QUADRATIC in its frequency. The target downscale factor enters
+        only through t, which is why the field is aliasing-free at any
+        scale WITHOUT re-training or a per-scale filter.
+
+    :param w0: Frequency multiplier (``w0_scale`` in the reference). Multiplies
+        both the oscillation argument and the envelope's frequency term. Must be
+        positive. Defaults to 1.0.
+    :type w0: float
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
+
+    :raises ValueError: If ``w0`` is not positive.
+
+    Input shape:
+        See :meth:`call`. The primary input ``x`` is ``(..., hidden)``; the
+        remaining arguments broadcast into it.
+
+    Output shape:
+        Same as ``x``, i.e. ``(..., hidden)``.
 
     Example:
         >>> act = ThermalActivation(w0=1.0)
         >>> # x, phase: (..., H); norm: (H,); k, t: scalars / broadcastable
         >>> y = act(x, t, norm, k, phase)
+
+    Note:
+        Stateless by design. Do not give it a ``phase`` weight: in THERA the
+        phase is produced per pixel by the hypernetwork.
     """
 
     def __init__(self, w0: float = 1.0, **kwargs: Any) -> None:
+        """Initialize the activation.
+
+        :param w0: Frequency multiplier.
+        :type w0: float
+        :param kwargs: Forwarded to :class:`keras.layers.Layer`.
+        :raises ValueError: If ``w0`` is not positive.
+        """
         super().__init__(**kwargs)
         if w0 <= 0:
             raise ValueError(f"w0 must be positive, got {w0}")
         self.w0 = float(w0)
 
     def build(self, input_shape: Any) -> None:
-        # Stateless layer: no weights to create. An explicit ``build`` is kept
-        # (rather than relying on the default) so parent layers calling
-        # ``child.build(...)`` do not trigger Keras' "build() was called but
-        # layer does not have a build() method" warning, which the repo treats
-        # as an unbuilt-sublayer serialization hazard (LESSONS.md build-order).
+        """Mark the layer built; there are no weights to create.
+
+        An explicit ``build`` is kept rather than relying on the default so a
+        parent layer calling ``child.build(...)`` does not trigger Keras'
+        "build() was called but layer does not have a build() method" warning,
+        which this repo treats as an unbuilt-sublayer serialization hazard
+        (``LESSONS.md`` build-order).
+
+        :param input_shape: Shape of the primary input; unused.
+        :type input_shape: Any
+        """
         super().build(input_shape)
 
     def call(
@@ -151,17 +190,23 @@ class ThermalActivation(keras.layers.Layer):
     ) -> Any:
         """Apply the thermal activation.
 
-        Args:
-            x: Pre-activation, shape ``(..., hidden)``.
-            t: Heat-diffusion time, broadcastable to ``(..., 1)`` (or scalar).
-            norm: Per-hidden-unit frequency norms, shape ``(hidden,)``.
-            k: Scalar heat conductivity (broadcastable).
-            phase: Per-pixel phase offsets, shape ``(..., hidden)``.
-            training: Unused; present for the standard Keras signature.
-
-        Returns:
-            ``sin(w0 * x + phase) * exp(-(w0 * norm)^2 * k * t)``, shape
+        :param x: Pre-activation of shape ``(..., hidden)``.
+        :type x: keras tensor
+        :param t: Heat-diffusion time, broadcastable to ``(..., 1)`` or scalar.
+            A rank gap against ``x`` is closed by inserting singleton spatial
+            axes, so a ``(B, 1)`` tensor lines its batch dim up with ``x``'s.
+        :type t: keras tensor
+        :param norm: Per-hidden-unit frequency norms, shape ``(hidden,)``.
+        :type norm: keras tensor
+        :param k: Scalar heat conductivity (broadcastable).
+        :type k: keras tensor
+        :param phase: Per-pixel phase offsets, shape ``(..., hidden)``.
+        :type phase: keras tensor
+        :param training: Unused; present for the standard Keras signature.
+        :type training: Optional[bool]
+        :return: ``sin(w0 * x + phase) * exp(-(w0 * norm)^2 * k * t)``, shape
             ``(..., hidden)``.
+        :rtype: keras tensor
         """
         oscillation = ops.sin(self.w0 * x + phase)
         # Envelope: norm is (hidden,) on the trailing axis; k scalar; t carries
@@ -179,12 +224,23 @@ class ThermalActivation(keras.layers.Layer):
         return oscillation * envelope
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
-        # Pointwise over the hidden axis: output matches the first input ``x``
-        # (the oscillation tensor), shape ``(..., hidden)``, unchanged. The
-        # envelope only broadcasts in, so it never alters x's shape.
+        """Compute the output shape, which matches the primary input ``x``.
+
+        The envelope only broadcasts in, so it never alters ``x``'s shape.
+
+        :param input_shape: Shape of ``x``, ``(..., hidden)``.
+        :type input_shape: Any
+        :return: The same shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({"w0": self.w0})
         return config
@@ -197,69 +253,131 @@ class ThermalActivation(keras.layers.Layer):
 class HeatField(keras.layers.Layer):
     """THERA spatially-varying neural heat field evaluated at query coordinates.
 
-    **Intent**: Realize THERA's spatially-varying neural heat field as a single
-    Keras layer: a per-pixel SIREN field whose decay follows the heat equation,
-    producing aliasing-free arbitrary-scale super-resolution. The field is shared
-    across pixels only through its frequency ``components`` and conductivity
-    ``k``; the per-pixel ``phase`` and output ``kernel`` are injected as inputs
-    from the hypernetwork, so every query pixel evaluates its own field while
-    still vectorizing over the ``(B, Hq, Wq)`` grid via a batched einsum.
+    Realizes THERA's spatially-varying neural heat field as a single Keras
+    layer: a per-pixel SIREN field whose decay follows the heat equation,
+    producing aliasing-free arbitrary-scale super-resolution. The field is
+    shared across pixels ONLY through its frequency ``components`` and its
+    conductivity ``k``; the per-pixel ``phase`` and output ``kernel`` are
+    injected as INPUTS from the hypernetwork, so every query pixel evaluates its
+    own field while still vectorizing over the ``(B, Hq, Wq)`` grid via a
+    batched einsum (INV-5: no ``vmap``, no parameter tree).
 
-    **Architecture**::
+    **Forward pass:**
 
-        rel_coords (...,2) --einsum('...c,ck')[components (2,k)]--> x (...,k)
-                                                                     |
-        phi_phase (...,k) -----------------------------------+      |
-        norm = ||components||_2 (axis -2) (k,)              \\ |     |
-        k (scalar), t (...,1) -----------------------------> ThermalActivation
-                                                                     |
-                                                       thermal (...,k)
-                                                                     |
-        phi_kernel (...,k,o) --einsum('...k,...ko->...o')------------+
-                                                                     v
-                                                          out (...,o)
+    .. code-block:: text
 
-    A per-pixel SIREN-style field with a heat-equation decay envelope. Given
-    relative query coordinates ``rel_coords`` and a heat time ``t``, it projects
-    the coordinates through shared frequency ``components``, applies the
-    :class:`ThermalActivation`, and contracts the result with a **per-pixel**
-    output kernel to produce the field value.
+        rel_coords [..., 2]
+              │
+              │  einsum('...c,ck->...k')
+              ▼
+        ┌──────────────────────────────────────┐
+        │  components [2, hidden]   ◄── WEIGHT │
+        │  shared by every query pixel         │
+        └───────────────┬──────────────────────┘
+                        │  x [..., hidden]
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  ThermalActivation(w0)               │
+        │    sin(w0·x + phi_phase)             │
+        │      × exp(−(w0·norm)²·k·t)          │
+        │                                      │
+        │  norm = ‖components‖₂ over axis −2   │
+        │       → [hidden]                     │
+        │  k    ◄── WEIGHT (scalar)            │
+        │  t    ◄── input, the diffusion time  │
+        │  phi_phase [..., hidden] ◄── INPUT   │
+        └───────────────┬──────────────────────┘
+                        │  thermal [..., hidden]
+                        │
+                        │  einsum('...k,...ko->...o')
+                        ▼
+        ┌──────────────────────────────────────┐
+        │ phi_kernel [..., hidden, out] ◄─INPUT│
+        │  a PER-PIXEL slab, no bias           │
+        └───────────────┬──────────────────────┘
+                        ▼
+                  out [..., out_dim]
 
-    The forward pass implements (with leading dims ``B, Hq, Wq`` flowing through
-    a single batched einsum -- INV-5, no ``vmap`` / param-tree)::
+    **Weights versus per-pixel inputs (the load-bearing split):**
 
-        x       = einsum('...c,ck->...k', rel_coords, components)   # (..., hidden)
-        norm    = ||components||_2  over axis -2                      # (hidden,)
-        thermal = sin(w0 * x + phi_phase) * exp(-(w0*norm)^2 * k * t) # (..., hidden)
-        out     = einsum('...k,...ko->...o', thermal, phi_kernel)     # (..., out)
+    .. code-block:: text
 
-    Owned (global, shared) trainable weights:
-        * ``components``: shape ``(2, hidden_dim)``, init :class:`LinearUpInitializer`.
-        * ``k``: scalar heat conductivity, init constant ``k_init``.
+                       THERA reference        this port
+                       ──────────────        ─────────
+        components     global param     →    OWNED WEIGHT (2, hidden)
+        k              global param     →    OWNED WEIGHT scalar
+        phase          hypernetwork φ   →    INPUT phi_phase
+        Dense kernel   hypernetwork φ   →    INPUT phi_kernel
 
-    Per-pixel inputs (produced by the hypernetwork, NOT weights):
-        * ``phi_phase``: shape ``(..., hidden_dim)``.
-        * ``phi_kernel``: shape ``(..., hidden_dim, out_dim)``.
+        `field.init` in the reference exists only for SHAPE inference;
+        phase and the output kernel are never the field's own weights.
 
-    Args:
-        hidden_dim: Field hidden width ``N`` (number of frequency components).
-        out_dim: Output channel count (e.g. 3 for RGB residual).
-        w0: SIREN frequency multiplier for the field / thermal activation.
-            Defaults to 1.0.
-        c: **DEAD KNOB.** In the THERA reference this is the SIREN variance
-            constant behind the last Dense layer's init, ``w_std = sqrt(c /
-            dim_hidden) / w0``. That initialization has **no counterpart
-            anywhere in this port** -- and in particular NOT in the hypernetwork,
-            which this docstring claimed until 2026-08-18:
-            ``ThéraHypernetwork.out_conv`` (the layer that produces
-            ``phi_kernel``) is a plain 1x1 ``keras.layers.Conv2D`` at Keras'
-            default ``glorot_uniform``. Nothing reads ``c``; it is stored and
-            serialized only. Defaults to 6.0.
-        k_init: Initial value of the scalar ``k`` weight. Defaults to
-            ``sqrt(log 4) / (2*pi^2)`` (THERA reference).
-        components_init_scale: Frequency-disk scale passed to
-            :class:`LinearUpInitializer` for ``components``. Defaults to 16.0.
-        **kwargs: Forwarded to :class:`keras.layers.Layer`.
+        Adding them as weights here would double-create the
+        hypernetwork's per-pixel params and collapse the field to a
+        single SHARED phase/kernel -- destroying the "spatially
+        varying" property the architecture is named for. See D-004.
+
+    **Vectorization (what replaced the JAX vmap):**
+
+    .. code-block:: text
+
+        JAX:    vmap(field)(per-pixel param tree)
+                one field instance conceptually per pixel
+
+        here:   ONE einsum over leading dims (B, Hq, Wq)
+                '...k,...ko->...o'
+                the per-pixel kernel slab rides the batch axes
+
+    :param hidden_dim: Field hidden width ``N``, the number of frequency
+        components. Must be positive.
+    :type hidden_dim: int
+    :param out_dim: Output channel count, e.g. 3 for an RGB residual. Must be
+        positive.
+    :type out_dim: int
+    :param w0: SIREN frequency multiplier for the field and its thermal
+        activation. Must be positive. Defaults to 1.0.
+    :type w0: float
+    :param c: **DEAD KNOB.** In the THERA reference this is the SIREN variance
+        constant behind the last Dense layer's init,
+        ``w_std = sqrt(c / dim_hidden) / w0``. That initialization has **no
+        counterpart anywhere in this port** -- and in particular NOT in the
+        hypernetwork, which this docstring claimed until 2026-08-18:
+        ``ThéraHypernetwork.out_conv`` (the layer that produces ``phi_kernel``)
+        is a plain 1x1 ``keras.layers.Conv2D`` at Keras' default
+        ``glorot_uniform``. Nothing reads ``c``; it is stored and serialized
+        only. Must still be positive. Defaults to 6.0.
+    :type c: float
+    :param k_init: Initial value of the scalar ``k`` weight. Defaults to
+        ``sqrt(log 4) / (2*pi^2)``, the THERA reference value, chosen so the
+        Gaussian heat kernel at unit time matches the reference anti-alias
+        filter.
+    :type k_init: float
+    :param components_init_scale: Frequency-disk scale passed to
+        :class:`LinearUpInitializer` for ``components``. Defaults to 16.0.
+    :type components_init_scale: float
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
+
+    :raises ValueError: If ``hidden_dim``, ``out_dim``, ``w0`` or ``c`` is not
+        positive.
+
+    Input shape:
+        Four tensors, in :meth:`call` order:
+
+        - ``rel_coords``: ``(..., 2)``
+        - ``phi_phase``: ``(..., hidden_dim)``
+        - ``phi_kernel``: ``(..., hidden_dim, out_dim)``
+        - ``t``: broadcastable to ``(..., 1)``, or scalar
+
+    Output shape:
+        ``(..., out_dim)``, where the leading dims are ``rel_coords``' own.
+
+    :ivar components: Shared frequency components, shape ``(2, hidden_dim)``,
+        initialized with :class:`LinearUpInitializer`.
+    :vartype components: keras.Variable
+    :ivar k: Scalar heat conductivity.
+    :vartype k: keras.Variable
+    :ivar thermal: The stateless :class:`ThermalActivation` sub-layer.
+    :vartype thermal: ThermalActivation
 
     Example:
         >>> hf = HeatField(hidden_dim=32, out_dim=3)
@@ -276,6 +394,25 @@ class HeatField(keras.layers.Layer):
         components_init_scale: float = DEFAULT_COMPONENTS_INIT_SCALE,
         **kwargs: Any,
     ) -> None:
+        """Initialize the field and create its stateless activation sub-layer.
+
+        The two owned weights are created in :meth:`build`.
+
+        :param hidden_dim: Field hidden width.
+        :type hidden_dim: int
+        :param out_dim: Output channel count.
+        :type out_dim: int
+        :param w0: SIREN frequency multiplier.
+        :type w0: float
+        :param c: Dead knob; see the class docstring.
+        :type c: float
+        :param k_init: Initial value of the scalar ``k``.
+        :type k_init: float
+        :param components_init_scale: Frequency-disk scale for ``components``.
+        :type components_init_scale: float
+        :param kwargs: Forwarded to :class:`keras.layers.Layer`.
+        :raises ValueError: If any positivity constraint is violated.
+        """
         super().__init__(**kwargs)
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
@@ -301,6 +438,17 @@ class HeatField(keras.layers.Layer):
         self.k = None
 
     def build(self, input_shape: Any) -> None:
+        """Create ``components`` and ``k``, and build the thermal sub-layer.
+
+        The owned weights depend only on ``hidden_dim`` / ``out_dim``, so
+        ``input_shape`` is not unpacked for them; it is normalized robustly for
+        both single- and multi-input invocation styles.
+
+        :param input_shape: The list/tuple of per-input shapes in :meth:`call`
+            order, ``[rel_coords, phi_phase, phi_kernel, t]``, or a single shape
+            tuple treated as ``rel_coords``.
+        :type input_shape: Any
+        """
         # DECISION plan_2026-06-11_f662207d/D-004 (see decisions.md):
         # The per-pixel phi (phi_phase, phi_kernel) are INPUTS produced by the
         # hypernetwork, NOT weights of this field; only ``components`` and ``k``
@@ -346,13 +494,18 @@ class HeatField(keras.layers.Layer):
     def _normalize_input_shapes(
         input_shape: Any,
     ) -> List[Tuple[Optional[int], ...]]:
-        """Coerce a single- or multi-input ``build`` shape arg into a shape list.
+        """Coerce a single- or multi-input ``build`` shape argument to a list.
 
         ``HeatField`` is invoked with four positional tensors. Depending on how
-        Keras routes ``build`` (functional vs. subclass / explicit call), the
-        ``input_shape`` may arrive as a list/tuple of per-input shapes, or as a
-        single shape tuple. This normalizes to a list of shape tuples; the first
-        element is always treated as ``rel_coords``' shape.
+        Keras routes ``build`` (functional versus subclass or explicit call),
+        ``input_shape`` may arrive as a list/tuple of per-input shapes or as a
+        single shape tuple.
+
+        :param input_shape: Per-input shapes, or one shape tuple.
+        :type input_shape: Any
+        :return: A list of shape tuples whose FIRST element is always treated
+            as ``rel_coords``' shape.
+        :rtype: List[Tuple[Optional[int], ...]]
         """
         # A list/tuple whose first element is itself a shape (list/tuple) =>
         # already a collection of per-input shapes.
@@ -372,16 +525,20 @@ class HeatField(keras.layers.Layer):
     ) -> Any:
         """Evaluate the heat field at the query coordinates.
 
-        Args:
-            rel_coords: Relative query coordinates, shape ``(..., 2)``.
-            phi_phase: Per-pixel phase offsets, shape ``(..., hidden_dim)``.
-            phi_kernel: Per-pixel output kernel slabs, shape
-                ``(..., hidden_dim, out_dim)``.
-            t: Heat-diffusion time, broadcastable to ``(..., 1)`` (or scalar).
-            training: Unused; present for the standard Keras signature.
-
-        Returns:
-            Field values, shape ``(..., out_dim)``.
+        :param rel_coords: Relative query coordinates, shape ``(..., 2)``.
+        :type rel_coords: keras tensor
+        :param phi_phase: Per-pixel phase offsets from the hypernetwork, shape
+            ``(..., hidden_dim)``.
+        :type phi_phase: keras tensor
+        :param phi_kernel: Per-pixel output kernel slabs from the hypernetwork,
+            shape ``(..., hidden_dim, out_dim)``.
+        :type phi_kernel: keras tensor
+        :param t: Heat-diffusion time, broadcastable to ``(..., 1)`` or scalar.
+        :type t: keras tensor
+        :param training: Unused; present for the standard Keras signature.
+        :type training: Optional[bool]
+        :return: Field values, shape ``(..., out_dim)``.
+        :rtype: keras tensor
         """
         # Project coords through shared frequency components: (...,2),(2,k)->(...,k)
         x = ops.einsum("...c,ck->...k", rel_coords, self.components)
@@ -400,11 +557,24 @@ class HeatField(keras.layers.Layer):
         self,
         input_shape: Any,
     ) -> Tuple[Optional[int], ...]:
+        """Compute the output shape from ``rel_coords``' leading dimensions.
+
+        :param input_shape: As accepted by :meth:`build`.
+        :type input_shape: Any
+        :return: ``rel_coords``' shape with the size-2 coordinate axis replaced
+            by ``out_dim``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         shapes = self._normalize_input_shapes(input_shape)
         leading = shapes[0][:-1]  # drop the coordinate (size-2) axis
         return tuple(leading) + (self.out_dim,)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "hidden_dim": self.hidden_dim,
