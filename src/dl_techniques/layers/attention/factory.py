@@ -1414,8 +1414,35 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     :type attention_type: str
     :param kwargs: Parameter dictionary to validate for the specified attention type.
     :raises ValueError: If attention_type is not supported, required parameters are missing,
-        or parameter values violate constraints.
+        an UNDECLARED parameter is present, or parameter values violate constraints.
     """
+    # DECISION plan-2026-08-27T040114-580f8b63/D-025
+    # The undeclared-key check lives HERE as well as in `create_attention_layer`,
+    # and the duplication is deliberate.
+    #
+    # This function's own docstring promises "comprehensive validation", and the
+    # README demonstrates it as a PRE-FLIGHT check. It used to accept any
+    # undeclared key silently -- `validate_attention_config('multi_head', dim=32,
+    # num_head=4)` returned cleanly while `create_attention_layer` with the same
+    # kwargs raised on the typo. A caller who validates and then constructs the
+    # class directly, rather than through the factory, got no signal at all.
+    #
+    # `create_attention_layer` keeps its own copy because it runs BEFORE this
+    # function (so unknown-type calls keep their existing failure mode) and its
+    # message names the wrapper-defaults remedy that only applies on that path.
+    _info = ATTENTION_REGISTRY.get(attention_type)
+    if _info is not None:
+        _declared = set(_info['required_params']) | set(
+            _info['optional_params'].keys()
+        )
+        _undeclared = sorted(set(kwargs) - _declared)
+        if _undeclared:
+            raise ValueError(
+                f"validate_attention_config('{attention_type}'): "
+                f"{len(_undeclared)} {STRICT_DROPPED_KEY_MARKER} {_undeclared}. "
+                f"'{attention_type}' ({_info['class'].__name__}) accepts only "
+                f"{sorted(_declared)}."
+            )
     if attention_type not in ATTENTION_REGISTRY:
         available_types = list(ATTENTION_REGISTRY.keys())
         raise ValueError(

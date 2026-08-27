@@ -13,6 +13,7 @@ Covers the previously-untested ``create_attention_layer`` factory surface:
 
 import inspect
 import typing
+import re
 import pytest
 
 from dl_techniques.layers.attention.factory import (
@@ -240,6 +241,47 @@ class TestFactoryHelpers:
             validate_attention_config(
                 'group_query', dim=64, num_heads=5, num_kv_heads=2
             )
+
+    def test_validate_rejects_an_undeclared_kwarg(self):
+        """`validate_attention_config` must refuse what `create_attention_layer` refuses.
+
+        Why this test exists: it did not. `validate_attention_config('multi_head',
+        dim=32, num_head=4)` -- note the typo -- returned CLEANLY while
+        `create_attention_layer` with the same kwargs raised on it. The docstring
+        promises "comprehensive validation" and the README demonstrates this
+        function as a PRE-FLIGHT check, so a caller who validated and then built
+        the class directly rather than through the factory got no signal at all.
+
+        Why this can fail if the implementation is wrong: removing the
+        set-difference check from `validate_attention_config` makes this call
+        return None again.
+
+        `re.escape` on the marker is load-bearing: `STRICT_DROPPED_KEY_MARKER` is
+        the literal string "unsupported parameter(s)", and `pytest.raises(match=)`
+        treats its argument as a REGEX without escaping it. Unescaped, `(s)` is a
+        capture group, so the pattern matches "unsupported parameters" -- which
+        never appears -- and the test fails against a correct implementation.
+        """
+        with pytest.raises(ValueError, match=re.escape(STRICT_DROPPED_KEY_MARKER)):
+            validate_attention_config('multi_head', dim=32, num_head=4)
+
+    def test_validate_and_create_agree_on_what_is_acceptable(self):
+        """The two doors must not disagree about the same config.
+
+        Pins the RELATIONSHIP rather than either side alone: whatever
+        `create_attention_layer` rejects for an undeclared key,
+        `validate_attention_config` must reject too, and whatever validate accepts
+        must construct.
+        """
+        good = {'dim': 32, 'num_heads': 4}
+        validate_attention_config('multi_head', **good)
+        assert create_attention_layer('multi_head', **good) is not None
+
+        bad = {'dim': 32, 'num_heads': 4, 'no_such_parameter': 1}
+        with pytest.raises(ValueError, match=re.escape(STRICT_DROPPED_KEY_MARKER)):
+            validate_attention_config('multi_head', **bad)
+        with pytest.raises(ValueError, match=re.escape(STRICT_DROPPED_KEY_MARKER)):
+            create_attention_layer('multi_head', **bad)
 
     def test_get_attention_info_complete(self):
         info = get_attention_info()
