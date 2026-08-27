@@ -1,7 +1,7 @@
-# Authoring Keras 3 Custom Layers and Models
+# Authoring, Documenting and Verifying Keras 3 Custom Layers and Models
 
-A reference for writing Keras 3 custom layers and models that are correct, serializable, and
-verifiably do what they claim.
+A single reference for writing Keras 3 custom layers and models that are correct, serializable,
+documented in one house style, and verifiably do what they claim.
 
 ## Scope
 
@@ -10,7 +10,7 @@ successive library-wide audits of a large Keras 3 codebase found the same patter
 
 | Defect | Symptom to the author |
 |---|---|
-| A parameter validated, stored, serialized, documented — and read by no code path | `max\|dy\| = 0.000e+00` across every legal value |
+| A parameter validated, stored, serialized, documented, and read by no code path | `max\|dy\| = 0.000e+00` across every legal value |
 | A rotary embedding fed the head axis instead of the sequence axis | an **exact algebraic no-op**: `(Rq)·(Rk) = q·k` |
 | `add_weight(zeros)` + `.assign()` in `build()` | table stays all zeros in every real model |
 | A decoder-only LM with no causal mask | bidirectional attention under a next-token objective |
@@ -25,35 +25,37 @@ Every one shipped behind a green suite: shapes matched, parameter counts matched
 serialization round-tripped, loss curves looked normal.
 
 **Construction correctness and behavioural correctness are different properties, and only the first
-is easy to test.** Sections 1–13 are what to write. Sections 14–15 are how to prove it. They are not
-optional polish — a guard that cannot fail is the most likely outcome of writing a new test, and the
-audits measured that outcome repeatedly, including in tests written *during* the audits.
+is easy to test.** Sections 1 to 13 are what to write. Section 14 is how to document it. Sections 15
+and 16 are how to prove it. The proving sections are not optional polish. A guard that cannot fail is
+the most likely outcome of writing a new test, and the audits measured that outcome repeatedly,
+including in tests written *during* the audits.
 
 ### The four surfaces where the defects actually are
 
 Most Keras guidance covers construction and serialization. These four are where the audits found
 shipped, green-suite defects, and they are the reason this document is as long as it is:
 
-- **§7 The Save/Load Path** — archive layout, optimizer state, unbuilt saves, and why a symmetric
+- **§7 The Save/Load Path**: archive layout, optimizer state, unbuilt saves, and why a symmetric
   override pair is usually two independent decisions wearing one name.
-- **§13 Reachability and Provenance** — a knob nothing can reach, a variant table nobody checked
+- **§13 Reachability and Provenance**: a knob nothing can reach, a variant table nobody checked
   against its own reference, a weight nothing reads, a layer that computes something simpler than
   its name.
-- **§15 Warnings as a Defect Channel** — the framework is already telling you, the default
-  instrument under-reports by 5×, and most teams never turn it on.
-- **§14.6 Pin the property, not the sample** — five of nine long-standing RED tests in one audit
-  were a single defect class: an exact literal pinned against a seed-dealt or sub-ULP quantity.
+- **§16 Warnings as a Defect Channel**: the framework is already telling you, the default instrument
+  under-reports by 5×, and most teams never turn it on.
+- **§15.6 Pin the property, not the sample**: five of nine long-standing RED tests in one audit were
+  a single defect class, an exact literal pinned against a seed-dealt or sub-ULP quantity.
 
 ## How to read this
 
 | You are | Read |
 |---|---|
-| Writing a new layer | §1–§4, §6–§10, then the checklist in §18 |
+| Writing a new layer | §1 to §4, §6 to §10, §14, then the checklist in §19 |
 | Writing a new model package | all of it; §5 is the package shape |
 | Porting a published architecture | §13.2 first, then §9.7 and §10.4 |
-| Fixing a bug | §16 to find the pitfall, §14 to build a guard that can fail |
-| Reviewing | §16 as the code checklist, §14.7 as the test checklist |
-| Auditing a codebase you did not write | §15 first — it is the cheapest yield per hour |
+| Documenting or restyling an existing file | §14 on its own; it is self-contained |
+| Fixing a bug | §17 to find the pitfall, §15 to build a guard that can fail |
+| Reviewing | §17 as the code checklist, §14.7 as the docs checklist, §19.3 as the test checklist |
+| Auditing a codebase you did not write | §16 first, it is the cheapest yield per hour |
 
 Conventions used below: **❌ WRONG / ✅ CORRECT** code pairs; **Measured:** lines carry a figure that
 was observed, not estimated; **Detect:** lines name the probe that catches the defect; **Refuted:**
@@ -76,12 +78,13 @@ lines record a plausible claim that measurement killed.
 11. [The Training Path](#11-the-training-path)
 12. [Causality, Masking and Composition](#12-causality-masking-and-composition)
 13. [Reachability and Provenance](#13-reachability-and-provenance)
-14. [Testing and Validation](#14-testing-and-validation)
-15. [Warnings as a Defect Channel](#15-warnings-as-a-defect-channel)
-16. [Common Pitfalls and Solutions](#16-common-pitfalls-and-solutions)
-17. [Troubleshooting Guide](#17-troubleshooting-guide)
-18. [Summary Checklists](#18-summary-checklists)
-19. [Appendix: Refuted Claims](#19-appendix-refuted-claims)
+14. [Documentation House Style](#14-documentation-house-style)
+15. [Testing and Validation](#15-testing-and-validation)
+16. [Warnings as a Defect Channel](#16-warnings-as-a-defect-channel)
+17. [Common Pitfalls and Solutions](#17-common-pitfalls-and-solutions)
+18. [Troubleshooting Guide](#18-troubleshooting-guide)
+19. [Summary Checklists](#19-summary-checklists)
+20. [Appendix: Refuted Claims](#20-appendix-refuted-claims)
 
 ---
 
@@ -92,10 +95,10 @@ lines record a plausible claim that measurement killed.
 A custom layer has four lifecycle events, and they run in an order most authors never see written
 down:
 
-1. `__init__` — store configuration. **Create every sub-layer here.** Touch no shapes.
-2. `build(input_shape)` — create own weights; materialize the sub-layer tree.
-3. `call(...)` — the forward pass. Graph-safe operations only.
-4. `get_config` / `from_config` — reconstruct an equivalent object from data alone.
+1. `__init__`: store configuration. **Create every sub-layer here.** Touch no shapes.
+2. `build(input_shape)`: create own weights; materialize the sub-layer tree.
+3. `call(...)`: the forward pass. Graph-safe operations only.
+4. `get_config` / `from_config`: reconstruct an equivalent object from data alone.
 
 Deserialization runs `from_config` → `__init__` → `build` (from the saved `input_shape`) → weight
 restore. **Any sub-layer that does not exist by the end of `build` receives no weights, and nothing
@@ -106,8 +109,8 @@ raises.** That silence is the root of most of §7 and §8.
 **Create in `__init__`. Build in `build`. Never create in `build`.**
 
 A sub-layer created in `build()` exists after a live construction and does *not* exist after a
-`from_config` reconstruction that Keras builds from a stored shape — because `from_config` calls
-`__init__`, and your creation code lives elsewhere.
+`from_config` reconstruction that Keras builds from a stored shape. `from_config` calls `__init__`,
+and your creation code lives elsewhere.
 
 ```python
 # ❌ WRONG - the sub-layer exists only on the live path
@@ -146,7 +149,7 @@ def call(self, x, training=None):
 ```
 
 The cost is a component that legitimately receives no gradient in some modes. **That is not a
-defect** — see §13.4 — but it must be documented *at the creation site*, and waived *by name* in any
+defect** (see §13.4), but it must be documented *at the creation site*, and waived *by name* in any
 dead-weight sweep. Write the comment when you write the layer, not when someone audits it:
 
 ```python
@@ -158,7 +161,7 @@ self.mask_token = self.add_weight(name="mask_token", shape=(1, 1, dim), ...)
 ```
 
 **Measured:** in one audit **62 of 74** "gradients do not exist for variables" warnings were exactly
-this pattern — deliberate, documented, correct. Treating them as defects would have deleted a prompt
+this pattern: deliberate, documented, correct. Treating them as defects would have deleted a prompt
 encoder's conditionality, a masked-image-modelling head, a video masking scheme, and a memory bank.
 The comment above is what tells the next auditor which of the 74 they are looking at.
 
@@ -195,7 +198,7 @@ from typing import Optional, Union, Tuple, Dict, Any, List, Literal
 
 `keras.ops` is the backend-agnostic surface. Reaching for the backend directly (`tf.*`) in a forward
 path ties the layer to one backend and usually breaks XLA. Where a genuinely unmigratable op is
-needed (`ifft`, `svd`, `grid_sample`), isolate it and say so in a comment — an accepted exception is
+needed (`ifft`, `svd`, `grid_sample`), isolate it and say so in a comment. An accepted exception is
 fine; an undocumented one is a trap for the next reader.
 
 ### 2.2 The Registration Decorator
@@ -208,7 +211,7 @@ class MyLayer(keras.layers.Layer):
 
 The `package=` argument is not decoration. A bare `register_keras_serializable()` produces a
 **module-independent key**: two classes with the same name in different modules collide, and the last
-import wins. Measured on Keras 3.8 — the key is the bare class name.
+import wins. Measured on Keras 3.8, the key is the bare class name.
 
 **But changing it is a breaking change.** The key is written into every saved file. If a codebase
 already ships bare registrations, adding `package=` invalidates every existing checkpoint's
@@ -220,14 +223,14 @@ deserialization key.
 | Existing class, checkpoints exist | leave it; migrate only with a deliberate checkpoint migration |
 | Existing class, no checkpoints anyone needs | add `package=`, and say so in the commit |
 
-**Measured:** an audit of 212 bare registrations across 761 classes found **0 collisions** — the risk
+**Measured:** an audit of 212 bare registrations across 761 classes found **0 collisions**. The risk
 is real but latent. That is a reason to fix it on new code, not a reason to churn old code.
 
 ---
 
 ## 3. Layer Implementation Patterns
 
-### 3.1 Pattern 1 — A Layer With Its Own Weights
+### 3.1 Pattern 1: A Layer With Its Own Weights
 
 ```python
 @keras.saving.register_keras_serializable(package="MyProject")
@@ -284,7 +287,7 @@ class ScaledProjection(keras.layers.Layer):
         return config
 ```
 
-### 3.2 Pattern 2 — A Layer Containing Sub-layers
+### 3.2 Pattern 2: A Layer Containing Sub-layers
 
 Sub-layers are **created** in `__init__` and **built** in `build()`:
 
@@ -321,9 +324,9 @@ def call(self, inputs, training=None):
 The asymmetry is deliberate, and it is where §1.3 and §8 meet:
 
 ```
- norm is CREATED unconditionally   →  stable object graph and names   (§1.3)
- norm is BUILT   conditionally     →  build() materializes exactly
-                                      what call() runs, no more       (§8)
+ norm is CREATED unconditionally   ->  stable object graph and names   (§1.3)
+ norm is BUILT   conditionally     ->  build() materializes exactly
+                                       what call() runs, no more      (§8)
 ```
 
 Creating it costs nothing. Building a layer that `call()` skips adds weights the lazy path never
@@ -331,9 +334,9 @@ makes.
 
 **Always give sub-layers explicit names, including inside loops** (`name=f"block_{i}"`).
 Auto-generated names shift when depth changes, and checkpoints stop matching. This also matters for
-goldens: keying anything by a Keras-generated name makes it process-order dependent (§14.12).
+goldens: keying anything by a Keras-generated name makes it process-order dependent (§15.12).
 
-### 3.3 Pattern 3 — Constant Tables (the `StatelessScope` trap)
+### 3.3 Pattern 3: Constant Tables (the `StatelessScope` trap)
 
 ```python
 # ❌ WRONG - discarded by StatelessScope; all zeros in every real model
@@ -352,12 +355,12 @@ def build(self, input_shape):
     )
 ```
 
-**Measured:** an `.assign()` inside `build()` is silently discarded under `StatelessScope` — the path
+**Measured:** an `.assign()` inside `build()` is silently discarded under `StatelessScope`, the path
 every real model build takes. Eleven sites in one codebase. A trend-only forecasting model predicted
 **exactly zero**; a rotary table stayed all zeros, making the positional encoding an identity.
 
 **Detect:** assert a statistic of the table itself after construction (`ops.max(ops.abs(table)) > 0`),
-not a property of the model's output — a zeroed table often produces plausible-looking outputs.
+not a property of the model's output. A zeroed table often produces plausible-looking outputs.
 
 ### 3.4 Implementing `compute_output_shape`
 
@@ -380,7 +383,7 @@ weights.
 |---|---|
 | `__init__` | configuration invariants (ranges, enums, mutually exclusive flags) |
 | `build` | shape invariants (divisibility, minimum extent, rank) |
-| `call` | **nothing** — it runs per trace, and a Python check on a traced value does not do what it looks like |
+| `call` | **nothing**. It runs per trace, and a Python check on a traced value does not do what it looks like |
 
 Raise `ValueError` naming the offending value: `f"units must be positive, got {units}"`. A message
 that does not contain the bad value costs the reader a debugging session.
@@ -389,7 +392,7 @@ that does not contain the bad value costs the reader a debugging session.
 
 ## 4. Graph-Safe Operations in `call()`
 
-`call()` is traced, not executed, in every regime that matters — `fit()`, `predict()`, `jit_compile`,
+`call()` is traced, not executed, in every regime that matters: `fit()`, `predict()`, `jit_compile`,
 and the symbolic build of §8. Code that works in eager and breaks under tracing is the most common
 "works on my machine" failure in this domain.
 
@@ -397,10 +400,10 @@ and the symbolic build of §8. Code that works in eager and breaks under tracing
 
 - Use `keras.ops`, not the backend.
 - No Python `if` on a tensor **value**. Use `ops.where` / `ops.cond`. A Python `if` on a *config
-  flag* is fine — it folds at trace time, which is what you want.
+  flag* is fine, it folds at trace time, which is what you want.
 - No `.numpy()`, no `int(tensor)`, no `float(tensor)`.
 - No `.shape` arithmetic that assumes a concrete batch or sequence axis.
-- Do not construct layers, and do not mutate Python state — `call()` runs once per **trace**, not
+- Do not construct layers, and do not mutate Python state. `call()` runs once per **trace**, not
   once per step. A list that appends in `call()` grows once per trace and is empty in the graph.
 
 ### 4.2 Operations That Are Traps Under Tracing
@@ -468,15 +471,15 @@ opaque errors, and broke the three tests whose entire subject *was* that message
 
 ### 5.1 Module Skeleton
 
-The module docstring is **substantive prose, not a template**:
+The module docstring is **substantive prose, not a template**. Write it to the rules in §14:
 
 | # | Element |
 |---|---|
-| 1 | **One opening sentence** naming the architecture and its distinguishing options — a sentence, not a title with an `====` underline |
+| 1 | **One opening sentence** naming the architecture and its distinguishing options: a sentence, not a title with an `====` underline |
 | 2 | **The principle**: what problem the architecture solves and *why its mechanism resolves it*. Inline math in backticks (`` `y = F(x) + x` ``) where an equation carries the idea |
-| 3 | **The architecture**: stage/block structure, design trade-offs, and the places where the code does something non-obvious, and why |
-| 4 | **Every deliberate behavioural choice**, stated as a choice with its reason (e.g. why `pretrained=True` raises rather than warning) |
-| 5 | **Provenance**: the reference this is ported from, and *which* reference — see §13.2 |
+| 3 | **The architecture**: stage/block structure, design trade-offs, and the places where the code does something unobvious, and why |
+| 4 | **Every deliberate behavioural choice**, stated as a choice with its reason (for example, why `pretrained=True` raises rather than warning) |
+| 5 | **Provenance**: the reference this is ported from, and *which* reference (see §13.2) |
 | 6 | **`References:`** as `- Author et al., YEAR. Title. (url)` |
 
 This **replaces** terse `Model Variants:` / `Usage Examples:` boilerplate that restates the variant
@@ -514,7 +517,7 @@ class MyModel(keras.Model):
 
 | Member | Requirement |
 |---|---|
-| `call(self, inputs, training=None)` | **no logging inside** — it fires on every trace |
+| `call(self, inputs, training=None)` | **no logging inside**, it fires on every trace |
 | `build(self, input_shape)` | materializes the sub-layer tree (§8) |
 | `get_config()` | every constructor argument, complex objects serialized |
 | `from_config()` | deserializes them, symmetrically |
@@ -574,7 +577,7 @@ invisible to users, to `from package import *`, and to any guard that sweeps the
 nobody re-swept the family. Fix the family, not the instance.
 
 Note the inverse, too: if a package deliberately exposes nothing at the top level (forcing
-`from package.subpackage import X`), that is a valid convention — but then a guard asserting
+`from package.subpackage import X`), that is a valid convention, but then a guard asserting
 importability from the top level is wrong, not the code.
 
 ### 5.7 When the Shape Does Not Apply
@@ -584,9 +587,9 @@ single configuration should not grow a one-row `MODEL_VARIANTS` to satisfy a che
 docstring that the architecture is original and has no upstream, and the R-045-shaped audit question
 ("traced to a named external reference?") answers itself as *not applicable* rather than as debt.
 
-**Measured:** of 49 packages carrying that audit question, **12-13 were original to the codebase**,
-so the question was N/A. Two had been flagged as vacuous by an earlier audit and never actually
-ruled — an unruled N/A looks exactly like unfinished work forever.
+**Measured:** of 49 packages carrying that audit question, **12 to 13 were original to the
+codebase**, so the question was N/A. Two had been flagged as vacuous by an earlier audit and never
+actually ruled. An unruled N/A looks exactly like unfinished work forever.
 
 ---
 
@@ -594,8 +597,8 @@ ruled — an unruled N/A looks exactly like unfinished work forever.
 
 ### 6.1 Complete `get_config` / `from_config`
 
-Every `__init__` parameter appears in `get_config`. Objects — initializers, regularizers,
-constraints, activations — must be **serialized**, not stored raw:
+Every `__init__` parameter appears in `get_config`. Objects (initializers, regularizers, constraints,
+activations) must be **serialized**, not stored raw:
 
 ```python
 def get_config(self) -> Dict[str, Any]:
@@ -615,12 +618,12 @@ def from_config(cls, config: Dict[str, Any]) -> "MyLayer":
     return cls(**config)
 ```
 
-**The failure is asymmetric — measure all four rows before believing you are safe:**
+**The failure is asymmetric. Measure all four rows before believing you are safe:**
 
 | Activation kind | `save()` | `load_model()` |
 |---|---|---|
-| string `"gelu"` | OK | OK — round-trips at exactly `0.0` |
-| **registered** callable | OK | OK — Keras's generic encoder resolves it |
+| string `"gelu"` | OK | OK, round-trips at exactly `0.0` |
+| **registered** callable | OK | OK, Keras's generic encoder resolves it |
 | unregistered callable, no `custom_objects` | OK | **raises** `Could not interpret activation function identifier: {...}` |
 | unregistered callable + `custom_objects` | OK | loads, but `.activation` is left as a raw `{'module': ..., 'class_name': 'function'}` **dict**, which `get_config` then propagates onward |
 
@@ -632,7 +635,7 @@ Two further measured facts:
 - **`keras.activations.serialize` rejects a bare string** (`Unknown activation function 'gelu'
   cannot be serialized`). Pass strings through unchanged.
 - **Reverting `get_config` and reverting `from_config` fail *different* tests.** A class can have a
-  `from_config` that exists and still misses the key — one measured sibling had a `from_config`
+  `from_config` that exists and still misses the key. One measured sibling had a `from_config`
   handling only initializers and regularizers, silently dropping the activation. Test both
   directions independently.
 
@@ -662,7 +665,7 @@ def __init__(self, units, attn_dropout_rate=0.0, attn_num_heads=8, **kwargs):
 task_specific_keys = ["num_labels", "pooling_strategy", "classifier_dropout"]
 ```
 
-**Measured:** an AST caller scan — the correct instrument for finding keyword call sites — is
+**Measured:** an AST caller scan, the correct instrument for finding keyword call sites, is
 structurally blind to this, because it is a `List` of string constants, not a call keyword. A
 repository-wide parameter rename found it only via a second, exact-token pass over string literals.
 
@@ -681,7 +684,7 @@ passes the newly-rejected value.
 
 ### 6.5 Caches Derived From Weights
 
-A cache computed from weight values must be invalidated when weights change — after `load_weights`,
+A cache computed from weight values must be invalidated when weights change: after `load_weights`,
 after a `.assign`, after the optimizer's first step. Prefer recomputing to caching unless a
 measurement shows the cache matters.
 
@@ -690,8 +693,8 @@ measurement shows the cache matters.
 ## 7. The Save/Load Path
 
 Four separate real defects in one audit lived here, and **not one was visible to a round-trip
-value check**. This is the least-tested surface in most Keras codebases, because the
-obvious test — save, load, compare outputs — passes through all four.
+value check**. This is the least-tested surface in most Keras codebases, because the obvious test
+(save, load, compare outputs) passes through all four.
 
 ### 7.1 The Round-Trip Test, on VALUES, and Twice
 
@@ -720,23 +723,23 @@ assert {w.path for w in m2.weights} == {w.path for w in model.weights}
 
 **Why twice.** `keras.models.load_model` builds the model from the saved `input_shape` and restores
 weights immediately, so a model whose `build()` does not materialize its tree looks *fine* on the
-first reload — the loss only appears when that reloaded model is itself saved. Measured instances: an
+first reload. The loss only appears when that reloaded model is itself saved. Measured instances: an
 image encoder that reloaded **1 of 65** weights and a dense decoder that reloaded **0 of 12**, both
 invisible to a one-trip check.
 
 **Why perturb.** At initialization many weights are zeros or ones, and comparing default values
 cannot distinguish "restored correctly" from "re-initialized to the same defaults".
 
-**Why paths as a set.** A count can match while the identities differ. But note the caveat in §7.8 —
+**Why paths as a set.** A count can match while the identities differ. But note the caveat in §7.8:
 a path set is not always expected to be stable, and you must know which case you are in.
 
 ### 7.2 The Archive Layout Is Part of the Contract
 
 A round-trip delta of exactly `0.0` does **not** mean the file is correct.
 
-**Measured:** a depth model wrote **644 HDF5 datasets for 322 live weights — exactly 2.00×** — a
+**Measured:** a depth model wrote **644 HDF5 datasets for 322 live weights, exactly 2.00×**, a
 356 MB file of which 178 MB was redundant, with a round-trip delta of exactly `0.0` in both
-directions. At the shipped large variant: **1220 datasets for 610 weights, 4.88 GB → 2.44 GB after
+directions. At the shipped large variant: **1220 datasets for 610 weights, 4.88 GB to 2.44 GB after
 the fix.**
 
 The cause: a `save_own_variables` override wrote a flat `vars/N` store *while Keras's default
@@ -759,7 +762,7 @@ def test_every_weight_is_written_exactly_once(tmp_path):
 ```
 
 **Check the group breakdown too.** The measured archive had
-`{'decoder': 22, 'encoder': 150, 'frozen_encoder': 150, 'vars': 322}` — the first three already
+`{'decoder': 22, 'encoder': 150, 'frozen_encoder': 150, 'vars': 322}`. The first three already
 accounted for all 322, and `vars` was the duplicate. That breakdown is what turned "the ratio is 2"
 into a diagnosis.
 
@@ -767,7 +770,7 @@ into a diagnosis.
 
 `save_own_variables` and `load_own_variables` look like a matched pair. They frequently are not.
 
-**Measured, on the model above:** deleting *both* gave a round-trip error of **4.5575** — the pair
+**Measured, on the model above:** deleting *both* gave a round-trip error of **4.5575**, so the pair
 was genuinely load-bearing. But the halves separated cleanly:
 
 - the **load** half was essential. Keras calls the outer model's `load_own_variables` *before*
@@ -795,9 +798,9 @@ def compile_from_config(self, config):
 ```
 
 **Measured:** a VAE fitted for one epoch saved **122** optimizer variables and reloaded **2**. Every
-`.keras` resume restarted Adam with zeroed moments and a zeroed step count — so a "resumed" run was
+`.keras` resume restarted Adam with zeroed moments and a zeroed step count, so a "resumed" run was
 silently a fresh-optimizer run with warm weights. Loss curves looked normal. The only symptom was a
-`UserWarning` nobody had turned into an error (§15).
+`UserWarning` nobody had turned into an error (§16).
 
 ```python
 def test_the_reloaded_optimizer_state_survives(tmp_path):
@@ -828,11 +831,11 @@ Repair according to what the test is actually about:
 | weight round-tripping | build the optimizer state first: one `train_on_batch`, or `optimizer.build(model.trainable_variables)` |
 | loss/metric config round-tripping | `load_model(compile=False)` is honest, if nothing asserts optimizer state |
 | resuming training | build the state **and** assert it survived (§7.4) |
-| a bit-identity assertion on outputs | do **not** insert a throwaway train step — it changes the weights you are comparing |
+| a bit-identity assertion on outputs | do **not** insert a throwaway train step, it changes the weights you are comparing |
 
 > **`include_optimizer=False` is a silent no-op on the `.keras` path.** Measured: `saving_api` pops
 > the kwarg and the `.keras` branch calls `saving_lib.save_model(model, filepath)` without it. A
-> repair built on it does nothing, and the warning persists — which is how it was found.
+> repair built on it does nothing, and the warning persists, which is how it was found.
 
 ### 7.6 Saving an Unbuilt Model Writes an Empty Archive
 
@@ -855,19 +858,19 @@ def save_model(self, filepath):
 ```
 
 Note the two cases: a class that *stores* its input shape can build itself; one that does not must
-refuse. Refusing is not a lesser fix — it is the correct one when the shape is genuinely unknown.
+refuse. Refusing is not a lesser fix, it is the correct one when the shape is genuinely unknown.
 
 ### 7.7 Public Methods That Bypass Lazy Build
 
-Any public method reachable before the first call — `summary()`, `save_model()`, a custom
-`export_*`, a `predict_from_*` helper — must either build or refuse. Silently succeeding on an
-unbuilt model is the defect, and it is invisible because the method returns normally.
+Any public method reachable before the first call (`summary()`, `save_model()`, a custom `export_*`,
+a `predict_from_*` helper) must either build or refuse. Silently succeeding on an unbuilt model is
+the defect, and it is invisible because the method returns normally.
 
 ### 7.8 A Weight-Path Set Is Not Always Expected to Be Stable
 
 **Measured, and it corrected a plausible assertion:** a model holding a frozen teacher produced by
-`clone_model` had **172 distinct weight paths before save and 322 after reload** — because the clone
-inherits the student's path strings live, and the reload separates them. This was identical before
+`clone_model` had **172 distinct weight paths before save and 322 after reload**, because the clone
+inherits the student's path strings live and the reload separates them. This was identical before
 and after an unrelated fix, and harmless: the archive keys by attribute group (`encoder/` vs
 `frozen_encoder/`), not by the live path string.
 
@@ -917,7 +920,7 @@ def build(self, input_shape):
 ```
 
 **Prefer B.** Option A is a *second, hand-maintained encoding of the forward topology*, and its
-failure mode — a sub-layer that silently stops being built when the architecture changes — is exactly
+failure mode, a sub-layer that silently stops being built when the architecture changes, is exactly
 the defect being removed. A trace of `call()` cannot drift from `call()`.
 
 A workable helper, with the properties that matter:
@@ -939,8 +942,8 @@ def materialize_sublayers(model, input_shape, batch_size=1):
 ```
 
 **Measured, applying one shared helper to 22 model classes:** `.build(shape)` alone went from
-materializing **0** weights to 267 / 124 / 100 / 49 / 32 / 28 / 23 / 22 / … per model, and in the
-worst case **1 → 19**.
+materializing **0** weights to 267 / 124 / 100 / 49 / 32 / 28 / 23 / 22 / ... per model, and in the
+worst case **1 to 19**.
 
 **Option B does not always work, and that is fine.** Five of 27 classes could not be traced:
 
@@ -964,7 +967,7 @@ def test_the_unfixed_subjects_are_pinned_by_name():
         )
 ```
 
-> **Rejected, with a measurement:** an *eager* fallback trace materializes all five perfectly — and
+> **Rejected, with a measurement:** an *eager* fallback trace materializes all five perfectly, and
 > executes their `add_loss()` calls and BatchNorm updates for real, leaving accumulated losses and
 > moved moving statistics on a model that was merely *built*. A new defect traded for a warning.
 
@@ -976,16 +979,16 @@ outputs were identical. The missing `build()` was a contract violation with no c
 
 Two readings of that number are wrong:
 
-- "so it does not matter" — the same shape *has* caused real losses elsewhere in the same codebase
-  (1 of 65 weights, 0 of 12), and the contract is what stops it recurring;
-- "so we fixed a weight loss" — you did not, and saying so mis-prioritizes the next reader.
+- "so it does not matter". The same shape *has* caused real losses elsewhere in the same codebase
+  (1 of 65 weights, 0 of 12), and the contract is what stops it recurring.
+- "so we fixed a weight loss". You did not, and saying so mis-prioritizes the next reader.
 
 **Fix it, and state what you measured.** A guard docstring that overstates its own subject is a small
 lie that compounds.
 
 Two apparent non-zero readings in that same sweep were **the instrument**: two models with stochastic
-outputs read `3.4e-02` and `4.6e+00`, and a self-spread control — same model, same weights, same
-input, three calls — read `2.2e-02` and `4.1e+00`. The round-trip delta sat inside the model's own
+outputs read `3.4e-02` and `4.6e+00`, and a self-spread control (same model, same weights, same
+input, three calls) read `2.2e-02` and `4.1e+00`. The round-trip delta sat inside the model's own
 sampling noise. **Run the self-spread control before calling a delta a defect.**
 
 ### 8.5 Enforcement
@@ -1008,12 +1011,12 @@ builds nothing.
 
 ### 9.1 Reuse Order
 
-Reuse an existing layer → extend it → write a new one.
+Reuse an existing layer, then extend it, then write a new one.
 
 Grep the **class definition**, not the concept keyword. `grep "class Attention"` answers "is there a
 rival implementation?"; `grep -r attention` returns hundreds of docstring hits and answers nothing.
 Measured: a de-duplication survey over one codebase found that its *locations* held up while **4 of 5
-of its defect claims died on measurement** — treat "where" as a work list and "why it is broken" as a
+of its defect claims died on measurement**. Treat "where" as a work list and "why it is broken" as a
 hypothesis.
 
 ### 9.2 A Registry-Backed Factory MUST Raise on Undeclared Keys
@@ -1061,7 +1064,7 @@ def test_the_registry_key_set_is_exactly_the_pinned_one():
     assert set(_TYPE_TO_CLASS) == _PINNED_KEYS      # set equality, BOTH directions
 ```
 
-### 9.4 The Inverse Defect — a Hand-Written Kwarg List That Omits a Key
+### 9.4 The Inverse Defect: a Hand-Written Kwarg List That Omits a Key
 
 A factory that *filters* its kwargs against a hand-written allowlist silently drops anything the list
 forgot. Derive the list from the signature (`inspect.signature`), or pass through and let the
@@ -1075,7 +1078,7 @@ that agree until they do not. Pass the *input*, let the constructor derive (§1.
 ### 9.6 A Factory Is Not a Drop-In for the Layer It Wraps
 
 **Measured, and this nearly shipped as a routine "consistency cleanup":** a normalization factory
-defaulted epsilon to `1e-06`, while `keras.layers.BatchNormalization()` defaults to `1e-3` — a
+defaulted epsilon to `1e-06`, while `keras.layers.BatchNormalization()` defaults to `1e-3`, a
 **1000×** difference. A proposal to route two model families "through the factory like the others"
 would have silently changed **189** layers' epsilon.
 
@@ -1105,19 +1108,19 @@ def create_normalization_layer(norm_type, **kwargs):
 ```
 
 **Rejected, with the reason:** making the factory accept `epsilon=None` meaning "use the layer's own
-default" was considered and refused — it makes the resolved epsilon depend on the target class at all
+default" was considered and refused. It makes the resolved epsilon depend on the target class at all
 149 dynamic call sites, which is strictly harder to reason about than one documented constant.
 
 ### 9.7 Porting From a Reference Implementation
 
 Every implicitly-defaulted numeric in a port is a claim about the reference: epsilon, momentum,
 initializer stddev, attention scale, clip bounds, schedule constants, activation coefficients.
-Framework defaults differ between ecosystems — Keras norm eps `1e-3` against Torch `1e-5` silently
+Framework defaults differ between ecosystems. Keras norm eps `1e-3` against Torch `1e-5` silently
 mis-specified 86 of 114 layers in one measured port, with every test green.
 
 **Refuted, usefully, and it is the general lesson:** a carried claim that a mobile architecture's
 BatchNorm momentum was wrong did **not** survive fetching. The reference implementation that hosts
-all four shipped generations declares `norm_momentum=0.99, norm_epsilon=0.001` — exactly what
+all four shipped generations declares `norm_momentum=0.99, norm_epsilon=0.001`, exactly what
 shipped. An *older* reference, covering only the earlier generations, says `0.9997`. **Two references
 from the same organization disagreed**, the repo matched the newer one, and the real deviation was
 the *epsilon* (183 of 189 layers on a value no reference supports).
@@ -1152,14 +1155,14 @@ rescue inside an online-softmax block loop reads every strictly-upper causal til
 ### 10.2 A Guard Margin Below the Working ULP Fails on Every Input
 
 **Measured:** a model was 100% NaN because a stability margin was smaller than float16's ULP at the
-magnitude it guarded — the margin could never separate a valid value from an invalid one. Derive
+magnitude it guarded. The margin could never separate a valid value from an invalid one. Derive
 margins from the dtype's ULP at the operating magnitude, and write the derivation into the code.
 
-The same rule applies to test tolerances (§14.6) and to backward passes: an `eps` safe in the forward
-can overflow in the backward — a `(var + eps)^(-3/2)` term overflows fp16 at `eps < 6.1e-4`, giving
+The same rule applies to test tolerances (§15.6) and to backward passes: an `eps` safe in the forward
+can overflow in the backward. A `(var + eps)^(-3/2)` term overflows fp16 at `eps < 6.1e-4`, giving
 silent training death with a finite loss and all-zero weight movement.
 
-### 10.3 A Shared Initializer *Instance* Is the Discriminator — Not `seed=`
+### 10.3 A Shared Initializer *Instance* Is the Discriminator, Not `seed=`
 
 ```python
 # ❌ WRONG - one instance reaching several architectural roles
@@ -1189,18 +1192,18 @@ It is a defect exactly when the colliding weights play **different architectural
 
 This cannot be settled by counting. Four instruments over one codebase gave four different
 populations (940/188, 336/67, 178 groups, 175 groups) and **none reproduced the number carried from
-the previous audit**. Two AST-flagged candidates were refuted by probing — no bit-identical pairs at
+the previous audit**. Two AST-flagged candidates were refuted by probing: no bit-identical pairs at
 any legal config, because their shapes differ. And apparent collisions between `Ones()`-initialized
 norm gammas are constants, not sharing: filter on `std > 0`.
 
-> **Probe per site, fix by role, and pin the population with a ceiling gate (§14.8)** so it cannot
+> **Probe per site, fix by role, and pin the population with a ceiling gate (§15.8)** so it cannot
 > grow silently. Do not edit hundreds of sites, and do not ignore them.
 
 ### 10.4 Residual Initializer Scaling, and the Truncation Factor
 
 Deep residual stacks commonly scale the *residual output* projections' initializer std by
 `1/sqrt(2 * n_layer)`, so the residual stream's variance does not grow with depth. It applies to the
-attention output projection **and** the MLP output projection — both, not one. (Confirmed against two
+attention output projection **and** the MLP output projection, both, not one. (Confirmed against two
 independent reference implementations, which agree on the form and on the pair.)
 
 ```python
@@ -1218,7 +1221,7 @@ def __init__(self, ..., output_kernel_initializer=None, **kwargs):
 
 **Measured, and it invalidates the obvious assertion:** `TruncatedNormal(stddev=0.02)` has a realized
 std of `0.87964 × 0.02 = 0.017593`, not `0.02`, because truncation removes the tails. The reference
-*argument* `0.02 / sqrt(2 · 12) = 0.004082` is therefore **never** the measured value — the real
+*argument* `0.02 / sqrt(2 · 12) = 0.004082` is therefore **never** the measured value. The real
 target is `0.003591`.
 
 **A guard pinning the reference argument goes RED against a correct fix.** Pin the **ratio**, where
@@ -1229,12 +1232,12 @@ ratio = residual_proj_std / qkv_std
 assert ratio == pytest.approx(1.0 / math.sqrt(2 * n_layer), rel=tol)
 ```
 
-and add an arm at a **second depth** — otherwise a depth-blind constant `1/sqrt(24)` passes. Derive
+and add an arm at a **second depth**, otherwise a depth-blind constant `1/sqrt(24)` passes. Derive
 `tol` from the sample size (`8 * sqrt(1/(2·Na) + 1/(2·Nb))`), and assert the tolerance actually
 discriminates: that an unscaled ratio of 1.0 is >10× the tolerance away, and that the two depths are
 separated by >10× the tolerance.
 
-Verify explicitly that **QKV and FC1 stds are unchanged** — that is the entire point of the separate
+Verify explicitly that **QKV and FC1 stds are unchanged**. That is the entire point of the separate
 parameter, and scaling the shared initializer would shrink them too.
 
 ### 10.5 A Truthiness Guard on a Numeric Parameter Makes `0` Invisible
@@ -1249,13 +1252,13 @@ if self.random_seed is not None:
     rng = np.random.default_rng(self.random_seed)
 ```
 
-**Measured:** a layer was half-seeded at exactly `random_seed=0` — the value its own test file used in
+**Measured:** a layer was half-seeded at exactly `random_seed=0`, the value its own test file used in
 11 of 14 call sites. Sixty builds at `random_seed=0` gave **60 distinct correlations spanning
-0.1244–0.9958**, five of them below the test's own 0.85 threshold, presenting as an occasional
+0.1244 to 0.9958**, five of them below the test's own 0.85 threshold, presenting as an occasional
 1-in-12 flake. After the fix, 30 builds were bit-identical at exactly `0.0` spread, and an unseeded
-control still varied by 1.34 — which is what proves the fix rather than a coincidence.
+control still varied by 1.34, which is what proves the fix rather than a coincidence.
 
-The first hypothesis — a randomized eigensolver upstream — **died** on 300 refits returning a single
+The first hypothesis, a randomized eigensolver upstream, **died** on 300 refits returning a single
 value. Chase the falsy-zero before the exotic explanation.
 
 **This applies to every numeric parameter where 0 is legal**: `seed`, `dropout_rate=0.0`,
@@ -1267,8 +1270,8 @@ A single sign or index can survive a whole suite. Measured instances: an `ops.ro
 memory head shift the wrong way survived **249 green tests** because nothing tested addressing
 *direction*; a transposed attention bias passed **219 tests**; a flipped CLS slice passed 91/91.
 
-**Detect:** assert the **identity** of what is selected, not its shape — a delta impulse at a known
-asymmetric position, on a **non-square** grid, so a transpose cannot masquerade as correct.
+**Detect:** assert the **identity** of what is selected, not its shape. Use a delta impulse at a
+known asymmetric position, on a **non-square** grid, so a transpose cannot masquerade as correct.
 
 ### 10.7 Two Producers of the Same Quantity
 
@@ -1299,7 +1302,7 @@ def train_step(self, data):
 - **Differentiate the scaled loss.** Omitting `scale_loss` divides the whole update by ~`2^15` under
   `mixed_float16`. Measured at nine sites in one codebase; all nine now measure a ratio of
   `1.00 ± 0.008` against the stock path.
-- **Do not hand-roll regularizer summation** — Keras 3's `compute_loss` already sums `self.losses`.
+- **Do not hand-roll regularizer summation.** Keras 3's `compute_loss` already sums `self.losses`.
   An AST predicate asking "does the body mention `self.losses`" measures the wrong thing.
 
 ### 11.2 Python State That Never Reaches the Traced Graph
@@ -1315,25 +1318,25 @@ ops.cond(should_apply, lambda: self._apply(grads), lambda: None)
 ```
 
 **Detect:** assert the optimizer's iteration counter advances **exactly once per accumulation
-window** over several windows — not that the loss moved.
+window** over several windows, not that the loss moved.
 
 ### 11.3 A Zero Gradient Is Not a Freeze
 
 Assert gradient flow **after one real optimizer step**, never at initialization. A documented
 zero-initialized residual gate reads dead at init and is alive after one step. Measured: three
-suites showed 30–330 weights "dead" at init; after one `fit()` step two cleared to exactly 0 dead,
-and the third fell 30 → 3 after two steps — and *those* 3 were a genuine permanent defect that a
+suites showed 30 to 330 weights "dead" at init; after one `fit()` step two cleared to exactly 0 dead,
+and the third fell 30 to 3 after two steps, and *those* 3 were a genuine permanent defect that a
 blanket waiver would have hidden.
 
 ### 11.4 A Head That Trains Only in the Loop Written For It
 
 **Refuted, and worth the pattern:** a halting head appeared to receive zero gradient under its
-factory's `compile(loss={"logits": ...})`. It trains fine — in the custom training loop written for
+factory's `compile(loss={"logits": ...})`. It trains fine, in the custom training loop written for
 it, where its kernel moved by `0.9999`. The factory's own docstring said so verbatim, eight lines
 above the `compile()` call the finding had read.
 
 **Read the docstring above the line you are indicting.** Then make the advertised behaviour and the
-shipped behaviour agree, in whichever direction is true — if the loop is required, the factory should
+shipped behaviour agree, in whichever direction is true. If the loop is required, the factory should
 say so where a user will see it.
 
 ### 11.5 Optimizer and Callback Traps
@@ -1386,23 +1389,23 @@ padded length and leaked under ordinary prefix padding, while `mean` over a mask
 
 | arm | `max\|f([5,7,0,0])[:, :2] − f([5,7])\|` |
 |---|---|
-| shipped, `supports_masking = False` | **1.290977e-02** — attention **does** read padding |
-| `supports_masking = True` | **1.290977e-02 — IDENTICAL** |
+| shipped, `supports_masking = False` | **1.290977e-02**, attention **does** read padding |
+| `supports_masking = True` | **1.290977e-02, IDENTICAL** |
 | explicit `attention_mask=[[1,1,0,0]]` | **2.384186e-07** |
 
-Declaring `supports_masking = True` on a position-wise add is *honest* — the op genuinely preserves
-masks — but it fixes nothing on its own: the mask merely propagates one layer further, to attention
+Declaring `supports_masking = True` on a position-wise add is *honest*, the op genuinely preserves
+masks, but it fixes nothing on its own: the mask merely propagates one layer further, to attention
 layers that drop it too. The auto-mask was consumed by nothing and was numerically inert.
 
 **Set the flag because it is true; fix the leak by passing an explicit mask.** And do not let a
-`mask_zero=True` default advertise a masking guarantee the stack does not honour — measured, the
+`mask_zero=True` default advertise a masking guarantee the stack does not honour. Measured, the
 honest repair was to flip that default to `False` and require the explicit mask.
 
 ### 12.4 Masking by Zeroing Both Sides
 
 Zeroing both sides of a comparison makes an exact-match metric correct and a per-element metric
-silently wrong — `zero == zero` always agrees. Measured in one file: `sequence_accuracy` was sound
-while sibling `per_step_accuracy` and `bit_error_rate` understated error 3× from the identical
+silently wrong, because `zero == zero` always agrees. Measured in one file: `sequence_accuracy` was
+sound while sibling `per_step_accuracy` and `bit_error_rate` understated error 3× from the identical
 idiom. **Check what the reduction does with a masked position**, not whether a mask is applied.
 
 ### 12.5 Repair Granularity
@@ -1410,12 +1413,12 @@ idiom. **Check what the reduction does with a masked position**, not whether a m
 A rescue applied at the wrong reduction granularity fails silently and passes every finiteness test
 (§10.1). The repair must operate over the full axis the reduction reduces over.
 
-### 12.6 Inert Configuration — the Dead Knob
+### 12.6 Inert Configuration: the Dead Knob
 
 A parameter validated, stored, serialized, documented, and read by nothing.
 
 **Detect:** a knob-sensitivity probe. Set a **non-default** value and assert something measurable
-changes — the forward output, or the weight-shape signature for a structural knob.
+changes: the forward output, or the weight-shape signature for a structural knob.
 
 ```python
 def test_the_knob_reaches_the_forward_pass():
@@ -1469,10 +1472,10 @@ self.memory_attention = MemoryAttention(dim=d, num_layers=n, dropout_rate=dropou
 **Measured:** a segmentation model's memory attention accepted `dropout` and threaded it to all 12
 (small) / 24 (large) `Dropout` layers; the model's construction call simply never passed it. The
 layer default was in force and unreachable from the variant table, `__init__`, `get_config` and the
-factory. A sibling package had the identical shape with the opposite consequence — its unreachable
+factory. A sibling package had the identical shape with the opposite consequence: its unreachable
 rate was `0.0`, so the knob was a no-op either way, which is why it had never been noticed.
 
-**Detect — and the choice of arm is the whole test:**
+**Detect, and the choice of arm is the whole test:**
 
 ```python
 # ❌ VACUOUS - the default arm passes whether or not the knob is wired
@@ -1496,11 +1499,11 @@ non-default arm failed. The set form is what catches a rate that reaches the att
 not the residual ones.
 
 **Prefer a derived read-only property** over a stored duplicate when a sub-layer already owns the
-number — a stored outer copy can silently disagree with the sub-layer actually built, especially when
+number. A stored outer copy can silently disagree with the sub-layer actually built, especially when
 the constructor also accepts an already-constructed sub-layer.
 
 Finally, check the *other* end: a model that hard-wires `training=False` at a sub-layer call makes a
-model-level wet-vs-dry probe measure exactly `0.0` — a guard that cannot fail. Site the behavioural
+model-level wet-vs-dry probe measure exactly `0.0`, a guard that cannot fail. Site the behavioural
 check where the flag is actually threaded.
 
 ### 13.2 A Variant Table Is a Claim About a Published Model
@@ -1524,10 +1527,10 @@ Classify each variant table honestly:
 | Class | Meaning | Terminal state |
 |---|---|---|
 | **A** | a public released per-variant config exists | fetch it, compare field by field, ship any disagreement |
-| **B** | a named upstream exists, but only a paper table | record the paper + table/section; say plainly that no released config exists to fetch |
-| **C** | original to this codebase, no upstream | the question is **not applicable** — rule it, do not carry it as debt |
+| **B** | a named upstream exists, but only a paper table | record the paper plus table/section; say plainly that no released config exists to fetch |
+| **C** | original to this codebase, no upstream | the question is **not applicable**; rule it, do not carry it as debt |
 
-Class C is usually large and is the cheapest honest close. Measured: 12-13 of 49 packages. Two of
+Class C is usually large and is the cheapest honest close. Measured: 12 to 13 of 49 packages. Two of
 them had been noted as vacuous by an earlier audit and **never actually ruled**, so they looked like
 open work for two more cycles.
 
@@ -1541,11 +1544,11 @@ in the codebase. Worse, the whole layer was decorative:
 
 | probe | result |
 |---|---|
-| `max\|layer(x) − ops.conv(x, w_a + w_b)\|` | **0.0 EXACTLY** — it is a plain convolution |
-| `\|f(2x) − 2f(x)\|` | **0.0 EXACTLY** — degree-1 homogeneous, so **no non-linearity at all**, not even the advertised activation |
+| `max\|layer(x) − ops.conv(x, w_a + w_b)\|` | **0.0 EXACTLY**, it is a plain convolution |
+| `\|f(2x) − 2f(x)\|` | **0.0 EXACTLY**, degree-1 homogeneous, so **no non-linearity at all**, not even the advertised activation |
 | `control_points` movement after one `SGD(lr=1.0)` step | **0.0**, while the other two weights moved by an identical `1.221391` |
 
-**Eighty-three tests passed against this.** Shapes, serialization, gradients-exist, finiteness — all
+**Eighty-three tests passed against this.** Shapes, serialization, gradients-exist, finiteness, all
 green, because none of them asked what function the layer computes.
 
 **Detect, cheaply, for any layer claiming a non-linearity:**
@@ -1574,7 +1577,7 @@ def test_every_weight_moves_under_one_real_step():
 ```
 
 When you repair such a layer, verify the new forward against an **independent transcription of the
-documented equation** — a nested-loop reference on a **non-square** kernel — not against itself.
+documented equation**, a nested-loop reference on a **non-square** kernel, not against itself.
 
 ### 13.4 Inert Components, and How to Waive Them
 
@@ -1589,14 +1592,14 @@ def test_gradients_reach_every_trainable_weight():
     assert dead == DEAD_BY_DESIGN
 ```
 
-Set equality both ways is what makes the waiver fail when the design changes — an obsolete waiver is
+Set equality both ways is what makes the waiver fail when the design changes. An obsolete waiver is
 a silent hole, and a one-directional `dead <= DEAD_BY_DESIGN` never notices that a waived weight
 started training.
 
 **Never use a two-sided `expect_zero=`** for this: it also fails on any model whose weight *does*
 move, which converts a correct change into a false alarm.
 
-A standing example worth knowing: a stock `MultiHeadAttention` **key bias can never learn** —
+A standing example worth knowing: a stock `MultiHeadAttention` **key bias can never learn**, because
 `q·(k + b_k)ᵀ = q·kᵀ + q·b_kᵀ` adds a term constant along the softmax's reduction axis, and softmax
 is shift-invariant. Measured: gradient `3.9e-08` against a query-bias control of `7.8e-01`, a factor
 of `2.0e7`. It is a property of the formulation, shared with the reference implementations, and it
@@ -1605,8 +1608,8 @@ must be waived by name in any dead-weight sweep rather than "fixed".
 ### 13.5 A Library That Blocks on a GUI
 
 **Measured:** seven unconditional `plt.show()` calls in *library* code (not tests). Four
-visualization calls emitted 10 backend warnings **and leaked 4 open figures** — the leak is the half
-a warning filter hides.
+visualization calls emitted 10 backend warnings **and leaked 4 open figures**. The leak is the half a
+warning filter hides.
 
 ```python
 # ✅ CORRECT - return the figure; the caller decides
@@ -1620,28 +1623,222 @@ def visualize_grid(self, ..., show: bool = False):
     return fig
 ```
 
-Grep the whole library path, not the two sites a report names — the measured population was **12**,
+Grep the whole library path, not the two sites a report names. The measured population was **12**,
 of which 1 was a docstring example, 4 already conformed, and 7 were live.
 
 ---
 
-## 14. Testing and Validation
+## 14. Documentation House Style
+
+This section is the house style for docstrings, comments and ASCII diagrams. It is self-contained:
+use it both when writing a new file and when converting an existing file in place.
+
+**When converting an existing file, preserve ALL code byte-for-byte. Only docstrings, comments and
+diagrams change.**
+
+### 14.1 Write Plainly
+
+This is the priority. A docstring should read like one engineer explaining the code to another, not
+like a paper abstract.
+
+- Short sentences. One idea each. Break up anything over about 25 words.
+- Say what the thing does before saying why it matters.
+- Cut these: "deliberately", "load-bearing", "by construction", "non-obvious", "the whole argument
+  for", "worth stating precisely", "resolution of that tension". Cut nested clauses set off by
+  dashes.
+- Prefer "This is faster because X" over "The trade this makes, and it is why it is faster rather
+  than merely cheaper, is X".
+- Keep warnings blunt: "Don't pass 3 here, it runs out of memory at sequence length 8." Blunt is not
+  dense.
+- Numbers, shapes and file paths stay exact. Simplify the prose, never the facts.
+
+### 14.2 Docstring Format
+
+- Sphinx style: `:param x:` plus `:type x:`, `:return:` plus `:rtype:`, `:raises Err:`. Use `:ivar` /
+  `:vartype` for public attributes.
+- Keep `Input shape:` / `Output shape:` / `Example:` / `Note:` sections.
+- Every method gets a docstring. Every parameter gets documented.
+- Use the ResNet and BERT files as the format baseline, but with simpler prose.
+- Module docstrings follow the six-element shape in §5.1.
+
+A worked example, showing where the diagram sits relative to the parameter list:
+
+```python
+@keras.saving.register_keras_serializable(package="MyProject")
+class TransformerEncoder(keras.layers.Layer):
+    """Stack of pre-norm transformer blocks with an optional final norm.
+
+    Each block runs attention then an MLP, both wrapped in residuals. Pre-norm
+    means the norm sits inside the residual branch, so the skip path stays
+    unnormalized all the way to the output.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        Input [B, N, D]
+              │
+              ▼
+        ┌─────────────────┐
+        │ block_0         │  attention + MLP
+        └─────────────────┘
+              │ [B, N, D]
+              ▼
+             ...            num_layers blocks
+              │
+              ▼
+        ┌─────────────────┐
+        │ final_norm      │  ('pre' only)
+        └─────────────────┘
+              │ [B, N, D]
+              ▼
+            Output
+
+    :param num_layers: Number of blocks in the stack.
+    :type num_layers: int
+    :param dim: Model width ``D``.
+    :type dim: int
+    :param norm_position: ``'pre'`` or ``'post'``. ``'post'`` skips final_norm.
+    :type norm_position: str
+    :return: Encoded sequence, same shape as the input.
+    :rtype: keras.KerasTensor
+    :raises ValueError: If ``num_layers`` is not positive.
+
+    Input shape:
+        ``[B, N, D]``
+
+    Output shape:
+        ``[B, N, D]``
+    """
+```
+
+### 14.3 ASCII Diagrams: Where They Go
+
+Put them in the class docstring, after the opening paragraph and before the `:param` list. For a
+functional builder with no class, put them in the builder function's docstring.
+
+Each diagram gets a `**Bold Title:**` line, a blank line, then `.. code-block:: text`, then the
+diagram indented under it.
+
+### 14.4 ASCII Diagrams: Which Ones
+
+1. **Architecture Overview**: always. Input to output, every stage.
+2. **Block internals**: one per distinct sub-block. An encoder block and a decoder block are two
+   diagrams.
+3. **Variants**: the variant/scale table as aligned columns, values taken from the actual dict.
+4. **Extras**, only where the code is easy to get wrong and the file already documents it in prose:
+   masking semantics, residual wiring, dtype islands, channel arithmetic, drop-path schedules,
+   contrasts against the published paper. Skip if there is nothing surprising.
+
+### 14.5 ASCII Diagrams: Drawing Rules
+
+- Box a stage that owns weights or changes shape. Use `┌─┐ │ └─┘` for boxes, `▼ ▲ ◄ ►` for flow, and
+  `├ ┬ ┴ ┼` for splits and joins.
+- Annotate the tensor shape on the edges between boxes: `[B, N, D]`, `[B, H, W, C]`. Use the file's
+  own symbol names (`D`, `Lq`, `dim`).
+- Show every output branch. If `include_top=False` or a flag changes the return, draw the fork with
+  both leaves; do not describe it in prose.
+- Mark conditional stages as such: `(optional)`, `('pre' only)`.
+- Mark where a weight is shared between paths, and where a tensor is an input rather than a weight.
+- Width 60 columns, hard maximum 72. Labels 5 words maximum.
+- Keep vertical flow top-to-bottom. Go side-by-side only for genuinely parallel towers, or for a
+  before/after contrast.
+- Alignment matters more than detail. Misaligned boxes read as broken.
+- Tables: fixed-width columns, a header row, and values from the actual dict.
+- A one-line caption under a diagram is allowed when a rule needs stating, for example why a default
+  diverges from the paper.
+
+**What not to do:**
+
+- Do not invent behaviour. Every arrow must exist in `call()`.
+- Do not redraw generic Keras plumbing (`Dropout`, `Add`) as its own stage unless the placement is
+  the point.
+- Do not duplicate the whole `:param` list inside a diagram.
+- No emoji, and no ASCII art beyond box and arrow glyphs.
+
+A variant table drawn to these rules:
+
+```
+        ==============  ======  ========  =======  ==========
+        variant         dim     layers    heads    params
+        ==============  ======  ========  =======  ==========
+        tiny            192     12        3        5.7M
+        small           384     12        6        22M
+        base            768     12        12       86M
+        ==============  ======  ========  =======  ==========
+```
+
+### 14.6 No Trailing Comments
+
+No comment may share a line with code. Move every one to its own line above the statement it
+describes, or delete it if the line is already obvious. This includes short shape notes.
+
+```python
+# WRONG
+x = self.conv(x)  # (B, H, W, C)
+groups=self.channels,  # groups based on original channels
+
+# RIGHT
+# Shape after this: (B, H, W, C)
+x = self.conv(x)
+```
+
+Inside `.. code-block:: text` diagrams, inline annotation is fine.
+
+Note the one deliberate exception in this document's own code samples: the `# ❌ WRONG` / `# ✅
+CORRECT` markers and the short trailing notes in illustrative snippets exist to label the example,
+not to describe production code. Shipped files carry no trailing comments.
+
+### 14.7 DECISION Comments: Compress to 1 to 5 Lines
+
+These tend to grow into 20 to 60 line essays. Cut each to at most 5 lines, keeping exactly four
+things:
+
+1. the anchor ID (`# DECISION plan-.../D-NNN`)
+2. what the code does
+3. what NOT to change it to
+4. the one measured number that proves it, if there is one
+
+Drop history, superseded notes, re-derivations, test names, repeated rationale, and anything already
+said in the docstring. Keep the pointer (`See decisions.md D-NNN.`) so the full version stays
+findable.
+
+```python
+# DECISION plan-2024-07-norm/D-014
+# epsilon is 1e-3 here to match the reference implementation, not the factory default.
+# Do NOT route this family through create_normalization_layer: its default is 1e-6, 1000x off.
+# Measured: 189 layers would have changed. See decisions.md D-014.
+self.norm = keras.layers.BatchNormalization(epsilon=1e-3, name="norm")
+```
+
+### 14.8 Hard Constraints When Converting a File
+
+- Do not touch code, imports, constants, or variant tables.
+- Fix docstring bugs you find (wrong class name, bad indentation, a stale claim the code contradicts)
+  and say so in the commit message or the conversion report.
+- Every diagram arrow must be verified against the current `call()` before you draw it. A diagram is
+  a claim about behaviour, and §13 applies to claims in docstrings exactly as it applies to variant
+  tables.
+
+---
+
+## 15. Testing and Validation
 
 A guard that cannot fail is the most likely outcome of writing a new test. Across three audits this
-was measured repeatedly — including in guards written *by* the audits, caught only because each one
+was measured repeatedly, including in guards written *by* the audits, caught only because each one
 was injected against before being trusted.
 
-### 14.1 The Five House Rules
+### 15.1 The Five House Rules
 
 1. Every test asserts a **value or a relationship**, never only a shape.
 2. Every guard is proven **RED by injection** before it is trusted, and you check **which** assertion
    fired.
-3. Every tolerance is **derived** — from a dtype's ULP or a measured population — and the derivation
+3. Every tolerance is **derived**, from a dtype's ULP or a measured population, and the derivation
    is written into the test.
 4. Every waiver is pinned **by name**, with set equality in **both** directions.
 5. Compare failing **node-id SETs**, never counts. Quote `passed` **with** `collected`.
 
-### 14.2 Prove Every Guard RED
+### 15.2 Prove Every Guard RED
 
 Inject the specific defect the guard claims to catch; confirm the guard fails; confirm **which**
 assertion fired; restore from a scratch copy verified with `diff -q` / `sha256sum -c`.
@@ -1656,15 +1853,16 @@ diff -q /scratch/target.py.bak target.py && echo RESTORED
 
 > **Never `git stash` or `git checkout --` mid-proof.** Measured: one such restore destroyed an
 > entire uncommitted step, and the resulting mutation then "failed" with an unrelated `SystemExit`
-> from a missing CLI flag — a RED for the wrong reason is indistinguishable from a real one unless
+> from a missing CLI flag. A RED for the wrong reason is indistinguishable from a real one unless
 > you check which line raised.
 
-### 14.3 A Guard's RED-Proof Must Use the Arm That Can Actually Fail
+### 15.3 A Guard's RED-Proof Must Use the Arm That Can Actually Fail
 
 **Measured twice in one plan, both caught before shipping:**
 
-- an activation-serialization guard drafted with a **registered** callable **passed at HEAD** — the
-  registered path already round-trips. Only an *unregistered* callable reproduces the defect (§6.1).
+- an activation-serialization guard drafted with a **registered** callable **passed at HEAD**,
+  because the registered path already round-trips. Only an *unregistered* callable reproduces the
+  defect (§6.1).
 - a structural claim written as `type(model).call is MyModel.call` was **True with the override
   deleted entirely** (it resolves to the parent's `call`). The assertion that can fail is
   `"call" in MyModel.__dict__`.
@@ -1672,22 +1870,22 @@ diff -q /scratch/target.py.bak target.py && echo RESTORED
 Before trusting a green guard, ask: **what exact edit would make this red?** If the answer is
 "nothing", it is decoration.
 
-### 14.4 An Injection That Fails to Convict Is Evidence, Not a Setback
+### 15.4 An Injection That Fails to Convict Is Evidence, Not a Setback
 
-**Measured:** an injection meant to prove a boundary guard RED did not fire — a constant pad moves no
-pre-boundary position. That non-conviction *confirmed* the residual under test was numerical rather
-than positional, which was the open question. It was recorded as evidence; a second, correctly
+**Measured:** an injection meant to prove a boundary guard RED did not fire, because a constant pad
+moves no pre-boundary position. That non-conviction *confirmed* the residual under test was numerical
+rather than positional, which was the open question. It was recorded as evidence; a second, correctly
 derived injection then fired.
 
 Do not silently swap in an injection that works. And treat a control that comes back green on its
-first run as a probe defect until proven otherwise — measured twice in one step, once because a value
+first run as a probe defect until proven otherwise. Measured twice in one step: once because a value
 grid never crossed the boundary it was meant to exercise, and once because a bytecode fingerprint was
 structurally blind to the mutation it was checking.
 
-### 14.5 A Treatment Arm Without a Control Arm Proves Nothing
+### 15.5 A Treatment Arm Without a Control Arm Proves Nothing
 
 Running a suite under a new setting and seeing failures does **not** attribute them to the setting.
-Run the paired control — same directory, same process shape, setting off — and compare **sets**.
+Run the paired control: same directory, same process shape, setting off, and compare **sets**.
 
 **Measured, three ways in one plan:**
 
@@ -1698,26 +1896,26 @@ Run the paired control — same directory, same process shape, setting off — a
   had to be settled by running both node ids alone.
 
 The same discipline settles "is this pre-existing?": run the suspect at the **base commit in a
-detached worktree** — and see §14.7 for the trap that makes that measurement meaningless if you get
-it wrong.
+detached worktree**. See §15.7 for the trap that makes that measurement meaningless if you get it
+wrong.
 
-### 14.6 Pin the Property, Not the Sample
+### 15.6 Pin the Property, Not the Sample
 
 **Five of nine long-standing RED tests in one audit were the same defect class:** an exact or 7-digit
 literal pinned against a seed-dealt or sub-ULP quantity.
 
 | Pinned | Reality |
 |---|---|
-| `delta == pytest.approx(1.805329, rel=2e-3)` | over 90 draws `delta/amplitude` spans 0.28–1.03; the pin was ~30× tighter than the population |
-| `departure == 0.0` | the departure is `7.450581e-09` — **exactly one float32 ULP at 0.1**, so the assertion can never pass |
-| `residual == 0.0` (a mean-centring claim) | residual is 0.25–2.50 ULP over 20 blocks, never 0.0 |
-| `entropy < 0.9 * log(4)` | at that temperature entropy spans 0.40–1.33 over 20 seeds — the bar sat **inside** its own population |
+| `delta == pytest.approx(1.805329, rel=2e-3)` | over 90 draws `delta/amplitude` spans 0.28 to 1.03; the pin was ~30× tighter than the population |
+| `departure == 0.0` | the departure is `7.450581e-09`, **exactly one float32 ULP at 0.1**, so the assertion can never pass |
+| `residual == 0.0` (a mean-centring claim) | residual is 0.25 to 2.50 ULP over 20 blocks, never 0.0 |
+| `entropy < 0.9 * log(4)` | at that temperature entropy spans 0.40 to 1.33 over 20 seeds; the bar sat **inside** its own population |
 
 **The procedure, before writing any numeric assertion:**
 
-1. Sample the quantity over **≥20 seeds** or fresh builds.
+1. Sample the quantity over **20 or more seeds** or fresh builds.
 2. Report min / max / mean, and whether the distribution is **noisy or bimodal**.
-3. Put the bar **outside** the population — or better, assert a **relationship** instead
+3. Put the bar **outside** the population, or better, assert a **relationship** instead
    (monotonicity, a ratio, an ordering). A ladder strictly monotone in 20 of 20 seeds is a theorem; a
    threshold is a coin flip.
 4. Write the derivation into the test as a comment.
@@ -1731,22 +1929,22 @@ for hi, lo in zip(temps, temps[1:]):
 ```
 
 **Bimodal is not noisy, and the distinction changes the repair.** Measured: a separation read
-`0.270000` on 19 of 20 seeds and `0.003333` on one. That outlier was not spread — it was a degenerate
+`0.270000` on 19 of 20 seeds and `0.003333` on one. That outlier was not spread; it was a degenerate
 draw in which an untrained head coincidentally achieved the pinned target, collapsing the term.
 Widening the bar would have made the guard vacuous on exactly the fixture where it stops working.
 **Pin the draw; do not widen the bar.**
 
-Conversely, when a bound is provably **unattainable** — 1 of 50 comparisons over it, worst ratio
-1.0137, ~7 ULP at the output magnitude — widening *is* correct. Derive the new bound from the
+Conversely, when a bound is provably **unattainable** (1 of 50 comparisons over it, worst ratio
+1.0137, ~7 ULP at the output magnitude), widening *is* correct. Derive the new bound from the
 measured population (52 ULP, 7.5× headroom) and write down why this case differs from the seeded one.
 Both repairs can be correct in the same plan; the test must say which it is.
 
-### 14.7 Measurement Traps
+### 15.7 Measurement Traps
 
 | Trap | What it does |
 |---|---|
-| **TF32** | the default false model defect on Ampere+: a ~1e-3-scale "leak" that is the TF32 ULP. Quote near-zero statistics from CPU. Note one module disabling TF32 at import time changes every later measurement in the process |
-| **Eager-only bit-identity** | `0.0` eager and `4.2e-04` under `@tf.function` — the regime `fit()` uses. The control is the within-version eager-vs-graph delta |
+| **TF32** | the default false model defect on Ampere+: a ~1e-3-scale "leak" that is the TF32 ULP. Quote near-zero statistics from CPU. Note that one module disabling TF32 at import time changes every later measurement in the process |
+| **Eager-only bit-identity** | `0.0` eager and `4.2e-04` under `@tf.function`, the regime `fit()` uses. The control is the within-version eager-vs-graph delta |
 | **Untrained models** | a fresh classifier emits a uniform distribution, so an output-std probe reads **exactly 0.0** and measures nothing. Measured on four models; only overwriting every weight from a seeded stream produced signal |
 | **A detached worktree** | silently imports the **main** repo's package unless `PYTHONPATH` is forced. A "was this pre-existing?" measurement taken without that is meaningless |
 | **A trailing slash** | `find results/ ...` hashes differently from `find results ...`. Fix the exact command string in the guard |
@@ -1756,7 +1954,7 @@ Both repairs can be correct in the same plan; the test must say which it is.
 | **`get_weights()`** | can hide a defect that `trainable_weights` and an ordinal comparison expose |
 | **A save-side-only check** | cannot see a load-side loss (§7.1) |
 
-### 14.8 Ceiling Gates for Populations You Cannot Fix Site-by-Site
+### 15.8 Ceiling Gates for Populations You Cannot Fix Site-by-Site
 
 When a defect class has hundreds of sites and each needs a per-site judgment, do not edit all of them
 and do not ignore them. **Pin the population and ratchet it down:**
@@ -1774,15 +1972,15 @@ it growing. This converts an unbounded sweep into a bounded decision plus a ratc
 
 Two cautions:
 
-- **A ceiling is a `src/`-wide or package-wide figure — say which.** The same sweep restricted to a
+- **A ceiling is a `src/`-wide or package-wide figure. Say which.** The same sweep restricted to a
   sub-package gave a different number, and a ceiling quoted without its scope is unreproducible.
 - The pin should key on `(file, symbol)` or `(file, callee, keyword)`, **not on line numbers**, which
   drift with every commit.
 
-### 14.9 Process-Global State Leaks Across Tests
+### 15.9 Process-Global State Leaks Across Tests
 
 **Measured:** one unrestored `keras.utils.set_random_seed(1)` inside an *earlier* test made a later
-test in the same file fail. Deselecting that one test flipped the later one green — causally
+test in the same file fail. Deselecting that one test flipped the later one green: causally
 sufficient, not merely correlated. Eight directories shared the shape: run individually, **zero**
 failures; run in one process, **23**.
 
@@ -1802,30 +2000,30 @@ def _restore_global_rng():
 ```
 
 **After the fixture: 481 passed, 3 skipped, 0 failed in one combined process**, and the combined
-per-test totals equalled the sum of the eight solo runs exactly — order-neutrality *measured*, not
+per-test totals equalled the sum of the eight solo runs exactly. Order-neutrality *measured*, not
 asserted.
 
 Two facts this surfaced that are not obvious:
 
 - **`keras.utils.set_random_seed` is not the whole leak.** It writes Python `random`, NumPy's legacy
-  global, and the backend's global seed — but **not** Keras 3's global `SeedGenerator`, which every
+  global, and the backend's global seed, but **not** Keras 3's global `SeedGenerator`, which every
   unseeded `keras.random.*` call advances. That is a second, independent coupling of the same shape.
 - **The public getter for the backend's global generator *creates* it as a side effect.** Read the
   module global directly, or the act of observing the state manufactures it.
 
-State what you **cannot** restore — a generator first created inside a test, device-level RNG, a live
-dataset iterator — rather than implying full coverage. The same capture/restore discipline applies to
+State what you **cannot** restore (a generator first created inside a test, device-level RNG, a live
+dataset iterator) rather than implying full coverage. The same capture/restore discipline applies to
 the global dtype policy, `floatx`, and TF32 flags.
 
-### 14.10 An Instrument Can Report a Lower Bound
+### 15.10 An Instrument Can Report a Lower Bound
 
-See §15.1. This is the single highest-yield item in this document: the obvious instrument for a
+See §16.1. This is the single highest-yield item in this document: the obvious instrument for a
 warning census under-reports by **5×**, and every count derived from it is wrong.
 
-### 14.10a The Instrument That Closed the Item Was Blind to the Defect
+### 15.10a The Instrument That Closed the Item Was Blind to the Defect
 
 The lower-bound case above is one instance of the most expensive failure in this document, because it
-does not produce a wrong number — it produces a **confident, documented, wrong conclusion**, and the
+does not produce a wrong number. It produces a **confident, documented, wrong conclusion**, and the
 item is then closed and stops being looked at.
 
 Five measured instances, each of which had already closed an audit item before it was caught:
@@ -1835,7 +2033,7 @@ Five measured instances, each of which had already closed an audit item before i
 | `-W error::UserWarning` as a census | aborts each test at its FIRST warning | 58 node ids reported, **310** real |
 | A "was this pre-existing?" run at a mid-effort baseline commit | the baseline already contained the causing fix | 2 failures ruled "not ours" were **ours**; green at the true base |
 | A static census requiring 2+ *syntactic* sites per scope | a `for` loop handing one initializer to N blocks scores **1** | two models with 16 and 6 real collisions were **absent from the census entirely**; 119 loop-carried sites in 44 files |
-| "Strip the suppression, re-run, observe green" | a suppressed warning produces no failure and no output, so green is the expected result either way | 2 marks ruled "empirically dead" were **live**; flipping `ignore:`→`error:` turned 79 passed into 5 failed |
+| "Strip the suppression, re-run, observe green" | a suppressed warning produces no failure and no output, so green is the expected result either way | 2 marks ruled "empirically dead" were **live**; flipping `ignore:` to `error:` turned 79 passed into 5 failed |
 | An AST filter keyed on `__init__` annotations containing `Callable` | Python does not enforce annotations, and the `str`-annotated sites accept a callable too | 14 sites reported, **72** real |
 
 **The common shape**: the instrument answers a question that is *adjacent* to the one being asked.
@@ -1863,50 +2061,50 @@ measurement, and the ruling's justification is a property of the instrument ("a 
 validate these", "the suite is green without it") rather than a property of the code. That sentence is
 where to point the next probe.
 
-### 14.11 Why Guards Fail
+### 15.11 Why Guards Fail
 
-#### 14.11.1 One mutation per assertion, and check which one fired
+#### 15.11.1 One mutation per assertion, and check which one fired
 
 Two mutations that both break a value before it reaches a later assertion prove the *first*
 assertion twice and the second zero times. Verify by **name** which assertion fired for each
 mutation; if two land on the same one, add a mutation that isolates the other.
 
-#### 14.11.2 An injection that moves both sides proves nothing
+#### 15.11.2 An injection that moves both sides proves nothing
 
 If your injection perturbs the reference as well as the subject, the comparison is unchanged. Name,
 for each injection, the exact path it can and cannot see.
 
-#### 14.11.3 An oracle written by the same hand is a second copy of the bug
+#### 15.11.3 An oracle written by the same hand is a second copy of the bug
 
 A float64 "reference" that computes the value the same way the code does reproduces the same
 cancellation. **An oracle must consume the code's actual received bits, never the intended Python
-literals** — a gap below the dtype's ULP arrives bit-identical to the code, so an oracle fed the
+literals.** A gap below the dtype's ULP arrives bit-identical to the code, so an oracle fed the
 intended values is measuring a different input. Measured three times in one problem family.
 
-#### 14.11.4 Liveness is not correctness
+#### 15.11.4 Liveness is not correctness
 
 A destroy-negatives / destroy-positives probe can go green on code computing the **wrong quantity**.
 Measured: a raw-layout dice loss moved under both destroy probes while returning `0.765062` where the
 correct reshape gives `0.693310`. Assert the **value** under the probe, not only that the probe moved
 it.
 
-#### 14.11.5 A guard goes vacuous when its subject changes shape
+#### 15.11.5 A guard goes vacuous when its subject changes shape
 
 A property test whose subjects no longer have the property passes for a reason the test does not
 check. Measured: a "these variants can never window" test became doubly vacuous once a config change
-meant those variants built **zero** windowed layers at all — it was true, and true for a reason the
+meant those variants built **zero** windowed layers at all. It was true, and true for a reason the
 test never examined.
 
 Re-derive a guard's subject whenever the config it depends on changes. And when repairing such a
 test, respect any standing ruling about *how* it may not be fixed.
 
-#### 14.11.6 Anti-vacuity on collection
+#### 15.11.6 Anti-vacuity on collection
 
 An empty suite reads as a pass. Measured: three test targets collected **zero** tests, one of them
 four **0-byte** files, and had done for an unknown period. **Always quote `passed` with
 `collected`**, and assert a floor on collection where a suite matters.
 
-#### 14.11.7 A silent skip blinds every sweep in the file
+#### 15.11.7 A silent skip blinds every sweep in the file
 
 ```python
 # ❌ WRONG - a broken file silently shrinks the swept population
@@ -1926,13 +2124,13 @@ def _parse_or_fail(path, src):
         ) from None
 ```
 
-**Measured:** injecting a syntax error made an AST sweep drop a file (61 → 60 sites) while the guard
+**Measured:** injecting a syntax error made an AST sweep drop a file (61 to 60 sites) while the guard
 class still read **21 passed**. After the repair the same injection produced **59 failed / 455
-passed**. It was not one site — it was **all six** `ast.parse` call sites in that file. Keep the
+passed**. It was not one site, it was **all six** `ast.parse` call sites in that file. Keep the
 allow-list empty until a file proves it needs one (measured: 0 of 1,007 source files failed to
 parse).
 
-#### 14.11.8 A predicate that filters before it classifies
+#### 15.11.8 A predicate that filters before it classifies
 
 ```python
 # ❌ WRONG - drops an item before it can be judged; 5 of 8 became invisible
@@ -1947,21 +2145,21 @@ sites.append((path, name, verdict))
 Derive any count from the **verdict**, not from `len(sites)`, so existing floors keep their
 calibration when the population widens.
 
-#### 14.11.9 A guard on worktree text is not a behavioural guard
+#### 15.11.9 A guard on worktree text is not a behavioural guard
 
 `git diff --stat <path>` being empty asserts nothing about behaviour: it goes RED on a harmless
 trailing comment and GREEN on any change that has been committed or staged. Measured, both
-directions. Replace it with a behavioural golden (§14.12), and check the **false-positive** family as
-hard as the true-positive one — a comment-only edit must leave it green.
+directions. Replace it with a behavioural golden (§15.12), and check the **false-positive** family as
+hard as the true-positive one. A comment-only edit must leave it green.
 
-#### 14.11.10 A guard that cannot distinguish pathological from unusual destroys correct answers
+#### 15.11.10 A guard that cannot distinguish pathological from unusual destroys correct answers
 
 Test a guard's **false-positive** family as hard as its true-positive one. A cumsum-finiteness guard
 that looked obviously right was measured poisoning ordinary rows whose answers were exact.
 
-### 14.12 Deterministic Goldens
+### 15.12 Deterministic Goldens
 
-A golden pinned from a *seeded* build is a sample (§14.6). Fix every weight by **rule**:
+A golden pinned from a *seeded* build is a sample (§15.6). Fix every weight by **rule**:
 
 ```python
 for i, w in enumerate(model.weights):
@@ -1974,44 +2172,44 @@ Measured bit-identical across three separate processes.
 
 Two traps measured while building exactly this:
 
-- **`build(None)` materialized only 38 of 120 weights** — the remaining 82 arrive on the first call.
-  Assigning before a warm-up made two identical processes disagree. Warm up, then assign.
+- **`build(None)` materialized only 38 of 120 weights**, and the remaining 82 arrive on the first
+  call. Assigning before a warm-up made two identical processes disagree. Warm up, then assign.
 - **Keying the fill by `w.path` is process-order dependent**, through Keras's name-uniquification
   counter. Key by enumeration index and shape.
 
 Derive the tolerance from the smallest pinned magnitude and the dtype's resolution there, and say so:
-`atol=1e-6` is ~3 orders below a smallest pinned magnitude of `2.9e-05`, and far above float32
+`atol=1e-6` is about 3 orders below a smallest pinned magnitude of `2.9e-05`, and far above float32
 resolution (~1e-9) at that scale.
 
-### 14.13 Test Anti-Patterns
+### 15.13 Test Anti-Patterns
 
 - A test that asserts only shapes.
-- A fixture that constructs a shape the real pipeline can never emit — drive the **actual** factory
+- A fixture that constructs a shape the real pipeline can never emit. Drive the **actual** factory
   and data path.
 - A test whose tolerance is below the output dtype's resolution: it can never pass, so it measures
   nothing.
 - A pinned measured **count** that regression-locks a bug (a split count that silently included
   leaked samples). Pin the **property** the count was standing in for.
-- A same-seed determinism assertion over a small space — with 2 possible orders, two same-seed runs
+- A same-seed determinism assertion over a small space. With 2 possible orders, two same-seed runs
   coincide half the time even if the seed is ignored. Assert the **partition** over N seeds.
-- A suppression with no paired positive assertion (§15.3).
+- A suppression with no paired positive assertion (§16.3).
 
-### 14.14 Scoping Runs
+### 15.14 Scoping Runs
 
-Where a suite cannot run in one process — measured OOM at **36.6 GB RSS** on a 62 GB host — run
+Where a suite cannot run in one process (measured OOM at **36.6 GB RSS** on a 62 GB host), run
 per-directory, in separate processes, and compare failing node-id **sets** across runs. Re-run every
 failure **alone** before believing it. A directory-level pass/fail count is not comparable across
 runs; a node-id set is.
 
 ---
 
-## 15. Warnings as a Defect Channel
+## 16. Warnings as a Defect Channel
 
 The cheapest large-scale audit available. The framework is already telling you where the defects
 are; most codebases never turn the channel on, and the obvious way to turn it on under-reports by
 5×.
 
-### 15.1 The Default Instrument Reports a Lower Bound
+### 16.1 The Default Instrument Reports a Lower Bound
 
 ```bash
 # ❌ WRONG as a census - aborts each test at its FIRST warning
@@ -2022,7 +2220,7 @@ pytest -W always::UserWarning -rw
 ```
 
 **Measured:** the census went from **58** node ids to **310** on the same tree, purely by changing the
-instrument — and from four apparent root causes to **nine**. Every count derived from the first
+instrument, and from four apparent root causes to **nine**. Every count derived from the first
 instrument was wrong, including the estimate that sized the work.
 
 Use `error` as the **gate** (in CI, once the tree is clean) and `always -rw` as the **census** (when
@@ -2032,25 +2230,25 @@ Validate the instrument before trusting it: run both forms on one directory and 
 id set from `always` is a superset of the set from `error`. Measured: same three node ids, plus one
 warning text that `error` had masked because an earlier warning aborted the test first.
 
-### 15.2 Triage Into Four Classes, Not Two
+### 16.2 Triage Into Four Classes, Not Two
 
 | Class | Action |
 |---|---|
 | **REAL DEFECT** | fix it |
-| **EXPECTED-BY-DESIGN** | the component is deliberately inert (§1.3, §13.4) — waive by name, with a liveness control |
+| **EXPECTED-BY-DESIGN** | the component is deliberately inert (§1.3, §13.4). Waive by name, with a liveness control |
 | **TEST-ENVIRONMENT** | fix the test or the fixture, not the library |
 | **THIRD-PARTY-UNFIXABLE** | ignore, with a one-line justification naming the library and why |
 
 **The second class is the large one, and it is invisible if you only have two buckets.** Measured: 62
-of 74 in the dominant family. Treating them as defects would have deleted correct architecture — a
+of 74 in the dominant family. Treating them as defects would have deleted correct architecture: a
 prompt encoder's conditionality, a masked-modelling head, a video masking scheme, a memory bank.
 
 The diagnostic is not the warning text; it is the `call()` branch that produces the symptom, plus
 the in-source `ALWAYS CREATE / CONDITIONALLY USE` comment that should be sitting at the creation site
-(§1.3). If that comment is missing, write it as part of the triage — the next auditor should not have
+(§1.3). If that comment is missing, write it as part of the triage. The next auditor should not have
 to re-derive it.
 
-### 15.3 A Suppression Without a Positive Assertion Is Invisible Debt
+### 16.3 A Suppression Without a Positive Assertion Is Invisible Debt
 
 An `ignore` filter keeps working forever after the advisory it hid is deleted, reworded, or has its
 branch inverted. Nothing goes red. **A suppression with no paired positive assertion is a claim
@@ -2068,7 +2266,7 @@ def test_the_advisory_still_fires():
     assert tuple(out.shape) == (8, 4)            # an advisory must still return a valid tensor
 
 def test_a_feasible_request_does_not_warn():
-    """Control: without it the positive arm cannot fail — an unconditional warning
+    """Control: without it the positive arm cannot fail. An unconditional warning
     would satisfy it."""
     init = OrthogonalInitializer()
     with warnings.catch_warnings():
@@ -2084,7 +2282,7 @@ If you cannot cover every family, **name the residue with its count** rather tha
 suppressions are self-maintaining. Recorded honestly in one closure: 12 of 42 suppressions
 rot-guarded, 30 not, with the four unguarded families named.
 
-### 15.4 A Global Ignore Needs a Strictly Stronger Instrument
+### 16.4 A Global Ignore Needs a Strictly Stronger Instrument
 
 An entry in a global ignore list is defensible only when something else already proves what the
 warning would have told you. **Say which instrument, in the entry:**
@@ -2100,35 +2298,35 @@ filterwarnings = [
     # The STRONGER instrument is the per-variable gradient oracle, adopted by M packages:
     # it convicts identically-ZERO gradients this warning cannot see, pins its waivers BY
     # NAME, and fails loudly when a waiver goes stale.
-    # Read this as "the oracle, not the warning, is what proves they are not dead" --
+    # Read this as "the oracle, not the warning, is what proves they are not dead",
     # NOT as "dead weights are fine".
     "ignore:Gradients do not exist for variables:UserWarning",
 ]
 ```
 
 Keep the list short and justify each entry against that bar. If an entry cannot name a stronger
-instrument, it is not an ignore — it is an unfixed defect.
+instrument, it is not an ignore, it is an unfixed defect.
 
 One structural blocker worth knowing: a warning raised with `stacklevel=2` reports its location
 inside a **framework internal**, not your module, so no `:module:` filter can target it. Only a
-message regex can — and that suppresses the advisory in production runs too. Prefer `pytest.warns` at
+message regex can, and that suppresses the advisory in production runs too. Prefer `pytest.warns` at
 the sites in that case.
 
-### 15.5 The Ordering Hazard
+### 16.5 The Ordering Hazard
 
 **Measured, a self-inflicted regression:** a global `error::UserWarning` landed *last* in a sequence
-of fixes converted an earlier step's **deliberate** census advisory into a failure. The earlier step
-had verified green — truthfully, at its own commit.
+of fixes and converted an earlier step's **deliberate** census advisory into a failure. The earlier
+step had verified green, truthfully, at its own commit.
 
 **Land process-global configuration EARLY**, so every later measurement is taken under the final
 regime. If it must land late, re-run the suites that predate it before believing their green.
 
-The same hazard applies to an autouse conftest fixture (§14.9), a global dtype policy, and anything
+The same hazard applies to an autouse conftest fixture (§15.9), a global dtype policy, and anything
 that changes what "a passing run" means.
 
 ---
 
-## 16. Common Pitfalls and Solutions
+## 17. Common Pitfalls and Solutions
 
 ### Pitfall 1: Conditional layer creation
 ```python
@@ -2401,11 +2599,24 @@ self.blocks = [Block() for _ in range(n)]
 self.blocks = [Block(name=f"block_{i}") for i in range(n)]
 ```
 
+### Pitfall 26: A trailing comment, and a diagram that outran the code
+```python
+# ❌ WRONG - a trailing comment, and a docstring diagram showing a norm call() no longer runs
+x = self.proj(x)  # (B, N, D)
+
+# ✅ CORRECT - the note gets its own line; the diagram is re-checked against call()
+# Shape after this: (B, N, D)
+x = self.proj(x)
+```
+
+See §14.5 and §14.6. A diagram arrow that no longer exists in `call()` is the same defect class as a
+variant number nobody fetched (§13.2).
+
 ---
 
-## 17. Troubleshooting Guide
+## 18. Troubleshooting Guide
 
-### 17.1 Debug Checklist
+### 18.1 Debug Checklist
 
 Run these in order. Each is cheap, and each has caught a shipped defect.
 
@@ -2414,13 +2625,14 @@ Run these in order. Each is cheap, and each has caught a shipped defect.
 3. Does `.build(shape)` alone materialize every weight `call()` uses? (§8)
 4. Does a **non-default** value of every knob change something measurable? (§13.1)
 5. Does every trainable weight move after **one real optimizer step**? (§11.3, §13.3)
-6. Does the layer compute a non-linear function — `|f(2x) − 2f(x)| > 0`? (§13.3)
+6. Does the layer compute a non-linear function, `|f(2x) − 2f(x)| > 0`? (§13.3)
 7. Do the variant numbers match a **fetched** reference? (§13.2)
 8. Does the optimizer state survive a save/load? (§7.4)
-9. What does `pytest -W always::UserWarning -rw` say? (§15.1)
-10. Does the suite pass in one process as well as per-file? (§14.9)
+9. What does `pytest -W always::UserWarning -rw` say? (§16.1)
+10. Does the suite pass in one process as well as per-file? (§15.9)
+11. Does every arrow in the class docstring's diagram still exist in `call()`? (§14.5)
 
-### 17.2 Errors and Symptoms
+### 18.2 Errors and Symptoms
 
 | Symptom | Look at |
 |---|---|
@@ -2428,32 +2640,33 @@ Run these in order. Each is cheap, and each has caught a shipped defect.
 | Round trip fine, file suspiciously large | §7.2 archive layout; §7.3 override pair |
 | Training resumes but converges oddly | §7.4 optimizer state discarded on reload |
 | `Skipping variable loading for optimizer` | §7.5 saved before the optimizer was built |
-| `A total of N objects could not be loaded` | §7.5, or a deliberately-mismatched load — check which |
+| `A total of N objects could not be loaded` | §7.5, or a deliberately-mismatched load; check which |
 | `Could not interpret activation function identifier` | §6.1 raw callable in `get_config` |
 | A knob changes nothing | §13.1 unreachable; §12.6 dead knob |
-| A weight never moves | §13.3 dead weight; §13.4 inert by design — read the `call()` branch |
+| A weight never moves | §13.3 dead weight; §13.4 inert by design; read the `call()` branch |
 | Loss is suspiciously good on a causal task | §12.1 missing causal mask |
 | Attention attends to padding | §12.3 mask destroyed; pass an explicit mask |
-| A test flakes 1 in 12 | §10.5 falsy seed; §14.6 bar inside its own population; §14.9 RNG leak |
+| A test flakes 1 in 12 | §10.5 falsy seed; §15.6 bar inside its own population; §15.9 RNG leak |
 | NaNs only under fp16 | §10.1 sentinel; §10.2 margin below the working ULP |
 | Update is ~2^15 too small | §11.1 missing `scale_loss` |
 | `OperatorNotAllowedInGraphError` | §4.2 a traced `training`, or a Python branch on a tensor |
 | `pred must not be a Python bool` | §4.2 `ops.tril`/`ops.triu` under tracing |
-| Passes alone, fails in its directory | §14.9 process-global state |
-| Passes in its directory, fails in a combined run | §14.9, and check for import-time global mutation |
-| Guard never fails | §14.3 wrong arm; §14.11 vacuity |
-| A "pre-existing" failure you cannot reproduce | §14.7 the detached-worktree `PYTHONPATH` trap |
+| Passes alone, fails in its directory | §15.9 process-global state |
+| Passes in its directory, fails in a combined run | §15.9, and check for import-time global mutation |
+| Guard never fails | §15.3 wrong arm; §15.11 vacuity |
+| A "pre-existing" failure you cannot reproduce | §15.7 the detached-worktree `PYTHONPATH` trap |
+| The docstring describes a stage the code does not run | §14.8; fix the docstring and say so |
 
 ---
 
-## 18. Summary Checklists
+## 19. Summary Checklists
 
-### 18.1 A New Layer
+### 19.1 A New Layer
 
 - [ ] `@keras.saving.register_keras_serializable(package=...)`
 - [ ] Every sub-layer created in `__init__`, **unconditionally**
 - [ ] `build()` materializes exactly what `call()` runs; guarded by `if self.built: return`
-- [ ] No `.assign()` of a constant table in `build()` — the initializer *is* the value
+- [ ] No `.assign()` of a constant table in `build()`; the initializer *is* the value
 - [ ] `compute_output_shape` reads config, never weights
 - [ ] `get_config` complete; objects **serialized**; `from_config` symmetric; **both directions
       tested separately**
@@ -2461,15 +2674,15 @@ Run these in order. Each is cheap, and each has caught a shipped defect.
 - [ ] One initializer **instance** per consumer (clone it)
 - [ ] `keras.ops` only in `call()`; no Python branch on a tensor value; no state mutation
 - [ ] fp16-safe sentinels; margins derived from the working ULP
-- [ ] `supports_masking` set truthfully — and the leak fixed separately if there is one
+- [ ] `supports_masking` set truthfully, and the leak fixed separately if there is one
 - [ ] Explicit `name=` on every sub-layer, including inside loops
 - [ ] Validation in `__init__` and `build`, never `call`; messages name the offending value
 
-### 18.2 A New Model Package
+### 19.2 A New Model Package
 
 - [ ] Module docstring is substantive prose: principle, architecture, deliberate choices, references
 - [ ] One variant table, one home; architecture and training config kept separate
-- [ ] Every variant number traced to a **fetched** reference, with the URL cited — or explicitly
+- [ ] Every variant number traced to a **fetched** reference, with the URL cited, or explicitly
       classed as paper-table-only, or as original-with-no-upstream
 - [ ] Every layer knob reachable from `__init__`, the variant table, `get_config` **and** the factory
 - [ ] `from_variant` raises `ValueError` listing the available keys, and accepts the overrides its
@@ -2480,7 +2693,7 @@ Run these in order. Each is cheap, and each has caught a shipped defect.
 - [ ] No `plt.show()` anywhere in the library path
 - [ ] No custom `train_step` unless justified; if present, it uses `scale_loss`
 
-### 18.3 The Tests, Before You Call It Done
+### 19.3 The Tests, Before You Call It Done
 
 - [ ] Two-round-trip **value** equality, after perturbing every weight
 - [ ] `len(archive_datasets) == len(model.weights)`, and no unexpected flat store
@@ -2490,51 +2703,68 @@ Run these in order. Each is cheap, and each has caught a shipped defect.
 - [ ] Gradient flow after **one optimizer step**; waivers pinned by name, set-equal both ways
 - [ ] Non-linearity check for any layer claiming one
 - [ ] Causal isolation check for any causal model, with the control that proves the probe reached it
-- [ ] Every tolerance derived from a dtype or a ≥20-sample population, **derivation in the test**
-- [ ] Every guard proven RED by injection, with the firing assertion named, and restored via `cp` +
-      `diff -q` (never `git stash`)
+- [ ] Every tolerance derived from a dtype or a 20-sample-or-larger population, **derivation in the
+      test**
+- [ ] Every guard proven RED by injection, with the firing assertion named, and restored via `cp`
+      plus `diff -q` (never `git stash`)
 - [ ] False-positive family checked for any guard that can trip on innocent edits
 - [ ] Every deliberate advisory paired with a `pytest.warns` positive arm **and** a control
 - [ ] `passed` quoted **with** `collected`; no suite silently collecting zero
 - [ ] An autouse fixture restoring global RNG, dtype policy and `floatx`
 - [ ] Failing node-id **sets** compared across runs, never counts
 
+### 19.4 The Docs, Before You Call It Done
+
+- [ ] Code unchanged byte-for-byte if this was a docs-only conversion
+- [ ] Sphinx `:param` / `:type` / `:return` / `:rtype` / `:raises` on every method and parameter
+- [ ] Module docstring covers principle, architecture, deliberate choices, provenance, references
+- [ ] Architecture Overview diagram present; one diagram per distinct sub-block
+- [ ] Variant table drawn as aligned columns, values from the actual dict
+- [ ] Every diagram arrow verified against the current `call()`
+- [ ] Every output branch drawn, conditional stages marked `(optional)` / `('pre' only)`
+- [ ] Diagram width 60 columns, hard maximum 72; boxes aligned
+- [ ] No trailing comments anywhere; every note on its own line
+- [ ] DECISION comments at 5 lines or fewer, with anchor ID, what not to change it to, the measured
+      number, and the `See decisions.md D-NNN.` pointer
+- [ ] Docstring bugs found during the pass are fixed and reported
+- [ ] Numbers, shapes and paths unchanged; only the prose got simpler
+
 ---
 
-## 19. Appendix: Refuted Claims
+## 20. Appendix: Refuted Claims
 
 Recorded so they are not re-proposed, and so a rule above is not re-derived from a premise already
 falsified by measurement.
 
 | Claim | Status |
 |---|---|
-| The nested `List[List[Layer]]` weight-loss trap | **Does not reproduce on Keras 3.8** in general — `_flatten_layers` round-trips regardless of nesting. Where it *does* bite, the discriminating property is the **owner class** (`Layer` vs `Model`), not container depth |
+| The nested `List[List[Layer]]` weight-loss trap | **Does not reproduce on Keras 3.8** in general; `_flatten_layers` round-trips regardless of nesting. Where it *does* bite, the discriminating property is the **owner class** (`Layer` vs `Model`), not container depth |
 | "Overrides `build()`" is the discriminating property for round-trip loss | **Wrong property.** Whether `build()` *materializes the tree* is (§8.2) |
 | `Model.build(shape)` builds a subclassed model | **False.** It marks it built and walks no sub-layers; `count_params()` returns exactly **0** |
 | A structured-dict `y_pred` cannot be used with stock `compile()`/`fit()` | **False.** It breaks in exactly one configuration: a single `Loss` object handed a dict `y_pred` |
 | A custom `train_step` drops regularizer terms | **False.** Keras 3's `compute_loss` already sums `self.losses` |
 | `assert model.losses` proves a regularizer is live | **Vacuous** when an unrelated block contributes. Assert a delta against a no-regularizer baseline |
 | `x + g - stop_gradient(g)` is the identity | **False** under left-to-right float association (~25% of float64 draws differ by up to 1 ULP). Group as `x + (g - stop_gradient(g))` |
-| A GPU-only homogeneity RED at `5.063e-04` was a bias leak | **It was the TF32 ULP** (§14.7) |
-| A hard-coded `training=None` in a functional-graph build breaks training mode | **False.** `Functional.call` injects the caller's `training` into every traced operation at runtime — measured identical **with the `call` override deleted entirely**. The trace-time value is dead thereafter |
-| `include_optimizer=False` suppresses optimizer state on the `.keras` path | **False — a silent no-op.** The kwarg is popped and never forwarded |
+| A GPU-only homogeneity RED at `5.063e-04` was a bias leak | **It was the TF32 ULP** (§15.7) |
+| A hard-coded `training=None` in a functional-graph build breaks training mode | **False.** `Functional.call` injects the caller's `training` into every traced operation at runtime, measured identical **with the `call` override deleted entirely**. The trace-time value is dead thereafter |
+| `include_optimizer=False` suppresses optimizer state on the `.keras` path | **False, a silent no-op.** The kwarg is popped and never forwarded |
 | Only an *explicitly seeded* shared initializer produces identical weights | **False.** A shared **instance** produces bit-identical weights with or without `seed=`; instance identity is the discriminator (§10.3) |
 | A halting head that gets no gradient under its factory `compile()` is untrained | **False.** It trains in the custom loop written for it; the factory docstring said so eight lines above the line the finding read (§11.4) |
 | Routing two model families through a shared normalization factory is a safe cleanup | **False.** The factory's epsilon default differs from the layer's by **1000×**; 11 of 16 types diverge (§9.6) |
 | A published architecture's BatchNorm momentum was wrong in the port | **False.** The reference covering all shipped generations declares exactly what shipped; an *older* reference disagrees. The **epsilon** was the real deviation (§9.7) |
 | The reference initializer argument is the value to assert | **False for truncated normals.** Realized std is `0.87964 ×` the argument; pin the depth **ratio** instead (§10.4) |
 | Five "objects could not be loaded" warnings indicated weight loss | **False.** All five were deliberately-mismatched loads; the warning was the instrument working. Two-round-trip probes measured `0.0` on all four real subjects |
-| An exact-zero pin on a numerical residual is a strict test | **Broken.** `7.45e-09` is exactly one float32 ULP at 0.1 — the assertion can never pass, so it measures nothing (§14.6) |
-| A weight-path set is stable across a round trip | **Not always.** A `clone_model` teacher inherits the student's path strings live and separates on reload — 172 paths before, 322 after, harmlessly (§7.8) |
-| A single `-W error::UserWarning` run measures the warning population | **False — it is a lower bound.** It aborts each test at the first warning: 58 node ids against 310 (§15.1) |
-| A suppression can be tested for liveness by removing it and re-running | **False.** A suppressed warning produces no failure and no output, so "green" is the expected result whether the mark is live or dead. Two marks ruled dead this way were live; flipping `ignore:`→`error:` turned 79 passed into 5 failed. Wrap `warnings.warn` ahead of the filter machinery instead |
+| An exact-zero pin on a numerical residual is a strict test | **Broken.** `7.45e-09` is exactly one float32 ULP at 0.1, so the assertion can never pass and measures nothing (§15.6) |
+| A weight-path set is stable across a round trip | **Not always.** A `clone_model` teacher inherits the student's path strings live and separates on reload: 172 paths before, 322 after, harmlessly (§7.8) |
+| A single `-W error::UserWarning` run measures the warning population | **False, it is a lower bound.** It aborts each test at the first warning: 58 node ids against 310 (§16.1) |
+| A suppression can be tested for liveness by removing it and re-running | **False.** A suppressed warning produces no failure and no output, so "green" is the expected result whether the mark is live or dead. Two marks ruled dead this way were live; flipping `ignore:` to `error:` turned 79 passed into 5 failed. Wrap `warnings.warn` ahead of the filter machinery instead |
 | A static census bounds a shared-initializer population | **False for the commonest shape.** Requiring 2+ syntactic sites per scope scores a `for` loop over N blocks as **1**; two models with 16 and 6 real collisions never appeared in the census, and the ceiling gate built on it could not bound the family it capped. 119 loop-carried sites in 44 files |
-| Q/K/V drawn from one shared initializer are identical to each other | **Usually false — check the layout first.** A fused `qkv` Dense supplies all three roles from different column blocks of one draw (`\|Q−K\| = 0.0796`). The real defect there is by DEPTH: 12 transformer blocks initialized as 12 copies of one block, 132 of 264 same-shape pairs bit-identical. Where `q`/`k`/`v` ARE separate Denses, the collision is real and makes the score matrix exactly symmetric at step 0 |
+| Q/K/V drawn from one shared initializer are identical to each other | **Usually false; check the layout first.** A fused `qkv` Dense supplies all three roles from different column blocks of one draw (`\|Q−K\| = 0.0796`). The real defect there is by DEPTH: 12 transformer blocks initialized as 12 copies of one block, 132 of 264 same-shape pairs bit-identical. Where `q`/`k`/`v` ARE separate Denses, the collision is real and makes the score matrix exactly symmetric at step 0 |
 | A save/load forward-delta guard detects a raw activation in `get_config` | **Vacuous.** The forward `max\|delta\|` is `0.0` in every configuration, including the fully-broken one. The discriminating observables are JSON-safety and post-load callability |
 | An annotation is a reliable filter for "can a callable arrive here" | **False.** Python does not enforce annotations, and the `str`-annotated sites hand their value to `Dense`/`Activation`/`activations.get`, all of which accept a callable: 14 sites reported against **72** real |
 
 **The meta-lesson.** Across every audit that produced this document, the dominant failure mode was
-not a wrong fix — it was **a real symptom with a wrong explanation**:
+not a wrong fix. It was **a real symptom with a wrong explanation**:
 
 - a doubled archive whose own override comment claimed the opposite;
 - a "dead" head that trains in the loop written for it;
@@ -2544,14 +2774,15 @@ not a wrong fix — it was **a real symptom with a wrong explanation**:
 - a "test-order" flake that was one unrestored global seed.
 
 And a second-order variant that is worse, because it closes the item rather than merely mis-explaining
-it: **the instrument that closed the item was blind to the defect** (§14.10a). Five measured instances,
-each of which had produced a confident, documented, wrong conclusion — a census that under-reported 5×,
-a baseline commit that already contained the causing fix, a static pass that scored a loop as one site,
-a liveness test that could not observe a suppressed warning, and an annotation filter that missed 58 of
-72 sites. The tell is a closure justified by a property of the *instrument* rather than of the code.
+it: **the instrument that closed the item was blind to the defect** (§15.10a). Five measured
+instances, each of which had produced a confident, documented, wrong conclusion: a census that
+under-reported 5×, a baseline commit that already contained the causing fix, a static pass that scored
+a loop as one site, a liveness test that could not observe a suppressed warning, and an annotation
+filter that missed 58 of 72 sites. The tell is a closure justified by a property of the *instrument*
+rather than of the code.
 
 In the most recent audit roughly **one carried premise in five died on measurement**, and **six of the
-author's own prescriptions were falsified before they shipped** — one of which would have divided 189
+author's own prescriptions were falsified before they shipped**, one of which would have divided 189
 layers' epsilon by 1000, and another of which would have made a correct fix fail its own guard.
 
 Several *prescribed fixes* were themselves regressions, caught only by running them and diffing the
@@ -2561,7 +2792,7 @@ number:
 - forwarding a "dropped" dropout rate stacked a **second** dropout, so a requested 0.25 became an
   effective 0.4375;
 - landing a global warning-to-error configuration last converted an earlier step's deliberate
-  advisory into a failure (§15.5).
+  advisory into a failure (§16.5).
 
 > **Re-derive the premise at the moment you act on it. Then run the prescribed fix and diff the
 > number, not the shape.**
