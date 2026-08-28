@@ -1,73 +1,65 @@
 """
-A spatially-gated MLP block as an alternative to self-attention.
+A gated MLP block built from 1x1 convolutions.
 
-This layer realizes the Gated MLP (gMLP) architecture, proposed as a
-computationally efficient yet powerful alternative to the self-attention
-mechanisms prevalent in Transformer models. It adapts the principles of Gated
-Linear Units (GLUs) for spatial data (e.g., image feature maps) by using
-1x1 convolutions, which act as position-wise linear transformations.
+This layer gates one projection of the input with another projection of the
+same input. Both projections are 1x1 convolutions. A 1x1 convolution is a
+dense layer applied at every spatial position, with the weights shared across
+positions.
 
-The core idea is to replace the explicit token-mixing of self-attention with
-an implicit, spatially-aware gating mechanism. This allows the network to
-dynamically control the flow of information at each spatial location based on
-the local features, without incurring the quadratic complexity of attention.
+The forward pass has four stages:
 
-Architectural Overview:
-The gMLP operates through a dual-pathway gating structure, where all linear
-projections are implemented as 1x1 convolutions:
+1.  **Parallel projections**. The input feeds two independent 1x1
+    convolutions. One produces the gate, the other the value.
+2.  **Activation**. The gate and the value both go through
+    ``attention_activation``.
+3.  **Gating**. The activated gate multiplies the activated value element by
+    element. Where the gate is large the value passes through. Where it is
+    near zero the value is suppressed.
+4.  **Output projection**. A third 1x1 convolution maps the gated tensor to
+    ``filters`` channels, then ``output_activation`` is applied.
 
-1.  **Parallel Projections**: The input tensor is fed into two independent
-    1x1 convolutional layers. These function as position-wise dense layers,
-    projecting the feature vector at each spatial location into an
-    intermediate representation. One pathway learns a "gate" representation,
-    while the other learns a "value" (or "up") representation.
+Foundational mathematics:
+For the feature vector ``x_ij`` at spatial position ``(i, j)``:
 
-2.  **Non-linear Activation**: The outputs of both the gate and value pathways
-    are passed through a non-linear activation function.
+    g_ij = activation_attn(W_g @ x_ij + b_g)
+    v_ij = activation_attn(W_v @ x_ij + b_v)
+    h_ij = g_ij * v_ij
+    y_ij = activation_out(W_d @ h_ij + b_d)
 
-3.  **Gating Mechanism**: The activated gate tensor is element-wise multiplied
-    with the activated value tensor. This is the central operation of the
-    layer. The gate effectively learns a dynamic, content-aware spatial mask
-    that modulates the information carried by the value pathway. Features at
-    locations where the gate has high activation are preserved, while those
-    at locations with low activation are suppressed.
+``*`` is the element-wise product. ``W_g``, ``W_v`` and ``W_d`` are the
+kernels of the gate, up and down convolutions. All three are shared across
+every spatial position, so the whole block is three convolutions and one
+multiply.
 
-4.  **Output Projection**: The resulting gated tensor is passed through a
-    final 1x1 convolutional layer (the "down" projection) to produce the
-    layer's output, consolidating the filtered information.
+**This is not the gMLP block from the paper.** Every convolution here is 1x1,
+so nothing mixes information across spatial positions: output position
+``(i, j)`` depends only on input position ``(i, j)``. The part of gMLP that
+replaces attention is its Spatial Gating Unit, which projects along the token
+axis. That projection is absent here. What this layer implements is a Gated
+Linear Unit over channels, applied position-wise. If you need token mixing,
+use a layer that has it. This one cannot learn any. MEASURED on a
+``(1, 5, 5, 4)`` input with ``filters=8``: perturbing one pixel changes the
+output at that pixel and at no other, with an off-pixel delta of exactly 0.0.
 
-Foundational Mathematics:
-Let `X` be an input tensor with feature vectors `x_{ij}` at each spatial
-position `(i, j)`. The transformation at each position is:
-
-1.  Gate and Value Computation:
-    `g_{ij} = activation_{attn}(W_g @ x_{ij} + b_g)`
-    `v_{ij} = activation_{attn}(W_v @ x_{ij} + b_v)`
-    where `W_g` and `W_v` are the kernel weights of the gate and up 1x1
-    convolutions, respectively.
-
-2.  Gating Operation:
-    `h_{ij} = g_{ij} * v_{ij}`
-    where `*` denotes the Hadamard (element-wise) product.
-
-3.  Output Projection:
-    `y_{ij} = activation_{out}(W_d @ h_{ij} + b_d)`
-    where `W_d` is the kernel weight of the down 1x1 convolution.
-
-The use of 1x1 convolutions allows this entire sequence of operations to be
-applied efficiently across all spatial positions in parallel, with shared
-weights `{W_g, W_v, W_d}`.
+**Known defect: the gate and the value are the same function.** All three
+convolutions receive the SAME initializer instance, and ``conv_gate`` and
+``conv_up`` have the same shape, so they start with bit-identical kernels.
+The product ``g * v`` is symmetric in the two, so their gradients are equal
+too and they never diverge. MEASURED with the defaults: ``max|delta|`` is
+0.0 at build time and still 0.0 after 5 epochs of SGD, for the kernels and
+the biases. The layer therefore computes ``attn(conv(x))**2``, not a gate
+times a value. This is documented, not fixed - changing it changes every
+existing checkpoint.
 
 References:
-The gMLP architecture was introduced in:
--   Liu, H., Dai, Z., So, D. R., & Le, Q. V. (2021). Pay Attention to MLPs.
-    In Advances in Neural Information Processing Systems (NeurIPS).
-
-The gating mechanism itself is an instance of the Gated Linear Unit,
-originally proposed in:
 -   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
     Modeling with Gated Convolutional Networks. In Proceedings of the 34th
-    International Conference on Machine Learning (ICML).
+    International Conference on Machine Learning (ICML). This is the gating
+    mechanism the layer actually implements.
+-   Liu, H., Dai, Z., So, D. R., & Le, Q. V. (2021). Pay Attention to MLPs.
+    In Advances in Neural Information Processing Systems (NeurIPS). This is
+    the architecture the layer is named after; see the paragraph above for
+    what is missing.
 
 """
 
@@ -83,85 +75,193 @@ from dl_techniques.utils.activation_serialization import (
 @keras.saving.register_keras_serializable()
 class GatedMLP(keras.layers.Layer):
     """
-    Gated MLP layer using 1x1 convolutions for spatial data.
+    Gated MLP layer built from three 1x1 convolutions.
 
-    This layer implements the gMLP architecture where the input is processed through
-    three separate 1x1 convolution paths: gate, up, and down projections. The gating
-    mechanism computes ``output = activation_out(Conv1x1_down(activation_attn(Conv1x1_gate(x))
-    * activation_attn(Conv1x1_up(x))))``, allowing the network to selectively focus on
-    relevant spatial features via element-wise multiplication of the gate and up pathways.
+    Two 1x1 convolutions read the input. ``conv_gate`` produces the gate and
+    ``conv_up`` produces the value. Both go through ``attention_activation``,
+    the gate multiplies the value element by element, and ``conv_down`` maps
+    the product to ``filters`` channels:
+    ``y = out_act(conv_down(attn_act(conv_gate(x)) * attn_act(conv_up(x))))``.
+
+    All three convolutions use ``filters`` output channels, so the gate and
+    the value have the same width and the output width equals ``filters``.
+    The input width is independent of ``filters``.
+
+    Every kernel is 1x1 with stride 1, so the spatial size never changes and
+    no information moves between positions. See the module docstring for how
+    this differs from the published gMLP block.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────┐
-        │  Input (batch, H, W, channels)          │
-        └───────────────────┬─────────────────────┘
-                            │
-                      ┌─────┴─────┐
-                      ▼           ▼
-        ┌──────────────────┐ ┌──────────────────┐
-        │  conv_gate (1x1) │ │  conv_up (1x1)   │
-        └────────┬─────────┘ └────────┬─────────┘
-                 ▼                    ▼
-        ┌──────────────────┐ ┌──────────────────┐
-        │ attn_activation  │ │ attn_activation  │
-        └────────┬─────────┘ └────────┬─────────┘
-                 │                    │
-                 └────────┬───────────┘
-                          ▼
-        ┌─────────────────────────────────────────┐
-        │         Element-wise Multiply           │
-        └───────────────────┬─────────────────────┘
-                            ▼
-        ┌─────────────────────────────────────────┐
-        │          conv_down (1x1)                │
-        └───────────────────┬─────────────────────┘
-                            ▼
-        ┌─────────────────────────────────────────┐
-        │          output_activation              │
-        └───────────────────┬─────────────────────┘
-                            ▼
-        ┌─────────────────────────────────────────┐
-        │  Output (batch, H, W, filters)          │
-        └─────────────────────────────────────────┘
+            Input  [B, H, W, C]
+                     │
+               ┌─────┴─────┐
+               ▼           ▼
+        ┌────────────┐ ┌────────────┐
+        │ conv_gate  │ │  conv_up   │
+        │  1x1, F    │ │   1x1, F   │
+        └─────┬──────┘ └─────┬──────┘
+              ▼              ▼
+        ┌────────────┐ ┌────────────┐
+        │ attn activ │ │ attn activ │
+        └─────┬──────┘ └─────┬──────┘
+              └──────┬───────┘
+                     ▼
+              multiply  [B, H, W, F]
+                     │
+                     ▼
+            ┌────────────────┐
+            │   conv_down    │
+            │    1x1, F      │
+            └───────┬────────┘
+                    ▼
+            ┌────────────────┐
+            │  output activ  │
+            └───────┬────────┘
+                    ▼
+            Output [B, H, W, F]
 
-    :param filters: Integer, number of filters for all convolution layers. Must be positive.
+        F = filters. Shapes are for data_format='channels_last';
+        the fork below gives the 'channels_first' layout.
+
+    **Gate and value split (block internals):**
+
+    .. code-block:: text
+
+        x  [B, H, W, C]
+        │
+        ├──► conv_gate (1x1) ──► attn_act ──► g [B, H, W, F]
+        │                                          │
+        └──► conv_up   (1x1) ──► attn_act ──► v ───┤
+                                                   ▼
+                                        h = g * v  [B, H, W, F]
+
+        The SAME activation runs on both branches, so neither
+        branch is the linear one. This differs from SwiGLU-style
+        gating, where only the gate is non-linear.
+
+    **The data_format fork:**
+
+    .. code-block:: text
+
+                  data_format
+                       │
+              ┌────────┴────────┐
+              ▼                 ▼
+        'channels_last'   'channels_first'
+              │                 │
+              ▼                 ▼
+        channel axis -1   channel axis 1
+        in  [B, H, W, C]  in  [B, C, H, W]
+        mid [B, H, W, F]  mid [B, F, H, W]
+        out [B, H, W, F]  out [B, F, H, W]
+
+        Both leaves run the same three convolutions. Only the
+        axis holding the channels moves. call() does not branch:
+        the layout is handed to each Conv2D, while build() and
+        compute_output_shape() put `filters` on axis -1 or on
+        axis 1. `mid` is the width conv_down is built for.
+        data_format=None resolves at __init__ time through
+        keras.backend.image_data_format().
+
+    :param filters: Number of output channels for all three convolutions.
+        Must be positive.
     :type filters: int
-    :param use_bias: Whether to use bias in the convolution layers. Defaults to True.
+    :param use_bias: Whether the convolutions carry a bias. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the kernel weights matrices.
-        Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the convolution kernels. The
+        same instance is passed to all three convolutions. Defaults to
+        'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the bias vectors.
-        Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer function applied to kernel weights.
-        Defaults to None.
+    :param kernel_regularizer: Regularizer for the kernels. Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param bias_regularizer: Optional regularizer function applied to bias vectors.
-        Defaults to None.
+    :param bias_regularizer: Regularizer for the biases. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param attention_activation: Activation function for the gate and up projections.
-        Available options: 'relu', 'gelu', 'swish', 'silu', 'linear'. Defaults to 'relu'.
+    :param attention_activation: Activation for the gate and the value. One of
+        'relu', 'gelu', 'swish', 'silu', 'linear'. 'swish' and 'silu' select
+        the same function. Defaults to 'relu'.
     :type attention_activation: str
-    :param output_activation: Activation function for the output projection.
-        Available options: 'relu', 'gelu', 'swish', 'silu', 'linear'. Defaults to 'linear'.
+    :param output_activation: Activation applied after ``conv_down``. Same
+        five choices. Defaults to 'linear', which is the identity.
     :type output_activation: str
-    :param data_format: Data format for convolutions. Either 'channels_last' or
-        'channels_first'. Defaults to None (uses Keras default).
+    :param data_format: 'channels_last' or 'channels_first'. Defaults to None,
+        which reads ``keras.backend.image_data_format()``.
     :type data_format: Optional[str]
-    :param kwargs: Additional arguments passed to the parent Layer class.
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If filters is not positive.
-    :raises ValueError: If data_format is not 'channels_first' or 'channels_last'.
-    :raises ValueError: If activation function is not supported.
+    :ivar filters: The stored channel count.
+    :vartype filters: int
+    :ivar use_bias: Whether the convolutions carry a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar attention_activation: The activation NAME, still a string. Only the
+        five names above pass validation, and ``deserialize_activation``
+        returns a string unchanged, so this attribute is never a callable.
+        ``get_config()`` stores it.
+    :vartype attention_activation: str
+    :ivar output_activation: The output activation name, same rule.
+    :vartype output_activation: str
+    :ivar data_format: The RESOLVED layout. Never ``None``, even when ``None``
+        was passed.
+    :vartype data_format: str
+    :ivar conv_gate: The 1x1 convolution producing the gate.
+    :vartype conv_gate: keras.layers.Conv2D
+    :ivar conv_up: The 1x1 convolution producing the value.
+    :vartype conv_up: keras.layers.Conv2D
+    :ivar conv_down: The 1x1 convolution producing the output.
+    :vartype conv_down: keras.layers.Conv2D
+    :ivar attention_activation_fn: The callable looked up from
+        ``attention_activation``. This is what ``call()`` runs.
+    :vartype attention_activation_fn: Callable
+    :ivar output_activation_fn: The callable looked up from
+        ``output_activation``.
+    :vartype output_activation_fn: Callable
+
+    :raises ValueError: If ``filters`` is not positive.
+    :raises ValueError: If ``data_format`` is neither 'channels_first' nor
+        'channels_last'.
+    :raises ValueError: If ``attention_activation`` or ``output_activation``
+        is not one of the five supported names.
+
+    Input shape:
+        4D tensor. ``(batch, height, width, channels)`` for 'channels_last',
+        ``(batch, channels, height, width)`` for 'channels_first'.
+
+    Output shape:
+        Same rank and same spatial size as the input, with the channel axis
+        set to ``filters``.
+
+    Example:
+        .. code-block:: python
+
+            block = GatedMLP(filters=64, attention_activation='gelu')
+            y = block(keras.random.normal((2, 32, 32, 16)))
+            y.shape                 # (2, 32, 32, 64)
 
     Note:
-        This implementation uses 1x1 convolutions which are equivalent to dense layers
-        applied spatially. The gating mechanism provides a learnable way to control
-        information flow without explicit attention mechanisms.
+        The three convolutions are created in ``__init__`` and built in
+        ``build()``. ``conv_down`` has to be built by hand because it sees
+        ``filters`` channels, not the input width.
+
+    Warning:
+        ``conv_gate`` and ``conv_up`` share one initializer instance and have
+        the same shape, so they start bit-identical and stay bit-identical
+        under training. See the module docstring for the measurement. Until
+        that is fixed, treat this layer as a squared activation rather than
+        as a gate.
     """
 
     def __init__(
@@ -177,6 +277,17 @@ class GatedMLP(keras.layers.Layer):
         data_format: Optional[str] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create the three convolutions.
+
+        Every argument is documented on the class. ``data_format`` is
+        resolved before it is checked, so passing ``None`` picks up the Keras
+        default and then that default is validated too.
+
+        :raises ValueError: If ``filters`` is not positive, if the resolved
+            ``data_format`` is neither 'channels_first' nor 'channels_last',
+            or if either activation name is not supported.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -218,7 +329,8 @@ class GatedMLP(keras.layers.Layer):
             strides=(1, 1),
             padding="same",
             data_format=self.data_format,
-            activation=None,  # Apply activation separately
+            # Activation is applied in call(), not inside the convolution.
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -233,7 +345,8 @@ class GatedMLP(keras.layers.Layer):
             strides=(1, 1),
             padding="same",
             data_format=self.data_format,
-            activation=None,  # Apply activation separately
+            # Activation is applied in call(), not inside the convolution.
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -248,7 +361,8 @@ class GatedMLP(keras.layers.Layer):
             strides=(1, 1),
             padding="same",
             data_format=self.data_format,
-            activation=None,  # Apply activation separately
+            # Activation is applied in call(), not inside the convolution.
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -303,7 +417,8 @@ class GatedMLP(keras.layers.Layer):
         input_shape_list = list(input_shape)
         if self.data_format == "channels_last":
             intermediate_shape = tuple(input_shape_list[:-1] + [self.filters])
-        else:  # channels_first
+        else:
+            # channels_first: the channel axis is 1, not -1.
             intermediate_shape = tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
 
         # Build down convolution with intermediate shape
@@ -358,7 +473,8 @@ class GatedMLP(keras.layers.Layer):
 
         if self.data_format == "channels_last":
             return tuple(input_shape_list[:-1] + [self.filters])
-        else:  # channels_first
+        else:
+            # channels_first: the channel axis is 1, not -1.
             return tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
 
     def get_config(self) -> dict[str, Any]:

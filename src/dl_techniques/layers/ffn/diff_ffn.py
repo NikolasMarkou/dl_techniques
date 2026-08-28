@@ -1,88 +1,75 @@
 """
-A dual-pathway feed-forward network for differential processing.
+A dual-pathway feed-forward network that subtracts two branches.
 
-This layer introduces a non-standard feed-forward architecture inspired by
-the principle of push-pull or opponent processing found in biological neural
-systems, such as the human visual system. Instead of processing input signals
-through a single, monolithic pathway, it first decomposes the input into its
-positive and negative components and processes them through two parallel,
-specialized sub-networks. The final representation is derived from the
-difference between the outputs of these two pathways.
+This layer splits its input into a positive part and a negative part, runs
+each through its own branch, and subtracts one branch's output from the
+other. The idea comes from push-pull, or opponent, processing in biological
+sensory systems: one channel says "more", the other says "less", and what
+matters is the difference.
 
-The core hypothesis is that dedicating separate pathways for excitatory
-(positive) and inhibitory (negative) signals allows the network to learn
-more disentangled and robust features. This explicit separation forces the
-model to learn what aspects of the input should "push" the representation
-in a certain direction versus what should "pull" it away, potentially
-leading to better gradient flow and more nuanced function approximation.
+The hypothesis is that giving the excitatory and the inhibitory signal their
+own weights produces more disentangled features than one shared pathway.
 
 Architectural Overview:
-The layer's data flow is structured as follows:
 
-1.  **Input Decomposition**: The input tensor `x` is split into two
-    non-negative tensors: a positive part `x_pos = ReLU(x)` and a negative
-    part `x_neg = ReLU(-x)`. This ensures that for any given feature, its
-    signal is active in only one of the two pathways.
+1.  **Input decomposition**. The input ``x`` becomes two non-negative
+    tensors: ``x_pos = ReLU(x)`` and ``x_neg = ReLU(-x)``. Every feature is
+    active in exactly one of the two, so the branches see disjoint signals.
 
-2.  **Parallel Pathway Processing**: `x_pos` and `x_neg` are fed into two
-    structurally identical but independently parameterized branches. Each
-    branch consists of a sequence of linear transformations, layer
-    normalization, and non-linear activations. This allows each pathway to
-    learn specialized transformations for its respective signal type.
+2.  **Parallel branches**. ``x_pos`` and ``x_neg`` go through two branches with
+    the same structure and separate weights: Dense to ``hidden_dim``,
+    LayerNorm, ``branch_activation``, Dense to ``hidden_dim // 2``, then
+    ``gate_activation``.
 
-3.  **Differential Combination**: The outputs of the positive and negative
-    pathways are combined through subtraction. This "differential" tensor
-    represents the net effect, or the balance of evidence, between the
-    features learned by the two opposing branches.
+3.  **Difference**. The two branch outputs are subtracted. This is the net
+    evidence: what the positive branch found minus what the negative branch
+    found.
 
-4.  **Output Projection**: The resulting differential tensor is further
-    normalized and passed through a final linear projection to produce the
-    layer's output.
+4.  **Output projection**. The difference is normalized, passed through
+    dropout, and projected to ``output_dim``.
 
 Foundational Mathematics:
-Let `x` be the input vector. The layer's computation can be expressed as:
+Let ``x`` be the input vector.
 
-1.  Input Splitting:
-    `x_pos = max(0, x)`
-    `x_neg = max(0, -x)`
+1.  Input splitting:
+    ``x_pos = max(0, x)``
+    ``x_neg = max(0, -x)``
 
-2.  Branch Functions: Let `f_pos(.)` and `f_neg(.)` represent the learned
-    functions of the positive and negative pathways, respectively. Each
-    function is a composition of Dense, LayerNorm, and Activation layers.
-    `h_pos = f_pos(x_pos)`
-    `h_neg = f_neg(x_neg)`
+2.  Branch functions. ``f_pos`` and ``f_neg`` are the learned branch
+    functions, each a Dense, a LayerNorm, ``branch_activation``, a second
+    Dense and ``gate_activation``:
+    ``h_pos = f_pos(x_pos)``
+    ``h_neg = f_neg(x_neg)``
 
-3.  Differential Computation: The core operation is the subtraction of the
-    pathway outputs.
-    `h_diff = h_pos - h_neg`
+3.  Difference:
+    ``h_diff = h_pos - h_neg``
 
-4.  Final Output: The differential representation is then transformed to the
-    final output dimension.
-    `y = W_out @ h_diff + b_out`
+4.  Output. ``h_diff`` is normalized (with no centering), then dropped out,
+    then projected:
+    ``y = W_out @ dropout(norm(h_diff)) + b_out``
 
-This architecture transforms the standard FFN computation `y = f(x)` into
-`y = g(f_pos(max(0, x)) - f_neg(max(0, -x)))`, forcing the model to learn a
-function as a difference of two non-negative component functions. The default
-use of a `SoftOrthonormalConstraintRegularizer` on the weights encourages
-the learned transformations within each pathway to be well-conditioned,
-preventing feature collapse and promoting stable training dynamics.
+So the standard FFN form ``y = f(x)`` becomes
+``y = g(f_pos(max(0, x)) - f_neg(max(0, -x)))``: the model has to express its
+function as a difference of two non-negative component functions. When you
+pass no ``kernel_regularizer``, the layer installs a
+``SoftOrthonormalConstraintRegularizer``, which keeps each branch's
+transformation well conditioned and stops the features collapsing.
 
 References:
-The design synthesizes several key ideas in modern deep learning:
+The design combines several existing ideas:
 
--   The input splitting is a core component of the Concatenated ReLU (CReLU)
-    activation, which was proposed to preserve information by handling
-    positive and negative phases separately.
+-   The input split is the core of the Concatenated ReLU (CReLU) activation,
+    proposed to preserve information by handling the positive and negative
+    phases separately.
     - Shang, W., et al. (2016). Understanding and Improving Convolutional
       Neural Networks via Concatenated Rectified Linear Units. ICML.
 
--   The use of Layer Normalization is critical for stabilizing the activations
-    in each independent pathway, a technique introduced in:
+-   Layer Normalization stabilizes the activations inside each branch.
     - Ba, J. L., Kiros, J. R., & Hinton, G. E. (2016). Layer Normalization.
       arXiv preprint arXiv:1607.06450.
 
--   The concept of opponent processing is a foundational principle in
-    neuroscience, particularly in models of sensory perception.
+-   Opponent processing is a foundational principle in neuroscience, in
+    particular in models of sensory perception.
 
 """
 
@@ -101,98 +88,197 @@ from dl_techniques.initializers.clone import clone_initializer
 @keras.saving.register_keras_serializable()
 class DifferentialFFN(keras.layers.Layer):
     """
-    Differential Feed-Forward Network with dual-pathway processing.
+    Differential feed-forward network with two subtracted pathways.
 
-    This layer decomposes input into positive (``x_pos = ReLU(x)``) and negative
-    (``x_neg = ReLU(-x)``) components, processes each through independent
-    Dense-LayerNorm-Activation-Gate branches, computes their difference
-    ``h_diff = f_pos(x_pos) - f_neg(x_neg)``, and projects the result through
-    LayerNorm, Dropout, and a final Dense layer to produce the output. This
-    biologically-inspired opponent processing enables more disentangled feature
-    learning and improved gradient flow.
+    The input is split into ``x_pos = ReLU(x)`` and ``x_neg = ReLU(-x)``. Each
+    half runs through its own Dense - LayerNorm - activation - Dense -
+    activation branch. The two branch outputs are subtracted, and the
+    difference is normalized, dropped out and projected to ``output_dim``:
+    ``y = output_proj(dropout(norm(f_pos(x_pos) - f_neg(x_neg))))``.
+
+    Both branches end at ``hidden_dim // 2``, which is why ``hidden_dim`` has
+    to be even. The input width is independent of ``hidden_dim`` and of
+    ``output_dim``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────┐
-        │     Input (..., input_dim)       │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Split: ReLU(x)  │  ReLU(-x)     │
-        └───────┬──────────┴───────┬───────┘
-                ▼                  ▼
-        ┌────────────────┐   ┌────────────────┐
-        │ Positive Path  │   │ Negative Path  │
-        │ Dense(hidden)  │   │ Dense(hidden)  │
-        │  LayerNorm     │   │  LayerNorm     │
-        │  Activation    │   │  Activation    │
-        │ Dense(hidden/2)│   │ Dense(hidden/2)│
-        │  Gate Activ.   │   │  Gate Activ.   │
-        └───────┬────────┘   └─────┬──────────┘
-                │                  │
-                └────────┬─────────┘
-                         ▼
-        ┌──────────────────────────────────┐
-        │   Differential: pos - neg        │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │          LayerNorm               │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │       Dropout (optional)         │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │   output_proj: Dense(output_dim) │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │     Output (..., output_dim)     │
-        └──────────────────────────────────┘
+            Input  [..., input_dim]
+                     │
+               ┌─────┴─────┐
+               ▼           ▼
+            ReLU(x)     ReLU(-x)
+               │           │
+               ▼           ▼
+        ┌────────────┐ ┌────────────┐
+        │  positive  │ │  negative  │
+        │   branch   │ │   branch   │
+        └─────┬──────┘ └─────┬──────┘
+              │ [..., D/2]   │ [..., D/2]
+              └──────┬───────┘
+                     ▼
+             subtract: pos - neg  [..., D/2]
+                     │
+                     ▼
+          ┌──────────────────────┐
+          │   layer_norm_diff    │
+          │    center=False      │
+          └──────────┬───────────┘
+                     ▼
+          ┌──────────────────────┐
+          │       dropout        │
+          └──────────┬───────────┘
+                     ▼
+          ┌──────────────────────┐
+          │     output_proj      │
+          │  Dense(output_dim)   │
+          └──────────┬───────────┘
+                     ▼
+            Output [..., output_dim]
 
-    :param hidden_dim: Integer, dimension of the hidden layer in each branch. Must be positive
-        and divisible by 2 for proper gating projection.
+        D = hidden_dim. The Dropout layer is ALWAYS created, at
+        rate dropout_rate; at the 0.0 default it is a no-op that
+        still sits in the graph. layer_norm_diff does not centre,
+        because a difference is already centred at zero.
+
+    **Branch internals (the two pathways):**
+
+    .. code-block:: text
+
+        x_pos = ReLU(x)               x_neg = ReLU(-x)
+            │                             │
+            ▼                             ▼
+        positive_dense                negative_dense
+        Dense(D)  [..., D]            Dense(D)  [..., D]
+            │                             │
+            ▼                             ▼
+        layer_norm_pos                layer_norm_neg
+            │                             │
+            ▼                             ▼
+        branch_activation             branch_activation
+            │                             │
+            ▼                             ▼
+        positive_proj                 negative_proj
+        Dense(D/2)                    Dense(D/2)
+            │                             │
+            ▼                             ▼
+        gate_activation               gate_activation
+            │                             │
+            └───────► pos - neg ◄─────────┘
+                      [..., D/2]
+
+        Two activations at two places. branch_activation ('gelu'
+        by default) runs after the LayerNorm. gate_activation
+        ('sigmoid' by default) runs on the second Dense, and its
+        output is what gets subtracted.
+
+        Nothing is multiplied here. The "gate" is a squashing
+        function, and the two paths are joined by subtraction. With
+        the sigmoid default each branch output lies in (0, 1), so
+        the difference lies in (-1, 1) before layer_norm_diff.
+
+        The branches never share weights: every Dense gets its own
+        clone of the initializer.
+
+    :param hidden_dim: Width of the first Dense in each branch. Must be
+        positive and even, because the second Dense halves it.
     :type hidden_dim: int
-    :param output_dim: Integer, dimension of the output. Must be positive.
+    :param output_dim: Width of the output. Must be positive.
     :type output_dim: int
-    :param branch_activation: Activation function used in the branches.
-        Accepts standard activation names ('gelu', 'relu', 'swish') or callables.
-        Defaults to 'gelu'.
+    :param branch_activation: Activation applied after the LayerNorm in each
+        branch. A name ('gelu', 'relu', 'swish') or a callable. Defaults to
+        'gelu'.
     :type branch_activation: Union[str, Callable]
-    :param gate_activation: Activation function used in the gate projections.
-        Typically 'sigmoid' for proper gating behavior. Defaults to 'sigmoid'.
+    :param gate_activation: Activation applied to the second Dense of each
+        branch. 'sigmoid' bounds each branch to (0, 1). Defaults to 'sigmoid'.
     :type gate_activation: Union[str, Callable]
-    :param dropout_rate: Float between 0.0 and 1.0, dropout rate applied to differential features.
-        Provides regularization to prevent overfitting. Defaults to 0.0.
+    :param dropout_rate: Dropout rate on the differential features, in
+        ``[0.0, 1.0]``. Defaults to 0.0. The Dropout layer exists either way.
     :type dropout_rate: float
-    :param use_bias: Whether to use bias terms in dense layers. Defaults to True.
+    :param use_bias: Whether the Dense layers carry a bias. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for kernel weights.
-        Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the kernels. Each Dense gets a
+        clone, never the same instance. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for bias weights.
-        Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases, also cloned per
+        Dense. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for kernel weights.
-        If None, uses SoftOrthonormalConstraintRegularizer for stability.
+    :param kernel_regularizer: Regularizer for the kernels. When None, the
+        layer installs a ``SoftOrthonormalConstraintRegularizer`` instead of
+        leaving the kernels unregularized. Pass one explicitly to turn that
+        off.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param bias_regularizer: Optional regularizer for bias weights.
-        Defaults to None.
+    :param bias_regularizer: Regularizer for the biases. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If ``hidden_dim`` is not positive or not divisible by 2.
+    :ivar hidden_dim: The stored branch width.
+    :vartype hidden_dim: int
+    :ivar output_dim: The stored output width.
+    :vartype output_dim: int
+    :ivar branch_activation: The resolved branch activation, always a
+        callable after ``keras.activations.get``.
+    :vartype branch_activation: Callable
+    :ivar gate_activation: The resolved gate activation.
+    :vartype gate_activation: Callable
+    :ivar dropout_rate: The stored dropout rate.
+    :vartype dropout_rate: float
+    :ivar use_bias: Whether the Dense layers carry a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer. Clones of it go
+        to the five Dense layers.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The regularizer actually in use. This is the
+        ``SoftOrthonormalConstraintRegularizer`` default when the argument was
+        None, so it is never None.
+    :vartype kernel_regularizer: keras.regularizers.Regularizer
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar positive_dense: ``Dense(hidden_dim)`` on the positive path.
+    :vartype positive_dense: keras.layers.Dense
+    :ivar layer_norm_pos: LayerNorm on the positive path.
+    :vartype layer_norm_pos: keras.layers.LayerNormalization
+    :ivar positive_proj: ``Dense(hidden_dim // 2)`` on the positive path.
+    :vartype positive_proj: keras.layers.Dense
+    :ivar negative_dense: ``Dense(hidden_dim)`` on the negative path.
+    :vartype negative_dense: keras.layers.Dense
+    :ivar layer_norm_neg: LayerNorm on the negative path.
+    :vartype layer_norm_neg: keras.layers.LayerNormalization
+    :ivar negative_proj: ``Dense(hidden_dim // 2)`` on the negative path.
+    :vartype negative_proj: keras.layers.Dense
+    :ivar layer_norm_diff: LayerNorm on the difference, with ``center=False``.
+    :vartype layer_norm_diff: keras.layers.LayerNormalization
+    :ivar dropout: ``Dropout(dropout_rate)``. Always present.
+    :vartype dropout: keras.layers.Dropout
+    :ivar output_proj: ``Dense(output_dim)``, the final projection.
+    :vartype output_proj: keras.layers.Dense
+
+    :raises ValueError: If ``hidden_dim`` is not positive or is odd.
     :raises ValueError: If ``output_dim`` is not positive.
-    :raises ValueError: If ``dropout_rate`` is not between 0.0 and 1.0.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0]``.
+
+    Input shape:
+        Tensor of rank >= 2, shape ``(..., input_dim)``.
+
+    Output shape:
+        Same rank and leading axes as the input, last axis ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            ffn = DifferentialFFN(hidden_dim=128, output_dim=64)
+            y = ffn(keras.random.normal((2, 10, 32)))
+            y.shape                 # (2, 10, 64)
 
     Note:
-        The ``hidden_dim`` must be divisible by 2 because each branch's gating projection
-        maps to ``hidden_dim // 2`` dimensions, ensuring the final differential features
-        have consistent dimensionality.
+        ``hidden_dim`` must be even because each branch's second Dense maps to
+        ``hidden_dim // 2``. Both branches must land on the same width for the
+        subtraction to be defined.
     """
 
     def __init__(
@@ -209,6 +295,17 @@ class DifferentialFFN(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create the nine sub-layers.
+
+        Every argument is documented on the class. When ``kernel_regularizer``
+        is None a ``SoftOrthonormalConstraintRegularizer`` is installed in its
+        place, so the layer is never built without kernel regularization.
+
+        :raises ValueError: If ``hidden_dim`` is not positive or is odd, if
+            ``output_dim`` is not positive, or if ``dropout_rate`` is outside
+            ``[0.0, 1.0]``.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -242,6 +339,7 @@ class DifferentialFFN(keras.layers.Layer):
         # Following modern Keras 3 pattern - create but don't build here
 
         # Positive branch: Dense -> LayerNorm -> Activation -> Dense(gate)
+
         # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
         # branch. Do NOT pass the shared `self.kernel_initializer` here: the positive
         # and negative branches are the architecture, and one shared instance made
@@ -264,7 +362,8 @@ class DifferentialFFN(keras.layers.Layer):
         )
         self.positive_proj = keras.layers.Dense(
             units=self.hidden_dim // 2,
-            activation=None,  # Activation applied separately for clarity
+            # gate_activation is applied in call(), not inside the Dense.
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
@@ -291,7 +390,8 @@ class DifferentialFFN(keras.layers.Layer):
         )
         self.negative_proj = keras.layers.Dense(
             units=self.hidden_dim // 2,
-            activation=None,  # Activation applied separately for clarity
+            # gate_activation is applied in call(), not inside the Dense.
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
@@ -302,7 +402,8 @@ class DifferentialFFN(keras.layers.Layer):
 
         # Differential processing layers
         self.layer_norm_diff = keras.layers.LayerNormalization(
-            center=False,  # No centering for differential features
+            # A difference is already centred at zero, so no beta is needed.
+            center=False,
             scale=True,
             name="layer_norm_diff"
         )
