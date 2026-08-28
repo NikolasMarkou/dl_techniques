@@ -557,6 +557,10 @@ class SAM2MemoryEncoder(keras.layers.Layer):
     ``2 * num_pos_feats``. The default here is therefore ``out_dim // 2``, and
     the invariant to assert is the OUTPUT width
     (:attr:`pos_enc_channels` ``== out_dim``), never the constructor argument.
+    The resolved ``num_pos_feats`` must ITSELF be even, so a defaulted
+    ``out_dim`` must be a multiple of 4, not merely even. ``from_config`` is
+    deliberately more lenient than ``__init__`` and rounds a non-conforming
+    stored value UP with a warning rather than making an archive unloadable.
 
     **A KNOWN, ACCEPTED half-pixel deviation in that encoding.** The reused
     :class:`PositionEmbeddingSine2D` normalizes coordinates to pixel CENTRES
@@ -609,8 +613,9 @@ class SAM2MemoryEncoder(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``in_dim`` or ``out_dim`` is not positive, if
-        ``out_dim`` is odd while ``num_pos_feats`` is defaulted, or if
-        ``num_pos_feats`` is not positive.
+        ``out_dim`` is not a multiple of 4 while ``num_pos_feats`` is
+        defaulted, or if the resolved ``num_pos_feats`` is not positive and
+        even.
 
     Example:
         >>> import numpy as np
@@ -648,11 +653,22 @@ class SAM2MemoryEncoder(keras.layers.Layer):
             raise ValueError(f"in_dim must be positive, got {in_dim}")
         if out_dim <= 0:
             raise ValueError(f"out_dim must be positive, got {out_dim}")
-        if num_pos_feats is None and out_dim % 2 != 0:
+        # DECISION plan-2026-08-28T181715-3870472c/D-007
+        # The constraint on the DEFAULTED path is `% 4`, NOT `% 2`. Do not
+        # "relax" this back to evenness: `out_dim // 2` becomes `num_pos_feats`
+        # and THAT value must itself be even, because
+        # `PositionEmbeddingSine2D` splits it between its sine and cosine
+        # halves. `out_dim = 10` passed the old `% 2` check, produced
+        # `num_pos_feats = 5`, and built a position encoder that could never
+        # complete a forward pass. See decisions.md D-007.
+        if num_pos_feats is None and out_dim % 4 != 0:
             raise ValueError(
-                f"out_dim must be even when num_pos_feats is defaulted so the "
-                f"sine encoding can split it between the two spatial axes, got "
-                f"{out_dim}"
+                f"out_dim ({out_dim}) must be a positive multiple of 4 when "
+                f"num_pos_feats is defaulted, not merely even: the sine "
+                f"encoding receives num_pos_feats = out_dim // 2 = "
+                f"{out_dim // 2}, and that value must ITSELF be even because "
+                f"PositionEmbeddingSine2D splits it between its sine and "
+                f"cosine halves. Use out_dim = {((out_dim + 3) // 4) * 4}."
             )
 
         # Store ALL configuration parameters.
@@ -685,6 +701,15 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         if self.num_pos_feats <= 0:
             raise ValueError(
                 f"num_pos_feats must be positive, got {self.num_pos_feats}")
+        if self.num_pos_feats % 2 != 0:
+            raise ValueError(
+                f"num_pos_feats ({self.num_pos_feats}) must be even because "
+                f"PositionEmbeddingSine2D splits it between its sine and "
+                f"cosine halves; it was "
+                f"{'derived from out_dim as out_dim // 2' if num_pos_feats is None else 'passed explicitly'} "
+                f"with out_dim = {self.out_dim}. Use "
+                f"num_pos_feats = {self.num_pos_feats + 1}."
+            )
 
         # Sub-layers -- created unconditionally, built explicitly in build().
         self.mask_downsampler = SAM2MaskDownSampler(
@@ -924,5 +949,50 @@ class SAM2MemoryEncoder(keras.layers.Layer):
             "pos_enc_temperature": self.pos_enc_temperature,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "SAM2MemoryEncoder":
+        """Rebuild from a config, tolerating an odd stored ``num_pos_feats``.
+
+        Guide section 6.3 migration path. The constructor's evenness rule on
+        the resolved ``num_pos_feats`` is a NEW rejection of a value the old
+        ``out_dim % 2`` check accepted, so an archive written before it must
+        still load. A non-conforming value is rounded UP here with a warning,
+        never raised on. When the stored ``num_pos_feats`` is exactly
+        ``out_dim // 2`` -- the default -- ``out_dim`` is widened to the next
+        multiple of 4 alongside it, preserving the invariant
+        ``pos_enc_channels == out_dim``. Rounding up rather than down preserves
+        capacity, and the width change cannot break anything that previously
+        worked: such an encoder's position encoding could never complete a
+        forward pass, so no model carrying one was ever trainable or servable.
+
+        :param config: Serialized configuration.
+        :type config: Dict[str, Any]
+        :return: The reconstructed memory encoder.
+        :rtype: SAM2MemoryEncoder
+        """
+        config = dict(config)
+        out_dim = config.get("out_dim")
+        num_pos_feats = config.get("num_pos_feats")
+        if (isinstance(num_pos_feats, int) and num_pos_feats > 0
+                and num_pos_feats % 2 != 0):
+            substitute = num_pos_feats + 1
+            widened = (isinstance(out_dim, int)
+                       and num_pos_feats == out_dim // 2)
+            logger.warning(
+                "SAM2MemoryEncoder config carries num_pos_feats=%d "
+                "(out_dim=%s), which is odd; this archive predates the "
+                "evenness requirement and its position encoder could never run "
+                "a forward pass. Substituting num_pos_feats=%d%s. The "
+                "position-encoding output width changes from %d to %d, so "
+                "stored weights for this layer will not match.",
+                num_pos_feats, out_dim, substitute,
+                (" and out_dim=%d" % (2 * substitute)) if widened else "",
+                2 * num_pos_feats, 2 * substitute,
+            )
+            config["num_pos_feats"] = substitute
+            if widened:
+                config["out_dim"] = 2 * substitute
+        return cls(**config)
 
 # ---------------------------------------------------------------------

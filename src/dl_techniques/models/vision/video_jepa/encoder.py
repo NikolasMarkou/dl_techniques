@@ -26,7 +26,11 @@ Notes
 -----
 * ``PositionEmbeddingSine2D`` emits channels-first ``(B, 2*num_pos_feats, H_p,
   W_p)``. We transpose to channels-last and assert the feature dim is ``D``
-  (requires ``num_pos_feats = D // 2``, which the constructor enforces).
+  (requires ``num_pos_feats = D // 2``). The constructor enforces
+  ``D % 4 == 0``, not merely ``D % 2 == 0``: ``num_pos_feats = D // 2`` must
+  ITSELF be even, because the sine layer splits it between its sine and cosine
+  halves. ``D = 10`` passed the old evenness check and built an encoder that
+  could never run a forward pass.
 * ``CliffordNetBlock`` uses ``BatchNormalization`` inside the context stream;
   smoke tests **must** use batch size ``B*T >= 2`` (plan § Hard constraints).
 """
@@ -38,6 +42,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import keras
 from keras import ops
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
@@ -49,8 +54,9 @@ from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 class VideoJEPACliffordEncoder(keras.layers.Layer):
     """Hybrid per-frame encoder: PatchEmbedding2D → sine2D PE → N × CliffordNetBlock.
 
-    :param embed_dim: Embedding dimension ``D``. Must be even
-        (``num_pos_feats = D // 2``).
+    :param embed_dim: Embedding dimension ``D``. Must be a positive multiple
+        of 4: ``num_pos_feats = D // 2`` is handed to
+        :class:`PositionEmbeddingSine2D`, and that value must itself be even.
     :param patch_size: Non-overlapping patch edge length ``P``.
     :param img_size: Square input edge length ``H = W``. Must be divisible
         by ``P``.
@@ -75,10 +81,23 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        if embed_dim <= 0 or embed_dim % 2 != 0:
+        # DECISION plan-2026-08-28T181715-3870472c/D-007
+        # The constraint is `% 4`, NOT `% 2`. Do not "relax" this back to
+        # evenness: `embed_dim // 2` is handed to `PositionEmbeddingSine2D` as
+        # `num_pos_feats`, and THAT value must itself be even because the layer
+        # splits it between its sine and cosine halves. `embed_dim = 10` passed
+        # the old `% 2` check, produced `num_pos_feats = 5`, and built a
+        # position encoder that could never complete a forward pass. See
+        # decisions.md D-007.
+        if embed_dim <= 0 or embed_dim % 4 != 0:
             raise ValueError(
-                f"embed_dim must be positive and even (D/2 used by sine2D PE); "
-                f"got {embed_dim}"
+                f"embed_dim ({embed_dim}) must be a positive multiple of 4, "
+                f"not merely even: the sine position encoding receives "
+                f"num_pos_feats = embed_dim // 2 = {embed_dim // 2}, and that "
+                f"value must ITSELF be even because PositionEmbeddingSine2D "
+                f"splits it between its sine and cosine halves. Use "
+                f"embed_dim = "
+                f"{((embed_dim + 3) // 4) * 4 if embed_dim > 0 else 4}."
             )
         if img_size % patch_size != 0:
             raise ValueError(
@@ -220,3 +239,36 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "VideoJEPACliffordEncoder":
+        """Rebuild from a config, tolerating a pre-``% 4`` stored ``embed_dim``.
+
+        Guide section 6.3 migration path. The constructor's multiple-of-4 rule
+        is a NEW rejection of a value the old ``% 2`` check accepted, so an
+        archive written before it must still load. A non-conforming
+        ``embed_dim`` is rounded UP here with a warning, never raised on.
+        Rounding up rather than down preserves capacity, and the width change
+        cannot break anything that previously worked: such an encoder's
+        position encoding could never complete a forward pass, so no model
+        carrying one was ever trainable or servable.
+
+        :param config: Serialized configuration.
+        :return: The reconstructed encoder.
+        """
+        config = dict(config)
+        embed_dim = config.get("embed_dim")
+        if isinstance(embed_dim, int) and embed_dim > 0 and embed_dim % 4 != 0:
+            substitute = ((embed_dim + 3) // 4) * 4
+            logger.warning(
+                "VideoJEPACliffordEncoder config carries embed_dim=%d, whose "
+                "sine width num_pos_feats=%d is odd; this archive predates the "
+                "multiple-of-4 requirement and its position encoder could "
+                "never run a forward pass. Substituting embed_dim=%d "
+                "(num_pos_feats=%d). The encoder output width changes from %d "
+                "to %d, so stored weights for this layer will not match.",
+                embed_dim, embed_dim // 2, substitute, substitute // 2,
+                embed_dim, substitute,
+            )
+            config["embed_dim"] = substitute
+        return cls(**config)

@@ -355,7 +355,9 @@ class DETR(models.Model):
         num_queries: Max number of detections per image.
         backbone: A Keras model (CNN) for feature extraction.
         transformer: The DETR transformer module.
-        hidden_dim: Dimensionality of the transformer. Defaults to 256.
+        hidden_dim: Dimensionality of the transformer. Must be a multiple of 4
+            (the sine position encoding takes `hidden_dim // 2` features per
+            axis, and that value must itself be even). Defaults to 256.
         aux_loss: If True, returns predictions from all intermediate decoder
             layers for auxiliary loss calculation. Defaults to True.
         **kwargs: Additional model arguments.
@@ -385,6 +387,25 @@ class DETR(models.Model):
         super().__init__(**kwargs)
         if num_classes <= 0 or num_queries <= 0 or hidden_dim <= 0:
             raise ValueError("num_classes, num_queries, and hidden_dim must be positive.")
+        # DECISION plan-2026-08-28T181715-3870472c/D-007
+        # The constraint is `% 4`, and before this there was NO parity check at
+        # all. Do not drop it: `hidden_dim // 2` is handed to
+        # `PositionEmbeddingSine2D` as `num_pos_feats`, and THAT value must
+        # itself be even because the layer splits it between its sine and
+        # cosine halves. `hidden_dim = 10` produced `num_pos_feats = 5` and
+        # built a position encoder that could never complete a forward pass;
+        # `call()` also reshapes the encoding to `hidden_dim`, which needs
+        # `2 * (hidden_dim // 2) == hidden_dim`, i.e. an even `hidden_dim`.
+        # See decisions.md D-007.
+        if hidden_dim % 4 != 0:
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be a multiple of 4: the sine "
+                f"position encoding receives num_pos_feats = hidden_dim // 2 = "
+                f"{hidden_dim // 2}, and that value must ITSELF be even "
+                f"because PositionEmbeddingSine2D splits it between its sine "
+                f"and cosine halves. Use "
+                f"hidden_dim = {((hidden_dim + 3) // 4) * 4}."
+            )
 
         self.num_classes = num_classes
         self.num_queries = num_queries
@@ -565,8 +586,44 @@ class DETR(models.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "DETR":
-        """Deserialize model from configuration. fix 1k: defensive copy."""
+        """Deserialize model from configuration.
+
+        Defensive copy, plus the guide section 6.3 migration path for
+        ``hidden_dim``. The constructor's multiple-of-4 rule is a NEW rejection
+        of a value the old code accepted without any parity check at all, so an
+        archive written before it must still load. A non-conforming
+        ``hidden_dim`` is rounded UP here with a warning, never raised on --
+        including inside the serialized transformer sub-config, so the two
+        widths stay consistent. Rounding up rather than down preserves
+        capacity, and the width change cannot break anything that previously
+        worked: such a model's position encoder could never complete a forward
+        pass, so it was never trainable or servable.
+        """
         config = dict(config)
+        hidden_dim = config.get("hidden_dim")
+        if isinstance(hidden_dim, int) and hidden_dim > 0 and hidden_dim % 4 != 0:
+            substitute = ((hidden_dim + 3) // 4) * 4
+            logger.warning(
+                "DETR config carries hidden_dim=%d, whose sine width "
+                "num_pos_feats=%d is odd; this archive predates the "
+                "multiple-of-4 requirement and its position encoder could "
+                "never run a forward pass. Substituting hidden_dim=%d "
+                "(num_pos_feats=%d). Every hidden_dim-wide weight changes "
+                "width from %d to %d, so stored weights will not match.",
+                hidden_dim, hidden_dim // 2, substitute, substitute // 2,
+                hidden_dim, substitute,
+            )
+            config["hidden_dim"] = substitute
+            transformer_config = config.get("transformer")
+            if (isinstance(transformer_config, dict)
+                    and isinstance(transformer_config.get("config"), dict)
+                    and transformer_config["config"].get("hidden_dim")
+                    == hidden_dim):
+                transformer_config = dict(transformer_config)
+                transformer_config["config"] = dict(
+                    transformer_config["config"])
+                transformer_config["config"]["hidden_dim"] = substitute
+                config["transformer"] = transformer_config
         backbone = keras.saving.deserialize_keras_object(config.pop("backbone"))
         transformer = keras.saving.deserialize_keras_object(config.pop("transformer"))
         return cls(backbone=backbone, transformer=transformer, **config)
@@ -601,7 +658,7 @@ def create_detr(
         num_queries: Number of object queries.
         backbone_name: Name of the CNN backbone ("resnet50").
         backbone_trainable: If True, the backbone weights will be fine-tuned.
-        hidden_dim: Dimensionality of the transformer.
+        hidden_dim: Dimensionality of the transformer. Must be a multiple of 4.
         num_heads: Number of attention heads.
         num_encoder_layers: Number of encoder layers.
         num_decoder_layers: Number of decoder layers.

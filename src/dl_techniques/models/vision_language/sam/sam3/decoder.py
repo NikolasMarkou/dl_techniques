@@ -683,7 +683,12 @@ class Sam3TransformerDecoder(keras.layers.Layer):
     on ``self.training`` at its only call site, so it is provably inert at
     inference. It is named in the package docstring rather than left absent.
 
-    :param d_model: Model width. Default: ``256``.
+    :param d_model: Model width. Must be a positive multiple of 4 -- the box
+        sine embedding takes ``d_model // 2`` features per box scalar and
+        splits THAT in half again between ``sin`` and ``cos``. ``from_config``
+        is deliberately more lenient and rounds a non-conforming stored value
+        UP with a warning rather than making an archive unloadable.
+        Default: ``256``.
     :type d_model: int
     :param num_heads: Attention heads per layer, and boxRPB's bias width.
         Default: ``8``.
@@ -761,9 +766,26 @@ class Sam3TransformerDecoder(keras.layers.Layer):
         if len(feat_size) != 2 or min(feat_size) <= 0:
             raise ValueError(f"feat_size must be a pair of positive ints, got "
                              f"{feat_size}")
-        if d_model % 2 != 0:
-            raise ValueError(f"d_model must be even (the box sine embedding "
-                             f"splits it in half), got {d_model}")
+        # DECISION plan-2026-08-28T181715-3870472c/D-008
+        # The constraint is `% 4`, NOT `% 2`. This site does NOT use
+        # `PositionEmbeddingSine2D` -- `_sine_embed_for_boxes` is hand-rolled
+        # -- but it carries the identical latent halving: `num_feats =
+        # d_model // 2`, then `arange(num_feats // 2)`, then a `stack` of the
+        # sin/cos pair reshaped BACK to `num_feats`. That reshape is only
+        # size-preserving when `num_feats` is even. MEASURED at d_model=10:
+        # `InvalidArgumentError: Input to reshape is a tensor with 24 values,
+        # but the requested shape has 30 [Op:Reshape]` -- the docstring's
+        # `2 * d_model = 20` promise is correct, the value is simply
+        # unreachable. Do not "relax" this back to evenness.
+        # See decisions.md D-008.
+        if d_model % 4 != 0:
+            raise ValueError(
+                f"d_model ({d_model}) must be a multiple of 4, not merely "
+                f"even: the box sine embedding takes num_feats = d_model // 2 "
+                f"= {d_model // 2} features per box scalar and then splits "
+                f"THAT in half between sin and cos, so it must itself be "
+                f"even. Use d_model = {((d_model + 3) // 4) * 4}."
+            )
 
         self.d_model = int(d_model)
         self.num_heads = int(num_heads)
@@ -886,7 +908,11 @@ class Sam3TransformerDecoder(keras.layers.Layer):
 
         :param boxes: ``(batch, num_queries, 4)`` normalized ``cxcywh``.
         :type boxes: Any
-        :param d_model: Model width; must be even.
+        :param d_model: Model width; must be a multiple of 4. ``num_feats =
+            d_model // 2`` is split in half again between ``sin`` and ``cos``,
+            so an odd ``num_feats`` makes the reshape below non
+            size-preserving and it raises. ``Sam3TransformerDecoder.__init__``
+            enforces this.
         :type d_model: int
         :return: ``(batch, num_queries, 2 * d_model)``.
         :rtype: Any
@@ -1160,3 +1186,43 @@ class Sam3TransformerDecoder(keras.layers.Layer):
             "norm_epsilon": self.norm_epsilon,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "Sam3TransformerDecoder":
+        """Rebuild from a config, tolerating a pre-``% 4`` stored ``d_model``.
+
+        Guide section 6.3 migration path. The constructor's multiple-of-4 rule
+        is a NEW rejection of a value the old ``% 2`` check accepted, so an
+        archive written before it must still load. A non-conforming ``d_model``
+        is rounded UP here with a warning, never raised on -- to the next
+        common multiple of 4 and ``num_heads``, because ``num_heads`` must
+        keep dividing it. Rounding up rather than down preserves capacity, and
+        the width change cannot break anything that previously worked: such a
+        decoder raised inside ``_sine_embed_for_boxes`` on its first forward
+        pass, so no model carrying one was ever trainable or servable.
+
+        :param config: Serialized configuration.
+        :type config: Dict[str, Any]
+        :return: The reconstructed decoder stack.
+        :rtype: Sam3TransformerDecoder
+        """
+        config = dict(config)
+        d_model = config.get("d_model")
+        num_heads = config.get("num_heads")
+        if isinstance(d_model, int) and d_model > 0 and d_model % 4 != 0:
+            step = 4
+            if isinstance(num_heads, int) and num_heads > 0:
+                step = math.lcm(4, num_heads)
+            substitute = ((d_model + step - 1) // step) * step
+            logger.warning(
+                "Sam3TransformerDecoder config carries d_model=%d, whose box "
+                "sine width num_feats=%d is odd; this archive predates the "
+                "multiple-of-4 requirement and its box embedding raised on "
+                "the first forward pass. Substituting d_model=%d "
+                "(num_feats=%d). Every d_model-wide weight changes width from "
+                "%d to %d, so stored weights will not match.",
+                d_model, d_model // 2, substitute, substitute // 2,
+                d_model, substitute,
+            )
+            config["d_model"] = substitute
+        return cls(**config)

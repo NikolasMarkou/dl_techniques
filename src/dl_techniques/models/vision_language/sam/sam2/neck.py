@@ -98,7 +98,11 @@ class SAM2FpnNeck(keras.layers.Layer):
     channels; the default ``d_model // 2`` therefore yields a ``d_model``-wide
     encoding, which is what the memory attention adds to its
     ``d_model``-wide input. Read the OUTPUT width, not this parameter, when
-    comparing against the reference configuration.
+    comparing against the reference configuration. The resolved
+    ``num_pos_feats`` must itself be EVEN, so a defaulted ``d_model`` must be a
+    multiple of 4, not merely even. ``from_config`` is deliberately more
+    lenient than ``__init__`` and rounds a non-conforming stored value UP with
+    a warning rather than making an archive unloadable.
 
     :param d_model: Output channel width of every level.
     :type d_model: int
@@ -120,8 +124,10 @@ class SAM2FpnNeck(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``d_model`` is not positive or not even, if
-        ``backbone_channel_list`` is empty or holds a non-positive width, or if
-        a ``fpn_top_down_levels`` entry is out of range.
+        ``d_model`` is not a multiple of 4 while ``num_pos_feats`` is
+        defaulted, if the resolved ``num_pos_feats`` is not positive and even,
+        if ``backbone_channel_list`` is empty or holds a non-positive width, or
+        if a ``fpn_top_down_levels`` entry is out of range.
 
     Example:
         >>> import numpy as np
@@ -152,6 +158,23 @@ class SAM2FpnNeck(keras.layers.Layer):
             raise ValueError(
                 f"d_model must be even so the sine positional encoding can "
                 f"split it between the two spatial axes, got {d_model}"
+            )
+        # DECISION plan-2026-08-28T181715-3870472c/D-007
+        # The constraint on the DEFAULTED path is `% 4`, NOT `% 2`. Do not
+        # "relax" this back to evenness: `d_model // 2` becomes `num_pos_feats`
+        # and THAT value must itself be even, because
+        # `PositionEmbeddingSine2D` splits it between its sine and cosine
+        # halves. `d_model = 10` passed the old `% 2` check, produced
+        # `num_pos_feats = 5`, and built a position encoder that could never
+        # complete a forward pass. See decisions.md D-007.
+        if num_pos_feats is None and d_model % 4 != 0:
+            raise ValueError(
+                f"d_model ({d_model}) must be a positive multiple of 4 when "
+                f"num_pos_feats is defaulted, not merely even: the sine "
+                f"encoding receives num_pos_feats = d_model // 2 = "
+                f"{d_model // 2}, and that value must ITSELF be even because "
+                f"PositionEmbeddingSine2D splits it between its sine and "
+                f"cosine halves. Use d_model = {((d_model + 3) // 4) * 4}."
             )
         if len(backbone_channel_list) == 0:
             raise ValueError("backbone_channel_list must not be empty")
@@ -197,6 +220,15 @@ class SAM2FpnNeck(keras.layers.Layer):
         if self.num_pos_feats <= 0:
             raise ValueError(
                 f"num_pos_feats must be positive, got {self.num_pos_feats}")
+        if self.num_pos_feats % 2 != 0:
+            raise ValueError(
+                f"num_pos_feats ({self.num_pos_feats}) must be even because "
+                f"PositionEmbeddingSine2D splits it between its sine and "
+                f"cosine halves; it was "
+                f"{'derived from d_model as d_model // 2' if num_pos_feats is None else 'passed explicitly'} "
+                f"with d_model = {self.d_model}. Use "
+                f"num_pos_feats = {self.num_pos_feats + 1}."
+            )
 
         # Sub-layers -- created unconditionally, built explicitly in build().
         #
@@ -379,6 +411,51 @@ class SAM2FpnNeck(keras.layers.Layer):
             "pos_enc_temperature": self.pos_enc_temperature,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "SAM2FpnNeck":
+        """Rebuild from a config, tolerating an odd stored ``num_pos_feats``.
+
+        Guide section 6.3 migration path. The constructor's evenness rule on
+        the resolved ``num_pos_feats`` is a NEW rejection of a value the old
+        ``d_model % 2`` check accepted, so an archive written before it must
+        still load. A non-conforming value is rounded UP here with a warning,
+        never raised on. When the stored ``num_pos_feats`` is exactly
+        ``d_model // 2`` -- the default -- ``d_model`` is widened to the next
+        multiple of 4 alongside it, preserving the invariant
+        ``pos_enc_channels == d_model``. Rounding up rather than down preserves
+        capacity, and the width change cannot break anything that previously
+        worked: such a neck's position encoder could never complete a forward
+        pass, so no model carrying one was ever trainable or servable.
+
+        :param config: Serialized configuration.
+        :type config: Dict[str, Any]
+        :return: The reconstructed neck.
+        :rtype: SAM2FpnNeck
+        """
+        config = dict(config)
+        d_model = config.get("d_model")
+        num_pos_feats = config.get("num_pos_feats")
+        if (isinstance(num_pos_feats, int) and num_pos_feats > 0
+                and num_pos_feats % 2 != 0):
+            substitute = num_pos_feats + 1
+            widened = (isinstance(d_model, int)
+                       and num_pos_feats == d_model // 2)
+            logger.warning(
+                "SAM2FpnNeck config carries num_pos_feats=%d (d_model=%s), "
+                "which is odd; this archive predates the evenness requirement "
+                "and its position encoder could never run a forward pass. "
+                "Substituting num_pos_feats=%d%s. The position-encoding output "
+                "width changes from %d to %d, so stored weights for this "
+                "layer will not match.",
+                num_pos_feats, d_model, substitute,
+                (" and d_model=%d" % (2 * substitute)) if widened else "",
+                2 * num_pos_feats, 2 * substitute,
+            )
+            config["num_pos_feats"] = substitute
+            if widened:
+                config["d_model"] = 2 * substitute
+        return cls(**config)
 
 # ---------------------------------------------------------------------
 
