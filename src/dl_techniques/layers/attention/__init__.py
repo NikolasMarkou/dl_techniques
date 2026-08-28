@@ -1,42 +1,46 @@
 """
-Attention Layers Module.
+Attention layers.
 
-This module exposes a comprehensive collection of attention mechanisms, ranging
-from standard multi-head attention to specialized variants for vision, efficiency,
-and advanced modeling.
-
-It includes a factory interface (`create_attention_layer`) for unified instantiation
-and direct access to all layer classes.
+This package exports every attention layer in the library plus the factory
+interface that builds them from a config dict. Import a class directly, or call
+`create_attention_layer(type=...)` when the type comes from configuration.
 
 Factory coverage of the names exported here
 -------------------------------------------
-`factory.py` registers **33** keys. Of the 36 layer classes re-exported below, 30 are
-reachable through `create_attention_layer(type=...)` and 6 are **direct-import only**:
+`factory.py` registers **33** keys. This package re-exports 36 layer classes.
+30 of them are reachable through `create_attention_layer(type=...)`. The other 6
+are direct-import only:
 
     ProgressiveFocusedAttention, Ideogram4Attention, MMDiTJointAttention,
     AttentionRoutingCapsule, CapsuleBlockV2, WindowAttention
 
-`WindowAttention` is the subtle one. It has **no factory key of its own**. The keys
-`'window'`, `'window_zigzag'` and `'window_band'` are registered against the module-level
-wrapper FUNCTIONS `create_grid_window_attention` / `create_zigzag_window_attention` /
-`create_band_window_attention` (`window_attention.py`), each of which constructs a
-`WindowAttention` locked to one `partition_mode` ('grid' / 'zigzag' / 'band') with that
-mode's `use_relative_position_bias` default. `'band'` is the 1-D one: `window_size` is a
-HALF-WIDTH IN TOKENS and query `i` attends key `j` iff `abs(i - j) <= window_size`, with
-no grid folding and no square padding. The general class — the one whose `partition_mode` you choose yourself — is
-NOT factory-constructible; import it directly from this package, as done below.
+`WindowAttention` is the subtle one. It has **no factory key of its own**. The
+keys `'window'`, `'window_zigzag'` and `'window_band'` are registered against
+three module-level wrapper FUNCTIONS in `window_attention.py`:
+`create_grid_window_attention`, `create_zigzag_window_attention` and
+`create_band_window_attention`. Each one builds a `WindowAttention` locked to a
+single `partition_mode` ('grid', 'zigzag' or 'band'), with that mode's
+`use_relative_position_bias` default.
 
-The remaining two window helpers, `create_kan_key_window_attention` and
+`'band'` is the 1-D key. There `window_size` is a HALF-WIDTH IN TOKENS, and
+query `i` attends key `j` when `abs(i - j) <= window_size`. No grid folding, no
+square padding.
+
+To choose `partition_mode` yourself, import `WindowAttention` from this package.
+The general class is not factory-constructible.
+
+Two more window helpers, `create_kan_key_window_attention` and
 `create_adaptive_softmax_window_attention` (`window_attention.py`), are
-**intentionally non-public**: referenced by neither this module nor `factory.py`, their
-only callers are in `tests/test_layers/test_attention/test_window_attention.py`. They
-are convenience constructors for the `attention_mode='kan_key'` and
-`probability_type='adaptive'` configurations, both of which are reachable today by
-passing those kwargs to `WindowAttention` directly. Do NOT "fix the inconsistency" by
-registering them — the registry surface and `__all__` are frozen public API.
+**intentionally non-public**. Neither this module nor `factory.py` references
+them; their only callers are in
+`tests/test_layers/test_attention/test_window_attention.py`. They are
+convenience constructors for `attention_mode='kan_key'` and
+`probability_type='adaptive'`, both of which you can reach today by passing
+those kwargs to `WindowAttention` directly. Don't "fix the inconsistency" by
+registering them. The registry surface and `__all__` are frozen public API.
 
-The `__all__` grouping comments below are documentation, not semantics: import order is
-load-bearing (it fixes Keras registration order) and is deliberately left untouched.
+The `__all__` grouping comments below are documentation, not semantics. Import
+order fixes Keras registration order, so it is left untouched.
 """
 
 # Factory and Utility Functions
@@ -59,16 +63,18 @@ from .multi_head_latent_attention import MultiHeadLatentAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # Vision and Spatial Attention
-# All factory-registered except WindowAttention: keys 'window'/'window_zigzag'/
-# 'window_band' point at the create_grid_window_attention /
-# create_zigzag_window_attention / create_band_window_attention wrappers, not at the
-# class. The general partition_mode-selectable class is direct-import only.
+# Every class below is factory-registered except WindowAttention. The keys
+# 'window', 'window_zigzag' and 'window_band' point at the
+# create_grid_window_attention / create_zigzag_window_attention /
+# create_band_window_attention wrappers, not at the class. The general
+# partition_mode-selectable class is direct-import only.
 from .convolutional_block_attention import CBAM
 from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 from .non_local_attention import NonLocalAttention
 from .mobile_mqa import MobileMQA
-from .beit_attention import BeitAttention  # key 'beit'
+# key 'beit'
+from .beit_attention import BeitAttention
 from .window_attention import WindowAttention
 from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
 
@@ -90,16 +96,23 @@ from .ring_attention import RingAttention
 from .rpc_attention import RPCAttention
 
 # Additional specialized attention — MIXED factory coverage.
-# The blanket "(direct instantiation only)" heading this comment replaced was wrong for
-# two of the names below: SingleWindowAttention IS registered (key 'single_window') and
-# WaveFieldAttention IS registered (key 'wave_field'). Per-name status:
-from .progressive_focused_attention import ProgressiveFocusedAttention  # direct only
-from .single_window_attention import SingleWindowAttention              # key 'single_window'
-from .wave_field_attention import WaveFieldAttention                    # key 'wave_field'
-from .ideogram4_attention import Ideogram4Attention                     # direct only
-from .mmdit_joint_attention import MMDiTJointAttention                  # direct only
-# AttentionRoutingCapsule + CapsuleBlockV2: direct only (CapsuleBlockV2 is a composite
-# block, not a bare attention layer; consumed by models/vision/capsnet/model_v2.py).
+# The blanket "(direct instantiation only)" heading this comment replaced was
+# wrong for two of the names below. SingleWindowAttention IS registered (key
+# 'single_window') and WaveFieldAttention IS registered (key 'wave_field').
+# Per-name status follows.
+# direct only
+from .progressive_focused_attention import ProgressiveFocusedAttention
+# key 'single_window'
+from .single_window_attention import SingleWindowAttention
+# key 'wave_field'
+from .wave_field_attention import WaveFieldAttention
+# direct only
+from .ideogram4_attention import Ideogram4Attention
+# direct only
+from .mmdit_joint_attention import MMDiTJointAttention
+# AttentionRoutingCapsule + CapsuleBlockV2: direct only. CapsuleBlockV2 is a
+# composite block, not a bare attention layer; it is consumed by
+# models/vision/capsnet/model_v2.py.
 from .attention_routing_capsule import AttentionRoutingCapsule, CapsuleBlockV2
 
 __all__ = [
@@ -126,8 +139,10 @@ __all__ = [
     "SpatialAttention",
     "NonLocalAttention",
     "MobileMQA",
-    "BeitAttention",  # factory key 'beit'
-    "WindowAttention",  # no factory key; 'window'/'window_zigzag'/'window_band' wrappers
+    # factory key 'beit'
+    "BeitAttention",
+    # no factory key; the 'window'/'window_zigzag'/'window_band' wrappers
+    "WindowAttention",
     "TripSE1",
     "TripSE2",
     "TripSE3",
@@ -149,11 +164,13 @@ __all__ = [
     "RingAttention",
     "RPCAttention",
 
-    # Additional Specialized (MIXED factory coverage — see the per-name comments
-    # beside the imports above; NOT all direct-instantiation-only)
+    # Additional Specialized (MIXED factory coverage — see the per-name
+    # comments beside the imports above; NOT all direct-instantiation-only)
     "ProgressiveFocusedAttention",
-    "SingleWindowAttention",  # factory key 'single_window'
-    "WaveFieldAttention",     # factory key 'wave_field'
+    # factory key 'single_window'
+    "SingleWindowAttention",
+    # factory key 'wave_field'
+    "WaveFieldAttention",
     "Ideogram4Attention",
     "MMDiTJointAttention",
     "AttentionRoutingCapsule",
