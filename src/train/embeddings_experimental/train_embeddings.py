@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import keras
@@ -79,10 +80,40 @@ from .data import build_packed_mlm_dataset
 
 # ---------------------------------------------------------------------
 
-__all__ = ["SimCSELoss", "SimCSEModel", "main", "parse_args", "run_study_cell"]
+__all__ = [
+    "SimCSELoss",
+    "SimCSEModel",
+    "main",
+    "parse_args",
+    "resolve_output_dir",
+    "run_study_cell",
+]
 
 #: Filename of the encoder handed from stage 1 to stage 2 and to evaluation.
 ENCODER_FILENAME = "encoder.keras"
+
+#: Repository root: this file is <repo>/src/train/embeddings_experimental/…
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def resolve_output_dir(output_dir: str) -> str:
+    """Resolve a relative output directory against the REPO ROOT.
+
+    Training artifacts belong in the repository's own ``results/``, never in
+    ``src/results/``. The documented way to run a trainer here is
+    ``python -m train.<pkg>.<script>`` from ``src/``, so a bare relative
+    ``results`` resolves against ``src/`` and quietly creates a second, wrong
+    results tree -- which is exactly what the first smoke runs of this trainer
+    did. An absolute path is returned unchanged, so an explicit
+    ``--output-dir /somewhere`` still wins.
+
+    :param output_dir: The configured output directory.
+    :type output_dir: str
+    :return: An absolute path.
+    :rtype: str
+    """
+    path = Path(output_dir)
+    return str(path if path.is_absolute() else REPO_ROOT / path)
 
 
 def encoder_path(run_dir: str) -> str:
@@ -518,6 +549,7 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
 
     if config.experiment_name is None:
         config.experiment_name = config.cell_id()
+    config.output_dir = resolve_output_dir(config.output_dir)
     # No `output_dir=`: that parameter is the FULLY-RESOLVED run dir, so
     # passing config.output_dir would put every run in `results/` itself.
     run_dir = str(prepare_run_dir(config))

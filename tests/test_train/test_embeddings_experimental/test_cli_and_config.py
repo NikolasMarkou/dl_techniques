@@ -211,3 +211,37 @@ class TestCellIdentity:
         ]
         ids = {base.cell_id()} | {c.cell_id() for c in variants}
         assert len(ids) == 5
+
+
+class TestOutputDirResolvesToTheRepoRoot:
+    """Training artifacts belong in the repo's `results/`, never `src/results/`.
+
+    The documented invocation is ``python -m train.<pkg>.<script>`` run from
+    ``src/``, so a bare relative ``results`` resolves against ``src/`` and
+    creates a second, wrong results tree. That is exactly what this trainer's
+    first smoke runs did, which is why the resolution is now explicit and
+    pinned here.
+    """
+
+    def test_a_relative_dir_resolves_against_the_repo_root(self):
+        from train.embeddings_experimental.train_embeddings import (
+            REPO_ROOT,
+            resolve_output_dir,
+        )
+
+        resolved = resolve_output_dir("results")
+        assert resolved == str(REPO_ROOT / "results")
+        assert not resolved.endswith("src/results")
+
+    def test_an_absolute_dir_is_left_alone(self, tmp_path):
+        from train.embeddings_experimental.train_embeddings import (
+            resolve_output_dir,
+        )
+
+        assert resolve_output_dir(str(tmp_path)) == str(tmp_path)
+
+    def test_the_repo_root_is_the_one_holding_src(self):
+        from train.embeddings_experimental.train_embeddings import REPO_ROOT
+
+        assert (REPO_ROOT / "src" / "train").is_dir()
+        assert (REPO_ROOT / "pyproject.toml").exists()

@@ -36,6 +36,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 
+from .train_embeddings import resolve_output_dir
+
 from .config import (
     BASELINE_MODEL,
     POOLING_STRATEGIES,
@@ -305,7 +307,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--sweep-root", type=str, default="results/embeddings_study",
-        help="Root directory; every cell writes under it.",
+        help=(
+            "Root directory; every cell writes under it. A relative path "
+            "resolves against the REPO ROOT, not the working directory, so a "
+            "sweep launched from src/ does not create src/results/."
+        ),
     )
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--max-cells", type=int, default=DEFAULT_MAX_CELLS)
@@ -338,6 +344,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     :rtype: int
     """
     args = parse_args(argv)
+
+    args.sweep_root = resolve_output_dir(args.sweep_root)
 
     try:
         specs = build_run_specs(
