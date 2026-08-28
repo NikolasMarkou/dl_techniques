@@ -545,6 +545,20 @@ class WindowAttention(keras.layers.Layer):
         ] = None,
         **kwargs: Any,
     ) -> None:
+        """Validate the configuration and store the resolved constants.
+
+        The mode-dependent refusals live here: ``partition_mode`` must name a
+        known partitioner, and ``'band'`` refuses a relative-position bias
+        outright rather than turning it off, because a 1-D band has no tile to
+        index one from. The softmax temperature is resolved once, taking
+        ``qk_scale`` when given and ``head_dim ** -0.5`` otherwise. The
+        projections and the bias table are created in :meth:`build`, where the
+        input width is known. See the class docstring for the parameter
+        reference.
+
+        :raises ValueError: For any invalid argument; see the class docstring's
+            ``:raises:`` list.
+        """
         super().__init__(**kwargs)
 
         if partition_mode not in _VALID_PARTITION_MODES:

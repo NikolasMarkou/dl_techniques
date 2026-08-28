@@ -267,6 +267,19 @@ class SingleWindowAttention(keras.layers.Layer):
             ] = None,
             **kwargs: Any,
     ) -> None:
+        """Validate the configuration and store the resolved constants.
+
+        Only the mode string and the probability type are checked here; the
+        shape-dependent arguments are validated in :meth:`build`, where the
+        input width is known. The softmax temperature is resolved once, taking
+        ``qk_scale`` when given and ``head_dim ** -0.5`` otherwise. The
+        projections and the relative-position bias table are created in
+        :meth:`build`. See the class docstring for the parameter reference.
+
+        :raises ValueError: If ``attention_mode`` is not one of ``"linear"`` or
+            ``"kan_key"``, or if ``probability_type`` names a score-level
+            routing or hierarchical variant.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -841,9 +854,9 @@ class SingleWindowAttention(keras.layers.Layer):
         #     and masks NOTHING, with no shape error and a finite output.
         #   * Do NOT invert the polarity "to match" some other site. This is a
         #     `1 = attend` predicate handed to the shared mask helper, which
-        #     performs no polarity inference (its D-002 anchor). An inversion raises
-        #     nothing, changes no shape, stays finite, and makes the layer attend to
-        #     exactly the pairs it was told to forbid.
+        #     performs no polarity inference (its own docstring says so). An
+        #     inversion raises nothing, changes no shape and stays finite, and it
+        #     makes the layer attend to exactly the pairs it was told to forbid.
         #     `TestSingleWindowAttentionPairwiseMask` is the only guard that sees
         #     it, and it measures the inverted control in the same test.
         #   * Do NOT mask the QUERY axis with the internal padding mask here. It is
@@ -1011,7 +1024,7 @@ class SingleWindowAttention(keras.layers.Layer):
         # batch element keeps no key at all". Do NOT pass `rescue_axis=None` to "get
         # the loud NaN back": the user ruled the finite-garbage semantics
         # package-wide on 2026-07-28, and opting out also restores the NaN GRADIENT.
-        # The full argument lives at the D-009 / D-008 anchors in `common.py`.
+        # `common.apply_attention_mask`'s docstring carries the full argument.
         # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
         #
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the softmax axis is
@@ -1026,13 +1039,13 @@ class SingleWindowAttention(keras.layers.Layer):
         # because its mask is ALWAYS reshaped to `(B, 1, 1, N)`, so a caller
         # configuring `axis=-2` — a softmax over queries — now gets a named
         # `ValueError` rather than a mask that cannot mask. Do NOT restore a bare
-        # `-1`, and do NOT read this as the rank/shape INFERENCE the D-009 anchor in
-        # `common.py` forbids: this reads the site's own declared config.
-        # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
+        # `-1`, and do NOT read this as the rank/shape INFERENCE that `common.py`
+        # forbids: this reads the site's own declared config.
         #
         # Shape: (B, N) -> (B, 1, 1, N)  [broadcasts over heads and query axis], or
         #        (B, N, N) -> (B, 1, N, N) on the pairwise branch (D-001 above),
         #        which broadcasts over heads ONLY.
+        # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
         if user_mask_is_pairwise:
             broadcast_mask = keras.ops.reshape(
                 final_attention_mask, (B, 1, N, N)

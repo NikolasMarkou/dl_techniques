@@ -137,8 +137,8 @@ class CBAM(keras.layers.Layer):
                        ▼
                output F''  [B, H, W, C]
 
-        M_s is computed from F', never from F. That conditioning is why the
-        two stages run in sequence rather than in parallel.
+        M_s is computed from F', never from F. That conditioning is
+        why the two stages run in sequence rather than in parallel.
 
     **Channel stage internals** (owned by ``channel_attention.py``):
 

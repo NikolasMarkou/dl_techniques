@@ -362,6 +362,18 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # depends on this axis, so the routing axis is always enforced and
         # any user-supplied "axis" in probability_config is overridden.
         def _site_config(axis: int) -> Dict[str, Any]:
+            """Compose the type_config for one ProbabilityOutput site.
+
+            :param axis: The routing axis this site normalizes over. It is
+                written into the returned config for every probability type
+                that honors an axis, overriding any ``axis`` the caller put in
+                ``probability_config``.
+            :type axis: int
+            :return: A copy of ``probability_config`` with ``axis`` set to the
+                site's routing axis, or with ``axis`` removed when the
+                probability type ignores it.
+            :rtype: Dict[str, Any]
+            """
             cfg = dict(self.probability_config or {})
             if self.probability_type.lower() in _AXIS_AGNOSTIC_PROB_TYPES:
                 # Adaptive softmax does not honor a custom axis, so we
@@ -386,9 +398,9 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # Keep axis=-2. It is the TRANSPOSE of Sabour et al. 2017, which the
         # class docstring cites. Flipping it to -1 makes `_horizontal_routing`'s
         # `num_output_capsules = 1` branch a size-1 softmax no-op, which
-        # produced NaN under mixed_float16 when it was tried. See the module
-        # docstring's "Deviation from the cited paper" note, and decisions.md
-        # D-008.
+        # produced NaN under mixed_float16 when it was tried. The module
+        # docstring's "Deviation from the cited paper" note carries the sums.
+        # See decisions.md D-008 (plan-2026-08-27T040114-580f8b63).
         self.attn_prob_routing = ProbabilityOutput(
             probability_type=self.probability_type,
             type_config=_site_config(-2),

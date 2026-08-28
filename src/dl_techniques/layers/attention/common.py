@@ -133,14 +133,15 @@ sibling module came from here.
     **Exactly FOUR modules still carry a LOCAL ``-1e9``-family value**, counted
     mechanically with comments and docstrings stripped:
 
-    * ``attention_routing_capsule.py:390`` — ``ops.where``-form, and the ``-inf`` is
-      provably harmless at that site. Left byte-unchanged on purpose.
+    * ``attention_routing_capsule.py`` (``_apply_top_k_mask``) — ``ops.where``-form,
+      and the ``-inf`` is provably harmless there. Left byte-unchanged on purpose.
     * ``ideogram4_attention.py`` (``_MASK_NEG``) — ``ops.where``-form with an
       explicit cast; structurally safe.
     * ``lighthouse_attention.py`` (``_MASK_SENTINEL``, a per-dtype TABLE) — the most
       careful form in the package, but a second thing to keep correct; out of scope
       (prior D-009).
-    * ``progressive_focused_attention.py:870`` — a dead ``'threshold'`` branch.
+    * ``progressive_focused_attention.py`` — the dead ``'threshold'`` branch of
+      ``_apply_sparsity``.
 
 Architecture:
     Flat on purpose: five module-level names, no classes, no registry, no Keras
@@ -487,7 +488,7 @@ def compute_attention_scale(head_dim: int) -> float:
     constant; computing it inside ``call()`` with ``keras.ops.sqrt`` would add a live
     op to every forward pass for a quantity that is fixed at construction time. This is
     the standing anchor ``plan_2026-06-14_33b77a7a/D-002``, already pinned in
-    ``performer_attention.py`` and ``lighthouse_attention.py``.
+    ``lighthouse_attention.py``.
 
     Note the direction: the scale **divides** the logits (it is ``1/sqrt(d)``, not
     ``sqrt(d)``). Layers storing ``self.scale = sqrt(head_dim)`` and later dividing by

@@ -286,6 +286,19 @@ class HopfieldAttention(keras.layers.Layer):
         qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and store the resolved constants.
+
+        Two values are resolved once here rather than per call: ``value_dim``
+        falls back to ``key_dim``, and the attention scale is precomputed as
+        ``sqrt(key_dim)``, the divisor this layer uses. The raw constructor
+        argument is kept alongside the resolved one so :meth:`get_config`
+        round-trips ``value_dim=None`` as ``None``. The Dense projections
+        depend on the input width and are created in :meth:`build`. See the
+        class docstring for the parameter reference.
+
+        :raises ValueError: For any invalid argument; see the class docstring's
+            ``:raises:`` list.
+        """
         super().__init__(**kwargs)
 
         # Validate parameters

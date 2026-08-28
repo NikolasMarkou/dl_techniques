@@ -230,6 +230,20 @@ class BeitAttention(keras.layers.Layer):
             ] = None,
             **kwargs: Any,
     ) -> None:
+        """Validate the configuration and create the four projections.
+
+        The three attention sub-layers whose width depends only on ``dim`` are
+        created here; the relative-position bias table and its index map are
+        allocated in :meth:`build`, because their shapes follow from
+        ``window_size`` and the sequence length the input carries. The softmax
+        temperature is resolved once here and stored alongside the caller's
+        original ``scale`` so that :meth:`get_config` round-trips intent rather
+        than a resolved number. See the class docstring for the parameter
+        reference.
+
+        :raises ValueError: For any invalid argument; see the class docstring's
+            ``:raises:`` list.
+        """
         super().__init__(**kwargs)
 
         if not isinstance(dim, int) or dim <= 0:
@@ -301,6 +315,16 @@ class BeitAttention(keras.layers.Layer):
         # identity is the discriminator, not `seed=`.
         # See decisions.md D-560 (plan-2026-08-23T091307-9a110062).
         def dense_kwargs() -> Dict[str, Any]:
+            """Build a fresh keyword set for one projection Dense layer.
+
+            Called once per projection. Every call clones the initializers, so
+            the four Dense layers never share an initializer instance.
+
+            :return: Keyword arguments for :class:`keras.layers.Dense`, holding
+                freshly cloned kernel and bias initializers and the shared
+                kernel and bias regularizers.
+            :rtype: Dict[str, Any]
+            """
             return dict(
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),

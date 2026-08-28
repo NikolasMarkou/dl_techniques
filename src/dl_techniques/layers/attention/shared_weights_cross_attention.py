@@ -234,6 +234,18 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the single shared weight set.
+
+        Exactly one ``qkv`` Dense, one ``proj`` Dense and one probability layer
+        are created here, and both streams reuse them — that sharing is the
+        layer's whole point. The softmax temperature is resolved to a Python
+        float here rather than in :meth:`call`, so no backend tensor is built
+        inside a symbolic scratch graph. See the class docstring for the
+        parameter reference.
+
+        :raises ValueError: For any invalid argument; see the class docstring's
+            ``:raises:`` list.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs

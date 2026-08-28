@@ -1778,6 +1778,7 @@ def assemble_attention_config(
     embedding and attention factories each bind their own registry and their own
     frozen public surface, so unifying the three is a refactor of three public
     APIs, not a de-duplication.
+    See decisions.md D-011 (plan-2026-08-17T183311-79c63e38).
 
     :param attention_type: An ``ATTENTION_REGISTRY`` key.
     :type attention_type: str

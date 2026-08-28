@@ -84,7 +84,7 @@ class RPCAttention(keras.layers.Layer):
     **[FROZEN SIGNATURE — D-007 carve-out]** ``call()``'s mask parameter is named
     ``mask``, not ``attention_mask`` as in most siblings. This inconsistency is
     intentional and is recorded by the standing anchor
-    ``plan_2026-06-14_0c5d4a21/D-007`` at ``factory.py:939-944``, which places this
+    ``plan_2026-06-14_0c5d4a21/D-007`` in ``factory.py``, which places this
     spelling (and ``performer_attention.PerformerAttention.call``'s complete
     absence of a mask argument) out of scope for normalization passes. **Do NOT
     rename it**: the factory and existing callers pass it by keyword.
@@ -269,7 +269,7 @@ class RPCAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # R13: adopts the shared validator. `test_rpc_attention.py:82` pins the FULL
+        # R13: adopts the shared validator. `test_invalid_dim_mismatch` pins the FULL
         # message with a regex (`dim \(63\) must be divisible by num_heads \(8\)`),
         # and the helper's default `*_name` kwargs reproduce that text
         # character-for-character, so the pinned regex still matches.

@@ -386,7 +386,8 @@ class GroupedQueryAttention(keras.layers.Layer):
         # `self.kernel_initializer` is left untouched, so `get_config` still
         # reports what the caller passed and a SEEDED initializer still
         # reproduces: two clones of `GlorotUniform(seed=7)` draw the same values.
-        # See D-057 for the per-site ruling and decisions.md D-068.
+        # D-057 of the same plan carries the per-site ruling.
+        # See decisions.md D-068 (plan-2026-08-19T163559-499b6f0e).
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -781,7 +782,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         # 2026-07-28, and opting out also restores the NaN GRADIENT on that row.
         # Don't move the rescue after the softmax either —
         # `ops.where(row_keeps, w, 0)` still contributes `0 * NaN` backward.
-        # The full argument is at the D-009 and D-008 anchors in `common.py`.
+        # `common.apply_attention_mask`'s docstring carries the full argument.
         # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
         #
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
@@ -795,8 +796,8 @@ class GroupedQueryAttention(keras.layers.Layer):
         # non-finite. Don't restore a bare `-1`, which is correct only while the
         # caller leaves the config alone, and don't read this as the rank/shape
         # INFERENCE that `common.py` forbids. It reads the site's own declared
-        # config. The full argument is at the D-017 anchors in `common.py` and
-        # `gated_attention.py`.
+        # config. `common.apply_attention_mask`'s docstring and the sibling site in
+        # `gated_attention.py` carry the full argument.
         # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
         scores_dtype = keras.backend.standardize_dtype(scores.dtype)
         return apply_attention_mask(
