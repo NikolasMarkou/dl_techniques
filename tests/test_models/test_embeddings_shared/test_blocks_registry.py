@@ -15,8 +15,10 @@ import pytest
 from dl_techniques.models.embeddings_experimental.shared.blocks import (
     BLOCK_REGISTRY,
     CliffordEncoderBlock,
+    ConvNextEncoderBlock,
     available_block_types,
     clifford_receptive_field,
+    conv_receptive_field,
     create_encoder_block,
 )
 
@@ -24,8 +26,8 @@ from dl_techniques.models.embeddings_experimental.shared.blocks import (
 class TestRegistrySurface:
     """The registry keys are public API."""
 
-    def test_both_study_arms_are_registered(self):
-        assert set(BLOCK_REGISTRY) >= {"transformer", "clifford"}
+    def test_every_study_arm_is_registered(self):
+        assert set(BLOCK_REGISTRY) >= {"transformer", "clifford", "convnext"}
 
     def test_available_block_types_is_sorted(self):
         types = available_block_types()
@@ -78,6 +80,7 @@ class TestBlockCallContract:
         [
             ("transformer", {"num_heads": 2, "intermediate_size": 32}),
             ("clifford", {"shifts": [1, 2], "context_kernel_size": 3}),
+            ("convnext", {"kernel_size": 3}),
         ],
     )
     def test_shape_is_preserved_and_mask_is_accepted(self, block_type, config):
@@ -97,6 +100,31 @@ class TestBlockCallContract:
 
         assert tuple(out.shape) == (batch, seq_len, hidden_size)
         assert np.isfinite(keras.ops.convert_to_numpy(out)).all()
+
+
+class TestTheTwoSpanFormulasDiffer:
+    """A ConvNeXt block has ONE conv per block; a Clifford block has two.
+
+    Matching the two arms on `kernel_size` does NOT match them on span, and
+    using one formula for the other arm silently halves or doubles the figure.
+    That is why they are separate functions rather than one with a flag.
+    """
+
+    @pytest.mark.parametrize("depth,kernel", [(4, 3), (6, 7), (8, 5)])
+    def test_the_clifford_span_is_exactly_twice_the_conv_span_minus_one(
+        self, depth, kernel
+    ):
+        conv = conv_receptive_field(depth, kernel)
+        clifford = clifford_receptive_field(depth, kernel)
+        assert clifford == 2 * conv - 1
+
+    def test_conv_span_matches_its_own_formula(self):
+        assert conv_receptive_field(6, 7) == 37
+        assert conv_receptive_field(4, 3) == 9
+
+    def test_a_unit_kernel_mixes_nothing_either_way(self):
+        assert conv_receptive_field(12, 1) == 1
+        assert clifford_receptive_field(12, 1) == 1
 
 
 class TestCliffordReceptiveField:

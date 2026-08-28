@@ -20,8 +20,8 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 100 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 283 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 101 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 285 .py
 ```
 
 ## Conventions
@@ -47,10 +47,10 @@ find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l   
 
 ```bash
 grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 88
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 93
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 94
 ```
 
-Over 283 files: Google-only 80, Sphinx-only 85, both 8, neither 110. No package-wide rule.
+Over 285 files: Google-only 80, Sphinx-only 86, both 8, neither 111. No package-wide rule.
 **Match the file you are editing; never convert one wholesale.** Perishable — re-run the
 greps. A different instrument gives a different answer (unanchored `Args:` returns 89).
 

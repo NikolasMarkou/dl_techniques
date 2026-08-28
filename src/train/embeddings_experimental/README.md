@@ -59,8 +59,15 @@ Add one entry to `MODEL_REGISTRY` in `config.py`. The trainer, the sweep and the
 report pick it up with no further edits; `--model` is generated from the
 registry, so the CLI and the study axes cannot drift from it.
 
-## Known deviation
+## Known deviations
 
-Stage 2 compiles with `jit_compile=False`. The SimCSE step fails to compile
+**A benign TF message on the ConvNeXt arm.** Grappler's layout optimizer logs
+`layout failed: INVALID_ARGUMENT: Size of values 0 does not match size of
+permutation 4 ... TransposeNHWCToNCHW-LayoutOptimizer` from the dropout inside
+`convnext_block`. It is an optimization pass declining to rewrite a tensor whose
+height axis is the singleton introduced by the sequence lift; the pass is
+skipped, training proceeds, and losses are finite. Not an error.
+
+**Stage 2 compiles with `jit_compile=False`.** The SimCSE step fails to compile
 under XLA on this TF 2.18 build (`FAILED_PRECONDITION: Can not combine dim
 orders and requirements`). Scoped to that stage — stage 1 compiles fine.

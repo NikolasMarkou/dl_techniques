@@ -47,6 +47,7 @@ import keras
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers import TransformerLayer
@@ -57,10 +58,13 @@ from dl_techniques.utils.logger import logger
 __all__ = [
     "BLOCK_REGISTRY",
     "CliffordEncoderBlock",
+    "ConvNextEncoderBlock",
     "available_block_types",
     "build_clifford_block",
+    "build_convnext_block",
     "build_transformer_block",
     "clifford_receptive_field",
+    "conv_receptive_field",
     "create_encoder_block",
 ]
 
@@ -310,6 +314,217 @@ class CliffordEncoderBlock(keras.layers.Layer):
         return config
 
 
+def conv_receptive_field(num_layers: int, kernel_size: int) -> int:
+    """Return the token-mixing span of a stack of ONE-convolution blocks.
+
+    A ConvNeXt block applies a SINGLE depthwise convolution, so a stack reaches
+    ``num_layers * (K - 1) + 1`` tokens -- half the span a Clifford stack of the
+    same depth and kernel gets, because that block applies two stacked
+    convolutions per block. Use :func:`clifford_receptive_field` for the other
+    arm; the two are deliberately separate functions rather than one with a
+    flag, because silently applying the wrong factor is the kind of error that
+    only shows up as a mediocre metric.
+
+    :param num_layers: Number of stacked blocks.
+    :type num_layers: int
+    :param kernel_size: Depthwise kernel width ``K``.
+    :type kernel_size: int
+    :return: Receptive field in tokens.
+    :rtype: int
+    """
+    return num_layers * (kernel_size - 1) + 1
+
+
+@keras.saving.register_keras_serializable()
+class ConvNextEncoderBlock(keras.layers.Layer):
+    """
+    ConvNeXt V1 mixing block over a token sequence, with the block call contract.
+
+    Wraps :class:`~dl_techniques.layers.convnext_v1_block.ConvNextV1Block` --
+    depthwise convolution, normalization, pointwise expansion, activation,
+    pointwise contraction, LayerScale -- and adapts it from images to sequences.
+
+    **The sequence is lifted to a singleton-height image.** The wrapped block is
+    2-D, so ``(B, L, D)`` becomes ``(B, 1, L, D)`` and the depthwise kernel is
+    ``(1, K)``: convolution along the sequence axis only, never across the
+    (length-1) height axis. The result is squeezed back. This is the same lift
+    ``CliffordNetBlock`` performs internally for its own sequence mode.
+
+    **The residual is external**, exactly as for the Clifford arm:
+    ``ConvNextV1Block.call`` ends at ``return x`` with no ``+ inputs`` (see its
+    step 7), so this wrapper computes ``inputs + drop_path(update)``. Note the
+    default LayerScale here is ``gamma_initial_value=1.0``, not the Clifford
+    block's ``1e-5``, so the update is full-magnitude from the first step.
+
+    **Padding is not neutral**, for the same reason as the Clifford arm: a
+    same-padded depthwise convolution pulls zero padding into the receptive
+    field of real positions near the boundary. Masked positions are zeroed
+    before the block, which bounds the effect without removing it. Stage 1 of
+    the study trains on packed sequences carrying no padding at all.
+
+    :param hidden_size: Channel dimension ``D``. Preserved by the block.
+    :type hidden_size: int
+    :param kernel_size: Depthwise kernel width along the sequence axis.
+    :type kernel_size: int
+    :param activation: Activation between the pointwise convolutions.
+    :type activation: str
+    :param dropout_rate: Dropout inside the block.
+    :type dropout_rate: float
+    :param drop_path_rate: Stochastic-depth rate for the residual branch.
+    :type drop_path_rate: float
+    :param gamma_initial_value: Initial LayerScale value.
+    :type gamma_initial_value: float
+    :param use_gamma: Whether to apply LayerScale at all.
+    :type use_gamma: bool
+    :param normalization_type: Normalization inside the wrapped block.
+    :type normalization_type: str
+    :param use_bias: Whether the convolutions carry a bias.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :raises ValueError: If ``hidden_size`` or ``kernel_size`` is not a positive
+        integer.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        kernel_size: int = 7,
+        activation: str = "gelu",
+        dropout_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        gamma_initial_value: float = 1.0,
+        use_gamma: bool = True,
+        normalization_type: str = "layernorm",
+        use_bias: bool = True,
+        depthwise_initializer: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if not isinstance(hidden_size, int) or hidden_size <= 0:
+            raise ValueError(
+                f"hidden_size must be a positive int, got {hidden_size!r}"
+            )
+        if not isinstance(kernel_size, int) or kernel_size <= 0:
+            raise ValueError(
+                f"kernel_size must be a positive int, got {kernel_size!r}"
+            )
+
+        self.hidden_size = hidden_size
+        self.kernel_size = kernel_size
+        self.activation = activation
+        self.dropout_rate = dropout_rate
+        self.drop_path_rate = drop_path_rate
+        self.gamma_initial_value = gamma_initial_value
+        self.use_gamma = use_gamma
+        self.normalization_type = normalization_type
+        self.use_bias = use_bias
+        self.depthwise_initializer = depthwise_initializer
+
+        self.block = ConvNextV1Block(
+            # (1, K): convolve along the sequence axis only. The height axis is
+            # the singleton introduced by the lift in `call`.
+            kernel_size=(1, kernel_size),
+            filters=hidden_size,
+            activation=activation,
+            dropout_rate=dropout_rate,
+            use_gamma=use_gamma,
+            gamma_initial_value=gamma_initial_value,
+            normalization_type=normalization_type,
+            use_bias=use_bias,
+            depthwise_initializer=depthwise_initializer,
+            name="convnext_block",
+        )
+        self.drop_path = StochasticDepth(
+            drop_path_rate=drop_path_rate, name="drop_path"
+        )
+
+    def build(self, input_shape: Any) -> None:
+        """Build the wrapped block on the lifted, rank-4 shape.
+
+        :param input_shape: ``(batch, seq_len, hidden_size)``.
+        :type input_shape: Any
+        """
+        batch, seq_len, channels = tuple(input_shape)
+        self.block.build((batch, 1, seq_len, channels))
+        self.drop_path.build(input_shape)
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        layer_idx: int = 0,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Apply the block and add its update to the input.
+
+        :param inputs: ``(batch, seq_len, hidden_size)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: ``(batch, seq_len)`` with 1 for kept positions.
+            Used only to zero padded positions before the block; a same-padded
+            convolution is maskless (see the class docstring).
+        :type attention_mask: keras.KerasTensor | None
+        :param layer_idx: Accepted for signature compatibility with
+            ``TransformerLayer``; unused.
+        :type layer_idx: int
+        :param training: Keras training flag.
+        :type training: bool | None
+        :return: ``(batch, seq_len, hidden_size)``.
+        :rtype: keras.KerasTensor
+        """
+        block_input = inputs
+        if attention_mask is not None:
+            keep = keras.ops.cast(
+                keras.ops.expand_dims(attention_mask, axis=-1), inputs.dtype
+            )
+            block_input = inputs * keep
+
+        # Lift (B, L, D) -> (B, 1, L, D) for the 2-D block, then squeeze back.
+        lifted = keras.ops.expand_dims(block_input, axis=1)
+        update = keras.ops.squeeze(self.block(lifted, training=training), axis=1)
+
+        # External residual: ConvNextV1Block.call returns the update only.
+        return inputs + self.drop_path(update, training=training)
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """Return the input shape; the block is shape-preserving.
+
+        :param input_shape: ``(batch, seq_len, hidden_size)``.
+        :type input_shape: Any
+        :return: The same shape.
+        :rtype: Any
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the constructor configuration.
+
+        :return: Serializable configuration dictionary.
+        :rtype: dict[str, Any]
+        """
+        config = super().get_config()
+        config.update(
+            {
+                "hidden_size": self.hidden_size,
+                "kernel_size": self.kernel_size,
+                "activation": self.activation,
+                "dropout_rate": self.dropout_rate,
+                "drop_path_rate": self.drop_path_rate,
+                "gamma_initial_value": self.gamma_initial_value,
+                "use_gamma": self.use_gamma,
+                "normalization_type": self.normalization_type,
+                "use_bias": self.use_bias,
+                "depthwise_initializer": keras.initializers.serialize(
+                    keras.initializers.get(self.depthwise_initializer)
+                )
+                if self.depthwise_initializer is not None
+                else None,
+            }
+        )
+        return config
+
+
 # ---------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------
@@ -458,12 +673,74 @@ def build_clifford_block(
     )
 
 
+def build_convnext_block(
+    *,
+    hidden_size: int,
+    name: str,
+    kernel_size: int = 7,
+    activation: str = "gelu",
+    dropout_rate: float = 0.0,
+    drop_path_rate: float = 0.0,
+    gamma_initial_value: float = 1.0,
+    use_gamma: bool = True,
+    normalization_type: str = "layernorm",
+    use_bias: bool = True,
+    kernel_initializer: Any = None,
+) -> keras.layers.Layer:
+    """Build one ConvNeXt V1 sequence-mixing block.
+
+    :param hidden_size: Model width.
+    :type hidden_size: int
+    :param name: Layer name.
+    :type name: str
+    :param kernel_size: Depthwise kernel width along the sequence axis.
+    :type kernel_size: int
+    :param activation: Activation between the pointwise convolutions.
+    :type activation: str
+    :param dropout_rate: Dropout inside the block.
+    :type dropout_rate: float
+    :param drop_path_rate: Stochastic-depth rate.
+    :type drop_path_rate: float
+    :param gamma_initial_value: Initial LayerScale value.
+    :type gamma_initial_value: float
+    :param use_gamma: Whether to apply LayerScale.
+    :type use_gamma: bool
+    :param normalization_type: Normalization inside the block.
+    :type normalization_type: str
+    :param use_bias: Whether the convolutions carry a bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the DEPTHWISE convolution. The
+        two pointwise convolutions inside ``ConvNextV1Block`` hard-code their
+        own ``TruncatedNormal`` and expose no override, so this reaches the
+        depthwise kernel only. Declared here so the encoder's shared
+        initializer injection has somewhere to land; the registry rejects an
+        undeclared keyword rather than dropping it.
+    :type kernel_initializer: Any
+    :return: A configured :class:`ConvNextEncoderBlock`.
+    :rtype: keras.layers.Layer
+    """
+    return ConvNextEncoderBlock(
+        hidden_size=hidden_size,
+        kernel_size=kernel_size,
+        activation=activation,
+        dropout_rate=dropout_rate,
+        drop_path_rate=drop_path_rate,
+        gamma_initial_value=gamma_initial_value,
+        use_gamma=use_gamma,
+        normalization_type=normalization_type,
+        use_bias=use_bias,
+        depthwise_initializer=kernel_initializer,
+        name=name,
+    )
+
+
 #: Block-type string -> builder. Append-only: the keys are public API,
 #: recorded in every run directory's config and in the study's reports, so
 #: renaming one invalidates existing results rather than tidying them.
 BLOCK_REGISTRY: Dict[str, Callable[..., keras.layers.Layer]] = {
     "transformer": build_transformer_block,
     "clifford": build_clifford_block,
+    "convnext": build_convnext_block,
 }
 
 

@@ -14,6 +14,7 @@ reported metric is attributable to the block rather than to the plumbing.
 |---|---|---|---|
 | `ascii_bert` | `TransformerLayer` (multi-head self-attention) | yes | quadratic |
 | `ascii_clifford_bert` | `CliffordNetBlock`, bidirectional sequence mode | no | linear |
+| `ascii_convnext_bert` | `ConvNextV1Block` along the sequence axis | no | linear |
 | `shared` | the skeleton and the block registry — not an arm | — | — |
 
 Adding an arm is one `BLOCK_REGISTRY` entry plus a thin leaf package. It is
@@ -23,11 +24,11 @@ never a second copy of the encoder.
 
 At `max_position_embeddings=128`, ASCII vocabulary (101 ids):
 
-| Variant | hidden / layers | `ascii_bert` | `ascii_clifford_bert` |
-|---|---|---:|---:|
-| tiny | 128 / 4 | 822,656 | 499,072 |
-| small | 256 / 6 | 4,797,696 | 3,630,336 |
-| base | 512 / 8 | 25,337,344 | 23,272,960 |
+| Variant | hidden / layers | `ascii_bert` | `ascii_clifford_bert` | `ascii_convnext_bert` |
+|---|---|---:|---:|---:|
+| tiny | 128 / 4 | 822,656 | 499,072 | 562,048 |
+| small | 256 / 6 | 4,797,696 | 3,630,336 | 3,229,440 |
+| base | 512 / 8 | 25,337,344 | 23,272,960 | 16,961,024 |
 
 **Equal variant names do not mean equal parameter counts.** The arms are depth-
 and width-matched, not parameter-matched, which is why the study reports the
@@ -53,14 +54,29 @@ truth:
 
 The study's answer is to remove padding rather than fake a mask: stage 1 trains
 on **packed** fixed-length sequences. The transformer arm honours its mask and
-measures exactly 0.0 on the same comparison.
+measures exactly 0.0 on the same comparison. The ConvNeXt arm has the same
+hazard for the same reason (a same-padded depthwise convolution), but shows it
+at initialization rather than hiding it, because its LayerScale starts at 1.0.
 
-**2. Token mixing in the Clifford arm is local.** The geometric product rolls
+**1b. The three arms separate two effects.** The Clifford arm differs from the
+baseline in two ways at once — convolutional instead of attentional, *and* a
+geometric product for channel mixing. `ascii_convnext_bert` is convolutional
+without the geometric product, so the three together tell those apart. A
+two-arm study could not.
+
+**2. Token mixing in both convolutional arms is local.** The geometric product rolls
 along the *channel* axis, so all cross-token mixing comes from the two depthwise
-convolutions per block: `num_layers * 2 * (K - 1) + 1` characters. At the
-layer's default `K=3` a 4-block stack sees **17 characters**. This arm therefore
-defaults to `K=7`, not 3, and warns when the span is shorter than
-`max_position_embeddings`.
+convolutions per block. The two arms do **not** share a formula:
+
+```
+clifford:  num_layers * 2 * (K - 1) + 1     (two convs per block)
+convnext:  num_layers * (K - 1) + 1         (one conv per block)
+```
+
+so matching them on `kernel_size` does not match them on span — the Clifford
+span is `2 * convnext - 1`. At the Clifford layer's default `K=3` a 4-block
+stack sees **17 characters**. Both arms therefore default to `K=7`, and both
+warn when the span is shorter than `max_position_embeddings`.
 
 ## Usage
 

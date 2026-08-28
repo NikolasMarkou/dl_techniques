@@ -24,6 +24,9 @@ from dl_techniques.models.embeddings_experimental.ascii_bert import create_ascii
 from dl_techniques.models.embeddings_experimental.ascii_clifford_bert import (
     create_ascii_clifford_bert,
 )
+from dl_techniques.models.embeddings_experimental.ascii_convnext_bert import (
+    create_ascii_convnext_bert,
+)
 
 # ---------------------------------------------------------------------
 
@@ -38,6 +41,7 @@ __all__ = [
 MODEL_REGISTRY: Dict[str, Callable[..., keras.Model]] = {
     "ascii_bert": create_ascii_bert,
     "ascii_clifford_bert": create_ascii_clifford_bert,
+    "ascii_convnext_bert": create_ascii_convnext_bert,
 }
 
 #: The study's baseline. Every paired statistic in the report is computed

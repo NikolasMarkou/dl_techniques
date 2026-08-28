@@ -34,7 +34,10 @@ builder does not declare. Filter-and-drop is never used: that design is what
 previously made a misspelled `dropout=` (against a declared `dropout_rate`) a
 silent no-op repo-wide.
 
-`CliffordEncoderBlock` adapts `CliffordNetBlock` and exists for two reasons:
+`CliffordEncoderBlock` and `ConvNextEncoderBlock` adapt their wrapped blocks and
+exist for two reasons each (`ConvNextEncoderBlock` additionally lifts `(B, L, D)`
+to `(B, 1, L, D)`, since the wrapped block is 2-D, and convolves with a `(1, K)`
+kernel so mixing happens along the sequence axis only):
 
 - **The residual is external.** The block returns *only* the gated update.
   `x = block(x)` does not apply a block, it replaces the signal — measured RMS
@@ -45,8 +48,11 @@ silent no-op repo-wide.
   padding contributes a known constant instead of a learned embedding, and logs
   the limitation. That bounds the effect; it does not remove it.
 
-`clifford_receptive_field(num_layers, K)` returns the token-mixing span. Check it
-before training any configuration.
+`clifford_receptive_field(num_layers, K)` and `conv_receptive_field(num_layers, K)`
+return the token-mixing span of a Clifford and a ConvNeXt stack respectively. They
+are separate functions because a Clifford block applies TWO depthwise convolutions
+and a ConvNeXt block applies ONE, so the spans differ by `2x - 1` at equal depth
+and kernel. Check the right one before training any configuration.
 
 ## Adding an arm
 

@@ -20,6 +20,7 @@ HIDDEN = 32
 BLOCK_CASES = [
     ("transformer", {"num_heads": 4, "intermediate_size": 64}),
     ("clifford", {"shifts": [1, 2], "context_kernel_size": 3}),
+    ("convnext", {"kernel_size": 3}),
 ]
 BLOCK_IDS = [case[0] for case in BLOCK_CASES]
 
