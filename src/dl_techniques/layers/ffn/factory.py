@@ -1,51 +1,186 @@
 """
-A Factory Method design pattern to provide a single,
-centralized entry point for creating various Feed-Forward Network (FFN)
-architectures. By abstracting the instantiation logic, it decouples client
-code from the concrete implementation of specific FFN layers. This is a core
-component for building flexible, modular, and configuration-driven models.
+Single entry point for building any of this package's 21 FFN layers.
 
-Architectural Overview:
-The factory operates on a registry-based design (`FFN_REGISTRY`). This
-registry maps a simple string identifier (the `ffn_type`) to the corresponding
-Keras Layer class and its associated metadata, such as required parameters
-and default values.
+``create_ffn_layer('swiglu', output_dim=512)`` returns a configured Keras
+layer. The mapping from the string ``'swiglu'`` to the class ``SwiGLUFFN``, to
+the parameters that class requires, and to the defaults it gets when you do not
+supply them, lives in one dict: ``FFN_REGISTRY``. Nothing else in the package
+needs to know which FFN classes exist.
 
-When called, the factory performs the following steps:
-1.  **Validation**: It first consults the registry to validate the requested
-    `ffn_type` and ensures that all required hyperparameters are provided in
-    `**kwargs`. This centralized validation guarantees that any layer created
-    is correctly configured.
-2.  **Class Retrieval**: It retrieves the appropriate Keras Layer class
-    associated with the `ffn_type`.
-3.  **Instantiation**: It instantiates the retrieved class, passing the
-    validated and filtered keyword arguments to its constructor.
+Two things follow. A model can pick its FFN from a config file, because the
+choice is a string. And a new FFN type becomes available everywhere by adding
+one registry entry, with no change to any model-building code.
 
-This design provides several key advantages for machine learning engineering:
--   **Modularity and Extensibility**: New FFN architectures can be integrated
-    into the framework simply by adding them to the registry, without any
-    changes to the model-building code that uses this factory.
--   **Configuration-Driven Experimentation**: It enables model architectures
-    to be defined in external configuration files (e.g., YAML or JSON), where
-    the choice of FFN is specified by a single string. This greatly simplifies
-    hyperparameter tuning and architectural A/B testing.
--   **Consistency and Reliability**: It provides a single, consistent interface
-    for creating FFNs, reducing the risk of misconfiguration and ensuring that
-    all layers adhere to a common set of standards.
+The factory is strict about parameters. A key the chosen ``ffn_type`` does not
+accept raises ``ValueError``; it is never silently dropped. If you are a
+wrapper layer pushing your own generic defaults (an ``activation``, a
+``dropout_rate``) down into whatever FFN the user picked, run them through
+``assemble_ffn_config`` first. That drops the keys the chosen type cannot take,
+then merges the user's own arguments on top without filtering them, so a user
+typo still reaches the factory and still raises.
 
-Foundational Concepts:
-The factory itself is an application of a well-established software design
-pattern. The layers it produces, however, are based on significant research
-in deep learning. It provides access to a curated set of FFNs, each with its
-own mathematical underpinnings, including:
+**Dispatch Flow:**
 
--   The standard "expand-then-contract" MLP from the original Transformer.
--   Advanced gated variants like GLU, GeGLU, and SwiGLU, which introduce
-    dynamic, input-dependent information filtering.
--   Residual blocks that facilitate gradient flow in very deep networks.
+.. code-block:: text
 
-By using this factory, a researcher can easily switch between these different
-computational blocks to evaluate their impact on model performance.
+    wrapper_config ─┐
+                    ├─► assemble_ffn_config()   (optional)
+    caller_args ────┘   drops keys this ffn_type cannot take,
+                        then merges caller_args on top UNFILTERED
+                                 │
+    config dict ──► create_ffn_from_config()   pops config['type']
+                                 │
+                                 ▼
+      create_ffn_layer(ffn_type, name=None, **kwargs)
+                                 │
+                                 ▼
+    ┌──────────────────────────────────────────────────────────────┐
+    │ try:                                                         │
+    │   validate_ffn_config(ffn_type, **kwargs)                    │
+    │     ├─ ffn_type not in FFN_REGISTRY ──────────► raise        │
+    │     ├─ a required_params name is missing ─────► raise        │
+    │     └─ a value fails a range / name check ────► raise        │
+    │     │                                                        │
+    │     ▼                                                        │
+    │   ffn_class = FFN_REGISTRY[ffn_type]['class']                │
+    │   valid  = required_params + optional_params names           │
+    │   params = optional_params defaults, then kwargs             │
+    │   final  = params filtered down to valid                     │
+    │     │                                                        │
+    │     ▼                                                        │
+    │   dropped = set(kwargs) - valid              (STRICT)        │
+    │     └─ dropped is not empty ──────────────────► raise        │
+    │     │                                                        │
+    │     ▼                                                        │
+    │   final['name'] = name    (only when name is given)          │
+    │   logger.info, one line per parameter                        │
+    │     │                                                        │
+    │     ▼                                                        │
+    │   ffn_layer = ffn_class(**final)                             │
+    ├──────────────────────────────────────────────────────────────┤
+    │ except (TypeError, ValueError) as e:                         │
+    │   every raise above lands here and is re-raised as ONE       │
+    │   ValueError naming ffn_type, its required params and the    │
+    │   params you provided, chained with `from e`.                │
+    └──────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                        keras.layers.Layer
+
+**FFN Registry:**
+
+All 21 entries, rendered from ``FFN_REGISTRY`` itself. The class each type
+builds and the parameters you must supply:
+
+.. code-block:: text
+
+    type key      class                  required params
+    ------------  ---------------------- -------------------------------
+    bilinear      GLUFFN                 hidden_dim,output_dim
+    counting      CountingFFN            output_dim,count_dim
+    differential  DifferentialFFN        hidden_dim,output_dim
+    gated_mlp     GatedMLP               filters
+    geglu         GeGLUFFN               hidden_dim,output_dim
+    gelu_tanh     GELUMLPFFN             hidden_dim
+    glu           GLUFFN                 hidden_dim,output_dim
+    kan           KANLinear              features
+    logic         LogicFFN               output_dim,logic_dim
+    lowrank       LowRankFFN             hidden_dim,output_dim
+    mixer         MixerBlock             tokens_mlp_dim,channels_mlp_dim
+    mlp           MLPBlock               hidden_dim,output_dim
+    monarch       MonarchFFN             hidden_dim,output_dim
+    orthoglu      OrthoGLUFFN            hidden_dim,output_dim
+    power_mlp     PowerMLPLayer          units
+    reglu         GLUFFN                 hidden_dim,output_dim
+    residual      ResidualBlock          hidden_dim,output_dim
+    squared_relu  SquaredReLUFFN         hidden_dim,output_dim
+    swiglu        SwiGLUFFN              output_dim
+    swin_mlp      SwinMLP                hidden_dim
+    tversky       TverskyProjectionLayer units,num_features
+
+The output width parameter is the constructor argument that sets
+``compute_output_shape(...)[-1]``. Its name is not uniform across types, so a
+caller that pattern-matches the literal string ``"output_dim"`` silently no-ops
+for four of them. ``mixer`` has no output width parameter at all: its output
+shape equals its input shape. The third column names one optional parameter per
+type that is not shared boilerplate; ``get_ffn_info()`` returns the full set.
+
+.. code-block:: text
+
+    type key      output width  notable optional default
+    ------------  ------------  --------------------------------
+    bilinear      output_dim    activation='linear'
+    counting      output_dim    counting_scope='local'
+    differential  output_dim    gate_activation='sigmoid'
+    gated_mlp     filters       attention_activation='relu'
+    geglu         output_dim    activation='gelu'
+    gelu_tanh     output_dim    output_dim=None
+    glu           output_dim    activation='swish'
+    kan           features      grid_size=5, spline_order=3
+    logic         output_dim    temperature=1.0
+    lowrank       output_dim    rank=None
+    mixer         None          activation='gelu'
+    mlp           output_dim    output_kernel_initializer=None
+    monarch       output_dim    nblocks=4
+    orthoglu      output_dim    ortho_reg_factor=1.0
+    power_mlp     units         k=3
+    reglu         output_dim    activation='relu'
+    residual      output_dim    activation='relu'
+    squared_relu  output_dim    (boilerplate only)
+    swiglu        output_dim    ffn_expansion_factor=4
+    swin_mlp      output_dim    output_dim=None
+    tversky       units         intersection_reduction='product'
+
+What each type is for:
+
+.. code-block:: text
+
+    type key      use case
+    ------------  --------------------------------------------
+    bilinear      identity-gated GLU variant (Shazeer 2020)
+    counting      sequences where feature frequency matters
+    differential  dual-pathway feature processing
+    gated_mlp     vision; cheaper stand-in for attention
+    geglu         GELU-gated transformer FFN
+    gelu_tanh     SD3 / MMDiT FeedForward
+    glu           gated FFN for better gradient flow
+    kan           B-spline per-connection activations
+    logic         symbolic-like reasoning, feature interaction
+    lowrank       parameter-efficient factorized FFN
+    mixer         attention-free token + channel mixing
+    mlp           general-purpose transformer FFN
+    monarch       structured parameter-efficient FFN
+    orthoglu      stable training, decorrelated features
+    power_mlp     sharp + smooth function approximation
+    reglu         ReLU-gated GLU variant (Shazeer 2020)
+    residual      deep nets needing skip connections
+    squared_relu  Primer squared-ReLU transformer FFN
+    swiglu        modern LLMs (LLaMA, Qwen)
+    swin_mlp      Swin Transformer and vision heads
+    tversky       asymmetric similarity projection, rank-2
+
+Public functions:
+
+- ``get_ffn_info()`` -- a shallow copy of the registry, for callers that
+  enumerate types or parameters at runtime.
+- ``validate_ffn_config(ffn_type, **kwargs)`` -- runs the checks and returns
+  ``None``; raises on anything it rejects.
+- ``assemble_ffn_config(ffn_type, wrapper_config, caller_args=None)`` -- builds
+  the kwargs dict for a wrapper layer, as described above.
+- ``create_ffn_layer(ffn_type, name=None, **kwargs)`` -- builds the layer.
+- ``create_ffn_from_config(config)`` -- builds the layer from a dict whose
+  ``'type'`` key names the ``ffn_type``.
+
+Module constants:
+
+- ``STRICT_DROPPED_KEY_MARKER`` -- the substring every strict dropped-key
+  ``ValueError`` from ``create_ffn_layer`` carries. Match on this constant
+  rather than retyping the phrase, so rewording the message cannot blind a
+  guard.
+- ``_FFN_CONFIG_PASSTHROUGH_KEYS`` -- ``('type', 'name')``, the keys every
+  construction path carries that are not FFN constructor parameters.
+  ``assemble_ffn_config`` keeps them whatever the registry says. Private: pass
+  its ``passthrough`` argument instead of importing this.
 
 References:
 -   Gamma, E., Helm, R., Johnson, R., & Vlissides, J. (1994). Design
@@ -315,15 +450,11 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
-            # DECISION plan-2026-08-22T035419-a11304c8/D-160
-            # `output_kernel_initializer` is declared ONLY here, not on the other
-            # 20 entries: `mlp` is the one registry type whose output projection
-            # is the transformer's residual-path projection AND whose expansion
-            # is a separate weight, which is the pair GPT-2's `1/sqrt(2*n_layer)`
-            # rule distinguishes. Declaring it
-            # here and nowhere else is what makes
-            # `TransformerLayer(residual_output_kernel_initializer=..., ffn_type=<other>)`
-            # a LOUD `create_ffn_layer` raise instead of a silent no-op.
+            # DECISION plan-2026-08-22T035419-a11304c8/D-160. See decisions.md D-160.
+            # `output_kernel_initializer` is declared here and on none of the
+            # other 20 entries: `mlp` is the only type whose output projection is
+            # the transformer residual projection. Do NOT add it elsewhere -- that
+            # turns a wrong-`ffn_type` raise into a silent no-op.
             'output_kernel_initializer': None,
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -361,12 +492,11 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             '(Tolstikhin et al. 2021). Output shape == input shape.'
         ),
         'required_params': ['tokens_mlp_dim', 'channels_mlp_dim'],
-        # DECISION plan-2026-07-30T140922-8af1028f/D-004: `None` here is a
-        # MEANINGFUL value, not a missing entry. MixerBlock.compute_output_shape
-        # returns the input shape unchanged (mlp_mixer_block.py:334-343) -- it has
-        # no output-width concept at all. Do NOT 'fix' this to 'output_dim' (the key
-        # does not exist) nor to 'channels_mlp_dim' (that is the INNER width of the
-        # channel-mixing MLP, not the block's output width). See decisions.md D-004.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-004: `None` is MEANINGFUL,
+        # not a missing entry. MixerBlock.compute_output_shape returns the input
+        # shape unchanged (mlp_mixer_block.py:334-343), so it has no output width.
+        # Do NOT 'fix' this to 'output_dim' (no such key) nor to 'channels_mlp_dim'
+        # (the channel-mixing MLP's inner width). See decisions.md D-004.
         'output_dim_param': None,
         'optional_params': {
             'activation': 'gelu',
@@ -469,7 +599,8 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': ['output_dim'],
         'output_dim_param': 'output_dim',
         'optional_params': {
-            'hidden_dim': None,  # explicit size; None => 2/3-rule from ffn_expansion_factor
+            # Explicit size; None means the 2/3 rule from ffn_expansion_factor.
+            'hidden_dim': None,
             'ffn_expansion_factor': 4,
             'ffn_multiple_of': 256,
             'dropout_rate': 0.0,
@@ -525,24 +656,57 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------
 
 def get_ffn_info() -> Dict[str, Dict[str, Any]]:
-    """
-    Get comprehensive information about all available FFN types.
+    """Return a copy of the FFN registry, one entry per supported type.
 
-    :return: Dict containing information about each FFN type, including
-        description, required_params, optional_params, and use_case.
+    Use this to enumerate the available types or to read a type's parameter
+    schema at runtime instead of hard-coding it.
+
+    The copy is SHALLOW: the top level is a new dict and each entry is a new
+    dict, but the ``required_params`` list, the ``optional_params`` dict and the
+    ``class`` object inside an entry are the registry's own objects. Do not
+    mutate them.
+
+    :return: A mapping from ``ffn_type`` to that type's registry entry, with the
+        keys ``class``, ``description``, ``required_params``,
+        ``output_dim_param``, ``optional_params`` and ``use_case``.
     :rtype: Dict[str, Dict[str, Any]]
     """
     return {ffn_type: info.copy() for ffn_type, info in FFN_REGISTRY.items()}
 
 
 def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
-    """
-    Validate FFN configuration parameters.
+    """Check that ``ffn_type`` exists and that ``kwargs`` is a usable config.
 
-    :param ffn_type: Type of FFN to validate.
+    Returns ``None`` on success. Every problem it finds is a ``ValueError``.
+    It checks, in order:
+
+    * ``ffn_type`` is a key of ``FFN_REGISTRY``.
+    * every name in that entry's ``required_params`` is present in ``kwargs``.
+    * ``dropout_rate``, if given, is in ``[0.0, 1.0]``.
+    * every dimension argument that is given and not ``None`` is positive
+      (``hidden_dim``, ``output_dim``, ``count_dim``, ``logic_dim``, ``filters``,
+      ``units``, ``features``, ``num_features``, ``tokens_mlp_dim``,
+      ``channels_mlp_dim``).
+    * the per-type constraints for ``swiglu``, ``counting``, ``logic``,
+      ``gated_mlp``, ``monarch``, ``lowrank``, ``power_mlp``, ``kan`` and
+      ``tversky`` -- positive factors, allowed enum values, integer types, and
+      ``grid_range`` being a ``(low, high)`` pair with ``low < high``.
+    * every activation string other than ``'linear'`` resolves through
+      ``keras.activations.get``, and every initializer string resolves through
+      ``keras.initializers.get``.
+
+    It does NOT check for keys the type does not accept. That is
+    ``create_ffn_layer``'s strict dropped-key check.
+
+    :param ffn_type: An ``FFN_REGISTRY`` key.
     :type ffn_type: str
-    :param kwargs: Parameters to validate.
-    :raises ValueError: If ffn_type is invalid or required parameters are missing.
+    :param kwargs: The parameters you intend to pass to the layer constructor.
+    :type kwargs: Any
+    :return: ``None``. The function is called for its exceptions.
+    :rtype: None
+    :raises ValueError: If ``ffn_type`` is not registered, a required parameter
+        is missing, a value is out of range or has the wrong type, or an
+        activation or initializer string does not resolve.
     """
     if ffn_type not in FFN_REGISTRY:
         available_types = sorted(list(FFN_REGISTRY.keys()))
@@ -697,17 +861,11 @@ def assemble_ffn_config(
     * Raises ``ValueError`` naming the available types if ``ffn_type`` is not in
       ``FFN_REGISTRY`` -- matching what the wrapper sites raised before.
 
-    # DECISION plan-2026-07-30T140922-8af1028f/D-017
-    This function owns the MERGE, not just the filter, and that is the whole
-    reason it takes two dicts instead of one. Do NOT "simplify" it to a
-    single-dict filter that call sites apply after merging their ``ffn_args``
-    in -- that ordering makes the pre-filter EAT the caller's keys, which turns
-    a caller's typo back into the silent drop this whole plan exists to remove
-    (and, once ``create_ffn_layer`` raises, means the raise can never fire).
-    With the merge inside, a call site cannot express the wrong order.
-    Pinned by ``TestFFNArgsSurviveThePreFilter`` in
-    ``tests/test_layers/test_transformers/test_transformer.py`` and its decoder
-    twin.
+    # DECISION plan-2026-07-30T140922-8af1028f/D-017. See decisions.md D-017.
+    This function owns the MERGE, not only the filter, which is why it takes two
+    dicts. Do NOT reduce it to a single-dict filter that call sites apply after
+    merging their ``ffn_args`` in: that order makes the pre-filter eat the
+    caller's keys, so a caller typo goes back to being silently dropped.
 
     :param ffn_type: An ``FFN_REGISTRY`` key.
     :type ffn_type: str
@@ -744,26 +902,46 @@ def create_ffn_layer(
         name: Optional[str] = None,
         **kwargs: Any
 ) -> keras.layers.Layer:
-    """
-    Factory function for creating FFN layers with unified interface.
+    """Build one FFN layer of the requested type.
 
-    This function provides a centralized way to create any FFN layer supported by
-    dl_techniques, with comprehensive parameter validation and consistent error handling.
+    Validates ``kwargs``, fills in the registry defaults for anything you left
+    out, then calls the registered class. See the module docstring for the
+    dispatch flow diagram and the full registry table.
 
-    :param ffn_type: Type of FFN layer to create. See ``FFNType`` for all supported types.
+    Parameter handling is STRICT. A key ``ffn_type`` does not accept raises
+    instead of being dropped. A wrapper layer that wants to offer generic
+    conveniences must pre-filter them through :func:`assemble_ffn_config` first;
+    the error message says so too.
+
+    Every exception raised inside this function is caught and re-raised as a
+    single ``ValueError`` that names the type, its required parameters and the
+    parameters you provided, chained to the original with ``from``. So a
+    ``TypeError`` from the layer constructor reaches you as a ``ValueError``
+    whose ``__cause__`` is that ``TypeError``.
+
+    Example:
+
+    .. code-block:: python
+
+        ffn = create_ffn_layer('swiglu', output_dim=512)
+        ffn = create_ffn_layer('mlp', hidden_dim=2048, output_dim=512,
+                               name='block0_ffn')
+
+    :param ffn_type: An ``FFN_REGISTRY`` key. See ``FFNType`` for the 21
+        supported values.
     :type ffn_type: FFNType
-    :param name: Optional name for the layer.
+    :param name: Keras layer name. Passed to the constructor only when it is not
+        ``None``.
     :type name: Optional[str]
-    :param kwargs: Parameters specific to the FFN type. See individual layer
-        documentation for parameter details. This is STRICT: any key ``ffn_type``
-        does not accept raises rather than being silently dropped. A wrapper that
-        wants to offer generic conveniences should pre-filter them through
-        :func:`assemble_ffn_config` before calling here.
-    :return: Configured FFN layer instance.
+    :param kwargs: Parameters for the chosen type. The type's
+        ``required_params`` must all be present; its ``optional_params`` default
+        in if absent. Any other key raises.
+    :type kwargs: Any
+    :return: The constructed layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: If ffn_type is invalid, a required parameter is missing,
-        or a supplied parameter is not accepted by ``ffn_type``.
-    :raises TypeError: If parameter types are incorrect.
+    :raises ValueError: If ``ffn_type`` is not registered, a required parameter
+        is missing, a value fails validation, a supplied key is not accepted by
+        ``ffn_type``, or the layer constructor itself fails.
     """
     try:
         # Validate configuration
@@ -787,34 +965,11 @@ def create_ffn_layer(
         # Filter out any unknown parameters to avoid "Unrecognized keyword arguments" error
         final_params = {key: val for key, val in params.items() if key in valid_param_names}
 
-        # DECISION plan-2026-07-30T140922-8af1028f/D-023
-        # RAISE, do not warn. This used to be a `logger.warning` guarded by a
-        # deferral comment citing a never-executed "29 (site, type) breakage"
-        # figure. That grid has since been executed (the real number is 13,
-        # none reachable by any production caller) and all 27 FFN construction
-        # sites in `src/` were swept and fixed BEFORE this flip. Reverting to a
-        # warning re-opens the silent-typo trap the sweep exists to keep shut.
-        #
-        # The predicate subtracts from the raw `kwargs` -- ONLY keys the caller
-        # actually supplied -- and both halves of it are load-bearing:
-        #
-        # * subtracting `valid_param_names` (required | optional), NOT just
-        #   `required_params`. The narrower right-hand side is the tempting
-        #   "simplification" and it is CATASTROPHIC: every optional parameter
-        #   anyone passes becomes an error. MEASURED -- with
-        #   `set(kwargs) - set(required_params)` the registry-defaults guard
-        #   fires for 21/21 types.
-        # * reading `kwargs` rather than the merged `params` dict. Note
-        #   HONESTLY that these two are EXTENSIONALLY EQUAL today, because
-        #   `params` is `optional_params` updated with `kwargs` and
-        #   `optional_params`'s keys are a subset of `valid_param_names` by
-        #   construction -- measured: swapping in `set(params) - ...` changes
-        #   nothing, 205/205 green. (The plan predicted mass failures here;
-        #   that prediction was wrong and is recorded as such in D-023.) The
-        #   `kwargs` form is kept because it stays correct if that subset
-        #   relation ever breaks -- i.e. if a registry entry gains an
-        #   `optional_params` key its class does not accept -- where the
-        #   `params` form would then blame the caller for the registry's bug.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-023. See decisions.md D-023.
+        # RAISE on an unsupported key; a warning re-opens the silent-typo trap.
+        # Subtract `valid_param_names` (required | optional), NOT `required_params`
+        # -- the narrow form fires for 21/21 types. Read `kwargs`, not `params`:
+        # equal today (205/205 green), still right if an entry gains a bad key.
         dropped = sorted(set(kwargs) - valid_param_names)
         if dropped:
             raise ValueError(
@@ -877,14 +1032,27 @@ def create_ffn_layer(
 
 
 def create_ffn_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
-    """
-    Create FFN layer from configuration dictionary.
+    """Build one FFN layer from a config dict.
 
-    :param config: Configuration dictionary containing 'type' key and parameters.
+    The dict's ``'type'`` key names the ``ffn_type``; every other key is passed
+    to :func:`create_ffn_layer` as a keyword argument, ``'name'`` included. The
+    input dict is copied, not mutated.
+
+    Example:
+
+    .. code-block:: python
+
+        ffn = create_ffn_from_config(
+            {'type': 'mlp', 'hidden_dim': 2048, 'output_dim': 512}
+        )
+
+    :param config: A dict with a ``'type'`` key plus the parameters for that
+        type.
     :type config: Dict[str, Any]
-    :return: Configured FFN layer instance.
+    :return: The constructed layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: If 'type' key is missing from config.
+    :raises ValueError: If ``config`` is not a dict, if it has no ``'type'``
+        key, or if :func:`create_ffn_layer` rejects the type or the parameters.
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dictionary, got {type(config)}")
