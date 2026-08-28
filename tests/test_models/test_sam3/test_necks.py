@@ -180,8 +180,40 @@ class TestConstruction:
             Sam3DualViTDetNeck(dim=18, d_model=8)
 
     def test_odd_d_model_raises(self):
-        with pytest.raises(ValueError, match="positive and even"):
+        with pytest.raises(ValueError, match="positive multiple of 4"):
             Sam3DualViTDetNeck(dim=16, d_model=7)
+
+    def test_an_even_d_model_that_halves_to_an_odd_width_raises(self):
+        # d_model=10 is EVEN and passed the old `% 2` check, but it hands
+        # num_pos_feats=5 to PositionEmbeddingSine2D, whose sine and cosine
+        # halves cannot then be stacked. Before this raise the neck
+        # CONSTRUCTED and only died on the first forward pass with an
+        # InvalidArgumentError from ops.stack. The message must name d_model
+        # -- the parameter the caller actually controls.
+        with pytest.raises(ValueError, match="d_model") as excinfo:
+            Sam3DualViTDetNeck(dim=32, d_model=10)
+        assert "multiple of 4" in str(excinfo.value)
+        assert "d_model // 2 = 5" in str(excinfo.value)
+
+    def test_a_pre_multiple_of_four_config_still_loads(self):
+        # Guide section 6.3 migration path: the `% 4` rule is a new rejection
+        # of a value the old `% 2` check accepted, so an archive carrying
+        # d_model=10 must still deserialize. from_config rounds UP and warns.
+        config = {
+            "name": "legacy_neck", "dim": 32, "d_model": 10,
+            "scale_factors": (2.0, 1.0), "add_sam2_neck": False,
+            "pe_temperature": 5000.0,
+        }
+        original = dict(config)
+        neck = Sam3DualViTDetNeck.from_config(config)
+        assert neck.d_model == 12
+        assert neck.position_encoding.num_pos_feats == 6
+        # The shim must not mutate the caller's dict.
+        assert config == original
+        # A conforming config is passed through untouched.
+        assert Sam3DualViTDetNeck.from_config(
+            {**original, "d_model": 12}
+        ).d_model == 12
 
     def test_unsupported_scale_raises(self):
         with pytest.raises(ValueError, match="not supported"):
@@ -776,9 +808,10 @@ class TestSerialization:
             # only ever constructed here and config-compared, so nothing
             # caught it. `PositionEmbeddingSine2D.__init__` now rejects an odd
             # width at construction, which is what surfaced this.
-            # NOTE: `Sam3DualViTDetNeck.__init__` still validates only
-            # `d_model % 2 == 0`, so 10 remains reachable from user code and
-            # now fails with a message naming `num_pos_feats`, not `d_model`.
+            # `Sam3DualViTDetNeck.__init__` now validates `d_model % 4 == 0`
+            # itself, so 10 is rejected at the neck with a message naming
+            # `d_model`; see `test_an_even_d_model_that_halves_to_an_odd_width
+            # _raises` and the section 6.3 load shim beside it.
             dim=32, d_model=12, scale_factors=(2.0, 1.0),
             add_sam2_neck=False, pe_temperature=5000.0,
         )

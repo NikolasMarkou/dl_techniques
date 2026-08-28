@@ -226,8 +226,12 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
     :param dim: Trunk channel width (the neck's input width).
     :type dim: int
     :param d_model: Common output width of every scale of every branch.
-        Must be even, because the sine encoding is built from ``d_model // 2``
-        features per axis.
+        Must be a positive multiple of **4**, not merely even. The sine
+        encoding receives ``num_pos_feats = d_model // 2`` features per axis,
+        and :class:`PositionEmbeddingSine2D` splits that width again between
+        its sine and cosine halves -- so ``d_model // 2`` must ITSELF be even.
+        ``d_model = 10`` is even, yields ``num_pos_feats = 5``, and builds a
+        position encoder that can never run a forward pass.
     :type d_model: int
     :param scale_factors: Resolution multipliers, in output order (finest
         first at the settled configuration).
@@ -240,8 +244,8 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``dim`` is not divisible by 4, if ``d_model`` is not
-        positive and even, if ``scale_factors`` is empty, or if it names an
-        unsupported scale.
+        a positive multiple of 4, if ``scale_factors`` is empty, or if it names
+        an unsupported scale.
 
     Example:
         >>> import numpy as np
@@ -271,10 +275,25 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
                 f"dim ({dim}) must be a positive multiple of 4 -- the 4.0 scale "
                 f"branch narrows it to dim // 4"
             )
-        if d_model <= 0 or d_model % 2 != 0:
+        # DECISION plan-2026-08-28T181715-3870472c/D-006
+        # The constraint is `% 4`, NOT `% 2`. Do not "relax" this back to
+        # evenness: `d_model // 2` is handed to `PositionEmbeddingSine2D` as
+        # `num_pos_feats`, and THAT value must itself be even because the layer
+        # splits it between its sine and cosine halves. `d_model = 10` passed
+        # the old `% 2` check, produced `num_pos_feats = 5`, and built an
+        # encoder that could never complete a forward pass -- it died later in
+        # `ops.stack` with `InvalidArgumentError: Shapes of all inputs must
+        # match: values[0].shape = [2,6,5,3] != values[1].shape = [2,6,5,2]`.
+        # Nothing caught it because the only test using 10 constructed the neck
+        # and compared configs without ever calling it. See decisions.md D-006.
+        if d_model <= 0 or d_model % 4 != 0:
             raise ValueError(
-                f"d_model ({d_model}) must be positive and even; the sine "
-                f"encoding uses d_model // 2 features per axis"
+                f"d_model ({d_model}) must be a positive multiple of 4, not "
+                f"merely even: the sine encoding receives num_pos_feats = "
+                f"d_model // 2 = {d_model // 2} features per axis, and that "
+                f"value must ITSELF be even because PositionEmbeddingSine2D "
+                f"splits it between its sine and cosine halves. Use "
+                f"d_model = {((d_model + 3) // 4) * 4 if d_model > 0 else 4}."
             )
         scale_factors = tuple(float(s) for s in scale_factors)
         if not scale_factors:
@@ -554,5 +573,40 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
             "pe_temperature": self.pe_temperature,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "Sam3DualViTDetNeck":
+        """Rebuild from a config, tolerating a pre-``% 4`` stored ``d_model``.
+
+        Guide section 6.3 migration path. The constructor's multiple-of-4 rule
+        is a NEW rejection of a value the old ``% 2`` check accepted, so an
+        archive written before it must still load. An odd ``d_model // 2`` is
+        rounded UP here (``d_model`` to the next multiple of 4) with a warning,
+        never raised on. Rounding up rather than down preserves capacity, and
+        the width change cannot break anything that previously worked: such a
+        neck's position encoder could never complete a forward pass, so no
+        model carrying one was ever trainable or servable.
+
+        :param config: Serialized configuration.
+        :type config: Dict[str, Any]
+        :return: The reconstructed neck.
+        :rtype: Sam3DualViTDetNeck
+        """
+        config = dict(config)
+        d_model = config.get("d_model")
+        if isinstance(d_model, int) and d_model > 0 and d_model % 4 != 0:
+            substitute = ((d_model + 3) // 4) * 4
+            logger.warning(
+                "Sam3DualViTDetNeck config carries d_model=%d, whose sine "
+                "width num_pos_feats=%d is odd; this archive predates the "
+                "multiple-of-4 requirement and its position encoder could "
+                "never run a forward pass. Substituting d_model=%d "
+                "(num_pos_feats=%d). The neck output width changes from %d to "
+                "%d, so stored weights for this layer will not match.",
+                d_model, d_model // 2, substitute, substitute // 2,
+                d_model, substitute,
+            )
+            config["d_model"] = substitute
+        return cls(**config)
 
 # ---------------------------------------------------------------------
