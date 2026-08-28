@@ -1,61 +1,34 @@
 """
-A position-wise Feed-Forward Network from the Transformer.
+The position-wise feed-forward network from the Transformer.
 
-This layer constitutes the second major sub-component within each block of a
-standard Transformer architecture, following the multi-head attention mechanism.
-Its primary role is to process the information aggregated by the attention
-mechanism, applying a non-linear transformation to each token's representation
-independently and identically. This "position-wise" application is a key
-design choice, allowing for parallel processing across the sequence.
+This is the second sub-block of a Transformer layer, the one that runs after
+attention. It transforms each token on its own. No token reads another, so
+the whole sequence goes through in parallel as two matmuls.
 
-Architectural Overview:
-The network follows a simple yet effective "expand-then-contract" design:
+The shape is expand-then-contract:
 
-1.  **Expansion**: An initial linear layer (`fc1`) projects the input
-    representation from its original dimension (`input_dim`) into a much
-    higher-dimensional intermediate space (`hidden_dim`). This expansion,
-    typically by a factor of four, provides the model with a higher-capacity
-    "workspace" to discover and disentangle complex feature interactions.
+1.  ``fc1`` projects each token from its input width up to ``hidden_dim``.
+    The usual expansion is 4x. The wider space gives the activation more
+    room to separate features.
+2.  An activation (GELU by default) runs element-wise on the wide tensor.
+    This is the only non-linearity. Without it the two Dense layers would
+    collapse into a single linear map.
+3.  ``fc2`` projects back down to ``output_dim``. Set ``output_dim`` to the
+    model width so the result can be added to the residual stream.
 
-2.  **Non-linear Activation**: A non-linear activation function (commonly GELU
-    or ReLU) is applied element-wise to the expanded representation. This is
-    the critical step that allows the FFN to model complex, non-linear
-    relationships that a purely linear transformation could not capture.
+The maths, for one token vector ``x``:
 
-3.  **Contraction**: A second linear layer (`fc2`) projects the activated,
-    high-dimensional representation back down to the model's original output
-    dimension (`output_dim`), which is typically the same as the `input_dim`
-    to facilitate residual connections. This final projection synthesizes the
-    rich features learned in the expanded space into a refined output token
-    representation.
+    FFN(x) = activation(x @ W_1 + b_1) @ W_2 + b_2
 
-This structure allows the FFN to act as a memory or knowledge store, where
-the parameters learn to recognize specific patterns from the attention output
-and map them to appropriate new representations.
+``W_1`` is ``(input_dim, hidden_dim)`` and ``W_2`` is
+``(hidden_dim, output_dim)``. GELU is ``x * Phi(x)``, where ``Phi`` is the
+standard Gaussian CDF. The same weights apply at every position.
 
-Foundational Mathematics:
-For an input vector `x` corresponding to a single position in the sequence,
-the computation performed by the MLP block is:
-
-`FFN(x) = W_2 * activation(W_1 @ x + b_1) + b_2`
-
-where:
-- `W_1` and `b_1` are the weight matrix and bias vector of the first linear
-  layer, projecting `x` from `input_dim` to `hidden_dim`.
-- `activation` is a non-linear function like GELU, `GELU(x) = x * Φ(x)`, where
-  `Φ(x)` is the standard Gaussian cumulative distribution function.
-- `W_2` and `b_2` are the weight matrix and bias vector of the second linear
-  layer, projecting the result back from `hidden_dim` to `output_dim`.
-
-The entire sequence of operations—expansion, non-linear filtering, and
-contraction—is applied identically to each token's vector in the sequence,
-but with shared weights across all positions.
+This layer holds no residual add and no normalization. The caller owns both.
 
 References:
-This specific FFN configuration was introduced as a core component of the
-Transformer architecture in the seminal paper:
-
 -   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
+    (introduced this FFN as a Transformer sub-block)
 
 """
 
@@ -75,86 +48,147 @@ from dl_techniques.initializers import clone_initializer
 @keras.saving.register_keras_serializable()
 class MLPBlock(keras.layers.Layer):
     """
-    MLP block used in Transformers.
+    The standard Transformer MLP block.
 
-    This block implements the standard feed-forward network used in transformer
-    architectures, consisting of two dense layers with an activation function
-    and optional dropout in between. The computation is
-    ``FFN(x) = W_2 * activation(W_1 @ x + b_1) + b_2``, applied identically
-    to each token position with shared weights.
+    Two Dense layers with one activation between them:
+    ``FFN(x) = activation(x @ W_1 + b_1) @ W_2 + b_2``. Each token is
+    transformed on its own, with the same weights at every position.
+
+    The input width does NOT have to equal ``output_dim``. ``fc1`` is built
+    from whatever width arrives, and ``output_dim`` sets only the output.
+
+    Dropout runs in ONE place, after the activation. There is no dropout on
+    the output of ``fc2``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────┐
-        │   Input (..., input_dim)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │  fc1: Dense(hidden_dim) │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │   Activation (e.g. GELU)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │   Dropout (optional)    │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │  fc2: Dense(output_dim) │
-        └────────────┬────────────┘
-                     ▼
-        ┌──────────────────────────┐
-        │  Output (..., output_dim)│
-        └──────────────────────────┘
+            Input  [..., input_dim]
+                        │
+                        ▼
+            ┌─────────────────────────┐
+            │ fc1                     │
+            │ Dense(hidden_dim)       │
+            └────────────┬────────────┘
+                         ▼
+            ┌─────────────────────────┐
+            │ activation              │
+            │ (default gelu)          │
+            └────────────┬────────────┘
+                         ▼
+            ┌─────────────────────────┐
+            │ dropout                 │
+            │ (only if rate > 0.0)    │
+            └────────────┬────────────┘
+                         ▼
+            ┌─────────────────────────┐
+            │ fc2                     │
+            │ Dense(output_dim)       │
+            └────────────┬────────────┘
+                         ▼
+            Output [..., output_dim]
 
-    :param hidden_dim: Integer, hidden dimension for the first dense layer (expansion).
-        Must be positive.
+        `dropout` really is conditional: at dropout_rate=0.0
+        the attribute is None and no Dropout layer exists in
+        the graph. There is no second dropout after fc2.
+
+        There is no residual add and no normalization inside
+        this layer. The caller owns both.
+
+    :param hidden_dim: Width of the expansion, the ``units`` of ``fc1``. Must
+        be positive. Transformers usually set it to 4x the model width.
     :type hidden_dim: int
-    :param output_dim: Integer, output dimension for the second dense layer (projection).
-        Must be positive.
+    :param output_dim: Width of the output, the ``units`` of ``fc2``. Must be
+        positive. It does NOT constrain the input width.
     :type output_dim: int
-    :param activation: Activation function name or callable.
-        Accepts string names ('gelu', 'relu', 'swish') or callable functions.
-        Defaults to 'gelu'.
+    :param activation: Activation applied after ``fc1``. A Keras name
+        ('gelu', 'relu', 'swish') or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
-    :param dropout_rate: Dropout rate applied after both dense layers.
-        Must be in range [0.0, 1.0). Defaults to 0.0.
+    :param dropout_rate: Dropout rate applied after the activation, in
+        ``[0.0, 1.0)``. At 0.0 no Dropout layer is created. Defaults to 0.0.
     :type dropout_rate: float
-    :param use_bias: Whether the dense layers use bias vectors.
-        Defaults to True.
+    :param use_bias: Whether ``fc1`` and ``fc2`` carry a bias. Defaults to
+        True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the dense layer kernels.
-        Accepts string names ('glorot_uniform', 'he_normal') or Initializer instances.
-        Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the kernels. A Keras name
+        ('glorot_uniform', 'he_normal') or an Initializer instance. Defaults
+        to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param output_kernel_initializer: Optional initializer for the OUTPUT
-        projection (``fc2``) only. ``None`` (the default) means ``fc2`` keeps a
-        clone of ``kernel_initializer``, i.e. exactly the historical behaviour.
-        Supply it only to give the residual-path projection a different scale
-        from the expansion -- see ``TransformerLayer``'s
+    :param output_kernel_initializer: Initializer for the OUTPUT projection
+        (``fc2``) only. ``None`` (the default) means ``fc2`` gets a clone of
+        ``kernel_initializer``, which is the historical behaviour. Pass one
+        to give the residual-path projection a different scale from the
+        expansion -- see ``TransformerLayer``'s
         ``residual_output_kernel_initializer``.
     :type output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
-    :param bias_initializer: Initializer for the bias vectors. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for the dense layer kernels.
-        Can be string name ('l2') or Regularizer instance. Defaults to None.
+    :param kernel_regularizer: Regularizer for the kernels. A Keras name
+        ('l2') or a Regularizer instance. Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param bias_regularizer: Optional regularizer for the dense layer biases.
-        Can be string name ('l1') or Regularizer instance. Defaults to None.
+    :param bias_regularizer: Regularizer for the biases. A Keras name ('l1')
+        or a Regularizer instance. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If hidden_dim or output_dim is not positive.
-    :raises ValueError: If dropout_rate is not in range [0.0, 1.0).
+    :ivar hidden_dim: The stored expansion width.
+    :vartype hidden_dim: int
+    :ivar output_dim: The stored output width.
+    :vartype output_dim: int
+    :ivar activation_name: The activation exactly as passed in, before
+        ``keras.activations.get``. Stored for reference; ``get_config()``
+        serializes ``activation_fn`` instead.
+    :vartype activation_name: Union[str, Callable]
+    :ivar activation_fn: The resolved activation, called in ``call()``.
+    :vartype activation_fn: Callable
+    :ivar dropout_rate: The stored dropout rate.
+    :vartype dropout_rate: float
+    :ivar use_bias: Whether the projections carry a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar output_kernel_initializer: The resolved ``fc2`` initializer, or
+        ``None`` when ``fc2`` follows ``kernel_initializer``.
+    :vartype output_kernel_initializer: Optional[keras.initializers.Initializer]
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar fc1: ``Dense(hidden_dim)``, the expansion.
+    :vartype fc1: keras.layers.Dense
+    :ivar fc2: ``Dense(output_dim)``, the contraction.
+    :vartype fc2: keras.layers.Dense
+    :ivar dropout: ``Dropout(dropout_rate)``, or ``None`` when the rate is
+        0.0.
+    :vartype dropout: Optional[keras.layers.Dropout]
+
+    :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not positive.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0)``.
+
+    Input shape:
+        Tensor of rank >= 2, shape ``(..., input_dim)``. The input width is
+        independent of ``output_dim``.
+
+    Output shape:
+        Same rank and leading axes as the input, with the last axis set to
+        ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            mlp = MLPBlock(hidden_dim=2048, output_dim=512)
+            y = mlp(keras.random.normal((2, 10, 512)))
+            y.shape                 # (2, 10, 512)
 
     Note:
-        This implementation follows the standard transformer MLP design where
-        the hidden dimension is typically 4x the model dimension. The dropout
-        is applied after both the activation and the final projection.
+        Sub-layers are created in ``__init__`` and built explicitly in
+        ``build()``. Keras does not build them on its own here, because
+        ``fc2`` sees ``hidden_dim`` rather than the input width.
     """
 
     def __init__(
@@ -171,31 +205,39 @@ class MLPBlock(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the MLP block.
+        """Validate the configuration and create the two projections.
 
-        :param hidden_dim: Hidden dimension for the first dense layer (expansion).
+        Every argument is documented on the class. Validation runs before any
+        attribute is stored, so a rejected configuration leaves no half-built
+        layer behind.
+
+        :param hidden_dim: Hidden width of ``fc1``. Must be positive.
         :type hidden_dim: int
-        :param output_dim: Output dimension for the second dense layer (projection).
+        :param output_dim: Output width of ``fc2``. Must be positive.
         :type output_dim: int
-        :param activation: Activation function name or callable.
+        :param activation: Activation name or callable, applied after ``fc1``.
         :type activation: Union[str, Callable]
-        :param dropout_rate: Dropout rate applied after both dense layers.
+        :param dropout_rate: Dropout rate applied after the activation only.
+            Must be in ``[0.0, 1.0)``.
         :type dropout_rate: float
-        :param use_bias: Whether the dense layers use bias vectors.
+        :param use_bias: Whether ``fc1`` and ``fc2`` carry a bias.
         :type use_bias: bool
-        :param kernel_initializer: Initializer for the dense layer kernels.
+        :param kernel_initializer: Initializer for both kernels.
         :type kernel_initializer: Union[str, keras.initializers.Initializer]
-        :param output_kernel_initializer: Optional initializer for ``fc2`` only;
-            ``None`` keeps a clone of ``kernel_initializer``.
+        :param output_kernel_initializer: Initializer for ``fc2`` only.
+            ``None`` means ``fc2`` gets a clone of ``kernel_initializer``.
         :type output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
-        :param bias_initializer: Initializer for the bias vectors.
+        :param bias_initializer: Initializer for both biases.
         :type bias_initializer: Union[str, keras.initializers.Initializer]
-        :param kernel_regularizer: Optional regularizer for the dense layer kernels.
+        :param kernel_regularizer: Regularizer for both kernels, or ``None``.
         :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param bias_regularizer: Optional regularizer for the dense layer biases.
+        :param bias_regularizer: Regularizer for both biases, or ``None``.
         :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param kwargs: Additional keyword arguments for the Layer base class.
+        :param kwargs: Extra arguments for ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
+            positive, or if ``dropout_rate`` is outside ``[0.0, 1.0)``.
         """
         super().__init__(**kwargs)
 
@@ -271,10 +313,12 @@ class MLPBlock(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> None:
         """
-        Build the layer and all its sub-layers.
+        Build the two projections and the dropout.
 
-        This method is called automatically when the layer first processes input.
-        For robust serialization, we explicitly build each sub-layer.
+        Keras calls this the first time the layer sees input. Each sub-layer
+        is built explicitly, in the order ``call()`` uses them, so every
+        weight exists before a save or a restore. ``fc2`` and the dropout see
+        the intermediate width ``hidden_dim``, not the input width.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -306,14 +350,17 @@ class MLPBlock(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply the MLP block to input tensors.
+        Run the block: ``fc1`` -> activation -> dropout -> ``fc2``.
 
-        :param inputs: Input tensor of shape (..., input_dim).
+        Dropout only exists when ``dropout_rate`` is above 0.0, and it sits
+        between the activation and ``fc2``. Nothing runs after ``fc2``.
+
+        :param inputs: Input tensor of shape ``(..., input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating whether the layer should behave
-            in training mode. Affects dropout behavior.
+        :param training: Whether to run in training mode. Only affects
+            dropout.
         :type training: Optional[bool]
-        :return: Output tensor of shape (..., output_dim).
+        :return: Output tensor of shape ``(..., output_dim)``.
         :rtype: keras.KerasTensor
         """
         # First dense layer (expansion)
@@ -336,12 +383,14 @@ class MLPBlock(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the layer.
+        Compute the output shape.
+
+        Every axis is preserved except the last, which becomes
+        ``output_dim``.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple. All dimensions preserved except last
-            dimension changes to output_dim.
+        :return: The input shape with the last axis set to ``output_dim``.
         :rtype: Tuple[Optional[int], ...]
         """
         # Convert to list for manipulation
@@ -352,11 +401,13 @@ class MLPBlock(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get layer configuration for serialization.
+        Return the config needed to rebuild this layer.
 
-        Returns ALL parameters passed to __init__ for complete reconstruction.
+        Holds every ``__init__`` argument. ``activation`` is stored in its
+        serialized form, taken from ``activation_fn``, so a callable
+        round-trips as well as a name.
 
-        :return: Dictionary containing the complete layer configuration.
+        :return: The complete layer configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
