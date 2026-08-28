@@ -187,13 +187,14 @@ class WaveFieldAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        head           0            …           H−1
-        frequency    0.3    linear ramp        4.0     sign structure / range
-        damping     −3.0    linear ramp        0.5     softplus'd → decay rate
-        phase        0.0    linear ramp         π      first-lobe offset
+        head            0        ...        H-1     what it controls
+        frequency     0.3    linear ramp     4.0     sign structure
+        damping      -3.0    linear ramp     0.5     range, via softplus
+        phase         0.0    linear ramp      pi     first-lobe offset
 
-        Slow-damping heads propagate far; fast-damping heads stay local.
-        L1 normalisation keeps total influence independent of decay rate.
+        Slow-damping heads propagate far, fast-damping heads stay local.
+        L1 normalisation keeps total influence independent of the decay
+        rate, so a slow head cannot win on mass alone.
 
     :param dim: Model dimension (must be divisible by ``num_heads``).
     :type dim: int
@@ -215,10 +216,12 @@ class WaveFieldAttention(keras.layers.Layer):
     :param coupling_seed: Seed for the ``IdentityPlusNoise`` initializer of
         ``field_coupling``. ``None`` (the default) draws from the global Keras
         RNG, so reproducibility then depends on ``keras.utils.set_random_seed``;
-        passing an explicit int makes a rebuild-from-config deterministic on its
-        own. This exists because the coupling matrix used to be initialized with
-        ``np.random.randn``, which is not serializable — see the
-        ``plan_2026-05-07_47199c68/D-002`` anchor in ``build()``.
+        passing an explicit int makes a rebuild-from-config deterministic on
+        its own. This argument exists because the coupling matrix used to be
+        initialized with ``np.random.randn``, which does not serialize; it is
+        now built by the seedable
+        :class:`~dl_techniques.initializers.identity_plus_noise.IdentityPlusNoise`
+        in :meth:`build`. Don't go back to a raw numpy draw.
     :type coupling_seed: Optional[int]
     :param query_modulation_activation_type: Activation applied to ``q / scale``
         to form the query-dependent gather modulation, resolved through
@@ -292,8 +295,10 @@ class WaveFieldAttention(keras.layers.Layer):
         dropout_layer: Output dropout, or ``None`` at rate 0.
         wave_frequency, wave_damping, wave_phase: Per-head kernel parameters.
         field_coupling: The learned ``(H, H)`` head-mixing matrix.
-        scale: ``sqrt(head_dim)`` — the INVERSE of every sibling's convention;
-            ``call`` divides by it. See the D-015 anchor.
+        scale: ``sqrt(head_dim)``, which is the INVERSE of every sibling's
+            convention in this package. ``call`` DIVIDES by it, at
+            ``q / self.scale``, where a sibling would multiply. Read the
+            division before assuming the usual meaning.
     """
 
     def __init__(
@@ -330,9 +335,11 @@ class WaveFieldAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # Shared implementation. Its message is byte-identical to the local check this
-        # replaced — `f"dim ({dim}) must be divisible by num_heads ({num_heads})"` — which
-        # `tests/.../test_wave_field_attention.py:83` pins with a `pytest.raises(match=...)`.
+        # Shared implementation. Its message is byte-identical to the local check
+        # this replaced - `f"dim ({dim}) must be divisible by num_heads
+        # ({num_heads})"` - which
+        # `test_wave_field_attention.py::test_invalid_dim_not_divisible` pins
+        # with a `pytest.raises(match=...)`.
         validate_head_divisibility(dim, num_heads)
         if field_size <= 1:
             raise ValueError(f"field_size must be > 1, got {field_size}")
@@ -525,15 +532,19 @@ class WaveFieldAttention(keras.layers.Layer):
         w_lo = 1.0 - frac
         w_hi = frac
 
-        lo_oh = keras.ops.one_hot(idx_lo, G, dtype="float32")  # (N, G)
-        hi_oh = keras.ops.one_hot(idx_hi, G, dtype="float32")  # (N, G)
+        # Both (N, G).
+        lo_oh = keras.ops.one_hot(idx_lo, G, dtype="float32")
+        hi_oh = keras.ops.one_hot(idx_hi, G, dtype="float32")
 
-        # Build gather first (one transpose total instead of three).
+        # Build gather first, then transpose once. Building both from scratch
+        # would cost three transposes.
+        # Shape: (N, G)
         gather_mat = (
             lo_oh * keras.ops.expand_dims(w_lo, -1)
             + hi_oh * keras.ops.expand_dims(w_hi, -1)
-        )  # (N, G)
-        scatter_mat = keras.ops.transpose(gather_mat)  # (G, N)
+        )
+        # Shape: (G, N)
+        scatter_mat = keras.ops.transpose(gather_mat)
         return scatter_mat, gather_mat
 
     def _build_wave_kernels_fft(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
@@ -598,7 +609,9 @@ class WaveFieldAttention(keras.layers.Layer):
         # (fp16 / bf16) training. Cast back to the input dtype at the end.
         in_dtype = field.dtype
         field32 = keras.ops.cast(field, "float32")
-        field_t = keras.ops.transpose(field32, (0, 1, 3, 2))  # (B, H, D_h, G)
+        # Move the grid axis last so the FFT runs along it.
+        # Shape: (B, H, G, D_h) -> (B, H, D_h, G)
+        field_t = keras.ops.transpose(field32, (0, 1, 3, 2))
         field_padded = keras.ops.pad(field_t, [[0, 0], [0, 0], [0, 0], [0, G]])
 
         field_re, field_im = keras.ops.rfft(field_padded)
@@ -682,10 +695,13 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # 1. QKV projection -> (B, H, N, D_h) each
         qkv = self.qkv_proj(inputs)
-        # DECISION plan_2026-05-07_47199c68/D-001 — use keras.ops.split rather than
-        # 5-D reshape + transpose + tensor[0]/[1]/[2] indexing for backend
-        # robustness across Keras 3 backends.
+        # DECISION plan_2026-05-07_47199c68/D-001
+        # The originating plan directory is gone, so this comment is the record.
+        # Use keras.ops.split here. Don't go back to a 5-D reshape plus
+        # transpose plus tensor[0]/[1]/[2] indexing: split is the form that
+        # behaves the same across Keras 3 backends.
         q, k, v = keras.ops.split(qkv, 3, axis=-1)
+        # Split heads and move the head axis forward: (B, H, N, D_h) each.
         q = keras.ops.transpose(keras.ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
         k = keras.ops.transpose(keras.ops.reshape(k, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
         v = keras.ops.transpose(keras.ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
@@ -700,17 +716,18 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # 3. Deposit = V * ||K||
         k_mag = keras.ops.sqrt(keras.ops.sum(keras.ops.square(k), axis=-1, keepdims=True) + 1e-8)
-        deposit = v * k_mag  # (B, H, N, D_h)
+        # The key MAGNITUDE replaces the pairwise score. Shape (B, H, N, D_h).
+        deposit = v * k_mag
 
-        # Apply padding mask to deposits
+        # Mask the deposits, so padded tokens emit nothing onto the field.
         if attention_mask is not None:
-            # Cast to float compute dtype so bool / int masks are accepted.
+            # Cast to the float compute dtype so bool and int masks are accepted.
             attention_mask = keras.ops.cast(attention_mask, self.compute_dtype)
-            # attention_mask: (B, N) -> (B, 1, N, 1)
+            # (B, N) -> (B, 1, N, 1), broadcasting over heads and features.
             mask_4d = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), -1)
             deposit = deposit * mask_4d
 
-        # Scatter onto field
+        # Scatter onto the field grid.
         field = keras.ops.einsum("gn,bhnd->bhgd", scatter_mat, deposit)
 
         # 4. FFT wave convolution
@@ -723,24 +740,30 @@ class WaveFieldAttention(keras.layers.Layer):
         # 6. Gather from field
         gathered = keras.ops.einsum("ng,bhgd->bhnd", gather_mat, field)
 
-        # 7. Query-dependent gather modulation (NEW in V3.6)
-        #    Q selects which dimensions of propagated info each token reads.
-        #    Distinct from the gate (which is input-based, not projection-based).
-        q_mod = self.query_modulation_activation(q / self.scale, training=training)  # (B, H, N, D_h)
+        # 7. GATE 1, query modulation. Q chooses WHICH DIMENSIONS of the
+        #    arrived field each token reads. Note the DIVISION by self.scale:
+        #    self.scale is sqrt(head_dim), not its reciprocal.
+        # Shape: (B, H, N, D_h)
+        q_mod = self.query_modulation_activation(q / self.scale, training=training)
         gathered = gathered * q_mod
 
-        # 8. Content-dependent gating (input-based)
-        gate = self.gate_activation(self.gate_proj(inputs), training=training)  # (B, N, D)
+        # 8. GATE 2, content gate. This one decides HOW MUCH survives, and it
+        #    is computed from the RAW INPUT, not from a projection of the field.
+        # Shape: (B, N, D)
+        gate = self.gate_activation(self.gate_proj(inputs), training=training)
         gate = keras.ops.reshape(gate, (batch_size, seq_len, H, D_h))
-        gate = keras.ops.transpose(gate, (0, 2, 1, 3))  # (B, H, N, D_h)
+        # Shape: (B, H, N, D_h)
+        gate = keras.ops.transpose(gate, (0, 2, 1, 3))
         output = gathered * gate
 
-        # 9. Merge heads + project
-        output = keras.ops.transpose(output, (0, 2, 1, 3))  # (B, N, H, D_h)
+        # 9. Merge heads and project back to dim.
+        # Shape: (B, H, N, D_h) -> (B, N, H, D_h) -> (B, N, dim)
+        output = keras.ops.transpose(output, (0, 2, 1, 3))
         output = keras.ops.reshape(output, (batch_size, seq_len, self.dim))
         output = self.output_proj(output)
 
-        # Apply padding mask to output
+        # Mask the output too, so padded tokens read nothing back. The mask is
+        # applied twice: once on deposit, once here.
         if attention_mask is not None:
             output = output * keras.ops.expand_dims(attention_mask, -1)
 

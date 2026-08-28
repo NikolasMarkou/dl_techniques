@@ -81,59 +81,64 @@ class MultiHeadAttention(keras.layers.Layer):
     correct and cheaper than three.
 
     **[REUSE] This class contains no attention arithmetic.** Every projection,
-    score, mask application, probability normalization and output projection is
-    performed by the single ``MultiHeadCrossAttention`` sub-layer created in
+    score, mask application, probability normalization and output projection
+    happens in the single ``MultiHeadCrossAttention`` sub-layer created in
     ``__init__``, invoked with ``kv_input=None`` (self-attention) and
     ``shared_qk_projections=True`` (one fused QKV ``Dense`` instead of three).
     ``build()`` only validates the input rank and forwards; ``call()`` is a
     one-expression delegation; ``compute_output_shape()`` is the identity.
 
-    WHAT NOT TO DO: do not inline a copy of the QKV/score/softmax pipeline here
-    "for clarity" or "to avoid a layer of indirection". Two independent copies of
-    scaled dot-product attention would immediately drift (the sibling already
-    carries QK-norm, ``ProbabilityOutput`` strategies and an mask-broadcast
-    helper), and every ``.keras`` checkpoint of this layer stores the nested
-    ``cross_attention`` sub-layer's weights under that name — flattening the
-    wrapper is a silent checkpoint break, not a refactor.
+    WHAT NOT TO DO: don't inline a copy of the QKV/score/softmax pipeline here
+    for clarity, or to remove a layer of indirection. Two copies of scaled
+    dot-product attention drift apart - the sibling already carries QK-norm,
+    ``ProbabilityOutput`` strategies and a mask-broadcast helper. And every
+    ``.keras`` checkpoint of this layer stores the nested ``cross_attention``
+    sub-layer's weights under that name, so flattening the wrapper is a silent
+    checkpoint break, not a refactor.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────┐
-        │  Input [B, seq, dim]                 │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────────────────────────────┐
-        │  self.cross_attention : MultiHeadCrossAttention              │
-        │    constructed in __init__ with shared_qk_projections=True,  │
-        │    invoked with kv_input=None                                │
-        │                                                              │
-        │    ONE fused Dense(3·dim) → Q, K, V → heads                  │
-        │    QK-norm, scores · 1/sqrt(d_k), mask, probability,         │
-        │    dropout, · V, merge heads, output projection — ALL in     │
-        │    there; see that class's own diagram, do not re-derive it  │
-        └───────────────┬──────────────────────────────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Output [B, seq, dim]                │
-        └──────────────────────────────────────┘
+                    inputs  [B, seq, dim]
+                             │
+                             ▼
+          ┌───────────────────────────────────────┐
+          │ cross_attention                       │
+          │   MultiHeadCrossAttention, built in   │
+          │   __init__ with                       │
+          │     shared_qk_projections=True        │
+          │   called with kv_input=None           │
+          │                                       │
+          │   ONE fused Dense(3 * dim) -> Q, K, V │
+          │   split into num_heads of width d_k   │
+          │   optional QK-norm                    │
+          │   scores * 1/sqrt(d_k)                │
+          │   attention_mask, probability, dropout│
+          │   weighted sum of V, merge heads      │
+          │   output projection back to dim       │
+          └──────────────────┬────────────────────┘
+                             ▼
+                    output  [B, seq, dim]
 
-        Do not flatten the sub-layer away: its nested name is baked into every
-        saved .keras checkpoint of this class.
+        Every stage in that box belongs to MultiHeadCrossAttention. Read
+        its diagram for the internals; this class adds no arithmetic.
+        Don't flatten the sub-layer away: the name cross_attention is
+        baked into every saved .keras checkpoint of this class.
 
     **Why the heads are split rather than stacked:**
 
     .. code-block:: text
 
-        one head of width dim      one notion of relevance; the softmax makes
-                                   it competitive, so a position must choose
-        h heads of width dim/h     h relations held simultaneously, same
-                                   parameter budget, mixed by the output
-                                   projection
+        one head, width dim     one notion of relevance. The softmax
+                                makes it competitive, so a position must
+                                choose.
 
-        d_k = dim // num_heads, and the 1/sqrt(d_k) factor holds logit variance
-        constant so head width does not saturate the softmax.
+        h heads, width dim/h    h relations held at once, same parameter
+                                budget, mixed by the output projection.
+
+        d_k = dim // num_heads. The 1/sqrt(d_k) factor holds logit
+        variance constant, so head width does not saturate the softmax.
 
     :param dim: Integer, dimension of input embeddings. Must be positive
         and divisible by num_heads.
@@ -239,22 +244,26 @@ class MultiHeadAttention(keras.layers.Layer):
     ) -> None:
         """Validate the cheap invariants and create the wrapped attention engine.
 
-        Every argument is stored and forwarded verbatim; the values this class
-        supplies itself are ``shared_qk_projections=True`` and
-        ``bias_initializer="zeros"``. Note the deliberate check ORDER anchored
-        below. See the class docstring for the parameter reference.
+        Every argument is stored and forwarded verbatim. The only values this
+        class supplies itself are ``shared_qk_projections=True`` and
+        ``bias_initializer="zeros"``. The check ORDER below is load-carrying and
+        is explained in the comment beside it. See the class docstring for the
+        parameter reference.
         """
         super().__init__(**kwargs)
 
         # Validate inputs
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
-        # R13: adopts the shared validator. Its message is character-for-character
-        # what stood here (`dim (63) must be divisible by num_heads (8)`), so the
-        # regex pinned at test_multi_head_attention.py:82 still matches and no
-        # diagnostic detail is lost. The check ORDER is preserved deliberately: this
-        # runs BEFORE the `num_heads <= 0` guard, exactly as before, because Python's
-        # `%` on a negative modulus does not raise and callers have seen this ordering.
+        # Adopts the shared validator. Its message is character-for-character
+        # what stood here - `dim (63) must be divisible by num_heads (8)` - so the
+        # regex in
+        # `test_multi_head_attention.py::test_invalid_dim_not_divisible` still
+        # matches and no diagnostic detail is lost.
+        #
+        # Don't move this below the `num_heads <= 0` guard. It has always run
+        # first, Python's `%` on a negative modulus does not raise, and callers
+        # have seen this ordering.
         validate_head_divisibility(dim, num_heads)
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
@@ -277,18 +286,19 @@ class MultiHeadAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # CREATE the underlying MultiHeadCrossAttention layer
-        # Use shared_qk_projections=True for efficient self-attention
+        # The engine. Its name is part of the checkpoint format.
         self.cross_attention = MultiHeadCrossAttention(
             dim=self.dim,
             num_heads=self.num_heads,
             dropout_rate=self.dropout_rate,
-            shared_qk_projections=True,  # Efficient self-attention mode
+            # One fused Dense(3 * dim): all three projections read the same
+            # tensor, so sharing is both correct and cheaper.
+            shared_qk_projections=True,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             output_kernel_initializer=self.output_kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            bias_initializer="zeros",  # Use default bias initializer
+            bias_initializer="zeros",
             probability_type=self.probability_type,
             probability_config=self.probability_config,
             qk_norm_type=self.qk_norm_type,
@@ -354,12 +364,14 @@ class MultiHeadAttention(keras.layers.Layer):
         :return: Attention output tensor of shape ``(batch_size, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
-        # Shape: (B, seq, dim) -> (B, seq, dim)
-        # Pure delegation — no arithmetic happens in this frame. See the [REUSE]
+        # Shape: (B, seq, dim) -> (B, seq, dim).
+        # Pure delegation. No arithmetic happens in this frame. See the [REUSE]
         # note on the class docstring.
+        #
+        # kv_input=None is what selects the engine's self-attention path.
         return self.cross_attention(
             query_input=inputs,
-            kv_input=None,  # Self-attention: kv_input=None
+            kv_input=None,
             attention_mask=attention_mask,
             training=training
         )

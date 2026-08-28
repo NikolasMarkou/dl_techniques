@@ -1,29 +1,33 @@
 """
-SD3 MMDiT joint attention: dual-stream (image + text) joint self-attention.
+SD3 MMDiT joint attention: image and text attend in ONE attention operation.
 
-This layer is the Keras 3 port of the diffusers ``JointAttnProcessor`` semantics
-used inside SD3 MMDiT blocks. Two token streams -- the image (``hidden_states``)
-and the text/context (``encoder_hidden_states``) -- are independently projected to
-Q/K/V, optionally per-head RMS-normed on Q/K, then **concatenated along the
-sequence axis** so the two streams attend *jointly* in a single scaled-dot-product
-attention. The joint output is then **split back** to the original per-stream
-lengths and each stream is run through its own output projection.
+This is the Keras 3 port of the diffusers ``JointAttnProcessor`` semantics used
+inside SD3 MMDiT blocks. Two token streams, the image (``hidden_states``) and
+the text context (``encoder_hidden_states``), are projected to Q/K/V by their
+own separate weights, optionally per-head RMS-normed on Q and K, then
+CONCATENATED along the sequence axis. One scaled-dot-product attention runs
+over the concatenation, so image tokens can attend to text tokens and text to
+image. The result is SPLIT back at the image length, and each stream goes
+through its own output projection.
 
-This faithfully reproduces the MMDiT joint-attention math while deliberately
-DROPPING the PyTorch source's paging / KV-cache / deque machinery (the source
-carries a ``# TODO: REVISIT THE PAGING LOGIC``): that cache is an inference-time
-hack that is irrelevant to -- and unused by -- correct training-time joint
-attention. See the ``# DECISION`` anchor in :meth:`call`.
+That single joint attention is the structural difference from a single-stream
+DiT. Per-modality weights, one shared attention problem.
+
+The port implements plain joint SDPA and drops the PyTorch source's paging,
+KV-cache and deque machinery; the source itself carries a
+``# TODO: REVISIT THE PAGING LOGIC`` there. That cache is an inference-time
+device with no bearing on the joint-attention math. See the ``DECISION`` anchor
+in :meth:`call`.
 
 **Intent**
 
-Provide the dual-stream joint attention primitive for SD3 MMDiT blocks: image and
-text tokens attend to each other (and themselves) in one shared attention, which
-is the structural difference from a single-stream DiT. The layer owns only the
-projection + norm + SDPA math; AdaLN modulation lives in the surrounding block.
+Provide the dual-stream joint attention primitive for SD3 MMDiT blocks. The
+layer owns the projections, the norms and the SDPA math. AdaLN modulation lives
+in the surrounding block, not here.
 
-When ``context_pre_only`` is True (the final MMDiT block discards the text path),
-``to_add_out`` is not created and ``call`` returns only the image stream.
+When ``context_pre_only`` is True, the final MMDiT block discards the text path:
+``to_add_out`` is not created and ``call`` returns the image stream alone rather
+than a two-element list.
 
 PyTorch reference semantics (diffusers ``JointAttnProcessor2_0``, paging stripped)::
 
@@ -56,43 +60,76 @@ class MMDiTJointAttention(keras.layers.Layer):
     """
     SD3 MMDiT dual-stream joint attention (image + text).
 
-    Projects an image token stream and a text/context token stream to Q/K/V,
-    applies optional per-head RMS QK-norm to each stream, concatenates the two
-    streams along the sequence axis for a single joint scaled-dot-product
-    attention, then splits the result back to the original per-stream lengths
-    and projects each stream out.
+    Projects an image token stream and a text context stream to Q/K/V with
+    separate per-modality weights, applies optional per-head RMS QK-norm to
+    each, concatenates the two along the sequence axis for ONE joint
+    scaled-dot-product attention, then splits the result back at the image
+    length and projects each stream out through its own weights.
+
+    Shapes below use ``B`` = batch, ``N_img`` and ``N_txt`` = per-stream
+    sequence lengths, ``H`` = num_heads, ``hd`` = head_dim, and
+    ``N = N_img + N_txt``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │                         MMDiTJointAttention                         │
-        │                                                                     │
-        │  image (B, N_img, dim)          text (B, N_txt, dim)                │
-        │        │ to_q/to_k/to_v               │ add_{q,k,v}_proj            │
-        │        │ reshape ► (B,H,N_img,hd)     │ reshape ► (B,H,N_txt,hd)    │
-        │        │ norm_q / norm_k              │ norm_added_q / norm_added_k │
-        │        └──────────────┬───────────────┘                             │
-        │                       │ concat on the sequence axis                 │
-        │                       ▼                                             │
-        │        Q, K, V  (B, H, N_img+N_txt, hd)                             │
-        │                       │ softmax(Q · Kᵀ · head_dim^-0.5) · V         │
-        │                       ▼                                             │
-        │        merge heads ► (B, N_img+N_txt, dim)                          │
-        │                       │ split at N_img                              │
-        │        ┌──────────────┴───────────────┐                             │
-        │        ▼                              ▼                             │
-        │     to_out                       to_add_out *                       │
-        │  image_out (B, N_img, dim)       text_out (B, N_txt, dim)           │
-        │                                                                     │
-        │  (*) omitted entirely when context_pre_only=True — call()           │
-        │      then returns the image stream alone, not a 2-element           │
-        │      list.  This layer accepts no attention mask.                   │
-        └─────────────────────────────────────────────────────────────────────┘
+          image [B, N_img, dim]        text [B, N_txt, dim]
+                    │                            │
+                    ▼                            ▼
+          ┌────────────────────┐      ┌────────────────────┐
+          │ to_q, to_k, to_v   │      │ add_q_proj,        │
+          │ image weights      │      │ add_k_proj,        │
+          │                    │      │ add_v_proj         │
+          │                    │      │ text weights       │
+          └─────────┬──────────┘      └─────────┬──────────┘
+                    ▼                           ▼
+          reshape to heads              reshape to heads
+          [B, H, N_img, hd]             [B, H, N_txt, hd]
+                    │                           │
+                    ▼                           ▼
+          ┌────────────────────┐      ┌────────────────────┐
+          │ norm_q, norm_k     │      │ norm_added_q,      │
+          │ (optional)         │      │ norm_added_k       │
+          │                    │      │ (optional)         │
+          └─────────┬──────────┘      └─────────┬──────────┘
+                    └────────────┬──────────────┘
+                                 ▼
+                    CONCAT on the sequence axis
+                    Q, K, V  [B, H, N, hd],  N = N_img + N_txt
+                                 │
+                                 ▼
+          ┌───────────────────────────────────────────────┐
+          │ ONE joint attention over the concatenation    │
+          │   S = Q . K^T * head_dim^-0.5   [B, H, N, N]  │
+          │   softmax in float32, cast back to V's dtype  │
+          │   A . V                                       │
+          │ This is where image tokens see text tokens    │
+          │ and text tokens see image tokens.             │
+          └───────────────────────┬───────────────────────┘
+                                  ▼
+                    merge heads  [B, N, dim]
+                                  │
+                    SPLIT at N_img
+                    ┌─────────────┴─────────────┐
+                    ▼                           ▼
+          ┌────────────────────┐      ┌────────────────────┐
+          │ to_out             │      │ to_add_out         │
+          │                    │      │ (omitted entirely  │
+          │                    │      │  when              │
+          │                    │      │  context_pre_only) │
+          └─────────┬──────────┘      └─────────┬──────────┘
+                    ▼                           ▼
+          image_out [B, N_img, dim]    text_out [B, N_txt, dim]
 
-    The full flow, including the PyTorch reference semantics this port reproduces,
-    is in the module docstring above.
+        With context_pre_only=True, to_add_out is never created and
+        call() returns the image stream ALONE, not a two-element list.
+        The right branch above stops at the split.
+
+        This layer accepts no attention mask.
+
+    The PyTorch reference semantics this port reproduces are in the module
+    docstring above.
 
     :param dim: Model / embedding dimensionality. Must be divisible by
         ``num_heads``.
@@ -142,6 +179,27 @@ class MMDiTJointAttention(keras.layers.Layer):
         eps: float = 1e-6,
         **kwargs: Any,
     ) -> None:
+        """Validate the configuration and create every projection and norm.
+
+        :param dim: Model dimensionality, divisible by ``num_heads``.
+        :type dim: int
+        :param num_heads: Number of attention heads.
+        :type num_heads: int
+        :param qk_norm: Whether to build the four per-head RMS QK-norms.
+        :type qk_norm: bool
+        :param use_bias: Whether the Dense projections carry a bias.
+        :type use_bias: bool
+        :param context_pre_only: If True, ``to_add_out`` is not created.
+        :type context_pre_only: bool
+        :param eps: Epsilon for the QK-norms.
+        :type eps: float
+        :param kwargs: Additional ``keras.layers.Layer`` arguments.
+        :type kwargs: Any
+
+        :raises ValueError: If ``dim`` or ``num_heads`` is not a positive
+            integer, if ``dim`` is not divisible by ``num_heads``, or if
+            ``eps`` is not positive.
+        """
         super().__init__(**kwargs)
 
         # --- validation -------------------------------------------------
@@ -151,13 +209,13 @@ class MMDiTJointAttention(keras.layers.Layer):
             raise ValueError(
                 f"num_heads must be a positive integer, got {num_heads}"
             )
-        # R13 cross-reference: this check DELIBERATELY does not adopt
-        # `common.validate_head_divisibility`. The shared helper's message omits this
-        # one's TRAILING PERIOD, so adopting it would change the raised text. That text is
-        # cheap to change here but not free — a `pytest.raises(match=...)` elsewhere in the
-        # repo, or a downstream log matcher, could pin it, and this pass is text-preserving
-        # as well as behavior-preserving. Sibling that DOES adopt the helper (its message
-        # is byte-identical to the shared one): `wave_field_attention.py`.
+        # This check does not call `common.validate_head_divisibility`, and the
+        # reason is one character: the shared helper's message has no TRAILING
+        # PERIOD, this one does. Adopting the helper would change the raised
+        # text, which a `pytest.raises(match=...)` or a log matcher elsewhere
+        # could be pinned on. `wave_field_attention.py` is the sibling that DOES
+        # adopt the helper, because its message is byte-identical to the shared
+        # one.
         if dim % num_heads != 0:
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads})."
@@ -173,12 +231,14 @@ class MMDiTJointAttention(keras.layers.Layer):
         self.use_bias = bool(use_bias)
         self.context_pre_only = bool(context_pre_only)
         self.eps = float(eps)
-        # R13 cross-reference: DELIBERATELY not `common.compute_attention_scale(head_dim)`.
-        # That helper computes `1.0 / math.sqrt(float(head_dim))`, which is the same real
-        # number but NOT guaranteed to be the same float64 bit pattern as `head_dim ** -0.5`
-        # (different libm paths, last-ULP divergence). Swapping it is a numerics change,
-        # however small, and this pass forbids those. It is already a Python float computed
-        # in `__init__`, so the D-002 "never `ops.sqrt` in `call()`" intent is satisfied.
+        # Not `common.compute_attention_scale(head_dim)`. That helper computes
+        # `1.0 / math.sqrt(float(head_dim))`, the same real number but not the
+        # same float64 bit pattern as `head_dim ** -0.5` - different libm paths
+        # diverge in the last ULP. Swapping it would be a numerics change,
+        # however small.
+        #
+        # The property that matters is already satisfied: this is a Python float
+        # computed in `__init__`, not a `keras.ops.sqrt` call in `call()`.
         self._scale = self.head_dim ** -0.5
 
         # --- image-stream projections (created here, built in build()) --
@@ -199,7 +259,8 @@ class MMDiTJointAttention(keras.layers.Layer):
         self.add_v_proj = keras.layers.Dense(
             dim, use_bias=self.use_bias, name="add_v_proj"
         )
-        # Text output projection only when the text stream is kept.
+        # The text output projection exists only when the text stream is kept.
+        # `call()` returns a single tensor in the other case.
         self.to_add_out = (
             None
             if self.context_pre_only
@@ -234,7 +295,10 @@ class MMDiTJointAttention(keras.layers.Layer):
     def build(
         self, input_shape: List[Tuple[Optional[int], ...]]
     ) -> None:
-        """Build the per-stream Q/K/V, QK-norm, and output projections.
+        """Build the per-stream Q/K/V, QK-norm and output projections.
+
+        The four QK-norms are built at a shape whose last axis is ``head_dim``,
+        so each scale parameter comes out ``(head_dim,)``.
 
         :param input_shape: List ``[img_shape, txt_shape]`` where
             ``img_shape = (B, N_img, dim)`` and ``txt_shape = (B, N_txt, dim)``.
@@ -262,7 +326,8 @@ class MMDiTJointAttention(keras.layers.Layer):
                 f"{self.dim}), got {txt_shape}"
             )
 
-        # Image-stream Q/K/V consume (B, N_img, dim).
+        # The two streams have separate weights, so each is built at its own
+        # shape. Image stream first.
         self.to_q.build(img_shape)
         self.to_k.build(img_shape)
         self.to_v.build(img_shape)
@@ -276,8 +341,8 @@ class MMDiTJointAttention(keras.layers.Layer):
         if self.to_add_out is not None:
             self.to_add_out.build(txt_shape)
 
-        # QK-norm normalizes over the per-head dim; build with a shape whose
-        # last axis is head_dim so each scale parameter is (head_dim,).
+        # QK-norm normalizes over the per-head dim. Building with a 4D shape
+        # whose last axis is head_dim is what makes each scale (head_dim,).
         if self.qk_norm:
             qk_norm_shape = (None, self.num_heads, None, self.head_dim)
             self.norm_q.build(qk_norm_shape)
@@ -288,7 +353,13 @@ class MMDiTJointAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def _to_heads(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Reshape ``(B, N, dim)`` -> ``(B, num_heads, N, head_dim)``."""
+        """Split the channel axis into heads and move the head axis forward.
+
+        :param x: Tensor of shape ``(B, N, dim)``.
+        :type x: keras.KerasTensor
+        :return: Tensor of shape ``(B, num_heads, N, head_dim)``.
+        :rtype: keras.KerasTensor
+        """
         shape = keras.ops.shape(x)
         batch, length = shape[0], shape[1]
         x = keras.ops.reshape(
@@ -303,6 +374,10 @@ class MMDiTJointAttention(keras.layers.Layer):
     ) -> Union[keras.KerasTensor, List[keras.KerasTensor]]:
         """Run dual-stream joint attention.
 
+        Project each stream with its own weights, concatenate on the sequence
+        axis, run ONE attention over the concatenation, split the result back at
+        the image length, and project each stream out.
+
         :param inputs: ``[hidden_states, encoder_hidden_states]`` with shapes
             ``(B, N_img, dim)`` and ``(B, N_txt, dim)``.
         :type inputs: List[keras.KerasTensor]
@@ -314,7 +389,8 @@ class MMDiTJointAttention(keras.layers.Layer):
         """
         hidden_states, encoder_hidden_states = inputs[0], inputs[1]
 
-        # Dynamic image sequence length used for the post-attention split.
+        # Read the image length now: it is the index the post-attention split
+        # uses, and after the concatenation it is no longer recoverable.
         n_img = keras.ops.shape(hidden_states)[1]
 
         # --- project both streams to (B, heads, seq, head_dim) ----------
@@ -335,35 +411,42 @@ class MMDiTJointAttention(keras.layers.Layer):
 
         # --- joint attention: concat image + text along the seq axis ----
         # Shape: (B, H, N_img, hd) + (B, H, N_txt, hd) -> (B, H, N_img+N_txt, hd)
-        # This concat IS the "joint" in joint attention: after it there is a single
-        # attention problem, so image tokens can attend to text tokens and vice versa.
+        #
+        # This concatenation IS the "joint" in joint attention. After it there
+        # is one attention problem rather than two, so image tokens attend to
+        # text tokens and text tokens attend to image tokens. Don't split this
+        # into two separate attentions: that would be a different architecture.
         q = keras.ops.concatenate([img_q, txt_q], axis=2)
         k = keras.ops.concatenate([img_k, txt_k], axis=2)
         v = keras.ops.concatenate([img_v, txt_v], axis=2)
 
-        # DECISION plan_2026-06-12_dfce0712/D-004: implement plain joint SDPA and
-        # DROP the PyTorch source's paging / KV-cache / deque logic (the source
-        # carries `# TODO: REVISIT THE PAGING LOGIC`). The cache is an
-        # inference-time micro-opt that is UNUSED by and irrelevant to the MMDiT
-        # joint-attention math; porting it would add stateful, non-graph-safe,
-        # untested machinery for zero training-time benefit. Do NOT re-introduce a
-        # KV cache here -- if paged inference is ever needed it belongs in the
-        # pipeline, not in this stateless layer. Also: SDPA is computed manually
-        # with keras.ops (no fused op) for backend portability and bf16 safety,
-        # mirroring ideogram4_attention. See decisions.md D-004.
+        # DECISION plan_2026-06-12_dfce0712/D-004
+        # The originating plan directory is gone, so this comment is the record.
+        # Plain joint SDPA, with the PyTorch source's paging / KV-cache / deque
+        # logic dropped - the source carries `# TODO: REVISIT THE PAGING LOGIC`
+        # over it. The cache is an inference-time optimization that the MMDiT
+        # joint-attention math does not use. Porting it would add stateful,
+        # non-graph-safe, untested machinery for no training-time gain.
+        #
+        # Don't re-introduce a KV cache here. If paged inference is ever needed
+        # it belongs in the pipeline, not in this stateless layer.
+        #
+        # SDPA is also written out by hand in keras.ops rather than through a
+        # fused op, for backend portability and bf16 safety, matching
+        # ideogram4_attention.
         # Shape: (B, H, N, hd) @ (B, H, hd, N) -> (B, H, N, N),  N = N_img + N_txt
         scores = keras.ops.matmul(
             q, keras.ops.transpose(k, (0, 1, 3, 2))
         )
         scores = scores * self._scale
 
-        # Softmax in float32 for bf16 stability, then cast back.
+        # Softmax in float32 for bf16 stability, then back to V's dtype.
         attn = keras.ops.softmax(
             keras.ops.cast(scores, "float32"), axis=-1
         )
         attn = keras.ops.cast(attn, v.dtype)
         # Shape: (B, H, N, N) @ (B, H, N, hd) -> (B, H, N, hd)
-        out = keras.ops.matmul(attn, v)  # (B, heads, N_img+N_txt, head_dim)
+        out = keras.ops.matmul(attn, v)
 
         # --- merge heads -> (B, N_img+N_txt, dim) -----------------------
         out_shape = keras.ops.shape(out)
@@ -373,11 +456,12 @@ class MMDiTJointAttention(keras.layers.Layer):
         out = keras.ops.reshape(out, (batch, total_len, self.dim))
 
         # --- split back to per-stream lengths ---------------------------
-        # Shape: (B, N_img+N_txt, dim) -> (B, N_img, dim) and (B, N_txt, dim)
+        # Shape: (B, N_img+N_txt, dim) -> (B, N_img, dim) and (B, N_txt, dim).
+        # The split index is the image length captured before the concat.
         image_out = out[:, :n_img, :]
         text_out = out[:, n_img:, :]
 
-        # Shape: (B, N_img, dim) -> (B, N_img, dim)
+        # Each stream gets its OWN output projection.
         image_out = self.to_out(image_out)
 
         if self.context_pre_only:
@@ -391,7 +475,8 @@ class MMDiTJointAttention(keras.layers.Layer):
     ) -> Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
         """Return the per-stream output shape(s) from stored config.
 
-        Works before :meth:`build`.
+        Everything it needs is in ``self.dim`` and ``context_pre_only``, so it
+        works before :meth:`build`.
 
         :param input_shape: List ``[img_shape, txt_shape]``.
         :type input_shape: List[Tuple[Optional[int], ...]]
@@ -408,6 +493,9 @@ class MMDiTJointAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """Return the serialization config.
+
+        Every ``__init__`` argument is included, so a reloaded layer rebuilds
+        the same set of projections and norms.
 
         :return: Dictionary with all ``__init__`` parameters.
         :rtype: Dict[str, Any]
