@@ -713,8 +713,8 @@ class PolarWeightNorm(keras.layers.Layer):
         # `keras.activations.linear` for `None` -- measured on the pinned Keras
         # 3.8.0, and a true dtype-preserving identity at float16/32/64. The
         # guard therefore documented a `None` case that cannot occur and
-        # contradicted this class's own docstring (`:421-424`), which already
-        # states the attribute is never `None`. Deletion measured
+        # contradicted this class's own `:ivar activation:` entry, which
+        # already states the attribute is never `None`. Deletion measured
         # behaviour-preserving: forward output BIT-identical (uint32 view) at
         # BOTH `activation=None` and `activation='relu'`, before and after, plus
         # a matching `.keras` round-trip and `get_config()` at each.
