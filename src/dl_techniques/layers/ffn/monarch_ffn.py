@@ -2,37 +2,24 @@
 A Monarch-structured Feed-Forward Network (order-2 Monarch matrices).
 
 This layer is a drop-in replacement for the standard position-wise
-Feed-Forward Network (FFN) of a Transformer, in which each of the two dense
-projections is replaced by an **order-2 Monarch matrix**. A Monarch matrix is
-a structured (sub-quadratic) parameterization expressed as the product of two
-block-diagonal matrices interleaved with a fixed reshape/permute, introduced
-by Dao et al. (2022). It recovers a large fraction of the expressivity of a
-dense matrix while reducing parameter count and FLOPs from ``O(n^2)`` to
-``O(n^1.5)`` (for ``nblocks = sqrt(n)``), and generalizes many fast-transform
-structures (FFT, Hadamard, etc.).
+Feed-Forward Network (FFN) of a Transformer. Each of the two dense projections
+is replaced by an **order-2 Monarch matrix**: a structured (sub-quadratic)
+parameterization written as the product of two block-diagonal matrices with a
+fixed reshape/permute between them, introduced by Dao et al. (2022). It keeps
+much of the expressivity of a dense matrix while cutting parameter count and
+FLOPs from ``O(n^2)`` to ``O(n^1.5)`` (at ``nblocks = sqrt(n)``), and it
+generalizes many fast-transform structures (FFT, Hadamard, and others).
 
 Architectural Overview:
-The block keeps the familiar "expand-then-contract" FFN shape, but each linear
-map is realized as a Monarch map rather than a single dense kernel::
-
-    Input (..., input_dim)
-        │
-        ▼   expand: Monarch(input_dim -> hidden_dim)   [+bias]
-        │
-        ▼   activation (e.g. GELU)
-        │
-        ▼   Dropout (optional)
-        │
-        ▼   contract: Monarch(hidden_dim -> output_dim) [+bias]
-        │
-        ▼
-    Output (..., output_dim)
+The block keeps the familiar expand-then-contract FFN shape. Only the two
+linear maps change: each is a Monarch map instead of a single dense kernel.
+The flow diagram is on ``MonarchFFN`` itself, beside the code that runs it.
 
 Foundational Mathematics:
 An order-2 Monarch linear map sends a vector of dimension ``n_in`` to a vector
 of dimension ``n_out``. Both dimensions are split into ``nblocks`` blocks
 (``b_in = n_in / nblocks``, ``b_out = n_out / nblocks``). The map is computed in
-five reshape/einsum steps (no dense ``n x n`` kernel is ever materialized):
+five reshape/einsum steps, and no dense ``n x n`` kernel is ever materialized:
 
 1.  reshape ``(..., n_in)`` -> ``(..., nblocks, b_in)``
 2.  first block-diagonal multiply with ``L`` of shape ``(nblocks, b_in, b_out)``
@@ -45,11 +32,11 @@ five reshape/einsum steps (no dense ``n x n`` kernel is ever materialized):
 
 For the square case (``n_in == n_out``) this is exactly an order-2 Monarch
 matrix. For the non-square case (``n_in != n_out``) the first block-diagonal
-factor is rectangular per block (``b_in -> b_out``); this is the natural,
-minimal generalization that keeps the structure intact without falling back to
-a dense projection. The only requirement is that ``nblocks`` divides **all** of
-``input_dim``, ``hidden_dim`` and ``output_dim`` so that the block grids line up
-(validated in ``__init__`` / ``build``).
+factor is rectangular per block (``b_in -> b_out``). That is the smallest
+generalization that keeps the structure intact without falling back to a dense
+projection. It requires ``nblocks`` to divide **all** of ``input_dim``,
+``hidden_dim`` and ``output_dim`` so the block grids line up; that is checked
+in ``__init__`` and in ``build``.
 
 References:
 -   Dao, T., Chen, B., Sohoni, N., Desai, A., Poli, M., Grogan, J., Liu, A.,
@@ -76,53 +63,84 @@ class MonarchFFN(keras.layers.Layer):
     """
     Order-2 Monarch-structured Feed-Forward Network.
 
-    Replaces each of the two dense projections of a standard FFN with an order-2
-    Monarch map (product of two block-diagonal factors interleaved with a
-    reshape/permute). The computation is
+    Each of the two dense projections of a standard FFN becomes an order-2
+    Monarch map: two block-diagonal factors with a reshape/permute between
+    them. The computation is
     ``FFN(x) = monarch_contract(dropout(activation(monarch_expand(x))))``, with
-    optional bias terms after each Monarch map. See the module docstring for the
-    five-step Monarch math and references (Dao et al. 2022).
+    an optional bias after each Monarch map. The module docstring carries the
+    five-step Monarch math and the reference (Dao et al. 2022).
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────┐
-        │   Input (..., input_dim)    │
-        └──────────────┬──────────────┘
-                       ▼
-        ┌─────────────────────────────┐
-        │expand: Monarch -> hidden_dim│  (L_e, R_e)  [+ bias_e]
-        └──────────────┬──────────────┘
-                       ▼
-        ┌─────────────────────────────┐
-        │   Activation (e.g. GELU)    │
-        └──────────────┬──────────────┘
-                       ▼
-        ┌─────────────────────────────┐
-        │     Dropout (optional)      │
-        └──────────────┬──────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │ contract: Monarch -> out_dim │  (L_c, R_c)  [+ bias_c]
-        └──────────────┬───────────────┘
-                       ▼
-        ┌─────────────────────────────┐
-        │  Output (..., output_dim)   │
-        └─────────────────────────────┘
+        Input  [..., input_dim]
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ expand: Monarch -> hidden_dim   │
+        │   factors L_e, R_e   [+ bias_e] │
+        └────────────────┬────────────────┘
+                         ▼  [..., hidden_dim]
+        ┌─────────────────────────────────┐
+        │ activation  (default GELU)      │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ dropout  (no-op at rate 0)      │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ contract: Monarch -> output_dim │
+        │   factors L_c, R_c   [+ bias_c] │
+        └────────────────┬────────────────┘
+                         ▼
+        Output [..., output_dim]
 
-    :param hidden_dim: Integer, intermediate (expansion) dimension. Must be
-        positive and divisible by ``nblocks``.
+        The bias rows exist only when use_bias=True. Dropout
+        is always in the graph; at rate 0.0 it is a no-op.
+
+    **One Monarch map (the block arithmetic):**
+
+    .. code-block:: text
+
+        n_in -> n_out, with k = nblocks,
+        b_in = n_in / k and b_out = n_out / k:
+
+          x   [..., n_in]
+          │
+          ▼  reshape
+          x   [..., k, b_in]
+          │
+          ▼  einsum '...ki,kio->...ko'  with L (k, b_in, b_out)
+          x   [..., k, b_out]
+          │
+          ▼  transpose the last two axes
+          x   [..., b_out, k]        <- the Monarch permutation
+          │
+          ▼  einsum '...ok,okj->...oj'  with R (b_out, k, k)
+          x   [..., b_out, k]
+          │
+          ▼  reshape
+          y   [..., n_out]
+
+        L is rectangular per block (b_in -> b_out); R is square
+        in the block axis and mixes across blocks. No dense
+        (n_in, n_out) kernel is ever built. Kernel parameters
+        are k*b_in*b_out + b_out*k*k, against n_in*n_out dense.
+
+    :param hidden_dim: Intermediate (expansion) width. Must be a positive int
+        and divisible by ``nblocks``.
     :type hidden_dim: int
-    :param output_dim: Integer, output dimension. Must be positive and divisible
-        by ``nblocks``.
+    :param output_dim: Output width. Must be a positive int and divisible by
+        ``nblocks``.
     :type output_dim: int
-    :param nblocks: Integer, number of Monarch blocks (the structure knob). The
-        per-block size is ``dim / nblocks``. Must be a positive integer that
-        divides ``input_dim``, ``hidden_dim`` and ``output_dim``. Defaults to 4.
+    :param nblocks: Number of Monarch blocks, the structure knob. The per-block
+        size is ``dim / nblocks``. Must be a positive int that divides
+        ``input_dim``, ``hidden_dim`` and ``output_dim``. Defaults to 4.
     :type nblocks: int
-    :param activation: Activation function name or callable applied after the
-        expand Monarch map. Defaults to 'gelu'.
+    :param activation: Activation applied after the expand map. A name or a
+        callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
     :param dropout_rate: Dropout rate applied after the activation. Must be in
         ``[0.0, 1.0)``. Defaults to 0.0.
@@ -135,25 +153,92 @@ class MonarchFFN(keras.layers.Layer):
     :type kernel_initializer: Union[str, initializers.Initializer]
     :param bias_initializer: Initializer for the bias vectors. Defaults to 'zeros'.
     :type bias_initializer: Union[str, initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for the Monarch factor weights.
+    :param kernel_regularizer: Regularizer for the Monarch factor weights.
         Defaults to None.
     :type kernel_regularizer: Optional[regularizers.Regularizer]
-    :param bias_regularizer: Optional regularizer for the bias vectors.
+    :param bias_regularizer: Regularizer for the bias vectors.
         Defaults to None.
     :type bias_regularizer: Optional[regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If hidden_dim or output_dim is not a positive integer.
-    :raises ValueError: If nblocks is not a positive integer.
-    :raises ValueError: If hidden_dim or output_dim is not divisible by nblocks.
-    :raises ValueError: If dropout_rate is not in ``[0.0, 1.0)``.
-    :raises ValueError: (in ``build``) If input_dim is not divisible by nblocks.
+    :ivar hidden_dim: The stored expansion width.
+    :vartype hidden_dim: int
+    :ivar output_dim: The stored output width.
+    :vartype output_dim: int
+    :ivar nblocks: The stored block count.
+    :vartype nblocks: int
+    :ivar activation: The RESOLVED activation callable, not the name that was
+        passed. ``get_config()`` serializes it back to a name.
+    :vartype activation: Callable
+    :ivar dropout_rate: The stored dropout rate, cast to ``float``.
+    :vartype dropout_rate: float
+    :ivar use_bias: Whether each Monarch map is followed by a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved factor initializer.
+    :vartype kernel_initializer: initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: initializers.Initializer
+    :ivar kernel_regularizer: The resolved factor regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[regularizers.Regularizer]
+    :ivar dropout: ``Dropout(dropout_rate)``. Always present, even at rate 0.0.
+    :vartype dropout: keras.layers.Dropout
+    :ivar expand_l: Expand-map factor ``L``, shape
+        ``(nblocks, input_dim // nblocks, hidden_dim // nblocks)``. ``None``
+        until ``build()``.
+    :vartype expand_l: Optional[keras.Variable]
+    :ivar expand_r: Expand-map factor ``R``, shape
+        ``(hidden_dim // nblocks, nblocks, nblocks)``. ``None`` until
+        ``build()``.
+    :vartype expand_r: Optional[keras.Variable]
+    :ivar contract_l: Contract-map factor ``L``, shape
+        ``(nblocks, hidden_dim // nblocks, output_dim // nblocks)``. ``None``
+        until ``build()``.
+    :vartype contract_l: Optional[keras.Variable]
+    :ivar contract_r: Contract-map factor ``R``, shape
+        ``(output_dim // nblocks, nblocks, nblocks)``. ``None`` until
+        ``build()``.
+    :vartype contract_r: Optional[keras.Variable]
+    :ivar expand_bias: Bias of shape ``(hidden_dim,)``, or ``None`` when
+        ``use_bias`` is False.
+    :vartype expand_bias: Optional[keras.Variable]
+    :ivar contract_bias: Bias of shape ``(output_dim,)``, or ``None`` when
+        ``use_bias`` is False.
+    :vartype contract_bias: Optional[keras.Variable]
+
+    :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not a positive
+        integer.
+    :raises ValueError: If ``nblocks`` is not a positive integer.
+    :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not divisible by
+        ``nblocks``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0)``.
+    :raises ValueError: From ``build()``, if the last input dimension is
+        undefined or is not divisible by ``nblocks``.
+
+    Input shape:
+        Tensor of rank >= 2, shape ``(..., input_dim)``, with ``input_dim``
+        divisible by ``nblocks``.
+
+    Output shape:
+        Same rank and leading axes as the input, with the last axis set to
+        ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            ffn = MonarchFFN(
+                hidden_dim=1024, output_dim=256, nblocks=4)
+            y = ffn(keras.random.normal((2, 10, 512)))
+            y.shape                 # (2, 10, 256)
 
     Note:
-        For ``nblocks = 1`` the Monarch map degenerates to a dense matrix. With
-        ``nblocks = sqrt(dim)`` the parameter count is ``O(dim^1.5)`` rather than
-        ``O(dim^2)``. The structure is preserved exactly for square maps and via
-        rectangular per-block factors for non-square maps.
+        At ``nblocks = 1`` the Monarch map degenerates to a dense matrix. At
+        ``nblocks = sqrt(dim)`` the parameter count is ``O(dim^1.5)`` instead
+        of ``O(dim^2)``. The structure is exact for square maps, and kept for
+        non-square maps by making the first factor rectangular per block.
     """
 
     def __init__(
@@ -170,10 +255,21 @@ class MonarchFFN(keras.layers.Layer):
         bias_regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the Monarch FFN layer with comprehensive parameter validation."""
+        """Validate the configuration and create the dropout sub-layer.
+
+        Every argument is documented on the class. Validation runs before any
+        attribute is stored, so a rejected configuration leaves no half-built
+        layer behind. The Monarch factor weights are not created here: their
+        shapes need ``input_dim``, which only ``build()`` knows.
+
+        :raises ValueError: If ``hidden_dim``, ``output_dim`` or ``nblocks`` is
+            not a positive integer, if ``hidden_dim`` or ``output_dim`` is not
+            divisible by ``nblocks``, or if ``dropout_rate`` is outside
+            ``[0.0, 1.0)``.
+        """
         super().__init__(**kwargs)
 
-        # Comprehensive input validation with informative error messages
+        # Reject bad configuration before storing anything.
         if not isinstance(hidden_dim, int) or hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be a positive integer, got {hidden_dim}")
         if not isinstance(output_dim, int) or output_dim <= 0:
@@ -193,7 +289,7 @@ class MonarchFFN(keras.layers.Layer):
         if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store ALL configuration parameters for serialization
+        # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.nblocks = nblocks
@@ -205,11 +301,12 @@ class MonarchFFN(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern).
-        # Monarch factor weights are created in build() (they need input_dim).
+        # Sub-layers are created here, per the Keras 3 pattern. The Monarch
+        # factor weights are not: their shapes need input_dim, so build() makes
+        # them.
         self.dropout = keras.layers.Dropout(rate=self.dropout_rate, name="dropout")
 
-        # Weight handles created in build()
+        # Weight handles, filled in by build().
         self.expand_l = None
         self.expand_r = None
         self.contract_l = None
@@ -274,18 +371,11 @@ class MonarchFFN(keras.layers.Layer):
         if input_dim is None:
             raise ValueError("The last dimension of input_shape must be defined")
 
-        # DECISION plan_2026-06-19_2ea7a9a0/D-003
-        # Non-square order-2 Monarch sizing: the expand map (input_dim -> hidden_dim)
-        # and contract map (hidden_dim -> output_dim) are generally non-square. We keep
-        # the structure exact by making the FIRST block-diagonal factor L rectangular
-        # PER BLOCK (b_in -> b_out, shape (nblocks, b_in, b_out)) and the SECOND factor R
-        # square in the block axis (shape (b_out, nblocks, nblocks)). Do NOT "fix" a
-        # non-square map by appending a trailing keras.layers.Dense projection — that
-        # injects an unstructured O(n^2) dense kernel and silently destroys the Monarch
-        # structure this layer exists to provide (PM1 / LESSONS: fix-forward-to-non-crash
-        # != correct). The unavoidable consequence of this block-grid alignment is that
-        # nblocks MUST divide input_dim, hidden_dim AND output_dim; that is enforced for
-        # hidden_dim/output_dim in __init__ and for input_dim here. See decisions.md D-003.
+        # DECISION plan_2026-06-19_2ea7a9a0/D-003: for the non-square expand and
+        # contract maps, factor L is rectangular per block (nblocks, b_in, b_out)
+        # and factor R stays square (b_out, nblocks, nblocks). Do NOT square them
+        # up with a trailing Dense; that re-adds an unstructured O(n^2) kernel.
+        # The price is this guard: nblocks must divide input_dim as well.
         if input_dim % self.nblocks != 0:
             raise ValueError(
                 f"input_dim must be divisible by nblocks, "
@@ -336,12 +426,12 @@ class MonarchFFN(keras.layers.Layer):
         """
         Apply one order-2 Monarch linear map to ``x`` of shape ``(..., n_in)``.
 
-        Graph-safe: the last axis is split into ``(nblocks, b_in)`` / merged back
-        via reshape, and the dynamic leading (batch/sequence) dims are carried
-        through by stacking the per-axis sizes from ``keras.ops.shape`` into an
-        explicit 1-D integer target shape (no ambiguous ``-1`` placeholder, no
-        tuple/tensor concatenation pitfalls). All block sizes are static ints from
-        config. Only ``keras.ops`` reshape/transpose/einsum are used.
+        The map is graph-safe. The last axis is split into ``(nblocks, b_in)``
+        and merged back with reshape. The leading batch and sequence sizes are
+        dynamic, so they are read with ``keras.ops.shape`` and stacked into an
+        explicit 1-D integer target shape. There is no ``-1`` placeholder and
+        no tuple/tensor concatenation. Block sizes are static ints from config,
+        and only ``keras.ops`` reshape/transpose/einsum are used.
 
         :param x: Input tensor of shape ``(..., n_in)``.
         :type x: keras.KerasTensor

@@ -1,52 +1,49 @@
 """
 A low-rank factorized Feed-Forward Network.
 
-This layer is structurally identical to the standard Transformer MLP
-("expand-then-contract", `MLPBlock`), but each of its two dense projections is
-replaced by a *low-rank factorization*. Instead of a single full-rank weight
-matrix `W` of shape `(d_in, d_out)`, the layer learns two smaller matrices
-`U` of shape `(d_in, rank)` and `V` of shape `(rank, d_out)` whose product
-`U @ V` approximates `W`. When `rank << min(d_in, d_out)` this drastically
-reduces the parameter count and compute of the projection.
+This layer has the same shape as the standard Transformer MLP
+("expand-then-contract"), but each of its two dense projections is factorized.
+Instead of one full-rank weight matrix `W` of shape `(d_in, d_out)`, the layer
+learns `U` of shape `(d_in, rank)` and `V` of shape `(rank, d_out)` and uses
+their product `U @ V` in place of `W`. When `rank << min(d_in, d_out)` this
+cuts both the parameter count and the compute of the projection.
 
 Architectural Overview:
-The network keeps the classic expand/contract shape, but each projection is a
-bottleneck:
+The expand/contract shape is unchanged. Each projection becomes a bottleneck:
 
-1.  **Expansion (factorized)**: The input `(..., input_dim)` is projected to
-    `hidden_dim` through a bottleneck of width `rank`:
+1.  Expansion (factorized). The input `(..., input_dim)` reaches `hidden_dim`
+    through a bottleneck of width `rank`:
     `U1: Dense(rank, no bias) -> V1: Dense(hidden_dim)`.
 
-2.  **Non-linear Activation**: A configurable activation (default GELU) is
-    applied element-wise to the expanded representation, followed by optional
-    dropout.
+2.  Non-linear activation. A configurable activation (default GELU) is applied
+    element-wise, followed by dropout.
 
-3.  **Contraction (factorized)**: The activated representation is projected
-    back down to `output_dim` through a second bottleneck of width `rank`:
+3.  Contraction (factorized). The activated tensor returns to `output_dim`
+    through a second bottleneck of the same width `rank`:
     `U2: Dense(rank, no bias) -> V2: Dense(output_dim)`.
 
-The intermediate `U` projections are deliberately bias-free: a bias on the
-bottleneck is redundant since it is immediately consumed by the following
-linear `V` projection (it can be folded into `V`'s bias). Only the `V`
-projections carry the (optional) bias.
+The `U` projections carry no bias. A bias there is redundant: the next linear
+map `V` consumes it immediately, so it can be folded into `V`'s own bias. Only
+the `V` projections carry the optional bias.
 
 Foundational Mathematics:
 For an input vector `x` at a single position the layer computes:
 
-`FFN(x) = V_2 @ (U_2 @ activation(V_1 @ (U_1 @ x)))`
+`FFN(x) = V_2(U_2(activation(V_1(U_1(x)))))`
 
-(with biases on the `V` maps when `use_bias=True`). A full dense FFN costs
-`input_dim*hidden_dim + hidden_dim*output_dim` parameters; the low-rank form
-costs `rank*(input_dim + hidden_dim) + rank*(hidden_dim + output_dim)`, which
-is strictly smaller whenever
-`rank < (input_dim*hidden_dim)/(input_dim + hidden_dim)` (and analogously for
-the contraction). For `rank << dims` the savings are substantial.
+(with biases on the `V` maps when `use_bias=True`). A dense FFN costs
+`input_dim*hidden_dim + hidden_dim*output_dim` kernel parameters. The low-rank
+form costs `rank*(input_dim + hidden_dim) + rank*(hidden_dim + output_dim)`.
+The expansion is cheaper whenever
+`rank < (input_dim*hidden_dim)/(input_dim + hidden_dim)`; the contraction
+follows the same rule with `hidden_dim` and `output_dim` in place of
+`input_dim` and `hidden_dim`.
 
 References:
 -   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS. (the base
     FFN structure this layer specializes).
 -   Hu, E. J., et al. (2021). LoRA: Low-Rank Adaptation of Large Language
-    Models. arXiv:2106.09685. (the low-rank factorization principle reused
+    Models. arXiv:2106.09685. (the low-rank factorization principle, used
     here as the layer's core structure rather than as an adapter).
 
 """
@@ -68,93 +65,176 @@ class LowRankFFN(keras.layers.Layer):
     """
     Low-rank factorized feed-forward network.
 
-    This block implements a standard expand/contract MLP in which each dense
-    projection is replaced by a low-rank product
-    ``Dense(rank, use_bias=False) -> Dense(out)``. The computation is
-    ``FFN(x) = V2(U2(activation(V1(U1(x)))))`` applied identically to each
-    token position with shared weights. When ``rank`` is small relative to the
-    layer dimensions this yields a sub-quadratic parameter count compared to a
-    dense MLP of the same hidden/output dimensions.
+    An expand/contract MLP in which each dense projection is replaced by a
+    low-rank product ``Dense(rank, use_bias=False) -> Dense(out)``. The
+    computation is ``FFN(x) = v2(u2(activation(v1(u1(x)))))``, applied to every
+    token position with the same weights. When ``rank`` is small relative to
+    the layer widths, this costs far fewer kernel parameters than a dense MLP
+    with the same hidden and output widths.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────┐
-        │   Input (..., input_dim)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ U1: Dense(rank, no bias)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │  V1: Dense(hidden_dim)  │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │   Activation (e.g. GELU)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │   Dropout (optional)    │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ U2: Dense(rank, no bias)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │  V2: Dense(output_dim)  │
-        └────────────┬────────────┘
-                     ▼
-        ┌──────────────────────────┐
-        │  Output (..., output_dim)│
-        └──────────────────────────┘
+        Input  [..., input_dim]
+                      │
+                      ▼
+        ┌───────────────────────────┐
+        │ u1: Dense(rank, no bias)  │
+        └─────────────┬─────────────┘
+                      ▼  [..., rank]
+        ┌───────────────────────────┐
+        │ v1: Dense(hidden_dim)     │
+        └─────────────┬─────────────┘
+                      ▼  [..., hidden_dim]
+        ┌───────────────────────────┐
+        │ activation  (default GELU)│
+        └─────────────┬─────────────┘
+                      ▼
+        ┌───────────────────────────┐
+        │ dropout  (no-op at rate 0)│
+        └─────────────┬─────────────┘
+                      ▼
+        ┌───────────────────────────┐
+        │ u2: Dense(rank, no bias)  │
+        └─────────────┬─────────────┘
+                      ▼  [..., rank]
+        ┌───────────────────────────┐
+        │ v2: Dense(output_dim)     │
+        └─────────────┬─────────────┘
+                      ▼
+        Output [..., output_dim]
 
-    :param hidden_dim: Integer, hidden (expansion) dimension. Must be positive.
+        Dropout is always in the graph. At dropout_rate=0.0
+        it is a no-op, not absent.
+
+    **One factorized projection (the rank bottleneck):**
+
+    .. code-block:: text
+
+           x  [..., d_in]
+                 │
+                 ▼
+           U: Dense(rank, use_bias=False)
+                 │        kernel (d_in, rank)
+                 ▼  [..., rank]
+           V: Dense(d_out, use_bias=use_bias)
+                 │        kernel (rank, d_out)
+                 ▼
+           y  [..., d_out]
+
+        U never carries a bias. A bias on the bottleneck would
+        be multiplied by V and added to V's own bias, so it
+        would add parameters without adding any function the
+        pair cannot already express.
+
+        Kernel parameters for one projection:
+
+          dense     d_in * d_out
+          low-rank  rank * (d_in + d_out)
+
+        The layer runs this twice with one shared rank:
+        input_dim -> hidden_dim, then hidden_dim -> output_dim.
+        rank defaults to max(1, hidden_dim // 4).
+
+    :param hidden_dim: Hidden (expansion) width. Must be positive.
     :type hidden_dim: int
-    :param output_dim: Integer, output (projection) dimension. Must be positive.
+    :param output_dim: Output (projection) width. Must be positive.
     :type output_dim: int
-    :param rank: Optional integer bottleneck width shared by both factorized
-        projections. If ``None``, it is resolved at construction time to
-        ``max(1, hidden_dim // 4)``. If provided it must be positive. The
-        original (possibly ``None``) value is preserved for serialization so
-        round-trips reconstruct identically.
+    :param rank: Bottleneck width shared by both factorized projections. When
+        ``None`` it resolves at construction time to
+        ``max(1, hidden_dim // 4)``. When given it must be positive. The
+        as-passed value (possibly ``None``) is what ``get_config()`` stores, so
+        a round trip re-runs the same resolution.
     :type rank: Optional[int]
-    :param activation: Activation function name or callable applied after the
-        expansion. Accepts string names ('gelu', 'relu', 'swish') or callables.
-        Defaults to 'gelu'.
+    :param activation: Activation applied after the expansion. Accepts a name
+        ('gelu', 'relu', 'swish') or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
     :param dropout_rate: Dropout rate applied after the activation. Must be in
-        range [0.0, 1.0). Defaults to 0.0.
+        ``[0.0, 1.0)``. Defaults to 0.0.
     :type dropout_rate: float
-    :param use_bias: Whether the ``V`` projections use bias vectors. The ``U``
-        (bottleneck) projections are always bias-free. Defaults to True.
+    :param use_bias: Whether the ``v1`` / ``v2`` projections carry a bias. The
+        ``u1`` / ``u2`` bottlenecks never do. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the dense layer kernels.
+    :param kernel_initializer: Initializer for all four Dense kernels. One
+        resolved instance is shared by all four layers.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the bias vectors. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the ``v1`` / ``v2`` biases.
+        Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for the dense layer kernels.
+    :param kernel_regularizer: Regularizer for all four Dense kernels.
         Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param bias_regularizer: Optional regularizer for the dense layer biases.
+    :param bias_regularizer: Regularizer for the ``v1`` / ``v2`` biases.
         Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If hidden_dim or output_dim is not positive.
-    :raises ValueError: If rank is provided and is not positive.
-    :raises ValueError: If dropout_rate is not in range [0.0, 1.0).
+    :ivar hidden_dim: The stored hidden width.
+    :vartype hidden_dim: int
+    :ivar output_dim: The stored output width.
+    :vartype output_dim: int
+    :ivar rank: The RESOLVED bottleneck width, always a positive int.
+    :vartype rank: int
+    :ivar _rank_arg: The rank as REQUESTED, possibly ``None``. This is what
+        ``get_config()`` stores.
+    :vartype _rank_arg: Optional[int]
+    :ivar activation_name: The activation argument exactly as passed. Kept for
+        inspection only; ``get_config()`` serializes ``activation_fn`` instead.
+    :vartype activation_name: Union[str, Callable]
+    :ivar activation_fn: The resolved activation callable.
+    :vartype activation_fn: Callable
+    :ivar dropout_rate: The stored dropout rate.
+    :vartype dropout_rate: float
+    :ivar use_bias: Whether ``v1`` and ``v2`` carry a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar u1: ``Dense(rank, use_bias=False)``, the expansion bottleneck.
+    :vartype u1: keras.layers.Dense
+    :ivar v1: ``Dense(hidden_dim)``, the expansion output.
+    :vartype v1: keras.layers.Dense
+    :ivar u2: ``Dense(rank, use_bias=False)``, the contraction bottleneck.
+    :vartype u2: keras.layers.Dense
+    :ivar v2: ``Dense(output_dim)``, the contraction output.
+    :vartype v2: keras.layers.Dense
+    :ivar dropout: ``Dropout(dropout_rate)``. Always present, even at rate 0.0.
+    :vartype dropout: keras.layers.Dropout
+
+    :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not positive.
+    :raises ValueError: If ``rank`` is given and is not positive.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0)``.
+
+    Input shape:
+        Tensor of rank >= 2, shape ``(..., input_dim)``. The input width is
+        free; it only has to stay the same across calls once built.
+
+    Output shape:
+        Same rank and leading axes as the input, with the last axis set to
+        ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            ffn = LowRankFFN(hidden_dim=1024, output_dim=256)
+            ffn.rank                # 256, from max(1, 1024 // 4)
+            y = ffn(keras.random.normal((2, 10, 512)))
+            y.shape                 # (2, 10, 256)
 
     Note:
-        The ``rank`` default resolution (``max(1, hidden_dim // 4)`` when
-        ``None``) is a construction-time decision: the resolved integer is
-        stored in ``self.rank`` and used to size the bottleneck Dense layers.
-        ``get_config`` emits the *original* ``rank`` argument (possibly
-        ``None``) so deserialization re-runs the identical resolution.
+        ``self.rank`` holds the resolved integer used to size the bottlenecks.
+        ``get_config()`` emits the original ``rank`` argument, which may be
+        ``None``, so deserialization repeats the same resolution instead of
+        pinning a width the caller never asked for.
     """
 
     def __init__(
@@ -171,9 +251,20 @@ class LowRankFFN(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the four Dense projections.
+
+        Every argument is documented on the class. Validation runs before any
+        attribute is stored, so a rejected configuration leaves no half-built
+        layer behind. ``rank`` is resolved here, not in ``build()``, because
+        the two bottleneck Dense layers need its value at creation time.
+
+        :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
+            positive, if ``rank`` is given and not positive, or if
+            ``dropout_rate`` is outside ``[0.0, 1.0)``.
+        """
         super().__init__(**kwargs)
 
-        # Validate inputs immediately
+        # Reject bad configuration before storing anything.
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
@@ -183,7 +274,7 @@ class LowRankFFN(keras.layers.Layer):
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store ALL configuration parameters.
+        # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         # Preserve the as-passed rank argument (possibly None) for round-trip
@@ -201,9 +292,8 @@ class LowRankFFN(keras.layers.Layer):
         # Resolve activation once.
         self.activation_fn = keras.activations.get(activation)
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern). The U
-        # (bottleneck) projections are always bias-free; only the V projections
-        # carry the optional bias.
+        # Sub-layers are created here, per the Keras 3 pattern. The u1/u2
+        # bottlenecks are always bias-free; only v1/v2 carry the optional bias.
         self.u1 = keras.layers.Dense(
             units=self.rank,
             use_bias=False,
