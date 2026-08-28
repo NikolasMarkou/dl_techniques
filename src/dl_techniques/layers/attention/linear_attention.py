@@ -1,5 +1,5 @@
 """
-Purely-linear (O(N)) self-attention that is Miyasawa-compliant by construction.
+Purely-linear (O(N)) self-attention that is Miyasawa-compliant.
 
 This module implements ``LinearAttention``: a multi-head, non-causal linear /
 kernel attention layer designed to satisfy this repo's two operational Miyasawa
@@ -23,9 +23,9 @@ Architecture:
     and the heads are merged and projected back to ``dim`` — again bias-free.
 
     There is **no softmax, no normalization layer, and no additive constant**
-    anywhere on that path, and there is **no masking stage at all**. Both are
-    deliberate: the first is what preserves degree-1 homogeneity, the second is
-    the layer's principal footgun and is documented as a warning on the class.
+    anywhere on that path, and there is **no masking stage at all**. Neither is
+    an oversight. The first is what preserves degree-1 homogeneity. The second is
+    this layer's principal footgun and carries a warning on the class.
 
 **Foundational Mathematics (the math).** Standard attention
 ``softmax(Q K^T / sqrt(d)) V`` is O(N^2) AND
@@ -50,10 +50,10 @@ homogeneous of degree ``p`` (``phi(c z) = c^p phi(z)`` for ``c > 0``):
     - denominator ``Sum_j phi(cQ_i) phi(cK_j)       = c^(2p) Den``
     - O_i(c x) = c^(2p+1) / c^(2p) . (Num/Den) = c . O_i(x)   -> degree-1, for ANY p.
 
-The **denominator normalizer is load-bearing** for homogeneity, not just for
-stability: an unnormalized linear attention ``Sum_j phi(Q_i) phi(K_j) V_j`` is
-degree ``2p+1`` and is degree-1 only in the trivial ``p = 0`` case. It is therefore
-mandatory here, never an optional flag.
+**The denominator normalizer is what makes the output degree-1.** It is not
+there for numerical stability. An unnormalized linear attention
+``Sum_j phi(Q_i) phi(K_j) V_j`` is degree ``2p+1``, which is degree-1 only in the
+trivial ``p = 0`` case. It is mandatory here, never an optional flag.
 
 **Why not Performer's feature map / epsilon.** Performer's FAVOR+ map
 ``cos/sin . exp(-||x||^2 / 2)`` uses a Gaussian factor that is NOT positively
@@ -109,7 +109,7 @@ class LinearAttention(keras.layers.Layer):
     Multi-head non-causal linear attention with a positively-homogeneous,
     non-negative feature map ``phi`` and a mandatory normalizer, computed via
     matmul associativity so the ``N x N`` attention matrix is never formed. Both
-    Miyasawa properties hold by construction: bias-free (all projections
+    Miyasawa properties hold for every input: bias-free (all projections
     ``use_bias=False`` by default) and degree-1 homogeneous
     (``f(alpha x) = alpha f(x)`` for ``alpha > 0``). See the module docstring for
     the full derivation (F-W2) and the eps resolution (F-W3, decisions.md D-001).
@@ -281,6 +281,12 @@ class LinearAttention(keras.layers.Layer):
             bias_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the four bias-free projections.
+
+        Every argument is documented on the class. Validation runs before any
+        attribute is stored, so a rejected configuration leaves no half-built
+        layer behind.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -288,26 +294,19 @@ class LinearAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # R13 / A4 DECLINE: this check deliberately does NOT adopt
-        # `common.validate_head_divisibility()`, for two independent reasons.
-        #
-        # 1. It is CONDITIONAL. The divisibility precondition only applies in the
-        #    `head_dim is None` branch; when `head_dim` is given explicitly, the
-        #    inner dim is `num_heads * head_dim` and `dim % num_heads` is
-        #    irrelevant. The shared helper is unconditional and has no way to
-        #    express that guard, so adopting it would require keeping the `if`
-        #    outside anyway — saving nothing while splitting one rule across two
-        #    places.
-        # 2. The trailing clause `"when head_dim is None"` carries the actual FIX
-        #    INSTRUCTION: it tells the user they can either change `dim`/`num_heads`
-        #    OR pass an explicit `head_dim`. The helper's message stops at
-        #    `"...must be divisible by num_heads (H)"` and would silently drop that
-        #    second, cheaper remedy. Message text is diagnostics; degrading it to
-        #    save three lines is a bad trade. Same judgment as the
-        #    `gated_attention.py` decline in step 2 of this plan.
-        #
-        # `test_linear_attention.py:115` pins only `"must be divisible"`, so the
-        # regex is not what forces this decision — the diagnostic quality is.
+        # This check does NOT adopt `common.validate_head_divisibility()`, for
+        # two reasons. First, it is CONDITIONAL: divisibility only matters in the
+        # `head_dim is None` branch, because an explicit `head_dim` makes the
+        # inner dim `num_heads * head_dim` and `dim % num_heads` irrelevant. The
+        # shared helper is unconditional, so adopting it would leave this `if`
+        # here anyway and split one rule across two places. Second, the trailing
+        # `"when head_dim is None"` clause is the fix instruction: it tells the
+        # caller they can change `dim`/`num_heads` OR pass an explicit `head_dim`.
+        # The helper's message stops at "...must be divisible by num_heads (H)"
+        # and would drop that cheaper remedy.
+        # `TestValidation::test_invalid_divisibility` matches only
+        # `"must be divisible"`, so the test is not what forces this; the
+        # diagnostic text is. No line number is given because it drifts.
         if head_dim is None and dim % num_heads != 0:
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads}) "
@@ -353,13 +352,12 @@ class LinearAttention(keras.layers.Layer):
         self.inner_dim = self.num_heads * self.head_dim
 
         # Create sub-layers in __init__ (unbuilt).
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
-        # projection. Do NOT "simplify" this back to a bare
-        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE reused
-        # across same-shape weights yields BIT-IDENTICAL tensors (MEASURED here:
-        # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
-        # key projections started life equal and the attention logits started
-        # symmetric. `seed=` is NOT the discriminator -- instance identity is.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200
+        # Clone the initializer per projection. Don't pass
+        # `self.kernel_initializer` straight in: one Initializer INSTANCE reused
+        # across same-shape weights gives bit-identical kernels (measured
+        # max|delta| = 0.0 over Q, K, V and output_proj), so Q and K would start
+        # equal and the logits symmetric. See decisions.md D-200.
         self.query_proj = layers.Dense(
             self.inner_dim,
             use_bias=use_bias,
@@ -398,11 +396,11 @@ class LinearAttention(keras.layers.Layer):
         )
 
         # DECISION plan-2026-08-27T040114-580f8b63/D-016
-        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
-        # ("Create Unconditionally, Use Conditionally") and Pitfall 1. The
-        # conditional spelling this replaces made the object graph and the
-        # auto-generated sub-layer names depend on `dropout_rate`; a Dropout owns
-        # no weights, so always creating it costs nothing in the checkpoint.
+        # Create the Dropout unconditionally and gate it in `call()`. Don't put
+        # it back behind `if dropout_rate > 0`: that made the object graph and the
+        # auto-generated sub-layer names depend on `dropout_rate`. A Dropout owns
+        # no weights, so always creating it is free in the checkpoint.
+        # See decisions.md D-016.
         self.dropout = layers.Dropout(dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -483,13 +481,15 @@ class LinearAttention(keras.layers.Layer):
         :return: Output tensor of shape ``(batch, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
-        # `del mask` is deliberate and is the ONLY handling this argument gets:
-        # binding it to nothing makes the discard explicit at the top of the
-        # function rather than leaving a reader to scan the body for a use that
-        # does not exist. Do NOT silently start honoring `mask` here without also
-        # removing the warnings in the class docstring and the diagram note — a
-        # half-implemented mask is worse than a documented no-op.
-        del mask  # v1 is non-causal and unmasked; accepted only for API uniformity.
+        # `del mask` is the ONLY handling this argument gets. Binding it to
+        # nothing makes the discard explicit at the top of the function, instead
+        # of leaving a reader to scan the body for a use that does not exist.
+        # v1 is non-causal and unmasked; the argument exists only so this layer's
+        # signature matches its siblings'. Don't start honoring `mask` here
+        # without also removing the warnings in the class docstring and the note
+        # in the diagram. A half-implemented mask is worse than a documented
+        # no-op.
+        del mask
 
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -514,8 +514,9 @@ class LinearAttention(keras.layers.Layer):
         )
 
         # 3. Positively-homogeneous, non-negative features on Q and K.
-        phi_q = self._feature_map(q)  # (B, H, N, d), degree p
-        phi_k = self._feature_map(k)  # (B, H, N, d), degree p
+        # Both are (B, H, N, d) and degree p.
+        phi_q = self._feature_map(q)
+        phi_k = self._feature_map(k)
 
         # 4. Associativity (O(N) in seq: the (N x N) matrix is never formed).
         #    kv    = Sum_j phi(K_j) (x) V_j  -> (B, H, d, d),  degree p+1
@@ -527,30 +528,35 @@ class LinearAttention(keras.layers.Layer):
         num = ops.einsum('bhnd,bhde->bhne', phi_q, kv)
         z = ops.einsum('bhnd,bhd->bhn', phi_q, k_sum)
 
-        # 5. Input-scaled epsilon (THE CRUX; decisions.md D-001).
-        #    A FIXED additive floor (Performer's bare +1e-6) is a degree-0 constant
-        #    that breaks EXACT degree-1: num is degree 2p+1, z is degree 2p, so a
-        #    constant added to z does NOT scale with z and the quotient stops being
-        #    degree-1 (F-W3). Instead scale epsilon by z's OWN degree-2p mean, so the
-        #    floor has the SAME degree as z: then num/(z + eps_eff) stays exactly
-        #    degree-1. The maximum(., 1e-20) is ONLY a NaN guard for a fully-dead
-        #    batch (all phi zero -> z_mean == 0); it is a negligible degree-0 floor
-        #    that the homogeneity probe tolerance absorbs -- the single residual
-        #    non-homogeneous corner.
-        #    fp16-SAFETY: the divide + 1e-20 floor run in float32, then cast back to
-        #    the compute dtype. Under a mixed_float16 policy the compute dtype is fp16,
-        #    where 1e-20 rounds to 0.0 -> the dead-token guard would fail (0/0 NaN on an
-        #    all-zero batch). Doing it in float32 is numerically identical to a pure-fp32
-        #    run, so exact degree-1 on float32 is UNCHANGED. Do NOT drop the cast: a bare
-        #    fp16 divide reintroduces the NaN (reviewer WARNING, review-iter-1.md:13).
+        # 5. Input-scaled epsilon. This is the crux of the layer.
         # DECISION plan_2026-07-07_1cab8d7a/D-001
-        z_mean = ops.mean(z, axis=-1, keepdims=True)          # (B, H, 1), degree 2p
-        eps_eff = self.epsilon * z_mean                       # degree 2p -> keeps degree-1
-        denom = z + eps_eff                                   # (B, H, N), degree 2p
-        out_dtype = num.dtype                                 # compute dtype (fp16 under mixed policy)
+        # The originating plan directory is gone, so this comment is the record.
+        # Scale epsilon by z's OWN degree-2p mean, so the floor carries the same
+        # degree as z. Then num / (z + eps_eff) stays exactly degree-1. Don't
+        # replace it with a fixed additive floor such as Performer's bare +1e-6:
+        # num is degree 2p+1 and z is degree 2p, so a degree-0 constant added to z
+        # does not scale with z, and the quotient stops being degree-1 (F-W3).
+        # The maximum(., 1e-20) is only a NaN guard for a fully dead batch (all
+        # phi zero, so z_mean == 0). It is a negligible degree-0 floor that the
+        # homogeneity probe tolerance absorbs, and it is the one residual
+        # non-homogeneous corner.
+        # fp16 safety: the divide and the 1e-20 floor run in float32, then cast
+        # back. Under a mixed_float16 policy the compute dtype is fp16, where
+        # 1e-20 rounds to 0.0, so the dead-batch guard would fail with 0/0 NaN.
+        # Running it in float32 is numerically identical to a pure fp32 run, so
+        # exact degree-1 on float32 is unchanged. Don't drop the cast: a bare
+        # fp16 divide brings the NaN back.
+        # z_mean is (B, H, 1) degree 2p; eps_eff keeps degree 2p; denom is
+        # (B, H, N) degree 2p.
+        z_mean = ops.mean(z, axis=-1, keepdims=True)
+        eps_eff = self.epsilon * z_mean
+        denom = z + eps_eff
+        # out_dtype is the compute dtype, fp16 under a mixed policy. out is
+        # (B, H, N, d) and degree 1.
+        out_dtype = num.dtype
         num_f32 = ops.cast(num, 'float32')
-        denom_f32 = ops.maximum(ops.cast(denom, 'float32'), 1e-20)  # NaN guard on all-dead batch only
-        out = ops.cast(num_f32 / denom_f32[..., None], out_dtype)   # (B, H, N, d), degree 1
+        denom_f32 = ops.maximum(ops.cast(denom, 'float32'), 1e-20)
+        out = ops.cast(num_f32 / denom_f32[..., None], out_dtype)
 
         # 6. Merge heads -> (B, N, inner_dim) -> bias-free output projection.
         out = ops.reshape(

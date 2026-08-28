@@ -28,7 +28,7 @@ normalized keys.
 Three responsibilities are delegated rather than reimplemented — rotary position
 embeddings, score normalization (so `probability_type` selects softmax, sparsemax
 or adaptive with no branching in `call`), and the optional QK-norms. Mask handling
-is deliberately NOT shared: this is the third of three broadcasting variants in the
+is NOT shared: this is the third of three broadcasting variants in the
 package and the most different, because 4D vision inputs arrive with a flattened
 ``H*W`` sequence axis and the head axis is materialized by an explicit repeat
 rather than broadcast. The reasons are anchored at `_apply_mask`.
@@ -121,34 +121,34 @@ class GroupedQueryAttention(keras.layers.Layer):
 
         ┌──────────────────────────────────────────────────────────────┐
         │  Input [B, S, dim]  or  [B, H, W, dim]                       │
-        └───────┬──────────────────────┬───────────────────────┬───────┘
-                ▼                      ▼                       ▼
-        ┌───────────────┐   ┌───────────────────┐   ┌───────────────────┐
-        │ w_q           │   │ w_k               │   │ w_v               │
-        │ num_heads·d_h │   │ num_kv_heads·d_h  │   │ num_kv_heads·d_h  │
-        └───────┬───────┘   └─────────┬─────────┘   └─────────┬─────────┘
-                ▼                     ▼                       │
-        ┌──────────────────────────────────────────┐          │
-        │  [4D only] flatten H·W → S, then reshape │          │
-        │  to per-head and transpose               │          │
-        │    Q [B, num_heads,    S, d_h]           │          │
-        │    K [B, num_kv_heads, S, d_h]           │          │
-        └───────┬──────────────────────┬───────────┘          │
-                ▼                      ▼                      │
-        ┌──────────────────────────────────────────┐          │
-        │  optional RoPE(Q), RoPE(K)               │          │
-        │  optional q_norm(Q), k_norm(K)           │          │
-        │    K is normalized in its NATIVE         │          │
-        │    num_kv_heads shape, BEFORE grouping   │          │
-        └───────┬──────────────────────┬───────────┘          │
-                │                      ▼                      ▼
-                │        ┌──────────────────────────────────────────────────┐
-                │        │  keras.ops.repeat(K, num_groups) — and V likewise│
-                │        │    num_kv_heads → num_heads, at SCORE time.      │
-                │        │    Never materialized in the KV cache; that      │
-                │        │    is where the memory saving lives.             │
-                │        └──────────────────┬───────────────────────────────┘
-                ▼                           ▼
+        └───────┬─────────────────────┬──────────────────────┬─────────┘
+                ▼                     ▼                      ▼
+        ┌───────────────┐   ┌───────────────────┐  ┌───────────────────┐
+        │ w_q           │   │ w_k               │  │ w_v               │
+        │ num_heads·d_h │   │ num_kv_heads·d_h  │  │ num_kv_heads·d_h  │
+        └───────┬───────┘   └─────────┬─────────┘  └─────────┬─────────┘
+                ▼                     ▼                      │
+        ┌─────────────────────────────────────────────────┐  │
+        │  [4D only] flatten H·W → S, then reshape        │  │
+        │  to per-head and transpose                      │  │
+        │    Q [B, num_heads,    S, d_h]                  │  │
+        │    K [B, num_kv_heads, S, d_h]                  │  │
+        └───────┬─────────────────────┬───────────────────┘  │
+                │                     │                      │
+        ┌─────────────────────────────────────────────────┐  │
+        │  optional RoPE(Q), RoPE(K)                      │  │
+        │  optional q_norm(Q), k_norm(K)                  │  │
+        │    K is normalized in its NATIVE                │  │
+        │    num_kv_heads shape, BEFORE grouping          │  │
+        └───────┬─────────────────────┬───────────────────┘  │
+                │                     ▼                      ▼
+                │        ┌─────────────────────────────────────────────┐
+                │        │ keras.ops.repeat(K, num_groups); V likewise │
+                │        │   num_kv_heads → num_heads, at SCORE time.  │
+                │        │   Never stored in the KV cache. That is     │
+                │        │   where the memory saving lives.            │
+                │        └──────────────────────┬──────────────────────┘
+                ▼                               ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  scores = Q @ Kᵀ · scale          [B, num_heads, S, S]       │
         │    scale is a Python float from __init__ (D-001)             │
@@ -361,33 +361,32 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.head_dim = self.dim // self.num_heads
         self.num_groups = self.num_heads // self.num_kv_heads
 
-        # DECISION plan_2026-06-14_ab855e7e/D-001: static attention scale as a
-        # Python float (math.sqrt, NOT keras.ops.sqrt on a cast scalar — D-002 pattern).
-        # Inherited by MobileMQA. Do NOT revert to keras.ops.sqrt.
-        #
-        # R13: the expression now lives in `common.compute_attention_scale`, which IS
-        # `1.0 / math.sqrt(float(head_dim))` — verified repr-identical for every
-        # realistic head_dim, so `self.scale` is bit-identical and `MobileMQA`, which
-        # reads this attribute in its own `call()`, is unaffected. The anchor above
-        # still governs: Python float, computed in `__init__`, never in `call()`.
+        # DECISION plan_2026-06-14_ab855e7e/D-001
+        # The originating plan directory is gone, so this comment is the record.
+        # Keep the attention scale a static Python float, computed here in
+        # `__init__` and never in `call()`. Don't revert to `keras.ops.sqrt` on a
+        # cast scalar. `MobileMQA` inherits this attribute and reads it in its own
+        # `call()`. The expression now lives in `common.compute_attention_scale`,
+        # whose body is `1.0 / math.sqrt(float(head_dim))` — repr-identical for
+        # every realistic head_dim, so `self.scale` is bit-identical to what it
+        # replaced and the subclass is unaffected.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # CREATE all sub-layers in __init__
+        # Create all sub-layers here, in __init__.
         # DECISION plan-2026-08-19T163559-499b6f0e/D-068
-        # Each projection gets its OWN initializer via `clone_initializer`.
-        # Handing the SAME `Initializer` INSTANCE to several `Dense` layers
-        # makes every same-shaped kernel bit-identical (Keras 3 behaviour --
-        # a seedless instance self-assigns a fixed seed at construction and
-        # replays it), and `w_q`, `w_k`, `w_v` and `w_o` are four DIFFERENT
-        # architectural roles. MEASURED in `FastVLM` before this change:
+        # Give each projection its OWN initializer via `clone_initializer`.
+        # Don't hand the same `Initializer` INSTANCE to several `Dense` layers:
+        # in Keras 3 a seedless instance self-assigns a fixed seed at
+        # construction and replays it, so every same-shaped kernel comes out
+        # bit-identical. `w_q`, `w_k`, `w_v` and `w_o` are four different
+        # architectural roles. Measured in `FastVLM` before this change:
         # `w_q/kernel == w_k/kernel == w_v/kernel == w_o/kernel` bit-for-bit in
-        # every one of the 6 `stage3` attention blocks, i.e. an attention layer
-        # whose query and key projections are the same function, so the initial
-        # score matrix is exactly symmetric. `self.kernel_initializer` is left
-        # untouched so `get_config` still reports what the caller passed, and a
-        # SEEDED initializer still reproduces (two clones of
-        # `GlorotUniform(seed=7)` are deliberately identical). See D-057 for the
-        # per-site ruling and decisions.md D-068.
+        # all 6 `stage3` attention blocks, so query and key were the same
+        # function and the initial score matrix was exactly symmetric.
+        # `self.kernel_initializer` is left untouched, so `get_config` still
+        # reports what the caller passed and a SEEDED initializer still
+        # reproduces: two clones of `GlorotUniform(seed=7)` draw the same values.
+        # See D-057 for the per-site ruling and decisions.md D-068.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -667,7 +666,8 @@ class GroupedQueryAttention(keras.layers.Layer):
         # 6. Scaled Dot-Product Attention
         # (B, H, S, D_h) @ (B, H, D_h, S) -> (B, H, S, S)
         scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
-        scores = scores * keras.ops.cast(self.scale, scores.dtype)  # D-001: precomputed
+        # `self.scale` is the Python float precomputed in `__init__` (D-001).
+        scores = scores * keras.ops.cast(self.scale, scores.dtype)
 
         if attention_mask is not None:
             scores = self._apply_mask(scores, attention_mask)
@@ -680,8 +680,9 @@ class GroupedQueryAttention(keras.layers.Layer):
         out = keras.ops.matmul(attention_weights, v)
 
         # 8. Restore Output Shape
-        out = keras.ops.transpose(out, (0, 2, 1, 3))  # (B, S, H, D_h)
-        out = keras.ops.reshape(out, (batch_size, seq_len, self.dim))  # (B, S, D)
+        # (B, H, S, D_h) -> (B, S, H, D_h) -> (B, S, D).
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = keras.ops.reshape(out, (batch_size, seq_len, self.dim))
 
         # Final projection
         output = self.w_o(out, training=training)
@@ -714,10 +715,10 @@ class GroupedQueryAttention(keras.layers.Layer):
         :return: Masked scores tensor, in the scores' own dtype.
         :rtype: keras.KerasTensor
         """
-        # R13 cross-reference — this helper is deliberately NOT shared.
+        # This helper is NOT shared, on purpose.
         #
-        # It is the THIRD variant of mask broadcasting in this package and the most
-        # different of the three:
+        # It is the THIRD variant of mask broadcasting in this package and the
+        # most different of the three:
         #   * `multi_head_cross_attention.py::_apply_attention_mask` — casts first,
         #     then a double `ops.expand_dims` for the 2D case, and relies on
         #     broadcasting over the head axis;
@@ -729,9 +730,9 @@ class GroupedQueryAttention(keras.layers.Layer):
         #     memory cost; it exists because 4D inputs arrive with a flattened
         #     `H*W` sequence axis and broadcast alone proved fragile there.
         #
-        # WHAT NOT TO DO: do not unify the three. Any single body must choose one
-        # cast order, one rank probe, and either broadcast or repeat — silently
-        # rewriting the traced graph of the two layers it did not come from.
+        # Don't unify the three. Any single body has to pick one cast order, one
+        # rank probe, and either broadcast or repeat. That silently rewrites the
+        # traced graph of the two layers it did not come from.
         #
         mask_shape = keras.ops.shape(mask)
 
@@ -746,62 +747,57 @@ class GroupedQueryAttention(keras.layers.Layer):
         if len(keras.ops.shape(mask)) == 4 and keras.ops.shape(mask)[1] == 1:
             mask = keras.ops.repeat(mask, self.num_heads, axis=1)
 
-        # THIS SITE'S MASK POLARITY, passed through verbatim: `mask` is a `1 = keep`
-        # predicate, so it IS the keep predicate `apply_attention_mask` wants. Do NOT
-        # "normalize" it into a `> 0` comparison or invert it — the helper performs no
-        # polarity inference by design, so an inversion here raises nothing, changes
-        # no shape and stays finite; the layer would just attend to the padding.
-        # `TestGroupedQueryAttentionMaskPolarity` is the only guard that can see it.
+        # This site's mask polarity is `1 = keep`, passed through verbatim, so
+        # `mask` already IS the keep predicate the shared helper wants. Don't
+        # "normalize" it with a `> 0` comparison and don't invert it. The helper
+        # infers no polarity, so an inversion raises nothing, changes no shape and
+        # stays finite. The layer would simply attend to the padding.
+        # `TestGroupedQueryAttentionMaskPolarity` is the only guard that sees it.
         #
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores return
-        # in the compute dtype (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE`
-        # is `-inf` again. That is deliberate and is NOT the bug being fixed:
-        #   * The bug is `0 * -inf = NaN` at every UNMASKED position, produced by the
-        #     ARITHMETIC form this line replaces. `ops.where` inside `mask_dtype(...)`
-        #     removes that product structurally, and a row keeping >= 1 key softmaxes
-        #     correctly with `-inf` entries. MEASURED on unfixed HEAD
-        #     (B=2, N=64, D=64, H=4, kv=2): an ALL-ONES mask — masking NOTHING — gave
-        #     8192/8192 NaN.
-        #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
-        #     also rescue a FULLY-MASKED row. It cannot: the next consumer is
-        #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
-        #     float32 input inside its own `call()` as float16 — so the promotion is
-        #     silently undone and all that remains is a wider, slower add. Pinned by
-        #     `TestGroupedQueryAttentionMaskHazardIsReal::
-        #     test_the_probability_sublayer_autocasts_a_float32_input`.
-        #   * A FULLY-MASKED query row is a SEPARATE hazard that no `out_dtype` choice can
-        #     touch. It is handled by the rescue below (D-009), not here.
+        # Pin `out_dtype` to the SCORES' own dtype. The biased scores then come
+        # back in the compute dtype, fp16 under `mixed_float16`, where the mask
+        # bias is `-inf` again. That is intended and is not the bug being fixed.
+        # The bug was `0 * -inf = NaN` at every UNMASKED position, produced by the
+        # arithmetic form this line replaces; `ops.where` inside the helper removes
+        # that product, and a row keeping at least one key softmaxes correctly with
+        # `-inf` entries. Measured on unfixed HEAD (B=2, N=64, D=64, H=4, kv=2): an
+        # ALL-ONES mask, masking nothing, gave 8192/8192 NaN.
+        # Don't "improve" this to `out_dtype=None` to stay in float32 and also
+        # rescue a fully-masked row. It cannot. The next consumer is
+        # `self.attn_prob`, a Keras layer with autocasting ON, measured to see a
+        # float32 input inside its own `call()` as float16, so the promotion is
+        # undone and all that is left is a wider, slower add. Pinned by
+        # `TestGroupedQueryAttentionMaskHazardIsReal::
+        # test_the_probability_sublayer_autocasts_a_float32_input`.
         # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
         #
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-        # The fully-masked-row rescue IS applied here, and it supersedes the "not applied
-        # here" note above: a query row that keeps NOTHING is treated as keeping EVERYTHING,
-        # so the all-`-inf` row is never FORMED and no NaN gradient is created either. It
-        # arrives via `apply_attention_mask`'s DEFAULT `rescue_axis=-1` — step 4c flipped
-        # the step-4b opt-in default on the user's direction ("I care about correctness, not
-        # backwards compatibility").
+        # The fully-masked-row rescue IS applied here. A query row that keeps
+        # nothing is treated as keeping everything, so the all-`-inf` row is never
+        # formed and no NaN gradient is created. It arrives via the helper's
+        # DEFAULT rescue axis. Don't pass `rescue_axis=None` to get the loud NaN
+        # back: the finite-garbage semantics were ruled package-wide on
+        # 2026-07-28, and opting out also restores the NaN GRADIENT on that row.
+        # Don't move the rescue after the softmax either —
+        # `ops.where(row_keeps, w, 0)` still contributes `0 * NaN` backward.
+        # The full argument is at the D-009 and D-008 anchors in `common.py`.
+        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
         #
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-        # The axis is DERIVED from this layer's own `probability_config` rather than left
-        # to the helper's `-1` default: `ProbabilityOutput` reads its softmax `axis` from
-        # `type_config` (`activations/probability_output.py:180`) and this layer forwards
-        # `probability_config` VERBATIM, so a caller can move the reduction axis and the
-        # pre-step-10 "checked, not assumed" claim held only for the DEFAULT config.
-        # MEASURED at the sibling `gated_attention` under `mixed_float16` with
-        # `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192 non-finite.
-        # WHAT NOT TO DO: do NOT restore a bare `-1` (correct only while the caller leaves
-        # the config alone) and do NOT read this as the rank/shape INFERENCE the D-009
-        # anchor in `common.py` forbids — this reads the site's own declared config.
-        # The full argument lives at the D-017 anchors in `common.py` and
-        # `gated_attention.py`. See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
-        #
-        # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" — the
-        # user ruled the finite-garbage semantics package-wide on 2026-07-28, and opting out
-        # also restores the NaN GRADIENT on that row; do NOT move the rescue after the
-        # softmax (`ops.where(row_keeps, w, 0)` still contributes `0 * NaN` in the backward
-        # pass). The full argument lives at the D-009 / D-008 anchors in `common.py`.
-        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+        # DERIVE the rescue axis from this layer's own `probability_config`, not
+        # from the helper's `-1` default. `ProbabilityOutput` reads its softmax
+        # `axis` out of `type_config` when it builds `keras.layers.Softmax`, and
+        # this layer forwards `probability_config` verbatim, so a caller can move
+        # the reduction axis. No line number is given for that read; it drifts.
+        # Measured at the sibling `gated_attention` under `mixed_float16` with
+        # `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192
+        # non-finite. Don't restore a bare `-1`, which is correct only while the
+        # caller leaves the config alone, and don't read this as the rank/shape
+        # INFERENCE that `common.py` forbids. It reads the site's own declared
+        # config. The full argument is at the D-017 anchors in `common.py` and
+        # `gated_attention.py`.
+        # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
         scores_dtype = keras.backend.standardize_dtype(scores.dtype)
         return apply_attention_mask(
             scores,

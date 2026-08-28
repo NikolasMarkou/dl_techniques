@@ -40,7 +40,7 @@ its siblings this layer exposes no `probability_type` hook — adding one would
 either break exactness or force full materialization, which is the only thing this
 layer exists to avoid.
 
-Two further properties are load-bearing and must survive any future style pass.
+Two further properties must survive any future style pass.
 The sequence length is read STATICALLY as a Python `int`, because
 `range(num_blocks)` cannot consume a traced tensor under `@tf.function`; the batch
 dimension stays fully dynamic. And masking here differs from every other mask site
@@ -167,8 +167,9 @@ class RingAttention(keras.layers.Layer):
         ┌──────────────────────────────────────────────────────────────┐
         │  mask, if given: validate rank 2/3/4, then rescue a row that │
         │  keeps NOTHING — ONCE, OVER THE FULL KEY AXIS, before the    │
-        │  loop. Never per tile: a per-tile rescue un-masks the future │
-        │  under a causal mask (D-011).                                │
+        │  loop. Never per tile: a per-tile rescue reads a fully       │
+        │  masked tile as degenerate and un-masks the future under a   │
+        │  causal mask.                                                │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
@@ -206,18 +207,20 @@ class RingAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        rank 2  [B, S]        key-padding; sliced on the KEY axis only and
-                              broadcast over heads and the query block, so mask
-                              memory stays O(N) instead of O(N²)
-        rank 3  [B, S, S]     per-query; block region extracted, expanded to heads
-        rank 4  [B, H, S, S]  per-query per-head; block region extracted
-        other                 ValueError, raised BEFORE any block work
+        rank 2  [B, S]       key-padding. Sliced on the KEY axis only,
+                             broadcast over heads and the query block.
+                             Mask memory stays O(N), not O(N²).
+        rank 3  [B, S, S]    per-query. Block region extracted, then
+                             expanded to heads.
+        rank 4  [B, H, S, S] per-query per-head; region extracted.
+        other                ValueError, before any block work.
 
-        dtype:   accumulation runs in mask_dtype(compute) whenever a mask is
-                 supplied — an all-masked tile would otherwise give
-                 −inf − −inf = NaN in the running max
-        rescue:  applied ONCE over the full key axis, pre-loop; the per-block
-                 call passes rescue_axis=None
+        dtype   the accumulation runs in mask_dtype(compute) whenever a
+                mask is given. An all-masked tile would otherwise give
+                −inf − −inf = NaN in the running max.
+        rescue  applied ONCE over the full key axis, before the loop.
+                The per-block call passes rescue_axis=None. Per tile it
+                would un-mask the future under a causal mask.
 
     :param dim: Input/output dimension (embedding size). Must be positive and
         divisible by num_heads.
@@ -279,7 +282,7 @@ class RingAttention(keras.layers.Layer):
         >>> pad = keras.ops.ones((2, 8192))
         >>> y = attn(x, attention_mask=pad, training=False)
         >>>
-        >>> # No weights to inspect, by construction
+        >>> # There are no attention weights to hand back
         >>> y, w = attn(x, return_attention_weights=True)   # w is None
 
     Note:
@@ -337,21 +340,20 @@ class RingAttention(keras.layers.Layer):
 
         # Derived parameters
         self.head_dim = self.dim // self.num_heads
-        # R13: was `1.0 / math.sqrt(self.head_dim)`, which is exactly the shared
-        # helper's body (`math.sqrt(int)` and `math.sqrt(float(int))` are the same
-        # double). Verified rather than assumed: `.hex()` compared across 27
-        # realistic head dims (1..512), all equal. Still a Python float computed in
-        # `__init__` and never in `call()`, per `plan_2026-06-14_33b77a7a/D-002`.
+        # This was `1.0 / math.sqrt(self.head_dim)`, which is exactly the
+        # shared helper's body: `math.sqrt(int)` and `math.sqrt(float(int))` are
+        # the same double. Checked, not assumed — `.hex()` compared across 27
+        # realistic head dims from 1 to 512, all equal. Still a Python float
+        # computed in `__init__`, never in `call()`.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per
-        # projection. Do NOT "simplify" this back to a bare
-        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE reused
-        # across same-shape weights yields BIT-IDENTICAL tensors (MEASURED here:
-        # max|delta| = 0.0 between Q, K, V and the output projection), so the query and
-        # key projections started life equal and the attention logits started
-        # symmetric. `seed=` is NOT the discriminator -- instance identity is.
+        # Create all sub-layers here, unbuilt.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200
+        # Clone the initializer per projection. Don't pass
+        # `self.kernel_initializer` straight in: one Initializer INSTANCE reused
+        # across same-shape weights gives bit-identical kernels (measured
+        # max|delta| = 0.0 over Q, K, V and w_o), so Q and K would start equal
+        # and the logits symmetric. See decisions.md D-200.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -512,9 +514,10 @@ class RingAttention(keras.layers.Layer):
         seq_len = keras.ops.shape(inputs)[1]
 
         # Project to Q, K, V
-        q = self.w_q(inputs)  # (batch, seq_len, num_heads * head_dim)
-        k = self.w_k(inputs)  # (batch, seq_len, num_heads * head_dim)
-        v = self.w_v(inputs)  # (batch, seq_len, num_heads * head_dim)
+        # Each is (batch, seq_len, num_heads * head_dim).
+        q = self.w_q(inputs)
+        k = self.w_k(inputs)
+        v = self.w_v(inputs)
 
         # Reshape for multi-head attention
         q = keras.ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
@@ -541,7 +544,8 @@ class RingAttention(keras.layers.Layer):
         )
 
         # Transpose back and reshape to original format
-        attention_output = keras.ops.transpose(attention_output, (0, 2, 1, 3))  # (batch, seq_len, num_heads, head_dim)
+        # (batch, seq_len, num_heads, head_dim)
+        attention_output = keras.ops.transpose(attention_output, (0, 2, 1, 3))
         attention_output = keras.ops.reshape(attention_output, (batch_size, seq_len, self.dim))
 
         # Final output projection
@@ -587,12 +591,14 @@ class RingAttention(keras.layers.Layer):
         """
         batch_size = keras.ops.shape(queries)[0]
         num_heads = self.num_heads
-        # DECISION plan_2026-06-14_ab855e7e/D-002: the block-wise loop count and
-        # `range(num_blocks)` below require a Python int. A dynamic
-        # ops.shape(queries)[2] makes range() crash under @tf.function/jit (the
-        # static-shape defect class already fixed in capsule/PFA). Read the seq
-        # dim statically and fail loud on None; batch stays dynamic. Do NOT revert
-        # to ops.shape for the sequence dim here.
+        # DECISION plan_2026-06-14_ab855e7e/D-002
+        # The originating plan directory is gone, so this comment is the record.
+        # Read the sequence dim statically and fail loud on None. The block count
+        # and `range(num_blocks)` below need a Python int, and a dynamic
+        # `ops.shape(queries)[2]` makes `range()` crash under `@tf.function` or
+        # jit. This is the same static-shape defect already fixed in capsule and
+        # PFA. Don't revert to `ops.shape` for the sequence dim; the batch dim
+        # stays dynamic.
         seq_len = queries.shape[2]
         if seq_len is None:
             raise ValueError(
@@ -605,17 +611,14 @@ class RingAttention(keras.layers.Layer):
         # Calculate number of blocks
         num_blocks = (seq_len + self.block_size - 1) // self.block_size
 
-        # NOTE: A `probability_type` customization hook is intentionally NOT
-        # exposed on this layer. The online/blockwise softmax below maintains
-        # running max/sum statistics that are mathematically tied to the
-        # exponential normalizer; alternatives like sparsemax or threshmax do
-        # not admit an equivalent streaming form and would break exactness.
-        #
-        # This is a CONSTRAINT, not a missing feature. Do NOT "restore parity"
-        # with the rest of the package by wiring in `ProbabilityOutput` here: any
-        # non-exponential normalizer needs the whole score row at once, which
-        # would force full `N x N` materialization and destroy the only reason
-        # this layer exists. The same statement is on the class docstring under
+        # There is no `probability_type` hook on this layer, and that is a
+        # constraint rather than a missing feature. The online softmax below
+        # carries running max/sum statistics tied to the exponential normalizer.
+        # Sparsemax and threshmax have no equivalent streaming form.
+        # Don't wire `ProbabilityOutput` in here to match the rest of the
+        # package. Any non-exponential normalizer needs a whole score row at
+        # once, which forces full N x N materialization and removes the only
+        # reason this layer exists. The class docstring says the same under
         # `[NO PROBABILITY HOOK]`; keep both in sync.
 
         # Accumulate per-block outputs in a Python list, concatenated after the
@@ -629,38 +632,36 @@ class RingAttention(keras.layers.Layer):
         state_dtype = keras.backend.standardize_dtype(queries.dtype)
         if attention_mask is not None:
             # DECISION plan-2026-07-27T183600-b4ef45f0/D-013
-            # The rank is validated ONCE, HERE, before any block work and before
-            # the rescue below — not only inside the loop. A rank this layer
-            # cannot dispatch on used to fall through both branches of the in-loop
-            # `if/elif` and surface as `UnboundLocalError: cannot access local
-            # variable 'mask_slice'` on the FIRST (q_block 0, kv_block 0)
-            # iteration. Validating up front means the caller gets a named
-            # `ValueError` naming the ranks that ARE supported, before a single
-            # matmul runs.
-            # WHAT NOT TO DO: do NOT delete the `else: raise` at the in-loop
-            # dispatch on the grounds that this check makes it unreachable. That
-            # `else` is the STRUCTURAL guarantee that `mask_slice` cannot be read
-            # unbound; a future rank added here but not there would re-create
-            # exactly the defect this fixes, silently and only on the masked path.
-            # See decisions.md D-013 (plan-2026-07-27T183600-b4ef45f0).
+            # Validate the rank ONCE, here, before any block work and before the
+            # rescue below. A rank this layer cannot dispatch on used to fall
+            # through both branches of the in-loop `if/elif` and surface as
+            # `UnboundLocalError: cannot access local variable 'mask_slice'` on
+            # the first (q_block 0, kv_block 0) iteration. Checking up front
+            # gives the caller a `ValueError` that names the supported ranks,
+            # before a single matmul runs.
+            # Don't delete the `else: raise` at the in-loop dispatch because
+            # this check makes it unreachable. That `else` is what guarantees
+            # `mask_slice` cannot be read unbound. A rank added here but not
+            # there would re-create this defect, silently, on the masked path
+            # only. See decisions.md D-013 (plan-2026-07-27T183600-b4ef45f0).
             mask_rank = len(keras.ops.shape(attention_mask))
             if mask_rank not in (2, 3, 4):
                 raise ValueError(_UNSUPPORTED_MASK_RANK.format(rank=mask_rank))
 
             state_dtype = mask_dtype(state_dtype)
-            # THIS SITE'S MASK POLARITY, passed through verbatim: `1 = keep`. The
-            # rescue is spelled on the PREDICATE, exactly as `apply_attention_mask`
-            # spells it internally, so that no all-`MASK_BIAS_VALUE` row is ever
-            # FORMED (and no NaN gradient with it). It is duplicated here rather
-            # than extracted because a rescue-only helper in `common.py` is a named
-            # STOP tripwire for this plan, and the parameter cannot express
-            # "reduce over an axis the caller has split into tiles".
-            # This runs AFTER the rank check above and BEFORE the loop, so every
-            # supported rank gets the IDENTICAL rescue: `axis=-1` is the key axis
+            # This site's mask polarity is `1 = keep`, passed through verbatim.
+            # The rescue is spelled on the PREDICATE, the same way
+            # `apply_attention_mask` spells it internally, so no all-bias row is
+            # ever formed and no NaN gradient comes with it. It is written out
+            # here rather than extracted: a rescue-only helper in `common.py`
+            # cannot express "reduce over an axis the caller has split into
+            # tiles".
+            # This runs after the rank check above and before the loop, so every
+            # supported rank gets the identical rescue. `axis=-1` is the key axis
             # for rank 2 `(batch, seq_len)`, rank 3 `(batch, seq_q, seq_k)` and
-            # rank 4 `(batch, heads, seq_q, seq_k)` alike. For rank 2 the reduction
-            # is per batch item rather than per query row, which is the same thing
-            # — every query row shares one key mask.
+            # rank 4 `(batch, heads, seq_q, seq_k)` alike. For rank 2 the
+            # reduction is per batch item rather than per query row, which is the
+            # same thing, since every query row shares one key mask.
             _keep = keras.ops.cast(attention_mask, state_dtype) > 0.0
             _keep = keras.ops.logical_or(
                 _keep,
@@ -672,15 +673,18 @@ class RingAttention(keras.layers.Layer):
         for q_block_idx in range(num_blocks):
             # Get query block bounds
             q_start = q_block_idx * self.block_size
-            q_end = min(q_start + self.block_size, seq_len)  # Python int (static seq_len)
-            q_block = queries[:, :, q_start:q_end, :]  # (batch, num_heads, q_block_size, head_dim)
+            # `q_end` is a Python int because `seq_len` is static.
+            # `q_block` is (batch, num_heads, q_block_size, head_dim).
+            q_end = min(q_start + self.block_size, seq_len)
+            q_block = queries[:, :, q_start:q_end, :]
 
             q_block_size = q_end - q_start
 
             # Initialize running statistics for online softmax
             # (batch, num_heads, q_block_size)
             # `state_dtype` is the compute dtype when no mask is supplied and
-            # `mask_dtype(...)` when one is — see the D-011 anchor above.
+            # `mask_dtype(...)` when one is; widened where the mask is validated
+            # above.
             running_max = keras.ops.full(
                 (batch_size, num_heads, q_block_size),
                 -float('inf'),
@@ -697,8 +701,10 @@ class RingAttention(keras.layers.Layer):
             for kv_block_idx in range(num_blocks):
                 # Get key/value block bounds
                 kv_start = kv_block_idx * self.block_size
-                kv_end = min(kv_start + self.block_size, seq_len)  # Python int (static seq_len)
-                k_block = keys[:, :, kv_start:kv_end, :]  # (batch, num_heads, kv_block_size, head_dim)
+                # `kv_end` is a Python int because `seq_len` is static.
+                # `k_block` is (batch, num_heads, kv_block_size, head_dim).
+                kv_end = min(kv_start + self.block_size, seq_len)
+                k_block = keys[:, :, kv_start:kv_end, :]
                 v_block = values[:, :, kv_start:kv_end, :]
 
                 # Compute attention scores for this block pair
@@ -716,7 +722,7 @@ class RingAttention(keras.layers.Layer):
                 # `mask_slice` unbound; MEASURED, that raised `UnboundLocalError:
                 # cannot access local variable 'mask_slice'` on the FIRST
                 # (q_block 0, kv_block 0) iteration. It now has its own branch, and
-                # the `else` below makes an unbound read impossible by construction.
+                # the `else` below makes an unbound read structurally impossible.
                 # See the D-013 anchor above the pre-loop rank check.
                 #
                 # DEFECT #2 — FIXED (plan-2026-07-27T183600-b4ef45f0, step 5). The
@@ -727,9 +733,9 @@ class RingAttention(keras.layers.Layer):
                 # 8192/8192 NaN for an all-ones mask, right padding, left padding
                 # AND a causal mask, with float32 and float64 at 0/8192 and an fp16
                 # no-mask forward also clean. It now delegates to
-                # `common.apply_attention_mask`; see the D-011 anchor above the loop
-                # for why this site's `out_dtype` and `rescue_axis` differ from every
-                # other adoption in the package.
+                # `common.apply_attention_mask`. Why this site's `out_dtype` and
+                # `rescue_axis` differ from every other adoption in the package
+                # is recorded in that helper's own docstring.
                 if attention_mask is not None:
                     # Extract relevant portion of mask for these blocks
                     if len(keras.ops.shape(attention_mask)) == 2:
@@ -768,12 +774,15 @@ class RingAttention(keras.layers.Layer):
                     # `mask_slice` is this site's `1 = keep` predicate, passed
                     # through verbatim (no `> 0` comparison invented, no inversion —
                     # the helper performs no polarity inference by design).
+                    # `rescue_axis=None` opts this site out of the per-call
+                    # rescue: it was already applied once, over the full key
+                    # axis, before the loop.
                     mask_slice = keras.ops.cast(mask_slice, scores.dtype)
                     scores = apply_attention_mask(
                         scores,
                         mask_slice,
                         out_dtype=state_dtype,
-                        rescue_axis=None,   # D-011: rescued once, before the loop
+                        rescue_axis=None,
                     )
 
                 # Compute new maximum for safe softmax
@@ -828,8 +837,8 @@ class RingAttention(keras.layers.Layer):
         # numerically identical to the prior slice_update assembly, and the
         # last (possibly partial) block carries its own size via the q-slice.
         outputs = keras.ops.concatenate(block_outputs, axis=2)
-        # Back to the layer's compute dtype. An identity unless a mask promoted the
-        # accumulation to `mask_dtype(...)` — see the D-011 anchor above.
+        # Back to the layer's compute dtype. An identity unless a mask promoted
+        # the accumulation to `mask_dtype(...)` where the mask was validated.
         return keras.ops.cast(outputs, keras.backend.standardize_dtype(queries.dtype))
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

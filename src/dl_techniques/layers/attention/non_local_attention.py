@@ -42,7 +42,7 @@ Architecture:
     4.  **Scoring.** Optional QK-normalization (``qk_norm_type``) is applied to the
         flattened query and key, then ``Q @ Kᵀ``. Scaling by
         ``common.compute_attention_scale(key_value_channels)`` is applied **only in
-        ``dot_product`` mode**; ``gaussian`` mode is deliberately left unscaled to
+        ``dot_product`` mode**. ``gaussian`` mode is left unscaled on purpose, to
         preserve the behavior of the ``keras.layers.Attention(use_scale=False)``
         this layer replaced. An optional additive ``attention_mask`` is added, and
         :class:`ProbabilityOutput` (``probability_type`` / ``probability_config``)
@@ -52,8 +52,10 @@ Architecture:
         values, the result is reshaped back to ``(B, H, W, C_kv)``, and passed
         through ``output_conv`` + ``output_activation_layer`` + optional dropout.
         Those two sub-layers alone are created lazily in ``build()`` because their
-        filter count defaults to the RUNTIME input channel count — the package's
-        one documented R6 exception (see the ``D-003`` anchor in ``build()``).
+        filter count defaults to the RUNTIME input channel count. This is the
+        package's one documented exception to "create every sub-layer in
+        ``__init__``", and the ``D-003`` anchor that records it sits in
+        ``__init__``, beside the two ``None`` sentinels.
 
 Foundational Mathematics:
     For an input feature map ``x`` with positions ``i`` (output) and ``j`` (all
@@ -286,6 +288,12 @@ class NonLocalAttention(keras.layers.Layer):
         activity_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and create every eagerly-buildable sub-layer.
+
+        Every argument is documented on the class. ``output_conv`` and
+        ``output_activation_layer`` are the two exceptions: they stay ``None``
+        here because their filter count is only known in :meth:`build`.
+        """
         super().__init__(**kwargs)
 
         # Validate parameters
@@ -368,13 +376,15 @@ class NonLocalAttention(keras.layers.Layer):
         else:
             self.output_norm = None
 
-        # Adjust the embedded attention dim based on attention mode.
-        # Gaussian mode uses fewer channels as per original paper.
-        # DECISION plan_2026-06-14_adaddf34/D-002: gaussian reduces Q,K,V to a shared
-        # embedded dim (Q@Kᵀ needs a matched contraction dim); dot_product path
-        # byte-identical since key_value_channels==attention_channels there (F18).
-        # The max(1, ...) clamps attention_channels<8 to embedded dim 1 (not 0).
-        # See decisions.md D-002.
+        # Adjust the embedded attention dim for the attention mode. Gaussian
+        # mode uses fewer channels, as in the original paper.
+        # DECISION plan_2026-06-14_adaddf34/D-002
+        # The originating plan directory is gone, so this comment is the record.
+        # `gaussian` reduces Q, K AND V to one shared embedded dim, because Q@Kᵀ
+        # needs a matched contraction dim. Don't reduce only one of them. The
+        # `dot_product` path is byte-identical, since `key_value_channels` equals
+        # `attention_channels` there. The `max(1, ...)` clamps
+        # `attention_channels < 8` to an embedded dim of 1, never 0.
         self.key_value_channels = (
             self.attention_channels
             if self.attention_mode == 'dot_product'
@@ -441,32 +451,32 @@ class NonLocalAttention(keras.layers.Layer):
             self.attn_dropout = None
             self.dropout = None
 
-        # DECISION plan_2026-06-14_0c5d4a21/D-003: output_conv/output_activation_layer
-        # are declared as None sentinels here (NOT instantiated) because their filter
-        # count depends on the input channels resolved in build(); they are instantiated
-        # behind an idempotency guard in build(). Do NOT move full instantiation here
-        # (filters unknown pre-build) and do NOT leave them undeclared until build()
-        # (Keras-3 conformance: attributes must exist post-__init__; a second build()
-        # must not replace already-built sublayers). See decisions.md D-003 (F3).
+        # DECISION plan_2026-06-14_0c5d4a21/D-003
+        # The originating plan directory is gone, so this comment is the record.
+        # `output_conv` and `output_activation_layer` are declared here as `None`
+        # sentinels and NOT instantiated. Their filter count depends on the input
+        # channels, which are only resolved in `build()`, so they are built there
+        # behind an idempotency guard. Don't move full instantiation up here, the
+        # filters are unknown before build. Don't leave them undeclared until
+        # `build()` either: Keras 3 expects attributes to exist after `__init__`,
+        # and a second `build()` must not replace an already-built sub-layer.
         #
-        # ---- Why this is the ONE sanctioned exception to house rule R6 ----
-        # R6 ("create every sub-layer unconditionally in __init__") holds for the other
-        # 30 modules in this package; this pair is its single documented deviation, and
-        # it is a deviation by *necessity*, not by taste:
+        # This pair is the package's one documented deviation from "create every
+        # sub-layer unconditionally in __init__", and it is a deviation by
+        # necessity. `output_channels` defaults to -1, meaning "match the input
+        # channel count". That count comes from `input_shape[-1]` in `build()`,
+        # so `Conv2D(filters=...)` cannot be constructed in `__init__` for the
+        # default configuration.
         #
-        #   `output_channels` defaults to -1, meaning "match the input channel count".
-        #   That count is only known from `input_shape[-1]` in build(). So
-        #   `Conv2D(filters=...)` genuinely cannot be constructed in __init__ for the
-        #   default configuration.
-        #
-        # WHAT NOT TO DO: do not "fix" this by making `output_channels` a required
-        # constructor argument so the convs can move up here. That is a BREAKING public
-        # API change — it invalidates every caller and every serialized `get_config()`
-        # relying on the -1 default — traded for cosmetic rubric uniformity. The
-        # sentinel + `is None` guard + `if self.built: return` in build() already give
-        # the two properties R6 exists to protect: attributes exist immediately after
-        # __init__ (so `hasattr`/`from_config` introspection is safe), and a second
-        # build() cannot replace an already-built sub-layer.
+        # Don't "fix" this by making `output_channels` a required constructor
+        # argument so the convs can move up here. That breaks the public API: it
+        # invalidates every caller and every serialized `get_config()` that
+        # relies on the -1 default, in exchange for cosmetic uniformity. The
+        # sentinel, the `is None` guard and the `if self.built: return` in
+        # `build()` already give the two properties the rule protects. Attributes
+        # exist immediately after `__init__`, so `hasattr` and `from_config`
+        # introspection are safe, and a second `build()` cannot replace an
+        # already-built sub-layer.
         self.output_conv = None
         self.output_activation_layer = None
 
@@ -478,6 +488,15 @@ class NonLocalAttention(keras.layers.Layer):
         probability_type: str,
     ) -> None:
         """Validate initialization parameters.
+
+        :param attention_channels: Channel count of the attention mechanism.
+        :type attention_channels: int
+        :param dropout_rate: Dropout rate to validate.
+        :type dropout_rate: float
+        :param attention_mode: Attention mode name to validate.
+        :type attention_mode: str
+        :param probability_type: Probability strategy identifier to validate.
+        :type probability_type: str
 
         :raises ValueError: If any parameter is invalid.
         """
@@ -499,7 +518,15 @@ class NonLocalAttention(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all sub-layers for robust serialization."""
+        """Build the layer and all sub-layers for robust serialization.
+
+        This is also where ``output_conv`` and ``output_activation_layer`` are
+        finally created: their filter count defaults to the runtime input
+        channel count, which is only known here.
+
+        :param input_shape: Shape tuple of the 4-D input ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         # Idempotency guard (D-003): a second build() (from_config / functional reuse)
         # must be a no-op. The explicit child `.build(...)` calls below are NOT
         # self-guarded by Keras and would raise a "cannot add state to an already-built
@@ -629,8 +656,14 @@ class NonLocalAttention(keras.layers.Layer):
         # Scaled dot-product attention scores: (B, N_q, N_k)
         scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 2, 1]))
         if self.attention_mode == 'dot_product':
-            # Match previous behavior of keras.layers.Attention(use_scale=True)
-            # DECISION plan_2026-06-14_33b77a7a/D-003: precompute 1/sqrt(key_value_channels) (D-002 pattern); dot_product mode only — gaussian stays unscaled. key_value_channels is final at __init__.
+            # Match the previous behavior of
+            # `keras.layers.Attention(use_scale=True)`.
+            # DECISION plan_2026-06-14_33b77a7a/D-003
+            # The originating plan directory is gone, so this comment is the
+            # record. `1/sqrt(key_value_channels)` is precomputed in `__init__`,
+            # where `key_value_channels` is already final. Don't recompute it per
+            # call, and don't apply it in `gaussian` mode; that mode stays
+            # unscaled.
             scores = scores * self._inv_sqrt_kv
         # In 'gaussian' mode, no scaling (matches previous use_scale=False)
 
@@ -647,17 +680,19 @@ class NonLocalAttention(keras.layers.Layer):
             # softmaxes `all -inf` to `0/0`. Measured on a 16x16 feature map with
             # one fully-masked query row: 32 NaNs in the output.
             #
-            # Clamping rather than routing through `common.apply_attention_mask`
-            # is deliberate: that helper takes a KEEP PREDICATE, while this
-            # layer's public contract -- stated in `call()`'s docstring and in the
-            # ASCII diagram at the top of this module -- is an ADDITIVE mask where
-            # 0 keeps and a large negative masks. Converting would mean inferring
-            # polarity from magnitudes, which that helper explicitly refuses to do,
-            # and would silently break every caller passing an additive mask.
+            # Clamp here rather than route through
+            # `common.apply_attention_mask`. That helper takes a KEEP PREDICATE,
+            # while this layer's public contract is an ADDITIVE mask where 0
+            # keeps and a large negative masks. The contract is stated in
+            # `call()`'s docstring and in the diagram at the top of this module.
+            # Converting would mean inferring polarity from magnitudes, which
+            # that helper refuses to do, and would break every caller passing an
+            # additive mask.
             #
-            # A fully-masked row therefore ends up with every logit at the same
-            # floor, so its softmax is finite and uniform rather than NaN -- the
-            # same rescue semantics `apply_attention_mask` gives by default.
+            # A fully-masked row ends up with every logit at the same floor, so
+            # its softmax is finite and uniform rather than NaN. That is the same
+            # rescue `apply_attention_mask` gives by default.
+            # See decisions.md D-015 (plan-2026-08-27T040114-580f8b63).
             compute_floor = float(
                 np.finfo(np.dtype(self.compute_dtype)).min
             ) / 2.0
@@ -692,14 +727,30 @@ class NonLocalAttention(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        The spatial dimensions are preserved. The channel count becomes
+        ``output_channels`` unless that is ``-1``, in which case the input
+        channel count is kept.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         output_shape = list(input_shape)
         if self.output_channels > 0:
             output_shape[-1] = self.output_channels
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Get layer configuration for serialization.
+
+        :return: Dictionary holding every parameter needed to recreate this
+            layer.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'attention_channels': self.attention_channels,
