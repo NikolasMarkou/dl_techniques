@@ -1,60 +1,98 @@
 r"""
 Shared primitives for the ``layers/attention`` package.
 
-This module is the shared home for five small pieces that were previously re-derived
-across the package: the additive attention-mask bias constant, the dtype in which a
-masked softmax must be evaluated, the fp16-safe bias *application* itself, the
-``dim % num_heads`` divisibility check, and the softmax temperature
-(``1 / sqrt(head_dim)``).
+Five small things live here that sibling modules used to re-derive: the additive
+attention-mask bias constant, the dtype a masked softmax must be evaluated in,
+the fp16-safe application of that bias, the ``dim % num_heads`` divisibility
+check, and the softmax temperature ``1 / sqrt(head_dim)``.
 
-Adoption is **deliberately partial, and unevenly so** — read this before assuming a
-number you see in a sibling module came from here:
+**Module map:**
 
--   ``validate_head_divisibility`` (11 importers) and ``compute_attention_scale``
-    (14 importers) ARE genuinely consolidated. Where a module declines them, it says
-    so in a comment naming the measurement — e.g. ``progressive_focused_attention.py``
+.. code-block:: text
+
+    MASK_BIAS_VALUE ──┐
+    (the -1e9 bias)   │
+                      ├─► apply_attention_mask(logits, keep, ...)
+    mask_dtype(dt)  ──┘   the one place the pair is used together
+    (>= float32)
+
+    validate_head_divisibility(dim, num_heads) ─► None, or ValueError
+    compute_attention_scale(head_dim)          ─► a Python float
+
+Adoption is partial, and uneven. Read this before assuming a number you see in a
+sibling module came from here.
+
+-   ``validate_head_divisibility`` (12 importers) and ``compute_attention_scale``
+    (15 importers) ARE genuinely consolidated. Where a module declines one, it
+    says so in a comment naming the measurement. ``progressive_focused_attention.py``
     and ``mmdit_joint_attention.py`` both keep ``head_dim ** -0.5``, which is NOT
-    bit-identical to ``compute_attention_scale`` (it mismatches in the last ULP for
-    218 of head_dim 1..1024, including 32 and 128).
+    bit-identical to ``compute_attention_scale`` — it mismatches in the last ULP
+    for 218 of head_dim 1..1024, including 32 and 128.
 
--   ``apply_attention_mask`` (added by ``plan-2026-07-27T183600-b4ef45f0``) is the *behavioral*
-    counterpart to the pair below: it performs the ``ops.where`` bias application that
-    ``MASK_BIAS_VALUE`` / ``mask_dtype`` only describe. It exists because the same
-    three-line incantation was hand-written correctly in exactly one module
-    (``energy_attention.py``) and incorrectly — as the ``0 * -inf = NaN`` arithmetic
-    form — in ten others. It takes the **keep predicate itself** as an argument and
-    performs NO polarity inference; see its docstring for why that is not negotiable.
-    Its ``rescue_axis`` argument addresses the second, separable hazard — a query row
+    **Those two counts are MECHANICAL. Re-derive them before editing either**,
+    from the repository root. Use an AST walk, never a text search: the two names
+    also appear in prose, in this very docstring among other places, so a ``grep``
+    counts discussion as adoption::
+
+        .venv/bin/python - <<'PY'
+        import ast, collections, pathlib
+        c = collections.Counter()
+        for p in pathlib.Path("src").rglob("*.py"):
+            for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+                if isinstance(n, ast.ImportFrom):
+                    if (n.module or "").split(".")[-1] == "common":
+                        c.update(a.name for a in n.names)
+        print(c["validate_head_divisibility"], c["compute_attention_scale"])
+        PY
+
+    It prints ``12 15``. The last dotted component is what is matched, so a
+    relative ``from .common import ...`` is counted. Both numbers were one short
+    of the truth until 2026-08-28, because nothing re-derived them. The 11 / 8
+    pair below has a test that re-derives it on every run.
+
+-   ``apply_attention_mask`` (added by ``plan-2026-07-27T183600-b4ef45f0``) is the
+    *behavioral* counterpart to the pair below. It performs the ``ops.where`` bias
+    application that ``MASK_BIAS_VALUE`` / ``mask_dtype`` only describe. It exists
+    because the same three-line incantation was hand-written correctly in exactly
+    one module (``energy_attention.py``) and incorrectly — as the ``0 * -inf = NaN``
+    arithmetic form — in ten others. It takes the **keep predicate itself** as an
+    argument and performs NO polarity inference; see its docstring for why that is
+    not negotiable.
+
+    Its ``rescue_axis`` argument addresses a second, separable hazard: a query row
     that keeps NOTHING, whose all-``MASK_BIAS_VALUE`` logits softmax to ``NaN`` in
     fp16 and to meaningless uniform garbage in float32. The convention the rescue
-    installs is: **a slice that keeps nothing is treated as keeping everything**, so
-    such a row returns ``softmax(unbiased logits)`` and is finite and identical in
+    installs is: **a slice that keeps nothing is treated as keeping everything**.
+    Such a row returns ``softmax(unbiased logits)`` and is finite and identical in
     float16 / float32 / float64. ``rescue_axis`` names the axis the CALLER's softmax
-    reduces over; it defaults to ``-1``, so the rescue is **ON by default**.
-    ``rescue_axis=None`` is the explicit, documented opt-OUT (``ring_attention.py``
-    is the one site that takes it — a per-tile rescue there would read every
-    entirely-masked tile as degenerate and un-mask the FUTURE under a causal mask,
-    measured at 24.14; it rescues once over the full key axis before its block loop
-    instead). A site whose softmax reduces over some other axis must name that axis
-    explicitly — the axis is never inferred, for the same reason polarity is never
-    inferred. **EIGHT of the ELEVEN adopters** therefore DERIVE the axis from their own
-    ``probability_config`` (whose ``axis`` key ``ProbabilityOutput`` honors) rather
-    than inheriting the ``-1`` default; of the remaining three, ``capsule_routing`` PINS
-    the axis in ``__init__`` (its ``_site_config`` overrides any caller value, so there
-    is nothing to derive), ``ring`` OPTS OUT per tile (``rescue_axis=None``, D-011), and
-    ``beit`` passes ``rescue_axis=-1`` as a LITERAL because it has no
-    ``probability_config`` at all — it calls ``ops.softmax(..., axis=-1)`` directly, so
-    there is no config object to derive the axis from. That literal is a necessity of
-    the layer's surface, not an oversight, and it must not be "fixed" by inventing a
-    ``probability_config`` parameter for it.
-    A ``keep`` whose extent along every named axis is statically 1 while ``logits`` is
-    longer is REJECTED — it cannot mask anything, because softmax is invariant to a
-    constant shift of the axis it reduces over (D-017). ``rescue_axis`` may also be a
-    TUPLE of axes, in which case the rescue and that rejection are JOINT over them
-    (D-018).
+    reduces over. It defaults to ``-1``, so the rescue is **ON by default**.
 
-    **Both counts above are MECHANICAL — re-derive them in one command each, from the
-    repository root, and never hand-edit one without the other**::
+    ``rescue_axis=None`` is the explicit, documented opt-OUT. ``ring_attention.py``
+    is the one site that takes it: a per-tile rescue there would read every
+    entirely-masked tile as degenerate and un-mask the FUTURE under a causal mask,
+    measured at 24.14. It rescues once over the full key axis before its block loop
+    instead. A site whose softmax reduces over some other axis must name that axis
+    explicitly. The axis is never inferred, for the same reason polarity is never
+    inferred. **EIGHT of the ELEVEN adopters** therefore DERIVE the axis from their
+    own ``probability_config`` (whose ``axis`` key ``ProbabilityOutput`` honors)
+    rather than inheriting the ``-1`` default. Of the remaining three,
+    ``capsule_routing`` PINS the axis in ``__init__`` (its ``_site_config`` overrides
+    any caller value, so there is nothing to derive), ``ring`` OPTS OUT per tile
+    (``rescue_axis=None``, D-011), and ``beit`` passes ``rescue_axis=-1`` as a
+    LITERAL because it has no ``probability_config`` at all — it calls
+    ``ops.softmax(..., axis=-1)`` directly, so there is no config object to derive
+    the axis from. That literal is a necessity of the layer's surface, not an
+    oversight, and it must not be "fixed" by inventing a ``probability_config``
+    parameter for it.
+
+    A ``keep`` whose extent along every named axis is statically 1 while ``logits``
+    is longer is REJECTED. It cannot mask anything, because softmax is invariant to
+    a constant shift of the axis it reduces over (D-017). ``rescue_axis`` may also
+    be a TUPLE of axes, in which case the rescue and that rejection are JOINT over
+    them (D-018).
+
+    **Both counts above are MECHANICAL — re-derive them in one command each, from
+    the repository root, and never hand-edit one without the other**::
 
         # 11 adopters (files calling the module-level helper; excludes this file's
         # own definition and the private `self._apply_attention_mask` wrappers):
@@ -72,30 +110,31 @@ number you see in a sibling module came from here:
         grep -rl 'rescue_axis=(self.probability_config' \
             src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
 
-    These two numbers previously drifted THREE ways at once across this docstring, the
-    D-009 anchor below and the plan's own records, so they are now stated ONCE (here)
-    and pinned executably by ``test_common.py::TestTheAdopterCountsAreMechanical``,
-    which runs exactly the greps above and fails if this paragraph disagrees with the
-    source. Anything else that needs the number cites this paragraph rather than
-    repeating it.
+    These two numbers previously drifted THREE ways at once across this docstring,
+    the anchor below and the plan's own records. They are now stated ONCE
+    (here) and pinned executably by
+    ``test_common.py::TestTheAdopterCountsAreMechanical``, which runs exactly the
+    greps above and fails if this paragraph disagrees with the source. Anything
+    else that needs the number cites this paragraph rather than repeating it.
 
 -   ``MASK_BIAS_VALUE`` / ``mask_dtype`` are **no longer single-use.** After
-    ``plan-2026-07-27T183600-b4ef45f0`` they are reached — directly or through
-    ``apply_attention_mask`` — by every masked layer in the package except four.
+    ``plan-2026-07-27T183600-b4ef45f0`` they are reached — directly or through the
+    helper above — by every masked layer in the package except four.
     ``energy_attention.py`` still imports the pair directly under the legacy private
-    aliases ``_MASK_BIAS_VALUE`` / ``_mask_dtype`` (the D-007 contract; do not remove
-    those aliases). Ten modules migrated to ``apply_attention_mask``:
+    aliases ``_MASK_BIAS_VALUE`` / ``_mask_dtype`` (the D-007 contract; do not
+    remove those aliases). Ten modules migrated to the helper:
     ``capsule_routing``, ``differential``, ``gated``, ``group_query``, ``hopfield``,
-    ``multi_head_cross``, ``multi_head_latent``, ``ring``, ``rpc``, ``single_window``.
-    (``beit`` ADOPTED the helper at birth rather than migrating to it, which is why
-    that migration list is ten while the adopter count above is ELEVEN. The migration
-    list is history and does not move; the adopter count is mechanical and does.)
+    ``multi_head_cross``, ``multi_head_latent``, ``ring``, ``rpc``,
+    ``single_window``. (``beit`` ADOPTED the helper at birth rather than migrating
+    to it, which is why that migration list is ten while the adopter count above is
+    ELEVEN. The migration list is history and does not move; the adopter count is
+    mechanical and does.)
 
     **Exactly FOUR modules still carry a LOCAL ``-1e9``-family value**, counted
     mechanically with comments and docstrings stripped:
 
-    * ``attention_routing_capsule.py:390`` — ``ops.where``-form and the ``-inf`` is
-      provably harmless at that site; deliberately left byte-unchanged.
+    * ``attention_routing_capsule.py:390`` — ``ops.where``-form, and the ``-inf`` is
+      provably harmless at that site. Left byte-unchanged on purpose.
     * ``ideogram4_attention.py`` (``_MASK_NEG``) — ``ops.where``-form with an
       explicit cast; structurally safe.
     * ``lighthouse_attention.py`` (``_MASK_SENTINEL``, a per-dtype TABLE) — the most
@@ -103,32 +142,27 @@ number you see in a sibling module came from here:
       (prior D-009).
     * ``progressive_focused_attention.py:870`` — a dead ``'threshold'`` branch.
 
-    *(This corrects two earlier figures in this same docstring: the "9 other modules"
-    of D-011 and the "fourteen other modules" recorded at step 10 of the previous
-    plan. The step-10 count was right at the time it was taken; ten of those fourteen
-    have since migrated.)*
-
 Architecture:
-    Deliberately **flat**: five module-level names, no classes, no registry, no Keras
-    serialization registration. Nothing here is a layer, and nothing here holds state.
-    A Keras layer imports these the same way it imports ``math`` — they are helpers,
-    not a base class. Keeping the module free of classes is what stops a shared-helper
-    file from quietly growing into a framework that every layer must inherit from.
+    Flat on purpose: five module-level names, no classes, no registry, no Keras
+    serialization registration. Nothing here is a layer and nothing here holds
+    state. A Keras layer imports these the way it imports ``math`` — they are
+    helpers, not a base class. Keeping the module free of classes is what stops a
+    shared-helper file from growing into a framework every layer must inherit from.
 
-    1.  **Masking** — ``MASK_BIAS_VALUE`` together with ``mask_dtype()`` form a pair.
-        The constant is only safe inside the dtype the helper returns; using one
-        without the other reintroduces the fp16 overflow documented below.
-        ``apply_attention_mask()`` bundles that pairing into a single call so a call
+    1.  **Masking** — ``MASK_BIAS_VALUE`` and ``mask_dtype()`` form a pair. The
+        constant is only safe inside the dtype the helper returns; using one without
+        the other reintroduces the fp16 overflow documented below.
+        ``apply_attention_mask()`` bundles that pairing into a single call, so a call
         site cannot use one half without the other.
 
-    2.  **Validation** — ``validate_head_divisibility()`` centralizes a check that was
-        written 19 times with 6 slightly different message spellings. Its parameter
-        names are configurable so that each call site keeps naming *its own*
-        constructor arguments (``dim``/``hidden_size``/``embed_dim``).
+    2.  **Validation** — ``validate_head_divisibility()`` centralizes a check that
+        was written 19 times with 6 slightly different message spellings. Its
+        parameter names are configurable so that each call site keeps naming *its
+        own* constructor arguments (``dim`` / ``hidden_size`` / ``embed_dim``).
 
-    3.  **Scaling** — ``compute_attention_scale()`` returns a plain Python ``float``, so
-        the softmax temperature is a graph constant folded at trace time rather than a
-        per-call ``ops.sqrt`` node.
+    3.  **Scaling** — ``compute_attention_scale()`` returns a plain Python ``float``,
+        so the softmax temperature is a graph constant folded at trace time rather
+        than a per-call ``ops.sqrt`` node.
 
 Foundational Mathematics:
     Masked scaled dot-product attention applies an additive bias ``b`` to the logits
@@ -136,14 +170,14 @@ Foundational Mathematics:
 
         A = softmax( (Q K^T) * s + b ),   s = 1 / sqrt(d_head)
 
-    with ``b = 0`` at kept positions and ``b = MASK_BIAS_VALUE`` at masked positions.
+    with ``b = 0`` at kept positions and ``b = MASK_BIAS_VALUE`` at masked ones.
     Because ``exp(-1e9) == 0`` in float32, the masked positions receive exactly zero
-    probability mass. This argument holds **only** while ``-1e9`` is representable —
+    probability mass. That argument holds **only** while ``-1e9`` is representable —
     see the fp16 note on ``MASK_BIAS_VALUE``.
 
 References:
-    - Vaswani et al. (2017). "Attention Is All You Need". NeurIPS. (The ``1/sqrt(d_k)``
-      scaling and the additive mask bias.)
+    - Vaswani et al. (2017). "Attention Is All You Need". NeurIPS. (The
+      ``1/sqrt(d_k)`` scaling and the additive mask bias.)
     - ``GUIDE.md`` in this package, section "What lives in ``common.py``".
 """
 
@@ -156,38 +190,20 @@ import keras
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-07-27T130643-38c5646a/D-002
-# Promoted verbatim in substance from `energy_attention.py` (anchor
-# `plan_2026-07-13_57c9833e/D-009`), which was the only module in the package carrying
-# this guard. Every other `-1e9` mask site had the hazard and no documentation.
-#
-# `-1e9` is NOT a dtype-independent "finite" number: `np.float16(-1e9) == -inf`
-# (verified empirically, not assumed). This constant is therefore ONLY usable inside a
-# float32-or-wider computation. Callers MUST materialize the bias in `mask_dtype(...)`,
-# run the logits -> bias -> softmax/logsumexp chain there, and cast back to the compute
-# dtype at the end.
-#
-# WHAT NOT TO DO (this bug SHIPPED once and was caught by an adversarial reviewer):
-#   * Do NOT apply this bias directly in the layer's compute dtype. Under
-#     `mixed_precision.set_global_policy('mixed_float16')` it becomes `-inf`.
-#   * Do NOT use the arithmetic form `mask_bias = (1 - keep) * MASK_BIAS_VALUE`. At
-#     every UNMASKED position that is `0 * -inf = NaN` — which made EnergyAttention and
-#     EnergyTransformer emit 512/512 NaN under mixed_float16 with NO mask supplied. Use
-#     `keras.ops.where(keep > 0, 0.0, MASK_BIAS_VALUE)`, which CANNOT produce `0 * inf` at
-#     all: the failure mode is removed structurally, not merely numerically.
-#   * Do NOT "simplify" this into a per-dtype magic constant (e.g. `finfo(dtype).min / 2`).
-#     A dtype-dependent constant is a second thing to get wrong, and fp16's usable range
-#     is too narrow to both zero a softmax AND keep comfortable headroom.
-# See decisions.md D-002 (this plan) and energy_attention.py's D-009 anchor.
+# DECISION plan-2026-07-27T130643-38c5646a/D-002 — promoted from `energy_attention.py`'s
+# `plan_2026-07-13_57c9833e/D-009`, which was the package's only copy of this guard.
+# `np.float16(-1e9)` is `-inf`, so use this constant only inside a `mask_dtype(...)` chain
+# and cast back at the end. Do NOT bias in the compute dtype. Do NOT write
+# `(1 - keep) * MASK_BIAS_VALUE` — `0 * -inf = NaN`. See decisions.md D-002.
 MASK_BIAS_VALUE = -1e9
 
 
 def mask_dtype(compute_dtype: str) -> str:
     """Dtype in which a masked softmax / logsumexp chain must be evaluated.
 
-    Always AT LEAST float32, regardless of the global mixed-precision policy, so that
-    :data:`MASK_BIAS_VALUE` is finite by construction and so the ``logsumexp`` is not
-    evaluated in fp16. A ``float64`` policy is honored rather than silently downcast.
+    Always AT LEAST float32, whatever the global mixed-precision policy. That is what
+    keeps :data:`MASK_BIAS_VALUE` finite, and it keeps the ``logsumexp`` out of fp16. A
+    ``float64`` policy is honored rather than silently downcast.
 
     :param compute_dtype: The layer's compute dtype (e.g. ``'float16'`` under
         ``mixed_float16``).
@@ -209,22 +225,62 @@ def apply_attention_mask(
     """Add the additive attention-mask bias to ``logits`` in a dtype where it is finite.
 
     Generalizes the one hand-written-correct instance of this pattern in the package
-    (``energy_attention.py``, anchor ``plan_2026-07-13_57c9833e/D-009``): the whole
-    logits -> bias -> softmax chain is evaluated in :func:`mask_dtype`, and the bias is
-    built with ``keras.ops.where`` rather than arithmetic, so ``0 * -inf = NaN`` is impossible
-    **structurally** and not merely by virtue of the dtype.
+    (``energy_attention.py``, anchor ``plan_2026-07-13_57c9833e/D-009``). The whole
+    logits -> bias -> softmax chain runs in :func:`mask_dtype`, and the bias is built
+    with ``keras.ops.where`` rather than arithmetic, so ``0 * -inf = NaN`` cannot happen
+    at all. That is a structural guarantee, not a consequence of the dtype.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+          logits [any shape]         keep [broadcastable]
+                  │                           │
+                  ▼                           ▼
+        cast to mask_dtype(..)       kept = cast(keep) > 0
+             (>= float32)                     │
+                  │              ┌────────────┴────────────┐
+                  │              ▼                         ▼
+                  │      rescue_axis is None       an int, or a tuple
+                  │         (rescue OFF)                   │
+                  │              │              reject a keep broadcast
+                  │              │              over EVERY named axis
+                  │              │                         │
+                  │              │              a slice keeping NOTHING
+                  │              │              keeps EVERYTHING, joint
+                  │              │              over the named axes
+                  │              └────────────┬────────────┘
+                  │                           ▼
+                  │       ┌────────────────────────────────────────┐
+                  │       │ bias = where(kept, 0, MASK_BIAS_VALUE) │
+                  │       └───────────────────┬────────────────────┘
+                  │                           │
+                  └───────────────────────┬───┘
+                                          ▼
+                                   logits + bias
+                                          │
+                             ┌────────────┴────────────┐
+                             ▼                         ▼
+                     out_dtype is None          out_dtype given
+                     -> mask_dtype(..)          -> cast to it
+                             │                         │
+                             └────────────┬────────────┘
+                                          ▼
+                              biased logits, for the
+                              CALLER's own softmax
+
+    A ``rescue_axis`` that is neither ``None``, an ``int``, nor a non-empty tuple of
+    ``int`` raises before any of the above runs.
+
+    No ``expand_dims``, ``reshape`` or ``repeat`` happens here. Each call site keeps its
+    own broadcast and cast order and passes an already-broadcastable ``keep``.
 
     **Degenerate-row semantics (the default).** A slice of ``keep`` that keeps NOTHING
     is treated as keeping EVERYTHING: it receives no bias at all, and its softmax is a
-    finite uniform-ish distribution over every key instead of ``softmax(all -inf) =
-    0/0 = NaN``. This is ON by default (``rescue_axis=-1``); ``rescue_axis=None`` opts
-    OUT and restores the un-rescued, NaN-capable behavior. The accepted cost of the
-    default is stated plainly: a caller whose mask is wrong gets finite garbage rather
-    than a loud NaN.
-
-    This function is orthogonal to broadcasting: it does no ``expand_dims``, ``reshape``
-    or ``repeat``. Each call site keeps its own (deliberately non-unified) broadcast and
-    cast order and passes an already-broadcastable ``keep``.
+    finite spread over every key instead of ``softmax(all -inf) = 0/0 = NaN``. This is
+    ON by default (``rescue_axis=-1``). ``rescue_axis=None`` opts OUT and restores the
+    un-rescued, NaN-capable behavior. The cost of the default is real: a caller whose
+    mask is wrong gets finite garbage rather than a loud NaN.
 
     :param logits: Pre-softmax attention scores, any shape, any float dtype. Cast up to
         ``mask_dtype(...)`` internally; the caller's tensor is not modified.
@@ -269,8 +325,9 @@ def apply_attention_mask(
 
         Pass an explicit axis where the downstream softmax does NOT reduce over the
         last axis. The default is a documented constant, not an inference: this
-        function never looks at the rank or shape of ``logits`` to pick an axis.
-        See the D-009 anchor above.
+        function never looks at the rank or shape of ``logits`` to pick an axis. That
+        is the same rule as the polarity rule on ``keep`` — the caller states what it
+        means, and this helper guesses nothing.
 
         Note the rescue is evaluated on ``keep``'s OWN shape, before any broadcast
         against ``logits``, so a rank-2 ``(B, N)`` key mask expanded to ``(B, 1, 1, N)``
@@ -279,9 +336,9 @@ def apply_attention_mask(
 
         A **tuple/list of axes** is also accepted, because ``keras.layers.Softmax``
         accepts one and the deriving sites forward it verbatim. The rescue is then
-        JOINT over those axes — a whole reduced BLOCK that keeps nothing keeps
-        everything — which is the exact generalization, not an approximation. See
-        the D-018 anchor above.
+        JOINT over those axes: a whole reduced BLOCK that keeps nothing keeps
+        everything. That is the exact generalization, not an approximation. See the
+        D-018 comment in the body below.
     :type rescue_axis: Optional[Union[int, Sequence[int]]]
 
     :raises ValueError: If ``rescue_axis`` is neither ``None``, an ``int``, nor a
@@ -299,7 +356,7 @@ def apply_attention_mask(
         (no softmax axis was named), when the extent is unknown at trace time, when
         ``logits`` is itself size 1 along that axis (an ordinary single-token
         sequence), or — for a multi-axis softmax — when ``keep`` varies along at least
-        one of the named axes. See the D-017 and D-018 anchors above.
+        one of the named axes. See the D-017 and D-018 comments in the body below.
 
     :return: ``logits + bias``, broadcast to the common shape of ``logits`` and
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.
@@ -323,7 +380,7 @@ def apply_attention_mask(
                 "softmax reduces over, as `keras.layers.Softmax` spells them), or "
                 "None to opt out of the fully-masked-slice rescue."
             )
-        # D-017. STATIC shapes only, and deliberately inline: a second module-level
+        # D-017. STATIC shapes only, and inline on purpose: a second module-level
         # helper in this file is a named STOP tripwire of the plan that wrote it. The
         # condition is BROADCAST, not size: `keep` is rejected only when it is
         # size 1 along the reduced axis WHILE `logits` is genuinely longer there. A
@@ -437,10 +494,10 @@ def compute_attention_scale(head_dim: int) -> float:
     it are a different convention and must not adopt this helper without checking their
     ``call()``.
 
-    :param head_dim: Per-head dimension (``dim // num_heads``). Expected positive;
-        deliberately **not** re-validated here, so that adopting this helper at an
-        existing call site cannot change which exception that site raises. Callers
-        validate ``dim``/``num_heads`` via :func:`validate_head_divisibility` and their
+    :param head_dim: Per-head dimension (``dim // num_heads``). Expected positive, and
+        **not** re-validated here. That is on purpose: adopting this helper at an
+        existing call site must not change which exception that site raises. Callers
+        validate ``dim`` / ``num_heads`` via :func:`validate_head_divisibility` and their
         own positivity checks in ``__init__``.
     :type head_dim: int
 

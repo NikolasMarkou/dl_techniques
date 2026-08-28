@@ -3,14 +3,16 @@ Implements the multi-head *energy* attention of the Energy Transformer (ET), Hoo
 Liang, Pham, Panda, Strobelt, Zaki, Chau, Krotov, "Energy Transformer", NeurIPS 2023
 (https://arxiv.org/abs/2302.07253), equations (3)-(4).
 
-**This is NOT standard attention.** There is **no value matrix**. The layer defines a
-scalar energy ``E_ATT(g)`` over the token state, and its ``call()`` returns the
-**negative gradient of that energy** — a descent direction — rather than a weighted sum
-of values. The gradient is hand-coded in closed form (``keras.ops`` only, no autodiff:
+**This is NOT standard attention, and there is no value matrix.** The layer defines a
+scalar energy ``E_ATT(g)`` over the token state. Its ``call()`` returns the **negative
+gradient of that energy**, a descent direction, not a weighted sum of values.
+
+The gradient is hand-coded in closed form, with ``keras.ops`` and no autodiff.
 ``keras.ops.grad`` does not exist in keras 3.8, and a backend-specific autodiff tape is
-forbidden in ``src/`` — see decisions.md D-001). Its correctness rests entirely on the
-autodiff oracle test ``test_gradient_oracle`` in
-``tests/test_layers/test_attention/test_energy_attention.py``.
+not allowed in ``src/``. Nothing in the file proves the derivation; the autodiff oracle
+test ``test_gradient_oracle`` in
+``tests/test_layers/test_attention/test_energy_attention.py`` is the only thing that
+does.
 
 Architecture:
     The module is a *descent-direction generator*, not a token mixer. Three free
@@ -25,19 +27,18 @@ Architecture:
         are aliased re-exports of ``common.py`` (see the D-007 anchor below).
 
     2.  **:meth:`EnergyAttention.energy` — the forward face.** Layer-normed tokens
-        ``g`` are projected by two bias-free weights ``w_key`` and ``w_query`` into
-        per-head keys and queries, scored, masked, and reduced by a ``logsumexp`` over
-        the key axis into a single SCALAR energy per batch element. There is **no
-        value matrix and no output projection** — nothing is ever "read out" of the
-        tokens.
+        ``g`` are projected by two bias-free weights, ``w_key`` and ``w_query``, into
+        per-head keys and queries. Those are scored, masked, and reduced by a
+        ``logsumexp`` over the key axis into one SCALAR energy per batch element.
+        There is no value matrix and no output projection. Nothing is ever "read out"
+        of the tokens.
 
-    3.  **:meth:`EnergyAttention.call` — the gradient face.** Returns
-        ``-dE_ATT/dg``, hand-derived in closed form with ``keras.ops`` only. The
-        softmax that appears here is the *derivative* of the ``logsumexp`` in
-        ``energy()``, not a separately-designed attention distribution — which is why
-        the two methods must be edited as a pair and why ``test_gradient_oracle`` is
-        the only thing standing between this file and a silently wrong descent
-        direction.
+    3.  **:meth:`EnergyAttention.call` — the gradient face.** Returns ``-dE_ATT/dg``,
+        hand-derived in closed form with ``keras.ops`` only. The softmax here is the
+        *derivative* of the ``logsumexp`` in ``energy()``, not a separately designed
+        attention distribution. Edit the two methods as a pair. A wrong descent
+        direction still runs, still trains and still looks finite, so
+        ``test_gradient_oracle`` is the only thing that would catch it.
 
 Foundational Mathematics:
     For layer-normed tokens ``g`` (shape ``(B, N, D)``), heads ``h``, key/query
@@ -72,35 +73,37 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # DECISION plan-2026-07-27T130643-38c5646a/D-007
-# These three names are a PUBLISHED PRIVATE CONTRACT, not local implementation detail.
+# These three names are a PUBLISHED PRIVATE CONTRACT, not local detail.
 # `layers/transformers/energy_transformer.py:91` does
 # `from dl_techniques.layers.attention.energy_attention import _mask_dtype, _token_keep`
-# — a plain by-name `from ... import`, verified at `energy_transformer.py:88-91`.
-#
+# — a plain by-name import, verified at `energy_transformer.py:88-91`.
 # WHAT NOT TO DO:
 #   * Do NOT delete `_MASK_BIAS_VALUE` / `_mask_dtype` from this module's namespace just
-#     because their bodies now live in `common.py`. `energy_transformer.py` imports two of
-#     them BY NAME and, until this plan's step 9 lands its guard test, NOTHING in the test
-#     suite fails when they vanish — `EnergyTransformer` simply stops importing, taking
-#     every ET model and trainer with it.
-#   * Do NOT "clean up" the aliasing by rewriting the import in `energy_transformer.py`:
-#     that file is outside this plan's scope, and the alias is the cheaper contract.
+#     because their bodies now live in `common.py`. Deleting one does not break a
+#     forward pass; `EnergyTransformer` stops IMPORTING, taking every ET model and
+#     trainer with it. That is now pinned by
+#     `test_energy_attention.py::TestPrivateReExportContract`, which was proven RED by
+#     removing one alias. Before that test existed the suite stayed green.
+#   * Do NOT "clean up" the aliasing by rewriting the import in `energy_transformer.py`.
+#     The alias is the cheaper contract.
 #   * Do NOT re-point `_token_keep` at `common.py` — it was never extracted. It encodes
-#     the rank-2 `(B, N)` Keras-mask contract that is specific to the Energy Transformer
-#     family, not a generic attention primitive, and it stays DEFINED here (below).
-# See decisions.md D-007 (this plan) and D-002 (why the bodies moved to `common.py`).
+#     the rank-2 `(B, N)` Keras-mask contract specific to the Energy Transformer family,
+#     not a generic attention primitive, and it stays DEFINED here, below.
+# The D-007 entry itself lives in that plan's own decisions.md.
 #
-# DECISION plan_2026-07-13_57c9833e/D-009 (preserved — many docstrings in this file say
-# "see the D-009 anchor at ``_MASK_BIAS_VALUE``" and this is that anchor).
+# DECISION plan_2026-07-13_57c9833e/D-009
+# The originating plan directory is gone, so this comment is the record.
+# Keep this anchor HERE, at `_MASK_BIAS_VALUE`: several docstrings in this file say
+# "see the D-009 anchor at ``_MASK_BIAS_VALUE``", and this is that anchor.
 # `-1e9` is NOT a dtype-independent "finite" number: `np.float16(-1e9) == -inf`. It is
-# usable ONLY inside a float32-or-wider computation, which this module guarantees BY
-# CONSTRUCTION: the whole logits -> bias -> softmax/logsumexp chain runs in
+# usable ONLY inside a float32-or-wider computation, and this module keeps it there: the
+# whole logits -> bias -> softmax/logsumexp chain runs in
 # `_mask_dtype(self.compute_dtype)` and is cast back to the compute dtype at the end.
-# The three standing prohibitions — never apply the bias in the compute dtype, never use
-# the arithmetic form `(1 - keep) * _MASK_BIAS_VALUE` (that is `0 * -inf = NaN` at every
-# UNMASKED position; use `ops.where(keep > 0, 0.0, _MASK_BIAS_VALUE)`), and never
-# "simplify" to a per-dtype magic constant — are stated in full at the definition site,
-# `common.py`'s `MASK_BIAS_VALUE`. See decisions.md D-009.
+# Three standing prohibitions, stated in full at the definition site
+# (`common.py`'s `MASK_BIAS_VALUE`): never apply the bias in the compute dtype; never use
+# the arithmetic form `(1 - keep) * _MASK_BIAS_VALUE`, which is `0 * -inf = NaN` at every
+# UNMASKED position, and use `ops.where(keep > 0, 0.0, _MASK_BIAS_VALUE)` instead; never
+# "simplify" to a per-dtype magic constant.
 from dl_techniques.layers.attention.common import (
     MASK_BIAS_VALUE as _MASK_BIAS_VALUE,
     mask_dtype as _mask_dtype,
@@ -117,20 +120,19 @@ def _token_keep(
     """Validate and cast a Keras-propagated rank-2 ``(B, N)`` per-token validity mask.
 
     The SINGLE place the rank-2 contract for the Keras-propagated ``mask`` lives. It has
-    **FOUR** call sites (this said "two" until they were recounted — the Hopfield energy/update
-    PAIR and the block's own mask-AND were never counted). Names are the stable identifier; the
-    line numbers are as of this writing and WILL drift:
+    **FOUR** call sites. Names are the stable identifier, so no line numbers are given here:
+    the four that used to be were all stale within a month.
 
-    1. :meth:`EnergyAttention._build_keep_mask` (``energy_attention.py:452``) — which then
-       expands it symmetrically over the key/query axes (``_symmetric_token_keep``).
-    2. ``HopfieldNetwork.energy`` (``energy_transformer.py:391``) — per-token and un-expanded,
-       to drop PAD tokens from the energy SUM.
-    3. ``HopfieldNetwork.update`` (``energy_transformer.py:489``) — the matching gradient side.
-       The pair MUST see the same keep, or ``update() != -dE/dg``.
-    4. ``EnergyTransformer._hopfield_token_mask`` (``energy_transformer.py:956``) — which ANDs
-       the Keras mask with a rank-2 ``attention_mask`` (D-006).
+    1. :meth:`EnergyAttention._build_keep_mask`, which then expands the result
+       symmetrically over the key and query axes (``_symmetric_token_keep``).
+    2. ``HopfieldNetwork.energy`` in ``layers/transformers/energy_transformer.py``,
+       per-token and un-expanded, to drop PAD tokens from the energy SUM.
+    3. ``HopfieldNetwork.update`` in the same file — the matching gradient side. The pair
+       MUST see the same keep, or ``update() != -dE/dg``.
+    4. ``EnergyTransformer._hopfield_token_mask``, which ANDs the Keras mask with a
+       rank-2 ``attention_mask`` (D-006).
 
-    Do NOT re-implement the rank check at any call site: a second copy is a second error
+    Do NOT re-implement the rank check at any call site. A second copy is a second error
     message to drift.
 
     :param mask: Boolean (or 0/1) per-token validity mask of shape ``(B, N)``.
@@ -170,9 +172,11 @@ def _symmetric_token_keep(token_keep: keras.KerasTensor) -> keras.KerasTensor:
     :return: 0/1 keep tensor of shape ``(B, 1, N, N)``, axis 2 = key ``n``, axis 3 = query ``m``.
     :rtype: keras.KerasTensor
     """
-    key_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=-1)   # (B,1,N,1)
-    query_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=2)  # (B,1,1,N)
-    return key_keep * query_keep                                               # (B,1,N,N)
+    # key_keep is (B,1,N,1) and query_keep is (B,1,1,N), so the product broadcasts
+    # to (B,1,N,N).
+    key_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=-1)
+    query_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=2)
+    return key_keep * query_keep
 
 
 @keras.saving.register_keras_serializable()
@@ -188,43 +192,45 @@ class EnergyAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────────────────────────────────────┐
-        │       EnergyAttention — scalar energy and its closed-form gradient        │
-        │                                                                           │
-        │   NO value matrix and NO output projection exist anywhere in this         │
-        │   layer. call(g) returns a DESCENT DIRECTION -dE/dg, so a consumer        │
-        │   ADDS step_size * call(g) to g.                                          │
-        │                                                                           │
-        │                       Input  g  [B, N, D]                                 │
-        │                                │                                          │
-        │             ┌──────────────────┴──────────────────┐                       │
-        │             ▼                                     ▼                       │
-        │       w_key  (Y,H,D)                       w_query  (Y,H,D)               │
-        │       einsum ► K  [B,Y,H,N]                einsum ► Q  [B,Y,H,N]          │
-        │       (bias-free)                          (bias-free)                    │
-        │             │                                     │                       │
-        │             └──────────────────┬──────────────────┘                       │
-        │                                ▼                                          │
-        │               A = sum_y K·Q  [B,H,N,N]    n = KEY, m = QUERY              │
-        │                                ▼                                          │
-        │               keep mask [B,1,N,N] ► additive -1e9 bias in                 │
-        │               mask_dtype (>= f32). The diagonal is dropped when           │
-        │               attn_self=False; PAD tokens drop in BOTH roles.             │
-        │                                │                                          │
-        │         ┌──────────────────────┴──────────────────────┐                   │
-        │         ▼                                             ▼                   │
-        │  E_ATT = -(1/beta) ·                   omega = softmax_n(beta·A),         │
-        │    sum_h,m logsumexp_n(beta·A)         then · keep   [B,H,N,N]            │
-        │         │                                             ▼                   │
-        │         │                              optional · W_hat (eq. 25           │
-        │         │                              weighted adjacency, Branch A)      │
-        │         │                              ►  omega_eff                       │
-        │         ▼                                             ▼                   │
-        │  energy(g)  ►  [B,]                    update(g) = -dE/dg                 │
-        │  a diagnostic trace only —               = einsum(w_query, K, omega)      │
-        │  it never drives the state               + einsum(w_key,   Q, omega)      │
-        │  update                                  ►  [B, N, D]  == call(g)         │
-        └───────────────────────────────────────────────────────────────────────────┘
+                      Input  g   [B, N, D]
+                               │
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+        w_key  (Y, H, D)                w_query  (Y, H, D)
+        einsum ► K  [B,Y,H,N]           einsum ► Q  [B,Y,H,N]
+        (bias-free)                     (bias-free)
+               └───────────────┬───────────────┘
+                               ▼
+                  A = sum_y K·Q      [B, H, N, N]
+                  n = KEY index,  m = QUERY index
+                               ▼
+                  logits = beta * A, cast to mask_dtype
+                  (>= float32)
+                               ▼
+                  optional: logits = logits ⊙ Ŵ
+                  (adjacency_weight, paper eq. 25)
+                               ▼
+                  keep [B,1,N,N] ► additive -1e9 bias.
+                  The diagonal is dropped when attn_self
+                  is False; a PAD token drops in BOTH the
+                  key role and the query role.
+                               │
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+        energy(g)                       update(g) == call(g)
+        lse = logsumexp_n(logits)       omega = softmax_n(logits)
+        gate columns that keep          omega = omega * keep
+        no key at all                   omega = omega * Ŵ (optional)
+               │                               │
+               ▼                               ▼
+        E = -(1/beta) *                 term_q = einsum(w_query,K,omega)
+            sum_h,m lse                 term_k = einsum(w_key,  Q,omega)
+        ► [B,]  a diagnostic            ► term_q + term_k  [B, N, D]
+          trace; it never drives          == -dE_ATT/dg
+          the state update
+
+    There is NO value matrix and NO output projection in this layer. A consumer
+    ADDS ``step_size * call(g)`` to ``g``.
 
     **Mathematics** (notation: ``B``=batch, ``N``=tokens, ``D``=``dim``, ``Y``=``head_dim``,
     ``H``=``num_heads``; ``n`` indexes a token in its **KEY** role, ``m`` in its **QUERY**
@@ -232,11 +238,12 @@ class EnergyAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        K_{y h n} = sum_d W^K_{y h d} g_{n d}            # keys   (no bias)
-        Q_{y h m} = sum_d W^Q_{y h d} g_{m d}            # queries (no bias)
+        K_{y h n} = sum_d W^K_{y h d} g_{n d}     # keys    (no bias)
+        Q_{y h m} = sum_d W^Q_{y h d} g_{m d}     # queries (no bias)
         A_{h n m} = sum_y K_{y h n} Q_{y h m}
 
-        E_ATT = -(1/beta) * sum_h sum_m log( sum_{n valid} exp(beta * A_{h n m}) )
+        E_ATT = -(1/beta) * sum_h sum_m
+                    log( sum_{n valid} exp(beta * A_{h n m}) )
 
     The ``n != m`` exclusion (``attn_self=False``, the paper's ET-Full image config) is a
     mask, not a separate code path; appendix eq. 13 permits ``attn_self=True``.
@@ -246,8 +253,9 @@ class EnergyAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        -dE_ATT/dg_{i d} = sum_h sum_y [ W^Q_{y h d} * ( sum_n K_{y h n} omega_{h n i} )
-                                       + W^K_{y h d} * ( sum_m Q_{y h m} omega_{h i m} ) ]
+        -dE_ATT/dg_{i d} = sum_h sum_y
+            [ W^Q_{y h d} * ( sum_n K_{y h n} omega_{h n i} )
+            + W^K_{y h d} * ( sum_m Q_{y h m} omega_{h i m} ) ]
 
     Derivation sketch:
 
@@ -259,18 +267,19 @@ class EnergyAttention(keras.layers.Layer):
     - Chain rule, then negate -> the two terms above. **Both** softmax normalizations are
       over the KEY index ``n``.
 
-    The **second** term is the ET-specific contribution and is absent from vanilla
-    attention. See the ``D-001`` anchor at :meth:`update`.
+    The **second** term is the ET-specific contribution. Vanilla attention has no
+    equivalent. See the ``D-001`` anchor on ``term_k`` in :meth:`update`.
 
-    **SIGN DISCIPLINE.** :meth:`update` returns ``-dE/dg`` — the **descent direction**,
-    NOT the gradient. A consumer therefore *adds* ``step_size * update``. Do not "fix"
-    this sign: flipping it silently turns the block's dynamics into energy *ascent*, which
-    still runs and still produces finite outputs.
+    **SIGN DISCIPLINE.** :meth:`update` returns ``-dE/dg``, the **descent direction**,
+    not the gradient. A consumer therefore *adds* ``step_size * update``. Do not "fix"
+    this sign. Flipping it turns the block's dynamics into energy *ascent*, which still
+    runs and still produces finite outputs.
 
-    **Duck-typed convention (NOT an ABC).** This layer and ``HopfieldNetwork`` both expose
+    **Duck-typed convention, not an ABC.** This layer and ``HopfieldNetwork`` both expose
     the trio ``energy(g, ...) -> (B,)`` / ``update(g, ...) -> (B, N, D)`` /
-    ``call(...) -> update(...)``. Two implementors and one consumer earn the *convention*,
-    not an inheritance hierarchy; there is deliberately no base class or ``Protocol``.
+    ``call(...) -> update(...)``. Two implementors and one consumer earn a *convention*,
+    not an inheritance hierarchy. There is no base class and no ``Protocol`` here on
+    purpose: one more implementor would be the point at which that changes.
 
     :param dim: Token embedding dimension ``D``. The only required argument.
     :type dim: int
@@ -323,6 +332,18 @@ class EnergyAttention(keras.layers.Layer):
         kernel_initializer: Union[str, initializers.Initializer] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and resolve ``head_dim`` and ``beta``.
+
+        Every argument is documented on the class. The two projection weights are
+        created in :meth:`build`, not here, because their shape needs ``dim``, which
+        is a constructor argument, and Keras expects weight creation in ``build``.
+
+        :param kwargs: Forwarded to ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: If ``dim <= 0``, ``num_heads <= 0``, the resolved
+            ``head_dim <= 0``, or an explicitly-supplied ``beta <= 0``.
+        """
         super().__init__(**kwargs)
 
         # ----- validation -----
@@ -395,10 +416,11 @@ class EnergyAttention(keras.layers.Layer):
                 f"Input feature dimension {feature_dim} does not match dim={self.dim}"
             )
 
-        w_shape = (self._head_dim, self.num_heads, self.dim)  # (Y, H, D)
+        # (Y, H, D) — per-head dim first, so the einsums below read 'yhd'.
+        w_shape = (self._head_dim, self.num_heads, self.dim)
 
-        # NO BIAS, by construction: the paper's energy E_ATT is defined without one, and
-        # a bias term would not be expressible in the closed-form gradient below.
+        # NO BIAS. The paper's energy E_ATT is defined without one, and a bias term
+        # would not be expressible in the closed-form gradient below.
         self.w_key = self.add_weight(
             name="w_key",
             shape=w_shape,
@@ -406,15 +428,11 @@ class EnergyAttention(keras.layers.Layer):
             trainable=True,
             dtype=self.dtype,
         )
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-068
-        # `clone_initializer`, because handing the SAME instance to both
-        # `add_weight` calls made `w_key` and `w_query` bit-identical -- so the
-        # initial attention score matrix `K^T Q` was EXACTLY SYMMETRIC in all
-        # six `energy_transformer` / `graph_energy_transformer` classes. Key and
-        # query are different architectural roles; this is the D-057 defect
-        # case, not the harmless one. `self.kernel_initializer` is untouched so
-        # `get_config` still reports the caller's argument, and a SEEDED
-        # initializer still reproduces. See decisions.md D-068.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-068 — `clone_initializer`, because one
+        # shared instance handed to both `add_weight` calls made `w_key` and `w_query`
+        # bit-identical, so the initial score matrix `K^T Q` was EXACTLY SYMMETRIC in all six
+        # `energy_transformer` / `graph_energy_transformer` classes. `self.kernel_initializer`
+        # itself is untouched, so `get_config` still reports it. See decisions.md D-068.
         self.w_query = self.add_weight(
             name="w_query",
             shape=w_shape,
@@ -438,54 +456,57 @@ class EnergyAttention(keras.layers.Layer):
         """Normalize the user KEEP mask to a ``(b, h, n, m)``-broadcastable 0/1 tensor.
 
         # DECISION plan_2026-07-13_57c9833e/D-006
-        Mask convention follows the sibling ``multi_head_cross_attention.py:380-407``:
-        ``attention_mask`` is a **KEEP** mask (``1`` = attend, ``0`` = masked), NOT an
-        additive ``-inf`` bias. Do NOT re-interpret it as a boolean *drop* mask and do NOT
-        accept an additive mask — every sibling attention layer in this package uses the
-        keep convention, and flipping it here would silently invert every caller's mask.
+        The originating plan directory is gone, so this comment is the record.
+        Mask convention follows the sibling
+        ``MultiHeadCrossAttention._apply_attention_mask``: ``attention_mask`` is a
+        **KEEP** mask (``1`` = attend, ``0`` = masked), NOT an additive ``-inf`` bias.
+        Do NOT re-interpret it as a boolean *drop* mask, and do NOT accept an additive
+        mask. Every sibling attention layer in this package uses the keep convention, so
+        flipping it here would silently invert every caller's mask.
 
         The ``attn_self=False`` diagonal exclusion is a SEPARATE, always-on mask ANDed
-        with the user mask (not folded into it), because ET *generates* fully-masked query
-        columns by construction (``attn_self=False`` with ``N == 1``). The two-stage
+        with the user mask rather than folded into it, because ET *generates* fully-masked
+        query columns on its own (``attn_self=False`` with ``N == 1``). The two-stage
         treatment that follows in :meth:`energy` / :meth:`update` — a FINITE ``-1e9``
-        additive bias PLUS a post-softmax ``* keep`` PLUS a ``col_valid`` gate on the
-        energy — is load-bearing for exactly that degenerate case. See decisions.md D-006.
+        additive bias, PLUS a post-softmax ``* keep``, PLUS a ``col_valid`` gate on the
+        energy — is what makes that degenerate case come out right. Do not collapse it.
 
         # DECISION plan_2026-07-13_57c9833e/D-008
-        A rank-2 ``(B, N)`` mask is applied **SYMMETRICALLY** (to the key axis ``n`` AND
-        the query axis ``m``), which is a DELIBERATE DEVIATION from the sibling, where a
-        rank-2 mask is key-only. Do NOT "restore" the key-only reading: in ET a token
-        masked only as a KEY still acts as a QUERY, and the second gradient term
-        (``term_k``, summed over query columns ``m``) then propagates that token's state
-        into EVERY other token's update — so a padding token would still influence real
-        tokens, and its query column would still be summed into ``E_ATT``. Vanilla
-        attention has no ``term_k``, which is why key-only masking is sufficient THERE and
-        insufficient HERE. Verified live: the key-only reading makes S8a
-        (``test_masked_token_has_no_influence``) RED. Rank-3/rank-4 masks keep the
-        sibling's ``(n = key, m = query)`` semantics untouched. See decisions.md D-008.
+        The originating plan directory is gone, so this comment is the record.
+        A rank-2 ``(B, N)`` mask is applied **SYMMETRICALLY**, to the key axis ``n`` AND
+        the query axis ``m``. That is a chosen deviation from the sibling, where a rank-2
+        mask is key-only. Do NOT "restore" the key-only reading. In ET a token masked only
+        as a KEY still acts as a QUERY, and the second gradient term (``term_k``, summed
+        over query columns ``m``) then propagates that token's state into EVERY other
+        token's update. A padding token would still influence real tokens, and its query
+        column would still be summed into ``E_ATT``. Vanilla attention has no ``term_k``,
+        which is why key-only masking is enough THERE and not enough HERE. Verified live:
+        the key-only reading makes ``test_masked_token_has_no_influence`` RED.
+        Rank-3 and rank-4 masks keep the sibling's ``(n = key, m = query)`` semantics.
 
         # DECISION plan_2026-07-13_ca4f71a2/D-002
+        The originating plan directory is gone, so this comment is the record.
         The Keras-propagated ``mask`` (from e.g. ``Embedding(mask_zero=True)``) is merged
-        HERE, as one extra multiplicative keep factor reusing D-008's symmetric expansion
-        (``_symmetric_token_keep``) — because the propagated mask IS exactly a rank-2
-        ``(B, N)`` per-token validity mask, i.e. D-008's shape and D-008's semantics. Do NOT
+        HERE, as one extra multiplicative keep factor that reuses D-008's symmetric
+        expansion (``_symmetric_token_keep``). The propagated ``mask`` IS exactly a rank-2
+        ``(B, N)`` per-token validity mask — D-008's shape and D-008's semantics. Do NOT
         give it its own masking path: a second convention is a second thing to get wrong,
-        and the symmetric (key AND query) treatment is precisely what F-02 needs (a PAD
-        token masked only as a KEY still propagates through ``term_k``). The merge is
-        ADDITIVE — no D-006/D-008 semantics change. See decisions.md D-002.
+        and the symmetric key-AND-query treatment is exactly what the PAD-token defect
+        needs, since a PAD token masked only as a KEY still propagates through ``term_k``.
+        The merge only ADDS a factor; D-006 and D-008 semantics are unchanged.
 
         # DECISION plan_2026-07-13_ca4f71a2/D-003
-        Precedence when BOTH masks arrive is LOGICAL AND: the multiplication below IS the
-        AND, and it composes with ANY rank (2/3/4) of ``attention_mask``.
+        The originating plan directory is gone, so this comment is the record.
+        Precedence when BOTH masks arrive is LOGICAL AND. The multiplication below IS that
+        AND, and it composes with ANY rank (2, 3 or 4) of ``attention_mask``.
         WHAT NOT TO DO:
           * Do NOT raise on a conflict between the two masks. Detecting one compares mask
-            VALUES — a tensor-valued condition, unresolvable at trace time and therefore
-            graph-UNSAFE (unlike the Python-bool ``is_masked`` below).
-          * Do NOT make the explicit ``attention_mask`` win. That would let an explicit mask
-            silently UN-MASK a PAD token the framework declared invalid — reintroducing F-02
-            through the front door. AND is the only rule monotone in safety: neither mask can
-            ever resurrect a token the other hid.
-        See decisions.md D-003.
+            VALUES — a tensor-valued condition, unresolvable at trace time and so
+            graph-UNSAFE, unlike the Python-bool ``is_masked`` below.
+          * Do NOT make the explicit ``attention_mask`` win. That would let an explicit
+            mask silently UN-MASK a PAD token the framework had declared invalid, which is
+            the PAD-token defect through the front door. AND is the only rule monotone in
+            safety: neither mask can ever resurrect a token the other hid.
 
         :param g: Token state ``(B, N, D)``.
         :type g: keras.KerasTensor
@@ -528,7 +549,7 @@ class EnergyAttention(keras.layers.Layer):
                 # (B, N) token-validity mask -> (B, 1, N, N), applied SYMMETRICALLY:
                 # keep[b, :, n, m] = mask[b, n] * mask[b, m]. An invalid token is removed
                 # from BOTH the key role and the query role (D-008 above).
-                keep = _symmetric_token_keep(explicit)                                # (B,1,N,N)
+                keep = _symmetric_token_keep(explicit)
             elif rank == 3:
                 # (B, N, N) read as (b, n, m) -> (B, 1, N, N): broadcast over heads.
                 keep = ops.expand_dims(explicit, axis=1)
@@ -546,12 +567,14 @@ class EnergyAttention(keras.layers.Layer):
             # arrives BOOLEAN, and it must NEVER land in fp16 where `-1e9` is `-inf` (D-009).
             # Multiplying the keep factors IS the logical AND (D-003) and composes with any
             # rank of `attention_mask` above.
-            keras_mask = _token_keep(mask, mask_dtype)       # rank-2 contract, ONE place
+            # `_token_keep` is the ONE place the rank-2 contract lives.
+            keras_mask = _token_keep(mask, mask_dtype)
             keep = keep * _symmetric_token_keep(keras_mask)
 
         if not self.attn_self:
             # Always-on diagonal exclusion (n == m), ANDed with the user mask.
-            eye = ops.eye(num_tokens, dtype=mask_dtype)                  # (N, N) = (n, m)
+            # (N, N), read as (n = key, m = query).
+            eye = ops.eye(num_tokens, dtype=mask_dtype)
             keep = keep * (1.0 - ops.reshape(eye, (1, 1, num_tokens, num_tokens)))
 
         return keep, is_masked
@@ -596,22 +619,25 @@ class EnergyAttention(keras.layers.Layer):
         """
         keep, is_masked = self._build_keep_mask(g, attention_mask, mask=mask)
 
-        k = ops.einsum('yhd,bnd->byhn', self.w_key, g)      # (B, Y, H, N)  n = KEY
-        q = ops.einsum('yhd,bmd->byhm', self.w_query, g)    # (B, Y, H, N)  m = QUERY
-        a = ops.einsum('byhn,byhm->bhnm', k, q)             # (B, H, N, N)
+        # k and q are (B, Y, H, N) with n = KEY and m = QUERY; a is (B, H, N, N).
+        k = ops.einsum('yhd,bnd->byhn', self.w_key, g)
+        q = ops.einsum('yhd,bmd->byhm', self.w_query, g)
+        a = ops.einsum('byhn,byhm->bhnm', k, q)
 
         # DECISION plan_2026-07-13_57c9833e/D-009
+        # The originating plan directory is gone, so this comment is the record.
         # (a) The ENTIRE logits -> bias -> softmax/logsumexp chain runs in float32, so
-        #     `_MASK_BIAS_VALUE` is finite BY CONSTRUCTION under ANY global policy (in fp16
-        #     it would be `-inf`). This is also the numerically right thing to do for a
-        #     `logsumexp` under mixed precision.
-        # (b) The bias is applied via `ops.where`, never as `(1 - keep) * NEG`: `where`
-        #     cannot produce `0 * inf`, so the NaN failure mode is gone STRUCTURALLY and not
+        #     `_MASK_BIAS_VALUE` stays finite under ANY global policy; in fp16 it would be
+        #     `-inf`. It is also the right thing numerically for a `logsumexp` under mixed
+        #     precision.
+        # (b) The bias is applied via `ops.where`, never as `(1 - keep) * NEG`. `where`
+        #     cannot produce `0 * inf`, so the NaN failure mode is gone structurally, not
         #     just by virtue of the dtype.
         # (c) When nothing is masked anywhere (no user mask AND `attn_self=True`) the bias
         #     is SKIPPED entirely — the sibling's fast path.
-        # Do NOT collapse any of the three. See decisions.md D-009.
-        logits = ops.cast(a, _mask_dtype(self.compute_dtype)) * self._beta  # (B,H,N,N) f32
+        # Do NOT collapse any of the three. They are three separate guarantees.
+        # (B, H, N, N) in the mask dtype, i.e. float32 or wider.
+        logits = ops.cast(a, _mask_dtype(self.compute_dtype)) * self._beta
         if adjacency_weight is not None:
             # Branch A (paper eq.25): fold the FINITE learned edge weight `Ŵ` into the score
             # MULTIPLICATIVELY, in the mask dtype (>= float32) so the whole logits -> bias ->
@@ -620,7 +646,7 @@ class EnergyAttention(keras.layers.Layer):
             # the existing delta-structure (see the omega_eff anchor in `update`). A real
             # Python branch — NOT a multiply-by-ones — so `None` is byte-identical to today.
             w_hat = ops.cast(adjacency_weight, _mask_dtype(self.compute_dtype))
-            logits = logits * w_hat                                          # (B,H,N,N) f32
+            logits = logits * w_hat
         if is_masked:
             # Both `where` branches are tensors IN THE MASK DTYPE — a bare Python `0.0` /
             # `-1e9` pair gets promoted to float32 and then collides with a float64 `logits`.
@@ -648,7 +674,8 @@ class EnergyAttention(keras.layers.Layer):
 
         .. code-block:: text
 
-            E_ATT = -(1/beta) * sum_h sum_m logsumexp_n( beta * A_{h n m} )
+            E_ATT = -(1/beta) * sum_h sum_m
+                        logsumexp_n( beta * A_{h n m} )
 
         The ``logsumexp`` is over the **KEY** axis ``n``. A query column ``m`` whose keys
         are ALL masked contributes **exactly 0** (not ``-1e9 / beta``): the ``col_valid``
@@ -692,9 +719,10 @@ class EnergyAttention(keras.layers.Layer):
         # WITH a Keras mask (`mask_kind` in {KERAS, BN+KERAS}) precisely to catch that. The
         # SAME discipline applies to `adjacency_weight`: it must reach the SAME `_project`
         # call that `update()` makes, or `update() != -dE/dg`.
+        # `logits` and `keep` come back in the mask dtype (float32 or wider).
         _, _, logits, keep = self._project(
             g, attention_mask, mask=mask, adjacency_weight=adjacency_weight
-        )                                                       # logits, keep: float32
+        )
 
         # logsumexp over the KEY axis n (axis=2) -> (B, H, N) indexed by (b, h, m).
         lse = ops.logsumexp(logits, axis=2)
@@ -704,25 +732,28 @@ class EnergyAttention(keras.layers.Layer):
         # gradient path (the autodiff oracle sees it as a constant).
         col_valid = ops.cast(
             ops.sum(keep, axis=2) > 0.0, _mask_dtype(self.compute_dtype)
-        )                                                   # (B, H, N) or broadcastable
+        )
 
         # DECISION plan_2026-07-13_ca4f71a2/D-005
+        # The originating plan directory is gone, so this comment is the record.
         # The energy is returned in the REDUCE dtype (`_mask_dtype`, i.e. >= float32) and is
-        # deliberately NOT cast back to the compute dtype. WHAT NOT TO DO:
+        # NOT cast back to the compute dtype. WHAT NOT TO DO:
         #   * Do NOT "restore the boundary" with `ops.cast(energy, self.compute_dtype)`. That
-        #     is the bug this anchor replaces: the float32 reduction protects the ACCUMULATOR,
-        #     and the cast then puts the O(-8e4) result back into fp16 (max 65504) on the very
-        #     last op. Measured under `mixed_float16`: N=256 -> -32256 (finite, already within
-        #     a factor of 2 of the limit), N=512 -> near the limit, N=1024 -> `-inf`. It also
-        #     quantized the trace to ~1 part in 2048, making the energy DESCENT invisible.
-        #   * This is safe precisely because NOTHING in the compute path consumes `energy()`.
-        #     It is a REPORTED DIAGNOSTIC SCALAR: `EnergyTransformer.call()` only appends it to
-        #     the `return_energy=True` trace; the state update is driven by `update()` alone.
-        #     So widening the energy's dtype cannot change any layer's OUTPUT. If a future
-        #     change makes some compute path contract this against fp16 weights, cast AT THAT
-        #     CALL SITE — do not re-narrow the energy here.
-        # See decisions.md D-005.
-        return -(1.0 / self._beta) * ops.sum(lse * col_valid, axis=(1, 2))    # (B,), >= f32
+        #     spelling is the bug this anchor replaces. The float32 reduction protects the
+        #     ACCUMULATOR, and the cast then puts the O(-8e4) result back into fp16 (max
+        #     65504) on the very last op. Measured WHEN THAT CAST WAS PRESENT, under
+        #     `mixed_float16`: N=256 gave -32256, already within a factor of 2 of the limit;
+        #     N=512 sat at the limit; and the energy went `-inf` at N >= 512, reaching a full
+        #     `-inf` at N=1024. Those numbers describe the rejected spelling, not the code
+        #     below. The cast also quantized the trace to ~1 part in 2048, which made the
+        #     energy DESCENT invisible.
+        #   * This is safe because NOTHING in the compute path consumes `energy()`. It is a
+        #     REPORTED DIAGNOSTIC SCALAR: `EnergyTransformer.call()` only appends it to the
+        #     `return_energy=True` trace, and the state update is driven by `update()` alone.
+        #     Widening the energy's dtype therefore cannot change any layer's OUTPUT. If some
+        #     future compute path contracts this against fp16 weights, cast AT THAT CALL
+        #     SITE — do not re-narrow the energy here.
+        return -(1.0 / self._beta) * ops.sum(lse * col_valid, axis=(1, 2))
 
     # -----------------------------------------------------------------
 
@@ -764,20 +795,22 @@ class EnergyAttention(keras.layers.Layer):
 
         # I1/STOP-IF 2: same masks AND same `adjacency_weight` as `energy()` — see the note
         # there. A weight landing in only one of them makes `update() != -dE/dg`.
+        # `logits` and `keep` come back in the mask dtype (float32 or wider).
         k, q, logits, keep = self._project(
             g, attention_mask, mask=mask, adjacency_weight=adjacency_weight
-        )                                                       # logits, keep: float32
+        )
 
         # Softmax over the KEY axis n, then ZERO the masked keys. The post-softmax `* keep`
         # is NOT redundant with the additive -1e9 bias: softmax of an ALL -1e9 row returns
-        # a UNIFORM 1/N, which is WRONG, and ET generates such rows by construction
+        # a UNIFORM 1/N, which is wrong, and ET generates such rows on its own
         # (attn_self=False with N == 1). Additive biasing alone cannot fix a fully-masked
-        # row. See decisions.md D-006.
+        # row. See the D-006 anchor in `_build_keep_mask`.
         # The softmax itself is evaluated in float32 (D-009); `omega` is cast back to the
         # compute dtype at the boundary, to contract with the compute-dtype K/Q/weights.
-        omega = ops.softmax(logits, axis=2) * keep          # (B, H, N, N), float32
+        omega = ops.softmax(logits, axis=2) * keep
 
         # DECISION plan-2026-07-15T053724-78001af1/D-001
+        # The originating plan directory is gone, so this comment is the record.
         # Branch A (paper eq.25) weighted adjacency. When `Ŵ` is supplied, the energy is
         # `E' = -(1/beta) Σ_h Σ_m logsumexp_n( beta·A·Ŵ + M )`, so
         #   -dE'/dg = -(1/beta) Σ omega'·d(beta·A·Ŵ)/dg = Σ (omega'·Ŵ)·dA/dg ,
@@ -787,38 +820,40 @@ class EnergyAttention(keras.layers.Layer):
         # of `omega`. WHAT NOT TO DO (this is the exact gradient the oracle at
         # test_energy_attention.py::TestGradientOracle checks, verified RED when the `·Ŵ`
         # factor is deleted, at N∈{64,1024}):
-        #   * Do NOT recompute `Ŵ` per descent step — it is a per-block constant HOISTED by
-        #     the block; recomputing it from the evolving `g_t` would add a `dŴ/dg` term (**)
-        #     that this closed form deliberately does NOT carry (that is Branch B1, Tier-3).
+        #   * Do NOT recompute `Ŵ` per descent step. It is a per-block constant HOISTED by
+        #     the block; recomputing it from the evolving `g_t` would add a `dŴ/dg` term that
+        #     this closed form does not carry. That is Branch B1, Tier-3, and it is not this.
         #   * Do NOT drop the `·Ŵ` factor from `omega_eff`. Folding `Ŵ` into the logits ALONE
         #     (so only `omega'` sees it) is NOT enough: the chain rule pulls a SECOND `Ŵ` out
         #     of `d(beta·A·Ŵ)/dg`. Omitting it leaves a layer that runs, trains, and produces
         #     finite plausible output while no longer being `-dE/dg` — the descent guarantee
         #     silently evaporates. Only `test_gradient_oracle` catches it.
         #   * Do NOT feed `Ŵ` to only one of `term_q`/`term_k`; BOTH gradient terms carry it.
-        # See decisions.md D-001 (this plan) and the sibling D-001 anchor on `term_k` below.
+        # The sibling D-001 anchor on `term_k` below is the other half of this gradient.
         if adjacency_weight is not None:
             w_hat = ops.cast(adjacency_weight, _mask_dtype(self.compute_dtype))
-            omega = omega * w_hat                            # omega_eff, still float32
+            # This is omega_eff, still in the mask dtype.
+            omega = omega * w_hat
         omega = ops.cast(omega, self.compute_dtype)
 
         # Term 1: token i in the QUERY role. This is the only term vanilla attention has
         # (with an implied value matrix V = (W^Q)^T K).
-        term_q = ops.einsum('yhd,byhn,bhnm->bmd', self.w_query, k, omega)   # (B, N, D)
+        term_q = ops.einsum('yhd,byhn,bhnm->bmd', self.w_query, k, omega)
 
         # DECISION plan_2026-07-13_57c9833e/D-001
+        # The originating plan directory is gone, so this comment is the record.
         # DO NOT DELETE `term_k`. It is the SECOND term of the closed-form gradient
-        # -dE_ATT/dg (token i in the KEY role) and is the ET-specific contribution absent
-        # from vanilla attention. Removing it leaves a layer that runs, produces
+        # -dE_ATT/dg (token i in the KEY role), and it is the ET-specific contribution that
+        # vanilla attention does not have. Removing it leaves a layer that runs, produces
         # plausible finite outputs, and TRAINS — while no longer being the gradient of any
-        # energy, so the block's descent guarantee silently evaporates. It is NOT
-        # verifiable by inspection; the ONLY thing proving it correct is
-        # `test_gradient_oracle` (S6a), and its necessity was verified LIVE by deleting it
-        # once and confirming BOTH S6a and the energy-descent test S7 go RED (plan S10).
-        # See decisions.md D-001.
-        term_k = ops.einsum('yhd,byhm,bhnm->bnd', self.w_key, q, omega)     # (B, N, D)
+        # energy, so the block's descent guarantee silently evaporates. It is NOT verifiable
+        # by inspection. The only thing proving it correct is `test_gradient_oracle`, and its
+        # necessity was verified LIVE: deleting it once turned both that oracle and the
+        # energy-descent test RED.
+        term_k = ops.einsum('yhd,byhm,bhnm->bnd', self.w_key, q, omega)
 
-        return term_q + term_k                              # == -dE_ATT/dg
+        # (B, N, D). This sum IS -dE_ATT/dg.
+        return term_q + term_k
 
     # -----------------------------------------------------------------
 

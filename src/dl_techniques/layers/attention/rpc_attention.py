@@ -17,11 +17,11 @@ Architecture:
     the recombined ``L + S`` is normalized by the shared ``ProbabilityOutput``
     layer before being applied to ``V``.
 
-    The iteration count is a Python constant, not a convergence test: early
-    stopping was deliberately removed so the loop unrolls identically under graph
-    tracing. Cost is therefore ``max_pcp_iter`` batched SVDs of an ``S x S``
-    matrix per forward pass, which makes this layer far more expensive than plain
-    scaled dot-product attention and unsuitable for long sequences.
+    The iteration count is a Python constant, not a convergence test. Early
+    stopping was removed so the loop unrolls identically under graph tracing.
+    Cost is ``max_pcp_iter`` batched SVDs of an ``S x S`` matrix per forward
+    pass. That makes this layer far more expensive than plain scaled dot-product
+    attention, and unsuitable for long sequences.
 
     ``call()``'s mask parameter is spelled ``mask=``, not ``attention_mask=``; see
     the ``[FROZEN SIGNATURE]`` note on the class below.
@@ -250,6 +250,18 @@ class RPCAttention(keras.layers.Layer):
             qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create every sub-layer.
+
+        Every argument is documented on the class. All sub-layers are built here
+        rather than in :meth:`build`, so a layer that is never called still
+        serializes and deserializes to the same object graph.
+
+        :param kwargs: Forwarded to ``keras.layers.Layer``.
+        :type kwargs: Any
+
+        :raises ValueError: On any invalid argument — see the class docstring for
+            the full list.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -305,9 +317,9 @@ class RPCAttention(keras.layers.Layer):
         # R13: was `1.0 / np.sqrt(self.head_dim)`. Adoption was gated on an explicit
         # equality probe, not on the two expressions looking alike:
         # `float(1.0/np.sqrt(d)).hex()` matched `compute_attention_scale(d).hex()`
-        # for 27 realistic head dims (1..512). (Step 2 of this plan proved the
-        # `head_dim ** -0.5` form is NOT bit-identical, so the probe is load-bearing.)
-        # The only change is the Python-level type, `np.float64` -> `float`;
+        # for 27 realistic head dims (1..512). The probe matters: the sibling
+        # `head_dim ** -0.5` form is NOT bit-identical to either of them.
+        # The only change is the Python-level type, `np.float64` -> `float`.
         # `np.float64` is a `float` subclass, this value is not a `get_config()` key,
         # and `keras.ops` converts either to the tensor dtype identically.
         #
@@ -554,55 +566,28 @@ class RPCAttention(keras.layers.Layer):
                 mask = keras.ops.expand_dims(mask, axis=1)
 
             # The keep predicate is spelled `mask != 0` because THIS site spells
-            # masking `mask == 0` (every multiply-form sibling instead treats a
-            # `1 = keep` float mask). `apply_attention_mask` performs no polarity
-            # inference by design, so the polarity lives here, in one visible line.
-            # Inverting it would raise nothing, change no shape and stay finite —
-            # the layer would simply attend to the padding. `test_rpc_attention.py::
-            # TestRPCAttentionMaskPolarity` is the only guard that can see that.
+            # masking `mask == 0`. The shared helper infers no polarity, so the
+            # polarity lives here, in one visible line. Inverting it raises nothing,
+            # changes no shape and stays finite: the layer would simply attend to the
+            # padding. `test_rpc_attention.py::TestRPCAttentionMaskPolarity` is the
+            # only guard that can see that.
             #
-            # `out_dtype` is deliberately LEFT AT ITS DEFAULT, so the biased scores
-            # stay in `mask_dtype(...)` (>= float32) all the way into the SVD below.
-            # See the D-005 anchor at the cast-back boundary for why that is the
-            # whole point of this site's fix.
+            # `out_dtype` is left at its default, so the biased scores stay in
+            # `mask_dtype(...)` (>= float32) all the way into the SVD below. The
+            # D-005 anchor at the cast-back boundary says why that is the point.
             #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-            # `rescue_axis` is ALSO left at its default, which since step 4c means the
-            # degenerate-row rescue is ON here: a query row that keeps NOTHING is
-            # treated as keeping EVERYTHING. Step 4b had deliberately excluded this
-            # site to keep it byte-identical; the user removed that hedge on
-            # 2026-07-28 ("I care about correctness, not backwards compatibility"),
-            # and one uniform semantics across the package is the point.
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — `rescue_axis` is left at its
+            # default, so the degenerate-row rescue is ON: a query row that keeps NOTHING is
+            # treated as keeping EVERYTHING. Do NOT pass `rescue_axis=None`. MEASURED before
+            # the rescue, one blanked query row: 64/4096 non-finite under `mixed_float16`, and
+            # 0.710 max deviation in float32 — the PCP is GLOBAL. See decisions.md D-009.
             #
-            # This is NOT cosmetic here, contrary to the "rpc runs in float32 so it
-            # was already finite" reading. MEASURED at step 4c with a rank-3 mask that
-            # blanks exactly one query row: under `mixed_float16` the pre-4c forward
-            # returned 64/4096 NON-FINITE outputs — the all-`-1e9` row survives the
-            # SVD but the cast-back boundary below turns it into all-`-inf`, and
-            # `self.attn_prob` softmaxes that to NaN. In float32 and float64 it was
-            # finite but WRONG-BY-CONVENTION: because `_pcp_decomposition` is a GLOBAL
-            # factorization, one all-`-1e9` row shifted the ENTIRE output (measured
-            # max deviation 0.710 in float32, 0.0293 in float64 against an all-ones
-            # mask that the rescue makes it equivalent to).
-            #
-            # WHAT NOT TO DO: do NOT pass `rescue_axis=None` here to restore the old
-            # numbers. Guarded by
-            # `test_rpc_attention.py::TestRPCAttentionFullyMaskedRow`.
-            # See decisions.md D-009 (plan-2026-07-27T183600-b4ef45f0).
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-            # The axis is DERIVED from this layer's own `probability_config` rather than
-            # left to the helper's `-1` default: `ProbabilityOutput` reads its softmax
-            # `axis` from `type_config` (`activations/probability_output.py:180`) and
-            # this layer forwards `probability_config` VERBATIM, so a caller can move
-            # the reduction axis and the pre-step-10 "`-1` is correct because
-            # `self.attn_prob` reduces over the KEY axis" claim held only for the
-            # DEFAULT config. MEASURED at the sibling `gated_attention` under
-            # `mixed_float16` with `probability_config={"axis": -2}` and a dead KEY
-            # COLUMN: 8192/8192 non-finite. WHAT NOT TO DO: do NOT restore a bare `-1`,
-            # and do NOT read this as the rank/shape INFERENCE the D-009 anchor in
-            # `common.py` forbids — this reads the site's own declared config.
-            # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the softmax axis is DERIVED from
+            # this layer's `probability_config`, not the helper's `-1` default.
+            # `ProbabilityOutput` reads `axis` from `type_config` (`probability_output.py`,
+            # `_type_config.get("axis", -1)`); this layer forwards the config verbatim. Do NOT
+            # restore a bare `-1`: at `{"axis": -2}` a dead key column gave 8192/8192
+            # non-finite. See decisions.md D-017.
             attention_scores = apply_attention_mask(
                 attention_scores,
                 keras.ops.not_equal(mask, 0),
@@ -612,42 +597,11 @@ class RPCAttention(keras.layers.Layer):
         # Perform PCP decomposition
         L, S = self._pcp_decomposition(attention_scores)
 
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-005
-        # THE cast-back boundary. The masked score matrix is promoted to float32 by
-        # `apply_attention_mask` above and stays there through `_pcp_decomposition`;
-        # this single line brings it back to the compute dtype, AFTER the SVD and
-        # BEFORE the probability activation.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT move this cast ABOVE `_pcp_decomposition` (i.e. do not pass
-        #     `out_dtype=scores_dtype` to `apply_attention_mask`) to "keep the loop in
-        #     the compute dtype like before". Under `mixed_float16` that re-creates
-        #     `-inf` masked entries, and MEASURED on TF 2.18 + CUDA, `ops.svd` then
-        #     fails outright: `Could not find device for node: Svd[T=DT_HALF]` — the
-        #     op has NO float16 kernel (registered: CPU float/double/complex, GPU
-        #     float/double). Even where a half kernel exists (XLA), a single
-        #     non-finite entry NaN-poisons the entire decomposition. The promotion is
-        #     not a precision nicety; it is what makes a masked forward pass exist at
-        #     all under mixed precision.
-        #   * Do NOT "simplify" this away as redundant with Keras autocasting. It is
-        #     redundant only for the value it produces, not for the invariant it
-        #     states: the boundary is named here so the next reader sees exactly where
-        #     the float32 region ends, instead of discovering it inside
-        #     `ProbabilityOutput.__call__`.
-        #   * Do NOT replace `scores_dtype` with `self.compute_dtype`. `scores_dtype`
-        #     is captured from the tensor itself before masking, which is what makes
-        #     the NO-MASK path provably unchanged: `ops.cast` to a tensor's own dtype
-        #     returns that tensor, so an unmasked forward traces the same graph and
-        #     produces bit-identical output to the pre-fix implementation (verified).
-        #
-        # The FULLY-masked query row used to be a known residual here — it became
-        # all-`-inf` at exactly this cast under fp16 and its softmax was NaN. That is
-        # FIXED as of step 4c, not by this boundary but by the degenerate-row rescue
-        # now defaulted on in `apply_attention_mask` above (D-009): the all-`-1e9` row
-        # is never formed, so there is nothing for this cast to overflow. Still
-        # unchanged: an fp16 forward with NO mask hits the missing `Svd[T=DT_HALF]`
-        # kernel, because nothing promotes it.
-        # See decisions.md D-005 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-005 — THE cast-back boundary. The mask
+        # helper promoted the scores to float32; they stay there through the PCP loop, and
+        # this line brings them back after the SVD. Do NOT move the cast above that loop:
+        # under `mixed_float16` `ops.svd` then dies with `Could not find device for node:
+        # Svd[T=DT_HALF]`. Do NOT use `self.compute_dtype`. See decisions.md D-005.
         robust_attention_scores = keras.ops.cast(L + S, scores_dtype)
 
         # Apply probability activation to get attention weights
@@ -718,13 +672,13 @@ class RPCAttention(keras.layers.Layer):
         # For returning attention scores if requested
         attention_weights = None
         if return_attention_scores:
-            # KNOWN DEFECT (pre-existing, deliberately NOT fixed here — the fix is a
-            # numerics change AND a restructuring of `_compute_attention`): this
-            # branch re-runs the ENTIRE PCP decomposition, i.e. `max_pcp_iter` more
-            # batched SVDs, roughly doubling the cost of the forward pass. Worse, it
-            # recomputes the scores WITHOUT applying `mask`, so the weights returned
-            # to the caller do not correspond to the weights that produced `output`
-            # whenever a mask is supplied. Reported, not fixed, in this plan.
+            # KNOWN DEFECT, pre-existing and not fixed here — fixing it is a numerics
+            # change plus a restructuring of `_compute_attention`. This branch re-runs
+            # the ENTIRE PCP decomposition, i.e. `max_pcp_iter` more batched SVDs, so
+            # it roughly doubles the cost of the forward pass. Worse, it recomputes the
+            # scores WITHOUT applying `mask`, so whenever a mask is supplied the
+            # weights returned to the caller do not match the weights that produced
+            # `output`.
             # Recompute attention scores for output
             # Shape: (B, H, N, head_dim) @ (B, H, head_dim, N) -> (B, H, N, N)
             attention_scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 1, 3, 2]))
