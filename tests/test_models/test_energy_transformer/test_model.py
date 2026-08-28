@@ -383,6 +383,20 @@ class TestMaskedLossThroughFit:
         and that silent wrong answer.
         """
         image, input_mask, targets, loss_weight = fixed_batch
+        # Seed the model init (same convention as `:563` / `:713`). The margin
+        # here is bounded by an UNTRAINED model's per-token error
+        # non-uniformity, so an unseeded init made this a genuine flake: Keras'
+        # lazy global SeedGenerator takes its first seed from Python's
+        # OS-entropy-seeded `random`, so every pytest PROCESS drew different
+        # weights. Measured |real - dead| over 13 candidate seeds
+        # [0,1,2,3,7,11,13,42,99,123,1234,2026,31337]:
+        #   min 4.660e-04 (seed 3) / median 2.564e-03 (seed 7)
+        #   / max 8.393e-03 (seed 2026)
+        #   2 of 13 at or below the 1e-3 bar -> reproduces the measured 10%.
+        # 99 sits ABOVE the median and well below the max: margin 4.351e-03,
+        # 4.4x the bar. Kept (not folded into the sharp sibling below) on
+        # purpose: a guard is not redundant because another guard overlaps it.
+        keras.utils.set_random_seed(99)
         model = _mim()
         model.compile(optimizer="adam", loss="mse")
 
