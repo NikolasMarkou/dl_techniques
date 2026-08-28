@@ -181,39 +181,76 @@ class EnergyLayerNorm(keras.layers.Layer):
       ``1.001358e-05``, and the fp16 minimum subnormal is about ``6e-8``), so
       ``sqrt(0 + eps)`` does not become ``sqrt(0)``. The forward pass is finite.
 
-    .. warning::
-        **The BACKWARD pass is a different matter under** ``mixed_float16``.
-        The gradient of ``rsqrt`` carries ``(var + eps)^(-3/2)``, which overflows
-        fp16 for a near-constant token. Measured on a ``(1, 1, 8)`` input filled
-        with ``3.0`` and one element raised by ``1e-3`` (fp16 variance
-        ``4.172e-07``): the forward output is finite at every epsilon tried, but
-        the gradient is **NaN** for ``epsilon <= 1.481e-05`` and finite for
-        ``epsilon >= 1.482e-05``. The shipped default ``epsilon=1e-5`` is inside
-        the NaN region. The float32 control on the same input is finite at
-        ``epsilon=1e-6`` (``max|grad| = 1.4219e+03``), so this is an fp16 range
-        limit, not a mathematical singularity. An ordinary token is unaffected:
-        a standard-normal ``(2, 4, 8)`` input at ``epsilon=1e-5`` gives a finite
-        gradient at 20 of 20 ``keras.random.normal`` seeds, with ``max|grad|``
-        in ``[3.876e-03, 1.523e-02]`` under the same ``sum(y ** 2)`` loss as the
-        float32 control above; at ``numpy.random.default_rng(0)`` it measures
-        ``7.5684e-03``, and so does ``seed=11``. The loss is part of the claim:
-        a plain ``sum(y)`` loss makes the input gradient cancel and reads
-        ``0.0`` at ``seed=2``, and it does not reproduce the ``1.4219e+03``
-        float32 control above. The magnitude is draw-dependent; the finiteness
-        is not. The threshold moves with the token's variance: the same
-        ``(1, 1, 8)`` probe with the perturbation raised to ``0.1`` (fp16
-        variance ``1.085e-03``) is finite at ``epsilon=1e-5``.
+    **The BACKWARD pass used to be a different matter under** ``mixed_float16``
+    **— FIXED 2026-08-28; do not re-derive the historical numbers below against
+    the current code, they will not reproduce.** The gradient of ``rsqrt``
+    carries ``(var + eps)^(-3/2)``, which overflows fp16 for a near-constant
+    token. Until 2026-08-28 ``call()`` ran that arithmetic in the compute dtype,
+    so under ``mixed_float16`` the layer returned a FINITE forward and a **NaN
+    input gradient**. Measured then on a ``(1, 1, 8)`` input filled with ``3.0``
+    and one element raised by ``1e-3`` (fp16 variance ``4.172e-07``): the forward
+    output was finite at every epsilon tried, but the gradient was **NaN** for
+    ``epsilon <= 1.481e-05`` and finite for ``epsilon >= 1.482e-05`` — and the
+    shipped default ``epsilon=1e-5`` sat inside the NaN region. The float32
+    control on the same input was finite at ``epsilon=1e-6``
+    (``max|grad| = 1.4219e+03``), which is what identified it as an fp16 RANGE
+    limit rather than a mathematical singularity, and therefore as a dtype bug.
+
+    ``call()`` now computes the statistics in
+    ``keras.backend.result_type(inputs.dtype, "float32")`` and casts the result
+    back, the same template as ``rms_norm.py``. Measured before vs after on a
+    ``(1, 2, 8)`` input whose token 0 is ``[3.0] * 7 + [3.001]`` (variance
+    ``1.09375e-07``, small but NONZERO — an exactly constant token measures the
+    SAFE case), taking the gradient of ``sum(y ** 2)`` w.r.t. the input, GPU,
+    TF32 disabled:
+
+    .. code-block:: text
+
+        arm                            grad finite BEFORE   AFTER    max|grad| AFTER
+        mixed_float16 @ eps=1e-5       False (8 of 16 NaN)  True     3.1475e+02
+        float32       @ eps=1e-5       True                 True     1.7122e+02
+        mixed_float16 @ eps=1e-3       True                 True     3.4160e+00
+
+    The 8 NaNs were exactly token 0's 8 components. The float32 forward output is
+    BITWISE identical before and after (max abs diff ``0.0``): this was a dtype
+    fix, not a change of the layer's math.
+
+    The training-path consequence was the reason it mattered. Under
+    ``mixed_float16``, ``fit()`` wraps the optimizer in a ``LossScaleOptimizer``,
+    whose job is to SKIP a non-finite step — so a NaN gradient produced no error
+    and no warning, just a model that did not train. Measured on
+    ``Input(2, 8) -> Dense(8, identity, no bias) -> EnergyLayerNorm(eps=1e-5)``
+    with ``LossScaleOptimizer(SGD(0.1))``: BEFORE, the gradient was NaN at every
+    one of 30 steps, the dynamic loss scale decayed ``32768 -> 0.0``, the loss
+    was pinned at ``0.5228752493858337`` for the first 12 steps and ended HIGHER
+    than it started. AFTER, the gradient is merely too large for fp16 at the
+    initial loss scale — ``inf``, not ``NaN``, which is exactly the condition
+    ``LossScaleOptimizer`` exists to handle — so the scale backs off
+    ``32768 -> 1024`` over 5 steps and the model then trains normally:
+    ``0.5198928713798523`` at step 0 down to ``5.235e-05`` at step 29, total
+    ``|delta W| = 95.80``. A 5-step trace is therefore too short to observe
+    recovery; that is loss-scale warm-up, not the defect.
+
+    An ordinary token was never affected, before or after: a standard-normal
+    ``(2, 4, 8)`` input at ``epsilon=1e-5`` gave a finite gradient at 20 of 20
+    ``keras.random.normal`` seeds, with ``max|grad|`` in
+    ``[3.876e-03, 1.523e-02]`` under the same ``sum(y ** 2)`` loss as the float32
+    control above; at ``numpy.random.default_rng(0)`` it measured ``7.5684e-03``,
+    and so did ``seed=11``. The loss is part of the claim: a plain ``sum(y)``
+    loss makes the input gradient cancel and reads ``0.0`` at ``seed=2``, and it
+    does not reproduce the ``1.4219e+03`` float32 control above.
 
     **Mitigation for a caller who sees a training-stability cliff** (loss spikes
     on a batch with heavy padding, or in the first steps before activations
     spread out): raise ``norm_epsilon`` / ``epsilon``. The ceiling is
     ``gamma / sqrt(eps)``, so moving eps from ``1e-5`` to ``1e-3`` cuts the
-    worst-case gain 10x and also leaves the fp16 NaN region above. The
-    alternative is to mask PAD tokens so they never reach the norm, which is what
+    worst-case gain 10x. Note this is a CONDITIONING mitigation only — it is no
+    longer needed for fp16 finiteness, and it is NOT the way to fix a NaN,
+    because a larger epsilon trains a different network. The alternative is to
+    mask PAD tokens so they never reach the norm, which is what
     ``EnergyTransformer`` already does for the Hopfield energy.
 
     :param epsilon: Positive constant added inside the sqrt. Defaults to ``1e-5``.
-        See the warning above before running this layer under ``mixed_float16``.
     :type epsilon: float
     :param gamma_initializer: Initializer for the scalar ``gamma``. Defaults to
         ``'ones'``. The paper requires ``gamma > 0`` for the PSD Hessian.
@@ -430,6 +467,19 @@ class EnergyLayerNorm(keras.layers.Layer):
         ``gamma = 1.7`` and ``eps = 1e-5``: ``max|layer - closed form| =
         9.537e-07``.
 
+        The statistics are computed in
+        ``keras.backend.result_type(inputs.dtype, "float32")`` and the result is
+        cast back, so the returned tensor carries the layer's own compute dtype.
+        This is not decoration: computing them in the compute dtype gave a NaN
+        INPUT gradient under ``mixed_float16`` at the shipped default
+        ``epsilon=1e-5`` (8 of 16 components, exactly the near-constant token's,
+        at token variance ``1.09375e-07``) while the FORWARD pass stayed finite —
+        so a forward-only check cannot see it. Fixed 2026-08-28; the class
+        docstring carries the full before/after trace, including the
+        ``LossScaleOptimizer`` run that turned it into a silently non-training
+        model. The float32 forward output is bitwise unchanged by the fix
+        (max abs diff ``0.0``), so this is a dtype fix and not a math change.
+
         :param inputs: Input tensor of shape ``(..., D)``.
         :type inputs: keras.KerasTensor
         :param training: Unused; present for interface consistency.
@@ -438,16 +488,36 @@ class EnergyLayerNorm(keras.layers.Layer):
         :return: Tensor of the same shape as ``inputs``.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan-2026-08-28T122601-61a91416/D-008
+        # The statistics MUST be computed in at least float32, and the result cast back.
+        # Do NOT "simplify" this by dropping the upcast and running the arithmetic in the
+        # compute dtype, and do NOT fix the fp16 gradient NaN by raising `epsilon` to 1e-3
+        # instead: a larger epsilon trains a DIFFERENT network (the Jacobian ceiling
+        # gamma/sqrt(eps) drops 10x), a substitution two prior plans already refused.
+        # `rsqrt`'s gradient carries (var + eps)^(-3/2), which overflows fp16 for a
+        # near-constant token; computing it in fp16 gave a FINITE forward and a NaN input
+        # gradient at the shipped default eps=1e-5. See the call() docstring for the
+        # measured before/after and decisions.md D-008.
+        # Template: rms_norm.py:362-372 (the in-package upcast pattern).
+        original_dtype = inputs.dtype
+        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        x = ops.cast(inputs, stat_dtype)
+
         # Statistics over the LAST axis only — per token, per sample. No token mixing.
-        x_bar = ops.mean(inputs, axis=-1, keepdims=True)
-        centered = inputs - x_bar
+        x_bar = ops.mean(x, axis=-1, keepdims=True)
+        centered = x - x_bar
         variance = ops.mean(ops.square(centered), axis=-1, keepdims=True)
 
         inv_std = ops.rsqrt(variance + self.epsilon)
 
         # gamma is a scalar => broadcasts over everything; delta is (D,) => broadcasts
         # over the leading (batch, token) axes.
-        return self.gamma * centered * inv_std + self.delta
+        gamma = ops.cast(self.gamma, stat_dtype)
+        delta = ops.cast(self.delta, stat_dtype)
+        outputs = gamma * centered * inv_std + delta
+
+        # Cast back: a Keras layer returns its own COMPUTE dtype.
+        return ops.cast(outputs, original_dtype)
 
     # -----------------------------------------------------------------
 
