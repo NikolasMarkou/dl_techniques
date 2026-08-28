@@ -981,6 +981,16 @@ class TestSchedulableTeacherTemperature:
         teacher = (rng.normal(size=(8, out_dim)) * 3.0).astype("float32")
 
         loss = DINOLoss(out_dim=out_dim, center_momentum=0.999999)
+        # Seed the model init (same convention as `_build_two_batch_problem`).
+        # UNSEEDED, this test is a genuine flake: Keras draws the Dense kernel
+        # from the lazily created global `SeedGenerator`, whose first seed comes
+        # from Python's OS-entropy-seeded `random`, so every pytest PROCESS gets
+        # different initial weights. Measured |second - first| over 13 candidate
+        # seeds [0,1,2,3,7,11,13,42,99,123,1234,2026,31337]:
+        #   min 0.0995 (seed 2) / median 1.0674 (seed 2026) / max 4.1847 (seed 11)
+        #   2 of 13 fell at or below the 0.5 bar -> matches the ~20% flake rate.
+        # 2026 is the MEDIAN draw (not the widest): margin 1.0674, 2.1x the bar.
+        keras.utils.set_random_seed(2026)
         model = keras.Sequential([keras.layers.Dense(out_dim)])
         model.compile(optimizer=keras.optimizers.SGD(0.0), loss=loss)
 
