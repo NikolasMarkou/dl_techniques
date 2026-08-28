@@ -420,6 +420,45 @@ layer(keras.random.normal((2, 16, 128))).shape
 
 Executed on 2026-08-28, the last line prints `(2, 16, 256)`.
 
+## Behaviour Changes
+
+Changes here that reject something the package previously accepted, and what
+each does to a stored `.keras` archive. Every new raise is paired with a
+migration path: the constructor stays strict so fresh code has to be correct,
+the deserialization path substitutes and warns so an old checkpoint still
+loads.
+
+### 2026-08-28 — `PositionalEmbedding` checks the `max_seq_len` ceiling in `build()`
+
+`build()` now raises `ValueError` when the input's STATICALLY known sequence
+length exceeds `max_seq_len`. Previously nothing checked it and the failure was
+`InvalidArgumentError: Expected size[1] in [0, 8], but got 20 [Op:Slice]`, from
+inside `ops.slice` at call time. A dynamic sequence axis (`None`) carries no
+length and is unaffected.
+
+*Migration*: `build_from_config()` — the path Keras uses to replay a recorded
+build shape when loading — logs a warning and builds anyway instead of raising,
+so a model saved with an over-long recorded shape still loads. Such a layer
+still fails at call time on an input that long; the ceiling itself has not
+moved. Only `build_from_config()` is relaxed, and the relaxation is cleared in
+a `finally`, so the next ordinary `build()` is strict again.
+
+### 2026-08-28 — `PositionEmbeddingSine2D` rejects an odd `num_pos_feats`
+
+`__init__` now raises `ValueError` for an odd `num_pos_feats`. The class
+docstring always required an even value; nothing enforced it, and the failure
+was `InvalidArgumentError: Shapes of all inputs must match ... [Op:Pack]` from
+`ops.stack` at call time. This layer owns no weights and has no `build()`, so
+`__init__` is the only construction-time site available.
+
+*Migration*: `from_config()` rounds an odd stored value UP to the next even
+number and logs a warning, rather than raising, so an archive written before
+the check still deserializes. **The output width changes** in that case, from
+`2 * n` to `2 * (n + 1)` channels — a model whose downstream layers were built
+against the odd width will fail on the shape. It could never have run at all
+before, since the stack raised, so nothing that previously worked is broken.
+`from_config()` copies the config; the caller's dict is not modified.
+
 ## Parameter Validation
 The factory performs comprehensive validation, catching common errors before layer creation.
 

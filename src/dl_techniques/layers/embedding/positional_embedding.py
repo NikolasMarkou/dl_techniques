@@ -63,10 +63,18 @@ class PositionalEmbedding(keras.layers.Layer):
     position-wise: the output at step ``i`` depends only on the input at
     step ``i``.
 
-    ``max_seq_len`` is a hard ceiling, and it is NOT checked with a friendly
-    error. An input longer than the table reaches the slice and the backend
-    raises there, at call time. Size the table for the longest sequence the
-    model will ever see.
+    ``max_seq_len`` is a hard ceiling and it IS checked, in :meth:`build`,
+    as soon as the input length is statically known: a longer input raises
+    ``ValueError`` naming the parameter, before any backend op runs. A
+    dynamic sequence axis (``None``) carries no length, so it cannot be
+    checked there and still fails inside the slice at call time. Size the
+    table for the longest sequence the model will ever see.
+
+    The check is RELAXED on the deserialization path. Keras replays the
+    recorded build shape through ``build_from_config()``, and an archive
+    written before this check existed can carry an over-long one. On that
+    path the violation is logged as a warning and the layer is built anyway,
+    so an old checkpoint still loads instead of dying on load.
 
     ``scale`` resolves the DEFAULT initializer only. It is the standard
     deviation used when ``pos_initializer`` is the bare string
@@ -140,8 +148,11 @@ class PositionalEmbedding(keras.layers.Layer):
     :raises ValueError: If ``max_seq_len``, ``dim`` or ``scale`` is not
         positive, or if ``dropout_rate`` is outside ``[0, 1]``. Raised from
         ``__init__``.
-    :raises ValueError: If the input is not rank 3, or if its last dimension
-        is not ``dim``. Raised from ``build()``.
+    :raises ValueError: If the input is not rank 3, if its last dimension is
+        not ``dim``, or if its statically known sequence length exceeds
+        ``max_seq_len``. Raised from ``build()``. The length check is
+        downgraded to a warning when ``build()`` is reached through
+        ``build_from_config()``.
 
     Example:
 
@@ -230,6 +241,10 @@ class PositionalEmbedding(keras.layers.Layer):
         # argument brought it to 2.384186e-07. See decisions.md D-055.
         self.supports_masking = True
 
+        # Escape hatch for `build_from_config()` only: see `build()` and
+        # `build_from_config()` below. False for every ordinary construction.
+        self._loading_recorded_build_shape = False
+
         # CREATE sub-layer in __init__ (modern Keras 3 pattern)
         self.dropout = keras.layers.Dropout(self.dropout_rate, name="pos_dropout")
 
@@ -244,8 +259,10 @@ class PositionalEmbedding(keras.layers.Layer):
 
         :param input_shape: Shape of the input, ``(batch, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If the input is not rank 3, or if its last
-            dimension is not ``dim``.
+        :raises ValueError: If the input is not rank 3, if its last
+            dimension is not ``dim``, or if its statically known sequence
+            length exceeds ``max_seq_len``. The last of these is downgraded
+            to a warning when called from :meth:`build_from_config`.
         """
         if self.built:
             return
@@ -260,6 +277,32 @@ class PositionalEmbedding(keras.layers.Layer):
             raise ValueError(
                 f"Input dimension {input_shape[-1]} does not match expected dim {self.dim}"
             )
+
+        # DECISION plan-2026-08-28T181715-3870472c/D-003
+        # Check the `max_seq_len` ceiling HERE, where the length is a plain
+        # Python int, not in `call()`, where it is a traced scalar. Without
+        # this the only failure is `InvalidArgumentError: Expected size[1] in
+        # [0, 8], but got 20 [Op:Slice]` from inside `ops.slice`. Do NOT make
+        # this an unconditional raise: `build_from_config()` replays a
+        # RECORDED shape from an archive written before the check existed, and
+        # raising there makes such a checkpoint unloadable. Do NOT move the
+        # check into `call()` either; a dynamic axis has no length to compare.
+        # See decisions.md D-003.
+        if input_shape[1] is not None and input_shape[1] > self.max_seq_len:
+            message = (
+                f"Input sequence length {input_shape[1]} exceeds max_seq_len "
+                f"{self.max_seq_len}. The position table has only "
+                f"{self.max_seq_len} rows, so it cannot encode this input. "
+                f"Increase max_seq_len or shorten the input."
+            )
+            if self._loading_recorded_build_shape:
+                logger.warning(
+                    f"{message} Building anyway because this shape came from a "
+                    f"stored config; this layer will fail at call time on an "
+                    f"input this long."
+                )
+            else:
+                raise ValueError(message)
 
         # Create positional embeddings weight
         self.pos_embedding = self.add_weight(
@@ -298,8 +341,10 @@ class PositionalEmbedding(keras.layers.Layer):
         input_shape = ops.shape(inputs)
         seq_len = input_shape[1]
 
-        # A seq_len above max_seq_len fails inside this slice, at call time.
-        # There is no earlier check.
+        # A seq_len above max_seq_len fails inside this slice. `build()`
+        # already rejected any STATICALLY known over-long length, so this is
+        # reachable only for a dynamic sequence axis, or for a layer built
+        # through the `build_from_config()` warn-and-continue path.
         positions = ops.slice(
             self.pos_embedding,
             start_indices=(0, 0, 0),
@@ -312,6 +357,26 @@ class PositionalEmbedding(keras.layers.Layer):
         outputs = self.dropout(outputs, training=training)
 
         return outputs
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Rebuild from a recorded build shape, tolerating an over-long one.
+
+        This is the deserialization path. The ``max_seq_len`` ceiling check
+        added to :meth:`build` is a NEW raise on a shape the old code
+        accepted, so applying it here would make a previously loadable
+        archive unloadable. The violation is warned about instead, per the
+        migration rule for a new validation raise: the constructor and
+        ``build()`` stay strict, the load path substitutes and warns.
+
+        :param config: Build config recorded by ``get_build_config()``,
+            normally ``{"input_shape": ...}``.
+        :type config: Dict[str, Any]
+        """
+        self._loading_recorded_build_shape = True
+        try:
+            super().build_from_config(config)
+        finally:
+            self._loading_recorded_build_shape = False
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Report the output shape, which equals the input shape.

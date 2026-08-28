@@ -48,6 +48,12 @@ from keras import ops
 from typing import Optional, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PositionEmbeddingSine2D(keras.layers.Layer):
@@ -65,10 +71,16 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
     A caller that writes ``x + pos(x)`` on a channels-last ``x`` will either
     broadcast wrongly or fail on the shapes.
 
-    Second, ``num_pos_feats`` must be EVEN. Sine takes the even channels and
-    cosine the odd ones, and the two are stacked pairwise. With an odd
-    ``num_pos_feats`` the halves have different widths and the stack raises
-    at call time, not at construction.
+    Second, ``num_pos_feats`` must be EVEN, and ``__init__`` enforces it.
+    Sine takes the even channels and cosine the odd ones, and the two are
+    stacked pairwise; with an odd ``num_pos_feats`` the halves have different
+    widths and the stack cannot run. An odd value now raises ``ValueError``
+    at construction rather than dying inside the backend at call time.
+
+    ``from_config`` is deliberately more lenient than ``__init__``: a stored
+    config written before that check existed can carry an odd value, so it is
+    rounded UP to the next even number and a warning is logged, rather than
+    making the archive unloadable.
 
     **Architecture Overview:**
 
@@ -187,13 +199,29 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
         :param kwargs: Additional keyword arguments for the Layer base class.
         :type kwargs: Any
         :raises ValueError: If ``num_pos_feats`` or ``temperature`` is not
-            positive.
+            positive, or if ``num_pos_feats`` is odd.
         """
         super().__init__(**kwargs)
 
         # Validate inputs
         if num_pos_feats <= 0:
             raise ValueError(f"num_pos_feats must be positive, got {num_pos_feats}")
+        # DECISION plan-2026-08-28T181715-3870472c/D-004
+        # Enforce evenness HERE. This layer owns no weights and therefore has
+        # no `build()`, so `__init__` is the only construction-time site
+        # available. Without this the failure is
+        # `InvalidArgumentError: Shapes of all inputs must match:
+        # values[0].shape=[2,6,5,4] != values[1].shape=[2,6,5,3] [Op:Pack]`
+        # raised from `ops.stack` at call time. Do NOT copy this raise into
+        # `from_config`: an archive predating this check can carry an odd
+        # value and must still load. See decisions.md D-004.
+        if num_pos_feats % 2 != 0:
+            raise ValueError(
+                f"num_pos_feats must be even, got {num_pos_feats}. The sine "
+                f"half takes the even channels and the cosine half the odd "
+                f"ones, so an odd width leaves the two halves unequal and "
+                f"they cannot be stacked."
+            )
         if temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
 
@@ -217,9 +245,11 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
         :return: Position code of shape
             ``(batch, 2 * num_pos_feats, H, W)``, channels FIRST.
         :rtype: keras.KerasTensor
-        :raises Exception: From the backend, if ``num_pos_feats`` is odd. The
-            sine and cosine halves then have different widths and cannot be
-            stacked.
+        :raises Exception: From the backend, if ``num_pos_feats`` is somehow
+            odd. ``__init__`` rejects an odd value and ``from_config``
+            rounds one up, so this is no longer reachable through either
+            construction path; it remains possible only if the attribute is
+            overwritten after construction.
         """
         if mask is None:
             # No mask means every position is valid. The input is assumed
@@ -296,5 +326,35 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
             "scale": self.scale
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "PositionEmbeddingSine2D":
+        """Rebuild the layer, repairing an odd ``num_pos_feats`` if present.
+
+        The evenness check in ``__init__`` is a NEW raise on a value the old
+        code accepted, so applying it here would turn a previously loadable
+        archive into an unloadable one. Instead the odd value is rounded UP
+        to the next even number and a warning is logged: the constructor
+        stays strict, the load path substitutes and warns. The caller's
+        mapping is copied, not modified.
+
+        :param config: Configuration produced by ``get_config()``. Not
+            modified.
+        :type config: Dict[str, Any]
+        :return: A new layer instance.
+        :rtype: PositionEmbeddingSine2D
+        """
+        num_pos_feats = config.get("num_pos_feats")
+        if isinstance(num_pos_feats, int) and num_pos_feats > 0 and num_pos_feats % 2 != 0:
+            config = dict(config)
+            config["num_pos_feats"] = num_pos_feats + 1
+            logger.warning(
+                f"Stored config carries an odd num_pos_feats={num_pos_feats}, "
+                f"which this layer cannot run: substituting "
+                f"{num_pos_feats + 1}. The output width changes from "
+                f"{2 * num_pos_feats} to {2 * (num_pos_feats + 1)} channels. "
+                f"Re-save the model to make this permanent."
+            )
+        return cls(**config)
 
 # ---------------------------------------------------------------------

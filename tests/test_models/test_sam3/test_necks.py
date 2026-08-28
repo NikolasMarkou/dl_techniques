@@ -769,7 +769,17 @@ class TestSerialization:
 
     def test_config_roundtrip_preserves_every_value(self):
         neck = Sam3DualViTDetNeck(
-            dim=32, d_model=10, scale_factors=(2.0, 1.0),
+            # d_model must be a multiple of 4, not merely even: the neck
+            # passes `d_model // 2` to `PositionEmbeddingSine2D`, which needs
+            # an EVEN `num_pos_feats`. The old `d_model=10` gave 5 and built a
+            # position encoder that could never run a forward pass -- it was
+            # only ever constructed here and config-compared, so nothing
+            # caught it. `PositionEmbeddingSine2D.__init__` now rejects an odd
+            # width at construction, which is what surfaced this.
+            # NOTE: `Sam3DualViTDetNeck.__init__` still validates only
+            # `d_model % 2 == 0`, so 10 remains reachable from user code and
+            # now fails with a message naming `num_pos_feats`, not `d_model`.
+            dim=32, d_model=12, scale_factors=(2.0, 1.0),
             add_sam2_neck=False, pe_temperature=5000.0,
         )
         clone = Sam3DualViTDetNeck.from_config(neck.get_config())

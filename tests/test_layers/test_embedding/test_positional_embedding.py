@@ -487,6 +487,71 @@ class TestCallerSuppliedInitializerSurvives:
         assert std > 0.3
 
 
+class TestMaxSeqLenCeilingIsCheckedEarly:
+    """SC4/§3.5: the `max_seq_len` ceiling is a STATIC shape contract.
+
+    It used to be checked nowhere until the `ops.slice` inside `call()`, so an
+    over-long input produced
+    `InvalidArgumentError: Expected size[1] in [0, 8], but got 20 [Op:Slice]`
+    from deep inside the backend instead of a `ValueError` naming the
+    parameter. `build()` already had `input_shape[1]` in scope.
+    """
+
+    def test_build_raises_value_error_naming_the_parameter(self):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4)
+        with pytest.raises(ValueError) as excinfo:
+            layer.build((None, 20, 4))
+        assert "max_seq_len" in str(excinfo.value)
+        assert "20" in str(excinfo.value)
+
+    def test_call_raises_value_error_not_a_backend_error(self):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4)
+        with pytest.raises(ValueError) as excinfo:
+            layer(np.random.randn(2, 20, 4).astype("float32"))
+        assert "max_seq_len" in str(excinfo.value)
+
+    def test_a_dynamic_sequence_axis_is_still_allowed(self):
+        """`None` carries no length, so it cannot violate the ceiling."""
+        layer = PositionalEmbedding(max_seq_len=8, dim=4)
+        layer.build((None, None, 4))
+        assert layer.built
+
+    def test_a_fitting_length_still_builds(self):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4)
+        layer.build((None, 8, 4))
+        assert layer.built
+
+
+class TestOverLongStoredBuildShapeStillLoads:
+    """SC4/§6.3: the new raise must not brick a stored checkpoint.
+
+    Keras rebuilds a saved layer through `build_from_config()`, which replays
+    the RECORDED build shape. A model saved before this raise existed can
+    carry an over-long recorded shape; deserializing it must WARN and build,
+    not raise, or the checkpoint becomes unloadable.
+    """
+
+    def test_build_from_config_warns_and_builds(self, caplog):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4)
+        with caplog.at_level("WARNING"):
+            layer.build_from_config({"input_shape": (None, 20, 4)})
+        assert layer.built
+        assert layer.pos_embedding.shape == (1, 8, 4)
+        # Assert on WARNING RECORDS, not `caplog.text`: this layer logs an
+        # INFO line that already contains the string "max_seq_len", so a
+        # `caplog.text` substring check here CANNOT FAIL.
+        warnings_ = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("max_seq_len" in m for m in warnings_), warnings_
+
+    def test_the_escape_hatch_does_not_leak_to_the_next_build(self):
+        """A fresh layer must still raise after a shim-path build happened."""
+        shimmed = PositionalEmbedding(max_seq_len=8, dim=4)
+        shimmed.build_from_config({"input_shape": (None, 20, 4)})
+        strict = PositionalEmbedding(max_seq_len=8, dim=4)
+        with pytest.raises(ValueError):
+            strict.build((None, 20, 4))
+
+
 if __name__ == "__main__":
     # Run tests
     pytest.main([__file__, "-v"])

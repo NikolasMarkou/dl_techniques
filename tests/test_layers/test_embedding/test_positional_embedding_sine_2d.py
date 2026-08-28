@@ -68,3 +68,66 @@ class TestPositionEmbeddingSine2D:
         model.save(path)
         after = keras.ops.convert_to_numpy(keras.models.load_model(path)(x))
         np.testing.assert_allclose(before, after, atol=1e-6)
+
+
+class TestOddNumPosFeatsIsRejectedAtConstruction:
+    """SC4/§3.5: `num_pos_feats` must be EVEN.
+
+    The class's own docstring already said so, but nothing enforced it, so an
+    odd value survived construction and died at CALL time with
+    `InvalidArgumentError: Shapes of all inputs must match:
+    values[0].shape=[2,8,8,4] != values[1].shape=[2,8,8,3] [Op:Pack]`.
+    This layer owns no weights and has no `build()`, so `__init__` is the only
+    possible site for the check.
+    """
+
+    def test_ctor_rejects_odd_num_pos_feats(self):
+        with pytest.raises(ValueError) as excinfo:
+            PositionEmbeddingSine2D(num_pos_feats=7)
+        assert "num_pos_feats" in str(excinfo.value)
+        assert "even" in str(excinfo.value).lower()
+
+    def test_even_values_still_accepted(self):
+        assert PositionEmbeddingSine2D(num_pos_feats=8).num_pos_feats == 8
+
+    def test_zero_still_rejected_for_being_non_positive(self):
+        with pytest.raises(ValueError, match="positive"):
+            PositionEmbeddingSine2D(num_pos_feats=0)
+
+
+class TestOddNumPosFeatsStoredConfigStillLoads:
+    """SC4/§6.3: the new raise must not brick a stored config.
+
+    A config written before the raise existed can carry an odd
+    `num_pos_feats`. `from_config` must substitute-and-warn so the archive
+    still deserializes; only fresh construction is required to be correct.
+    """
+
+    def test_from_config_substitutes_and_warns(self, caplog):
+        config = PositionEmbeddingSine2D(num_pos_feats=8).get_config()
+        config["num_pos_feats"] = 7  # what an old archive can contain
+        with caplog.at_level("WARNING"):
+            layer = PositionEmbeddingSine2D.from_config(config)
+        assert layer.num_pos_feats == 8
+        assert layer.num_pos_feats % 2 == 0
+        warnings_ = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("num_pos_feats" in m for m in warnings_), warnings_
+
+    def test_from_config_leaves_a_valid_even_value_alone(self):
+        config = PositionEmbeddingSine2D(num_pos_feats=16, temperature=5000.0).get_config()
+        layer = PositionEmbeddingSine2D.from_config(config)
+        assert layer.num_pos_feats == 16
+        assert layer.temperature == 5000.0
+
+    def test_from_config_does_not_mutate_the_caller_dict(self):
+        config = PositionEmbeddingSine2D(num_pos_feats=8).get_config()
+        config["num_pos_feats"] = 7
+        PositionEmbeddingSine2D.from_config(config)
+        assert config["num_pos_feats"] == 7
+
+    def test_the_substituted_layer_actually_runs(self):
+        config = PositionEmbeddingSine2D(num_pos_feats=8).get_config()
+        config["num_pos_feats"] = 7
+        layer = PositionEmbeddingSine2D.from_config(config)
+        x = keras.ops.convert_to_tensor(np.random.rand(2, 6, 5, 3).astype("float32"))
+        assert tuple(layer(x).shape) == (2, 16, 6, 5)
