@@ -1052,6 +1052,86 @@ class TestTheAdopterCountsAreMechanical:
             "ring_attention.py",
         }
 
+    @staticmethod
+    def _importers():
+        """AST-derive who imports ``validate_head_divisibility`` / ``compute_attention_scale``.
+
+        An ``ast.ImportFrom`` walk over the whole of ``src/``, matching on the LAST
+        dotted component of the module being ``common`` so that a relative
+        ``from .common import ...`` is counted. This is the identical predicate the
+        module docstring prints as a copy-pasteable command.
+
+        A text search is NOT usable here and never was: both names appear in prose —
+        in ``common.py``'s own docstring, in ``GUIDE.md``, in anchor bodies — so
+        ``grep`` counts DISCUSSION as adoption and reads 18 / 19 instead of 12 / 15.
+        """
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        # .../src/dl_techniques/layers/attention/common.py -> .../src
+        src_root = pathlib.Path(common_mod.__file__).parents[3]
+        divisibility, scale = [], []
+        for path in sorted(src_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if (node.module or "").split(".")[-1] != "common":
+                    continue
+                for alias in node.names:
+                    if alias.name == "validate_head_divisibility":
+                        divisibility.append(path.name)
+                    elif alias.name == "compute_attention_scale":
+                        scale.append(path.name)
+        return divisibility, scale
+
+    def test_the_module_docstring_states_the_derived_importer_counts(self):
+        """The OTHER pair in the same docstring — the one that actually drifted.
+
+        Both counts were one short of the truth (11 / 14 against a real 12 / 15)
+        from the day they were written until 2026-08-28, while the ``11 / 8``
+        adopter pair four paragraphs below stayed correct for the whole of that
+        time. The difference between the two pairs was not care: it was that one
+        of them had this file checking it on every run and the other did not.
+
+        No literal ``12`` or ``15`` is asserted here on purpose. Pinning the number
+        in the test would give it a SECOND home, which is the defect being fixed —
+        the count has exactly one home (the docstring) and this test only checks
+        that the one home agrees with the source.
+        """
+        import dl_techniques.layers.attention.common as common_mod
+
+        divisibility, scale = self._importers()
+        # The docstring wraps mid-sentence, so compare against a whitespace-collapsed
+        # copy; the assertion is about the words, not about where the lines break.
+        doc = " ".join((common_mod.__doc__ or "").split())
+        rerun = (
+            "Re-derive with the AST walk printed in that same docstring "
+            "(the `.venv/bin/python - <<'PY'` block under the 'Those two counts "
+            "are MECHANICAL' heading), then update BOTH sentences: the "
+            "'(N importers)' pair and the 'It prints ``N M``.' line."
+        )
+        for name, importers in (
+            ("validate_head_divisibility", divisibility),
+            ("compute_attention_scale", scale),
+        ):
+            expected = f"``{name}`` ({len(importers)} importers)"
+            assert expected in doc, (
+                f"common.py's module docstring no longer states the "
+                f"mechanically-derived importer count for {name}: the AST walk "
+                f"finds {len(importers)} ({sorted(importers)}), so the docstring "
+                f"must contain {expected!r}. " + rerun
+            )
+        expected_prints = f"It prints ``{len(divisibility)} {len(scale)}``."
+        assert expected_prints in doc, (
+            "common.py's module docstring shows the derivation command but reports "
+            f"the wrong output for it: the AST walk prints "
+            f"{len(divisibility)} {len(scale)}, so the docstring must contain "
+            f"{expected_prints!r}. " + rerun
+        )
+
     def test_the_module_docstring_states_the_derived_numbers(self):
         """The prose must agree with the source, or this fails loudly.
 
