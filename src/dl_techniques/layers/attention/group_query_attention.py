@@ -373,21 +373,11 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.scale = compute_attention_scale(self.head_dim)
 
         # Create all sub-layers here, in __init__.
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-068
-        # Give each projection its OWN initializer via `clone_initializer`.
-        # Don't hand the same `Initializer` INSTANCE to several `Dense` layers:
-        # in Keras 3 a seedless instance self-assigns a fixed seed at
-        # construction and replays it, so every same-shaped kernel comes out
-        # bit-identical. `w_q`, `w_k`, `w_v` and `w_o` are four different
-        # architectural roles. Measured in `FastVLM` before this change:
-        # `w_q/kernel == w_k/kernel == w_v/kernel == w_o/kernel` bit-for-bit in
-        # all 6 `stage3` attention blocks, so query and key were the same
-        # function and the initial score matrix was exactly symmetric.
-        # `self.kernel_initializer` is left untouched, so `get_config` still
-        # reports what the caller passed and a SEEDED initializer still
-        # reproduces: two clones of `GlorotUniform(seed=7)` draw the same values.
-        # D-057 of the same plan carries the per-site ruling.
-        # See decisions.md D-068 (plan-2026-08-19T163559-499b6f0e).
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-068 — give each projection its
+        # OWN initializer via `clone_initializer`. Don't hand one `Initializer`
+        # INSTANCE to several `Dense` layers: a seedless instance replays its draw,
+        # measured in `FastVLM` as `w_q == w_k == w_v == w_o` bit-for-bit in all 6
+        # `stage3` attention blocks. See decisions.md D-068.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -755,50 +745,26 @@ class GroupedQueryAttention(keras.layers.Layer):
         # stays finite. The layer would simply attend to the padding.
         # `TestGroupedQueryAttentionMaskPolarity` is the only guard that sees it.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-        # Pin `out_dtype` to the SCORES' own dtype. The biased scores then come
-        # back in the compute dtype, fp16 under `mixed_float16`, where the mask
-        # bias is `-inf` again. That is intended and is not the bug being fixed.
-        # The bug was `0 * -inf = NaN` at every UNMASKED position, produced by the
-        # arithmetic form this line replaces; `ops.where` inside the helper removes
-        # that product, and a row keeping at least one key softmaxes correctly with
-        # `-inf` entries. Measured on unfixed HEAD (B=2, N=64, D=64, H=4, kv=2): an
-        # ALL-ONES mask, masking nothing, gave 8192/8192 NaN.
-        # Don't "improve" this to `out_dtype=None` to stay in float32 and also
-        # rescue a fully-masked row. It cannot. The next consumer is
-        # `self.attn_prob`, a Keras layer with autocasting ON, measured to see a
-        # float32 input inside its own `call()` as float16, so the promotion is
-        # undone and all that is left is a wider, slower add. Pinned by
-        # `TestGroupedQueryAttentionMaskHazardIsReal::
-        # test_the_probability_sublayer_autocasts_a_float32_input`.
-        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007 — pin `out_dtype` to the
+        # SCORES' own dtype. The form this replaces, `scores + (1.0 - mask) * -1e9`,
+        # is `0 * -inf = NaN` at every UNMASKED position in float16: measured on
+        # unfixed HEAD (B=2, N=64, D=64, H=4, kv=2), an ALL-ONES mask gave 8192/8192
+        # NaN. Don't use `out_dtype=None`; `attn_prob` autocasts a float32 input
+        # back to float16. See decisions.md D-007.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-        # The fully-masked-row rescue IS applied here. A query row that keeps
-        # nothing is treated as keeping everything, so the all-`-inf` row is never
-        # formed and no NaN gradient is created. It arrives via the helper's
-        # DEFAULT rescue axis. Don't pass `rescue_axis=None` to get the loud NaN
-        # back: the finite-garbage semantics were ruled package-wide on
-        # 2026-07-28, and opting out also restores the NaN GRADIENT on that row.
-        # Don't move the rescue after the softmax either —
-        # `ops.where(row_keeps, w, 0)` still contributes `0 * NaN` backward.
-        # `common.apply_attention_mask`'s docstring carries the full argument.
-        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — the fully-masked-row
+        # rescue IS applied, via the helper's DEFAULT rescue axis, so the all-`-inf`
+        # row is never formed. Don't pass `rescue_axis=None` to get the loud NaN
+        # back: that also restores the NaN GRADIENT. Don't move the rescue after the
+        # softmax either — `ops.where(row_keeps, w, 0)` still contributes `0 * NaN`
+        # backward. See decisions.md D-009 and D-008.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-        # DERIVE the rescue axis from this layer's own `probability_config`, not
-        # from the helper's `-1` default. `ProbabilityOutput` reads its softmax
-        # `axis` out of `type_config` when it builds `keras.layers.Softmax`, and
-        # this layer forwards `probability_config` verbatim, so a caller can move
-        # the reduction axis. No line number is given for that read; it drifts.
-        # Measured at the sibling `gated_attention` under `mixed_float16` with
-        # `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192
-        # non-finite. Don't restore a bare `-1`, which is correct only while the
-        # caller leaves the config alone, and don't read this as the rank/shape
-        # INFERENCE that `common.py` forbids. It reads the site's own declared
-        # config. `common.apply_attention_mask`'s docstring and the sibling site in
-        # `gated_attention.py` carry the full argument.
-        # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — DERIVE the rescue axis
+        # from this layer's own `probability_config`, not the helper's `-1` default;
+        # a caller can move the reduction axis. Measured at the sibling
+        # `gated_attention` under `mixed_float16` with `{"axis": -2}` and a dead KEY
+        # COLUMN: 8192/8192 non-finite. Don't restore a bare `-1`, and don't read
+        # this as the rank/shape INFERENCE `common.py` forbids. See decisions.md D-017.
         scores_dtype = keras.backend.standardize_dtype(scores.dtype)
         return apply_attention_mask(
             scores,

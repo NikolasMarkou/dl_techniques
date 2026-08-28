@@ -694,15 +694,10 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
             # DECISION plan-2026-08-22T035419-a11304c8/D-160 — declared on
-            # 'multi_head' and 'multi_head_cross' ONLY, of the 33 registered
-            # types. Those two are the ones whose output projection IS the
-            # transformer block's residual-path projection (GPT-2's
-            # `attn.c_proj`). Do NOT declare it anywhere else: leaving it
-            # undeclared is what turns
-            # `TransformerLayer(residual_output_kernel_initializer=...,
-            # attention_type=<anything else>)` into a LOUD
-            # `create_attention_layer` raise instead of a silently ignored
-            # request. See decisions.md D-160.
+            # 'multi_head' and 'multi_head_cross' ONLY, of the 33 registered types,
+            # the two whose output projection IS the block's residual-path
+            # projection. Do NOT declare it anywhere else: leaving it undeclared is
+            # what turns the request into a LOUD raise. See decisions.md D-160.
             'output_kernel_initializer': None,
             'kernel_regularizer': None,
             'use_bias': False,
@@ -1338,16 +1333,10 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'gate_activation_type': 'sigmoid',
             'gate_activation_args': None,
             # DECISION plan-2026-08-17T183311-79c63e38/D-011 — `num_kv_heads` is
-            # DECLARED here, and that is the one exception to the FROZEN PUBLIC
-            # SURFACE note at the top of this module. `GatedAttention.__init__`
-            # has always ACCEPTED the parameter, as
-            # `num_kv_heads: Optional[int] = None` meaning "one K/V head per
-            # query head"; only the registry entry omitted it, which made the
-            # drift test for [attention:gated] RED. Do NOT clear that red node by
-            # deleting the parameter or exempting the entry: with the strict raise
-            # below, an undeclared `num_kv_heads` turns a supported feature into a
-            # hard ValueError. The declaration and the raise ship together.
-            # See decisions.md D-011 (plan-2026-08-17T183311-79c63e38).
+            # DECLARED here, the one exception to this module's FROZEN PUBLIC
+            # SURFACE note. Do NOT clear the drift test by deleting it or exempting
+            # the entry: with the strict raise below an undeclared `num_kv_heads` is
+            # a hard ValueError, not a supported feature. See decisions.md D-011.
             'num_kv_heads': None
         },
         'use_case': (
@@ -1556,15 +1545,9 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     """
     # DECISION plan-2026-08-27T040114-580f8b63/D-025 — the undeclared-key check
     # lives HERE as well as in `create_attention_layer`. Do NOT delete either
-    # copy. This function is documented and demonstrated as a PRE-FLIGHT check,
-    # and it used to pass an undeclared key silently:
-    # `validate_attention_config('multi_head', dim=32, num_head=4)` returned
-    # cleanly while `create_attention_layer` raised on the same typo, so a caller
-    # who validated here and then built the class directly got no signal at all.
-    # `create_attention_layer` keeps its own copy because that one runs BEFORE
-    # this function, which is what preserves the unknown-type failure mode, and
-    # because its message names a remedy that only applies on that path.
-    # See decisions.md D-025 (plan-2026-08-27T040114-580f8b63).
+    # copy: this function is documented as a PRE-FLIGHT check and used to pass an
+    # undeclared key silently, and the other copy runs BEFORE it, which is what
+    # preserves the unknown-type failure mode. See decisions.md D-025.
     _info = ATTENTION_REGISTRY.get(attention_type)
     if _info is not None:
         _declared = set(_info['required_params']) | set(
@@ -1606,25 +1589,15 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         'dim', 'channels', 'attention_channels', 'num_heads', 'num_kv_heads',
         'window_size', 'head_dim', 'kv_latent_dim'
     ]
-    # DECISION plan-2026-08-11T012340-f63796dc/D-006 — the COMPONENTS are
-    # compared, not the value, because a value in this list may legitimately be a
-    # SEQUENCE: `window_size` is a scalar edge length for
-    # 'window'/'window_zigzag'/'single_window' but a `(Wh, Ww)` patch grid for
-    # 'beit'. A bare `kwargs[param] <= 0` raises `TypeError: '<=' not supported
-    # between instances of 'tuple' and 'int'`, which the caller below catches and
-    # re-raises as a ValueError about "parameter compatibility" — naming neither
-    # the parameter nor the cause, for a configuration that is valid. A scalar is
-    # wrapped in a 1-tuple, so scalar behaviour is unchanged.
-    #
-    #   * Do NOT special-case 'beit' (or any type) here. This validator is a FLAT
-    #     allowlist of parameter NAMES applied to every type; a per-type branch
-    #     starts the per-type-schema conversion one exception at a time.
-    #   * Do NOT drop `window_size` from `positive_int_params` to dodge the
-    #     TypeError. That removes the `> 0` guard from the three scalar-window
-    #     types as well.
-    #   * Do NOT rename `BeitAttention.window_size`. The name is what matches the
-    #     'window'/'single_window' registry precedent, and renaming only moves the
-    #     same hole to the next sequence-valued parameter.
+    # DECISION plan-2026-08-11T012340-f63796dc/D-006 — the COMPONENTS are compared,
+    # not the value, because `window_size` is a scalar edge length for
+    # 'window'/'window_zigzag'/'single_window' but a `(Wh, Ww)` grid for 'beit'; a
+    # bare `<= 0` raises a TypeError the caller re-wraps as a vague "parameter
+    # compatibility" ValueError. Scalars are wrapped in a 1-tuple, unchanged.
+    #   * Do NOT special-case 'beit' here — this is a FLAT allowlist of NAMES.
+    #   * Do NOT drop `window_size` from `positive_int_params`; that also removes
+    #     the `> 0` guard from the three scalar-window types.
+    #   * Do NOT rename `BeitAttention.window_size`; it moves the hole one param on.
     # See decisions.md D-006 (plan-2026-08-11T012340-f63796dc).
     for param in positive_int_params:
         if param not in kwargs:
@@ -1767,18 +1740,17 @@ def assemble_attention_config(
     accept. Filtering it here would turn the caller's typo back into a silent
     drop.
 
+    This helper is a near-copy of the equivalents in ``layers/ffn/factory.py``
+    (``assemble_ffn_config``, D-017/D-023) and ``layers/embedding/factory.py``
+    rather than a shared generic helper: each of the three binds its own registry
+    and its own frozen public surface, so unifying them is a refactor of three
+    public APIs, not a de-duplication.
+
     # DECISION plan-2026-08-17T183311-79c63e38/D-011
-    This is the attention twin of ``layers/ffn/factory.py::assemble_ffn_config``
-    (D-017/D-023) and it owns the MERGE, not just the filter — that is why it
-    takes two dicts instead of one. Do NOT reduce it to a single-dict filter that
-    call sites apply AFTER merging their ``attention_args`` in: that ordering
-    makes the pre-filter EAT the caller's keys, so a caller typo can never reach
-    the raise. With the merge inside, a call site cannot express the wrong order.
-    It is a near-copy rather than a shared generic helper on purpose: the FFN,
-    embedding and attention factories each bind their own registry and their own
-    frozen public surface, so unifying the three is a refactor of three public
-    APIs, not a de-duplication.
-    See decisions.md D-011 (plan-2026-08-17T183311-79c63e38).
+    It owns the MERGE, not just the filter — that is why it takes two dicts. Do
+    NOT reduce it to a single-dict filter applied AFTER call sites merge their
+    ``attention_args`` in: the pre-filter would EAT the caller's keys, so a typo
+    could never reach the raise. See decisions.md D-011.
 
     :param attention_type: An ``ATTENTION_REGISTRY`` key.
     :type attention_type: str

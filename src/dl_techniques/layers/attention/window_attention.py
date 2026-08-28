@@ -568,15 +568,10 @@ class WindowAttention(keras.layers.Layer):
             )
 
         # DECISION plan-2026-08-25T053412-0f1fa04f/D-010 — the relative-position
-        # bias is REFUSED under `partition_mode='band'`, not quietly turned off.
-        # It is gathered at `(slot // window_size, slot % window_size)` and a 1-D
-        # band has no tile, so every gathered row would be arbitrary — and an
-        # arbitrary learnable bias passes every shape, dtype and finiteness check
-        # there is. Do NOT `setdefault` it to False on the CLASS instead: the
-        # default-off belongs on `create_band_window_attention`, the refusal
-        # belongs here. Do NOT downgrade it to a warning, because pytest
-        # escalates warnings to errors and runtime does not.
-        # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
+        # bias is REFUSED under `partition_mode='band'`, not quietly turned off: a
+        # 1-D band has no tile to index, so the gathered rows are arbitrary yet pass
+        # every shape/dtype/finiteness check. Do NOT `setdefault` it to False on the
+        # CLASS, and do NOT downgrade this to a warning. See decisions.md D-010.
         if partition_mode == "band":
             if use_relative_position_bias:
                 raise ValueError(
@@ -660,16 +655,11 @@ class WindowAttention(keras.layers.Layer):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-081 — the name is
-            # EXPLICIT, and it is spelled as the auto-name Keras would give the
-            # first instance in a process. Without it the global `auto_name`
-            # counter numbers this sub-layer per process, so two instances of the
-            # SAME builder disagree by weight path. MEASURED cost: the weight
-            # paths moved for `swin_transformer`, `scunet` and `modern_bert`. A
-            # `.keras` archive is positional and round-trips fine (CPU-eager
-            # forward delta exactly 0.0 for all three), but a by-NAME load against
-            # a checkpoint written before this line will not find these tensors.
-            # See decisions.md D-081 (plan-2026-08-19T163559-499b6f0e).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-081 — the name is EXPLICIT,
+            # spelled as the auto-name Keras gives the first instance in a process.
+            # Do NOT drop it: `auto_name` counts per process, so two instances of
+            # one builder disagree by weight path. MEASURED: the paths moved for
+            # `swin_transformer`, `scunet` and `modern_bert`. See decisions.md D-081.
             name="single_window_attention",
         )
 
@@ -682,19 +672,11 @@ class WindowAttention(keras.layers.Layer):
             self.zigzag_indices = None
             self.inverse_zigzag_indices = None
 
-    # DECISION plan-2026-08-25T053412-0f1fa04f/D-014 — the zigzag layout below is
-    # built with NUMPY, not `keras.ops`, so it has exactly ONE representation that
-    # both the tensor pipeline and the relative-position bias can read. Do NOT put
-    # it back on `keras.ops`: `build()` can run inside a `tf.function` trace, and
-    # the degenerate short-circuit needs the INVERSE permutation as a
-    # Python-visible numpy array for `set_window_slots` (see D-015), where
-    # `convert_to_numpy` on a graph tensor raises. Do NOT hand-write a SECOND
-    # zigzag permutation next to the short-circuit — two copies of one layout is
-    # the "kept in lockstep" shape this repo treats as a defect, and a wrong
-    # permutation is INVISIBLE whenever the vector it permutes is all ones.
-    # `argsort` tie-breaking is a non-issue: `combined_key = s * H + secondary` is
-    # INJECTIVE, so the sort has no ties and every spelling returns one answer.
-    # See decisions.md D-014 (plan-2026-08-25T053412-0f1fa04f).
+    # DECISION plan-2026-08-25T053412-0f1fa04f/D-014 — the zigzag layout is NUMPY,
+    # giving exactly ONE representation. Do NOT put it back on `keras.ops`:
+    # `build()` can run in a `tf.function` trace and `set_window_slots` needs a
+    # Python-visible numpy inverse (D-015). Do NOT hand-write a SECOND permutation:
+    # a wrong one is INVISIBLE on all-ones vectors. See decisions.md D-014.
 
     @staticmethod
     def _generate_zigzag_indices(H: int, W: int) -> np.ndarray:
@@ -1082,35 +1064,20 @@ class WindowAttention(keras.layers.Layer):
             window_mask = attention_mask
         else:
             # DECISION plan-2026-08-25T053412-0f1fa04f/D-011 —
-            # `attention_mask=None` is NOT "no mask" here. It means "every token is
-            # real", and the pad slots this method just created are not tokens. So
-            # when the caller passes nothing, an all-ones key mask is SYNTHESIZED,
-            # and the sequence pad (`ceil(sqrt(N))**2 - N` slots) and the tile pad
-            # (`pad_h` / `pad_w` rows and columns) travel down the SAME
-            # zero-padding pipeline the caller's own mask would. Before this,
-            # `None` skipped the pipeline and the zero-filled pads entered every
-            # real token's softmax as ordinary keys and values. MEASURED on
+            # `attention_mask=None` means "every token is real", so an all-ones key
+            # mask is SYNTHESIZED and the sequence and tile pads travel the same
+            # zero-padding pipeline the caller's own mask would. MEASURED on
             # 8435dcc2f, max |delta| between `None` and an explicit all-ones
-            # `(B, N)` mask, which masks no REAL token and is a mathematical no-op:
-            # 1.0258900 at `ws=8, N=100`, 0.7214095 at `ws=4, N=20`, 0.2340506 at
-            # `ws=2, N=15`, and exactly 0.0 wherever there is nothing to pad.
-            #
-            #   * Do NOT synthesize the mask UNCONDITIONALLY. When the geometry
-            #     tiles exactly there are no pads and the mask is a no-op — but a
-            #     no-op that allocates a `(B, ws**2)` int32 tensor per window on the
-            #     path Swin, FastVLM and TiRex take. The `_pads_exist` guard keeps
-            #     every exactly-tiling `N` on the byte-identical original path,
-            #     which is what keeps the 12 strict bitwise cells of
-            #     `test_window_attention_restructure_is_inert.py` bitwise.
-            #   * Do NOT "fix" this inside `SingleWindowAttention` instead. By the
-            #     time the windows reach it, `N_actual == N_target == ws**2` and its
-            #     own padding mask is all ones: down there the pads are
-            #     indistinguishable from real tokens. The geometry is only known
-            #     HERE.
-            #   * Do NOT build the ones with `keras.ops.ones((B, N_actual), ...)`.
-            #     `B` and `N_actual` come from `keras.ops.shape`, so they are
-            #     TENSORS under a `tf.function` trace. `ones_like` on a rank-2 slice
-            #     of the input carries the dynamic shape without materializing it.
+            # `(B, N)` mask (a mathematical no-op): 1.0258900 at `ws=8, N=100`, and
+            # exactly 0.0 wherever there is nothing to pad.
+            #   * Do NOT synthesize it UNCONDITIONALLY — the `_pads_exist` guard is
+            #     what keeps every exactly-tiling `N` on the byte-identical path.
+            #   * Do NOT "fix" this inside `SingleWindowAttention`: down there
+            #     `N_actual == N_target == ws**2` and the pads are indistinguishable
+            #     from real tokens. The geometry is only known HERE.
+            #   * Do NOT build the ones with `keras.ops.ones((B, N_actual), ...)` —
+            #     those are TENSORS under a trace; `ones_like` on a rank-2 slice
+            #     carries the dynamic shape without materializing it.
             # See decisions.md D-011 (plan-2026-08-25T053412-0f1fa04f).
             key_mask = attention_mask
             if key_mask is None and self._pads_exist(inputs.shape[1], ws):
@@ -1159,40 +1126,25 @@ class WindowAttention(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-25T053412-0f1fa04f/D-010 — the band is built as a
-        # KEEP predicate (`1 = attend`) and handed to `SingleWindowAttention` on
-        # its rank-3 PAIRWISE branch, which routes it through
-        # `common.apply_attention_mask`.
+        # KEEP predicate (`1 = attend`) and handed to `SingleWindowAttention` on its
+        # rank-3 PAIRWISE branch, which routes it through `apply_attention_mask`.
+        #   * Do NOT copy `gemma3_transformer.py:_create_attention_mask` verbatim —
+        #     that one is CAUSAL and in SUPPRESS semantics; this band is SYMMETRIC
+        #     and already in keep polarity, so gemma's expression would blind every
+        #     token to its own future neighbours, invisibly.
+        #   * Do NOT hand-roll an additive `-1e9` sentinel: `-1e9` is `-inf` in
+        #     float16 and `0 * -inf = NaN`.
+        #   * Do NOT REPLACE the caller's `attention_mask` with the band; the two
+        #     are composed multiplicatively so a padded key stays masked.
+        #   * Do NOT reuse `window_slots` to suppress the internal padding — slots
+        #     are validated into `[0, window_size ** 2)`, capping ModernBERT's
+        #     `window_size=64` at 4096 tokens. `pad_to_window=False` is the
+        #     layout-free spelling.
         #
-        #   * Do NOT copy `gemma3_transformer.py:_create_attention_mask` verbatim.
-        #     That one is CAUSAL and in SUPPRESS semantics (`j > i` OR-ed with
-        #     `(i - j) >= sliding_window_size`, inverted once by its caller). This
-        #     band is SYMMETRIC and non-causal, because ModernBERT is an encoder,
-        #     so it is `abs(i - j) <= window_size` and is already in the keep
-        #     polarity the mask helper wants. Taking gemma's expression unchanged
-        #     would blind every token to its own future neighbours, which no shape
-        #     or finiteness check can see.
-        #   * Do NOT hand-roll an additive `-1e9` sentinel here. `-1e9` is `-inf`
-        #     in float16 and `0 * -inf = NaN`. This repo has a recorded 10-site
-        #     fp16 mask-NaN family, and the shared helper is the one fixed instance
-        #     of that pattern.
-        #   * Do NOT REPLACE the caller's `attention_mask` with the band. The two
-        #     are composed multiplicatively so a padded key stays masked inside the
-        #     band; substituting either way un-masks real padding or un-masks the
-        #     far context, both silently.
-        #   * Do NOT reuse `window_slots` to suppress the internal padding. Its
-        #     values are validated into `[0, window_size ** 2)` because they index
-        #     a TILE, so at ModernBERT's `window_size = 128 // 2 = 64` that caps
-        #     the sequence at 4096 tokens for a layout with no such bound.
-        #     `pad_to_window=False` is the layout-free spelling; see the D-010
-        #     anchor in `single_window_attention.py`.
-        #
-        # ACCEPTED COST, stated because D-027 records ten previously-INVERTED cost
-        # claims about this exact layer: a dense `N x N` banded mask is `O(N^2)`,
-        # the SAME asymptotics as full attention. It is not the `O(N * W)` that
-        # "sliding window" suggests — that needs a fused kernel this repo has no
-        # path to. What it buys over `'grid'` is that `N` real tokens are never
-        # inflated to `window_size ** 2` slots. `create_band_window_attention`'s
-        # docstring carries a one-line command that measures it.
+        # ACCEPTED COST: a dense `N x N` banded mask is `O(N^2)`, the SAME
+        # asymptotics as full attention, NOT the `O(N * W)` that "sliding window"
+        # suggests. What it buys over `'grid'` is that `N` real tokens are never
+        # inflated to `window_size ** 2` slots.
         # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
         n_tokens = keras.ops.shape(inputs)[1]
         positions = keras.ops.arange(n_tokens, dtype="int32")
@@ -1254,54 +1206,29 @@ class WindowAttention(keras.layers.Layer):
 
         # DECISION plan-2026-08-25T053412-0f1fa04f/D-014 — the SAME
         # degenerate-single-window short-circuit `_call_grid` has carried since
-        # D-007, on the path that never got it. When `N < window_size ** 2` the
-        # zigzag layout below is ALSO exactly one window: it squares the sequence
-        # into a `ceil(sqrt(N)) x ceil(sqrt(N))` grid, so
-        # `N_grid = ceil(sqrt(N)) ** 2 <= window_size ** 2` and `num_windows == 1`.
-        # Every token attends every other token either way — the zigzag order is a
-        # PERMUTATION of the single window's slots, not a different neighbourhood —
-        # so all the padding path adds is the `win_len - N` zero slots, which D-011
-        # then has to mask back out, and their cost.
+        # D-007, on the path that never got it: at `N < window_size ** 2` the zigzag
+        # layout is ALSO exactly one window, so all the padding path adds is
+        # `win_len - N` zero slots that D-011 must mask back out, and their cost.
         #
-        # THE FIGURE BELOW IS A COUNTERFACTUAL. Do NOT re-run it, get a small
-        # number and delete this branch: the branch is why the number is small.
-        # BEFORE this short-circuit landed, `(1, 128, 64)` at `window_size=128`
-        # inflated 128 real tokens to 16,384 slots and attended them densely, for a
-        # measured CPU peak RSS of 21.695 GB — a 33x penalty against the `window`
-        # key's 0.649 GB in the same 2026-08-25 run. Re-measured 2026-08-28 with
-        # the short-circuit in place, one fresh process per mode, the same case is
-        # 0.678 GB, level with `window` 0.681, `window_band` 0.679 and
-        # `multi_head` 0.675. Those last three are NOT a cost comparison: a bare
-        # `import keras` in this environment already costs 0.655 GB, so they are
-        # the interpreter. The 21.695 is the only figure here that ever measured a
-        # layer, and it no longer reproduces on purpose.
+        # THE FIGURE BELOW IS A COUNTERFACTUAL. Do NOT re-run it, get a small number
+        # and delete this branch: the branch is why the number is small. BEFORE the
+        # short-circuit, `(1, 128, 64)` at `window_size=128` measured a CPU peak RSS
+        # of 21.695 GB; re-measured 2026-08-28 with it in place, 0.678 GB.
         #
-        #   * Do NOT reuse `_single_window_slots`. That is the GRID layout's slot
-        #     map, `(i // grid_side) * ws + (i % grid_side)`, and zigzag does not
-        #     lay tokens out row-major. The right slot for token `i` is its ZIGZAG
-        #     POSITION, `inverse_zigzag_indices[i]`, which is where the padding
-        #     path puts it — so the relative-position bias gathers the identical
-        #     table rows and the bias is bit-for-bit unchanged.
-        #   * Do NOT widen this to `N <= ws ** 2`. At `N == ws ** 2` both pads are
-        #     zero, so the padding path already attends exactly the N real tokens;
-        #     taking the short-circuit there would only move 8 harness cells off
-        #     the byte-identical path for no gain.
-        #   * Do NOT drop the `N > 1` guard, for the reason `_call_grid` keeps it:
-        #     `keras.ops.softmax` warns on a size-1 reduction axis and this repo's
-        #     pytest config escalates warnings to errors.
-        #   * Do NOT take this branch on a rank-3 mask. This method's mask pipeline
-        #     is rank-2-only — it pads and permutes a `(B, N)` key mask — so a
-        #     rank-3 pairwise mask has no meaning here and must reach the code
-        #     below, which is where it fails.
+        #   * Do NOT reuse `_single_window_slots` — that is the GRID row-major map;
+        #     zigzag's slot for token `i` is `inverse_zigzag_indices[i]`, which is
+        #     what keeps the relative-position bias bit-for-bit unchanged.
+        #   * Do NOT widen this to `N <= ws ** 2`: at `N == ws ** 2` both pads are
+        #     zero, so it would only move 8 harness cells off the bitwise path.
+        #   * Do NOT drop the `N > 1` guard — `keras.ops.softmax` warns on a size-1
+        #     reduction axis and this repo's pytest escalates warnings to errors.
+        #   * Do NOT take this branch on a rank-3 mask: this method's mask pipeline
+        #     is rank-2-only, so a rank-3 mask must reach the code below and fail.
         #
-        # ACCEPTED COST, a VALUE change in this regime exactly as D-007 ruled for
-        # grid: the short-circuit sums `N` products where the padding path summed
-        # `win_len` products of which `win_len - N` are exactly zero, and it sums
-        # them in token order rather than zigzag order, so the two differ at
-        # float32 REDUCTION ORDER. MEASURED against the pad-masked pre-restructure
-        # reference, worst case over the six affected harness cells: 2.086e-07, one
-        # to two float32 ulps.
-        # See decisions.md D-007, D-009 and D-014.
+        # ACCEPTED COST, as D-007 ruled for grid: the short-circuit sums in token
+        # rather than zigzag order, so the two differ at float32 REDUCTION ORDER.
+        # MEASURED worst case over the six affected harness cells: 2.086e-07, one
+        # to two float32 ulps. See decisions.md D-007, D-009 and D-014.
         static_n = inputs.shape[1]
         degenerate = (
             static_n is not None
@@ -1329,31 +1256,15 @@ class WindowAttention(keras.layers.Layer):
             padded_inputs, self.zigzag_indices, axis=1
         )
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-011 — the SAME
-        # synthesized-mask fix as `_call_grid`, for the same reason, on a path that
-        # never had the D-007 short-circuit at all. This method pads twice —
-        # `pad_len_seq` slots to square the sequence into the zigzag grid, then
-        # `pad_len_win` slots to fill the last window — and with
-        # `attention_mask=None` neither pad was ever masked, so the zero-filled
-        # slots entered the softmax as ordinary keys and values at EVERY ragged
-        # `N`, not merely below `window_size ** 2`. MEASURED on 8435dcc2f, max
-        # |delta| between `None` and an explicit all-ones `(B, N)` mask, a
-        # mathematical no-op: 0.3826489 at `ws=4, N=9` (pad_len_seq=0,
-        # pad_len_win=7 of 16), 0.2675675 at `ws=7, N=25` (pad_len_seq=0,
-        # pad_len_win=24 of 49), 0.0807583 at `ws=8, N=50` (pad_len_seq=14,
-        # pad_len_win=0), and exactly 0.0 at `N in {4, 16, 64, 196, 256}` for their
-        # window sizes, where both pads are zero.
-        #
-        #   * Do NOT gate on `self.pad_len_seq` alone. `ws=4, N=9` has
-        #     `pad_len_seq == 0` — 9 is a perfect square, so the zigzag grid is
-        #     exactly 3x3 — and still leaks 0.38, entirely through `pad_len_win`.
-        #     Both pads have to be in the condition.
-        #   * Do NOT permute the synthesized mask by hand. It is created in
-        #     UNPERMUTED token coordinates and then passed through the same
-        #     `pad -> take(zigzag_indices) -> pad` pipeline as the data, so the
-        #     permutation is applied to it exactly once, by the same code. Building
-        #     it after the permutation would make the pad positions a second,
-        #     hand-maintained copy of the layout.
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-011 — the SAME synthesized-mask
+        # fix as `_call_grid`, on a path that never had the D-007 short-circuit.
+        # This method pads twice, and at `attention_mask=None` neither pad was ever
+        # masked. MEASURED on 8435dcc2f, max |delta| vs an all-ones `(B, N)` mask:
+        # 0.3826489 at `ws=4, N=9`; exactly 0.0 where both pads are zero. Do NOT
+        # gate on `self.pad_len_seq` alone — `ws=4, N=9` has `pad_len_seq == 0` and
+        # still leaks 0.38, entirely through `pad_len_win`. Do NOT permute the
+        # synthesized mask by hand; it rides the data's own `pad -> take -> pad`
+        # pipeline, so the layout keeps exactly one copy.
         # See decisions.md D-011 (plan-2026-08-25T053412-0f1fa04f).
         key_mask = attention_mask
         if key_mask is None and (self.pad_len_seq > 0 or pad_len_win > 0):

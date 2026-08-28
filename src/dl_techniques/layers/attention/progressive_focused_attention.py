@@ -676,33 +676,20 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         attn_mask = mask_windows[:, :, np.newaxis] - mask_windows[:, np.newaxis, :]
         attn_mask = np.where(attn_mask != 0, -100.0, 0.0).astype(np.float32)
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-011
-        # This returns a plain NUMPY ARRAY, held as a constant. It is neither a
-        # `keras.Variable` nor a backend tensor, and both of those alternatives
-        # are wrong here. The mask is a pure function of `(shift_size,
-        # window_size, height, width)`, all of which come from the config and the
-        # static input shape, so it carries no state to track, save or restore.
-        #
-        # Do NOT make it a bare `keras.Variable(...)`, which is what it used to
-        # be. A bare Variable is not attributed to THIS layer, so Keras charges it
-        # to whichever layer is on the build stack. Inside a subclassed
-        # `keras.Model` that is the Model, which is already built by then, and
-        # every `shift_size > 0` layer died on its first bare call with
-        # `ValueError: You cannot add new elements of state (variables or
-        # sub-layers) to a layer that is already built.` -- under `fit()` and
-        # `predict()` alike.
-        #
-        # Do NOT make it `self.add_weight(...)` either. That puts a derived
-        # constant in the checkpoint, and the zero-init plus `.assign()` spelling
-        # of it is silently discarded under `StatelessScope`.
-        #
-        # Do NOT convert it here with `keras.ops.convert_to_tensor`. `build()`
-        # runs inside a scratch FuncGraph, so a tensor materialised here is out of
-        # scope by the time `call()` runs: `ValueError: The tensor ... cannot be
-        # accessed from here, because it was defined in FuncGraph(
-        # name=scratch_graph) which is out of scope.` The conversion belongs at
-        # the USE site in `call()`, where a numpy constant is simply baked into
-        # whichever graph is tracing.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-011 — this returns a plain
+        # NUMPY ARRAY held as a constant; the mask is a pure function of
+        # `(shift_size, window_size, height, width)`, so it carries no state.
+        #   * Do NOT make it a bare `keras.Variable(...)`: a bare Variable is
+        #     charged to whichever layer is on the build stack, so inside a
+        #     subclassed `keras.Model` every `shift_size > 0` layer died on its
+        #     first call with `ValueError: You cannot add new elements of state
+        #     ... to a layer that is already built.`
+        #   * Do NOT make it `self.add_weight(...)`: that puts a derived constant
+        #     in the checkpoint, and zero-init plus `.assign()` is silently
+        #     discarded under `StatelessScope`.
+        #   * Do NOT `keras.ops.convert_to_tensor` it here: `build()` runs inside a
+        #     scratch FuncGraph, so the tensor is out of scope by the time `call()`
+        #     runs. The conversion belongs at the USE site.
         # See decisions.md D-011 (plan-2026-08-27T040114-580f8b63).
         return attn_mask
 

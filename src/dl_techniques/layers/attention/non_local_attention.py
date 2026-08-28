@@ -669,30 +669,11 @@ class NonLocalAttention(keras.layers.Layer):
 
         # Optional additive attention mask
         if attention_mask is not None:
-            # DECISION plan-2026-08-27T040114-580f8b63/D-015
-            # The mask is CLAMPED into the finite range of the compute dtype
-            # before it is cast down, and the clamp is done in `mask_dtype`
-            # (>= float32) where the caller's sentinel is still finite.
-            #
-            # Casting straight to `scores.dtype` was a NaN generator under
-            # `mixed_float16`: the documented `-1e9` sentinel becomes `-inf` in
-            # float16 (max magnitude 65504), and a row that is FULLY masked then
-            # softmaxes `all -inf` to `0/0`. Measured on a 16x16 feature map with
-            # one fully-masked query row: 32 NaNs in the output.
-            #
-            # Clamp here rather than route through
-            # `common.apply_attention_mask`. That helper takes a KEEP PREDICATE,
-            # while this layer's public contract is an ADDITIVE mask where 0
-            # keeps and a large negative masks. The contract is stated in
-            # `call()`'s docstring and in the diagram at the top of this module.
-            # Converting would mean inferring polarity from magnitudes, which
-            # that helper refuses to do, and would break every caller passing an
-            # additive mask.
-            #
-            # A fully-masked row ends up with every logit at the same floor, so
-            # its softmax is finite and uniform rather than NaN. That is the same
-            # rescue `apply_attention_mask` gives by default.
-            # See decisions.md D-015 (plan-2026-08-27T040114-580f8b63).
+            # DECISION plan-2026-08-27T040114-580f8b63/D-015 — CLAMP the mask in
+            # `mask_dtype` (>= float32) before the cast down: `-1e9` cast to float16
+            # is `-inf`, and a fully-masked row then softmaxes to NaN (measured 32).
+            # Do NOT route this through `common.apply_attention_mask` — it wants a
+            # KEEP PREDICATE, not this layer's ADDITIVE contract. See decisions.md D-015.
             compute_floor = float(
                 np.finfo(np.dtype(self.compute_dtype)).min
             ) / 2.0

@@ -417,12 +417,10 @@ class PerformerAttention(keras.layers.Layer):
             name='output_projection'
         )
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-014
-        # The Dropout is created UNCONDITIONALLY and gated in `call()`. Do NOT
-        # go back to creating it only when `dropout_rate > 0`: that made both the
-        # object graph and the auto-generated sub-layer names depend on
-        # `dropout_rate`. An unused Dropout owns no weights, so always creating it
-        # costs nothing in a checkpoint.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-014 — the Dropout is created
+        # UNCONDITIONALLY and gated in `call()`. Do NOT go back to creating it only
+        # when `dropout_rate > 0`: that made both the object graph and the
+        # auto-generated sub-layer names depend on `dropout_rate`.
         # See decisions.md D-014 (plan-2026-08-27T040114-580f8b63).
         self.dropout = keras.layers.Dropout(dropout_rate, name="dropout")
 
@@ -471,19 +469,11 @@ class PerformerAttention(keras.layers.Layer):
         # Generate random Gaussian matrix
         # Shape: (num_heads, nb_features//2, head_dim)
         shape = (self.num_heads, self.nb_features // 2, self.head_dim)
-        # DECISION plan-2026-08-27T040114-580f8b63/D-014
-        # `dtype=self.compute_dtype` is required, not tidiness. Do NOT drop it.
-        # Without it `keras.random.normal` follows the GLOBAL float policy and
-        # returns float32, while `q`/`k` arrive in the layer's compute dtype.
-        # Under a `mixed_float16` global policy the einsum and the
-        # `features * self._feature_scale` multiply below then mix a half tensor
-        # with a float tensor, and the layer raises `InvalidArgumentError: cannot
-        # compute Mul as input #1 was expected to be a float tensor but is a half
-        # tensor` -- PerformerAttention could not run at all under the project's
-        # standard mixed-precision policy. Nothing caught that at the time because
-        # the file had no mixed-precision coverage; a dedicated mixed-precision
-        # guard test for this layer exists now.
-        # See decisions.md D-014 (plan-2026-08-27T040114-580f8b63).
+        # DECISION plan-2026-08-27T040114-580f8b63/D-014 — `dtype=self.compute_dtype`
+        # is required. Do NOT drop it: without it `keras.random.normal` follows the
+        # GLOBAL float policy and returns float32 while `q`/`k` arrive in the
+        # compute dtype, so under `mixed_float16` the einsum below raises
+        # `InvalidArgumentError: cannot compute Mul`. See decisions.md D-014.
         projection = keras.random.normal(
             shape=shape,
             mean=0.0,

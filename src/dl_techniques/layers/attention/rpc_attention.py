@@ -577,17 +577,15 @@ class RPCAttention(keras.layers.Layer):
             # D-005 anchor at the cast-back boundary says why that is the point.
             #
             # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — `rescue_axis` is left at its
-            # default, so the degenerate-row rescue is ON: a query row that keeps NOTHING is
-            # treated as keeping EVERYTHING. Do NOT pass `rescue_axis=None`. MEASURED before
-            # the rescue, one blanked query row: 64/4096 non-finite under `mixed_float16`, and
-            # 0.710 max deviation in float32 — the PCP is GLOBAL. See decisions.md D-009.
+            # default, so the degenerate-row rescue is ON. Do NOT pass `rescue_axis=None`.
+            # MEASURED before the rescue, one blanked query row: 64/4096 non-finite under
+            # `mixed_float16`, 0.710 max deviation in float32 — the PCP is GLOBAL.
+            # See decisions.md D-009.
             #
             # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the softmax axis is DERIVED from
-            # this layer's `probability_config`, not the helper's `-1` default.
-            # `ProbabilityOutput` reads `axis` from `type_config` (`probability_output.py`,
-            # `_type_config.get("axis", -1)`); this layer forwards the config verbatim. Do NOT
-            # restore a bare `-1`: at `{"axis": -2}` a dead key column gave 8192/8192
-            # non-finite. See decisions.md D-017.
+            # this layer's `probability_config`, not the helper's `-1` default. Do NOT restore
+            # a bare `-1`: at `{"axis": -2}` a dead key column gave 8192/8192 non-finite.
+            # See decisions.md D-017.
             attention_scores = apply_attention_mask(
                 attention_scores,
                 keras.ops.not_equal(mask, 0),

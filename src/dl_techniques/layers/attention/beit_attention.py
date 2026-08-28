@@ -308,12 +308,8 @@ class BeitAttention(keras.layers.Layer):
         # DECISION plan-2026-08-23T091307-9a110062/D-560 — a CALLABLE, not a dict,
         # so each of the four `(dim, dim)` projections gets its OWN
         # `clone_initializer(...)`. Do NOT collapse it back to a shared
-        # `dense_kwargs = dict(...)`: one seedless initializer INSTANCE replays its
-        # draw, so q, k, v and proj all came out bit-identical — measured before
-        # this change on a seeded 4-block BEiT at `max|delta| = 0.0` across 24
-        # pairs, which made the step-0 score matrix exactly symmetric. Instance
-        # identity is the discriminator, not `seed=`.
-        # See decisions.md D-560 (plan-2026-08-23T091307-9a110062).
+        # `dense_kwargs = dict(...)`: measured `max|delta| = 0.0` across 24 pairs.
+        # See decisions.md D-560.
         def dense_kwargs() -> Dict[str, Any]:
             """Build a fresh keyword set for one projection Dense layer.
 
@@ -335,20 +331,13 @@ class BeitAttention(keras.layers.Layer):
             self.dim, use_bias=self.qv_bias, name="q", **dense_kwargs()
         )
         # DECISION plan-2026-08-11T012340-f63796dc/D-001 — `use_bias=False` is
-        # BEiT's ARCHITECTURE, not a forgotten `self.qv_bias`. The reference fuses
-        # QKV behind one bias vector `cat(q_bias, zeros_like(v_bias), v_bias)` with
-        # the middle third frozen, so no `k_bias` exists in the checkpoint at all.
-        #
-        #   * Do NOT "unify" this to `use_bias=self.qv_bias`. That adds `dim`
-        #     parameters BEiT does not have and makes the layer incompatible with
-        #     every BEiT checkpoint — with no error, no shape mismatch and a
-        #     plausible loss curve.
-        #   * Do NOT use `use_bias=True` with a zero or frozen bias. A zero bias
-        #     TRAINS; a frozen one still occupies a variable slot. The parameter has
-        #     to be structurally ABSENT.
-        #   * Do NOT add a `k_bias` flag "for symmetry". A single fused `use_bias`
-        #     flag cannot express this asymmetry, which is the reason this layer is
-        #     standalone instead of a `MultiHeadCrossAttention` subclass.
+        # BEiT's ARCHITECTURE: the reference fuses QKV behind one bias vector
+        # `cat(q_bias, zeros_like(v_bias), v_bias)`, so no `k_bias` exists.
+        #   * Do NOT "unify" this to `use_bias=self.qv_bias` — that adds `dim`
+        #     parameters and breaks every BEiT checkpoint, silently.
+        #   * Do NOT use `use_bias=True` with a zero or frozen bias; the parameter
+        #     has to be structurally ABSENT.
+        #   * Do NOT add a `k_bias` flag "for symmetry".
         # See decisions.md D-001 (plan-2026-08-11T012340-f63796dc).
         self.k_dense = keras.layers.Dense(
             self.dim, use_bias=False, name="k", **dense_kwargs()
@@ -494,16 +483,10 @@ class BeitAttention(keras.layers.Layer):
                 dtype=self.dtype,
             )
             # DECISION plan-2026-08-11T012340-f63796dc/D-011 — keep this index a
-            # NUMPY array. Do NOT call `ops.convert_to_tensor` (or any
-            # `keras.ops`/`tf` op) here and store the result: `build()` can run
-            # lazily INSIDE the traced train step, so the tensor lands in the inner
-            # `one_step_on_data` FuncGraph and is unreachable from the outer
-            # `multi_step_on_iterator` graph. `model.fit()` on an unbuilt model then
-            # dies with `InaccessibleTensorError` while every eager forward pass and
-            # every explicitly-built test still passes. The conversion happens in
-            # `call()`, in whatever graph is tracing. It is not a weight: it is a
-            # pure function of `window_size`, so `build()` recomputes it from the
-            # restored config. See decisions.md D-011.
+            # NUMPY array. Do NOT call `ops.convert_to_tensor` here and store the
+            # result: `build()` can run lazily INSIDE the traced train step, so it
+            # lands in the inner `one_step_on_data` FuncGraph and `model.fit()` dies
+            # with `InaccessibleTensorError`. See decisions.md D-011.
             self._rel_pos_index = np.ascontiguousarray(
                 self._build_relative_position_index().reshape(-1),
                 dtype=np.int32,

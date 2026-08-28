@@ -573,16 +573,10 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # STEP 3: ROPE APPLICATION
         # ═══════════════════════════════════════════════════════════════════
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-083: RoPE is applied in the
-        # (B, H, S, D) frame, so transpose FIRST and leave the tensors
-        # transposed. STEP 4 below wants that frame anyway.
-        # Do NOT call `self.rope(q_pe)` on the (B, S, H, D) tensor: RoPE takes
-        # its sequence length from axis 2 against a position-indexed table, and
-        # axis 2 in that frame is HEADS. Before the fix `q_pe` was rotated by its
-        # HEAD INDEX while `k_pe`, whose head axis is a singleton, was read as
-        # sequence length 1 and rotated by position 0 alone -- the identity. No
-        # relative-position signal survived: permuting two input tokens moved the
-        # output by 4.47e-08, float32 noise (measured 2026-08-17, CPU).
-        # See decisions.md D-083.
+        # (B, H, S, D) frame, so transpose FIRST and leave the tensors transposed.
+        # Do NOT call `self.rope(q_pe)` on the (B, S, H, D) tensor: axis 2 is HEADS
+        # there, and no relative-position signal survived — permuting two input
+        # tokens moved the output by 4.47e-08, float32 noise. See decisions.md D-083.
         q_pe = self.rope(keras.ops.transpose(q_pe, (0, 2, 1, 3)))
         k_pe = self.rope(keras.ops.transpose(k_pe, (0, 2, 1, 3)))
 
@@ -692,44 +686,25 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # infers no polarity, so an inversion raises nothing, changes no shape and
         # stays finite — the layer would simply attend to the padding instead.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
-        # in the compute dtype. Under `mixed_float16` that means the mask bias is
-        # `-inf` again, and that is correct, not the bug being fixed. The bug was
-        # the arithmetic form this replaces, `scores + (1.0 - mask) * -1e9`: in
-        # float16 `-1e9` is `-inf` and `(1.0 - mask)` is 0 wherever nothing was
-        # masked, so the product is `0 * -inf = NaN` at every UNMASKED position.
-        # Measured at (B=2, N=64, dim=64, num_heads=4, kv_latent_dim=16) under
-        # `mixed_float16`: 8192/8192 NaN for an all-ones mask, for a padding mask
-        # and for a causal mask; float32 gave 0/8192 in every case, and an fp16
-        # forward with no mask was fine, which is what made it hard to notice.
-        # Do NOT "improve" this to `out_dtype=None` hoping to also rescue a
-        # fully-masked query row. It cannot: the next consumer is `self.attn_prob`,
-        # a Keras layer with autocasting on, measured to see a float32 input inside
-        # its own `call()` as float16.
-        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007 — `out_dtype` is pinned to
+        # the SCORES' own dtype. The form this replaces, `scores + (1.0 - mask) *
+        # -1e9`, is `0 * -inf = NaN` at every UNMASKED position in float16: measured
+        # at (B=2, N=64, dim=64, num_heads=4, kv_latent_dim=16), 8192/8192 NaN under
+        # `mixed_float16` against 0/8192 in float32. Do NOT use `out_dtype=None`;
+        # `attn_prob` autocasts a float32 input back to float16. See decisions.md D-007.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-        # The fully-masked-row rescue arrives via the helper's DEFAULT rescue axis:
-        # a query row that keeps NOTHING is treated as keeping EVERYTHING, so the
-        # all-`-inf` row is never FORMED and no NaN gradient is created either.
-        # Do NOT pass `rescue_axis=None` to "get the loud NaN back". The
-        # finite-garbage semantics were ruled package-wide on 2026-07-28, and
-        # opting out also restores the NaN GRADIENT on that row.
-        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — the fully-masked-row
+        # rescue arrives via the helper's DEFAULT rescue axis, so the all-`-inf` row
+        # is never FORMED and no NaN gradient is created. Do NOT pass
+        # `rescue_axis=None` to "get the loud NaN back": opting out also restores
+        # the NaN GRADIENT on that row. See decisions.md D-009 and D-008.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-        # The rescue axis is DERIVED from this layer's own `probability_config`
-        # rather than left at the helper's `-1` default. `ProbabilityOutput` builds
-        # its softmax with `axis` taken from its `type_config` dict, and this layer
-        # forwards `probability_config` into that dict verbatim, so a caller can
-        # move the reduction axis out from under a hard-coded `-1`. Measured at the
-        # sibling `gated_attention` under `mixed_float16` with an axis of -2 and a
-        # dead key column: 8192/8192 non-finite. Do NOT restore a bare `-1`, which
-        # is correct only while the caller leaves the config alone. This is not the
-        # rank/shape INFERENCE the shared helper forbids — it reads the site's own
-        # declared config, which is a different thing.
-        # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the rescue axis is DERIVED
+        # from this layer's own `probability_config`, not the helper's `-1` default;
+        # a caller can move the reduction axis. Measured at the sibling
+        # `gated_attention` under `mixed_float16` with an axis of -2 and a dead key
+        # column: 8192/8192 non-finite. Do NOT restore a bare `-1`, and do NOT read
+        # this as the rank/shape INFERENCE the helper forbids. See decisions.md D-017.
         scores = apply_attention_mask(
             scores,
             attention_mask,

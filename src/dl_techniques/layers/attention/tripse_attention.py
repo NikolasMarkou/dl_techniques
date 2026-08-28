@@ -310,16 +310,11 @@ class TripletAttentionBranch(layers.Layer):
         # 3. Attention Map Generation
         attention = self.conv(pooled)
         attention = self.batch_norm(attention, training=training)
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015
-        # Forward `training=` EXPLICITLY. Don't drop back to
-        # `self.sigmoid(attention)` because "Keras propagates it anyway".
-        # `CallContext.training` is a SINGLE MUTABLE SLOT that every nested
-        # `__call__` overwrites and nobody restores on exit, so one sibling
-        # sub-layer that forces `training=False` on a child of its own poisons
-        # the ambient value for every later un-forwarded call. Injecting that at
-        # `self.batch_norm` measured this gate receiving `False` while the branch
-        # was called with `training=True`. Pinned by
-        # `TestTripSETrainingIsForwardedExplicitly`. See decisions.md D-015.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015 — forward `training=`
+        # EXPLICITLY. Don't drop back to `self.sigmoid(attention)` because "Keras
+        # propagates it anyway": `CallContext.training` is a single mutable slot
+        # nobody restores, and injecting that at `self.batch_norm` measured this
+        # gate receiving `False` on a `training=True` call. See decisions.md D-015.
         attention = self.sigmoid(attention, training=training)
 
         # 4. Apply Attention
@@ -1268,12 +1263,10 @@ class _SEWeights(layers.Layer):
         # Excitation (MLP)
         x = self.conv_reduce(x, training=training)
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-015 (second site, same
-        # argument). The bottleneck activation was the only sub-layer in this
-        # method not handed `training=`, so it was the only one reading the
-        # poisonable ambient `CallContext.training` rather than this call's own
-        # value. Injecting a context-poisoning `global_pool` measured it
-        # receiving `False` while `_SEWeights` was called with `training=True`.
-        # Don't revert to `self.reduction_activation(x)`. See decisions.md D-015.
+        # argument) — the bottleneck activation is handed `training=` explicitly.
+        # Don't revert to `self.reduction_activation(x)`: a context-poisoning
+        # `global_pool` measured it receiving `False` while `_SEWeights` was
+        # called with `training=True`. See decisions.md D-015.
         x = self.reduction_activation(x, training=training)
         logits = self.conv_restore(x, training=training)
         # Return logits (pre-sigmoid) for addition in TripSE4

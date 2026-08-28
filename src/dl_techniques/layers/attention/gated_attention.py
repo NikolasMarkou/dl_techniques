@@ -326,22 +326,11 @@ class GatedAttention(keras.layers.Layer):
             )
 
         # Store every configuration parameter, for serialization.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071
-        # `num_kv_heads=None` means "one K/V head per query head". That is plain
-        # MHA and is byte-identical to the pre-2026-08-15 layer: same K/V
-        # projection widths, same weight names, same values.
-        # Don't give this a concrete default. Any non-`None` value is a
-        # WEIGHT-LAYOUT BREAK, not a behavioural knob. `k_linear` and `v_linear`
-        # project to `kv_dim` instead of `attention_dim`, and `k_norm`/`v_norm`
-        # are built at `kv_dim` in `build()`. Across the shipped Qwen3-Next
-        # variants that is a 4x to 8x narrowing of FOUR weights per block --
-        # `80b` is `num_attention_heads=16, num_key_value_heads=4` (4x) and
-        # `80b_a3b` is 16/2 (8x) -- so every `.keras` checkpoint written before
-        # 2026-08-15 fails to load. `None` is what keeps that break opt-in.
-        # Before this parameter existed, `Qwen3Next` validated, stored,
-        # serialized and printed a `num_key_value_heads` that reached no code at
-        # all. Every model was plain MHA, and `num_key_value_heads=1` bought no
-        # KV-cache saving. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071 — `num_kv_heads=None` means
+        # "one K/V head per query head": plain MHA, byte-identical to the
+        # pre-2026-08-15 layer. Don't give it a concrete default — any non-`None`
+        # value narrows FOUR weights per block, 4x on `80b` (16/4) to 8x on `80b_a3b`
+        # (16/2), so every pre-2026-08-15 `.keras` fails to load. See decisions.md D-071.
         self.dim = dim
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -394,12 +383,11 @@ class GatedAttention(keras.layers.Layer):
         self.scale = compute_attention_scale(self.head_dim)
 
         # Create all sub-layers here, unbuilt; build them in `build()`.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200
-        # Clone the initializer per projection. Don't pass
-        # `self.kernel_initializer` straight in: one Initializer INSTANCE reused
-        # across same-shape weights gives bit-identical kernels (measured
-        # max|delta| = 0.0 over Q, K, V and the output projection), so Q and K
-        # would start equal and the logits symmetric. See decisions.md D-200.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — clone the initializer
+        # per projection. Don't pass `self.kernel_initializer` straight in: one
+        # Initializer INSTANCE reused across same-shape weights gives
+        # bit-identical kernels (measured max|delta| = 0.0 over Q, K, V and the
+        # output projection), so Q and K start equal. See decisions.md D-200.
         self.input_linear = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
@@ -420,12 +408,11 @@ class GatedAttention(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer,
             name="q_linear"
         )
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071
-        # K and V project to `kv_dim`, Q to `attention_dim`. These are two of the
-        # four narrowed weights; the other two are `k_norm` and `v_norm`, built
-        # at `kv_shape` in `build()`. Don't "restore symmetry" by giving K/V
-        # `attention_dim` again. The narrower width IS the KV-cache saving, and
-        # it is what makes GQA a checkpoint break. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071 — K and V project to
+        # `kv_dim`, Q to `attention_dim`; the other two narrowed weights are
+        # `k_norm`/`v_norm`, built at `kv_shape`. Don't "restore symmetry" by
+        # giving K/V `attention_dim` again: the narrower width IS the KV-cache
+        # saving, and is what makes GQA a checkpoint break. See decisions.md D-071.
         self.k_linear = keras.layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
@@ -609,12 +596,11 @@ class GatedAttention(keras.layers.Layer):
         self.v_linear.build(linear_output_shape)
 
         # Build normalization layers.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071
-        # Build the K/V norms at `kv_shape`, NOT `qkv_shape`. They normalize the
-        # K/V projections, which are `kv_dim` wide under GQA. Building them at
-        # `qkv_shape` gives scale vectors `num_kv_groups` times too wide — 4x on
-        # the Qwen3-Next `80b` variant (16/4), 8x on `80b_a3b` (16/2) — and the
-        # forward pass then fails or silently mis-scales. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071 — build the K/V norms at
+        # `kv_shape`, NOT `qkv_shape`. Building them at `qkv_shape` gives scale
+        # vectors `num_kv_groups` times too wide — 4x on the Qwen3-Next `80b`
+        # variant (16/4), 8x on `80b_a3b` (16/2) — and the forward pass then
+        # fails or silently mis-scales. See decisions.md D-071.
         self.q_norm.build(qkv_shape)
         self.k_norm.build(kv_shape)
         self.v_norm.build(kv_shape)
@@ -782,29 +768,11 @@ class GatedAttention(keras.layers.Layer):
 
         # Apply Partial RoPE to Q and K (not V).
         #
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-083
-        # Apply RoPE in the (B, H, S, D) frame. That costs two transposes per
-        # call, and they are not optional.
-        # Don't pass the (B, S, H, D) tensors straight to `self.rope(...)`.
-        # `RotaryPositionEmbedding.call` reads its sequence length from
-        # `ops.shape(inputs)[2]` and indexes a POSITION-indexed table as
-        # `cos_cached[:seq_len]`. In the (B, S, H, D) frame axis 2 is HEADS, so
-        # every token at head h gets the angle for POSITION h — a per-head
-        # constant carrying no position information.
-        # This was not cosmetic. Measured 2026-08-17 on CPU in the (B, S, H, D)
-        # frame: permuting two input tokens moved the layer output by 3.58e-07
-        # at `num_kv_heads=None` and 2.98e-07 at `num_kv_heads=2`, i.e. float32
-        # noise. The layer was exactly permutation-equivariant and RoPE
-        # contributed nothing. It hid because a per-head constant rotation R_h
-        # is orthogonal and was applied to BOTH q and k of the same head, so
-        # `(R_h q).(R_h k) = q.k` and plain MHA was a no-op. Grouped-query
-        # attention broke that alibi: k head j is rotated by R_j and then
-        # repeated onto query head h != j, so the angles no longer cancel.
-        # Measured on the pairing identity — paired q/k heads carrying the same
-        # vector must leave RoPE bit-identical, because the angle depends on
-        # POSITION only — 4.04e+00 in the (B, S, H, D) frame, exactly 0.0e+00
-        # here. `group_query_attention.py` has always transposed first; this is
-        # now the single convention. See decisions.md D-083.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-083 — apply RoPE in the
+        # (B, H, S, D) frame; the two transposes are not optional. Don't pass the
+        # (B, S, H, D) tensors straight to `self.rope(...)`: it reads seq length from
+        # `ops.shape(inputs)[2]`, HEADS in that frame, leaving the layer exactly
+        # permutation-equivariant (measured 3.58e-07). See decisions.md D-083.
         q_rope = keras.ops.transpose(
             self.rope(keras.ops.transpose(q_reshaped, (0, 2, 1, 3)), training=training),
             (0, 2, 1, 3),

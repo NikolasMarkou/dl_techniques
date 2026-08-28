@@ -352,12 +352,11 @@ class LinearAttention(keras.layers.Layer):
         self.inner_dim = self.num_heads * self.head_dim
 
         # Create sub-layers in __init__ (unbuilt).
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200
-        # Clone the initializer per projection. Don't pass
-        # `self.kernel_initializer` straight in: one Initializer INSTANCE reused
-        # across same-shape weights gives bit-identical kernels (measured
-        # max|delta| = 0.0 over Q, K, V and output_proj), so Q and K would start
-        # equal and the logits symmetric. See decisions.md D-200.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — clone the initializer
+        # per projection. Don't pass `self.kernel_initializer` straight in: one
+        # Initializer INSTANCE reused across same-shape weights gives
+        # bit-identical kernels (measured max|delta| = 0.0 over Q, K, V and
+        # output_proj), so Q and K start equal. See decisions.md D-200.
         self.query_proj = layers.Dense(
             self.inner_dim,
             use_bias=use_bias,
@@ -395,11 +394,10 @@ class LinearAttention(keras.layers.Layer):
             name='output_proj'
         )
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-016
-        # Create the Dropout unconditionally and gate it in `call()`. Don't put
-        # it back behind `if dropout_rate > 0`: that made the object graph and the
-        # auto-generated sub-layer names depend on `dropout_rate`. A Dropout owns
-        # no weights, so always creating it is free in the checkpoint.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016 — the Dropout is created
+        # UNCONDITIONALLY and gated in `call()`. Don't put it back behind
+        # `if dropout_rate > 0`: that made the object graph and the auto-generated
+        # sub-layer names depend on `dropout_rate`. A Dropout owns no weights.
         # See decisions.md D-016.
         self.dropout = layers.Dropout(dropout_rate, name="dropout")
 

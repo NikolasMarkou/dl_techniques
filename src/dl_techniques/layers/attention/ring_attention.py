@@ -348,12 +348,11 @@ class RingAttention(keras.layers.Layer):
         self.scale = compute_attention_scale(self.head_dim)
 
         # Create all sub-layers here, unbuilt.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200
-        # Clone the initializer per projection. Don't pass
-        # `self.kernel_initializer` straight in: one Initializer INSTANCE reused
-        # across same-shape weights gives bit-identical kernels (measured
-        # max|delta| = 0.0 over Q, K, V and w_o), so Q and K would start equal
-        # and the logits symmetric. See decisions.md D-200.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — clone the initializer
+        # per projection. Don't pass `self.kernel_initializer` straight in: one
+        # Initializer INSTANCE reused across same-shape weights gives
+        # bit-identical kernels (measured max|delta| = 0.0 over Q, K, V and w_o),
+        # so Q and K start equal. See decisions.md D-200.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -631,19 +630,11 @@ class RingAttention(keras.layers.Layer):
 
         state_dtype = keras.backend.standardize_dtype(queries.dtype)
         if attention_mask is not None:
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-013
-            # Validate the rank ONCE, here, before any block work and before the
-            # rescue below. A rank this layer cannot dispatch on used to fall
-            # through both branches of the in-loop `if/elif` and surface as
-            # `UnboundLocalError: cannot access local variable 'mask_slice'` on
-            # the first (q_block 0, kv_block 0) iteration. Checking up front
-            # gives the caller a `ValueError` that names the supported ranks,
-            # before a single matmul runs.
-            # Don't delete the `else: raise` at the in-loop dispatch because
-            # this check makes it unreachable. That `else` is what guarantees
-            # `mask_slice` cannot be read unbound. A rank added here but not
-            # there would re-create this defect, silently, on the masked path
-            # only. See decisions.md D-013 (plan-2026-07-27T183600-b4ef45f0).
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-013 — validate the mask
+            # rank ONCE here: a rank this layer cannot dispatch on used to surface
+            # as `UnboundLocalError: cannot access local variable 'mask_slice'` on
+            # the first (q_block 0, kv_block 0) iteration. Don't delete the in-loop
+            # `else: raise` as unreachable. See decisions.md D-013.
             mask_rank = len(keras.ops.shape(attention_mask))
             if mask_rank not in (2, 3, 4):
                 raise ValueError(_UNSUPPORTED_MASK_RANK.format(rank=mask_rank))

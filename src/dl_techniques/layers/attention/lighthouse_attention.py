@@ -300,23 +300,11 @@ def _compute_mandatory_indices(
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-07-27T130643-38c5646a/D-009
-# HISTORICAL. This anchor recorded a cross-block causality defect and named four
-# red tests. D-023 of the same plan FIXED it two days later, by partitioning
-# `top_k` per causal block. Re-measured 2026-08-27 at N=32, L=2, p=2, top_k=16:
-# perturbing the last input token moves positions `< N // 2` by EXACTLY 0.0, and
-# all four of those tests pass (`12 passed, 1 xfailed`). What remains is
-# narrower and block-local, 8 violating cells all with `j == i + 1`, pinned by
-# the strict-xfail `test_causality_is_per_position`.
-#
-# The point kept from the original body: don't fix a causality defect inside a
-# docs or structure pass, and don't relax a red test to make a run look green. A
-# behaviour fix and a refactor need separate gates, or no later comparison can
-# say which one moved the numbers.
-#
-# The stale version of this text stood for a month, here and in two docstrings.
-# That is why the 2026-08-27 pass re-derives claims instead of reading them.
-# See decisions.md D-009 and D-003 of the same plan.
+# DECISION plan-2026-07-27T130643-38c5646a/D-009 — HISTORICAL: a cross-block
+# causality defect, FIXED by D-023 (per-causal-block `top_k`). Re-measured
+# 2026-08-27 (N=32, L=2, p=2, top_k=16): perturbing the last token moves positions
+# `< N // 2` by EXACTLY 0.0. Kept point: don't fix a causality defect in a docs
+# pass, and don't relax a red test to look green. See decisions.md D-009, D-003.
 
 
 @keras.saving.register_keras_serializable()
@@ -831,25 +819,11 @@ class LighthouseAttention(keras.layers.Layer):
         n_cand = int(self._candidate_indices.size)
         self._effective_k = int(min(self.top_k, n_cand))
 
-        # DECISION plan-2026-07-29T110112-09832856/D-023
-        # PARTITION THE DISCRETIONARY BUDGET BY CAUSAL TIME. Don't replace this
-        # with a single global `keras.ops.top_k` over all candidates. That is
-        # the causality defect this layer shipped with, and it is structural,
-        # not a masking slip. Measured on the pre-fix bytes (N=32, L=2, p=2,
-        # top_k=16, seed 7/99): perturbing only token 31 raised its score into
-        # the shared top_k and EVICTED pyramid entry 15, which base position 15
-        # reads as itself, so output position 15 moved by 2.585. The triangular
-        # mask cannot help; it stops an early query from READING a late entry,
-        # not a late entry from taking an early entry's BUDGET.
-        # What the per-block budget buys, stated without overclaiming: causality
-        # at BLOCK granularity. A perturbation at token T can still change the
-        # selection inside T's own block, and so outputs at positions in that
-        # block. It cannot reach any earlier block. Per-POSITION causality needs
-        # per-query selection and a block-wise SDPA, a different layer shape.
-        # Guarded by `test_causality` (cross-block),
-        # `test_causality_no_cross_block_leakage` (the block guarantee) and the
-        # strict-xfail `test_causality_is_per_position` (the residual).
-        # See decisions.md D-023.
+        # DECISION plan-2026-07-29T110112-09832856/D-023 — PARTITION THE
+        # DISCRETIONARY BUDGET BY CAUSAL TIME. Don't replace this with one global
+        # `keras.ops.top_k`: measured pre-fix (N=32, L=2, p=2, top_k=16), perturbing
+        # token 31 EVICTED pyramid entry 15, moving output 15 by 2.585; a triangular
+        # mask cannot stop that. Buys BLOCK causality only. See decisions.md D-023.
         cand_causal = self._causal_pos[self._candidate_indices]
         block_span = int(self._max_fanout)
         self._sel_block_span = block_span

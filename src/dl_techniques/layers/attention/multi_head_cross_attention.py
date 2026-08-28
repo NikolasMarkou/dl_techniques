@@ -412,17 +412,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self.kv_dense = keras.layers.Dense(self.dim * 2, name="kv", **dense_kwargs)
             self.qkv_dense = None
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-160
-        # `proj` is the attention block's RESIDUAL-path projection (GPT-2's
-        # `attn.c_proj`), so it is the one Dense here that may want a different
-        # initializer scale from Q/K/V. Two things must not be "cleaned up":
-        # (1) when `output_kernel_initializer` is None the kwargs dict is passed
-        # UNCHANGED, so `proj` keeps sharing the SAME initializer INSTANCE as
-        # `qkv`/`q`/`kv` — measured: a shared instance replays its draw, so
-        # max|delta| is 0.0 at equal shape;
-        # (2) the override REPLACES rather than merges, and reaches `proj` only.
-        # Letting it reach Q/K/V would shrink those too, which the GPT-2
-        # reference does not do. See decisions.md D-160.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160 — `proj` is the residual-
+        # path projection (GPT-2's `attn.c_proj`). Do NOT "clean up" either half:
+        # at `output_kernel_initializer=None` the kwargs pass UNCHANGED so `proj`
+        # keeps the SAME initializer INSTANCE (measured max|delta| = 0.0); and the
+        # override REPLACES, reaching `proj` ONLY. See decisions.md D-160.
         proj_kwargs = dict(dense_kwargs)
         if self.output_kernel_initializer is not None:
             proj_kwargs["kernel_initializer"] = self.output_kernel_initializer

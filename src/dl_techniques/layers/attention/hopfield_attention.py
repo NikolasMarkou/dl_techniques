@@ -365,11 +365,8 @@ class HopfieldAttention(keras.layers.Layer):
         # DECISION plan-2026-08-22T035419-a11304c8/D-200 — `clone_initializer` per
         # projection. Do NOT collapse this back to a bare
         # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE
-        # reused across same-shape weights yields BIT-IDENTICAL tensors, measured
-        # before this change at max|delta| = 0.0 between Q, K, V and the output
-        # projection, so Q and K started life equal and the logits started
-        # symmetric. Instance identity is the discriminator, not `seed=`.
-        # See decisions.md D-200 (plan-2026-08-22T035419-a11304c8).
+        # reused across same-shape weights measured max|delta| = 0.0 across Q, K, V
+        # and proj. `seed=` is not the discriminator. See decisions.md D-200.
         self.query_dense = keras.layers.Dense(
             self.num_heads * self.key_dim,
             use_bias=self.use_bias,
@@ -413,16 +410,10 @@ class HopfieldAttention(keras.layers.Layer):
 
         # Dropout layer
         # DECISION plan-2026-08-27T040114-580f8b63/D-016 — the Dropout is created
-        # UNCONDITIONALLY and gated in `call()`. It owns no weights, so creating it
-        # always costs nothing in the checkpoint and keeps the object graph and the
-        # auto-generated sub-layer names independent of `dropout_rate`. Do NOT
-        # extend the same treatment to `q_norm`/`k_norm` below: they come from
-        # `create_normalization_layer`, which REJECTS a `None` type
-        # (`ValueError: Unknown normalization type: 'None'`), so at
-        # `qk_norm_type=None` there is no object to construct at all. Matching the
-        # rule there would mean inventing an identity normalization layer, which is
-        # a new abstraction rather than a fix.
-        # See decisions.md D-016 (plan-2026-08-27T040114-580f8b63).
+        # UNCONDITIONALLY and gated in `call()`; it owns no weights. Do NOT extend
+        # the same treatment to `q_norm`/`k_norm` below: `create_normalization_layer`
+        # REJECTS a `None` type, so at `qk_norm_type=None` there is no object to
+        # construct at all. See decisions.md D-016 (plan-2026-08-27T040114-580f8b63).
         self.dropout_layer = keras.layers.Dropout(
                 self.dropout_rate,
                 name="attention_dropout"

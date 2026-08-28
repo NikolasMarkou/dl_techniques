@@ -315,11 +315,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             name="proj"
         )
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-016
-        # The Dropout is created UNCONDITIONALLY and gated in `call()` instead.
-        # It owns no weights, so always creating it costs nothing in a
-        # checkpoint and keeps the object graph independent of `dropout_rate`.
-        # Do NOT make creation conditional on `dropout_rate > 0`.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016 — the Dropout is created
+        # UNCONDITIONALLY and gated in `call()`. Do NOT make creation conditional
+        # on `dropout_rate > 0`: it owns no weights, so always creating it costs
+        # nothing in a checkpoint and keeps the object graph independent of it.
         # See decisions.md D-016 (plan-2026-08-27T040114-580f8b63).
         self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
 
@@ -369,13 +368,11 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qkv_dense.build(input_shape)
         self.proj_dense.build(input_shape)
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-018
-        # The Dropout is built EXPLICITLY, like every other sub-layer here.
-        # Do NOT go back to skipping it. Skipping was harmless only because
-        # Dropout owns no weights, so a `.keras` reload had nothing to restore
-        # into; that is a property of Dropout, not of this method, and it stops
-        # holding the moment the sub-layer becomes stateful.
-        # See decisions.md D-018 (plan-2026-08-27T040114-580f8b63).
+        # DECISION plan-2026-08-27T040114-580f8b63/D-018 — the Dropout is built
+        # EXPLICITLY, like every other sub-layer here. Do NOT go back to skipping
+        # it: skipping was harmless only because Dropout owns no weights, which is
+        # a property of Dropout, not of this method, and stops holding the moment
+        # the sub-layer becomes stateful. See decisions.md D-018.
         self.dropout_layer.build(
             (input_shape[0], self.num_heads, input_shape[1], input_shape[1])
         )

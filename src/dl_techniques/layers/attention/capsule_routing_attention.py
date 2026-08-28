@@ -394,12 +394,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # over input capsules). Shared between _vertical_routing and
         # _horizontal_routing calls into _dynamic_routing.
         #
-        # DECISION plan-2026-08-27T040114-580f8b63/D-008
-        # Keep axis=-2. It is the TRANSPOSE of Sabour et al. 2017, which the
-        # class docstring cites. Flipping it to -1 makes `_horizontal_routing`'s
-        # `num_output_capsules = 1` branch a size-1 softmax no-op, which
-        # produced NaN under mixed_float16 when it was tried. The module
-        # docstring's "Deviation from the cited paper" note carries the sums.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-008 — keep axis=-2, the
+        # TRANSPOSE of Sabour et al. 2017 that the class docstring cites. Flipping
+        # it to -1 makes `_horizontal_routing`'s `num_output_capsules = 1` branch a
+        # size-1 softmax no-op, which produced NaN under mixed_float16 when tried.
         # See decisions.md D-008 (plan-2026-08-27T040114-580f8b63).
         self.attn_prob_routing = ProbabilityOutput(
             probability_type=self.probability_type,
@@ -500,12 +498,11 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             )
 
         # Create projection layers now that we know dimensions.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200
-        # Clone the initializer per projection. Don't simplify this back to a
-        # bare `kernel_initializer=self.kernel_initializer`. One Initializer
-        # INSTANCE reused across same-shape weights gives bit-identical tensors,
-        # measured here at max|delta| = 0.0 across Q, K, V and output. `seed=` is
-        # not the discriminator; instance identity is. See decisions.md D-200.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — clone the initializer
+        # per projection. Don't simplify back to a bare
+        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE
+        # reused across same-shape weights measured max|delta| = 0.0 across Q, K,
+        # V and output. `seed=` is not the discriminator. See decisions.md D-200.
         self.query_dense = layers.Dense(
             self.num_heads * self.actual_key_dim,
             use_bias=self.use_bias,
@@ -955,13 +952,11 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         seq_len = attention_weights.shape[2]
 
         if self.use_positional_routing:
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-014
-            # This guard belongs INSIDE the positional branch. Don't hoist it
-            # back out "so the failure is earlier". Only the `for l in
-            # range(seq_len)` unroll below needs a static length; the
-            # non-positional path is dynamic-length safe. Accepted cost: a
-            # dynamic length with use_positional_routing=False used to raise and
-            # now runs. See decisions.md D-014.
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-014 — this guard belongs
+            # INSIDE the positional branch. Don't hoist it out "so the failure is
+            # earlier": only the `for l in range(seq_len)` unroll below needs a
+            # static length. Accepted cost: a dynamic length with positional
+            # routing off used to raise and now runs. See decisions.md D-014.
             if seq_len is None:
                 raise ValueError(
                     "CapsuleRoutingSelfAttention positional routing "
