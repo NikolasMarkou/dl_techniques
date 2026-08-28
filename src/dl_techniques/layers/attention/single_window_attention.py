@@ -1,56 +1,65 @@
 """
 Unified single-window multi-head self-attention.
 
-This layer implements multi-head self-attention restricted to a single square
-window of side ``window_size`` (i.e. ``window_size ** 2`` tokens). It merges
-several attention variants into one configurable layer: standard linear QKV
-projection or a non-linear KAN-based Key projection, combined with a unified
-probability output strategy applied to the attention scores. Internal padding
-ensures every window reaches ``window_size ** 2`` tokens before attention is
-computed, and the padded positions are stripped from the output.
+Multi-head self-attention over ONE window, with two things made configurable
+instead of forked into separate classes: how ``K`` is projected, and how raw
+scores become probabilities. :class:`WindowAttention` is the partitioning
+wrapper that feeds this layer; this layer owns all the attention math.
+
+Sizing depends on how the caller drives it, and there are THREE regimes, not
+one. By default the layer pads its input up to ``window_size ** 2`` tokens and
+strips the padding off the output, so a caller never has to pre-pad and a
+partial trailing window needs no separate code path. A caller that already
+knows the layout can instead call ``set_window_slots()``, and the ``N_actual``
+real tokens then ARE the window -- no internal padding, and the
+relative-position bias is gathered at the slots given. A caller with no tile
+at all passes ``pad_to_window=False``, which attends the ``N_actual`` tokens
+with no padding and no bias; that is the mode
+``WindowAttention(partition_mode='band')`` uses.
 
 Architecture:
-    The layer is one Swin-style window's worth of attention, made configurable
-    along two independent axes (how ``K`` is projected, and how scores become
-    probabilities) instead of being forked into separate classes.
-
     1.  **Projection.** Two mutually exclusive modes:
 
-        -   **linear**: a single fused dense layer produces ``Q``, ``K``, ``V``.
-        -   **kan_key**: separate dense layers produce ``Q`` and ``V``, while ``K``
-            is produced by a KAN linear layer to inject a non-linear key
-            projection.
+        -   ``'linear'``: one fused dense layer produces ``Q``, ``K``, ``V``.
+        -   ``'kan_key'``: separate dense layers produce ``Q`` and ``V``,
+            while ``K`` comes from a KAN linear layer, which injects a
+            non-linear key projection.
 
-    2.  **Padding to a full window.** Internal padding ensures every window
-        reaches ``window_size ** 2`` tokens before attention is computed, and the
-        padded positions are stripped from the output. Callers therefore never
-        have to pre-pad, and a partial trailing window is handled without a
-        separate code path.
+    2.  **Sizing.** One of the three regimes above. Whichever runs, an
+        internal padding mask is ALWAYS built and ALWAYS applied, so there is
+        no "no mask" path through this layer.
 
-    3.  **Scoring.** Optional QK-normalization (``qk_norm_type``) applies a
-        normalization layer to ``Q`` and ``K`` before the score matmul,
-        stabilising attention logits. An optional learnable relative position
-        bias, indexed by intra-window 2D coordinates and following the Swin
-        Transformer convention, is added to the scores.
+    3.  **Scoring.** ``qk_norm_type`` optionally normalizes ``Q`` and ``K``
+        before the score matmul, which stabilises the logits. An optional
+        learnable relative position bias, indexed by intra-window 2-D
+        coordinates in the Swin convention, is added to the scores. The
+        scores are then clipped to ``[-30, 30]`` BEFORE the mask bias is
+        applied; the D-010 anchor in ``call()`` says why that order matters.
 
-    4.  **Probability output.** Score-to-probability conversion is delegated to
-        :class:`ProbabilityOutput` via ``probability_type`` /
+    4.  **Probability output.** Scores become weights through
+        :class:`ProbabilityOutput`, selected by ``probability_type`` /
         ``probability_config``. Score-level routing strategies (``routing``,
-        ``deterministic_routing``, ``hierarchical``, ``hierarchical_routing``) are
-        rejected at construction time, as they are not appropriate normalizations
-        for raw attention scores in this layer.
+        ``deterministic_routing``, ``hierarchical``, ``hierarchical_routing``)
+        are rejected at construction time. They are not normalizations of raw
+        attention scores.
 
 Foundational Mathematics:
-    The layer follows the scaled dot-product attention formula::
+    The layer computes scaled dot-product attention::
 
         Attention(Q, K, V) = prob( Q K^T / sqrt(d_k) + bias ) V
 
     where ``prob`` is the configurable :class:`ProbabilityOutput` strategy and
-    ``bias`` is the optional relative position bias. Restricting the sum to one
-    window of ``M = window_size ** 2`` tokens is what turns global attention's
-    ``O(N^2)`` cost into ``O(N * M)`` for an image of ``N`` tokens: the bias table
-    is indexed by relative coordinate, so it has ``(2M_s - 1)^2`` entries for
-    window side ``M_s`` rather than one entry per absolute position pair.
+    ``bias`` is the optional relative position bias. Restricting the sum to
+    one window of ``M = window_size ** 2`` tokens is what turns global
+    attention's ``O(N^2)`` into ``O(N * M)`` for a sequence of ``N`` tokens.
+
+    The bias table is indexed by RELATIVE coordinate, not absolute position,
+    so it holds ``(2 * window_size - 1) ** 2`` rows -- one per possible 2-D
+    displacement inside the tile -- times ``num_heads``, instead of one entry
+    per absolute position pair. That is ~1.04 MB even at ``window_size=128``.
+    The INDEX that reads those rows is the expensive part, at
+    ``O(window_size ** 4)``, which is why it is built lazily and cached rather
+    than allocated in ``__init__``. See the D-006 anchor there.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
@@ -87,70 +96,74 @@ class SingleWindowAttention(keras.layers.Layer):
     """
     Unified multi-head self-attention for a single window.
 
-    Merges multiple attention mechanisms into a single configurable layer
-    supporting standard linear QKV projection or non-linear KAN-based Key
-    projection, with a unified probability output strategy applied to
-    attention scores (via :class:`ProbabilityOutput`). Internal padding
-    ensures every window reaches ``window_size ** 2`` tokens before
-    attention is computed, then strips padding from the output.
+    Merges several attention variants into one configurable layer: a standard
+    linear QKV projection or a non-linear KAN-based Key projection, combined
+    with a pluggable probability output applied to the attention scores (via
+    :class:`ProbabilityOutput`).
 
-    The scaled dot-product attention is computed as
-    ``Attention(Q, K, V) = prob(Q K^T / sqrt(d_k) + bias) V``, where ``prob``
-    is the configurable :class:`ProbabilityOutput` strategy and ``bias`` is
-    an optional learnable relative position bias table indexed by intra-window
-    2D coordinates (Swin convention).
+    It computes ``Attention(Q, K, V) = prob(Q K^T / sqrt(d_k) + bias) V``,
+    where ``prob`` is the configured :class:`ProbabilityOutput` and ``bias`` is
+    an optional learnable relative position bias, indexed by intra-window 2-D
+    coordinates in the Swin convention.
+
+    **Three sizing regimes, not one.** By default the layer pads the input up
+    to ``window_size ** 2`` tokens and strips the padding off the output. A
+    caller that supplies a slot map through :meth:`set_window_slots` instead
+    attends the ``N_actual`` real tokens and gathers the bias at those slots.
+    A caller passing ``pad_to_window=False`` attends the ``N_actual`` real
+    tokens with no tile at all, and must have the bias switched off. The two
+    non-default spellings are mutually exclusive and are checked as such.
+
+    Whichever regime runs, an internal padding mask is ALWAYS built and ALWAYS
+    applied. There is no unmasked path through this layer, which is why the
+    mask bias line here had no safe fallback under ``mixed_float16``; the
+    D-007 anchor in :meth:`call` records what that cost.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────────────────┐
-        │                 SingleWindowAttention                 │
-        │                                                       │
-        │   Input [B, N_actual, dim]                            │
-        │          │                                            │
-        │          ▼                                            │
-        │   ┌─────────────────────────────────────────────┐     │
-        │   │  Pad to window_size^2 tokens                │     │
-        │   │  + build internal padding mask              │     │
-        │   └─────────────────────────────────────────────┘     │
-        │          │                                            │
-        │          ▼                                            │
-        │   ┌─────────────────────────────────────────────┐     │
-        │   │  QKV Projection                             │     │
-        │   │    linear : fused Dense(3*dim)              │     │
-        │   │    kan_key: Dense(Q) + KAN(K) + Dense(V)    │     │
-        │   │                                             │     │
-        │   │  Reshape ──► (B, heads, N, d_h) for Q,K,V   │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │        scores = Q @ K^T / sqrt(d_k)         │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │      [+ relative_position_bias]             │     │
-        │   │      [+ additive padding/user mask]         │     │
-        │   │      [clip(scores, -30, 30)]                │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │     prob = ProbabilityOutput(               │     │
-        │   │              probability_type, config)      │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │        dropout ──► weights @ V              │     │
-        │   │                  │                          │     │
-        │   │                  ▼                          │     │
-        │   │           Output Projection                 │     │
-        │   └─────────────────────────────────────────────┘     │
-        │          │                                            │
-        │          ▼                                            │
-        │   ┌─────────────────────────────────────────────┐     │
-        │   │  Unpad ──► slice [:, :N_actual, :]          │     │
-        │   └─────────────────────────────────────────────┘     │
-        │          │                                            │
-        │          ▼                                            │
-        │   Output [B, N_actual, dim]                           │
-        └───────────────────────────────────────────────────────┘
-
+        Input  (B, N_actual, dim)
+              │
+              ▼
+        ┌────────────────────────────────────────────────────┐
+        │ SIZE THE WINDOW — one of three, then build the     │
+        │ internal padding mask (always)                     │
+        │   default          pad to N_target = ws^2          │
+        │   window_slots     N_target = len(slots), no pad   │
+        │   pad_to_window=F  N_target = N_actual,   no pad   │
+        └────────────────────────────────────────────────────┘
+              ▼
+        ┌────────────────────────────────────────────────────┐
+        │ QKV PROJECTION                                     │
+        │   'linear'  : fused Dense(3*dim)                   │
+        │   'kan_key' : Dense(Q) + KANLinear(K) + Dense(V)   │
+        │   reshape ► (B, heads, N_target, head_dim) each    │
+        └────────────────────────────────────────────────────┘
+              ▼
+        [q_norm / k_norm]  (optional, qk_norm_type)
+              ▼
+        scores = (Q * scale) @ K^T        (B, heads, N, N)
+              ▼
+        [+ relative position bias]  (optional, gathered at the
+                                     full index or at the slots)
+              ▼
+        clip(scores, -30, 30)       ON THE RAW SCORES — see D-010
+              ▼
+        ┌────────────────────────────────────────────────────┐
+        │ MASK — internal padding mask, times the caller's   │
+        │ mask if any.  rank-2 (B, N) ► (B, 1, 1, N)         │
+        │                rank-3 (B, N, N) ► (B, 1, N, N)     │
+        │ Fully-masked slices are rescued, not left as -inf. │
+        └────────────────────────────────────────────────────┘
+              ▼
+        ProbabilityOutput ► [dropout] ► weights @ V
+              ▼
+        transpose ► reshape ► output Dense projection
+              ▼
+        slice [:, :N_actual, :]      (a no-op when nothing was padded)
+              ▼
+        Output (B, N_actual, dim)
     :param dim: Total model dimension (split across heads). Must be positive
         and divisible by ``num_heads``.
     :type dim: int
@@ -364,88 +377,77 @@ class SingleWindowAttention(keras.layers.Layer):
             self.q_norm = None
             self.k_norm = None
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-006
-        # The `(window_size**2, window_size**2)` relative-position INDEX is NOT
-        # built here. It is built in `build()`, by `_relative_position_index()`.
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-006 — the
+        # `(window_size**2, window_size**2)` relative-position INDEX is NOT built
+        # here. `_relative_position_index()` builds it on first use, per distinct
+        # slot vector, and caches it. It is O(window_size**4): MEASURED at
+        # `window_size=128` the index is `16384*16384*4` bytes = 1.0 GiB resident
+        # and the `(2, 16384, 16384)` int32 broadcast that produces it another
+        # 2.0 GiB transient. Built in `__init__`, every byte of that was charged to
+        # CONSTRUCTION, before any shape was known and even if the layer was never
+        # called — construction peak RSS at `window_size=128` went 0.62 GB ->
+        # 5.64 GB from the `use_relative_position_bias` flag alone.
         #
-        # WHY: it is O(window_size**4). MEASURED at `window_size=128`: the index
-        # itself is `16384*16384*4` bytes = 1.0 GiB resident, and the
-        # `(2, 16384, 16384)` int32 broadcast that produces it is another 2.0 GiB
-        # transient. Built here, every byte of that was charged to
-        # `WindowAttention(...)` CONSTRUCTION -- before any shape was known and
-        # even if the layer was never called. Measured construction peak RSS at
-        # `window_size=128` went 0.62 GB -> 5.64 GB from the
-        # `use_relative_position_bias` flag alone.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT move it back into `__init__` "so the attribute always
-        #     exists". Constructing a layer must not allocate O(W^4).
+        #   * Do NOT move it back into `__init__` "so the attribute always exists".
+        #     Constructing a layer must not allocate O(W^4).
         #   * Do NOT make it an `add_weight(zeros)` + `.assign()` in `build()`.
         #     Under Keras 3's `StatelessScope` the assign is DISCARDED and the
-        #     tensor stays ALL ZEROS in a real model -- this repo has 11 recorded
+        #     tensor stays ALL ZEROS in a real model; this repo has 11 recorded
         #     instances. It is a CONSTANT, not a weight.
         #   * Do NOT build it with `keras.ops`. `build()` and `call()` can both run
         #     during a `tf.function` trace, which would make the stored tensor a
         #     graph tensor owned by THAT trace and unusable from any other one.
-        #     numpy has no graph affinity; the int32 values are exact either way,
-        #     so the gather is bit-for-bit what it was.
+        #     numpy has no graph affinity and the int32 values are exact either
+        #     way, so the gather is bit-for-bit what it was.
         #   * Do NOT build the FULL `(W**2, W**2)` index unconditionally in
-        #     `build()` either (step 2 did; step 3 does not). A caller that
-        #     supplies `window_slots` attends `n < W**2` real tokens and needs
-        #     only the `(n, n)` sub-index -- building the full one anyway would
-        #     hand back the entire O(W^4) cost the short-circuit exists to avoid.
-        #     It is therefore built ON FIRST USE, per distinct slot vector, and
-        #     cached in `_relative_position_index_cache`.
+        #     `build()` either. A caller supplying `window_slots` attends
+        #     `n < W**2` real tokens and needs only the `(n, n)` sub-index;
+        #     building the full one anyway hands back the entire O(W^4) cost the
+        #     short-circuit exists to avoid.
         # See decisions.md D-006 and D-007 (plan-2026-08-25T053412-0f1fa04f).
         self.relative_position_index = None
         self._relative_position_index_cache: Dict[bytes, np.ndarray] = {}
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-015
-        # The window-slot map lives HERE, on the instance, and is set by
-        # `set_window_slots()` immediately before a call. It is NOT a `call()`
-        # keyword argument.
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-015 — the window-slot map
+        # lives HERE, on the instance, set by `set_window_slots()` immediately
+        # before a call. It is NOT a `call()` keyword argument. It is a static
+        # LAYOUT CONSTANT, fully determined by `(partition_mode, window_size, N)`,
+        # and it selects ROWS of the relative-position bias table by numpy indexing
+        # at trace time. Keras 3's `Layer.__call__` maps `convert_input` over every
+        # argument, so an ndarray passed as a call kwarg becomes a backend tensor —
+        # symbolic inside a `tf.function` trace — and the `np.asarray` below then
+        # raises `NotImplementedError: Cannot convert a symbolic tf.Tensor`.
         #
-        # WHY: it is a static LAYOUT CONSTANT -- fully determined by
-        # `(partition_mode, window_size, N)` -- and it selects ROWS of the
-        # relative-position bias table by numpy indexing at trace time. Keras 3's
-        # `Layer.__call__` maps `dtype_policy.convert_input` over every argument,
-        # so an ndarray passed as a call kwarg becomes a backend tensor; inside a
-        # `tf.function` trace that is a SYMBOLIC tensor, and the `np.asarray`
-        # below then raises `NotImplementedError: Cannot convert a symbolic
-        # tf.Tensor ... to a numpy array`.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT put `window_slots` back in the `call()` signature. MEASURED
-        #     on b380c6f79 for `1 < N < window_size ** 2` in BOTH 'grid' and
-        #     'zigzag': `layer(x)` and `model(x)` eager PASS while
-        #     `model.predict(x)`, `model.fit(...)` and any `@tf.function` wrapper
-        #     raise `NotImplementedError` -- i.e. every functional Keras consumer
-        #     was broken in exactly the regime the short-circuit exists to fix
-        #     (`TiRexCore(attention_type='window', attention_window_size=8)` on 8
-        #     patch tokens was the shipped casualty). Pinned by
+        #   * Do NOT put `window_slots` back in the `call()` signature. MEASURED on
+        #     b380c6f79 for `1 < N < window_size ** 2` in BOTH 'grid' and 'zigzag':
+        #     `layer(x)` and `model(x)` eager PASS while `model.predict(x)`,
+        #     `model.fit(...)` and any `@tf.function` wrapper raise
+        #     `NotImplementedError`. That is every functional Keras consumer broken
+        #     in exactly the regime the short-circuit exists to fix;
+        #     `TiRexCore(attention_type='window', attention_window_size=8)` on 8
+        #     patch tokens was the shipped casualty. Pinned by
         #     `test_window_attention_graph_mode.py`.
-        #   * Do NOT "fix" it by catching `NotImplementedError` or by testing
-        #     `isinstance(x, np.ndarray)` inside `call()`. That leaves the layout
-        #     riding the traced-tensor channel and silently SKIPS the range and
-        #     length validation below on exactly the path that has no other guard.
-        #   * Do NOT make the callee tensor-agnostic (`keras.ops.take` on a
-        #     symbolic slot vector) instead. The slot vector indexes a numpy-built
-        #     `(n, n)` index that is CACHED by `slots.tobytes()`; a symbolic
-        #     vector has no bytes, so the cache key, the O(n^2) sub-index and the
-        #     `[0, window_size ** 2)` validation would all have to grow a
-        #     second, trace-time-only spelling.
-        #   * Do NOT skip the `finally`-reset in the caller's `_attend()` wrapper.
-        #     A stale slot map is invisible: it has the right dtype and a
-        #     plausible length, and it moves only the relative-position bias.
+        #   * Do NOT "fix" that by catching `NotImplementedError` or by testing
+        #     `isinstance(x, np.ndarray)` inside `call()`. That leaves the layout on
+        #     the traced-tensor channel and silently SKIPS the range and length
+        #     validation below, on the one path with no other guard.
+        #   * Do NOT make the callee tensor-agnostic (`keras.ops.take` on a symbolic
+        #     slot vector) instead. The slot vector indexes a numpy-built `(n, n)`
+        #     index CACHED by `slots.tobytes()`; a symbolic vector has no bytes, so
+        #     the cache key, the O(n^2) sub-index and the `[0, window_size ** 2)`
+        #     validation would each grow a second, trace-time-only spelling.
+        #   * Do NOT skip the `finally`-reset in the caller's `_attend()` wrapper. A
+        #     stale slot map is invisible: right dtype, plausible length, and it
+        #     moves only the relative-position bias.
         # See decisions.md D-015 (plan-2026-08-25T053412-0f1fa04f).
         self._window_slots: Optional[np.ndarray] = None
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-012
-        # One entry per sequence length: the slot map this instance has already
-        # committed to at that length. Used by `set_window_slots()` to refuse a
-        # second, different layout at the same length, which a reused trace would
-        # silently ignore. Not serialized -- it is derived, and a fresh instance
-        # legitimately starts empty.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-012 — one entry per sequence
+        # length: the slot map this instance already committed to at that length.
+        # `set_window_slots()` reads it to refuse a second, different layout at the
+        # same length, which a reused trace would silently ignore. Not serialized,
+        # because it is derived and a fresh instance legitimately starts empty.
+        # See decisions.md D-012 (plan-2026-08-27T040114-580f8b63).
         self._slot_layout_by_length: Dict[int, bytes] = {}
 
     def set_window_slots(
@@ -490,25 +492,20 @@ class SingleWindowAttention(keras.layers.Layer):
 
         slots = np.asarray(window_slots, dtype=np.int32)
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-012
-        # Enforce the invariant this class already documents: the slot map is a
-        # static LAYOUT CONSTANT "fully determined by (partition_mode,
-        # window_size, N)" (D-015). For one instance at one N there is therefore
-        # exactly ONE legal slot map, and two different maps at the same length
-        # can only mean misuse.
-        #
-        # Keyed by LENGTH, deliberately. A different length changes the input
-        # shape, which retraces the graph, so the layout genuinely may differ
-        # there -- `partition_mode='band'` is length-polymorphic by design and a
+        # DECISION plan-2026-08-27T040114-580f8b63/D-012 — one instance at one `N`
+        # has exactly ONE legal slot map (D-015: the map is fully determined by
+        # `(partition_mode, window_size, N)`), so two different maps at the same
+        # length can only mean misuse, and this raises instead of returning a stale
+        # trace's answer. Keyed by LENGTH on purpose: a different length changes the
+        # input shape, which retraces the graph, so the layout genuinely may differ
+        # there — `partition_mode='band'` is length-polymorphic and a
         # length-agnostic guard would reject it wrongly. Same length is the exact
-        # and only case where one trace is reused with a changed layout, which is
-        # the silent-staleness regime measured in the warning above.
-        #
-        # The alternative fixes are both closed off: putting `window_slots` back
-        # on the `call()` signature is D-015's measured NO (it broke every
-        # functional Keras consumer), and comparing the map inside `call()`
-        # cannot work because `call()` does not re-run per graph invocation --
-        # not re-running is the defect.
+        # and only case where one trace is reused with a changed layout. Both
+        # alternative fixes are closed: putting `window_slots` back on the `call()`
+        # signature is D-015's measured NO, and comparing the map inside `call()`
+        # cannot work because `call()` does not re-run per graph invocation — not
+        # re-running is the defect.
+        # See decisions.md D-012 (plan-2026-08-27T040114-580f8b63).
         previous = self._slot_layout_by_length.get(int(slots.shape[0]))
         if previous is not None and previous != slots.tobytes():
             raise ValueError(
@@ -683,12 +680,21 @@ class SingleWindowAttention(keras.layers.Layer):
         """
         Forward pass for the unified single-window attention.
 
-        Pads the input up to ``window_size ** 2`` tokens, runs multi-head
-        self-attention with optional relative position bias and configurable
-        normalization, then slices the padding off the output. The internal
-        padding mask is combined (multiplicatively) with any user-supplied
-        ``attention_mask`` before being converted to an additive ``-1e9``
-        bias on the attention scores.
+        Sizes the window, runs multi-head self-attention with optional
+        relative position bias and configurable normalization, then slices any
+        padding off the output. The internal padding mask is combined
+        multiplicatively with any caller-supplied ``attention_mask`` before it
+        becomes an additive ``MASK_BIAS_VALUE`` bias on the scores.
+
+        The window-slot map is NOT an argument here. It is set on the instance
+        by :meth:`set_window_slots` immediately before the call; the D-015
+        anchor in ``__init__`` says why it must stay off the traced argument
+        channel. When it is set it asserts *these are all the tokens there
+        are*: the layer attends the ``N_actual`` real tokens with no internal
+        padding and gathers the relative-position bias at those slots'
+        coordinates. When it is ``None``, ``pad_to_window`` decides between
+        the default pad-to-``window_size ** 2`` behaviour and no padding
+        at all.
 
         :param inputs: Token embeddings of shape ``(B, N_actual, dim)``.
         :type inputs: keras.KerasTensor
@@ -708,14 +714,6 @@ class SingleWindowAttention(keras.layers.Layer):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating whether in training mode.
         :type training: Optional[bool]
-        The window-slot map is NOT an argument here: it is set on the instance by
-        :meth:`set_window_slots` immediately before the call (see the D-015 anchor
-        in ``__init__`` for why it must stay off the traced argument channel).
-        When it is set, it asserts *these are all the tokens there are*: the layer
-        attends the ``N_actual`` real tokens with no internal padding and gathers
-        the relative-position bias at those slots' coordinates. When it is
-        ``None`` the original pad-to-``window_size ** 2`` behaviour runs.
-
         :param pad_to_window: If ``True`` (the default, and the only behaviour
             any pre-2026-08-25 caller had) the input is padded up to
             ``window_size ** 2`` slots, which is what a *tile* partition
@@ -742,34 +740,31 @@ class SingleWindowAttention(keras.layers.Layer):
         input_shape = keras.ops.shape(inputs)
         B_actual, N_actual = input_shape[0], input_shape[1]
         if window_slots is None:
-            # DECISION plan-2026-08-25T053412-0f1fa04f/D-010
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-010 —
             # `pad_to_window=False` is the ONLY way to run this layer without a
-            # `window_size x window_size` tile, and it exists for
+            # `window_size x window_size` tile. It exists for
             # `WindowAttention(partition_mode='band')`, where `window_size` is a
             # 1-D half-width in TOKENS and `window_size ** 2` is not a length.
             #
-            # WHAT NOT TO DO, and why:
-            #   * Do NOT express band mode as `window_slots=np.arange(N)`
-            #     instead. It looks equivalent and is not: `window_slots` values
-            #     are validated into `[0, window_size ** 2)` because they index a
-            #     TILE, so at `window_size=64` (ModernBERT's `local_attention=128
-            #     // 2`) any sequence longer than 4096 tokens raises -- for a
-            #     layout that has no tile and no such bound. It would also keep
-            #     the relative-position gather alive on a path where the bias
-            #     means nothing.
-            #   * Do NOT let `pad_to_window=False` coexist with a relative
-            #     position bias. The bias is gathered through
-            #     `_relative_position_index`, which maps a slot to
-            #     `(slot // window_size, slot % window_size)` -- a 2-D grid
-            #     coordinate. Without a grid those rows are arbitrary, and an
-            #     arbitrary learnable bias is indistinguishable from a correct one
-            #     at every shape, dtype and finiteness check. It is REFUSED here
-            #     rather than forced off, so a caller can receive neither a bias
-            #     that means nothing nor silence.
-            #   * Do NOT add a second boolean meaning the same thing. This flag
-            #     and `window_slots` are mutually exclusive by explicit check;
-            #     two spellings of "do not pad" is the failure mode D-005 exists
-            #     to avoid.
+            #   * Do NOT express band mode as `window_slots=np.arange(N)` instead.
+            #     It looks equivalent and is not: slot values are validated into
+            #     `[0, window_size ** 2)` because they index a TILE, so at
+            #     `window_size=64` (ModernBERT's `local_attention=128 // 2`) any
+            #     sequence longer than 4096 tokens raises — for a layout with no
+            #     tile and no such bound. It would also keep the relative-position
+            #     gather alive on a path where the bias means nothing.
+            #   * Do NOT let `pad_to_window=False` coexist with a relative position
+            #     bias. The bias is gathered through `_relative_position_index`,
+            #     which maps a slot to `(slot // window_size, slot % window_size)`,
+            #     a 2-D grid coordinate. Without a grid those rows are arbitrary,
+            #     and an arbitrary learnable bias is indistinguishable from a
+            #     correct one at every shape, dtype and finiteness check. It is
+            #     REFUSED here rather than forced off, so a caller gets neither a
+            #     meaningless bias nor silence.
+            #   * Do NOT add a second boolean meaning the same thing. This flag and
+            #     `window_slots` are mutually exclusive by explicit check; two
+            #     spellings of "do not pad" is the failure mode D-005 exists to
+            #     avoid.
             # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
             if pad_to_window:
                 N_target = self.window_size * self.window_size
@@ -829,30 +824,26 @@ class SingleWindowAttention(keras.layers.Layer):
             axis=1,
         )
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-001
-        # A rank-3 `(B, N_actual, N_actual)` mask is a PAIRWISE (query, key) keep
-        # predicate and gets its OWN branch. It is not a variant spelling of the
-        # rank-2 `(B, N_actual)` key-only mask below.
+        # DECISION plan-2026-07-31T042809-ddc92265/D-001 — a rank-3
+        # `(B, N_actual, N_actual)` mask is a PAIRWISE (query, key) keep predicate
+        # and gets its OWN branch. It is not a variant spelling of the rank-2
+        # `(B, N_actual)` key-only mask below. Shifted-window self-attention
+        # (SW-MSA) cannot be expressed any other way: after Swin's cyclic roll one
+        # physical window holds tokens from up to four pre-roll regions, and which
+        # keys a query may see depends on the QUERY's region. The rank-2 contract
+        # broadcasts one key predicate over every query row and is structurally
+        # incapable of saying that.
         #
-        # WHY IT EXISTS: shifted-window self-attention (SW-MSA) cannot be expressed
-        # any other way. After Swin's cyclic roll, one physical window holds tokens
-        # from up to four different pre-roll regions, and which keys a query may see
-        # depends on the QUERY's region — so the predicate genuinely varies along
-        # the query axis. The rank-2 contract broadcasts one key predicate over
-        # every query row and is structurally incapable of saying that.
-        #
-        # WHAT NOT TO DO, and why:
         #   * Do NOT collapse this back into the rank-2 `reshape(..., (B,1,1,N))`
-        #     path, e.g. by reducing the pairwise mask to a key mask with
-        #     `any(mask, axis=-2)`. That reduction is exactly the information loss
-        #     the branch exists to avoid: for an SW-MSA mask every key is kept by
-        #     SOME query, so the reduction yields all-ones and masks NOTHING, with
-        #     no shape error and a perfectly finite output.
+        #     path, e.g. by reducing the pairwise mask with `any(mask, axis=-2)`.
+        #     That reduction is exactly the information loss the branch avoids: for
+        #     an SW-MSA mask every key is kept by SOME query, so it yields all-ones
+        #     and masks NOTHING, with no shape error and a finite output.
         #   * Do NOT invert the polarity "to match" some other site. This is a
-        #     `1 = attend` predicate handed to `apply_attention_mask`, which
-        #     performs no polarity inference by design (its D-002 anchor). An
-        #     inversion raises nothing, changes no shape, stays finite, and makes
-        #     the layer attend to exactly the pairs it was told to forbid.
+        #     `1 = attend` predicate handed to the shared mask helper, which
+        #     performs no polarity inference (its D-002 anchor). An inversion raises
+        #     nothing, changes no shape, stays finite, and makes the layer attend to
+        #     exactly the pairs it was told to forbid.
         #     `TestSingleWindowAttentionPairwiseMask` is the only guard that sees
         #     it, and it measures the inverted control in the same test.
         #   * Do NOT mask the QUERY axis with the internal padding mask here. It is
@@ -860,22 +851,23 @@ class SingleWindowAttention(keras.layers.Layer):
         #     branch does, so the two branches agree BIT-for-BIT on a mask that is
         #     constant over queries (pinned by
         #     `test_a_query_broadcast_rank_3_mask_equals_the_rank_2_mask`).
-        #     NOTE what this does and does NOT avoid, because an earlier version
-        #     of this comment claimed more than is true. It keeps the INTERNAL
-        #     padding mask off the query axis; it does NOT keep the query axis
-        #     unmasked, because the `ops.pad` below zero-pads the USER's rank-3
-        #     mask on BOTH axes. So whenever `N_actual < N_target` the padded
-        #     query rows ARE fully masked and `apply_attention_mask`'s
-        #     fully-masked-row rescue DOES fire on them. MEASURED at
-        #     `(window_size=4, N_actual=10, B=2)`: 12 of 32 query slices keep
-        #     nothing on this branch, versus 0 on the rank-2 branch and 0 with no
-        #     mask at all. It is harmless — those rows' outputs are sliced off
-        #     unread below, and the rescue keeps them finite rather than NaN —
-        #     and it is unreachable from the Swin caller, which always passes
-        #     `N == window_size ** 2` exactly (measured: 0 of 32 there).
-        # ACCEPTED COST: the predicate handed to `apply_attention_mask` is
-        # `(B, 1, N, N)` rather than `(B, 1, 1, N)`, i.e. O(N^2) mask memory on this
-        # path only. The rank-2 and `None` paths are untouched (I1/I2).
+        #
+        # NOTE what that does and does NOT avoid, because an earlier version of this
+        # comment claimed more than is true. It keeps the INTERNAL padding mask off
+        # the query axis. It does NOT keep the query axis unmasked, because the
+        # `ops.pad` below zero-pads the USER's rank-3 mask on BOTH axes. So whenever
+        # `N_actual < N_target` the padded query rows ARE fully masked and the
+        # helper's fully-masked-row rescue DOES fire on them. MEASURED at
+        # `(window_size=4, N_actual=10, B=2)`: 12 of 32 query slices keep nothing on
+        # this branch, versus 0 on the rank-2 branch and 0 with no mask at all. It
+        # is harmless — those rows' outputs are sliced off unread below, and the
+        # rescue keeps them finite rather than NaN — and it is unreachable from the
+        # Swin caller, which always passes `N == window_size ** 2` exactly
+        # (measured: 0 of 32 there).
+        #
+        # ACCEPTED COST: the predicate handed to the mask helper is `(B, 1, N, N)`
+        # rather than `(B, 1, 1, N)`, i.e. O(N^2) mask memory on this path only. The
+        # rank-2 and `None` paths are untouched.
         # See decisions.md D-001 (plan-2026-07-31T042809-ddc92265).
         user_mask_is_pairwise = (
                 attention_mask is not None and len(attention_mask.shape) == 3
@@ -965,91 +957,79 @@ class SingleWindowAttention(keras.layers.Layer):
             # Shape: (B, H, N, N) + (1, H, N, N) -> (B, H, N, N)
             attn = attn + keras.ops.expand_dims(relative_position_bias, 0)
 
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-010
-        # `clip(attn, -30, 30)` runs HERE, on the RAW scores, and must NOT be moved
-        # back below the mask bias where it used to live.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT re-order this after `apply_attention_mask`. Clipping the BIASED
-        #     logits floors a masked position at `-30` instead of `MASK_BIAS_VALUE`,
-        #     which turns a hard mask into a soft one: once every logit in a row
-        #     already sits below the floor, the mask stops masking. MEASURED in
-        #     float32 on unfixed HEAD, driving `relative_position_bias_table` to a
-        #     uniform value and perturbing a MASKED token: leak 0.0 at bias 0.0,
-        #     2.73e-04 at -20, and **0.439** at -50, against a kept-token signal of
-        #     32.6. Pinned by
-        #     `TestSingleWindowAttentionClipDoesNotFloorTheMask`.
-        #   * Do NOT delete the clip instead. Its job — bounding the attention
-        #     logits before the softmax — is independent of masking and is
-        #     unaffected by this move; the raw scores are exactly what it was
-        #     meant to bound.
-        # ACCEPTED COST: for a mask that leaves every row's logits inside
-        # [-30, 30] (the ordinary case) this changes nothing measurable, but a
-        # masked position's softmax weight now goes to exactly 0 rather than
-        # `exp(-30 - max)`. That is a deliberate numerics change in float32 too,
-        # not only fp16.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-010 — `clip(attn, -30, 30)`
+        # runs HERE, on the RAW scores, and must NOT be moved back below the mask
+        # bias where it used to live. Clipping the BIASED logits floors a masked
+        # position at `-30` instead of `MASK_BIAS_VALUE`, which turns a hard mask
+        # into a soft one: once every logit in a row already sits below the floor,
+        # the mask stops masking. MEASURED in float32 on unfixed HEAD, driving
+        # `relative_position_bias_table` to a uniform value and perturbing a MASKED
+        # token: leak 0.0 at bias 0.0, 2.73e-04 at -20, and 0.439 at -50, against a
+        # kept-token signal of 32.6. Pinned by
+        # `TestSingleWindowAttentionClipDoesNotFloorTheMask`. Do NOT delete the clip
+        # instead: bounding the logits before the softmax is independent of masking
+        # and is unaffected by the move. ACCEPTED COST: for a mask that leaves every
+        # row inside [-30, 30] nothing measurable changes, but a masked position's
+        # softmax weight now goes to exactly 0 rather than `exp(-30 - max)` — a
+        # numerics change in float32, not only fp16.
         # See decisions.md D-010 (plan-2026-07-27T183600-b4ef45f0).
         attn = keras.ops.clip(attn, -30.0, 30.0)
 
         # THIS SITE'S MASK POLARITY, passed through verbatim: `broadcast_mask` is a
-        # `1 = keep` predicate, so it IS the keep predicate `apply_attention_mask`
-        # wants. Do NOT "normalize" it into a `> 0` comparison or invert it — the
-        # helper performs no polarity inference by design, so an inversion here
-        # raises nothing, changes no shape and stays finite; the layer would just
+        # `1 = keep` predicate, so it IS the keep predicate the shared mask helper
+        # wants. Do NOT "normalize" it into a `> 0` comparison and do NOT invert it.
+        # The helper performs no polarity inference by design, so an inversion
+        # raises nothing, changes no shape and stays finite — the layer would just
         # attend to the padding. `TestSingleWindowAttentionMaskPolarity` is the only
         # guard that can see it.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
-        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
-        # in the compute dtype (fp16 under `mixed_float16`), where
-        # `MASK_BIAS_VALUE` is `-inf` again. That is deliberate and is NOT the bug
-        # being fixed:
-        #   * The bug was the ARITHMETIC form this replaces,
-        #     `attn + (1.0 - keep) * -1e9`. In float16 `-1e9` is `-inf`
-        #     (np.float16(-1e9) == -inf) and `(1.0 - keep) == 0` at every UNMASKED
-        #     position, so the product is `0 * -inf = NaN`. THIS SITE HAD NO SAFE
-        #     PATH AT ALL: the mask is unconditional here (the internal padding mask
-        #     is always built and always applied), so `attention_mask=None` went
-        #     down the same line. MEASURED at (B=2, N=64, dim=64, window_size=8,
-        #     num_heads=4) under `mixed_float16`: 8192/8192 NaN with NO mask, with
-        #     an all-ones mask, with right padding and with left padding; float32
-        #     gave 0/8192 in every case.
-        #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
-        #     also rescue a fully-masked element. It cannot: the next consumer is
-        #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
-        #     float32 input inside its own `call()` as float16. Pinned by
-        #     `TestSingleWindowAttentionMaskHazardIsReal::
-        #     test_the_probability_sublayer_autocasts_a_float32_input`.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007 — `out_dtype` is pinned to
+        # the SCORES' own dtype, so the biased scores stay in the compute dtype
+        # (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE` is `-inf` again.
+        # That is intended and is NOT the bug being fixed. The bug was the
+        # ARITHMETIC form this replaces, `attn + (1.0 - keep) * -1e9`: in float16
+        # `-1e9` is `-inf` and `(1.0 - keep) == 0` at every UNMASKED position, so
+        # the product is `0 * -inf = NaN`. THIS SITE HAD NO SAFE PATH AT ALL,
+        # because the mask is unconditional here — the internal padding mask is
+        # always built and always applied, so `attention_mask=None` went down the
+        # same line. MEASURED at (B=2, N=64, dim=64, window_size=8, num_heads=4)
+        # under `mixed_float16`: 8192/8192 NaN with no mask, with an all-ones mask,
+        # with right padding and with left padding; float32 gave 0/8192 in every
+        # case. Do NOT "improve" this to `out_dtype=None` hoping to also rescue a
+        # fully-masked element: it cannot, because the next consumer is
+        # `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
+        # float32 input inside its own `call()` as float16. Pinned by
+        # `TestSingleWindowAttentionMaskHazardIsReal::
+        # test_the_probability_sublayer_autocasts_a_float32_input`.
         # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
-        # The fully-masked-slice rescue arrives via `apply_attention_mask`'s DEFAULT
-        # `rescue_axis=-1`: a slice of the mask that keeps NOTHING is treated as
-        # keeping EVERYTHING, so an all-`-inf` row is never FORMED and no NaN
-        # gradient is created either. Note the mask has no QUERY axis at this site,
-        # so "keeps nothing" means "this batch element keeps no key at all".
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017
-        # The axis is DERIVED from this layer's own `probability_config` rather than
-        # left to the helper's `-1` default: `ProbabilityOutput` reads its softmax
-        # `axis` from `type_config` (`activations/probability_output.py:180`) and this
-        # layer forwards `probability_config` VERBATIM, so a caller can move the
-        # reduction axis and the pre-step-10 "checked, not assumed" claim held only for
-        # the DEFAULT config. MEASURED at the sibling `gated_attention` under
-        # `mixed_float16` with `probability_config={"axis": -2}` and a dead KEY COLUMN:
-        # 8192/8192 non-finite. This site is also the one where the D-017 size-1
-        # rejection is most visible: its mask is ALWAYS reshaped to `(B, 1, 1, N)`, so a
-        # caller configuring `axis=-2` (a softmax over queries) now gets a named
-        # `ValueError` rather than a mask that cannot mask. WHAT NOT TO DO: do NOT
-        # restore a bare `-1`, and do NOT read this as the rank/shape INFERENCE the
-        # D-009 anchor in `common.py` forbids — this reads the site's own declared
-        # config. See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
-        #
-        # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back"
-        # — the user ruled the finite-garbage semantics package-wide on 2026-07-28,
-        # and opting out also restores the NaN GRADIENT. The full argument lives at
-        # the D-009 / D-008 anchors in `common.py`.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — the fully-masked-slice
+        # rescue arrives via `apply_attention_mask`'s DEFAULT `rescue_axis=-1`: a
+        # slice of the mask that keeps NOTHING is treated as keeping EVERYTHING, so
+        # an all-`-inf` row is never FORMED and no NaN gradient is created either.
+        # The mask has no QUERY axis at this site, so "keeps nothing" means "this
+        # batch element keeps no key at all". Do NOT pass `rescue_axis=None` to "get
+        # the loud NaN back": the user ruled the finite-garbage semantics
+        # package-wide on 2026-07-28, and opting out also restores the NaN GRADIENT.
+        # The full argument lives at the D-009 / D-008 anchors in `common.py`.
         # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the softmax axis is
+        # DERIVED from this layer's own `probability_config`, not left at the
+        # helper's `-1` default. `ProbabilityOutput` reads `axis` from `type_config`
+        # (`probability_output.py`, `_type_config.get("axis", -1)`) and this layer
+        # forwards `probability_config` verbatim, so a caller can move the reduction
+        # axis and a "checked, not assumed" claim about the DEFAULT config would not
+        # cover it. MEASURED at the sibling `gated_attention` under `mixed_float16`
+        # with `probability_config={"axis": -2}` and a dead KEY COLUMN: 8192/8192
+        # non-finite. This site is where the D-017 size-1 rejection is most visible,
+        # because its mask is ALWAYS reshaped to `(B, 1, 1, N)`, so a caller
+        # configuring `axis=-2` — a softmax over queries — now gets a named
+        # `ValueError` rather than a mask that cannot mask. Do NOT restore a bare
+        # `-1`, and do NOT read this as the rank/shape INFERENCE the D-009 anchor in
+        # `common.py` forbids: this reads the site's own declared config.
+        # See decisions.md D-017 (plan-2026-07-27T183600-b4ef45f0).
+        #
         # Shape: (B, N) -> (B, 1, 1, N)  [broadcasts over heads and query axis], or
         #        (B, N, N) -> (B, 1, N, N) on the pairwise branch (D-001 above),
         #        which broadcasts over heads ONLY.
