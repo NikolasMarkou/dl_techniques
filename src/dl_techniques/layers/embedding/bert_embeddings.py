@@ -1,63 +1,61 @@
 """
-Construct the composite input embeddings for BERT-style models.
+Composite input embeddings for BERT-style encoders.
 
-This layer builds the initial vector representation for each token in an
-input sequence by combining three distinct sources of information. This
-composite structure is essential for enabling a non-recurrent,
-attention-based model like BERT to understand the nuances of language,
-including token identity, sequence order, and sentence relationships.
+This layer builds the initial vector for each token of a sequence by summing a
+token embedding, a position embedding and, optionally, a segment (token type)
+embedding, then normalizing the sum and applying dropout. It is the standard
+BERT embedding stage, generalized so that several encoder families share one
+implementation instead of each keeping a private copy.
+
+Shared by three model packages:
+    ``BertEmbeddings`` is not local to any one model. Three packages consume it,
+    each verified against the tree:
+
+    - ``models/language/bert/model.py`` imports the class directly.
+    - ``models/language/fnet/model.py`` imports the class directly.
+    - ``models/language/distilbert/model.py`` builds it through
+      ``create_embedding_layer('bert_embeddings', ...)``, passing
+      ``use_token_type_embeddings=False`` and ``mask_zero=False``.
+
+    ``models/language/modern_bert/`` is NOT a consumer. It uses the separate
+    ``ModernBertEmbeddings`` class in ``modern_bert_embeddings.py``, which has no
+    position embedding at all; the two must not be conflated. A change to this
+    file's behaviour, defaults or error messages therefore lands in three model
+    families at once, and the sharing is documented here rather than only on the
+    consumer side so an editor of this file sees it first.
 
 Architecture:
-    The architecture is based on the principle that a token's meaning is a
-    function of its identity, its position, and the sentence it belongs to.
-    To capture this, the layer generates three separate embedding vectors
-    which are then summed element-wise:
+    A token's representation is treated as a function of its identity, its
+    position and the sentence it belongs to. One vector is produced per source
+    and the three are summed element-wise:
 
-    1.  **Token Embeddings:** This is the standard word embedding lookup,
-        mapping each token ID from the vocabulary to a high-dimensional
-        vector. It provides the foundational, context-independent meaning
-        of the token.
+    1.  Token embeddings. The ordinary word-embedding lookup, mapping a token id
+        to a dense vector: the context-independent meaning of the token.
 
-    2.  **Positional Embeddings:** Since the Transformer architecture is
-        inherently permutation-invariant (it has no built-in sense of
-        sequence order), positional information must be explicitly injected.
-        Unlike the fixed sinusoidal embeddings used in the original
-        Transformer, BERT utilizes *learnable* positional embeddings. A
-        unique vector is learned for each absolute position in the
-        sequence (up to a maximum length), allowing the model to flexibly
-        learn the optimal way to represent token order for its pre-training
-        tasks.
+    2.  Position embeddings. Attention is permutation-invariant, so order has to
+        be injected explicitly. Two modes exist. ``'learned'`` (the BERT
+        convention) allocates a trainable table with one row per absolute
+        position, letting the model choose how to represent order. Choosing
+        ``'sinusoidal'`` instead computes a fixed sin/cos table on the fly: it
+        allocates no weight and is not bounded by ``max_position_embeddings``.
 
-    3.  **Segment (Token Type) Embeddings:** This component is specifically
-        designed to support BERT's pre-training objective of Next Sentence
-        Prediction (NSP). When two sentences (A and B) are concatenated to
-        form a single input sequence, this embedding provides a simple,
-        learnable signal that allows the model to distinguish between tokens
-        belonging to sentence A and those belonging to sentence B.
+    3.  Segment (token type) embeddings. BERT's Next Sentence Prediction task
+        concatenates two sentences into a single sequence, and this term is the
+        learnable signal for which sentence a token came from. It is optional:
+        DistilBERT has no segment embedding and switches the term off.
 
-Foundational Mathematics:
-    The final embedding for a token at position `i` in the input sequence is
-    the element-wise sum of the three constituent embeddings:
+Mathematics:
+    For a token at position ``i``, the embedding before normalization is::
 
-        E_final(token_i) = E_word(token_i) + E_position(i) + E_segment(A or B)
+        E(token_i) = E_word(token_i) + E_position(i) + E_segment(A or B)
 
-    This summation projects the three distinct information sources into a
-    single, unified vector space. The subsequent Transformer layers are then
-    trained to process these rich, composite representations.
-
-    Following the summation, two final steps are applied:
-    -   **Layer Normalization:** The combined embedding vector is normalized.
-        This stabilizes the learning process by ensuring that the inputs to
-        the first Transformer layer have a consistent distribution, which is
-        crucial for training deep networks.
-    -   **Dropout:** A standard dropout layer is applied for regularization,
-        preventing the model from becoming overly reliant on any single
-        feature in the combined embedding.
+    with the third term present only when token type embeddings are enabled.
+    The sum passes through the configured normalization layer, which keeps the
+    distribution reaching the first encoder block stable, and then through
+    dropout for regularization.
 
 References:
-    - The embedding strategy is a core component of the BERT model,
-      introduced in:
-      Devlin, J., Chang, M. W., Lee, K., & Toutanova, K. (2018). "BERT:
+    - Devlin, J., Chang, M. W., Lee, K., & Toutanova, K. (2018). "BERT:
       Pre-training of Deep Bidirectional Transformers for Language
       Understanding".
 """
@@ -76,16 +74,13 @@ from ..norms.band_rms import BandRMS
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
-# Accepted enum values -- the SINGLE source of truth.
+# Accepted enum values -- the single source of truth.
 #
 # DECISION plan-2026-08-10T183739-b007f435/D-009
-# These two tuples are imported by layers/embedding/factory.py's
-# validate_embedding_config. Do NOT inline a literal list back into either the
-# constructor's checks or the factory's: before this step the normalization list
-# existed as two hand-maintained copies (factory.py and this file), which is a
-# lockstep invariant, i.e. a defect waiting for one side to be edited alone.
-# The factory validation is defence-in-depth in front of the constructor's own
-# raise, so the two MUST agree by construction, not by discipline.
+# factory.py's validate_embedding_config imports these two tuples. Do NOT
+# inline a literal list into the constructor checks or into the factory: the
+# normalization list was once two hand-maintained copies, and one rule kept in
+# two places is a defect waiting for one side to be edited alone.
 # See decisions.md D-009.
 # ---------------------------------------------------------------------
 
@@ -98,46 +93,50 @@ VALID_POSITION_EMBEDDING_TYPES: Tuple[str, ...] = ('learned', 'sinusoidal')
 
 @keras.saving.register_keras_serializable()
 class BertEmbeddings(keras.layers.Layer):
-    """BERT embedding layer combining word, position, and token type embeddings.
+    """BERT embedding layer combining word, position and token type embeddings.
 
-    Constructs composite token representations by summing three learnable
-    embedding lookups: word embeddings ``E_word(token_i)`` mapping token IDs to
-    dense vectors, positional embeddings ``E_position(i)`` encoding absolute
-    sequence position, and segment embeddings ``E_segment(A|B)`` distinguishing
-    sentence membership. The combined embedding
-    ``E = E_word + E_position + E_segment`` is then layer-normalized and passed
-    through dropout for regularization.
+    Builds a composite token representation by summing a word embedding
+    ``E_word(token_i)``, a position embedding ``E_position(i)`` and, when token
+    type embeddings are enabled, a segment embedding ``E_segment(A|B)``. The sum
+    is normalized by the configured normalization layer and passed through
+    dropout. Three model packages share this layer -- ``bert``, ``fnet`` and
+    ``distilbert`` -- so its defaults and error messages are a contract across
+    all three; see the module docstring.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
-        │  input_ids   │  │ position_ids │  │ token_type_ids   │
-        │  (batch, L)  │  │ (batch, L)   │  │ (batch, L)       │
-        └──────┬───────┘  └──────┬───────┘  └──────┬───────────┘
-               ▼                 ▼                  ▼
-        ┌──────────────┐ ┌──────────────┐ ┌────────────────────┐
-        │ Word Embed   │ │ Pos Embed    │ │ Token Type Embed   │
-        │ (vocab, D)   │ │ (max_pos, D) │ │ (type_vocab, D)    │
-        └──────┬───────┘ └──────┬───────┘ └──────┬─────────────┘
-               └────────┬───────┴────────┬───────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Element-wise Sum                    │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  LayerNorm / RMSNorm / BandRMS       │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Dropout                             │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Output (batch, L, hidden_size)      │
-        └──────────────────────────────────────┘
+        input_ids     position_ids         token_type_ids
+        (batch, L)    (batch, L)           (batch, L), optional
+             │                 │                     │
+             ▼                 ▼                     ▼
+        ┌─────────┐   ┌─────────────────┐  ┌──────────────────┐
+        │Embedding│   │ 'learned':      │  │ Embedding        │
+        │ (V, D)  │   │   Embedding     │  │ (type_vocab, D)  │
+        │         │   │   (max_pos, D)  │  │                  │
+        │         │   │ 'sinusoidal':   │  │ built only when  │
+        │         │   │   fixed sin/cos │  │ token types are  │
+        │         │   │   table, no     │  │ enabled          │
+        │         │   │   weight        │  │                  │
+        └────┬────┘   └────────┬────────┘  └─────────┬────────┘
+             │                 │                     │
+             └────────┬────────┘                     │
+                      ▼                              │
+        word_embeds + position_embeds                │
+                      │                              │
+                      └───────────────┬──────────────┘
+                                      ▼
+                       element-wise sum (batch, L, D)
+                                      │
+                                      ▼
+              LayerNormalization / RMSNorm / BandRMS / BatchNorm
+                                      │
+                                      ▼
+                                   Dropout
+                                      │
+                                      ▼
+                       output (batch, L, hidden_size)
 
     :param vocab_size: Size of the vocabulary. Must be positive.
     :type vocab_size: int
@@ -176,7 +175,7 @@ class BertEmbeddings(keras.layers.Layer):
         ``'sinusoidal'`` computes a fixed, non-trainable sin/cos table on the
         fly — it allocates no weight and is not bounded by
         ``max_position_embeddings``, but requires an even ``hidden_size``.
-        Any other value raises; there is deliberately no silent fallback.
+        Any other value raises; there is no silent fallback to a default.
     :type position_embedding_type: str
     :param mask_zero: Whether the inner ``word_embeddings`` sub-layer treats
         token id ``0`` as a padding mask. ``True`` reproduces BERT.
@@ -194,7 +193,40 @@ class BertEmbeddings(keras.layers.Layer):
     :type mask_zero: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: If any parameter is invalid or out of expected range.
+    :raises ValueError: From the constructor, if ``vocab_size``,
+        ``hidden_size``, ``max_position_embeddings``, ``initializer_range`` or
+        ``layer_norm_eps`` is not positive; if ``dropout_rate`` is outside
+        ``[0, 1]``; if ``type_vocab_size`` is missing or non-positive while
+        ``use_token_type_embeddings`` is ``True``; if ``normalization_type`` or
+        ``position_embedding_type`` is not one of the accepted values; or if
+        ``hidden_size`` is odd while ``position_embedding_type`` is
+        ``'sinusoidal'``.
+
+    Input shape:
+        Integer tensor ``input_ids`` of shape ``(batch_size, seq_length)``.
+        ``token_type_ids`` and ``position_ids`` are separate call arguments and
+        are not part of this shape; see :meth:`call`.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, seq_length, hidden_size)``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding.bert_embeddings import (
+            BertEmbeddings,
+        )
+
+        embed = BertEmbeddings(
+            vocab_size=30522,
+            hidden_size=768,
+            max_position_embeddings=512,
+            type_vocab_size=2,
+        )
+        ids = keras.ops.zeros((2, 128), dtype="int32")
+        embed(ids).shape  # (2, 128, 768)
     """
 
     def __init__(
@@ -212,6 +244,43 @@ class BertEmbeddings(keras.layers.Layer):
             mask_zero: bool = True,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create every sub-layer.
+
+        All sub-layers are constructed here and built in :meth:`build`. See the
+        class docstring for what each parameter means and for the full list of
+        conditions that raise.
+
+        :param vocab_size: Size of the vocabulary.
+        :type vocab_size: int
+        :param hidden_size: Hidden dimension for embeddings.
+        :type hidden_size: int
+        :param max_position_embeddings: Maximum sequence length covered by the
+            learned position table.
+        :type max_position_embeddings: int
+        :param type_vocab_size: Size of the token type vocabulary, or ``None``
+            when token type embeddings are disabled.
+        :type type_vocab_size: Optional[int]
+        :param initializer_range: Standard deviation of the truncated normal
+            initializer used for every embedding table.
+        :type initializer_range: float
+        :param layer_norm_eps: Epsilon for the normalization layer.
+        :type layer_norm_eps: float
+        :param dropout_rate: Dropout probability applied to the sum.
+        :type dropout_rate: float
+        :param normalization_type: Which normalization layer to build.
+        :type normalization_type: str
+        :param use_token_type_embeddings: Whether to build the segment term.
+        :type use_token_type_embeddings: bool
+        :param position_embedding_type: ``'learned'`` or ``'sinusoidal'``.
+        :type position_embedding_type: str
+        :param mask_zero: Passed to the inner word ``Embedding``; see the class
+            docstring for what it does and does not do here.
+        :type mask_zero: bool
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :type kwargs: Any
+        :raises ValueError: If any parameter is invalid; see the class
+            docstring for the full list.
+        """
         super().__init__(**kwargs)
 
         # Validate parameters
@@ -247,11 +316,10 @@ class BertEmbeddings(keras.layers.Layer):
             raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {normalization_type}")
 
         # DECISION plan-2026-08-10T183739-b007f435/D-006
-        # An unrecognized position_embedding_type MUST raise. Do NOT "simplify" this
-        # into an `else:` that falls back to 'learned' -- a silent normalization
-        # fallback of exactly that shape is the defect this plan exists to delete
-        # (models/language/distilbert/model.py:170-174, measured in findings/
-        # step1-premise-rederivation.md (c)). See decisions.md D-006.
+        # An unrecognized position_embedding_type MUST raise. Do NOT "simplify"
+        # this into an `else:` that falls back to 'learned': a silent fallback
+        # of exactly that shape is the defect this rule exists to keep out, here
+        # and in every caller that forwards a type string. See decisions.md D-006.
         valid_position_types = list(VALID_POSITION_EMBEDDING_TYPES)
         if position_embedding_type not in valid_position_types:
             raise ValueError(
@@ -280,15 +348,11 @@ class BertEmbeddings(keras.layers.Layer):
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         #
         # DECISION plan-2026-08-10T183739-b007f435/D-007
-        # The ORDER of these constructor statements is load-bearing: each
-        # TruncatedNormal instance draws its seed from the process-global RNG at
-        # construction, so reordering them changes every initialized weight. A
-        # measured probe (findings/step2-i1-reference.md, mutation M2) showed a
-        # swap of position_embeddings <-> token_type_embeddings moves the forward
-        # output only at the ~7th decimal -- invisible to an atol=1e-6 comparison
-        # and to every structural check (paths, shapes and param total all still
-        # matched). Do NOT reorder, and do NOT hoist the new branches above an
-        # existing construction: guard in place. See decisions.md D-007.
+        # Statement ORDER is part of the contract: each TruncatedNormal seeds
+        # from the process-global RNG at construction, so a reorder changes every
+        # weight while moving the output only at the ~7th decimal (measured in
+        # plan b007f435, mutation M2) -- below atol=1e-6 and invisible to every
+        # structural check. Do NOT reorder; guard in place. See decisions.md D-007.
         self.word_embeddings = keras.layers.Embedding(
             input_dim=vocab_size,
             output_dim=hidden_size,
@@ -396,26 +460,22 @@ class BertEmbeddings(keras.layers.Layer):
             ``(batch_size, seq_length, hidden_size)`` in ``target_dtype``.
         :rtype: keras.KerasTensor
         """
+        # Two separate dtype rules follow. Neither may be collapsed into the
+        # other, and neither may be re-keyed off self.compute_dtype.
+        #
         # DECISION plan-2026-08-10T183739-b007f435/D-008
+        # COMPUTE in the WIDER of float32 and self.variable_dtype: float32 is a
+        # FLOOR (10000^(-2i/d) underflows fp16), not a ceiling (float64 policy
+        # computing in float32 capped accuracy at ~1.5e-06 vs ~1e-16 expected,
+        # measured at c6ab51084). Gate on variable_dtype, NOT compute_dtype --
+        # the narrow one under a mixed policy. See decisions.md D-008.
+        #
         # DECISION plan-2026-08-10T183739-b007f435/D-016
-        # Two separate dtype rules, neither of which may be collapsed into the
-        # other or re-keyed off self.compute_dtype:
-        #  (1) COMPUTE in the WIDER of float32 and self.variable_dtype. float32 is
-        #      the FLOOR because 10000^(-2i/d) underflows fp16 across the feature
-        #      axis; it is not the ceiling -- a float64 policy computing in float32
-        #      capped the table's accuracy at ~1.5e-06 where a float64 user expects
-        #      ~1e-16 (measured at c6ab51084). Gate on variable_dtype, NOT
-        #      compute_dtype: under a mixed policy compute_dtype is the NARROW one
-        #      (float16/bfloat16) while variables stay float32, so compute_dtype
-        #      would silently re-introduce the underflow this floor exists to stop.
-        #  (2) CAST to target_dtype -- the dtype of the tensor this table is
-        #      actually summed with, NOT self.compute_dtype. Under mixed_float16 a
-        #      Keras sub-layer autocasts its output, so compute_dtype and the real
-        #      tensor dtype can disagree; summing a float32 table with a float16
-        #      word-embedding raises `InvalidArgumentError: cannot compute AddV2 as
-        #      input #1 was expected to be a half tensor but is a float tensor`
-        #      (measured at HEAD in findings/step1-premise-rederivation.md (b)).
-        # See decisions.md D-008 and D-016.
+        # CAST to target_dtype -- the dtype of the tensor this table is summed
+        # with -- NOT self.compute_dtype: under mixed_float16 a Keras sub-layer
+        # autocasts its output, so the two disagree and the sum raises
+        # `InvalidArgumentError: cannot compute AddV2 as input #1 was expected to
+        # be a half tensor but is a float tensor`. See decisions.md D-016.
         variable_dtype = keras.backend.standardize_dtype(self.variable_dtype)
         compute_precision = "float64" if variable_dtype == "float64" else "float32"
 
@@ -511,29 +571,19 @@ class BertEmbeddings(keras.layers.Layer):
         else:
             # DECISION plan-2026-08-10T183739-b007f435/D-021
             # Materialize BEFORE reading the rank. Do NOT reduce this to a bare
-            # `len(position_ids.shape)`: a Python list/tuple/int has no `.shape`,
-            # so that form turns every non-array caller into an opaque
-            # `AttributeError: 'list' object has no attribute 'shape'` raised from
-            # inside call() -- the exact failure shape D-015 exists to remove, and
-            # a REGRESSION measured at 7e65bdb43 against c6ab51084 (where a
-            # `[[0,1,2,3],[0,1,2,3]]` was accepted by the sinusoidal branch).
-            # The `hasattr` gate is deliberate: convert_to_tensor is applied only
-            # to objects that are not already arrays/tensors, so the symbolic
-            # KerasTensor path through a functional graph is left untouched.
-            # See decisions.md D-021.
+            # `len(position_ids.shape)`: a list/tuple/int has no `.shape`, so that
+            # form turns every non-array caller into an opaque AttributeError (a
+            # regression measured at 7e65bdb43). The `hasattr` gate converts only
+            # non-arrays, leaving the symbolic path intact. See decisions.md D-021.
             if not hasattr(position_ids, 'shape'):
                 position_ids = ops.convert_to_tensor(position_ids)
 
             # DECISION plan-2026-08-10T183739-b007f435/D-015
             # Rank normalization happens HERE, once, for BOTH branches. Do NOT
-            # delete it and do NOT push it down into either branch: the two
-            # branches consume position_ids differently, so without this the SAME
-            # rank-1 input that the learned branch silently broadcasts
-            # (keras.layers.Embedding returns (seq, hidden), broadcast in the sum)
-            # crashes the sinusoidal branch with an opaque
-            # `IndexError: tuple index out of range` from the
-            # (shape[0], shape[1], hidden_size) reshape, which assumes rank 2.
-            # Measured at c6ab51084. See decisions.md D-015.
+            # delete it or push it into either branch: the same rank-1 input the
+            # learned branch silently broadcasts crashes the sinusoidal branch on
+            # its rank-2 reshape (`IndexError`, at c6ab51084).
+            # See decisions.md D-015.
             position_rank = len(position_ids.shape)
             if position_rank == 1:
                 position_ids = ops.broadcast_to(

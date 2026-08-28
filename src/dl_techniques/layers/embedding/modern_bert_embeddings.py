@@ -1,3 +1,37 @@
+"""
+Input embeddings for ModernBERT-style encoders.
+
+This module offers a single layer, :class:`ModernBertEmbeddings`, which turns
+token ids into the first hidden representation of a ModernBERT encoder. It sums
+a word embedding and a segment (token type) embedding, normalizes the sum and
+applies dropout.
+
+How this differs from ``bert_embeddings.BertEmbeddings``:
+    The two are different classes for different model families and are not
+    interchangeable. ``BertEmbeddings`` (in ``bert_embeddings.py``, shared by the
+    ``bert``, ``fnet`` and ``distilbert`` packages) adds a third, positional term
+    and offers a choice of normalization layer, a learned or sinusoidal position
+    mode, and an optional segment term.
+
+    ``ModernBertEmbeddings`` has NO position embedding of any kind. Its output is
+    permutation-equivariant, and the positional signal is injected later, by the
+    attention layers. Its normalization is always ``LayerNormalization``, its
+    segment term is always built, and every constructor argument is required --
+    there are no defaults to inherit. Its only consumer is
+    ``models/language/modern_bert/model.py``, where the missing positional term
+    is supplied by Rotary Position Embeddings on queries and keys in the global
+    layers and by a learnable relative position bias in the windowed layers.
+
+Mathematics:
+    For a token at position ``i`` with segment id ``t``::
+
+        E(token_i) = E_word(token_i) + E_segment(t)
+
+    followed by layer normalization and dropout. Nothing in that expression
+    depends on ``i``, which is the whole reason the encoder above it has to
+    carry the positional information itself.
+"""
+
 import keras
 from keras import ops, initializers, layers
 from typing import Optional, Any, Dict, Tuple
@@ -19,13 +53,14 @@ class ModernBertEmbeddings(keras.layers.Layer):
     dropout. Unlike classical BERT, this layer omits absolute positional
     embeddings: it emits a permutation-equivariant representation and the
     positional signal is injected by the attention layers downstream. In
-    :class:`~dl_techniques.models.language.modern_bert.model.ModernBERT`, which is this
-    layer's only consumer, that means Rotary Position Embeddings (RoPE) applied
-    to queries and keys in the global layers and a learnable relative position
-    bias in the windowed layers. A stack built over this layer with neither is
-    permutation-equivariant end to end. The combined embedding is
+    :class:`~dl_techniques.models.language.modern_bert.model.ModernBERT`, which
+    is this layer's only consumer, that means Rotary Position Embeddings (RoPE)
+    applied to queries and keys in the global layers and a learnable relative
+    position bias in the windowed layers. A stack built over this layer with
+    neither is permutation-equivariant end to end. The combined embedding is
     ``E = E_word(token_i) + E_segment(type_i)``, followed by LayerNorm and
-    Dropout.
+    Dropout. None of the parameters below has a default: every one is required
+    at construction, unlike ``BertEmbeddings``, which defaults most of them.
 
     **Architecture Overview:**
 
@@ -73,11 +108,46 @@ class ModernBertEmbeddings(keras.layers.Layer):
     :type layer_norm_eps: float
     :param dropout_rate: Dropout rate applied to the final embeddings.
     :type dropout_rate: float
-    :param use_bias: Whether the layer normalization sub-layer should use a
-        bias term.
+    :param use_bias: Whether the layer normalization sub-layer keeps its
+        ``center`` (beta) term. Passed straight to
+        ``LayerNormalization(center=...)``.
     :type use_bias: bool
     :param kwargs: Additional arguments for the ``keras.layers.Layer`` base
         class.
+
+    :raises ValueError: If ``vocab_size``, ``hidden_size`` or
+        ``type_vocab_size`` is not positive, or if ``dropout_rate`` is outside
+        ``[0, 1]``. ``initializer_range`` and ``layer_norm_eps`` are not
+        validated.
+
+    Input shape:
+        Integer tensor ``input_ids`` of shape ``(batch_size, seq_length)``.
+        ``token_type_ids``, when supplied, is a separate call argument of the
+        same shape.
+
+    Output shape:
+        3D tensor with shape ``(batch_size, seq_length, hidden_size)``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding import (
+            modern_bert_embeddings,
+        )
+
+        embed = modern_bert_embeddings.ModernBertEmbeddings(
+            vocab_size=50368,
+            hidden_size=768,
+            type_vocab_size=2,
+            initializer_range=0.02,
+            layer_norm_eps=1e-5,
+            dropout_rate=0.0,
+            use_bias=False,
+        )
+        ids = keras.ops.zeros((2, 128), dtype="int32")
+        embed(ids).shape  # (2, 128, 768)
     """
 
     def __init__(
@@ -91,6 +161,35 @@ class ModernBertEmbeddings(keras.layers.Layer):
         use_bias: bool,
         **kwargs: Any,
     ) -> None:
+        """Validate the configuration and create every sub-layer.
+
+        Every parameter is required; this layer inherits no defaults from
+        ModernBERT's model config. Sub-layers are constructed here and built in
+        :meth:`build`.
+
+        :param vocab_size: Size of the vocabulary. Must be positive.
+        :type vocab_size: int
+        :param hidden_size: Dimensionality of the embedding vectors. Must be
+            positive.
+        :type hidden_size: int
+        :param type_vocab_size: Number of segment types. Must be positive.
+        :type type_vocab_size: int
+        :param initializer_range: Standard deviation of the truncated normal
+            initializer used for both embedding tables.
+        :type initializer_range: float
+        :param layer_norm_eps: Epsilon of the layer normalization.
+        :type layer_norm_eps: float
+        :param dropout_rate: Dropout probability. Must be in ``[0, 1]``.
+        :type dropout_rate: float
+        :param use_bias: Whether the layer normalization keeps its ``center``
+            (beta) term.
+        :type use_bias: bool
+        :param kwargs: Additional arguments for the ``Layer`` base class.
+        :type kwargs: Any
+        :raises ValueError: If ``vocab_size``, ``hidden_size`` or
+            ``type_vocab_size`` is not positive, or if ``dropout_rate`` is
+            outside ``[0, 1]``.
+        """
         super().__init__(**kwargs)
 
         # Validate configuration (mirrors BertEmbeddings).
