@@ -4,11 +4,11 @@ The `dl_techniques.layers.embedding` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes thirteen factory-registered embedding layer types, covering patch tokenization, learned absolute positional encodings, fixed 2D sinusoidal encodings, various forms of Rotary Position Embeddings (RoPE), scalar/timestep sinusoidal embeddings, and BERT/ModernBERT/ALBERT-style token embeddings (plus one direct-import-only codebook embedding). All layers are designed for modern Keras 3.x compatibility with full serialization support and are accessible through a centralized factory system.
+This module holds eighteen layer classes. Thirteen are factory-registered, covering patch tokenization, learned absolute positional encodings, fixed 2D sinusoidal encodings, various forms of Rotary Position Embeddings (RoPE), scalar/timestep sinusoidal embeddings, and BERT/ModernBERT/ALBERT-style token embeddings. The remaining five have no factory key and are imported directly. All eighteen are designed for modern Keras 3.x compatibility with full serialization support.
 
 ## Available Embedding Types
 
-All layers in this module are supported by the factory system, which provides automated parameter validation, default value handling, and a consistent creation interface.
+The thirteen types below are supported by the factory system, which provides automated parameter validation, default value handling, and a consistent creation interface. The five direct-import-only classes are listed in the next section.
 
 | Type | Class | Description | Use Case |
 | :--- | :--- | :--- | :--- |
@@ -26,9 +26,31 @@ All layers in this module are supported by the factory system, which provides au
 | `scalar_sinusoidal` | `ScalarSinusoidalEmbedding` | Sinusoidal embedding of a scalar (e.g. diffusion time in `[0,1]`) followed by a SiLU MLP. | Timestep/scalar conditioning in diffusion / flow-matching models. |
 | `mrope_ideogram4` | `Ideogram4MRoPE` | 3D multi-axis (t/h/w) rotary position embedding with per-axis frequency-band interleave. | Image/text multimodal positional encoding (Ideogram4-style DiT). |
 
-> **Direct-import only (not factory-registered):** `HierarchicalCodebookEmbedding`
-> (bit-chunk factorized vocabulary embedding) — construct it directly via
-> `from dl_techniques.layers.embedding.hierarchical_codebook_embedding import HierarchicalCodebookEmbedding`.
+## Direct-Import-Only Classes
+
+These five classes have no factory key. Import them from their own module and construct them directly; the factory's validation and defaults do not apply.
+
+| Class | Module | Description | Use Case |
+| :--- | :--- | :--- | :--- |
+| `AxialRoPE2D` | `axial_rope_2d` | Rotates post-head-split `q`/`k` by a token's 2D grid position. Reads the token axis as a row-major flattening of an `(H, W)` grid, so flat index `t` sits at row `t // W`, column `t % W`. | Vision backbones whose tokens carry a 2D position, e.g. the SAM 2 memory attention and the SAM 3 ViTDet trunk. |
+| `ClassTokenPrepend` | `class_token` | Prepends one learnable `[CLS]` token to a `(B, L, D)` sequence. Holds a single `(1, 1, D)` weight; the sequence grows by exactly one position. | ViT-style trunks that need a classification token, e.g. DINO v1/v3 and BEiT. |
+| `MaskTokenApply` | `mask_token` | Replaces masked positions of `(B, L, D)` with a learnable mask token. Called on the pair `layer((patch_embeddings, mask))` with a boolean `(B, L)` mask, where `True` marks a position to replace (the iBOT convention). Sequence length is unchanged. | Masked-image-modelling pre-training, e.g. DINO v2, BEiT and the vision Energy Transformer. |
+| `RegisterTokens` | `register_tokens` | Produces `num_tokens` independent learnable tokens for a batch from a single `(1, R, D)` weight. The input sequence is a batch-size reference only: its values are discarded and the output length is `R`. | Register / storage tokens concatenated onto a ViT sequence, e.g. DINO v2. |
+| `HierarchicalCodebookEmbedding` | `hierarchical_codebook_embedding` | Splits each token ID into `num_chunks` fixed-width chunks, looks each chunk up in its own codebook and sums the results. Stores `num_chunks * 2**chunk_bits * output_dim` parameters instead of `vocab_size * output_dim`. | Parameter-efficient vocabulary embedding where the restricted embedding manifold is acceptable. |
+
+```python
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
+from dl_techniques.layers.embedding.hierarchical_codebook_embedding import (
+    HierarchicalCodebookEmbedding,
+)
+
+cls_token = ClassTokenPrepend(name='cls_token')
+codebook = HierarchicalCodebookEmbedding(
+    vocab_size=50261, output_dim=128, num_chunks=2
+)
+```
+
+`AxialRoPE2D` is the one exception to the direct-import rule: it is also re-exported from the package, so `from dl_techniques.layers.embedding import AxialRoPE2D` works.
 
 ## Factory Interface
 
@@ -86,7 +108,8 @@ bert_embed = create_embedding_from_config(config)
 ### Parameter Discovery
 
 ```python
-from dl_techniques.layers.embedding import get_embedding_info
+# get_embedding_info is not re-exported from the package __init__.
+from dl_techniques.layers.embedding.factory import get_embedding_info
 
 # Get information about all embedding types
 info = get_embedding_info()
@@ -95,8 +118,13 @@ info = get_embedding_info()
 bert_info = info['bert_embeddings']
 print(f"Required: {bert_info['required_params']}")
 print(f"Optional: {list(bert_info['optional_params'].keys())}")
-# Required: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
-# Optional: ['initializer_range', 'layer_norm_eps', 'dropout_rate', 'normalization_type']
+# Required: ['vocab_size', 'hidden_size', 'max_position_embeddings']
+# Optional: ['type_vocab_size', 'initializer_range', 'layer_norm_eps',
+#            'dropout_rate', 'normalization_type', 'use_token_type_embeddings',
+#            'position_embedding_type', 'mask_zero']
+
+# The copy is SHALLOW: the nested lists and dicts belong to the registry.
+# Treat the result as read-only, or deep-copy it before editing.
 ```
 
 ### Validation
@@ -135,7 +163,9 @@ ts_embed = create_embedding_layer(
 
 ### PatchEmbedding2D (`patch_2d`)
 - **Required**: `patch_size`, `embed_dim`
-- **Optional**: `activation` (default: `'linear'`), `use_bias` (default: `True`)
+- **Optional**: `flatten` (default: `True`), `activation` (default: `'linear'`), `use_bias` (default: `True`)
+
+Set `flatten=False` to get the raw 4D grid `(batch, H/P_h, W/P_w, embed_dim)` instead of the 3D sequence. Window-attention backbones need that layout; the SAM 1 image encoder is the one caller in `src/` that uses it.
 
 ```python
 img_embed = create_embedding_layer(
@@ -211,8 +241,10 @@ sincos_embed_2d = create_embedding_layer(
 ```
 
 ### BertEmbeddings (`bert_embeddings`)
-- **Required**: `vocab_size`, `hidden_size`, `max_position_embeddings`, `type_vocab_size`
-- **Optional**: `initializer_range` (default: `0.02`), `layer_norm_eps` (default: `1e-8`), `hidden_dropout_rate` (default: `0.0`), `normalization_type` (default: `'layer_norm'`)
+- **Required**: `vocab_size`, `hidden_size`, `max_position_embeddings`
+- **Optional**: `type_vocab_size` (default: `None`), `initializer_range` (default: `0.02`), `layer_norm_eps` (default: `1e-8`), `dropout_rate` (default: `0.0`), `normalization_type` (default: `'layer_norm'`), `use_token_type_embeddings` (default: `True`), `position_embedding_type` (default: `'learned'`), `mask_zero` (default: `True`)
+
+`type_vocab_size` is optional in the registry but conditionally required at validation time: omit it while `use_token_type_embeddings` is `True`, which is the default, and the factory raises. Pass `use_token_type_embeddings=False` for a model without segment embeddings.
 
 ```python
 # Standard BERT embeddings
@@ -251,7 +283,13 @@ bert_band_embed = create_embedding_layer(
 While the factory is recommended for consistency and validation, direct instantiation is always available.
 
 ```python
-from dl_techniques.layers.embedding import PatchEmbedding2D, RotaryPositionEmbedding, BertEmbeddings
+# The package __init__ re-exports only AxialRoPE2D and the four factory
+# functions, so a layer class must be imported from its own module.
+from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.layers.embedding.rotary_position_embedding import (
+    RotaryPositionEmbedding,
+)
+from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 
 # Direct instantiation (bypasses factory validation and defaults)
 patch_embed = PatchEmbedding2D(patch_size=16, embed_dim=768)
@@ -349,7 +387,10 @@ The factory performs comprehensive validation, catching common errors before lay
 # Raises ValueError: "Required parameters missing for patch_2d: ['embed_dim']"
 create_embedding_layer('patch_2d', patch_size=16)
 
-# Raises ValueError: "Required parameters missing for bert_embeddings: ['type_vocab_size']"
+# type_vocab_size is NOT in required_params, so this is not a missing-required
+# error. It fails the conditional rule instead:
+# Raises ValueError: "type_vocab_size is required and must be positive when
+#                     use_token_type_embeddings is True (the default), got None."
 create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768, max_position_embeddings=512)
 ```
 
@@ -369,10 +410,10 @@ create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768,
 
 #### Invalid String Value Validation
 ```python
-# Raises ValueError: "padding must be 'same', 'valid', or 'causal', got 'invalid_padding'"
+# Raises ValueError: "padding must be 'same', 'valid', or 'causal', got invalid_padding"
 create_embedding_layer('patch_1d', patch_size=16, embed_dim=128, padding='invalid_padding')
 
-# Raises ValueError: "normalization_type must be one of ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm'], got 'invalid_norm'"
+# Raises ValueError: "normalization_type must be one of ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm'], got invalid_norm"
 create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768,
                       max_position_embeddings=512, type_vocab_size=2, normalization_type='invalid_norm')
 ```
@@ -384,15 +425,18 @@ The factory provides detailed logging to aid in debugging model configurations.
 Shows all parameters passed to each layer, including resolved defaults.
 ```
 INFO Creating 'bert_embeddings' embedding layer with parameters:
-INFO   'dropout_rate': 0.1
-INFO   'hidden_size': 768
-INFO   'initializer_range': 0.02
-INFO   'layer_norm_eps': 1e-08
-INFO   'max_position_embeddings': 512
-INFO   'name': 'bert_embeddings'
-INFO   'normalization_type': 'rms_norm'
-INFO   'type_vocab_size': 2
-INFO   'vocab_size': 30522
+INFO   dropout_rate: 0.1
+INFO   hidden_size: 768
+INFO   initializer_range: 0.02
+INFO   layer_norm_eps: 1e-08
+INFO   mask_zero: True
+INFO   max_position_embeddings: 512
+INFO   name: 'bert_embeddings'
+INFO   normalization_type: 'rms_norm'
+INFO   position_embedding_type: 'learned'
+INFO   type_vocab_size: 2
+INFO   use_token_type_embeddings: True
+INFO   vocab_size: 30522
 ```
 
 #### Debug Level Logging
@@ -405,10 +449,10 @@ DEBUG Successfully created 'bert_embeddings' layer: bert_embeddings
 Provides detailed context when layer creation fails.
 ```
 ERROR Failed to create 'bert_embeddings' embedding layer (BertEmbeddings).
-  Required params: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
+  Required params: ['vocab_size', 'hidden_size', 'max_position_embeddings']
   Provided params: ['vocab_size', 'hidden_size', 'max_position_embeddings']
   Check parameter compatibility and types. Use get_embedding_info() for details.
-  Original error: Required parameters missing for bert_embeddings: ['type_vocab_size']. Required: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
+  Original error: type_vocab_size is required and must be positive when use_token_type_embeddings is True (the default), got None. Pass a positive int, or pass use_token_type_embeddings=False for a model without segment embeddings.
 ```
 
 ## BERT Embeddings Advanced Usage
@@ -507,3 +551,18 @@ large_bert_embed = create_embedding_layer(
 - `'rms_norm'`: RMSNorm for efficiency
 - `'band_rms'`: Band-constrained RMS for stability
 - `'batch_norm'`: BatchNormalization (less common for transformers)
+
+#### Available Position Embedding Types for BERT Embeddings
+- `'learned'`: A trainable position embedding table (default)
+- `'sinusoidal'`: A fixed sinusoidal table
+
+Both lists are the tuples `VALID_NORMALIZATION_TYPES` and `VALID_POSITION_EMBEDDING_TYPES` in `bert_embeddings.py`, which `factory.py` imports. They have exactly one home; do not restate them as literals anywhere else.
+
+#### Strict Unknown-Keyword Rule
+`create_embedding_layer` raises `ValueError` on any keyword the chosen type does not declare, rather than dropping it. The message carries the substring exported as `STRICT_DROPPED_KEY_MARKER`. Match guards on that constant.
+
+```python
+# Raises ValueError: "... 1 unsupported parameter(s) ['dtype']. 'patch_2d'
+#                     (PatchEmbedding2D) accepts only [...]"
+create_embedding_layer('patch_2d', patch_size=4, embed_dim=32, dtype='float64')
+```
