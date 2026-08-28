@@ -428,6 +428,47 @@ layer(keras.random.normal((2, 16, 128))).shape
 
 Executed on 2026-08-28, the last line prints `(2, 16, 256)`.
 
+## RoPE pairing conventions — read this before loading foreign weights
+
+This package ships **four** rotary layers and they do **not** all use the same
+pairing. A RoPE rotation mixes exactly two channels, and there are two
+conventions for choosing the partner:
+
+- **INTERLEAVED** — channel `0` rotates with channel `1`, `2` with `3`, … This
+  is Su et al.'s original RoFormer formulation and GPT-J's
+  `rotate_every_two`; Meta's official LLaMA release uses it too.
+- **SPLIT-HALF** — channel `j` rotates with channel `j + head_dim/2`. This is
+  GPT-NeoX, HF's `LlamaModel`, HF Gemma and HF Qwen, i.e. anything built on
+  HF's `rotate_half`.
+
+**Both are valid rotations and both give the relative-position property, so
+the wrong one trains fine.** The convention is invisible in a config, invisible
+in a shape and silent at load time; a checkpoint from the other convention
+produces plausible, wrong numbers. It is a real-world trap, not a theoretical
+one: huggingface/transformers issue #25199, "[LLaMA] Rotary positional
+embedding differs with official implementation", exists because HF's LLaMA is
+split-half while Meta's official code is interleaved. The same weights serve
+both only because the HF conversion script **permutes the `q_proj`/`k_proj`
+rows** (`convert_llama_weights_to_hf.py::permute`). That permutation is what
+you need if you want to move a checkpoint between the two columns below.
+
+Measured by impulse (a one-hot at channel 0 at a non-zero position; the
+partner index IS the convention). Harness:
+`plans/.../evidence/rope_convention_impulse.py`.
+
+| Layer | Convention | Can consume `q_proj`/`k_proj` from | Reference |
+|---|---|---|---|
+| `RotaryPositionEmbedding` (`rotary_position_embedding.py`) | **INTERLEAVED** (0 ↔ 1) | RoFormer, GPT-J (`rotate_every_two`), Meta's official LLaMA (`apply_rotary_emb`) | Su et al., "RoFormer", arXiv:2104.09864 |
+| `AxialRoPE2D` (`axial_rope_2d.py`) | **INTERLEAVED** (0 ↔ 1) | SAM 2's memory-attention RoPE (adjacent-pair packing = upstream's `view_as_complex` on a `(..., -1, 2)` reshape); same set as above | Su et al., arXiv:2104.09864. No axial-specific paper is cited because the design follows SAM 2, and it is a deliberate minority choice against the vision axial-RoPE literature's more common split-half-per-axis form |
+| `Ideogram4MRoPE` (`multi_axis_rope.py`) | **SPLIT-HALF** (0 ↔ `head_dim/2`) | Qwen2-VL / Qwen2.5-VL M-RoPE, GPT-NeoX, HF `LlamaModel`, HF Gemma — anything using HF `rotate_half` | Su et al., arXiv:2104.09864; Wang et al., "Qwen2-VL", arXiv:2409.12191. Port of Ideogram4's own layer, which publishes no arXiv id |
+| `DualRotaryPositionEmbedding` (`dual_rotary_position_embedding.py`) | **SPLIT-HALF** (0 ↔ `head_dim/2`) | same HF `rotate_half` lineage as the row above | Su et al., arXiv:2104.09864; Google, "Gemma 3 Technical Report" (the dual global/local theta design) |
+
+Two things that are **not** the pairing convention and are easy to confuse
+with it: `AxialRoPE2D`'s split of the head dimension into an x-half and a
+y-half, and `Ideogram4MRoPE`'s assignment of frequency *slots* to `(t, h, w)`
+via `mrope_section`. Both are axis-assignment choices. Only the intra-pair
+rotation form has to match a checkpoint.
+
 ## Behaviour Changes
 
 Changes here that reject something the package previously accepted, and what

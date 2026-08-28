@@ -69,10 +69,31 @@ class RotaryPositionEmbedding(keras.layers.Layer):
     through. Shape is unchanged. The layer learns nothing; both tables are
     non-trainable and precomputed in :meth:`build`.
 
-    The pairing is INTERLEAVED, not split-half. A split-half implementation
-    rotates ``(x[i], x[i + d/2])`` instead. Both conventions are valid
-    rotations and both give the relative-position property, so a swap will
-    train fine and load an externally converted checkpoint wrong.
+    **Pairing convention: INTERLEAVED.** Channel 0 rotates with channel 1,
+    channel 2 with channel 3, and so on -- verified by impulse (a one-hot at
+    channel 0 leaks into channel 1 and nowhere else). The alternative,
+    SPLIT-HALF, rotates ``(x[j], x[j + d/2])``. Both are valid rotations and
+    both give the relative-position property, so a swapped convention TRAINS
+    FINE and is invisible in a config, in a shape and at load time -- it just
+    produces plausible, wrong numbers.
+
+    *Which checkpoints this can consume.* The interleaved form is the one in
+    Su et al.'s original RoFormer formulation and in GPT-J
+    (HF ``modeling_gptj.py::rotate_every_two``, which slices ``x[..., ::2]``
+    and ``x[..., 1::2]``); Meta's official LLaMA release uses it too
+    (``llama/model.py::apply_rotary_emb`` reshapes to ``(..., -1, 2)`` and
+    multiplies as complex numbers). A ``q_proj`` / ``k_proj`` matrix from any
+    of those drops in directly. A checkpoint from a SPLIT-HALF implementation
+    -- GPT-NeoX, HF's ``LlamaModel``, HF's Gemma/Qwen, i.e. anything built on
+    ``rotate_half`` -- does NOT, and needs its ``q_proj``/``k_proj`` ROWS
+    permuted first. That permutation is not hypothetical: HF ships it as
+    ``convert_llama_weights_to_hf.py::permute``, which is precisely what lets
+    the same LLaMA weights serve two different rotation conventions
+    (huggingface/transformers issue #25199, "[LLaMA] Rotary positional
+    embedding differs with official implementation").
+
+    *Reference*: Su, J., et al. (2021). "RoFormer: Enhanced Transformer with
+    Rotary Position Embedding". arXiv:2104.09864.
 
     **Architecture Overview:**
 

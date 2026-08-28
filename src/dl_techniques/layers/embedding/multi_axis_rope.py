@@ -76,6 +76,40 @@ class Ideogram4MRoPE(keras.layers.Layer):
     is decided at construction, so the selector is a static constant rather
     than a runtime scatter.
 
+    **Pairing convention: SPLIT-HALF.** ``call()`` returns
+    ``concat([freqs, freqs])``, and :func:`apply_rotary_pos_emb` applies
+    :func:`_rotate_half`, so channel ``j`` rotates with channel
+    ``j + head_dim/2`` -- verified by impulse through the pair of them (at
+    ``head_dim=8`` a one-hot at channel 0 leaks into channel 4 and nowhere
+    else). This is the GPT-NeoX / HF ``rotate_half`` form, NOT the INTERLEAVED
+    pairing used by ``rotary_position_embedding.py`` and ``axial_rope_2d.py``
+    in this same package. Both are valid rotations and both keep the
+    relative-position property, so the wrong one TRAINS FINE; the difference
+    is invisible in a config, in a shape and at load time, and surfaces only
+    as plausible, wrong numbers.
+
+    **Do not confuse the two "splits".** The per-axis assignment of frequency
+    SLOTS to ``(t, h, w)`` (what ``mrope_section`` controls) is a different
+    question from the intra-pair rotation form. Only the latter has to match a
+    checkpoint's ``q_proj``/``k_proj``.
+
+    *Which checkpoints this can consume.* Qwen2-VL / Qwen2.5-VL M-RoPE, the
+    family this layer's factory key ``mrope_ideogram4`` belongs to, uses the
+    identical split-half rotation (HF ``modeling_qwen2_vl.py`` defines the same
+    ``rotate_half``), as do GPT-NeoX, HF ``LlamaModel`` and HF Gemma. Weights
+    from an INTERLEAVED implementation -- GPT-J's ``rotate_every_two`` or
+    Meta's official LLaMA ``apply_rotary_emb`` -- need their
+    ``q_proj``/``k_proj`` rows permuted first; HF ships that permutation as
+    ``convert_llama_weights_to_hf.py::permute`` (huggingface/transformers
+    issue #25199).
+
+    *References*: Su, J., et al. (2021). "RoFormer: Enhanced Transformer with
+    Rotary Position Embedding". arXiv:2104.09864 (RoPE itself). Wang, P., et
+    al. (2024). "Qwen2-VL: Enhancing Vision-Language Model's Perception of the
+    World at Any Resolution". arXiv:2409.12191 (the M-RoPE multi-axis design).
+    The layer itself is a port of Ideogram4's ``Ideogram4MRoPE``, which
+    publishes no arXiv id of its own.
+
     The shared inverse-frequency vector is a non-trainable weight, so it
     survives ``.keras`` serialization. Its value comes from an
     ``initializer`` callable and never from a post-creation ``.assign()``.

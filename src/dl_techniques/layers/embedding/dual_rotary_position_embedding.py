@@ -70,9 +70,34 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
     ``local_theta_base``. ``call()`` takes a ``rope_type`` argument and uses
     exactly one pair; shape is unchanged either way.
 
-    The pairing is SPLIT-HALF, the Gemma3 form: channel ``j`` rotates with
-    channel ``j + head_dim/2``. It is NOT the interleaved pairing used by
-    ``rotary_position_embedding.py``.
+    **Pairing convention: SPLIT-HALF**, the Gemma 3 / GPT-NeoX form: channel
+    ``j`` rotates with channel ``j + head_dim/2`` -- verified by impulse (at
+    ``head_dim=8`` a one-hot at channel 0 leaks into channel 4 and nowhere
+    else). It is NOT the INTERLEAVED pairing used by
+    ``rotary_position_embedding.py`` and ``axial_rope_2d.py`` in this same
+    package. Both are valid rotations and both give the relative-position
+    property, so the wrong one TRAINS FINE: the difference is invisible in a
+    config, in a shape and at load time, and shows up only as plausible,
+    wrong numbers.
+
+    *Which checkpoints this can consume.* Split-half is HF's ``rotate_half``,
+    which is what ``modeling_gemma3.py``, ``modeling_gpt_neox.py``,
+    ``modeling_llama.py`` and the Qwen family all use (each defines the
+    identical ``rotate_half(x) = cat(-x[..., d/2:], x[..., :d/2])``), so a
+    ``q_proj``/``k_proj`` from any HF checkpoint in that lineage drops in
+    directly. It CANNOT consume weights from an INTERLEAVED implementation --
+    GPT-J's ``rotate_every_two``, Meta's official LLaMA ``apply_rotary_emb``,
+    or this package's own ``RotaryPositionEmbedding`` -- without permuting the
+    projection rows first. HF ships exactly that permutation as
+    ``convert_llama_weights_to_hf.py::permute``; the reason it has to exist is
+    huggingface/transformers issue #25199, "[LLaMA] Rotary positional
+    embedding differs with official implementation", which is the same weights
+    serving two conventions.
+
+    *References*: Su, J., et al. (2021). "RoFormer: Enhanced Transformer with
+    Rotary Position Embedding". arXiv:2104.09864 (RoPE itself). Google (2025).
+    "Gemma 3 Technical Report" (the dual global/local theta design this layer
+    implements).
 
     **Architecture Overview:**
 

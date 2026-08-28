@@ -78,8 +78,40 @@ class AxialRoPE2D(keras.layers.Layer):
     channels carry the x-position and the second ``D/2`` carry the
     y-position. Both halves use the SAME ``D/4`` frequency bands. The axes
     differ only in which coordinate multiplies the ladder and which channels
-    the result lands in. Pairing is INTERLEAVED: pair ``i`` is
-    ``(x[2i], x[2i+1])``.
+    the result lands in.
+
+    **Pairing convention: INTERLEAVED.** Pair ``i`` is ``(x[2i], x[2i+1])`` --
+    verified by impulse (a one-hot at channel 0 leaks into channel 1 and
+    nowhere else). The alternative, SPLIT-HALF, rotates
+    ``(x[j], x[j + D/2])``. Both are valid rotations, both keep the
+    relative-position property, and the difference is invisible in a config,
+    in a shape and at load time; it shows up only as plausible, wrong numbers.
+
+    *Which checkpoints this can consume.* Interleaved is what SAM 2's own
+    memory-attention RoPE uses -- adjacent-pair packing is exactly upstream's
+    ``view_as_complex`` on a ``(..., -1, 2)`` reshape -- and it is also the
+    convention of RoFormer, GPT-J (HF ``rotate_every_two``) and Meta's
+    official LLaMA. It CANNOT consume a ``q_proj``/``k_proj`` from a
+    ``rotate_half`` (split-half) implementation such as GPT-NeoX, HF's
+    ``LlamaModel``, HF Gemma or HF Qwen without permuting the projection rows
+    first; HF ships that permutation as
+    ``convert_llama_weights_to_hf.py::permute`` (see
+    huggingface/transformers issue #25199).
+
+    **This layer's own two-way divergence, stated plainly.** (1) Against the
+    broader 2D/axial-RoPE literature for vision, which more commonly splits
+    each axis's band in half rather than interleaving it, this layer is the
+    minority choice -- and deliberately so, because it exists to match SAM 2.
+    (2) Its per-axis CHANNEL split (x in ``[0, D/2)``, y in ``[D/2, D)``) is a
+    separate axis-assignment question and is NOT what "split-half" refers to
+    above; the intra-pair rotation form is the thing that must match a
+    checkpoint. The build-time anchor in :meth:`_build_angle_tables`
+    records the mutation experiment that pins this.
+
+    *Reference*: Su, J., et al. (2021). "RoFormer: Enhanced Transformer with
+    Rotary Position Embedding". arXiv:2104.09864. The module cites no
+    axial-specific paper because the design follows SAM 2's implementation,
+    not a 2D-RoPE paper.
 
     The layer owns no weights. Its cos/sin table is a pure function of
     ``(head_dim, feat_shape, theta, scale_pos)`` and is materialized in
