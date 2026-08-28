@@ -61,7 +61,7 @@ References:
       Text-to-Text Transformer". JMLR. (The relative-position-bias-as-logit-offset idea
       BEiT credits.)
     - Liu et al. (2021). "Swin Transformer". ICCV. (The square-window
-      ``(2W-1)**2`` table this one deliberately does *not* reuse; see
+      ``(2W-1)**2`` table this one does *not* reuse, on purpose; see
       ``single_window_attention.py``.)
 """
 
@@ -97,6 +97,60 @@ class BeitAttention(keras.layers.Layer):
     before the softmax and before any attention mask — it is a real-valued learned
     offset and must never be routed through an attention-mask helper, which treats its
     argument as a binary keep predicate.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        Input (B, N+1, D)   cls token first, then N = Wh*Ww patches
+                │
+                ├───────────────┬───────────────┐
+                ▼               ▼               ▼
+          ┌──────────┐    ┌──────────┐    ┌──────────┐
+          │ q Dense  │    │ k Dense  │    │ v Dense  │
+          │ (D, D)   │    │ (D, D)   │    │ (D, D)   │
+          │ bias if  │    │ NO bias  │    │ bias if  │
+          │ qv_bias  │    │ variable │    │ qv_bias  │
+          └──────────┘    └──────────┘    └──────────┘
+                │               │               │
+                ▼               ▼               ▼
+              split heads -> (B, H, N+1, head_dim)
+                │               │               │
+                └───────┬───────┘               │
+                        ▼                       │
+             scores = (q * scale) @ kT          │
+                  (B, H, N+1, N+1)              │
+                        │                       │
+                        ▼                       │
+          ┌──────────────────────────────┐      │
+          │ + relative position bias     │      │ (optional:
+          │   B[h,i,j] = table[R[i,j],h] │      │  use_relative
+          │   table (M, H) is a WEIGHT   │      │  _position
+          │   R is a static int index    │      │  _bias)
+          │   M = (2Wh-1)(2Ww-1) + 3     │      │
+          └──────────────────────────────┘      │
+                        │                       │
+                        ▼                       │
+             keep mask, if one was given        │
+             softmax(axis=-1) in >= float32     │
+             cast back, attn_dropout            │
+                        │                       │
+                        └───────┬───────────────┘
+                                ▼
+                     out = attn @ v  (B, H, N+1, head_dim)
+                                ▼
+                     merge heads -> (B, N+1, D)
+                                ▼
+                        ┌──────────────────┐
+                        │ proj Dense (D,D) │
+                        │ bias if          │
+                        │ use_proj_bias    │
+                        └──────────────────┘
+                                ▼
+                     proj_dropout -> Output (B, N+1, D)
+
+        The K projection owns NO bias variable. At dim=32 the built
+        layer has 8 weights and exactly 3 biases: q, v and proj.
 
     :param dim: Model / embedding dimension of the tokens. Must be positive and
         divisible by ``num_heads``.
@@ -237,20 +291,15 @@ class BeitAttention(keras.layers.Layer):
         )
 
         # Sub-layers are created unconditionally in __init__ and built in build().
-        # DECISION plan-2026-08-23T091307-9a110062/D-560
-        # This is a CALLABLE, not a dict, so each of the four projections gets its
-        # OWN `clone_initializer(...)` copy. Do NOT "simplify" it back to a shared
+        # DECISION plan-2026-08-23T091307-9a110062/D-560 — a CALLABLE, not a dict,
+        # so each of the four `(dim, dim)` projections gets its OWN
+        # `clone_initializer(...)`. Do NOT collapse it back to a shared
         # `dense_kwargs = dict(...)`: one seedless initializer INSTANCE replays its
-        # draw, so every same-shape kernel it reaches is bit-identical. All four
-        # kernels here are `(dim, dim)`. MEASURED at HEAD before this change, on a
-        # seeded 4-block BEiT: `q/kernel == k/kernel == v/kernel == proj/kernel` at
-        # `max|delta| = 0.0` inside EVERY block (24 pairs). `Q == K` makes the
-        # pre-softmax score matrix `x W W^T x^T` exactly SYMMETRIC at step 0, and
-        # `V == proj` makes the output projection the transpose-partner of its own
-        # value path -- the sharp form of this defect, not the weaker
-        # same-role-different-depth form. Same rationale and same remedy as
-        # `group_query_attention.py`. `seed=` is not the discriminator; instance
-        # identity is. See decisions.md D-560.
+        # draw, so q, k, v and proj all came out bit-identical — measured before
+        # this change on a seeded 4-block BEiT at `max|delta| = 0.0` across 24
+        # pairs, which made the step-0 score matrix exactly symmetric. Instance
+        # identity is the discriminator, not `seed=`.
+        # See decisions.md D-560 (plan-2026-08-23T091307-9a110062).
         def dense_kwargs() -> Dict[str, Any]:
             return dict(
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -261,29 +310,21 @@ class BeitAttention(keras.layers.Layer):
         self.q_dense = keras.layers.Dense(
             self.dim, use_bias=self.qv_bias, name="q", **dense_kwargs()
         )
-        # DECISION plan-2026-08-11T012340-f63796dc/D-001
-        # `use_bias=False` here is BEiT's ARCHITECTURE, not an oversight and not a
-        # forgotten `self.qv_bias`. The reference builds a fused QKV projection whose
-        # bias vector is `cat(q_bias, zeros_like(v_bias, requires_grad=False), v_bias)`
-        # — there is no `k_bias` parameter in the checkpoint at all — and HF's
-        # independent-projection port spells the same invariant as
-        # `nn.Linear(..., bias=False)` for K.
+        # DECISION plan-2026-08-11T012340-f63796dc/D-001 — `use_bias=False` is
+        # BEiT's ARCHITECTURE, not a forgotten `self.qv_bias`. The reference fuses
+        # QKV behind one bias vector `cat(q_bias, zeros_like(v_bias), v_bias)` with
+        # the middle third frozen, so no `k_bias` exists in the checkpoint at all.
         #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT "unify" this with `use_bias=self.qv_bias` so all three projections
-        #     agree. That silently adds `dim` parameters that BEiT does not have, makes
-        #     the layer structurally incompatible with any BEiT checkpoint, and produces
-        #     no error, no shape mismatch and a perfectly plausible loss curve.
-        #   * Do NOT "fix" it as `use_bias=True` with a zero initializer or a frozen
-        #     bias. A zero-initialized bias TRAINS; a frozen one still occupies a
-        #     variable slot and shifts every weight index after it. The parameter must
-        #     be structurally ABSENT, which is what `use_bias=False` gives.
-        #   * Do NOT expose a `k_bias` constructor flag "for symmetry". The whole reason
-        #     this layer is standalone rather than a subclass of
-        #     `MultiHeadCrossAttention` is that a single fused `use_bias` flag cannot
-        #     express this asymmetry (D-001 / H-4); re-introducing the flag would
-        #     re-introduce the defect the layer exists to avoid.
-        # Pinned by `TestBeitAttentionNoKBias` (exact bias-parameter count, not `> 0`).
+        #   * Do NOT "unify" this to `use_bias=self.qv_bias`. That adds `dim`
+        #     parameters BEiT does not have and makes the layer incompatible with
+        #     every BEiT checkpoint — with no error, no shape mismatch and a
+        #     plausible loss curve.
+        #   * Do NOT use `use_bias=True` with a zero or frozen bias. A zero bias
+        #     TRAINS; a frozen one still occupies a variable slot. The parameter has
+        #     to be structurally ABSENT.
+        #   * Do NOT add a `k_bias` flag "for symmetry". A single fused `use_bias`
+        #     flag cannot express this asymmetry, which is the reason this layer is
+        #     standalone instead of a `MultiHeadCrossAttention` subclass.
         # See decisions.md D-001 (plan-2026-08-11T012340-f63796dc).
         self.k_dense = keras.layers.Dense(
             self.dim, use_bias=False, name="k", **dense_kwargs()
@@ -428,18 +469,17 @@ class BeitAttention(keras.layers.Layer):
                 trainable=True,
                 dtype=self.dtype,
             )
-            # DECISION plan-2026-08-11T012340-f63796dc/D-011
-            # Keep this index as a NUMPY array. Do NOT call `ops.convert_to_tensor`
-            # (or any `keras.ops`/`tf` op) here and store the result: `build()` may
-            # run lazily INSIDE the traced train step, so the tensor would be created
-            # in the inner `one_step_on_data` FuncGraph and be unreachable from the
-            # outer `multi_step_on_iterator` graph -- `model.fit()` on an unbuilt
-            # model then dies with `InaccessibleTensorError`, while every eager
-            # forward pass and every explicitly-built test still passes. The
-            # conversion happens in `call()`, in whatever graph is tracing.
-            # A derived, non-trainable constant: it is a pure function of
-            # `window_size`, so it is deliberately NOT a weight. It survives
-            # serialization because `build()` recomputes it from the restored config.
+            # DECISION plan-2026-08-11T012340-f63796dc/D-011 — keep this index a
+            # NUMPY array. Do NOT call `ops.convert_to_tensor` (or any
+            # `keras.ops`/`tf` op) here and store the result: `build()` can run
+            # lazily INSIDE the traced train step, so the tensor lands in the inner
+            # `one_step_on_data` FuncGraph and is unreachable from the outer
+            # `multi_step_on_iterator` graph. `model.fit()` on an unbuilt model then
+            # dies with `InaccessibleTensorError` while every eager forward pass and
+            # every explicitly-built test still passes. The conversion happens in
+            # `call()`, in whatever graph is tracing. It is not a weight: it is a
+            # pure function of `window_size`, so `build()` recomputes it from the
+            # restored config. See decisions.md D-011.
             self._rel_pos_index = np.ascontiguousarray(
                 self._build_relative_position_index().reshape(-1),
                 dtype=np.int32,
