@@ -146,6 +146,19 @@ def test_model_training_with_anyloss() -> None:
 
     logger.info(f"Created training dataset with {np.sum(y_train)} positive samples out of {len(y_train)}")
 
+    # Seed the model init. PROPHYLACTIC: this node was reported flaky but could
+    # NOT be reproduced (0/41 across solo/file-alone/directory), so this line is
+    # NOT verified by reproduction -- it closes the same unseeded-init mechanism
+    # that was measured on `test_dino_loss.py` (Keras' lazy global SeedGenerator
+    # seeds itself from Python's OS-entropy-seeded `random`, so every pytest
+    # PROCESS gets different `he_normal`/`glorot_uniform` kernels).
+    # Measured (initial_loss - final_loss) over 13 candidate seeds
+    # [0,1,2,3,7,11,13,42,99,123,1234,2026,31337]:
+    #   min 0.0243 (seed 3) / median 0.1466 (seed 0) / max 0.2902 (seed 13)
+    #   0 of 13 at or below the 0.0 bar -- consistent with the 0/41 non-repro.
+    # 1234 is just ABOVE the median (not the widest): margin 0.1574.
+    keras.utils.set_random_seed(1234)
+
     # Create a simple model using Functional API to avoid warnings
     inputs = keras.Input(shape=(10,))
     x = keras.layers.Dense(16, activation='relu',
