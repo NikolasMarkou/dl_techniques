@@ -1,10 +1,122 @@
 """
-Embedding Layer Factory for dl_techniques Framework
+Factory for the embedding layers in this package.
 
-Provides a centralized factory function for creating various embedding layers
-with a unified interface, type safety, and comprehensive parameter validation.
-This factory supports patch embeddings, learned positional embeddings, various
-forms of rotary position embeddings (RoPE), and BERT-style embeddings.
+One entry point, :func:`create_embedding_layer`, builds any of the 13
+registered embedding types from a type key plus keyword arguments. The type
+key selects a row of ``EMBEDDING_REGISTRY``, which names the class, the
+parameters that must be supplied and the parameters that have defaults.
+
+The registry covers patch embeddings, learned positional embeddings, the
+rotary family (RoPE, dual RoPE, continuous RoPE, multi-axis RoPE), the fixed
+sinusoidal family, and the BERT-style token embeddings.
+
+The registry is public API. Its key set, each entry's key names, and each
+entry's ``required_params`` and ``optional_params`` are consumed by
+config-driven callers and asserted by ``tests/test_layers/test_embedding/
+test_embedding_factory.py`` and ``test_factory_ideogram4.py``. Adding,
+renaming or removing any of them is a breaking change, not a cleanup.
+
+Architecture Overview:
+
+.. code-block:: text
+
+    create_embedding_layer(embedding_type, name=None, **kwargs)
+                    │
+                    ▼
+        validate_embedding_config(embedding_type, **kwargs)
+          ├─ type not in EMBEDDING_REGISTRY ────► ValueError
+          ├─ a required_params name missing ────► ValueError
+          ├─ a value out of range ──────────────► ValueError
+          └─ patch_size of the wrong type ──────► TypeError
+                    │
+                    ▼
+        EMBEDDING_REGISTRY[embedding_type] -> class, params
+                    │
+                    ▼
+        params = optional_params defaults, then kwargs on top
+                    │
+                    ▼
+        strict key check: set(kwargs) - (required | optional)
+          └─ non-empty ──► ValueError carrying the substring
+                           STRICT_DROPPED_KEY_MARKER
+                    │
+                    ▼
+        embed_class(**final_params) ──────────► the layer
+
+    Every ValueError and TypeError above is caught by one handler at the
+    bottom of the function, wrapped with the class name, the required
+    params and the provided params, and re-raised as a ValueError. The
+    original text survives after "Original error:". Nothing leaves this
+    function as a TypeError.
+
+Registered types:
+    The table below is generated from ``EMBEDDING_REGISTRY``. The
+    ``optional`` column is the number of parameters that carry a default;
+    read the defaults themselves with :func:`get_embedding_info`.
+
+.. code-block:: text
+
+    ======================  ===========================  ========
+    type key                class                        optional
+    ======================  ===========================  ========
+    patch_1d                PatchEmbedding1D                    5
+    patch_2d                PatchEmbedding2D                    7
+    positional_learned      PositionalEmbedding                 3
+    rope                    RotaryPositionEmbedding             2
+    dual_rope               DualRotaryPositionEmbedding         2
+    continuous_rope         ContinuousRoPE                      2
+    continuous_sincos       ContinuousSinCosEmbed               2
+    bert_embeddings         BertEmbeddings                      8
+    modern_bert_embeddings  ModernBertEmbeddings                0
+    albert_factorized       AlbertFactorizedEmbedding           3
+    positional_sine_2d      PositionEmbeddingSine2D             4
+    scalar_sinusoidal       ScalarSinusoidalEmbedding           1
+    mrope_ideogram4         Ideogram4MRoPE                      0
+    ======================  ===========================  ========
+
+Required parameters per type:
+    A separate block, because the longest row holds seven names and would
+    not fit beside the two columns above. Truncating it would misstate the
+    contract.
+
+.. code-block:: text
+
+    patch_1d
+        patch_size, embed_dim
+    patch_2d
+        patch_size, embed_dim
+    positional_learned
+        max_seq_len, dim
+    rope
+        head_dim, max_seq_len
+    dual_rope
+        head_dim, max_seq_len
+    continuous_rope
+        dim, ndim
+    continuous_sincos
+        dim, ndim
+    bert_embeddings
+        vocab_size, hidden_size, max_position_embeddings
+    modern_bert_embeddings
+        vocab_size, hidden_size, type_vocab_size, initializer_range,
+        layer_norm_eps, dropout_rate, use_bias
+    albert_factorized
+        vocab_size, bottleneck_dim, output_dim
+    positional_sine_2d
+        (none)
+    scalar_sinusoidal
+        dim
+    mrope_ideogram4
+        head_dim, rope_theta, mrope_section
+
+Two registry facts do not appear in either table:
+    - ``bert_embeddings`` needs ``type_vocab_size`` whenever
+      ``use_token_type_embeddings`` is true, which is the default. That is a
+      computed rule inside :func:`validate_embedding_config`, not a static
+      ``required_params`` entry. The anchor at that entry says why.
+    - ``positional_sine_2d`` emits channels-FIRST,
+      ``(B, 2*num_pos_feats, H, W)``. Callers that work channels-last must
+      transpose.
 """
 
 import math
@@ -142,15 +254,13 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': BertEmbeddings,
         'description': 'BERT embeddings combining word, optional position, and optional token type embeddings with configurable normalization.',
         # DECISION plan-2026-08-10T183739-b007f435/D-010
-        # type_vocab_size is CONDITIONALLY required, not unconditionally optional:
-        # it belongs here only because it is meaningless (and normalized to None by
-        # the constructor) when use_token_type_embeddings is False. The static
-        # required-params check no longer covers it -- validate_embedding_config's
-        # computed rule below does. Do NOT "simplify" by deleting that rule, and do
-        # NOT move type_vocab_size back into required_params (that would force every
-        # token-type-free caller, e.g. models/language/distilbert/, to pass a dummy positive
-        # integer that is then serialized into every checkpoint -- the exact inert
-        # config key this plan exists to delete). See decisions.md D-002 and D-010.
+        # type_vocab_size is CONDITIONALLY required, and sits here only because
+        # it is meaningless when use_token_type_embeddings is False. Do NOT move
+        # it back into required_params: that forces every token-type-free caller,
+        # such as models/language/distilbert, to pass a dummy positive integer
+        # that is then serialized into every checkpoint. The computed rule in
+        # validate_embedding_config covers the case where it IS needed; do not
+        # delete that either. See decisions.md D-002 and D-010.
         'required_params': ['vocab_size', 'hidden_size', 'max_position_embeddings'],
         'optional_params': {
             'type_vocab_size': None,
@@ -217,24 +327,42 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------
 
 def get_embedding_info() -> Dict[str, Dict[str, Any]]:
-    """
-    Get comprehensive information about all available embedding layer types.
+    """Return the registry contents, one entry per embedding type.
 
-    :return: Dict containing information about each embedding type, including
-        description, required_params, optional_params, and use_case.
+    Each entry holds ``class``, ``description``, ``required_params``,
+    ``optional_params`` and ``use_case``. The ``optional_params`` mapping is
+    the only place the per-type defaults are written down.
+
+    The copy is SHALLOW. The outer dict and each type's dict are new, but
+    the nested ``required_params`` list and ``optional_params`` dict are the
+    registry's own objects. Mutating one of them changes the registry for
+    the whole process. Treat the result as read-only, or deep-copy it.
+
+    :return: Mapping from embedding type key to that type's registry entry.
     :rtype: Dict[str, Dict[str, Any]]
     """
     return {embed_type: info.copy() for embed_type, info in EMBEDDING_REGISTRY.items()}
 
 def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
-    """
-    Validate embedding configuration parameters.
+    """Check an embedding configuration before anything is constructed.
+
+    The checks run in a fixed order: the type must be registered, every name
+    in that type's ``required_params`` must be present, then the values are
+    range-checked. Value checks are keyed on the parameter NAME, so the
+    shared names such as ``dim`` and ``embed_dim`` are checked for every
+    type that passes them, and a handful of type-specific rules follow.
+
+    This function does NOT reject unknown keyword names.
+    :func:`create_embedding_layer` does that, after calling this.
 
     :param embedding_type: Type of embedding to validate.
     :type embedding_type: str
-    :param kwargs: Parameters to validate against the embedding type's requirements.
-    :raises ValueError: If embedding_type is invalid, required parameters are missing,
-        or parameter values are out of their valid range.
+    :param kwargs: Parameters to validate against that type's requirements.
+    :raises ValueError: If the type is not registered, if a required
+        parameter is missing, or if a value is outside its valid range.
+    :raises TypeError: If ``patch_size`` is neither an int nor a sequence,
+        for the ``patch_2d`` type. This is the one path here that does not
+        raise ``ValueError``.
     """
     if embedding_type not in EMBEDDING_REGISTRY:
         available_types = list(EMBEDDING_REGISTRY.keys())
@@ -328,14 +456,12 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
                 )
 
         # DECISION plan-2026-08-10T183739-b007f435/D-010
-        # CONDITIONAL-REQUIRED rule replacing the static required_params entry for
-        # type_vocab_size. The default below is READ FROM THE REGISTRY rather than
-        # written as a literal True, so flipping the registry default can never leave
-        # this rule disagreeing with what the factory actually injects.
-        # Deleting this block re-introduces the silent degradation the move to
-        # optional_params would otherwise cause: a caller who omits type_vocab_size
-        # with token types enabled would reach the constructor instead of failing the
-        # config check. See decisions.md D-010.
+        # The conditional-required rule that replaces the static required_params
+        # entry for type_vocab_size. The default below is READ FROM THE REGISTRY,
+        # not written as a literal True, so flipping the registry default cannot
+        # leave this rule disagreeing with what the factory injects. Delete this
+        # block and a caller who omits type_vocab_size with token types enabled
+        # reaches the constructor instead of failing here. See decisions.md D-010.
         token_types_default = EMBEDDING_REGISTRY['bert_embeddings'][
             'optional_params']['use_token_type_embeddings']
         if kwargs.get('use_token_type_embeddings', token_types_default):
@@ -356,10 +482,10 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
 
 #: The stable substring every strict dropped-key ``ValueError`` from
 #: :func:`create_embedding_layer` carries. Guards match on THIS constant rather
-#: than re-typing the phrase, so rewording the message cannot silently blind them
-#: (and so the phrase has exactly one home). Mirrors
-#: ``layers/ffn/factory.py``'s constant of the same name -- same contract, same
-#: wording, deliberately.
+#: than re-typing the phrase, so rewording the message cannot silently blind
+#: them, and so the phrase has exactly one home. ``layers/ffn/factory.py``
+#: defines a constant of the same name with the same wording and the same
+#: contract; the match is intentional.
 #: NOTE for test authors: the ``(s)`` makes this string a REGEX with a group, so
 #: ``pytest.raises(match=...)`` needs ``re.escape()`` around it (or use a plain
 #: ``in str(excinfo.value)`` substring check, as the FFN tests do).
@@ -371,24 +497,31 @@ def create_embedding_layer(
     name: Optional[str] = None,
     **kwargs: Any
 ) -> keras.layers.Layer:
-    """
-    Factory function for creating embedding layers with a unified interface.
+    """Build one of the 13 registered embedding layers.
 
-    This function provides a centralized way to create any embedding layer
-    supported by dl_techniques, with comprehensive parameter validation.
+    Validates the configuration, fills in that type's defaults, rejects any
+    keyword the type does not declare, and constructs the class. See the
+    module docstring for the registry table and the dispatch diagram.
 
-    :param embedding_type: Type of embedding layer to create.
+    Every failure leaves this function as a ``ValueError``, including the
+    ``TypeError`` paths. The handler at the bottom catches both, prepends
+    the class name, the required parameters and the parameters you supplied,
+    and re-raises. The original message survives after ``Original error:``,
+    so a guard matching :data:`STRICT_DROPPED_KEY_MARKER` still matches.
+
+    :param embedding_type: Type key of the layer to create.
     :type embedding_type: EmbeddingType
     :param name: Optional name for the layer.
     :type name: Optional[str]
-    :param kwargs: Parameters specific to the embedding type. See individual layer
-        documentation or use ``get_embedding_info()`` for details.
+    :param kwargs: Parameters for that embedding type. Read
+        ``get_embedding_info()`` or the module docstring for the names.
     :return: A configured Keras embedding layer instance.
     :rtype: keras.layers.Layer
-    :raises ValueError: If embedding_type is invalid, parameters are missing or
-        invalid, or any supplied keyword is not a parameter of ``embedding_type``
-        (the message then carries :data:`STRICT_DROPPED_KEY_MARKER`).
-    :raises TypeError: If parameter types are incorrect for the layer.
+    :raises ValueError: If the type is not registered, if a required
+        parameter is missing, if a value is out of range, if a supplied
+        keyword is not a parameter of that type (the message then carries
+        :data:`STRICT_DROPPED_KEY_MARKER`), or if the constructor itself
+        rejects the arguments.
     """
     try:
         # Validate the provided configuration
@@ -408,40 +541,34 @@ def create_embedding_layer(
         final_params = {key: val for key, val in params.items() if key in valid_param_names}
 
         # DECISION plan-2026-08-14T042537-ff96c6c6/D-002
-        # RAISE, do not drop silently. Ported from `ffn/factory.py`'s identical
-        # predicate (plan-2026-07-30T140922-8af1028f/D-023). The silent filter
-        # above turned `ViT(pos_dropout_rate=0.5)` into a permanent 0.0 at four
-        # production call sites -- MEASURED, not hypothesised -- because
-        # `dropout=` is not `dropout_rate=`. All 32 statically-resolvable call
-        # sites in `src/` AND `tests/` were swept clean, and all 12 splat /
-        # dynamic-type sites resolved by hand, BEFORE this raise landed;
-        # re-softening it to a warning re-opens exactly that trap.
+        # RAISE on an unrecognized kwarg; do NOT drop it silently and do NOT
+        # soften this to a warning. The filter above turned
+        # `ViT(pos_dropout_rate=0.5)` into a permanent 0.0 at four production
+        # call sites -- MEASURED -- because `dropout=` is not `dropout_rate=`.
+        # Every statically resolvable call site was swept clean before this
+        # raise landed. Ported from `ffn/factory.py`'s identical predicate
+        # (plan-2026-07-30T140922-8af1028f/D-023).
         #
-        # BOTH halves of the predicate are load-bearing:
+        # BOTH halves of the predicate matter:
         #
         # * subtract `valid_param_names` (required | optional), NEVER just
-        #   `required_params`. The narrower right-hand side is the tempting
-        #   "simplification" and it is CATASTROPHIC: every optional parameter
-        #   anyone legitimately passes becomes an error. MEASURED here (step 3's
-        #   injection B): with `set(kwargs) - set(required_params)` the
-        #   all-optional-params control fires for 11 of the 13 registered
-        #   embedding types -- i.e. EVERY type that declares an optional param at
-        #   all; the two survivors (`modern_bert_embeddings`, `mrope_ideogram4`)
-        #   have an empty `optional_params` and so have nothing to break. 22
-        #   tests went red in total. The same narrowing was measured at 21/21
-        #   types on the FFN side.
-        # * read `kwargs` (what the CALLER actually supplied), not the merged
-        #   `params`. They are extensionally equal today -- `params` is
-        #   `optional_params` updated with `kwargs`, and `optional_params`'s keys
-        #   are a subset of `valid_param_names` by construction -- but the
-        #   `kwargs` form stays correct if that subset relation ever breaks, i.e.
-        #   if a registry entry gains an `optional_params` key its class does not
-        #   accept. The `params` form would then blame the caller for the
-        #   registry's own bug.
+        #   `required_params`. That narrowing is the tempting "simplification"
+        #   and it turns every legitimately passed optional parameter into an
+        #   error. MEASURED: the all-optional control then fires for 11 of the
+        #   13 registered types and 22 tests go red. The two survivors,
+        #   `modern_bert_embeddings` and `mrope_ideogram4`, declare no optional
+        #   params and so have nothing to break. The FFN side measured 21/21.
+        # * read `kwargs`, what the CALLER supplied, not the merged `params`.
+        #   The two agree today, but the `kwargs` form stays correct if a
+        #   registry entry ever gains an `optional_params` key its class does
+        #   not accept. The `params` form would blame the caller for that.
         #
-        # Placement is also load-bearing: AFTER `validate_embedding_config`, so
-        # unknown-type / missing-required / bad-value calls keep their existing,
-        # earlier failure mode (3 negative-path tests depend on that ordering).
+        # Placement matters too: this runs AFTER `validate_embedding_config`, so
+        # unknown-type, missing-required and bad-value calls keep their earlier
+        # failure mode, and 3 negative-path tests depend on that order. The
+        # message below is quoted by consumers in models/language/distilbert and
+        # models/vision/energy_transformer; do not reword its shape.
+        # See decisions.md D-002.
         dropped = sorted(set(kwargs) - valid_param_names)
         if dropped:
             raise ValueError(
@@ -459,7 +586,8 @@ def create_embedding_layer(
 
         # Log final parameters before creating the layer
         logger.info(f"Creating '{embedding_type}' embedding layer with parameters:")
-        log_params = {**final_params} # create a copy for logging
+        # A copy, so adding the name for the log cannot touch final_params.
+        log_params = {**final_params}
         if name:
             log_params['name'] = name
         for param_name, param_value in sorted(log_params.items()):
@@ -494,15 +622,20 @@ def create_embedding_layer(
 
 
 def create_embedding_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
-    """
-    Create an embedding layer from a configuration dictionary.
+    """Build an embedding layer from a single configuration dictionary.
 
-    :param config: A dictionary containing a 'type' key specifying the embedding
-        layer and other keys as its parameters.
+    The ``'type'`` key selects the embedding type. Every other key is passed
+    to :func:`create_embedding_layer` as a keyword argument, so the strict
+    unknown-key rule applies to them too. The mapping is copied before the
+    ``'type'`` key is popped, so the caller's dictionary is left alone.
+
+    :param config: Dictionary holding a ``'type'`` key plus that type's
+        parameters.
     :type config: Dict[str, Any]
     :return: A configured Keras embedding layer instance.
     :rtype: keras.layers.Layer
-    :raises ValueError: If 'type' key is missing from config or config is not a dict.
+    :raises ValueError: If ``config`` is not a dict, if the ``'type'`` key is
+        missing, or for any reason :func:`create_embedding_layer` raises.
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dictionary, got {type(config)}")

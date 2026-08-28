@@ -1,18 +1,32 @@
-"""Hierarchical Codebook Embedding (HCE).
+"""
+Hierarchical Codebook Embedding (HCE).
 
-A parameter-efficient drop-in replacement for ``keras.layers.Embedding``
-inspired by routing-tree structure but using an *additive* (not
-multiplicative) composition mechanism.
+A parameter-efficient replacement for ``keras.layers.Embedding``. It stores
+K small codebooks instead of one row per token, and it sums K lookups to
+form each embedding.
+
+The name says "hierarchical", but the mechanism is flat. The K chunks of a
+token id are read in parallel and no chunk selects which codebook the next
+chunk uses. The hierarchy is in the ADDRESSING, not in the computation: high
+chunks name a coarse region of id space and low chunks name a position
+inside it. That matters for how you order your vocabulary, and it is why the
+"Sibling-token correlation" section below exists.
 
 Mechanism:
-    1. Each token ID ``i`` is decomposed into ``num_chunks`` integer
-       chunks by reading consecutive groups of ``chunk_bits`` bits:
-       ``chunk_k(i) = (i >> (chunk_bits * k)) & (2**chunk_bits - 1)``.
-    2. The k-th chunk indexes into the k-th codebook, a learnable matrix
-       of shape ``(2**chunk_bits, output_dim)``.
-    3. The K codebook lookups are summed to produce the embedding:
-       ``embed(i) = sum_k E_k[chunk_k(i)]``.
-    4. Optional final LayerNorm stabilizes the variance of the sum.
+    1. Each token ID ``i`` is split into ``num_chunks`` integer chunks by
+       reading consecutive groups of ``chunk_bits`` bits::
+
+           chunk_k(i) = (i >> (chunk_bits * k)) & (2**chunk_bits - 1)
+
+       The code writes this with ``floor_divide`` and ``mod`` instead of
+       shifts, because the backends do not all expose bitwise ops.
+    2. Chunk k indexes codebook k, a learnable matrix of shape
+       ``(2**chunk_bits, output_dim)``.
+    3. The K lookups are summed::
+
+           embed(i) = sum_k E_k[chunk_k(i)]
+
+    4. An optional LayerNorm stabilizes the variance of that sum.
 
 Parameter count: ``num_chunks * 2**chunk_bits * output_dim``.
 For vocab=50,261 and output_dim=128:
@@ -26,64 +40,64 @@ HCE(num_chunks=4, M=16)         ~8,192             ~785x smaller
 ==============================  =================  ==============
 
 Asymmetry vs. ``RoutingProbabilitiesLayer``:
-    - Routing layer (output side):  features  -> log2(N) sigmoid
-      decisions -> multiplicative tree -> N probabilities. Compresses
-      ``D x N`` projection cost to ``D x log(N)``.
-    - HCE (input side):  token_id -> K codebook lookups -> additive sum
-      -> D-dim vector. Compresses ``vocab x D`` storage cost to
+    The two layers look related and are not. They sit on opposite sides of
+    the model and use opposite compositions.
+
+    - Routing layer, output side: features -> log2(N) sigmoid decisions ->
+      multiplicative tree -> N probabilities. It compresses a ``D x N``
+      projection to ``D x log(N)``.
+    - HCE, input side: token_id -> K codebook lookups -> additive sum ->
+      D-dim vector. It compresses ``vocab x D`` storage to
       ``K * 2^chunk_bits * D``.
-    - Mechanisms: additive sum (HCE) vs multiplicative tree (routing).
-    - Roles: discrete -> continuous lookup (HCE) vs continuous ->
-      discrete projection (routing).
-    - Geometry: HCE embeddings live on the Minkowski sum of K
-      finite point sets in R^D; routing probs live on a sigmoid
-      manifold of dimension ``log2(N)``.
+    - Composition: additive sum here, multiplicative tree there.
+    - Direction: discrete to continuous here, continuous to discrete there.
+    - Geometry: HCE embeddings live on the Minkowski sum of K finite point
+      sets in R^D. Routing probabilities live on a sigmoid manifold of
+      dimension ``log2(N)``.
 
 Embedding manifold:
-    With K codebooks of M entries each, ``M^K`` distinct embeddings
-    are representable. Their affine span has dimension at most
-    ``K * (M - 1)`` (typically saturated), bounded above by ``D``. For
-    K=2, M=256, D=128: span dim ~= D, no practical restriction. For
-    K=4, M=16: span dim ~= 60 — meaningful restriction at D=128, but
-    the model can still achieve usable LM-quality embeddings,
-    especially when the vocab-to-leaf assignment respects semantic
-    structure (see "Pairing with vocab permutation" below).
+    With K codebooks of M entries each, ``M^K`` distinct embeddings are
+    representable. Their affine span has dimension at most ``K * (M - 1)``,
+    usually saturated, and bounded above by ``D``.
+
+    For K=2, M=256, D=128 the span reaches D, so there is no practical
+    restriction. For K=4, M=16 the bound is 60, which is a real restriction
+    at D=128. The model can still reach usable language-model quality there,
+    and it does so more easily when the vocabulary order respects chunk
+    boundaries. See "Pairing with vocab permutation" below.
 
 Sibling-token correlation:
-    Tokens whose IDs differ in only one chunk share K-1 codebook
-    contributions; their embeddings differ only by the difference of
-    the differing chunk's two codebook entries. Adjacent token IDs
-    (e.g. id=1234 vs 1235) share 3 of 4 chunks under default bit
-    layout. This is the input-side analogue of the routing head's
-    leaf-arrangement penalty: minimized by choosing a vocab
-    permutation (Huffman or spectral cluster order) that aligns chunk
-    boundaries with semantic boundaries.
+    Two tokens whose IDs differ in one chunk share K-1 codebook
+    contributions. Their embeddings then differ only by the difference of
+    two entries in the one differing codebook. Adjacent IDs such as 1234 and
+    1235 share 3 of 4 chunks under the default bit layout.
+
+    This is the input-side counterpart of the routing head's leaf-arrangement
+    penalty. Pick a vocabulary permutation, Huffman or spectral cluster
+    order, that puts semantic boundaries on chunk boundaries.
 
 Pairing with vocab permutation:
-    HCE benefits substantially from a static permutation that places
-    semantically related tokens at IDs sharing common high-order
-    chunks. The same Huffman/spectral permutation that fixes the
-    routing-head leaf-arrangement penalty also fixes HCE's chunk-
-    sharing penalty, so a single precomputed permutation buys both
-    benefits.
+    HCE gains a lot from a static permutation that gives semantically
+    related tokens IDs sharing high-order chunks. The same Huffman or
+    spectral permutation that fixes the routing head's leaf-arrangement
+    penalty also fixes HCE's chunk-sharing penalty, so one precomputed
+    permutation buys both.
 
 Alternative: ALBERT-style factorized embedding
-    When ``output_dim`` is large (>= 384) and you want unrestricted
-    expressivity per token (full-rank embedding manifold) instead of
-    HCE's restricted Minkowski-sum manifold, the standard alternative
-    is the ALBERT factorization::
+    Use the ALBERT factorization instead when ``output_dim`` is large, say
+    384 or more, and you need each token to occupy any direction
+    independently::
 
         embed_inner = keras.layers.Embedding(vocab, k)         # vocab * k
         embed_proj  = keras.layers.Dense(D, use_bias=False)    # k * D
         embed(i) = embed_proj(embed_inner(i))
 
-    Parameters: ``vocab * k + k * D`` (e.g. 50K * 64 + 64 * 768 = 3.25M
-    for D=768, k=64 vs 38.6M standard). Each token's embedding can
-    independently occupy any direction in the k-dim subspace projected
-    to D, with no cross-token coupling. Use ALBERT factorization when
-    you need full-rank per-token embeddings; use HCE when you want
-    maximum parameter compression and can tolerate the manifold
-    restriction.
+    That costs ``vocab * k + k * D`` parameters. For D=768 and k=64 over a
+    50K vocabulary this is 3.25M against 38.6M for a standard embedding.
+    There is no cross-token coupling. Choose the ALBERT form for full-rank
+    per-token embeddings, and HCE for maximum compression when the manifold
+    restriction is acceptable. ``AlbertFactorizedEmbedding`` in this package
+    implements the ALBERT form.
 
 References:
     - Jegou, H., Douze, M., Schmid, C. (2010). "Product Quantization
@@ -111,42 +125,114 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class HierarchicalCodebookEmbedding(keras.layers.Layer):
-    """Additive multi-codebook embedding for parameter-efficient token lookup.
+    """Sum K small codebook lookups into one token embedding.
 
-    See module docstring for full design rationale, asymmetry vs. the
-    routing head, and trade-offs against ALBERT-style factorization.
+    Each token id is split into ``num_chunks`` fixed-width chunks. Chunk k
+    indexes codebook k. The K resulting vectors are summed, and an optional
+    LayerNorm follows. The layer stores
+    ``num_chunks * 2**chunk_bits * output_dim`` parameters instead of
+    ``vocab_size * output_dim``.
+
+    The chunks are read in parallel. No chunk decides which codebook the
+    next chunk uses, so the structure is additive, not a tree. See the
+    module docstring for the design rationale, the comparison with the
+    routing head and the trade-off against ALBERT-style factorization.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        token id i  (e.g. 50260, chunk_bits=8, num_chunks=2)
+             │
+             │  chunk_k(i) = (i // 2^(chunk_bits*k)) % 2^chunk_bits
+             │
+             ├──────────────────────┬─────────────────  ...
+             ▼                      ▼
+        chunk_0 = i % 256      chunk_1 = (i // 256) % 256
+        (low bits)             (high bits)
+             │                      │
+             ▼                      ▼
+        ┌──────────────┐       ┌──────────────┐
+        │ codebook_0   │       │ codebook_1   │    ... K tables
+        │ (256, D)     │       │ (256, D)     │
+        └──────┬───────┘       └──────┬───────┘
+               │  take(row)           │  take(row)
+               ▼                      ▼
+            E_0[chunk_0]  ── + ──  E_1[chunk_1]  ... + E_k[chunk_k]
+                              │
+                              ▼
+                   optional LayerNormalization
+                              │
+                              ▼
+                  output (..., output_dim)
 
     :param vocab_size: Number of distinct token IDs the layer must support.
-        Token IDs in ``[0, vocab_size)`` produce well-defined embeddings;
-        IDs in ``[vocab_size, 2**(num_chunks * chunk_bits))`` are valid
-        inputs but address codebook regions that real tokens never visit
-        (and thus never receive gradient).
-    :param output_dim: Embedding dimensionality D.
-    :param num_chunks: Number of codebooks K. Default 2.
-    :param chunk_bits: Bits per chunk. If None (default), auto-computed
-        as ``ceil(ceil(log2(vocab_size)) / num_chunks)``. Codebook size
-        is ``2**chunk_bits``.
-    :param use_layer_norm: Apply LayerNorm to the summed embedding.
-        Recommended (default True) — sums of K independent codebook
-        contributions can have non-unit variance that destabilizes
-        downstream layers.
-    :param embeddings_initializer: Initializer for codebook tables.
-        Default ``"uniform"`` (matching ``keras.layers.Embedding``).
-    :param embeddings_regularizer: Optional regularizer applied to each
+        Must be greater than 1. Token IDs in ``[0, vocab_size)`` produce
+        well-defined embeddings. IDs in
+        ``[vocab_size, 2**(num_chunks * chunk_bits))`` are accepted and
+        address codebook regions no real token visits, so they never receive
+        gradient.
+    :type vocab_size: int
+    :param output_dim: Embedding dimensionality D. Must be positive.
+    :type output_dim: int
+    :param num_chunks: Number of codebooks K. Must be positive. Defaults
+        to 2.
+    :type num_chunks: int
+    :param chunk_bits: Bits per chunk. ``None`` (default) computes
+        ``ceil(ceil(log2(vocab_size)) / num_chunks)``. Codebook size is
+        ``2**chunk_bits``, so one extra bit doubles the parameter count.
+    :type chunk_bits: Optional[int]
+    :param use_layer_norm: Whether to apply LayerNorm to the summed
+        embedding. Defaults to ``True``. A sum of K independent codebook
+        contributions has roughly K times the variance of one, which
+        destabilizes the layers below.
+    :type use_layer_norm: bool
+    :param embeddings_initializer: Initializer for the codebook tables.
+        Defaults to ``"uniform"``, matching ``keras.layers.Embedding``.
+    :type embeddings_initializer: Union[str, initializers.Initializer]
+    :param embeddings_regularizer: Optional regularizer applied to every
         codebook.
+    :type embeddings_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :raises ValueError: If ``vocab_size``, ``output_dim``, ``num_chunks``,
-        or ``chunk_bits`` are non-positive, or if
-        ``num_chunks * chunk_bits`` cannot address ``vocab_size`` codes.
+    :ivar chunk_bits: The resolved bit width, never ``None``. ``__init__``
+        computes it when the argument is ``None``, and ``get_config()``
+        reports the resolved integer.
+    :vartype chunk_bits: int
+    :ivar codebooks: The K weight tables, each of shape
+        ``(2**chunk_bits, output_dim)``. Empty until ``build()`` runs.
+    :vartype codebooks: list
+    :ivar layer_norm: The LayerNormalization instance, or ``None`` when
+        ``use_layer_norm`` is ``False``.
+    :vartype layer_norm: keras.layers.LayerNormalization or None
 
-    Example::
+    Input shape:
+        Integer tensor of any shape holding token IDs. Non-integer inputs
+        are cast to ``int32``.
 
-        # 50K vocab, D=128 -> 65K params instead of 6.4M (98x compression)
+    Output shape:
+        The input shape with ``output_dim`` appended.
+
+    :raises ValueError: If ``vocab_size`` is not greater than 1, if
+        ``output_dim`` or ``num_chunks`` is not positive, if an explicit
+        ``chunk_bits`` is not positive, or if ``num_chunks * chunk_bits``
+        cannot address ``vocab_size`` codes. Raised from ``__init__``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding \
+            .hierarchical_codebook_embedding import (
+                HierarchicalCodebookEmbedding,
+            )
+
         embed = HierarchicalCodebookEmbedding(
             vocab_size=50261, output_dim=128, num_chunks=2,
         )
-        ids = keras.random.uniform((4, 32), 0, 50261, dtype="int32")
-        x = embed(ids)              # shape: (4, 32, 128)
+        ids = keras.random.randint((4, 32), 0, 50261)
+        embed(ids).shape  # (4, 32, 128)
     """
 
     def __init__(
@@ -160,6 +246,33 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         embeddings_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
         **kwargs: Any,
     ) -> None:
+        """Validate the configuration and resolve ``chunk_bits``.
+
+        No weight is created here. The K codebooks are created in
+        :meth:`build`.
+
+        :param vocab_size: Number of distinct token IDs to support.
+        :type vocab_size: int
+        :param output_dim: Embedding dimensionality D.
+        :type output_dim: int
+        :param num_chunks: Number of codebooks K.
+        :type num_chunks: int
+        :param chunk_bits: Bits per chunk, or ``None`` to derive it.
+        :type chunk_bits: Optional[int]
+        :param use_layer_norm: Whether to normalize the summed embedding.
+        :type use_layer_norm: bool
+        :param embeddings_initializer: Initializer for the codebooks.
+        :type embeddings_initializer: Union[str, initializers.Initializer]
+        :param embeddings_regularizer: Optional codebook regularizer.
+        :type embeddings_regularizer: Optional[Union[str, regularizers.Regularizer]]
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If ``vocab_size`` is not greater than 1, if
+            ``output_dim`` or ``num_chunks`` is not positive, if an explicit
+            ``chunk_bits`` is not positive, or if the chunk layout cannot
+            address ``vocab_size`` codes.
+        """
         super().__init__(**kwargs)
 
         if vocab_size <= 1:
@@ -205,7 +318,8 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         self._chunk_divisors = [1 << (chunk_bits * k) for k in range(num_chunks)]
         self._chunk_modulus = self._codebook_size
 
-        self.codebooks = []  # filled in build()
+        # Filled in build(), one entry per chunk.
+        self.codebooks = []
         self.layer_norm = (
             keras.layers.LayerNormalization(name="hce_norm")
             if use_layer_norm
@@ -225,6 +339,16 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create the K codebook tables and build the optional LayerNorm.
+
+        Each codebook has shape ``(2**chunk_bits, output_dim)`` and is
+        trainable. The LayerNorm is built against the OUTPUT shape, the
+        input shape with ``output_dim`` appended, because it runs after the
+        sum rather than on the ids.
+
+        :param input_shape: Shape of the token-id tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if self.built:
             return
 
@@ -246,14 +370,24 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
     def call(
         self, inputs: keras.KerasTensor, training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        # inputs: int tensor of token IDs, shape (..., )
+        """Split each token id into chunks and sum the K codebook lookups.
+
+        :param inputs: Integer tensor of token IDs, of any shape. Cast to
+            ``int32``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode or
+            inference mode. Forwarded to the LayerNorm only.
+        :type training: Optional[bool]
+        :return: Embeddings of shape ``inputs.shape + (output_dim,)``.
+        :rtype: keras.KerasTensor
+        """
         ids = ops.cast(inputs, "int32")
 
         out = None
         for k in range(self.num_chunks):
-            # chunk_k(i) = (i // 2^(chunk_bits*k)) % codebook_size
-            # Using integer arithmetic for backend portability (keras.ops
-            # bitwise ops are not uniformly available across all backends).
+            # chunk_k(i) = (i // 2^(chunk_bits*k)) % codebook_size, written
+            # with integer arithmetic rather than shifts: the keras.ops
+            # bitwise operations are not available on every backend.
             chunk_idx = ops.mod(
                 ops.floor_divide(ids, self._chunk_divisors[k]),
                 self._chunk_modulus,
@@ -269,9 +403,24 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...],
     ) -> Tuple[Optional[int], ...]:
+        """Append ``output_dim`` to the input shape.
+
+        :param input_shape: Shape of the token-id tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The input shape with ``output_dim`` appended.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return tuple(input_shape) + (self.output_dim,)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the configuration of the layer for serialization.
+
+        ``chunk_bits`` is reported as the resolved integer, not as the
+        ``None`` a caller may have passed.
+
+        :return: Dictionary holding every ``__init__`` parameter.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "vocab_size": self.vocab_size,
@@ -292,6 +441,18 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
     def from_config(
         cls, config: Dict[str, Any],
     ) -> "HierarchicalCodebookEmbedding":
+        """Rebuild the layer, deserializing the initializer and regularizer.
+
+        The two entries arrive as dicts from ``.keras`` files and are turned
+        back into objects here. This method MUTATES the ``config`` mapping
+        it is given rather than copying it, so do not reuse a config dict
+        after passing it in.
+
+        :param config: Configuration produced by ``get_config()``.
+        :type config: Dict[str, Any]
+        :return: A new layer instance.
+        :rtype: HierarchicalCodebookEmbedding
+        """
         for key in ("embeddings_initializer", "embeddings_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
                 if key == "embeddings_initializer":
