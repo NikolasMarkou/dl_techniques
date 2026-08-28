@@ -38,6 +38,8 @@ from dl_techniques.utils.logger import logger
 
 from .train_embeddings import resolve_output_dir
 
+from .metric_directions import direction_of
+
 from .config import (
     BASELINE_MODEL,
     POOLING_STRATEGIES,
@@ -276,9 +278,30 @@ def collect_results(sweep_root: str) -> List[Dict[str, Any]]:
         for stage in ("mlm", "contrastive"):
             history = payload.get(stage) or {}
             for metric, values in history.items():
-                if values:
-                    record[f"{stage}_{metric}_final"] = float(values[-1])
+                if not values:
+                    continue
+                record[f"{stage}_{metric}_final"] = float(values[-1])
+                # Direction comes from the single producer. Reducing every
+                # metric with `min` -- as this did originally -- silently made
+                # `mlm_val_accuracy_best` the WORST accuracy.
+                direction = direction_of(metric)
+                if direction == "min":
                     record[f"{stage}_{metric}_best"] = float(min(values))
+                elif direction == "max":
+                    record[f"{stage}_{metric}_best"] = float(max(values))
+                else:
+                    logger.warning(
+                        f"no direction registered for metric {metric!r}; "
+                        "emitting only its final value. Add it to "
+                        "metric_directions.METRIC_DIRECTIONS."
+                    )
+
+        evaluation = payload.get("embedding_eval") or {}
+        record["eval_ok"] = bool(evaluation.get("eval_ok", False))
+        for key, value in evaluation.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            record[f"eval_{key}"] = float(value)
         records.append(record)
     return records
 
@@ -298,11 +321,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--variants", nargs="+", default=["tiny"])
     parser.add_argument("--pooling", nargs="+", default=list(POOLING_STRATEGIES))
     parser.add_argument(
-        "--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5],
+        "--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5, 6],
         help=(
-            "Six by default, and that is a floor rather than a taste: the "
-            "report's two-sided sign-flip paired test cannot reach p < 0.05 "
-            "with five pairs or fewer, for any effect size."
+            "SEVEN by default, and that is a floor rather than a taste. The "
+            "report's paired test is two-sided sign-flip, so with n pairs the "
+            "smallest reachable p is 2/2**n; the primary endpoint is then "
+            "Holm-corrected across the non-baseline arms, which tightens the "
+            "bar to alpha/m. At three arms that needs 7 seeds -- 6 cannot "
+            "reject for ANY effect size."
         ),
     )
     parser.add_argument(

@@ -68,6 +68,15 @@ from train.common import (
 )
 from train.common.nlp import create_warmup_lr_schedule
 
+from .paths import (
+    ENCODER_FILENAME,
+    REPO_ROOT,
+    encoder_path,
+    eval_path,
+    resolve_output_dir,
+    results_path,
+)
+
 from .config import (
     BASELINE_MODEL,
     POOLING_STRATEGIES,
@@ -88,49 +97,6 @@ __all__ = [
     "resolve_output_dir",
     "run_study_cell",
 ]
-
-#: Filename of the encoder handed from stage 1 to stage 2 and to evaluation.
-ENCODER_FILENAME = "encoder.keras"
-
-#: Repository root: this file is <repo>/src/train/embeddings_experimental/…
-REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def resolve_output_dir(output_dir: str) -> str:
-    """Resolve a relative output directory against the REPO ROOT.
-
-    Training artifacts belong in the repository's own ``results/``, never in
-    ``src/results/``. The documented way to run a trainer here is
-    ``python -m train.<pkg>.<script>`` from ``src/``, so a bare relative
-    ``results`` resolves against ``src/`` and quietly creates a second, wrong
-    results tree -- which is exactly what the first smoke runs of this trainer
-    did. An absolute path is returned unchanged, so an explicit
-    ``--output-dir /somewhere`` still wins.
-
-    :param output_dir: The configured output directory.
-    :type output_dir: str
-    :return: An absolute path.
-    :rtype: str
-    """
-    path = Path(output_dir)
-    return str(path if path.is_absolute() else REPO_ROOT / path)
-
-
-def encoder_path(run_dir: str) -> str:
-    """Return the encoder checkpoint path for a run directory.
-
-    The ONE producer of this path. Both the stage-1 save site and every reader
-    call it, so the two cannot drift -- the failure mode this repo has already
-    paid for once, where a filename had several readers and no writer and every
-    default run died after training had finished.
-
-    :param run_dir: The run directory.
-    :type run_dir: str
-    :return: Absolute or relative path to the encoder checkpoint.
-    :rtype: str
-    """
-    return os.path.join(run_dir, ENCODER_FILENAME)
-
 
 # ---------------------------------------------------------------------
 # Optimizer
@@ -590,9 +556,34 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
             k: [float(v) for v in vs] for k, vs in contrastive_history.items()
         }
 
-    with open(os.path.join(run_dir, "results.json"), "w") as handle:
+    if config.run_embedding_eval:
+        # An evaluation failure must never kill a training cell that has
+        # already produced a checkpoint -- but a SILENT failure would leave an
+        # empty results table that reads like a config problem, so `eval_ok` is
+        # a first-class field the report counts and prints.
+        try:
+            from .evaluate_embeddings import EvalConfig, evaluate_run
+
+            results["embedding_eval"] = evaluate_run(
+                run_dir,
+                EvalConfig(
+                    tfds_data_dir=config.tfds_data_dir,
+                    max_length=config.max_seq_length,
+                    max_queries=config.eval_max_queries,
+                    probe_train_n=config.eval_probe_train_n,
+                    batch_size=config.eval_batch_size,
+                    seed=config.seed,
+                ),
+            )
+        except Exception as exc:
+            logger.error("embedding evaluation failed", exc_info=True)
+            results["embedding_eval"] = {
+                "eval_ok": False, "eval_error": str(exc)[:500]
+            }
+
+    with open(results_path(run_dir), "w") as handle:
         json.dump(results, handle, indent=2)
-    logger.info(f"Wrote {os.path.join(run_dir, 'results.json')}")
+    logger.info(f"Wrote {results_path(run_dir)}")
     return results
 
 
@@ -681,6 +672,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     model_group.add_argument(
         "--stochastic-depth-rate", type=float, default=defaults.stochastic_depth_rate
     )
+
+    evaluation = parser.add_argument_group("embedding evaluation")
+    evaluation.add_argument(
+        "--no-embedding-eval", dest="run_embedding_eval", action="store_false",
+        default=defaults.run_embedding_eval,
+        help=(
+            "Skip the SQuAD retrieval / SST-2 probe evaluation after training. "
+            "The evaluation is what makes the study measure embedding quality "
+            "rather than only optimisation."
+        ),
+    )
+    evaluation.add_argument("--tfds-data-dir", type=str, default=defaults.tfds_data_dir)
+    evaluation.add_argument("--eval-max-queries", type=int, default=defaults.eval_max_queries)
+    evaluation.add_argument(
+        "--eval-probe-train-n", type=int, default=defaults.eval_probe_train_n
+    )
+    evaluation.add_argument("--eval-batch-size", type=int, default=defaults.eval_batch_size)
 
     run = parser.add_argument_group("run")
     run.add_argument("--output-dir", type=str, default=defaults.output_dir)

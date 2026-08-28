@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from train.embeddings_experimental.config import BASELINE_MODEL
+from train.embeddings_experimental.metric_directions import direction_of
 from train.embeddings_experimental.report import (
     HEADLINE_METRICS,
     RNG_SEED,
@@ -175,51 +176,88 @@ class TestCollectResults:
 class TestReport:
     """The statistics, on fabricated records with a known answer."""
 
-    def _records(self, baseline_losses, arm_losses):
+    #: The PRIMARY endpoint; only this role yields a BETTER/WORSE verdict.
+    PRIMARY = "eval_squad_mrr_at_10"
+
+    def _records(self, baseline_values, arm_values, metric=None):
+        """Fabricate paired cells. Higher is better for the primary metric."""
+        metric = metric or self.PRIMARY
         records = []
-        for seed, value in enumerate(baseline_losses):
+        for seed, value in enumerate(baseline_values):
             records.append({
                 "model": BASELINE_MODEL, "variant": "tiny", "pooling": "mean",
-                "seed": seed, "parameters": 100,
-                "mlm_val_loss_best": value,
+                "seed": seed, "parameters": 100, metric: value,
             })
-        for seed, value in enumerate(arm_losses):
+        for seed, value in enumerate(arm_values):
             records.append({
                 "model": "ascii_clifford_bert", "variant": "tiny",
                 "pooling": "mean", "seed": seed, "parameters": 90,
-                "mlm_val_loss_best": value,
+                metric: value,
             })
         return records
 
     def test_a_clearly_better_arm_is_reported_better(self):
+        # MRR@10 is a maximize metric, so the better arm scores HIGHER.
         report = build_report(
-            self._records([4.0, 4.1, 4.2, 4.05, 4.15, 4.08],
-                          [3.0, 3.1, 3.2, 3.05, 3.15, 3.08])
+            self._records([0.10, 0.11, 0.12, 0.105, 0.115, 0.108],
+                          [0.30, 0.31, 0.32, 0.305, 0.315, 0.308])
         )
-        rows = [
-            r for r in report["paired"] if r["metric"] == "mlm_val_loss_best"
-        ]
+        rows = [r for r in report["paired"] if r["metric"] == self.PRIMARY]
         assert len(rows) == 1
         assert rows[0]["verdict"] == "BETTER"
-        assert rows[0]["diff_vs_baseline"] < 0
+        assert rows[0]["diff_vs_baseline"] > 0
+        assert rows[0]["correction"] == "holm"
 
     def test_a_clearly_worse_arm_is_reported_worse(self):
         report = build_report(
-            self._records([3.0, 3.1, 3.2, 3.05, 3.15, 3.08],
-                          [4.0, 4.1, 4.2, 4.05, 4.15, 4.08])
+            self._records([0.30, 0.31, 0.32, 0.305, 0.315, 0.308],
+                          [0.10, 0.11, 0.12, 0.105, 0.115, 0.108])
         )
-        rows = [r for r in report["paired"]]
+        rows = [r for r in report["paired"] if r["metric"] == self.PRIMARY]
         assert rows[0]["verdict"] == "WORSE"
 
     def test_identical_arms_are_indistinguishable(self):
-        values = [4.0, 4.1, 4.2, 4.05, 4.15, 4.08]
+        values = [0.10, 0.11, 0.12, 0.105, 0.115, 0.108]
         report = build_report(self._records(values, list(values)))
-        assert report["paired"][0]["verdict"] == "INDISTINGUISHABLE"
+        rows = [r for r in report["paired"] if r["metric"] == self.PRIMARY]
+        assert rows[0]["verdict"] == "INDISTINGUISHABLE"
+
+    def test_a_secondary_metric_never_gets_a_better_or_worse_verdict(self):
+        """Only the pre-registered primary endpoint yields a verdict."""
+        report = build_report(
+            self._records([4.0, 4.1, 4.2, 4.05, 4.15, 4.08],
+                          [1.0, 1.1, 1.2, 1.05, 1.15, 1.08],
+                          metric="mlm_val_loss_best")
+        )
+        rows = [r for r in report["paired"]
+                if r["metric"] == "mlm_val_loss_best"]
+        assert rows and all(r["role"] == "secondary" for r in rows)
+        assert all(r["verdict"] not in {"BETTER", "WORSE"} for r in rows)
+        assert all(r["correction"] == "bh" for r in rows)
+
+    def test_a_diagnostic_metric_gets_no_paired_row_at_all(self):
+        """A random projection wins on anisotropy while retrieving nothing."""
+        report = build_report(
+            self._records([0.1] * 8, [0.9] * 8,
+                          metric="eval_squad_ctx_anisotropy")
+        )
+        assert not [r for r in report["paired"]
+                    if r["metric"] == "eval_squad_ctx_anisotropy"]
+
+    def test_the_adjusted_p_is_never_smaller_than_the_raw_p(self):
+        report = build_report(
+            self._records([0.10, 0.11, 0.12, 0.105, 0.115, 0.108],
+                          [0.30, 0.31, 0.32, 0.305, 0.315, 0.308])
+        )
+        for row in report["paired"]:
+            assert row["p_adjusted"] >= row["p_value"] - 1e-12
 
     def test_direction_is_honoured_for_a_maximize_metric(self):
         """Higher accuracy is better; the sign convention must flip."""
         assert HEADLINE_METRICS["mlm_val_accuracy_best"][1] == "max"
         assert HEADLINE_METRICS["mlm_val_loss_best"][1] == "min"
+        # direction stays at index 1 so positional access keeps working
+        assert HEADLINE_METRICS["mlm_val_loss_best"].direction == "min"
 
     def test_arms_are_only_compared_within_a_matched_group(self):
         """Comparing across pooling strategies would confound the axes."""
@@ -280,12 +318,12 @@ class TestTheStudyIsPowered:
             records.append({
                 "model": BASELINE_MODEL, "variant": "tiny", "pooling": "mean",
                 "seed": seed, "parameters": 100,
-                "mlm_val_loss_best": 10.0 + seed * 0.01,
+                "eval_squad_mrr_at_10": 0.10 + seed * 0.001,
             })
             records.append({
                 "model": "ascii_clifford_bert", "variant": "tiny",
                 "pooling": "mean", "seed": seed, "parameters": 90,
-                "mlm_val_loss_best": 1.0 + seed * 0.01,
+                "eval_squad_mrr_at_10": 0.90 + seed * 0.001,
             })
         return records
 
@@ -294,7 +332,8 @@ class TestTheStudyIsPowered:
         self, n_seeds
     ):
         report = build_report(self._extreme_records(n_seeds))
-        rows = [r for r in report["paired"] if r["metric"] == "mlm_val_loss_best"]
+        rows = [r for r in report["paired"]
+                if r["metric"] == "eval_squad_mrr_at_10"]
         assert rows, n_seeds
         assert rows[0]["verdict"] == "UNDERPOWERED", (
             f"at {n_seeds} seeds the test cannot reach p<0.05, so a verdict of "
@@ -303,17 +342,26 @@ class TestTheStudyIsPowered:
 
     def test_six_seeds_can_reach_significance(self):
         report = build_report(self._extreme_records(6))
-        rows = [r for r in report["paired"] if r["metric"] == "mlm_val_loss_best"]
+        rows = [r for r in report["paired"]
+                if r["metric"] == "eval_squad_mrr_at_10"]
         assert rows[0]["verdict"] == "BETTER"
         assert rows[0]["p_value"] < 0.05
 
-    def test_the_sweep_default_seed_count_clears_the_floor(self):
-        from train.embeddings_experimental.report import (
-            MIN_SEEDS_FOR_SIGNIFICANCE,
-        )
+    def test_the_sweep_default_seed_count_clears_the_CORRECTED_floor(self):
+        """The floor that matters is the corrected one, not the m=1 one.
 
-        assert len(parse_args([]).seeds) >= MIN_SEEDS_FOR_SIGNIFICANCE, (
-            "the default sweep would be incapable of reporting any difference"
+        The primary endpoint is Holm-corrected across the non-baseline arms,
+        so the default must clear `min_pairs_for_significance(n_arms - 1)`,
+        which is 7 at four arms -- not the uncorrected 6.
+        """
+        from train.common.stats import min_pairs_for_significance
+        from train.embeddings_experimental.config import available_models
+
+        n_non_baseline = len(available_models()) - 1
+        floor = min_pairs_for_significance(n_non_baseline)
+        assert len(parse_args([]).seeds) >= floor, (
+            f"a {n_non_baseline}-arm primary family needs {floor} seeds; the "
+            "default sweep would be incapable of reporting any difference"
         )
 
 
@@ -325,3 +373,99 @@ class TestSweepCli:
 
     def test_dry_run_is_a_flag(self):
         assert parse_args(["--dry-run"]).dry_run is True
+
+
+class TestTheBestReductionHonoursDirection:
+    """`collect_results` reduced EVERY metric with `min`.
+
+    That made `mlm_val_accuracy_best` the WORST accuracy, while
+    `HEADLINE_METRICS` described the same key as a maximize metric. Silent, and
+    it inverted one of the three metrics the study reported.
+    """
+
+    def _cell(self, root, history):
+        cell = os.path.join(root, "ascii_bert", "tiny", "mean", "seed_0")
+        os.makedirs(cell, exist_ok=True)
+        payload = {
+            "config": {
+                "model": "ascii_bert", "variant": "tiny",
+                "pooling_strategy": "mean", "seed": 0,
+            },
+            "parameters": 1,
+            "mlm": history,
+        }
+        with open(os.path.join(cell, "results.json"), "w") as handle:
+            json.dump(payload, handle)
+        return collect_results(root)[0]
+
+    def test_a_maximize_metric_takes_the_max(self, tmp_path):
+        record = self._cell(str(tmp_path), {"val_accuracy": [0.1, 0.9, 0.4]})
+        assert record["mlm_val_accuracy_best"] == pytest.approx(0.9)
+        assert record["mlm_val_accuracy_final"] == pytest.approx(0.4)
+
+    def test_a_minimize_metric_takes_the_min(self, tmp_path):
+        record = self._cell(str(tmp_path), {"val_loss": [5.0, 1.0, 3.0]})
+        assert record["mlm_val_loss_best"] == pytest.approx(1.0)
+        assert record["mlm_val_loss_final"] == pytest.approx(3.0)
+
+    def test_an_unregistered_metric_gets_no_best_rather_than_a_guess(
+        self, tmp_path
+    ):
+        """Silence is how the original bug survived; refuse to guess."""
+        record = self._cell(str(tmp_path), {"val_mystery": [5.0, 1.0]})
+        assert "mlm_val_mystery_final" in record
+        assert "mlm_val_mystery_best" not in record
+
+    def test_direction_has_exactly_one_producer(self):
+        """`report` and `sweep` must not be able to disagree."""
+        for key, spec in HEADLINE_METRICS.items():
+            for stage in ("mlm_", "contrastive_"):
+                if key.startswith(stage) and key.endswith("_best"):
+                    bare = key[len(stage):-len("_best")]
+                    assert direction_of(bare) == spec.direction, key
+
+
+class TestCorrectionRaisesTheSeedFloor:
+    """A correction is not free; it is paid for in seeds.
+
+    A sign-flip test over n pairs cannot produce a p below 2/2**n, so a family
+    of size m needs n >= 1 + log2(m/alpha). With three non-baseline arms in the
+    primary family that is 7 seeds, not 6.
+    """
+
+    def _records(self, n_seeds, n_arms):
+        records = []
+        for seed in range(n_seeds):
+            records.append({
+                "model": BASELINE_MODEL, "variant": "tiny", "pooling": "mean",
+                "seed": seed, "parameters": 100,
+                "eval_squad_mrr_at_10": 0.10 + seed * 0.001,
+            })
+            for arm in range(n_arms):
+                records.append({
+                    "model": f"arm_{arm}", "variant": "tiny", "pooling": "mean",
+                    "seed": seed, "parameters": 90,
+                    "eval_squad_mrr_at_10": 0.90 + seed * 0.001,
+                })
+        return records
+
+    def test_family_size_matches_the_number_of_non_baseline_arms(self):
+        report = build_report(self._records(8, 3))
+        rows = [r for r in report["paired"] if r["role"] == "primary"]
+        assert rows and all(r["family_size"] == 3 for r in rows)
+        assert all(r["min_seeds_for_family"] == 7 for r in rows)
+
+    def test_six_seeds_is_underpowered_for_a_three_arm_family(self):
+        """Uncorrected 6 seeds would reject; corrected it cannot."""
+        report = build_report(self._records(6, 3))
+        rows = [r for r in report["paired"] if r["role"] == "primary"]
+        assert rows
+        assert all(r["verdict"] == "UNDERPOWERED" for r in rows), (
+            "at 6 seeds a Holm-corrected 3-arm family cannot reject for any "
+            "effect size; anything else overstates the study"
+        )
+
+    def test_seven_seeds_clears_the_floor(self):
+        report = build_report(self._records(7, 3))
+        rows = [r for r in report["paired"] if r["role"] == "primary"]
+        assert rows and all(r["verdict"] == "BETTER" for r in rows)

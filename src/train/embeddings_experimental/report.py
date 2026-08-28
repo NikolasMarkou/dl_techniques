@@ -23,7 +23,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -33,9 +33,12 @@ import numpy as np
 
 from dl_techniques.utils.logger import logger
 from train.common.stats import (
+    benjamini_hochberg,
     bootstrap_ci,
     format_mean_std,
+    holm_bonferroni,
     mean_std,
+    min_pairs_for_significance,
     paired_permutation_test,
 )
 
@@ -63,11 +66,81 @@ RNG_SEED = 20260828
 #: rather than INDISTINGUISHABLE.
 MIN_SEEDS_FOR_SIGNIFICANCE = 6
 
-#: metric key -> (human label, direction). "min" means lower is better.
-HEADLINE_METRICS: Dict[str, Tuple[str, str]] = {
-    "mlm_val_loss_best": ("MLM val loss (best)", "min"),
-    "mlm_val_accuracy_best": ("MLM val accuracy (best)", "max"),
-    "contrastive_val_loss_best": ("Contrastive val loss (best)", "min"),
+class MetricSpec(NamedTuple):
+    """How one metric is reported.
+
+    ``direction`` stays at index 1 so existing positional access keeps working.
+
+    ``role`` is what stops a diagnostic from being read as a quality claim:
+
+    - ``primary``   the single pre-registered confirmatory endpoint. Only this
+                    role produces a BETTER/WORSE verdict, corrected with Holm.
+    - ``secondary`` reported with a BH-adjusted q-value and the verdict
+                    ``SECONDARY``, never BETTER/WORSE.
+    - ``diagnostic`` mean and CI only, NO paired test at all. A random
+                    projection maximizes ``effective_rank``, minimizes
+                    ``anisotropy`` and minimizes ``uniformity`` while retrieving
+                    nothing, so "arm X is significantly better on anisotropy"
+                    would be a false claim about quality. Diagnostics explain
+                    WHY a primary number moved; they are not evidence that it
+                    did.
+    """
+
+    label: str
+    direction: Optional[str]
+    role: str
+
+
+#: metric key -> MetricSpec. Directions for history-derived keys must agree with
+#: `metric_directions.direction_of`; a test asserts it.
+HEADLINE_METRICS: Dict[str, MetricSpec] = {
+    # --- primary: the one confirmatory endpoint -----------------------
+    "eval_squad_mrr_at_10": MetricSpec(
+        "SQuAD MRR@10 (context prefixes)", "max", "primary"
+    ),
+    # --- secondary ----------------------------------------------------
+    "eval_squad_recall_at_1": MetricSpec("SQuAD R@1", "max", "secondary"),
+    "eval_squad_recall_at_10": MetricSpec("SQuAD R@10", "max", "secondary"),
+    "eval_sst2_probe_accuracy": MetricSpec(
+        "SST-2 probe accuracy (padded corpus)", "max", "secondary"
+    ),
+    "mlm_val_loss_best": MetricSpec("MLM val loss (best)", "min", "secondary"),
+    "mlm_val_accuracy_best": MetricSpec(
+        "MLM val accuracy (best)", "max", "secondary"
+    ),
+    "contrastive_val_loss_best": MetricSpec(
+        "Contrastive val loss (best)", "min", "secondary"
+    ),
+    # --- diagnostics: no verdict, no p-value --------------------------
+    "eval_squad_median_rank": MetricSpec(
+        "SQuAD median rank", "min", "diagnostic"
+    ),
+    "eval_squad_ctx_anisotropy": MetricSpec(
+        "Context anisotropy", None, "diagnostic"
+    ),
+    "eval_squad_ctx_effective_rank": MetricSpec(
+        "Context effective rank", None, "diagnostic"
+    ),
+    "eval_squad_alignment": MetricSpec(
+        "Alignment (question, context)", None, "diagnostic"
+    ),
+    "eval_squad_uniformity": MetricSpec("Uniformity", None, "diagnostic"),
+    "eval_squad_ctx_norm_mean": MetricSpec(
+        "Mean embedding L2 norm", None, "diagnostic"
+    ),
+    "eval_squad_ctx_pad_fraction": MetricSpec(
+        "Context padding fraction", None, "diagnostic"
+    ),
+    "eval_sst2_pad_fraction": MetricSpec(
+        "SST-2 padding fraction", None, "diagnostic"
+    ),
+}
+
+#: Metrics whose chance level is known and must be printed beside the result,
+#: so "low" can be told apart from "no better than chance".
+CHANCE_BASELINE_KEYS: Dict[str, str] = {
+    "eval_squad_recall_at_1": "eval_squad_chance_recall_at_1",
+    "eval_sst2_probe_accuracy": "eval_sst2_majority_baseline",
 }
 
 #: Axes that identify a comparison group. Arms are compared WITHIN a group.
@@ -121,7 +194,8 @@ def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     for (model, *group), seeded in sorted(
         by_cell.items(), key=lambda item: tuple(str(x) for x in item[0])
     ):
-        for metric, (label, direction) in HEADLINE_METRICS.items():
+        for metric, spec in HEADLINE_METRICS.items():
+            label, direction = spec.label, spec.direction
             values = [
                 r[metric] for r in seeded.values() if r.get(metric) is not None
             ]
@@ -134,6 +208,7 @@ def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "metric": metric,
                 "label": label,
                 "direction": direction,
+                "role": spec.role,
                 "n": len(values),
                 "mean": mean,
                 "std": std,
@@ -164,7 +239,14 @@ def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         for (model, *other_group), seeded in by_cell.items():
             if model == BASELINE_MODEL or tuple(other_group) != group:
                 continue
-            for metric, (label, direction) in HEADLINE_METRICS.items():
+            for metric, spec in HEADLINE_METRICS.items():
+                # Diagnostics get no paired test at all. A BETTER/WORSE verdict
+                # on one would be a false quality claim: a random projection
+                # wins on anisotropy, effective rank and uniformity while
+                # retrieving nothing.
+                if spec.role == "diagnostic":
+                    continue
+                label, direction = spec.label, spec.direction
                 shared = sorted(
                     seed
                     for seed in seeded
@@ -180,14 +262,6 @@ def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                     arm, base, n_perm=10000, rng=rng
                 )
                 better = (diff < 0) if direction == "min" else (diff > 0)
-                if len(shared) < MIN_SEEDS_FOR_SIGNIFICANCE:
-                    # Not a finding: at this many pairs the test cannot reach
-                    # p < 0.05 for ANY effect size.
-                    verdict = "UNDERPOWERED"
-                elif p_value < 0.05:
-                    verdict = "BETTER" if better else "WORSE"
-                else:
-                    verdict = "INDISTINGUISHABLE"
                 paired.append(
                     {
                         "model": model,
@@ -196,14 +270,76 @@ def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                         "metric": metric,
                         "label": label,
                         "direction": direction,
+                        "role": spec.role,
                         "n_pairs": len(shared),
                         "diff_vs_baseline": diff,
                         "p_value": p_value,
-                        "verdict": verdict,
+                        "better": better,
                     }
                 )
 
+    _apply_corrections(paired)
     return {"headline": headline, "paired": paired, "flags": flags}
+
+
+
+def _apply_corrections(paired: List[Dict[str, Any]]) -> None:
+    """Assign adjusted p-values and verdicts, in place.
+
+    Two families, and the split is the substantive choice:
+
+    - **Primary** -- the single pre-registered endpoint, across the
+      non-baseline arms WITHIN one comparison group. Corrected with **Holm**
+      (family-wise): the family is tiny, it backs one categorical claim, and
+      Holm is valid under arbitrary dependence where BH needs positive
+      dependency. This is the only family that yields BETTER/WORSE.
+    - **Secondary** -- every secondary metric across the arms within one group.
+      Corrected with **BH** (false-discovery rate): this family is exploratory
+      and strongly positively dependent, since recall@1, recall@10 and MRR@10
+      are three weightings of one recall curve. Reported as ``SECONDARY``,
+      never BETTER/WORSE.
+
+    Groups are separate families rather than pooled. A ``(variant, pooling)``
+    cell is a separate question, and correcting across them would penalise the
+    study for asking more questions rather than for asking one badly.
+
+    The correction raises the seed floor, which is why it is worth stating:
+    a sign-flip test over ``n`` pairs cannot produce a p below ``2/2**n``, so a
+    family of size ``m`` needs ``n >= 1 + log2(m/alpha)`` -- 6 seeds
+    uncorrected, 7 for a 3-arm primary family, 10 for an 18-test secondary one.
+    """
+    families: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in paired:
+        group = tuple(row[axis] for axis in GROUP_AXES)
+        if row["role"] == "primary":
+            families[("primary", group, row["metric"])].append(row)
+        else:
+            families[("secondary", group)].append(row)
+
+    for key, rows in families.items():
+        kind = key[0]
+        p_values = [r["p_value"] for r in rows]
+        correct = holm_bonferroni if kind == "primary" else benjamini_hochberg
+        _, adjusted = correct(p_values, alpha=0.05)
+        family_size = len(rows)
+        floor = min_pairs_for_significance(family_size)
+
+        for row, p_adj in zip(rows, adjusted):
+            row["p_adjusted"] = float(p_adj)
+            row["family_size"] = family_size
+            row["correction"] = "holm" if kind == "primary" else "bh"
+            row["min_seeds_for_family"] = floor
+
+            if row["n_pairs"] < floor:
+                # Not a finding: below this many pairs the corrected test
+                # cannot reject for ANY effect size.
+                row["verdict"] = "UNDERPOWERED"
+            elif kind == "secondary":
+                row["verdict"] = "SECONDARY"
+            elif p_adj < 0.05:
+                row["verdict"] = "BETTER" if row["better"] else "WORSE"
+            else:
+                row["verdict"] = "INDISTINGUISHABLE"
 
 
 def _markdown_table(rows: List[Dict[str, Any]], columns: Sequence[str]) -> str:
@@ -237,12 +373,13 @@ def write_report(report: Dict[str, Any], out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
 
     headline_columns = (
-        "model", *GROUP_AXES, "metric", "n", "mean", "std",
+        "model", *GROUP_AXES, "metric", "role", "n", "mean", "std",
         "ci_low", "ci_high", "parameters",
     )
     paired_columns = (
-        "model", "baseline", *GROUP_AXES, "metric", "n_pairs",
-        "diff_vs_baseline", "p_value", "verdict",
+        "model", "baseline", *GROUP_AXES, "metric", "role", "n_pairs",
+        "diff_vs_baseline", "p_value", "p_adjusted", "correction",
+        "family_size", "min_seeds_for_family", "verdict",
     )
 
     for name, rows, columns in (
@@ -288,6 +425,34 @@ def write_report(report: Dict[str, Any], out_dir: str) -> str:
         underpowered = [
             r for r in report["paired"] if r["verdict"] == "UNDERPOWERED"
         ]
+        coverage = [r for r in report["headline"]]
+        handle.write("\n## Protocol and caveats\n\n")
+        handle.write(
+            "- **Train/eval overlap.** SQuAD contexts ARE Wikipedia paragraphs "
+            "and the MLM corpus is Wikipedia. Every arm shares the leak, so a "
+            "RELATIVE comparison survives it; no absolute claim does.\n"
+            "- **Prefix retrieval.** The position table is sized at the "
+            "training length, so contexts (mean 780, median 705, p90 1166 "
+            "characters) are truncated to the window. The task is matching a "
+            "context PREFIX, not a passage.\n"
+            "- **Padding.** Stage 1 trains packed and padding-free because one "
+            "arm's block cannot honour a padding mask. Evaluation cannot pack, "
+            "so the `*_pad_fraction` diagnostics report how much padding each "
+            "corpus actually carried under length-sorted batching.\n"
+            "- **Pooled, not projected.** Stage 2 saves the encoder, not the "
+            "SimCSE wrapper, so these metrics are computed on `pooled_output`; "
+            "the contrastive loss is measured in projection space and the two "
+            "can move in opposite directions.\n"
+            "- **Correction.** The primary endpoint is corrected with Holm "
+            "across arms within a group; secondary metrics with "
+            "Benjamini-Hochberg. Groups are SEPARATE families, not pooled -- a "
+            "position a reader may disagree with. Diagnostics get no p-value "
+            "at all, because a random projection wins on anisotropy, effective "
+            "rank and uniformity while retrieving nothing.\n"
+            "- **Chance levels** are reported as metrics "
+            "(`eval_squad_chance_recall_at_1`, `eval_sst2_majority_baseline`) "
+            "so a near-floor number is legible as near-floor.\n"
+        )
         handle.write(
             "\n## Reading this report\n\n"
             f"The paired test is two-sided sign-flip, so with `n` pairs the "

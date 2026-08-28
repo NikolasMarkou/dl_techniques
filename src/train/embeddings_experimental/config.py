@@ -119,6 +119,13 @@ class ExperimentConfig:
     hidden_dropout_rate: float = 0.1
     stochastic_depth_rate: float = 0.0
 
+    # -- embedding evaluation ------------------------------------------
+    run_embedding_eval: bool = True
+    tfds_data_dir: str = "/media/arxwn/data0_4tb/datasets/tensorflow_datasets"
+    eval_max_queries: int = 2000
+    eval_probe_train_n: int = 8000
+    eval_batch_size: int = 64
+
     # -- run plumbing --------------------------------------------------
     output_dir: str = "results"
     experiment_name: Optional[str] = None
