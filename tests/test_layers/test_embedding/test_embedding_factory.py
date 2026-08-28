@@ -376,3 +376,43 @@ class TestStrictDroppedKwargs:
                                    definitely_bogus=1)
         assert STRICT_DROPPED_KEY_MARKER not in str(excinfo.value)
         assert "Required parameters missing" in str(excinfo.value)
+
+
+class TestGetEmbeddingInfoIsolation:
+    """`get_embedding_info()` must hand out data a caller can safely edit.
+
+    B-1: the copy used to be SHALLOW, so each returned entry's
+    `required_params` list and `optional_params` dict WERE the registry's own
+    objects and a caller editing them corrupted `EMBEDDING_REGISTRY`
+    process-wide, for every later `create_embedding_layer` in that process.
+    """
+
+    def test_mutating_returned_optional_params_leaves_registry_unchanged(self):
+        before = dict(EMBEDDING_REGISTRY["patch_2d"]["optional_params"])
+        info = get_embedding_info()
+        info["patch_2d"]["optional_params"]["kernel_initializer"] = "POISON"
+        assert EMBEDDING_REGISTRY["patch_2d"]["optional_params"] == before
+        assert "POISON" not in EMBEDDING_REGISTRY["patch_2d"]["optional_params"].values()
+
+    def test_mutating_returned_required_params_leaves_registry_unchanged(self):
+        before = list(EMBEDDING_REGISTRY["patch_2d"]["required_params"])
+        info = get_embedding_info()
+        info["patch_2d"]["required_params"].append("POISON")
+        assert EMBEDDING_REGISTRY["patch_2d"]["required_params"] == before
+
+    def test_nested_entries_are_not_the_registry_objects(self):
+        info = get_embedding_info()
+        for key, entry in EMBEDDING_REGISTRY.items():
+            assert info[key]["optional_params"] is not entry["optional_params"], key
+            assert info[key]["required_params"] is not entry["required_params"], key
+            # The class object itself is shared on purpose: it is the layer
+            # type, not mutable payload.
+            assert info[key]["class"] is entry["class"], key
+
+    def test_registry_still_usable_after_a_caller_mutates_the_copy(self):
+        info = get_embedding_info()
+        info["patch_2d"]["required_params"].append("POISON")
+        info["patch_2d"]["optional_params"].clear()
+        # A later construction must not see the caller's edits.
+        layer = create_embedding_layer("patch_2d", patch_size=4, embed_dim=16)
+        assert layer is not None

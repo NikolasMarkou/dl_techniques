@@ -68,20 +68,13 @@ class PositionalEmbedding(keras.layers.Layer):
     raises there, at call time. Size the table for the longest sequence the
     model will ever see.
 
-    KNOWN DEFECT, DESCRIBED AS IT BEHAVES TODAY. ``scale`` is applied
-    whenever the resolved initializer is a ``TruncatedNormal``, including one
-    the caller supplied. Passing
+    ``scale`` resolves the DEFAULT initializer only. It is the standard
+    deviation used when ``pos_initializer`` is the bare string
+    ``"truncated_normal"`` (the default). A caller-supplied initializer
+    INSTANCE is used exactly as given, whatever its type, and ``scale`` is
+    then ignored -- so
     ``pos_initializer=keras.initializers.TruncatedNormal(stddev=0.5)``
-    without also passing ``scale=0.5`` silently REPLACES that standard
-    deviation with ``scale``, which defaults to ``0.02``. Any other
-    initializer is used as given and ``scale`` is ignored, so the override is
-    both silent and type-dependent.
-
-    This is a DEFECT scheduled for repair, not a design choice: the intended
-    behaviour is that a caller-supplied instance survives and ``scale`` only
-    resolves the bare string ``"truncated_normal"``. Do not build on the
-    current behaviour. When it is fixed, this paragraph and the comment in
-    ``__init__`` both become false and must go with it.
+    keeps its ``0.5``.
 
     **Architecture Overview:**
 
@@ -125,10 +118,12 @@ class PositionalEmbedding(keras.layers.Layer):
         ``[0, 1]``. Defaults to ``0.0``.
     :type dropout_rate: float
     :param pos_initializer: Initializer for the table. Defaults to
-        ``"truncated_normal"``.
+        ``"truncated_normal"``. An instance is used exactly as supplied.
     :type pos_initializer: Union[str, keras.initializers.Initializer]
-    :param scale: Standard deviation used when the resolved initializer is a
-        ``TruncatedNormal``. Must be positive. Defaults to ``0.02``.
+    :param scale: Standard deviation for the DEFAULT initializer, i.e. used
+        only when ``pos_initializer`` is the string ``"truncated_normal"``.
+        Ignored for a caller-supplied instance. Must be positive. Defaults
+        to ``0.02``.
     :type scale: float
     :param kwargs: Additional keyword arguments for the Layer base class.
 
@@ -182,9 +177,12 @@ class PositionalEmbedding(keras.layers.Layer):
         :type dim: int
         :param dropout_rate: Dropout applied after the addition.
         :type dropout_rate: float
-        :param pos_initializer: Initializer for the table.
+        :param pos_initializer: Initializer for the table. An instance is
+            honoured as given; only the string ``"truncated_normal"`` is
+            resolved with ``scale``.
         :type pos_initializer: Union[str, keras.initializers.Initializer]
-        :param scale: Standard deviation used for a ``TruncatedNormal``.
+        :param scale: Standard deviation for the default
+            ``"truncated_normal"`` initializer.
         :type scale: float
         :param kwargs: Additional keyword arguments for the Layer base class.
         :type kwargs: Any
@@ -210,20 +208,17 @@ class PositionalEmbedding(keras.layers.Layer):
         self.scale = scale
         self.pos_initializer = keras.initializers.get(pos_initializer)
 
-        # `scale` owns the standard deviation of ANY resolved TruncatedNormal,
-        # including one the caller built themselves. A caller-supplied stddev
-        # is replaced here. This is a KNOWN DEFECT scheduled for repair, not a
-        # design choice; it is documented in the class docstring because it is
-        # silent. The intended behaviour is to honour the caller's instance and
-        # apply `scale` only to the bare string "truncated_normal".
-        #
-        # The `elif` below is UNREACHABLE. `keras.initializers.get` has already
-        # turned the string "truncated_normal" into a TruncatedNormal instance,
-        # so the `isinstance` arm always fires first for it. Whoever fixes the
-        # defect above must delete the `isinstance` arm, not this one.
-        if isinstance(self.pos_initializer, keras.initializers.TruncatedNormal):
-            self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
-        elif pos_initializer == "truncated_normal":
+        # DECISION plan-2026-08-28T181715-3870472c/D-001
+        # Branch on the ARGUMENT, never on the resolved object. An
+        # `isinstance(self.pos_initializer, TruncatedNormal)` test here would
+        # also catch a caller's own `TruncatedNormal(stddev=0.5)` and silently
+        # rewrite its stddev to `scale` (measured: 0.5 -> 0.02), while letting
+        # every other initializer type through untouched. Do NOT reintroduce
+        # it. `keras.initializers.get("truncated_normal")` already returns a
+        # TruncatedNormal, so the string test below is the only one that can
+        # distinguish "the caller took the default" from "the caller built an
+        # instance". See decisions.md D-001.
+        if isinstance(pos_initializer, str) and pos_initializer == "truncated_normal":
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
 
         # DECISION plan-2026-08-22T035419-a11304c8/D-055

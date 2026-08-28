@@ -441,6 +441,52 @@ class TestPositionalEmbedding:
         assert np.allclose(input_diff.numpy(), output_diff.numpy())
 
 
+class TestCallerSuppliedInitializerSurvives:
+    """B-2: a caller-supplied initializer INSTANCE must not be replaced.
+
+    `scale` used to overwrite the standard deviation of ANY resolved
+    `TruncatedNormal`, including one the caller built, so
+    `TruncatedNormal(stddev=0.5)` silently became `stddev=0.02`. Any other
+    initializer type passed through intact, which made the override both
+    silent and type-dependent.
+    """
+
+    def test_truncated_normal_instance_keeps_its_stddev(self):
+        layer = PositionalEmbedding(
+            max_seq_len=8, dim=4,
+            pos_initializer=keras.initializers.TruncatedNormal(stddev=0.5),
+        )
+        assert isinstance(layer.pos_initializer, keras.initializers.TruncatedNormal)
+        assert float(layer.pos_initializer.stddev) == pytest.approx(0.5)
+
+    def test_scale_still_resolves_the_bare_string(self):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4,
+                                    pos_initializer="truncated_normal", scale=0.05)
+        assert isinstance(layer.pos_initializer, keras.initializers.TruncatedNormal)
+        assert float(layer.pos_initializer.stddev) == pytest.approx(0.05)
+
+    def test_default_initializer_still_uses_scale(self):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4, scale=0.07)
+        assert float(layer.pos_initializer.stddev) == pytest.approx(0.07)
+
+    def test_other_initializer_types_still_pass_through(self):
+        layer = PositionalEmbedding(max_seq_len=8, dim=4,
+                                    pos_initializer=keras.initializers.HeNormal())
+        assert isinstance(layer.pos_initializer, keras.initializers.HeNormal)
+
+    def test_caller_stddev_actually_reaches_the_table(self):
+        """Not just the echo: the weights themselves must carry the spread."""
+        layer = PositionalEmbedding(
+            max_seq_len=4096, dim=64,
+            pos_initializer=keras.initializers.TruncatedNormal(stddev=0.5, seed=0),
+        )
+        layer.build((None, 8, 64))
+        std = float(np.std(keras.ops.convert_to_numpy(layer.pos_embedding)))
+        # TruncatedNormal at 2 sigma has std ~0.87 * stddev; 0.02 would be
+        # two orders of magnitude below this floor.
+        assert std > 0.3
+
+
 if __name__ == "__main__":
     # Run tests
     pytest.main([__file__, "-v"])

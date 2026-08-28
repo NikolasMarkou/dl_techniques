@@ -119,6 +119,7 @@ Two registry facts do not appear in either table:
       transpose.
 """
 
+import copy
 import math
 import keras
 from typing import Dict, Any, Literal, Optional
@@ -333,22 +334,17 @@ def get_embedding_info() -> Dict[str, Dict[str, Any]]:
     ``optional_params`` and ``use_case``. The ``optional_params`` mapping is
     the only place the per-type defaults are written down.
 
-    KNOWN DEFECT, DESCRIBED AS IT BEHAVES TODAY. The copy is SHALLOW. The
-    outer dict and each type's dict are new, but the nested
-    ``required_params`` list and ``optional_params`` dict are the registry's
-    own objects: ``get_embedding_info()['patch_2d']['optional_params'] is
-    EMBEDDING_REGISTRY['patch_2d']['optional_params']`` is ``True``, and so
-    is the same identity for ``required_params``. Mutating either one changes
-    the registry for every later call in the process.
+    The result is a DEEP COPY, so the caller owns it: editing the returned
+    ``required_params`` list or ``optional_params`` mapping cannot reach
+    ``EMBEDDING_REGISTRY``. The one object still shared with the registry is
+    each entry's ``class`` value, which is the layer type itself, not mutable
+    payload -- ``copy.deepcopy`` returns a class unchanged.
 
-    Treat the result as read-only, or deep-copy it. This is a DEFECT
-    scheduled for repair, not a design choice; when the entries are deep
-    copied this paragraph becomes false and must go with it.
-
-    :return: Mapping from embedding type key to that type's registry entry.
+    :return: Mapping from embedding type key to a private copy of that
+        type's registry entry.
     :rtype: Dict[str, Dict[str, Any]]
     """
-    return {embed_type: info.copy() for embed_type, info in EMBEDDING_REGISTRY.items()}
+    return copy.deepcopy(EMBEDDING_REGISTRY)
 
 def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
     """Check an embedding configuration before anything is constructed.

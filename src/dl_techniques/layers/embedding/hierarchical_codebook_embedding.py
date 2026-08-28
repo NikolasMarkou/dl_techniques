@@ -443,15 +443,18 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         """Rebuild the layer, deserializing the initializer and regularizer.
 
         The two entries arrive as dicts from ``.keras`` files and are turned
-        back into objects here. This method MUTATES the ``config`` mapping
-        it is given rather than copying it, so do not reuse a config dict
-        after passing it in.
+        back into objects here. The caller's mapping is COPIED first, so the
+        dict passed in is left untouched and stays reusable.
 
-        :param config: Configuration produced by ``get_config()``.
+        :param config: Configuration produced by ``get_config()``. Not
+            modified.
         :type config: Dict[str, Any]
         :return: A new layer instance.
         :rtype: HierarchicalCodebookEmbedding
         """
+        # Shallow copy is enough: only top-level keys are rebound below, and
+        # the nested dicts are handed to `deserialize`, which reads them.
+        config = dict(config)
         for key in ("embeddings_initializer", "embeddings_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
                 if key == "embeddings_initializer":

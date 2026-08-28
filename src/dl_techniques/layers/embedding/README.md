@@ -123,8 +123,9 @@ print(f"Optional: {list(bert_info['optional_params'].keys())}")
 #            'dropout_rate', 'normalization_type', 'use_token_type_embeddings',
 #            'position_embedding_type', 'mask_zero']
 
-# The copy is SHALLOW: the nested lists and dicts belong to the registry.
-# Treat the result as read-only, or deep-copy it before editing.
+# The result is a DEEP COPY. Editing the returned `required_params` list or
+# `optional_params` dict cannot reach `EMBEDDING_REGISTRY`. Only each entry's
+# `class` value is shared, because it is the layer type itself.
 ```
 
 ### Validation
@@ -180,6 +181,8 @@ img_embed = create_embedding_layer(
 ### PositionalEmbedding (`positional_learned`)
 - **Required**: `max_seq_len`, `dim`
 - **Optional**: `dropout_rate` (default: `0.0`), `scale` (default: `0.02`), `pos_initializer` (default: `'truncated_normal'`)
+- `scale` sets the standard deviation of the DEFAULT initializer only. Pass an
+  initializer instance and it is used exactly as given, `scale` ignored.
 
 ```python
 pos_embed = create_embedding_layer(

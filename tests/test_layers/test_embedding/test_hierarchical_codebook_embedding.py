@@ -175,3 +175,43 @@ class TestHierarchicalCodebookEmbedding:
         ids = tf.constant([[0, 1, 2]], dtype=tf.int32)
         out = layer(ids)
         assert out.shape == (1, 3, 16)
+
+
+class TestFromConfigDoesNotMutateCallerDict:
+    """B-3: `from_config` used to deserialize IN PLACE on its argument.
+
+    NOTE ON THE GUARD. The obvious test -- "call `from_config` twice on the
+    same dict" -- CANNOT FAIL: `initializers.deserialize` passes an
+    already-deserialized object straight through, so the second call succeeds
+    on the mutated dict too. It was green before the fix and after it. The
+    guard that CAN fail is a deep-copy comparison of the caller's own dict.
+    """
+
+    def test_callers_config_dict_is_unchanged(self):
+        import copy
+
+        layer = HierarchicalCodebookEmbedding(
+            vocab_size=64, output_dim=16, num_chunks=2, chunk_bits=3,
+        )
+        config = layer.get_config()
+        snapshot = copy.deepcopy(config)
+
+        HierarchicalCodebookEmbedding.from_config(config)
+
+        for key in ("embeddings_initializer", "embeddings_regularizer"):
+            assert type(config.get(key)) is type(snapshot.get(key)), (
+                f"from_config changed the caller's dict at {key!r}: "
+                f"{type(snapshot.get(key))} -> {type(config.get(key))}"
+            )
+        assert config == snapshot
+
+    def test_second_call_still_works(self):
+        """Kept as a regression on the documented behaviour -- it is NOT the
+        red arm (it passed before the fix as well)."""
+        layer = HierarchicalCodebookEmbedding(
+            vocab_size=64, output_dim=16, num_chunks=2, chunk_bits=3,
+        )
+        config = layer.get_config()
+        a = HierarchicalCodebookEmbedding.from_config(config)
+        b = HierarchicalCodebookEmbedding.from_config(config)
+        assert a.vocab_size == b.vocab_size == 64
