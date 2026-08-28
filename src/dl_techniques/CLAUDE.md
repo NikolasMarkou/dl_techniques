@@ -41,7 +41,7 @@ src/dl_techniques/
 
 Each package has its own `CLAUDE.md` with detailed documentation.
 
-`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 84 leaf
+`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 85 leaf
 packages sit under 12 family directories (`common`, `embeddings_experimental`,
 `general_purpose`, `graph`, `language`, `memory`, `neural_computer`, `point_cloud`,
 `tabular`, `time_series`, `vision`, `vision_language`), four of which nest one level further
@@ -75,7 +75,7 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 |---|---|---|
 | `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 265 of 300 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
-| `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 86 Sphinx-only, 8 both, 111 neither, over 285 `.py` files |
+| `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 87 Sphinx-only, 8 both, 112 neither, over 287 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
 | `metrics/` | Google majority | 12 of 15 / 2 |
 | `utils/` | Google majority | 22 of 41 / 11, 3 both |
@@ -102,11 +102,11 @@ Re-derive (`--include=*.py` is **load-bearing** — without it the greps match t
 and the numbers invalidate themselves):
 
 ```bash
-find src/dl_techniques/models -name '*.py' | wc -l                                   # 285
+find src/dl_techniques/models -name '*.py' | wc -l                                   # 287
 grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   #  88 = Google-only + both
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  94 = Sphinx-only + both
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  95 = Sphinx-only + both
 # comm -12 of those two sorted file lists -> 8 (both)
-# Google-only = 88 - 8 = 80;  Sphinx-only = 94 - 8 = 86;  neither = 285 - 80 - 86 - 8 = 111
+# Google-only = 88 - 8 = 80;  Sphinx-only = 95 - 8 = 87;  neither = 287 - 80 - 87 - 8 = 112
 ```
 
 > **The `Args:` anchor is load-bearing, and the numbers are not comparable without it.** An

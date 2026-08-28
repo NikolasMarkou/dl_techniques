@@ -15,6 +15,7 @@ reported metric is attributable to the block rather than to the plumbing.
 | `ascii_bert` | `TransformerLayer` (multi-head self-attention) | yes | quadratic |
 | `ascii_clifford_bert` | `CliffordNetBlock`, bidirectional sequence mode | no | linear |
 | `ascii_convnext_bert` | `ConvNextV1Block` along the sequence axis | no | linear |
+| `ascii_convnext_v2_bert` | `ConvNextV2Block` (V1 + Global Response Norm) | no | linear |
 | `shared` | the skeleton and the block registry — not an arm | — | — |
 
 Adding an arm is one `BLOCK_REGISTRY` entry plus a thin leaf package. It is
@@ -24,11 +25,11 @@ never a second copy of the encoder.
 
 At `max_position_embeddings=128`, ASCII vocabulary (101 ids):
 
-| Variant | hidden / layers | `ascii_bert` | `ascii_clifford_bert` | `ascii_convnext_bert` |
-|---|---|---:|---:|---:|
-| tiny | 128 / 4 | 822,656 | 499,072 | 562,048 |
-| small | 256 / 6 | 4,797,696 | 3,630,336 | 3,229,440 |
-| base | 512 / 8 | 25,337,344 | 23,272,960 | 16,961,024 |
+| Variant | hidden / layers | `ascii_bert` | `ascii_clifford_bert` | `ascii_convnext_bert` | `ascii_convnext_v2_bert` |
+|---|---|---:|---:|---:|---:|
+| tiny | 128 / 4 | 822,656 | 499,072 | 562,048 | 566,144 |
+| small | 256 / 6 | 4,797,696 | 3,630,336 | 3,229,440 | 3,241,728 |
+| base | 512 / 8 | 25,337,344 | 23,272,960 | 16,961,024 | 16,993,792 |
 
 **Equal variant names do not mean equal parameter counts.** The arms are depth-
 and width-matched, not parameter-matched, which is why the study reports the
@@ -58,11 +59,22 @@ measures exactly 0.0 on the same comparison. The ConvNeXt arm has the same
 hazard for the same reason (a same-padded depthwise convolution), but shows it
 at initialization rather than hiding it, because its LayerScale starts at 1.0.
 
-**1b. The three arms separate two effects.** The Clifford arm differs from the
-baseline in two ways at once — convolutional instead of attentional, *and* a
-geometric product for channel mixing. `ascii_convnext_bert` is convolutional
-without the geometric product, so the three together tell those apart. A
-two-arm study could not.
+The V2 arm adds a third variety, and it is the one most likely to fool a smoke
+test. GRN reduces over the sequence, so pad **length** enters every real
+position — but only once training moves biases off zero, because GRN's score is
+an L2 sum and exact zeros contribute nothing. Measured pad-8 vs pad-12:
+`convnext` 0.000e+00 at init and 0.000e+00 with non-zero biases; `convnext_v2`
+0.000e+00 at init and **3.215e-03** with non-zero biases. A freshly constructed
+V2 model looks padding-safe and is not.
+
+**1b. The arms are chosen to separate effects, not just to add data points.**
+The Clifford arm differs from the baseline in two ways at once — convolutional
+instead of attentional, *and* a geometric product for channel mixing.
+`ascii_convnext_bert` is convolutional without the geometric product, so those
+two come apart. `ascii_convnext_v2_bert` then differs from the V1 arm by
+*exactly* Global Response Normalization (asserted by test: the parameter gap is
+precisely the GRN weights), isolating channel competition. Each addition buys
+one comparison that the previous set could not make.
 
 **2. Token mixing in both convolutional arms is local.** The geometric product rolls
 along the *channel* axis, so all cross-token mixing comes from the two depthwise

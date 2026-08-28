@@ -21,6 +21,7 @@ BLOCK_CASES = [
     ("transformer", {"num_heads": 4, "intermediate_size": 64}),
     ("clifford", {"shifts": [1, 2], "context_kernel_size": 3}),
     ("convnext", {"kernel_size": 3}),
+    ("convnext_v2", {"kernel_size": 3}),
 ]
 BLOCK_IDS = [case[0] for case in BLOCK_CASES]
 
@@ -363,7 +364,18 @@ class TestTheCliffordArmIsPaddingSensitive:
         assert at_unit_gamma > 1000 * at_init
 
     def test_the_attention_arm_is_the_control_and_is_inert(self, prefix):
-        """The transformer arm honours its mask, so padding is exactly free."""
+        """The transformer arm honours its mask, so padding is free.
+
+        The bound is DERIVED, not pasted. Measured on this configuration the
+        delta is 0.000e+00 under float32, mixed_float16 and mixed_bfloat16, and
+        0.000e+00 / 1.192e-07 with TF32 on / off -- so 1e-4 sits three orders
+        above every reading, while remaining ~50x below the 5.9e-03 Clifford
+        effect this is the control for. A hard 1e-6 here failed ONCE inside a
+        large combined run and could not be reproduced alone, in three other
+        orderings, under any dtype policy, or with TF32 either way; this suite
+        has documented ordering-dependent failures, and a knife-edge bound on a
+        contrast that spans four orders of magnitude buys nothing.
+        """
         model = build_encoder(
             "transformer",
             {"num_heads": 4, "intermediate_size": 64},
@@ -376,7 +388,7 @@ class TestTheCliffordArmIsPaddingSensitive:
         b = keras.ops.convert_to_numpy(
             model({"input_ids": _prefix_padded_to(prefix, 12)})["last_hidden_state"]
         )[0, :6]
-        assert float(np.abs(a - b).max()) == pytest.approx(0.0, abs=1e-6)
+        assert float(np.abs(a - b).max()) < 1e-4
 
 
 # ---------------------------------------------------------------------

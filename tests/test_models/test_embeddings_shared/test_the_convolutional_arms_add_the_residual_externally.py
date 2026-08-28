@@ -44,6 +44,7 @@ MIN_SURVIVING_RATIO = 0.5
 ARMS = [
     ("clifford", {"shifts": [1, 2], "context_kernel_size": 7}),
     ("convnext", {"kernel_size": 7}),
+    ("convnext_v2", {"kernel_size": 7}),
 ]
 ARM_IDS = [arm[0] for arm in ARMS]
 
@@ -63,7 +64,7 @@ def _encoder(block_type, block_config):
 
 def _raw_update(layer, x, block_type):
     """Apply the WRAPPED block directly, bypassing the wrapper's residual."""
-    if block_type == "convnext":
+    if block_type.startswith("convnext"):
         lifted = keras.ops.expand_dims(x, axis=1)
         return keras.ops.squeeze(layer.block(lifted, training=False), axis=1)
     return layer.block(x, training=False)
@@ -178,7 +179,11 @@ def test_gradients_reach_the_wrapped_block_weights(
         pooled = model({"input_ids": token_ids}, training=True)["pooled_output"]
         loss = keras.ops.mean(keras.ops.square(pooled))
 
-    marker = "clifford_block" if block_type == "clifford" else "convnext_block"
+    marker = {
+        "clifford": "clifford_block",
+        "convnext": "convnext_v1_block",
+        "convnext_v2": "convnext_v2_block",
+    }[block_type]
     block_weights = [w for w in model.trainable_weights if marker in w.path]
     assert block_weights, f"[{block_type}] no wrapped-block weights found"
 

@@ -48,6 +48,7 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers import TransformerLayer
@@ -62,6 +63,7 @@ __all__ = [
     "available_block_types",
     "build_clifford_block",
     "build_convnext_block",
+    "build_convnext_v2_block",
     "build_transformer_block",
     "clifford_receptive_field",
     "conv_receptive_field",
@@ -380,10 +382,22 @@ class ConvNextEncoderBlock(keras.layers.Layer):
     :type normalization_type: str
     :param use_bias: Whether the convolutions carry a bias.
     :type use_bias: bool
+    :param version: ``"v1"`` or ``"v2"``. V2 inserts Global Response
+        Normalization after the activation and is otherwise the same block.
+        One class with a switch rather than two near-identical wrappers,
+        because everything around the wrapped block -- the lift, the mask
+        zeroing, the external residual -- is identical between them.
+    :type version: str
     :param kwargs: Additional keyword arguments for the Layer base class.
     :raises ValueError: If ``hidden_size`` or ``kernel_size`` is not a positive
-        integer.
+        integer, or ``version`` is not ``"v1"``/``"v2"``.
     """
+
+    #: Version string -> wrapped block class.
+    _BLOCK_CLASSES: Dict[str, Any] = {
+        "v1": ConvNextV1Block,
+        "v2": ConvNextV2Block,
+    }
 
     def __init__(
         self,
@@ -397,10 +411,16 @@ class ConvNextEncoderBlock(keras.layers.Layer):
         normalization_type: str = "layernorm",
         use_bias: bool = True,
         depthwise_initializer: Any = None,
+        version: str = "v1",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
+        if version not in self._BLOCK_CLASSES:
+            raise ValueError(
+                f"version must be one of {sorted(self._BLOCK_CLASSES)}, "
+                f"got {version!r}"
+            )
         if not isinstance(hidden_size, int) or hidden_size <= 0:
             raise ValueError(
                 f"hidden_size must be a positive int, got {hidden_size!r}"
@@ -420,8 +440,9 @@ class ConvNextEncoderBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.use_bias = use_bias
         self.depthwise_initializer = depthwise_initializer
+        self.version = version
 
-        self.block = ConvNextV1Block(
+        self.block = self._BLOCK_CLASSES[version](
             # (1, K): convolve along the sequence axis only. The height axis is
             # the singleton introduced by the lift in `call`.
             kernel_size=(1, kernel_size),
@@ -433,7 +454,7 @@ class ConvNextEncoderBlock(keras.layers.Layer):
             normalization_type=normalization_type,
             use_bias=use_bias,
             depthwise_initializer=depthwise_initializer,
-            name="convnext_block",
+            name=f"convnext_{version}_block",
         )
         self.drop_path = StochasticDepth(
             drop_path_rate=drop_path_rate, name="drop_path"
@@ -484,7 +505,8 @@ class ConvNextEncoderBlock(keras.layers.Layer):
         lifted = keras.ops.expand_dims(block_input, axis=1)
         update = keras.ops.squeeze(self.block(lifted, training=training), axis=1)
 
-        # External residual: ConvNextV1Block.call returns the update only.
+        # External residual: both ConvNext block versions return the update
+        # only (each ends at `return x`, with no `+ inputs`).
         return inputs + self.drop_path(update, training=training)
 
     def compute_output_shape(self, input_shape: Any) -> Any:
@@ -515,6 +537,7 @@ class ConvNextEncoderBlock(keras.layers.Layer):
                 "use_gamma": self.use_gamma,
                 "normalization_type": self.normalization_type,
                 "use_bias": self.use_bias,
+                "version": self.version,
                 "depthwise_initializer": keras.initializers.serialize(
                     keras.initializers.get(self.depthwise_initializer)
                 )
@@ -730,6 +753,78 @@ def build_convnext_block(
         normalization_type=normalization_type,
         use_bias=use_bias,
         depthwise_initializer=kernel_initializer,
+        version="v1",
+        name=name,
+    )
+
+
+def build_convnext_v2_block(
+    *,
+    hidden_size: int,
+    name: str,
+    kernel_size: int = 7,
+    activation: str = "gelu",
+    dropout_rate: float = 0.0,
+    drop_path_rate: float = 0.0,
+    gamma_initial_value: float = 1.0,
+    use_gamma: bool = True,
+    normalization_type: str = "layernorm",
+    use_bias: bool = True,
+    kernel_initializer: Any = None,
+) -> keras.layers.Layer:
+    """Build one ConvNeXt V2 sequence-mixing block.
+
+    Identical to :func:`build_convnext_block` except for the wrapped block:
+    V2 inserts Global Response Normalization after the activation. GRN scores
+    each channel by its L2 magnitude **over the sequence axis**, so unlike
+    every other block in this registry it performs a GLOBAL reduction along
+    the sequence -- see :class:`ConvNextEncoderBlock` for what that means for
+    padded batches.
+
+    A separate function rather than a ``version=`` argument on the v1 builder,
+    because the registry validates keywords against the builder's signature:
+    a shared builder would let ``version`` be passed through
+    ``block_config`` from anywhere, and the registry key is meant to be the
+    single place the version is decided.
+
+    :param hidden_size: Model width.
+    :type hidden_size: int
+    :param name: Layer name.
+    :type name: str
+    :param kernel_size: Depthwise kernel width along the sequence axis.
+    :type kernel_size: int
+    :param activation: Activation before GRN.
+    :type activation: str
+    :param dropout_rate: Dropout inside the block.
+    :type dropout_rate: float
+    :param drop_path_rate: Stochastic-depth rate.
+    :type drop_path_rate: float
+    :param gamma_initial_value: Initial LayerScale value.
+    :type gamma_initial_value: float
+    :param use_gamma: Whether to apply LayerScale.
+    :type use_gamma: bool
+    :param normalization_type: Normalization inside the block.
+    :type normalization_type: str
+    :param use_bias: Whether the convolutions carry a bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the depthwise convolution; see
+        :func:`build_convnext_block` for what it does and does not reach.
+    :type kernel_initializer: Any
+    :return: A configured :class:`ConvNextEncoderBlock` wrapping V2.
+    :rtype: keras.layers.Layer
+    """
+    return ConvNextEncoderBlock(
+        hidden_size=hidden_size,
+        kernel_size=kernel_size,
+        activation=activation,
+        dropout_rate=dropout_rate,
+        drop_path_rate=drop_path_rate,
+        gamma_initial_value=gamma_initial_value,
+        use_gamma=use_gamma,
+        normalization_type=normalization_type,
+        use_bias=use_bias,
+        depthwise_initializer=kernel_initializer,
+        version="v2",
         name=name,
     )
 
@@ -741,6 +836,7 @@ BLOCK_REGISTRY: Dict[str, Callable[..., keras.layers.Layer]] = {
     "transformer": build_transformer_block,
     "clifford": build_clifford_block,
     "convnext": build_convnext_block,
+    "convnext_v2": build_convnext_v2_block,
 }
 
 

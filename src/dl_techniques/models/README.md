@@ -39,7 +39,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **9** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 7 | forecasting, probabilistic and point |
-| [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
+| [`embeddings_experimental/`](embeddings_experimental/) | 5 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
@@ -47,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **84** | |
+| **Sum** | **85** | |
 
 ### `vision/` (35)
 
@@ -162,6 +162,7 @@ that `mamba` is only a language model.
 | `embeddings_experimental/ascii_bert/` | ASCII-vocabulary BERT, the study's transformer baseline |
 | `embeddings_experimental/ascii_clifford_bert/` | same skeleton, attention-free Clifford mixing |
 | `embeddings_experimental/ascii_convnext_bert/` | same skeleton, ConvNeXt V1 convolutional mixing |
+| `embeddings_experimental/ascii_convnext_v2_bert/` | ConvNeXt V2: V1 plus Global Response Normalization |
 
 ## Second-level nesting
 
