@@ -73,11 +73,21 @@ harness above, `num_heads=1, batch=1`, mean of 20 redraws::
     no norm fac: 0.7762   0.7720   0.7714   0.7713   0.7713   0.7714
     no clamp   : 0.7522   0.7434   0.7419   0.7405   0.7401   0.7399
 
-* The query-side `exp(-||x||^2/2)` factor is **INERT**, and provably so: it is a
-  POSITIVE per-row scalar, and `max(0, c * f) == c * max(0, f)` for `c > 0`, so
-  it factors straight out of `phi(Q)(phi(K)^T V) / phi(Q)(phi(K)^T 1)`. Its row
-  above differs from the shipped row only by redraw noise. It is neither a cause
-  of the floor nor a defect; it is a no-op.
+* The query-side `exp(-||x||^2/2)` factor very nearly cancels. It is a POSITIVE
+  per-row scalar `c`, and `max(0, c * f) == c * max(0, f)` for `c > 0`, so it
+  multiplies the numerator and the normalizer of
+  `phi(Q)(phi(K)^T V) / phi(Q)(phi(K)^T 1)` alike. It is NOT exactly inert, and
+  the earlier text claiming that was wrong. `_linear_attention` adds `1e-6` to
+  the normalizer, and that constant does not scale with `c`, so a relative
+  residue of about `(1/c - 1) * 1e-6 / z` survives. Measure it PAIRED: one set
+  of weights, one PINNED projection matrix, `num_heads=1, batch=1, seq_len=32`,
+  layer output magnitude ~0.3. The max absolute delta is then **7.3e-09 at
+  float64** and **1.3e-04 at float32**. The float32 figure is contraction
+  rounding, not the factor: each arm re-run against itself differs by exactly
+  0.0. **Do not read the `no norm fac` ROW above as this effect.** That table is
+  UNPAIRED: its rows are independent redraws, so the 0.0011 spread at `m=8` is
+  redraw noise and is larger than the factor's real contribution. The factor is
+  neither a cause of the floor nor a defect.
 * The `ops.maximum(features, 0)` clamp is not the cause of the floor either, and
   the previous claim that removing it alone is "catastrophic, two to four orders
   worse" (317.5 at `m=8`) DID NOT REPRODUCE: removing it lowers the mean error
@@ -109,7 +119,7 @@ Foundational mathematics::
 
     exp(q . k) ~ E[ <phi(q), phi(k)> ]
 
-    O = phi(Q) (phi(K)^T V) / ( phi(Q) (phi(K)^T 1_N) )
+    O = phi(Q) (phi(K)^T V) / ( phi(Q) (phi(K)^T 1_N) + 1e-6 )
 
 with the trigonometric feature map
 ``phi(x) = sqrt(2/r) [cos(w_i . x), sin(w_i . x)]``, additionally scaled by
@@ -536,8 +546,10 @@ class PerformerAttention(keras.layers.Layer):
         ``nb_features``, scaled so the inner product approximates the exponential
         kernel in expectation, and clamped non-negative. The
         ``exp(-||x||^2 / 2)`` factor is applied to QUERIES only. The asymmetry is
-        intended, and it is also inert: the factor cancels between the numerator
-        and the denominator downstream.
+        intended and nearly free: the factor cancels between the numerator and
+        the denominator downstream, except against the ``1e-6`` that
+        :meth:`_linear_attention` adds to the normalizer. See the module
+        docstring for the paired measurement of what survives.
 
         :param x: Input tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
         :type x: keras.KerasTensor

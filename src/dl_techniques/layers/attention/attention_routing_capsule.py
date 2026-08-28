@@ -55,7 +55,7 @@ Foundational mathematics::
     score[b,i,o]   = <u_hat[b,i,o,:], q[o,:]> / sqrt(D_out)
     a              = softmax(score, axis = output | input)
     s[b,o,:]       = sum_i a[b,i,o] * u_hat[b,i,o,:]  (+ bias)
-    v[b,o,:]       = sigmoid(prob_head(s)) * s / (||s|| + eps)
+    v[b,o,:]       = sigmoid(prob_head(s)) * s / sqrt(||s||^2 + eps)
 
 References:
     - Sabour et al., 2017. Dynamic Routing Between Capsules. NeurIPS 30.
@@ -138,7 +138,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  decoupled output — length and pose learned separately:      │
-        │    direction = s / (||s|| + eps)      unit pose vector       │
+        │    direction = s / sqrt(||s||^2 + eps)  unit pose vector     │
         │    mag       = sigmoid(prob_head(s))  Dense(1) over D_out    │
         │    v         = mag * direction        ||v|| ∈ (0, 1)         │
         └───────────────┬──────────────────────────────────────────────┘
@@ -638,10 +638,10 @@ class CapsuleBlockV2(keras.layers.Layer):
         │  block_dir_norm — created ONLY when direction_only_norm.     │
         │  The split/recombine is what keeps the block LENGTH-         │
         │  PRESERVING:                                                 │
-        │    mag = ||x||               magnitude held aside            │
+        │    mag = sqrt(||x||^2 + eps)   magnitude held aside          │
         │    dir = x / mag                                             │
         │    dir = LayerNorm(dir)      pose normalized ...             │
-        │    dir = dir / ||dir||       ... then re-unit-ized           │
+        │    dir = dir / sqrt(||dir||^2 + eps)   ... re-unit-ized      │
         │    x   = mag * dir           magnitude restored              │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼

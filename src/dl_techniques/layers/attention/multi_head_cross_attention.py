@@ -32,15 +32,21 @@ tensor's last axis is the key sequence length. QK-norm is likewise delegated to 
 norm factory, which makes all registered norm types available for free.
 
 Masking carries the most accumulated knowledge in this file, and it is
-site-specific by decision rather than by accident. The bias is BUILT with
-`keras.ops.where` rather than the arithmetic `(1 - keep) * MASK_BIAS_VALUE` form,
-because the latter produces `0 * -inf = NaN` at every UNMASKED position in fp16; a
-query row that keeps nothing is rescued to keep everything, so an all-`-inf` row is
-never formed and no NaN gradient with it; and the rescue axis is read from this
-layer's own `probability_config` rather than hard-coded, since a caller may move
-the reduction axis. Three near-identical mask helpers exist across the package and
-are not unified, on purpose — the differences in cast order, rank probing and
-head-axis handling each matter at their own site.
+site-specific by decision rather than by accident. Three things about it matter.
+
+The bias is BUILT with `keras.ops.where`, not with the arithmetic
+`(1 - keep) * MASK_BIAS_VALUE` form. The arithmetic form produces
+`0 * -inf = NaN` at every UNMASKED position in fp16.
+
+A query row that keeps nothing is rescued to keep everything. So an all-`-inf`
+row is never formed, and no NaN gradient with it.
+
+The rescue axis is read from this layer's own `probability_config` rather than
+hard-coded, because a caller may move the reduction axis.
+
+Three near-identical mask helpers exist across the package. They are not
+unified, on purpose. Cast order, rank probing and head-axis handling each matter
+at their own site.
 
 This class is the shared engine behind two thin facades,
 `multi_head_attention.MultiHeadAttention` (self-attention preset) and

@@ -122,14 +122,18 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :meth:`_window_reverse` mirror the module-level ``window_partition`` /
     ``window_reverse`` helpers in
     :mod:`~dl_techniques.layers.attention.window_attention`. They are **not** unified.
-    Reasons, recorded so the next reader does not "fix" it: (a) these are private
-    instance methods that close over ``self._window_size``, whereas the siblings are
-    free functions taking an explicit window size; (b) ``_window_reverse`` here derives
-    the batch size from ``ops.shape(windows)[0] // num_windows`` rather than taking it
-    as an argument; (c) the two implementations have drifted independently and any
-    merge would have to prove identical reshape/transpose ORDER, which is a
-    numerics-affecting property, not a cosmetic one. The SW-MSA mask built in
-    :meth:`_compute_attention_mask` depends on this exact window ordering.
+    Reasons, recorded so the next reader does not "fix" it.
+    (a) These are private instance methods that close over
+    ``self._window_size``. The siblings are free functions taking an explicit
+    window size.
+    (b) ``_window_reverse`` here derives the batch size from
+    ``ops.shape(windows)[0] // num_windows`` rather than taking it as an
+    argument.
+    (c) The two implementations have drifted independently. Any merge would have
+    to prove identical reshape/transpose ORDER, which is a numerics-affecting
+    property, not a cosmetic one.
+    The SW-MSA mask built in :meth:`_compute_attention_mask` depends on this
+    exact window ordering.
 
     **Architecture Overview:**
 
@@ -837,7 +841,9 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             If ``None``, returns scores unchanged.
         :type prev_attn_map: Optional[keras.KerasTensor]
 
-        :return: Sparse attention scores with masked positions set to ``-1e9``.
+        :return: The scores unchanged on every path that runs today. Only
+            the unreachable ``'threshold'`` branch sets masked positions to
+            ``-1e9``; see the warning below.
         :rtype: keras.KerasTensor
 
         .. warning::

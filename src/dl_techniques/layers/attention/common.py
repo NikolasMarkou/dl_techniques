@@ -50,13 +50,16 @@ sibling module came from here.
 
     It prints ``12 15``. The last dotted component is what is matched, so a
     relative ``from .common import ...`` is counted. The walk is scoped to
-    ``layers/`` on purpose: every importer of this module lives inside
-    ``layers/attention/``, and the loose module match would otherwise count an
-    unrelated ``some_package/common.py`` elsewhere in ``src/``. ``test_common.py``
-    runs the SAME scope; widen or narrow the two together or the number gets a
-    second home again. Both numbers were one short
-    of the truth until 2026-08-28, because nothing re-derived them. The 11 / 8
-    pair below has a test that re-derives it on every run.
+    ``layers/`` on purpose. Measured 2026-08-28: every importer of this module
+    lives inside ``layers/attention/``, and ``src``, ``layers`` and
+    ``layers/attention`` all print ``12 15``. The loose module match would
+    otherwise count an unrelated ``some_package/common.py`` elsewhere in
+    ``src/``. Nothing GUARDS that scoping. An importer appearing outside
+    ``layers/`` would leave both counts and the test unchanged, and this
+    sentence quietly wrong. ``test_common.py`` runs the SAME scope; widen or
+    narrow the two together or the number gets a second home again. Both numbers
+    were one short of the truth until 2026-08-28, because nothing re-derived
+    them. The 11 / 8 pair below has a test that re-derives it on every run.
 
 -   ``apply_attention_mask`` (added by ``plan-2026-07-27T183600-b4ef45f0``) is the
     *behavioral* counterpart to the pair below. It performs the ``ops.where`` bias
@@ -367,7 +370,8 @@ def apply_attention_mask(
         It is NOT raised in four cases: ``rescue_axis`` is ``None`` (no softmax axis
         was named); the extent is unknown at trace time; ``logits`` is itself size 1
         along that axis (an ordinary single-token sequence); or, for a multi-axis
-        softmax, ``keep`` varies along at least one of the named axes. See the D-017 and D-018 comments in the body below.
+        softmax, ``keep`` varies along at least one of the named axes.
+        See the D-017 and D-018 comments in the body below.
 
     :return: ``logits + bias``, broadcast to the common shape of ``logits`` and
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.

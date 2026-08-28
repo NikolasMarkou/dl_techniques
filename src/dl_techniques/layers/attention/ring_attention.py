@@ -41,16 +41,19 @@ either break exactness or force full materialization, which is the only thing th
 layer exists to avoid.
 
 Two further properties must survive any future style pass.
-The sequence length is read STATICALLY as a Python `int`, because
-`range(num_blocks)` cannot consume a traced tensor under `@tf.function`; the batch
-dimension stays fully dynamic. And masking here differs from every other mask site
-in the package on two counts, both forced by the online softmax: the accumulation
-runs in a wider dtype whenever a mask is supplied, because an entirely-masked tile
-would otherwise produce `-inf - -inf = NaN` in the running max; and the
-degenerate-row rescue ("a row that keeps nothing keeps everything") is applied ONCE
-over the full key axis before the loop, because inside the loop a "row" is one tile
-and a per-tile rescue would un-mask the future under a causal mask. Both are
-anchored at the code they constrain.
+
+The first is the sequence length. It is read STATICALLY as a Python `int`,
+because `range(num_blocks)` cannot consume a traced tensor under `@tf.function`.
+The batch dimension stays fully dynamic.
+
+The second is masking, which differs from every other mask site in the package
+on two counts. The online softmax forces both. First, the accumulation runs in a
+wider dtype whenever a mask is supplied. Without that, an entirely-masked tile
+produces `-inf - -inf = NaN` in the running max. Second, the degenerate-row
+rescue ("a row that keeps nothing keeps everything") is applied ONCE over the
+full key axis, before the loop. Inside the loop a "row" is one tile, and a
+per-tile rescue would un-mask the future under a causal mask. Both are anchored
+at the code they constrain.
 
 Attention weights are never returned as a tensor. `return_attention_weights=True`
 yields ``(output, None)``: there is no ``N x N`` matrix to hand back, which is the
@@ -180,8 +183,10 @@ class RingAttention(keras.layers.Layer):
         │      S  = q_blk @ k_blkᵀ            ONE tile in memory       │
         │      S  = S + mask bias             (rescue_axis=None)       │
         │      m' = max(m, rowmax(S))                                  │
-        │      O  = O·exp(m−m') + exp(S−m') @ v_blk                    │
-        │      l  = l·exp(m−m') + rowsum(exp(S−m'))                    │
+        │      P  = exp(S−m')                                          │
+        │      P  = dropout(P)                (training, rate > 0)     │
+        │      O  = O·exp(m−m') + P @ v_blk                            │
+        │      l  = l·exp(m−m') + rowsum(P)                            │
         │      m  = m'                                                 │
         │                                                              │
         │    block_out = O / l                                         │

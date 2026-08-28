@@ -377,7 +377,7 @@ class WindowAttention(keras.layers.Layer):
               Input: 1-D sequence  (B, N, dim)
                             │
         0. SHORT-CIRCUIT, 'grid' and 'zigzag' ONLY: if N is
-           static, 1 < N < ws^2, and any mask is rank <= 2,
+           static, 1 < N < ws^2, and the mask is rank 2 or absent,
            attend the N REAL tokens as ONE window and skip
            stages 1-3 and 5.  D-007 (grid), D-014 (zigzag).
                             │
@@ -1589,7 +1589,7 @@ def create_zigzag_window_attention(
 def create_band_window_attention(
     dim: int, window_size: int, num_heads: int, **kwargs: Any
 ) -> WindowAttention:
-    """
+    r"""
     Create a 1-D symmetric sliding-band attention layer.
 
     Configures :class:`WindowAttention` for ``partition_mode='band'``. Here

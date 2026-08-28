@@ -43,13 +43,15 @@ per-head GroupNorm to each head's differential output, and rescales that output
 by ``(1 - lambda_init)`` to align the residual-stream magnitude with a standard
 attention block. Verified absent, from the repository root::
 
-    grep -rn "GroupNorm" src/dl_techniques/layers/attention/*.py \
-        | grep -v '^src/dl_techniques/layers/attention/differential_attention.py:'
+    grep -rnE "GroupNorm[a-z]*\(" src/dl_techniques/layers/attention/*.py
 
-That prints nothing. The exclusion is REQUIRED, and for the same reason
-``common.py``'s adopter greps carry one: the search string appears in this very
-paragraph, so without it the command SELF-MATCHES and returns the two prose
-lines above as if they were code. Nothing in this file rescales by
+That prints nothing today, and unlike an earlier version of this check it can
+still fail. The pattern requires a CALL: the name, then lowercase letters, then
+an open parenthesis. A real ``keras.layers.GroupNormalization`` construction is
+a hit, in THIS file as much as in any other. Prose is not a hit, and the pattern
+does not match itself, because ``[`` follows ``GroupNorm`` here. The earlier
+version excluded this file by name. That made the command blind to the one place
+the missing step would actually be added. Nothing in this file rescales by
 ``(1 - lambda_init)`` either. The single-scalar reparameterization is
 a separate, already-disclosed simplification (the paper learns per-head
 ``exp(lam_q1 . lam_k1) - exp(lam_q2 . lam_k2) + lambda_init``). These two are
