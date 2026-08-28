@@ -21,9 +21,13 @@ import numpy as np
 import pytest
 
 from train.common.stats import (
+    benjamini_hochberg,
     bootstrap_ci,
     format_mean_std,
+    holm_bonferroni,
     mean_std,
+    min_pairs_for_significance,
+    min_reachable_p_signflip,
     paired_permutation_test,
 )
 
@@ -231,3 +235,154 @@ class TestFormatMeanStd:
     def test_negative_decimals_raises(self):
         with pytest.raises(ValueError):
             format_mean_std(1.0, 0.1, decimals=-1)
+
+
+# ---------------------------------------------------------------------------
+# Multiple-comparison correction
+# ---------------------------------------------------------------------------
+
+class TestHolmBonferroni:
+    """Step-down FWER correction, checked against hand-computed values."""
+
+    def test_a_hand_computed_family(self):
+        # m=3. Sorted p = [0.01, 0.02, 0.03].
+        #   raw*(m-i): 3*0.01=0.03, 2*0.02=0.04, 1*0.03=0.03
+        #   running max:      0.03,       0.04,       0.04
+        rejected, adjusted = holm_bonferroni([0.01, 0.02, 0.03], alpha=0.05)
+        np.testing.assert_allclose(adjusted, [0.03, 0.04, 0.04], atol=1e-12)
+        assert rejected.tolist() == [True, True, True]
+
+    def test_identity_at_family_size_one(self):
+        _, adjusted = holm_bonferroni([0.04])
+        np.testing.assert_allclose(adjusted, [0.04], atol=1e-12)
+
+    def test_output_is_in_input_order(self):
+        _, adjusted = holm_bonferroni([0.03, 0.01, 0.02])
+        # the 0.01 entry is the most significant wherever it sits
+        assert adjusted[1] == min(adjusted)
+
+    def test_adjusted_never_below_raw(self):
+        raw = [0.001, 0.01, 0.04, 0.2]
+        _, adjusted = holm_bonferroni(raw)
+        assert np.all(adjusted >= np.asarray(raw) - 1e-12)
+
+    def test_adjusted_is_clipped_to_one(self):
+        _, adjusted = holm_bonferroni([0.9, 0.95, 0.99])
+        assert np.all(adjusted <= 1.0)
+
+    def test_nan_entries_do_not_inflate_the_family(self):
+        """A comparison that could not be run must not penalise the others."""
+        _, alone = holm_bonferroni([0.01])
+        _, with_nans = holm_bonferroni([0.01, np.nan, np.nan])
+        np.testing.assert_allclose(with_nans[0], alone[0], atol=1e-12)
+        assert np.isnan(with_nans[1]) and np.isnan(with_nans[2])
+
+    def test_rejects_a_bad_alpha(self):
+        with pytest.raises(ValueError, match="alpha"):
+            holm_bonferroni([0.01], alpha=0.0)
+
+    def test_rejects_an_out_of_range_p_value(self):
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            holm_bonferroni([0.5, 1.5])
+
+
+class TestBenjaminiHochberg:
+    """Step-up FDR correction."""
+
+    def test_the_textbook_boundary_case(self):
+        # p = k*alpha/m for every k, so every entry sits exactly on the line.
+        rejected, adjusted = benjamini_hochberg(
+            [0.01, 0.02, 0.03, 0.04, 0.05], alpha=0.05
+        )
+        np.testing.assert_allclose(adjusted, [0.05] * 5, atol=1e-12)
+        assert rejected.tolist() == [True] * 5
+
+    def test_identity_at_family_size_one(self):
+        _, adjusted = benjamini_hochberg([0.04])
+        np.testing.assert_allclose(adjusted, [0.04], atol=1e-12)
+
+    def test_is_never_more_conservative_than_holm(self):
+        """BH trades FWER for power; it must never adjust higher than Holm."""
+        rng = np.random.default_rng(0)
+        for _ in range(2000):
+            p = rng.random(rng.integers(2, 12))
+            _, bh = benjamini_hochberg(p)
+            _, holm = holm_bonferroni(p)
+            assert np.all(bh <= holm + 1e-12)
+
+    def test_adjusted_is_monotone_in_the_raw_ordering(self):
+        rng = np.random.default_rng(1)
+        for _ in range(500):
+            p = np.sort(rng.random(8))
+            _, adjusted = benjamini_hochberg(p)
+            assert np.all(np.diff(adjusted) >= -1e-12)
+
+    def test_nan_entries_do_not_inflate_the_family(self):
+        _, alone = benjamini_hochberg([0.02])
+        _, with_nans = benjamini_hochberg([0.02, np.nan])
+        np.testing.assert_allclose(with_nans[0], alone[0], atol=1e-12)
+
+
+class TestTheSeedFloorIsAPropertyOfTheTest:
+    """How many seeds a corrected sign-flip test needs before it can reject.
+
+    A paired sign-flip test over n pairs enumerates 2**n sign vectors, so the
+    smallest two-sided p it can produce is 2/2**n -- regardless of effect size.
+    Any correction tightens the bar to alpha/m, so correcting a bigger family
+    costs seeds. These are the numbers that set the study's GPU budget.
+    """
+
+    def test_the_analytic_bound(self):
+        assert min_reachable_p_signflip(6) == pytest.approx(2 ** -5)
+        assert min_reachable_p_signflip(1) == 1.0
+        assert min_reachable_p_signflip(0) == 1.0
+
+    @pytest.mark.parametrize("n", [6, 8, 10])
+    def test_the_bound_matches_the_monte_carlo_estimator(self, n):
+        """Pins the analytic bound to this module's own implementation.
+
+        ``paired_permutation_test`` SAMPLES sign vectors with replacement
+        rather than enumerating them, so its p-value is a noisy estimate of
+        the exact ``2/2**n`` and fluctuates on BOTH sides of it -- measured at
+        n=6, 20000 draws, seed 7: 0.029099 against an exact 0.031250, which is
+        1.8 binomial standard errors low. An assertion that Monte Carlo
+        approaches the bound from above is therefore wrong; the tolerance here
+        is derived from the estimator's own standard error, not pasted.
+        """
+        rng = np.random.default_rng(7)
+        n_perm = 20000
+        a = [10.0 + i * 0.01 for i in range(n)]
+        b = [1.0 + i * 0.01 for i in range(n)]
+        _, p = paired_permutation_test(a, b, n_perm=n_perm, rng=rng)
+
+        bound = min_reachable_p_signflip(n)
+        std_err = math.sqrt(bound * (1.0 - bound) / n_perm)
+        assert abs(p - bound) <= 5.0 * std_err + 1.0 / (n_perm + 1)
+
+    @pytest.mark.parametrize(
+        "family_size,expected", [(1, 6), (3, 7), (18, 10), (21, 10), (63, 12)]
+    )
+    def test_the_seed_floor_table(self, family_size, expected):
+        assert min_pairs_for_significance(family_size) == expected
+
+    @pytest.mark.parametrize(
+        "family_size,expected", [(1, 6), (3, 7), (18, 10), (63, 12)]
+    )
+    def test_the_floor_is_reachable_and_the_step_below_is_not(
+        self, family_size, expected
+    ):
+        """Measured, not assumed: run the real test at n and at n-1."""
+        alpha = 0.05
+        rng = np.random.default_rng(11)
+
+        def smallest_p(n):
+            a = [10.0 + i * 0.01 for i in range(n)]
+            b = [1.0 + i * 0.01 for i in range(n)]
+            return paired_permutation_test(a, b, n_perm=20000, rng=rng)[1]
+
+        assert smallest_p(expected) <= alpha / family_size
+        assert smallest_p(expected - 1) > alpha / family_size
+
+    def test_rejects_a_bad_family_size(self):
+        with pytest.raises(ValueError, match="family_size"):
+            min_pairs_for_significance(0)

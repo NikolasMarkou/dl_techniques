@@ -14,6 +14,10 @@ Public surface
 - ``bootstrap_ci(values, ...)``                 → ``(ci_low, ci_high)``
 - ``paired_permutation_test(a, b, ...)``        → ``(observed_mean_diff, p_value)``
 - ``format_mean_std(mean, std, decimals=4)``    → ``"0.7006 ± 0.0123"``
+- ``holm_bonferroni(p_values, ...)``            → ``(rejected, p_adjusted)``
+- ``benjamini_hochberg(p_values, ...)``         → ``(rejected, p_adjusted)``
+- ``min_reachable_p_signflip(n_pairs)``         → smallest two-sided p attainable
+- ``min_pairs_for_significance(family_size)``   → seeds needed to reject at all
 
 Design notes
 ------------
@@ -31,6 +35,7 @@ Plan: ``plans/plan_2026-05-14_9c6387a3``  (multi-seed sweep, D-002, D-004).
 """
 from __future__ import annotations
 
+import math
 from typing import Tuple, Union
 
 import numpy as np
@@ -40,6 +45,10 @@ __all__ = [
     "bootstrap_ci",
     "paired_permutation_test",
     "format_mean_std",
+    "holm_bonferroni",
+    "benjamini_hochberg",
+    "min_reachable_p_signflip",
+    "min_pairs_for_significance",
 ]
 
 ArrayLike = Union[np.ndarray, list, tuple]
@@ -219,3 +228,170 @@ def format_mean_std(mean: float, std: float, decimals: int = 4) -> str:
     if not np.isfinite(mean) or not np.isfinite(std):
         return "nan ± nan"
     return f"{mean:.{decimals}f} ± {std:.{decimals}f}"
+
+
+# ---------------------------------------------------------------------------
+# Multiple-comparison correction
+# ---------------------------------------------------------------------------
+#
+# A sweep that reports M metrics across A arms performs M*A tests. At
+# alpha = 0.05 uncorrected, ~1 in 20 of those is expected to look "significant"
+# on noise alone, which for a study whose entire output is significance claims
+# is not acceptable. Neither correction below existed here before; the only
+# prior treatment in the repository is prose in
+# ``research/2026_correlations.md``.
+#
+# Both functions share one contract:
+#   * input and output are in the SAME order (never sorted in place);
+#   * NaN entries are EXCLUDED from the family size m and returned as NaN /
+#     False -- a comparison that could not be computed must not inflate the
+#     penalty applied to the ones that could;
+#   * adjusted p-values are made monotone, so a smaller raw p never yields a
+#     larger adjusted p;
+#   * at m == 1 both are the identity.
+
+
+def _prepare_p_values(p_values: ArrayLike) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Coerce, validate and locate the finite entries of a p-value vector.
+
+    :param p_values: Raw p-values; NaN marks a comparison that could not be run.
+    :return: ``(flat_array, finite_mask, m)`` where ``m`` is the family size,
+        counting only finite entries.
+    :raises ValueError: If any finite entry falls outside ``[0, 1]``.
+    """
+    arr = np.asarray(p_values, dtype=float).ravel()
+    finite = np.isfinite(arr)
+    if np.any((arr[finite] < 0.0) | (arr[finite] > 1.0)):
+        raise ValueError("p-values must lie in [0, 1]")
+    return arr, finite, int(finite.sum())
+
+
+def holm_bonferroni(
+    p_values: ArrayLike,
+    *,
+    alpha: float = 0.05,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Holm step-down correction, controlling the family-wise error rate.
+
+    Sorts ascending and compares ``p_(i)`` against ``alpha / (m - i)``, stopping
+    at the first failure. Adjusted values are ``(m - i) * p_(i)`` made monotone
+    by a running maximum and clipped to 1.
+
+    Prefer this over :func:`benjamini_hochberg` for a small family backing a
+    single categorical claim ("arm X beats the baseline"), where the family-wise
+    rate is the error you care about, and because Holm is valid under arbitrary
+    dependence between the tests while BH needs independence or PRDS.
+
+    :param p_values: Raw p-values; NaN entries are excluded from the family.
+    :param alpha: Family-wise error rate.
+    :return: ``(rejected, p_adjusted)``, both in input order.
+    :raises ValueError: If ``alpha`` is outside ``(0, 1)`` or a p-value is
+        outside ``[0, 1]``.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1); got {alpha}")
+
+    arr, finite, m = _prepare_p_values(p_values)
+    rejected = np.zeros(arr.shape, dtype=bool)
+    adjusted = np.full(arr.shape, np.nan, dtype=float)
+    if m == 0:
+        return rejected, adjusted
+
+    idx = np.flatnonzero(finite)
+    order = idx[np.argsort(arr[idx], kind="stable")]
+    scaled = (m - np.arange(m)) * arr[order]
+    # Running maximum: a later (larger raw p) entry can never be reported as
+    # more significant than an earlier one.
+    monotone = np.minimum(np.maximum.accumulate(scaled), 1.0)
+    adjusted[order] = monotone
+    rejected[order] = monotone <= alpha
+    return rejected, adjusted
+
+
+def benjamini_hochberg(
+    p_values: ArrayLike,
+    *,
+    alpha: float = 0.05,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Benjamini-Hochberg step-up correction, controlling the false discovery rate.
+
+    Adjusted values are ``m / (i + 1) * p_(i)`` made monotone by a running
+    minimum taken from the largest p-value downward, then clipped to 1.
+
+    Prefer this over :func:`holm_bonferroni` for an exploratory family where the
+    tolerable error is a *proportion* of false discoveries rather than any
+    false discovery at all, and where the tests are positively dependent --
+    which is BH's PRDS validity case.
+
+    :param p_values: Raw p-values; NaN entries are excluded from the family.
+    :param alpha: False-discovery rate.
+    :return: ``(rejected, p_adjusted)``, both in input order.
+    :raises ValueError: If ``alpha`` is outside ``(0, 1)`` or a p-value is
+        outside ``[0, 1]``.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1); got {alpha}")
+
+    arr, finite, m = _prepare_p_values(p_values)
+    rejected = np.zeros(arr.shape, dtype=bool)
+    adjusted = np.full(arr.shape, np.nan, dtype=float)
+    if m == 0:
+        return rejected, adjusted
+
+    idx = np.flatnonzero(finite)
+    order = idx[np.argsort(arr[idx], kind="stable")]
+    ranks = np.arange(1, m + 1)
+    scaled = arr[order] * m / ranks
+    # Running minimum from the largest p downward keeps the sequence monotone.
+    monotone = np.minimum(np.minimum.accumulate(scaled[::-1])[::-1], 1.0)
+    adjusted[order] = monotone
+    rejected[order] = monotone <= alpha
+    return rejected, adjusted
+
+
+def min_reachable_p_signflip(n_pairs: int) -> float:
+    """Smallest two-sided p-value a sign-flip permutation test can produce.
+
+    A paired sign-flip test over ``n`` pairs enumerates ``2**n`` sign vectors.
+    The observed assignment and its mirror are always at least as extreme as
+    the observation, so the smallest attainable two-sided p is ``2 / 2**n``.
+
+    This is why :func:`paired_permutation_test` cannot report significance below
+    a certain seed count *for any effect size* -- a property of the test, not of
+    the data.
+
+    :param n_pairs: Number of paired observations (seeds).
+    :return: ``2 ** (1 - n_pairs)``; 1.0 for ``n_pairs <= 1``.
+    :raises ValueError: If ``n_pairs`` is negative.
+    """
+    if n_pairs < 0:
+        raise ValueError(f"n_pairs must be non-negative; got {n_pairs}")
+    if n_pairs <= 1:
+        return 1.0
+    return float(2.0 ** (1 - n_pairs))
+
+
+def min_pairs_for_significance(family_size: int = 1, *, alpha: float = 0.05) -> int:
+    """Fewest paired observations at which a corrected sign-flip test can reject.
+
+    Both Holm and BH compare the smallest p-value in a family of size ``m``
+    against ``alpha / m``, so rejection requires
+    ``2 ** (1 - n) <= alpha / m``, i.e. ``n >= 1 + log2(m / alpha)``.
+
+    MEASURED against this module's own :func:`paired_permutation_test` on
+    maximally separated inputs: family size 1 needs 6 pairs, 3 needs 7, 18
+    needs 10, 21 needs 10, 63 needs 12. Correcting a larger family is therefore
+    not free -- it is paid for in seeds, and the choice of family is a choice
+    about how much compute the study costs.
+
+    :param family_size: Number of tests corrected together.
+    :param alpha: Significance level before correction.
+    :return: Minimum number of pairs.
+    :raises ValueError: If ``family_size`` is below 1 or ``alpha`` is outside
+        ``(0, 1)``.
+    """
+    if family_size < 1:
+        raise ValueError(f"family_size must be >= 1; got {family_size}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1); got {alpha}")
+    return int(math.ceil(1.0 + math.log2(family_size / alpha)))
