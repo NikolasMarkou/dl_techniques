@@ -439,6 +439,35 @@ class TestDtypePolicies:
     """S13: EnergyLayerNorm is FINITE under every global dtype policy."""
 
     def test_no_nan_under_mixed_precision(self, dtype_policy, sample_input, input_shape):
+        """Forward AND input-gradient finiteness under every global dtype policy.
+
+        The forward arm alone is STRUCTURALLY BLIND to the defect this test is named
+        for, and this test passed on the broken code for that reason. Measured on GPU 1
+        (RTX 4070) at BASE `06fdd9e60`, before FIX C1: the `mixed_float16` FORWARD pass
+        was finite in every arm, while the INPUT gradient below was `8 of 16`
+        components NaN at the shipped default `epsilon=1e-5`. After FIX C1 (upcast the
+        normalization statistics to `result_type(dtype, "float32")`) the same reading is
+        `0 of 16` NaN with `max|grad| = 314.75`; the float32 and float64 arms read
+        `171.22` both before and after. The verbatim RED, taken in a detached worktree
+        at BASE with `cwd` INSIDE it, was `AssertionError: 8/16 NaN in the INPUT
+        gradient under mixed_float16 at the default epsilon=1e-05`; full transcript in
+        `plans/plan-2026-08-28T122601-61a91416/evidence/step-4/red-proof.txt`.
+
+        Two traps this arm is built to avoid — both were measured, not assumed:
+
+        * The token must be near-constant with a variance that is small but NONZERO
+          (`[3.0] * 7 + [3.001]`, var `1.09e-07`). An EXACTLY constant token is the SAFE
+          case, not the hazardous one: `centered == 0` multiplies the singular
+          `(var + eps) ** -1.5` backward term to exact zero, and the probe measures
+          nothing.
+        * The gradient must be taken with respect to an INPUT. The layer's OWN weights
+          (`gamma`, `delta`) received finite gradients even when the layer was broken,
+          so a weight-gradient assertion is blind here too.
+
+        Do NOT "fix" a future failure of this test by raising `epsilon` to `1e-3`: a
+        larger epsilon trains a DIFFERENT network (the Jacobian ceiling
+        `gamma / sqrt(eps)` drops 10x), and two prior plans have refused that change.
+        """
         layer = EnergyLayerNorm()
         out = keras.ops.convert_to_numpy(layer(sample_input, training=False))
 
@@ -446,6 +475,37 @@ class TestDtypePolicies:
         assert np.isnan(out).sum() == 0, f"{np.isnan(out).sum()}/{out.size} NaN"
         assert np.isinf(out).sum() == 0, f"{np.isinf(out).sum()}/{out.size} Inf"
         assert np.all(np.isfinite(out))
+
+        # Token 0 is near-constant with a small but NONZERO variance; token 1 is ordinary.
+        near_constant = np.array(
+            [[[3.0] * 7 + [3.001], [0.5, -1.2, 2.0, 0.3, -0.7, 1.1, -2.4, 0.9]]],
+            dtype="float32",
+        )
+        keras.utils.set_random_seed(1234)      # seed immediately before construction
+        grad_layer = EnergyLayerNorm()         # DEFAULT epsilon: 1e-5, the shipped value
+        x = tf.Variable(near_constant, dtype=tf.float32)
+        with tf.GradientTape() as tape:
+            y = grad_layer(x, training=False)
+            loss = tf.reduce_sum(tf.cast(y, tf.float32) ** 2)
+        grad = keras.ops.convert_to_numpy(tape.gradient(loss, x))
+
+        assert np.isnan(grad).sum() == 0, (
+            f"{np.isnan(grad).sum()}/{grad.size} NaN in the INPUT gradient under "
+            f"{dtype_policy} at the default epsilon={grad_layer.epsilon}. The forward "
+            "pass above is finite and always was: the normalization statistics must be "
+            "computed in at least float32 and cast back (see EnergyLayerNorm.call)."
+        )
+        assert np.all(np.isfinite(grad)), (
+            f"{(~np.isfinite(grad)).sum()}/{grad.size} non-finite components in the "
+            f"INPUT gradient under {dtype_policy}"
+        )
+        # Anti-vacuity, LAST on purpose: on the broken code `nan_to_num` collapses the
+        # NaN half to 0 and the surviving half maxes at 1.83e-03, so this ordered
+        # FIRST it fired instead of the NaN check and reported '~0' for a NaN defect.
+        assert np.abs(np.nan_to_num(grad)).max() > 1.0, (
+            f"input gradient is ~0 (max |g| = {np.abs(np.nan_to_num(grad)).max():.3e}); "
+            "this arm cannot detect the fp16 NaN if nothing flows through it"
+        )
 
 
 if __name__ == "__main__":
