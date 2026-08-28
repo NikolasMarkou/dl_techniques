@@ -43,6 +43,7 @@ from train.common.stats import (
 )
 
 from .config import BASELINE_MODEL
+from .paths import resolve_output_dir
 
 # ---------------------------------------------------------------------
 
@@ -254,8 +255,12 @@ def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                     and seeded[seed].get(metric) is not None
                     and baseline_cells[seed].get(metric) is not None
                 )
-                if len(shared) < 2:
+                if len(shared) < 1:
                     continue
+                # A single pair still produces a row, deliberately: it is
+                # labelled UNDERPOWERED below. An ABSENT row reads as "no
+                # difference found", which is a stronger claim than a
+                # one-seed run can make.
                 arm = [seeded[s][metric] for s in shared]
                 base = [baseline_cells[s][metric] for s in shared]
                 diff, p_value = paired_permutation_test(
@@ -490,13 +495,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--out-dir", type=str, default=None)
     args = parser.parse_args(argv)
 
-    records = _load_records(args.in_dir)
+    # Resolve against the REPO ROOT, matching the trainer and the sweep. The
+    # documented invocation runs from `src/`, where a bare relative path would
+    # silently point at a second, empty results tree.
+    in_dir = resolve_output_dir(args.in_dir)
+    records = _load_records(in_dir)
     if not records:
-        logger.error(f"no cell results found under {args.in_dir}")
+        logger.error(f"no cell results found under {in_dir}")
         return 1
 
     report = build_report(records)
-    write_report(report, args.out_dir or args.in_dir)
+    write_report(report, resolve_output_dir(args.out_dir) if args.out_dir else in_dir)
     logger.info(
         f"{len(records)} cells, {len(report['paired'])} paired comparisons, "
         f"{len(report['flags'])} high-variance flags"
