@@ -215,3 +215,66 @@ class TestFromConfigDoesNotMutateCallerDict:
         a = HierarchicalCodebookEmbedding.from_config(config)
         b = HierarchicalCodebookEmbedding.from_config(config)
         assert a.vocab_size == b.vocab_size == 64
+
+
+class TestEpsilonKnob:
+    """`epsilon` reaches the internal LayerNormalization and survives a config.
+
+    Before this parameter existed the sub-layer was built as
+    `LayerNormalization(name="hce_norm")` with no `epsilon=`, so it silently
+    took Keras' default **1e-3** -- 1000x the `1e-6` both sibling classes
+    (`bert_embeddings.py`, `modern_bert_embeddings.py`) and
+    `create_normalization_layer` use, with no shape symptom and no warning, and
+    no way for a caller to change it short of subclassing.
+
+    The first three tests are RED at the commit before the fix (the constructor
+    raises `ValueError: Unrecognized keyword arguments`). The last two are
+    deliberately NOT red: they are the no-numeric-move arms, and they exist to
+    catch a LATER change of the default in the other direction. See
+    decisions.md D-010 for why the default is Keras' 1e-3 and not 1e-6.
+    """
+
+    KW = dict(vocab_size=1024, output_dim=16, num_chunks=2)
+
+    def test_epsilon_reaches_the_layer_normalization(self):
+        layer = HierarchicalCodebookEmbedding(epsilon=1e-6, **self.KW)
+        assert layer.layer_norm.epsilon == 1e-6
+
+    def test_epsilon_is_serialized_and_restored(self):
+        config = HierarchicalCodebookEmbedding(epsilon=1e-6, **self.KW).get_config()
+        assert config["epsilon"] == 1e-6
+        assert HierarchicalCodebookEmbedding.from_config(config).layer_norm.epsilon == 1e-6
+
+    def test_a_non_positive_epsilon_is_rejected(self):
+        with pytest.raises(ValueError, match="epsilon"):
+            HierarchicalCodebookEmbedding(epsilon=0.0, **self.KW)
+
+    def test_the_default_is_keras_own_1e_3(self):
+        """Additive: adding the knob must not move a single trained model."""
+        assert HierarchicalCodebookEmbedding(**self.KW).layer_norm.epsilon == 1e-3
+
+    def test_a_config_without_epsilon_still_loads_at_1e_3(self):
+        legacy = HierarchicalCodebookEmbedding(**self.KW).get_config()
+        legacy.pop("epsilon")
+        rebuilt = HierarchicalCodebookEmbedding.from_config(legacy)
+        assert rebuilt.layer_norm.epsilon == 1e-3
+
+    def test_epsilon_actually_changes_the_output(self):
+        """The knob is not merely stored -- it moves numbers.
+
+        A tiny `output_dim` and a wide epsilon gap make the variance floor
+        visible; at `epsilon=1.0` the normalizer is dominated by the floor.
+        """
+        ids = np.array([[3, 17, 250]], dtype="int32")
+        a = HierarchicalCodebookEmbedding(epsilon=1e-6, **self.KW)
+        b = HierarchicalCodebookEmbedding(epsilon=1.0, **self.KW)
+        a(ids)
+        b(ids)
+        # same codebooks in both, so any difference is the epsilon alone
+        for wa, wb in zip(a.codebooks, b.codebooks):
+            wb.assign(wa)
+        out_a = keras.ops.convert_to_numpy(a(ids))
+        out_b = keras.ops.convert_to_numpy(b(ids))
+        assert np.max(np.abs(out_a - out_b)) > 1e-3, (
+            "epsilon is stored but inert: 1e-6 and 1.0 produced the same output"
+        )

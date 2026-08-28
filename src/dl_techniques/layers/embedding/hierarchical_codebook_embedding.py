@@ -187,6 +187,21 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         contributions has roughly K times the variance of one, which
         destabilizes the layers below.
     :type use_layer_norm: bool
+    :param epsilon: Variance floor added inside the internal
+        ``LayerNormalization``; ignored when ``use_layer_norm`` is ``False``.
+        Defaults to ``1e-3``.
+
+        **The default is Keras' value, not the repo's usual ``1e-6``, and that
+        is deliberate.** Before this parameter existed the sub-layer was built
+        as ``LayerNormalization(name="hce_norm")`` and so took Keras' ``1e-3``;
+        keeping that as the default means adding the knob moves no already
+        trained model. The sibling classes ``BertEmbeddings`` and
+        ``ModernBertEmbeddings``, and ``create_normalization_layer``, all use
+        ``1e-6``. **Pass ``epsilon=1e-6`` explicitly for a new model** — this
+        layer is a bespoke codebook design with no reference architecture to
+        inherit a value from, so nothing here argues for ``1e-3`` on its
+        merits; only continuity does.
+    :type epsilon: float
     :param embeddings_initializer: Initializer for the codebook tables.
         Defaults to ``"uniform"``, matching ``keras.layers.Embedding``.
     :type embeddings_initializer: Union[str, initializers.Initializer]
@@ -241,6 +256,7 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         num_chunks: int = 2,
         chunk_bits: Optional[int] = None,
         use_layer_norm: bool = True,
+        epsilon: float = 1e-3,
         embeddings_initializer: Union[str, initializers.Initializer] = "uniform",
         embeddings_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
         **kwargs: Any,
@@ -260,6 +276,12 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         :type chunk_bits: Optional[int]
         :param use_layer_norm: Whether to normalize the summed embedding.
         :type use_layer_norm: bool
+        :param epsilon: Variance floor of the internal
+            ``LayerNormalization``. Ignored when ``use_layer_norm`` is
+            ``False``. Defaults to ``1e-3`` -- see the anchor in ``__init__``
+            for why the default is Keras' value and not the ``1e-6`` the
+            sibling classes and the norms factory use.
+        :type epsilon: float
         :param embeddings_initializer: Initializer for the codebooks.
         :type embeddings_initializer: Union[str, initializers.Initializer]
         :param embeddings_regularizer: Optional codebook regularizer.
@@ -273,6 +295,9 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
             address ``vocab_size`` codes.
         """
         super().__init__(**kwargs)
+
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
 
         if vocab_size <= 1:
             raise ValueError(
@@ -308,6 +333,7 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         self.num_chunks = num_chunks
         self.chunk_bits = chunk_bits
         self.use_layer_norm = use_layer_norm
+        self.epsilon = epsilon
         self.embeddings_initializer = initializers.get(embeddings_initializer)
         self.embeddings_regularizer = regularizers.get(embeddings_regularizer)
 
@@ -319,8 +345,28 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
 
         # Filled in build(), one entry per chunk.
         self.codebooks = []
+        # DECISION plan-2026-08-28T181715-3870472c/D-010
+        # `epsilon` DEFAULTS TO 1e-3, which is Keras' own `LayerNormalization`
+        # default and therefore EXACTLY the value this layer used before the
+        # parameter existed. Do NOT "fix" the default to 1e-6 to match
+        # `bert_embeddings.py` / `modern_bert_embeddings.py` / the norms factory:
+        # this is a bespoke codebook design with no reference architecture to
+        # inherit a value from, so there is nothing to be faithful TO, and moving
+        # the default would silently change the output of every already-trained
+        # HierarchicalCodebookEmbedding checkpoint -- 1000x in the denominator,
+        # with no shape symptom and no warning. Pass `epsilon=1e-6` explicitly
+        # for a new model; that is the recommended value and the whole reason
+        # this knob was added. See decisions.md D-010.
+        #
+        # The sub-layer is deliberately still created inside an `if` (guide
+        # §1.3). Audited as SOFT, not a defect, because the one constructing
+        # branch carries an explicit `name=`, so no downstream auto-generated
+        # name can shift. Making it unconditional is NOT free: it would attach an
+        # unused, tracked `LayerNormalization` to every `use_layer_norm=False`
+        # layer, which is a change to the serialized structure and exactly the
+        # kind of restructuring-a-working-layer this step was told not to do.
         self.layer_norm = (
-            keras.layers.LayerNormalization(name="hce_norm")
+            keras.layers.LayerNormalization(epsilon=epsilon, name="hce_norm")
             if use_layer_norm
             else None
         )
@@ -427,6 +473,7 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
             "num_chunks": self.num_chunks,
             "chunk_bits": self.chunk_bits,
             "use_layer_norm": self.use_layer_norm,
+            "epsilon": self.epsilon,
             "embeddings_initializer": initializers.serialize(
                 self.embeddings_initializer,
             ),

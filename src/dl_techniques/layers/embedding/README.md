@@ -46,9 +46,17 @@ from dl_techniques.layers.embedding.hierarchical_codebook_embedding import (
 
 cls_token = ClassTokenPrepend(name='cls_token')
 codebook = HierarchicalCodebookEmbedding(
-    vocab_size=50261, output_dim=128, num_chunks=2
+    vocab_size=50261, output_dim=128, num_chunks=2,
+    epsilon=1e-6,   # see below: the DEFAULT is Keras' 1e-3, not this
 )
 ```
+
+`HierarchicalCodebookEmbedding`'s `epsilon` sets the variance floor of its
+internal `LayerNormalization`. Its default is **`1e-3`** — Keras' own default,
+which is what the layer used before the parameter existed, so adding the knob
+moved no trained model. Every other normalization site in this repo uses
+`1e-6` (`BertEmbeddings`, `ModernBertEmbeddings`, `create_normalization_layer`).
+**Pass `epsilon=1e-6` explicitly for a new model.**
 
 `AxialRoPE2D` is the one exception to the direct-import rule: it is also re-exported from the package, so `from dl_techniques.layers.embedding import AxialRoPE2D` works.
 
