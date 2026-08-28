@@ -37,7 +37,7 @@ class PerChannelBinaryLoss(keras.losses.Loss):
     The adaptive weighting formula is:
 
     .. math::
-        w_c = \\sqrt{\\frac{\\text{count}_c}{\\text{total\_pixels}}} + 0.1
+        w_c = \\sqrt{\\frac{\\text{count}_c}{\\text{total\\_pixels}}} + 0.1
 
     This ensures that rare classes are not completely overwhelmed but also
     prevents common classes from dominating the gradient purely by volume.
