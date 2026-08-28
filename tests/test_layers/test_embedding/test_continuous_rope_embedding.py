@@ -132,7 +132,7 @@ class TestContinuousRoPE:
     # ---- graph safety (locks the removed eager convert_to_numpy) -----
 
     def test_graph_trace_no_eager(self):
-        layer = ContinuousRoPE(dim=64, ndim=3)  # assert_positive=True default
+        layer = ContinuousRoPE(dim=64, ndim=3)
         x = tf.constant(np.random.rand(2, 5, 3).astype("float32"))
         eager = keras.ops.convert_to_numpy(layer(x))
         f = tf.function(lambda t: layer(t),
@@ -160,10 +160,56 @@ class TestContinuousRoPE:
     # ---- serialization ----------------------------------------------
 
     def test_get_config_round_trip(self):
-        layer = ContinuousRoPE(dim=48, ndim=3, max_wavelength=5000.0, assert_positive=False)
+        layer = ContinuousRoPE(dim=48, ndim=3, max_wavelength=5000.0)
         rebuilt = ContinuousRoPE.from_config(layer.get_config())
         assert rebuilt.dim == 48 and rebuilt.ndim == 3
-        assert rebuilt.max_wavelength == 5000.0 and rebuilt.assert_positive is False
+        assert rebuilt.max_wavelength == 5000.0
+
+    # ---- the removed `assert_positive` dead knob (D-009) -------------
+    #
+    # This REPLACES a constructor-echo test that read
+    # `assert rebuilt.assert_positive is False` and could not fail for the
+    # reason it existed: it proved the value survived serialization, which was
+    # true of a flag that did NOTHING. The three assertions below are the whole
+    # contract of the removal, and each one is independently RED at the commit
+    # before it: the key is gone from `get_config`, the constructor REJECTS it,
+    # and a config that still carries it nevertheless loads.
+    #
+    # Do not "restore" the parameter as a graph-safe check. `keras.ops` has no
+    # assert op (keras 3.8; `ops.cond` cannot raise), and the TF-only
+    # `tf.debugging.assert_non_negative` was MEASURED silently dropped under
+    # `tf.function(jit_compile=True)` -- inert in exactly the compiled regime
+    # `fit()` uses. See decisions.md D-009.
+
+    def test_assert_positive_is_not_serialized(self):
+        assert "assert_positive" not in ContinuousRoPE(dim=48, ndim=3).get_config()
+
+    def test_assert_positive_is_rejected_by_the_constructor(self):
+        # Keras' `Layer.__init__` rejects an unrecognized keyword with
+        # `ValueError`, not `TypeError` -- measured, not assumed.
+        with pytest.raises(ValueError, match="assert_positive"):
+            ContinuousRoPE(dim=48, ndim=3, assert_positive=False)
+
+    def test_a_legacy_config_carrying_assert_positive_still_loads(self):
+        stored = ContinuousRoPE(dim=48, ndim=3, max_wavelength=5000.0).get_config()
+        legacy = dict(stored)
+        legacy["assert_positive"] = False          # as an old archive has it
+        rebuilt = ContinuousRoPE.from_config(legacy)
+        assert rebuilt.dim == 48 and rebuilt.max_wavelength == 5000.0
+        assert not hasattr(rebuilt, "assert_positive")
+        # `from_config` must not mutate the caller's dict (the B-3 shape).
+        assert legacy["assert_positive"] is False
+
+    def test_a_legacy_config_reloads_a_saved_model_unchanged(self, tmp_path):
+        """The end-to-end arm: a real `.keras` archive, not a dict."""
+        inp = keras.Input(shape=(5, 3))
+        model = keras.Model(inp, ContinuousRoPE(dim=48, ndim=3)(inp))
+        x = np.random.rand(2, 5, 3).astype("float32")
+        before = keras.ops.convert_to_numpy(model(x))
+        path = str(tmp_path / "m.keras")
+        model.save(path)
+        after = keras.ops.convert_to_numpy(keras.models.load_model(path)(x))
+        np.testing.assert_allclose(before, after, rtol=0, atol=0)
 
     # ---- dtype policies (D-007) --------------------------------------
 

@@ -235,9 +235,11 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': ContinuousRoPE,
         'description': 'RoPE extended to handle continuous multi-dimensional coordinates.',
         'required_params': ['dim', 'ndim'],
+        # `assert_positive` was REMOVED here together with the constructor
+        # parameter (plan-2026-08-28T181715-3870472c/D-009): it was an inert
+        # knob and this table is what made it look supported. Do not re-add it.
         'optional_params': {
-            'max_wavelength': 10000.0,
-            'assert_positive': True
+            'max_wavelength': 10000.0
         },
         'use_case': 'Applying rotational position encoding to data with continuous spatial coordinates (e.g., 3D point clouds).'
     },
@@ -245,9 +247,10 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'class': ContinuousSinCosEmbed,
         'description': 'Embeds continuous coordinates using fixed sine and cosine functions.',
         'required_params': ['dim', 'ndim'],
+        # `assert_positive` was REMOVED here together with the constructor
+        # parameter (plan-2026-08-28T181715-3870472c/D-009). Do not re-add it.
         'optional_params': {
-            'max_wavelength': 10000.0,
-            'assert_positive': True
+            'max_wavelength': 10000.0
         },
         'use_case': 'Creating fixed, smooth positional representations for continuous coordinate data.'
     },

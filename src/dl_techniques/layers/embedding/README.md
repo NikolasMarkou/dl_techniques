@@ -221,7 +221,7 @@ dual_rope_embed = create_embedding_layer(
 
 ### ContinuousRoPE (`continuous_rope`)
 - **Required**: `dim`, `ndim`
-- **Optional**: `max_wavelength` (default: `10000.0`), `assert_positive` (default: `True`)
+- **Optional**: `max_wavelength` (default: `10000.0`)
 
 ```python
 # For 3D point cloud data
@@ -234,7 +234,7 @@ continuous_rope_3d = create_embedding_layer(
 
 ### ContinuousSinCosEmbed (`continuous_sincos`)
 - **Required**: `dim`, `ndim`
-- **Optional**: `max_wavelength` (default: `10000.0`), `assert_positive` (default: `True`)
+- **Optional**: `max_wavelength` (default: `10000.0`)
 
 ```python
 # For 2D spatial data
@@ -458,6 +458,32 @@ the check still deserializes. **The output width changes** in that case, from
 against the odd width will fail on the shape. It could never have run at all
 before, since the stack raised, so nothing that previously worked is broken.
 `from_config()` copies the config; the caller's dict is not modified.
+
+### 2026-08-28 — `ContinuousRoPE` and `ContinuousSinCosEmbed` drop `assert_positive`
+
+The `assert_positive` constructor parameter is **gone** from both classes and
+from their `EMBEDDING_REGISTRY` `optional_params`. It was stored, serialized and
+echoed by a test, and it triggered no check at any point in either layer's life:
+the original `ops.convert_to_numpy(ops.min(coords))` check was removed for graph
+safety and never replaced. Passing it now raises `ValueError` from the
+constructor (Keras' own unrecognized-keyword error), and `create_embedding_layer('continuous_rope', ..., assert_positive=True)`
+raises `ValueError` naming the accepted key set.
+
+It was **not** reinstated as a graph-safe check, and that was decided by
+measurement, not preference. `keras.ops` (keras 3.8) exposes no assert op at
+all — the only conditional primitive is `ops.cond`, which must return a tensor
+from both branches and therefore cannot raise. The one candidate,
+`tf.debugging.assert_non_negative`, is TF-only, which breaks this package's
+`keras.ops` backend-agnosticism, and was measured **silently dropped under
+XLA**: with `tf.function(jit_compile=True)` a negative input produced no error
+and TensorFlow logged `Ignoring Assert operator ...`. A check that is inert in
+the compiled regime `fit()` uses is the same dead knob wearing a different hat.
+
+*Migration*: `from_config()` on both classes pops an `assert_positive` key left
+in a stored config and logs a warning, so an archive written before the removal
+still deserializes. Numerics are unaffected — the parameter never influenced a
+single output value. The registry's 13 keys and its uniform 5-key entry shape
+are unchanged; only the contents of two `optional_params` dicts moved.
 
 ## Parameter Validation
 The factory performs comprehensive validation, catching common errors before layer creation.

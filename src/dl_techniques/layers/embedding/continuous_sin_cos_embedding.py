@@ -59,6 +59,8 @@ from typing import Optional, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+
 
 # ---------------------------------------------------------------------
 
@@ -78,8 +80,12 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
     cases. A caller that slices this output, or sizes a downstream layer by
     counting informative channels, needs that number.
 
-    ``assert_positive`` is accepted and serialized but performs no check.
-    See the note in ``call()``.
+    ``assert_positive`` has been REMOVED. It was stored and serialized but
+    triggered no check at all; passing it now raises ``ValueError`` (Keras'
+    own unrecognized-keyword error). A stored
+    config that still carries the key loads -- ``from_config`` drops it with a
+    warning. The measurement that ruled out a graph-safe replacement is at the
+    ``from_config`` anchor.
 
     **Architecture Overview:**
 
@@ -163,9 +169,6 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         the embedding vary more slowly with position. Must be positive.
         Defaults to ``10000.0``.
     :type max_wavelength: float
-    :param assert_positive: Retained for config compatibility. It performs
-        NO check. Defaults to ``True``.
-    :type assert_positive: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
 
     :ivar padding: Number of trailing zero channels in the output.
@@ -264,7 +267,6 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
             dim: int,
             ndim: int,
             max_wavelength: float = 10000.0,
-            assert_positive: bool = True,
             **kwargs: Any
     ) -> None:
         """Validate the configuration and fix the width arithmetic.
@@ -278,9 +280,6 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         :type ndim: int
         :param max_wavelength: Base of the frequency ladder.
         :type max_wavelength: float
-        :param assert_positive: Retained for config compatibility, performs
-            no check.
-        :type assert_positive: bool
         :param kwargs: Additional keyword arguments for the Layer base class.
         :type kwargs: Any
         :raises ValueError: If ``dim``, ``ndim`` or ``max_wavelength`` is not
@@ -301,7 +300,6 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         self.dim = dim
         self.ndim = ndim
         self.max_wavelength = max_wavelength
-        self.assert_positive = assert_positive
 
         # Two separate padding terms. The first covers a dim that does not
         # divide by ndim. The second covers a per-axis width that is odd and
@@ -410,13 +408,14 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
             Its last ``padding`` channels are zero.
         :rtype: keras.KerasTensor
         """
-        # `assert_positive` is retained as a config-compatible flag and no
-        # longer triggers a runtime check. The previous implementation called
-        # `ops.convert_to_numpy(ops.min(coords))` here, an eager host
-        # materialization that breaks `@tf.function` and graph tracing. Do not
-        # restore it. The originating plan directory is gone, so this comment
-        # is the only record of why the flag is inert. Removed for
-        # graph compatibility (DECISION plan_2026-06-15_9dbb87c1/D-001).
+        # There is deliberately NO coordinate-sign check here. The original
+        # `ops.convert_to_numpy(ops.min(coords))` was an eager host
+        # materialization that broke `@tf.function` and graph tracing; do not
+        # restore it (DECISION plan_2026-06-15_9dbb87c1/D-001 -- that plan
+        # directory is gone, so this comment is the only record). The
+        # `assert_positive` flag it served outlived it as a dead knob and is now
+        # gone too; the `from_config` anchor holds the measurement that ruled
+        # out a graph-safe replacement.
 
         # DECISION plan-2026-07-31T210633-b63a35aa/D-002
         # Compute the sinusoids in a never-narrowing working dtype, and cast
@@ -498,7 +497,7 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         """Return the constructor arguments for serialization.
 
         :return: Configuration dictionary carrying every ``__init__``
-            argument, including the inert ``assert_positive``.
+            argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -506,8 +505,39 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
             "dim": self.dim,
             "ndim": self.ndim,
             "max_wavelength": self.max_wavelength,
-            "assert_positive": self.assert_positive,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ContinuousSinCosEmbed":
+        """Rebuild the layer, dropping the removed ``assert_positive`` key.
+
+        Guide v2 §6.3: a parameter that used to be serialized may not simply
+        vanish, or every stored config carrying it becomes unloadable. The key
+        is popped with a warning; nothing else about deserialization changes.
+
+        :param config: Configuration dictionary, possibly from an archive
+            written before ``assert_positive`` was removed. NOT mutated.
+        :type config: Dict[str, Any]
+        :return: A new layer instance.
+        :rtype: ContinuousSinCosEmbed
+        """
+        # DECISION plan-2026-08-28T181715-3870472c/D-009
+        # Second site of the same removal; the full measurement lives at the
+        # matching anchor in `continuous_rope_embedding.py`. In short: `keras.ops`
+        # has NO assert op (keras 3.8 -- `ops.cond` cannot raise, both branches
+        # must return a tensor), and the TF-only `tf.debugging.assert_non_negative`
+        # was MEASURED silently dropped under `tf.function(jit_compile=True)`
+        # ("Ignoring Assert operator ..."), so a "graph-safe" reinstatement would
+        # be inert in exactly the compiled regime `fit()` uses. Do not add one.
+        config = dict(config)
+        if "assert_positive" in config:
+            config.pop("assert_positive")
+            logger.warning(
+                "ContinuousSinCosEmbed: dropping the 'assert_positive' key from "
+                "a stored config. The parameter never performed any check and "
+                "has been removed; the layer's numerics are unaffected."
+            )
+        return cls(**config)
 
 # ---------------------------------------------------------------------

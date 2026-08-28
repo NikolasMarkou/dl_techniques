@@ -151,7 +151,6 @@ class SupernodePooling(keras.layers.Layer):
             self.rel_pos_embed = ContinuousSinCosEmbed(
                 dim=self.hidden_dim,
                 ndim=self.ndim + 1,  # relative coords + distance magnitude
-                assert_positive=False,
                 name="rel_pos_embed"
             )
         else:

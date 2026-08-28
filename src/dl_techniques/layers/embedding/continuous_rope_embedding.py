@@ -54,6 +54,8 @@ from typing import Optional, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+
 
 # ---------------------------------------------------------------------
 
@@ -110,10 +112,15 @@ class ContinuousRoPE(keras.layers.Layer):
     :param max_wavelength: Base of the frequency ladder. Larger values give
         lower frequencies and longer wavelengths. Defaults to ``10000.0``.
     :type max_wavelength: float
-    :param assert_positive: Kept for config compatibility only. It triggers
-        NO runtime check; see the note in :meth:`call`. Defaults to ``True``.
-    :type assert_positive: bool
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    .. note:: **Removed parameter** — ``assert_positive``. It was stored and
+       serialized but triggered no check at all, at any point in the layer's
+       life. Passing it now raises ``ValueError`` (Keras' own
+       unrecognized-keyword error). A STORED config that still
+       carries the key loads: :meth:`from_config` drops it with a warning.
+       Why it was not made to work instead is recorded at the
+       :meth:`from_config` anchor.
 
     :ivar padding: Total channels that could not be split evenly. The output
         gains ``padding // 2`` zero phase columns.
@@ -160,7 +167,6 @@ class ContinuousRoPE(keras.layers.Layer):
             dim: int,
             ndim: int,
             max_wavelength: float = 10000.0,
-            assert_positive: bool = True,
             **kwargs: Any
     ) -> None:
         """Validate the configuration and derive the padding split.
@@ -173,8 +179,6 @@ class ContinuousRoPE(keras.layers.Layer):
         :type ndim: int
         :param max_wavelength: Base of the frequency ladder.
         :type max_wavelength: float
-        :param assert_positive: Config-compatible flag; no runtime effect.
-        :type assert_positive: bool
         :param kwargs: Additional keyword arguments for the ``Layer`` base
             class.
         :type kwargs: Any
@@ -195,7 +199,6 @@ class ContinuousRoPE(keras.layers.Layer):
         self.dim = dim
         self.ndim = ndim
         self.max_wavelength = max_wavelength
-        self.assert_positive = assert_positive
 
         # Calculate padding needed if dim is not cleanly divisible by ndim
         self.ndim_padding = dim % ndim
@@ -282,13 +285,14 @@ class ContinuousRoPE(keras.layers.Layer):
             it.
         :rtype: keras.KerasTensor
         """
-        # `assert_positive` is retained as a config-compatible flag but no
-        # longer triggers a runtime check. The previous implementation called
-        # `ops.convert_to_numpy(ops.min(coords))` here, which is an eager host
-        # materialization that breaks `@tf.function` / graph tracing. Removed for
-        # graph compatibility (DECISION plan_2026-06-15_9dbb87c1/D-001).
-        # That plan directory no longer exists, so this comment is the only
-        # surviving record of the change. Do not delete it.
+        # There is deliberately NO coordinate-sign check here. The original
+        # `ops.convert_to_numpy(ops.min(coords))` was an eager host
+        # materialization that broke `@tf.function` / graph tracing and was
+        # removed (DECISION plan_2026-06-15_9dbb87c1/D-001; that plan directory
+        # no longer exists, so this comment is the only surviving record). The
+        # `assert_positive` flag it served outlived it as a dead knob and is now
+        # gone too -- see the `from_config` anchor for the measurement that
+        # decided against reinstating a graph-safe replacement.
 
         # DECISION plan-2026-07-31T210633-b63a35aa/D-007
         # Compute the phases in a NEVER-NARROWING work dtype and cast the
@@ -372,8 +376,45 @@ class ContinuousRoPE(keras.layers.Layer):
             "dim": self.dim,
             "ndim": self.ndim,
             "max_wavelength": self.max_wavelength,
-            "assert_positive": self.assert_positive,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ContinuousRoPE":
+        """Rebuild the layer, dropping the removed ``assert_positive`` key.
+
+        Guide v2 §6.3: a parameter that used to be serialized may not simply
+        vanish, or every stored config carrying it becomes unloadable. The key
+        is popped with a warning; nothing else about deserialization changes.
+
+        :param config: Configuration dictionary, possibly from an archive
+            written before ``assert_positive`` was removed. NOT mutated.
+        :type config: Dict[str, Any]
+        :return: A new layer instance.
+        :rtype: ContinuousRoPE
+        """
+        # DECISION plan-2026-08-28T181715-3870472c/D-009
+        # Do NOT "fix" this by reinstating `assert_positive` as a working check.
+        # There is no portable, graph-safe way to raise on a tensor VALUE in this
+        # repo: `keras.ops` exposes no assert op at all (measured on keras 3.8 --
+        # the only conditional primitive is `ops.cond`, which must return a
+        # tensor from both branches and therefore cannot raise). The only
+        # candidate, `tf.debugging.assert_non_negative`, is (a) TF-only, which
+        # breaks the package's `keras.ops` backend-agnosticism, and (b) MEASURED
+        # SILENTLY DROPPED under XLA: with `tf.function(jit_compile=True)` a
+        # negative input produced NO error and TF logged
+        # `Ignoring Assert operator ...` -- i.e. the "check" would be inert in
+        # exactly the compiled regime `fit()` uses, recreating the dead knob it
+        # was meant to cure. Deleting the parameter (with this shim) was chosen
+        # over `xfail(strict=True)`-pinning the inertness. See decisions.md D-009.
+        config = dict(config)
+        if "assert_positive" in config:
+            config.pop("assert_positive")
+            logger.warning(
+                "ContinuousRoPE: dropping the 'assert_positive' key from a "
+                "stored config. The parameter never performed any check and "
+                "has been removed; the layer's numerics are unaffected."
+            )
+        return cls(**config)
 
 # ---------------------------------------------------------------------
