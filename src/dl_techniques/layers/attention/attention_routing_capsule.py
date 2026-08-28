@@ -2,50 +2,52 @@
 Capsule routing in a single attention step, with capsule length and detection
 probability decoupled.
 
-Dynamic routing between capsules is an agreement procedure: each lower capsule
-casts a prediction for each higher one, the higher capsules pool those
-predictions, and predictions that agree with the pooled result have their
-coupling coefficients increased. Running that as a loop
-(``b_{i+1} = b_i + agreement(v_i)``) makes every iteration depend on the last, so
-the routing is sequential inside what is otherwise a feed-forward layer -- it
-cannot be fused, and it leaves accelerators idle. This module replaces the loop
-with one learned query per output capsule and a single softmax over agreement
-scores. Routing becomes one parallel pass: ``score = <u_hat, q> / sqrt(D_out)``,
-softmax, aggregate. Agreement is still what decides the coupling, but it is
-agreement with a learned prototype rather than with an iteratively refined
-consensus.
+Dynamic routing between capsules is an agreement procedure. Each lower capsule
+casts a prediction for each higher one. The higher capsules pool those
+predictions, and a prediction that agrees with the pooled result gets its
+coupling coefficient raised. Running that as a loop
+(``b_{i+1} = b_i + agreement(v_i)``) makes every iteration depend on the last.
+The routing is then sequential inside an otherwise feed-forward layer. It
+cannot be fused, and accelerators sit idle.
+
+This module replaces the loop with one learned query per output capsule and a
+single softmax over agreement scores. Routing becomes one parallel pass:
+``score = <u_hat, q> / sqrt(D_out)``, softmax, aggregate. Agreement still
+decides the coupling. The agreement is with a learned prototype rather than
+with an iteratively refined consensus.
 
 The second departure concerns what a capsule's magnitude means. In the original
-formulation ``squash`` maps a vector's length into ``(0, 1)`` and that length IS
-the detection probability, so pose and confidence share one degree of freedom:
-a strong pose cannot be reported with low confidence, and the map saturates to
-zero magnitude for small ``||s||``, which flattens the gradient exactly where a
-weak-but-real detection lives. Here the two are separated,
-``v = sigmoid(prob_head(s)) * s / ||s||``: direction is a unit vector carrying
-the pose, magnitude is a learned scalar per capsule read as the probability under
-margin loss. ``||v||`` still lies in ``(0, 1)`` by construction, so margin loss
-applies unchanged, but nothing forces the two quantities to move together and the
-saturation at zero is gone.
+formulation ``squash`` maps a vector's length into ``(0, 1)``, and that length
+IS the detection probability. Pose and confidence then share one degree of
+freedom. A strong pose cannot be reported with low confidence. The map also
+saturates to zero magnitude for small ``||s||``, which flattens the gradient
+exactly where a weak-but-real detection lives.
 
-Two optional mechanisms borrow from sparsely-gated mixtures rather than from the
+Here the two are separated: ``v = sigmoid(prob_head(s)) * s / ||s||``. The
+direction is a unit vector carrying the pose. The magnitude is a learned scalar
+per capsule, read as the probability under margin loss. ``||v||`` still lies in
+``(0, 1)``, so margin loss applies unchanged. Nothing forces the two quantities
+to move together, and the saturation at zero is gone.
+
+Two optional mechanisms come from sparsely-gated mixtures rather than from the
 capsule literature. Top-k masking restricts each routing softmax to its ``k``
 largest scores, which keeps per-output cost sub-quadratic as the input capsule
-count grows; the mask is taken along the SAME axis the softmax reduces, which is
-what guarantees no row is left entirely masked. And an auxiliary importance loss
-penalizes the squared coefficient of variation of routing usage, discouraging the
-collapse where one output capsule monopolizes the assignments. It is added
+count grows. The mask is taken along the SAME axis the softmax reduces. That is
+what guarantees no row is left entirely masked. An auxiliary importance loss
+penalizes the squared coefficient of variation of routing usage. It discourages
+the collapse where one output capsule monopolizes the assignments. It is added
 through ``add_loss`` only when ``training`` is truthy, so it never appears in an
 inference graph.
 
 Two layers, one composing the other. :class:`AttentionRoutingCapsule` is the
 routing primitive. :class:`CapsuleBlockV2` wraps it with optional dropout and an
-optional direction-only normalizer, and forwards every routing argument through,
+optional direction-only normalizer. It forwards every routing argument through,
 so the two classes share one parameter vocabulary. The normalizer is
-length-preserving on purpose: a plain ``LayerNormalization`` would rescale
+length-preserving for a reason. A plain ``LayerNormalization`` would rescale
 ``||x||`` and destroy the detection probability the routing capsule just encoded
-there, so magnitude is held aside, the direction is normalized and re-unit-ized,
-and the magnitude is restored. ``CapsuleBlockV2`` is consumed in production by
-``models/vision/capsnet/model_v2.py``.
+there. So the magnitude is held aside, the direction is normalized and
+re-unit-ized, and the magnitude is restored. ``CapsuleBlockV2`` is consumed in
+production by ``models/vision/capsnet/model_v2.py``.
 
 Foundational mathematics::
 
@@ -95,8 +97,8 @@ class AttentionRoutingCapsule(keras.layers.Layer):
     vector, magnitude is ``sigmoid`` of a learned scalar head, so ``||v||`` lies
     in ``(0, 1)`` without ``squash``'s saturation at zero.
 
-    Everything is one forward pass -- no inner loop, no sequential dependency, so
-    the layer is fully parallel and XLA-fusable.
+    Everything is one forward pass. There is no inner loop and no sequential
+    dependency, so the layer is fully parallel and XLA-fusable.
 
     **Architecture Overview:**
 
@@ -152,10 +154,13 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
     .. code-block:: text
 
-        'output' (default)   softmax over axis 2 — each INPUT capsule competes
-                             for where to send itself. Dynamic-routing semantics.
-        'input'              softmax over axis 1 — each OUTPUT capsule receives a
-                             normalised mixture of inputs. Classic attention.
+        'output'  (the default)
+            softmax over axis 2. Each INPUT capsule competes for where
+            to send itself. These are dynamic-routing semantics.
+
+        'input'
+            softmax over axis 1. Each OUTPUT capsule receives a
+            normalised mixture of inputs. This is classic attention.
 
     :param num_capsules: Number of output capsules ``N_out``. Must be positive.
     :type num_capsules: int
@@ -234,11 +239,11 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         >>> caps = AttentionRoutingCapsule(10, 16, softmax_axis="input")
 
     Note:
-        ``||v||`` is a detection probability and ``v / ||v||`` is a pose, by
-        construction rather than by convention. Anything downstream that rescales
-        the capsule vector — a plain ``LayerNormalization``, for instance —
-        destroys the first while preserving the second. See
-        :class:`CapsuleBlockV2` for the length-preserving alternative.
+        ``||v||`` is a detection probability and ``v / ||v||`` is a pose. That
+        split comes out of the arithmetic here, not out of a convention.
+        Anything downstream that rescales the capsule vector destroys the first
+        while preserving the second. A plain ``LayerNormalization`` does exactly
+        that. Use :class:`CapsuleBlockV2` for the length-preserving alternative.
 
     Attributes:
         W: Pose transformation tensor, ``(N_in, N_out, D_out, D_in)``.
@@ -299,9 +304,10 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
         # Per-capsule scalar probability head:
         # maps a D_out-dim capsule vector to a scalar probability via Dense(1).
+        # activation=None emits a raw logit; call() applies the sigmoid.
         self.prob_head = keras.layers.Dense(
             units=1,
-            activation=None,  # raw logit; sigmoid applied in call()
+            activation=None,
             use_bias=True,
             kernel_initializer=self.kernel_initializer,
             name="prob_head",
@@ -424,10 +430,11 @@ class AttentionRoutingCapsule(keras.layers.Layer):
             k = min(k, axis_size)
 
         if axis == 1:
-            # Move axis 1 to last for keras.ops.top_k.
-            score_t = keras.ops.transpose(score, (0, 2, 1))  # (B, N_out, N_in)
+            # Move axis 1 to last for keras.ops.top_k. Result: (B, N_out, N_in).
+            score_t = keras.ops.transpose(score, (0, 2, 1))
         else:
-            score_t = score  # (B, N_in, N_out)
+            # Already (B, N_in, N_out), which top_k can consume directly.
+            score_t = score
         # keras.ops.top_k operates on the last axis.
         topk_values, _ = keras.ops.top_k(score_t, k=k)
         # The k-th value (smallest of the top-k) is the threshold per row.
@@ -472,24 +479,26 @@ class AttentionRoutingCapsule(keras.layers.Layer):
             no dropout and no normalization statistics).
         :type training: Optional[bool]
 
-        :return: Output capsules of shape ``(B, N_out, D_out)`` whose per-capsule
-            norm lies in ``(0, 1)`` by construction.
+        :return: Output capsules of shape ``(B, N_out, D_out)``. The sigmoid
+            magnitude head puts every per-capsule norm in ``(0, 1)``.
         :rtype: keras.KerasTensor
         """
         # inputs: (B, N_in, D_in)
         # u_hat[b, i, o, d] = sum_e W[i, o, d, e] * inputs[b, i, e]
         # einsum keeps static shapes intact under tf.function tracing.
-        u_hat = keras.ops.einsum("iode,bie->biod", self.W, inputs)  # (B, N_in, N_out, D_out)
+        # Result: (B, N_in, N_out, D_out).
+        u_hat = keras.ops.einsum("iode,bie->biod", self.W, inputs)
 
         # Score: (u_hat · q) / sqrt(D_out)
-        # u_hat: (B, N_in, N_out, D_out); q: (1, 1, N_out, D_out)
-        score = keras.ops.sum(u_hat * self.q, axis=-1)  # (B, N_in, N_out)
-        # R13: deliberately NOT `common.compute_attention_scale`. This site
-        # DIVIDES by sqrt(D_out); the helper returns the reciprocal 1/sqrt(D_out)
-        # for call sites that MULTIPLY. Swapping in the helper would change a
-        # divide into a multiply — a real (if tiny) numerics change, forbidden by
-        # this pass. Measured across 27 dims: `float(x) ** 0.5` differs from the
-        # helper's value for 26 of them, as it must (it is the reciprocal).
+        # u_hat: (B, N_in, N_out, D_out); q: (1, 1, N_out, D_out).
+        # Result: (B, N_in, N_out).
+        score = keras.ops.sum(u_hat * self.q, axis=-1)
+        # R13: this is NOT `common.compute_attention_scale`, and must not become
+        # it. This site DIVIDES by sqrt(D_out). The helper returns the
+        # reciprocal 1/sqrt(D_out), for call sites that MULTIPLY. Swapping it in
+        # turns a divide into a multiply, which is a real if tiny numerics
+        # change. Measured across 27 dims: `float(x) ** 0.5` differs from the
+        # helper's value for 26 of them, as it must, since it is the reciprocal.
         score = score / float(self.dim_capsules) ** 0.5
 
         # Optional Top-K masking before softmax.
@@ -501,28 +510,33 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
         # Softmax along the chosen axis.
         if self.softmax_axis == "output":
-            a = keras.activations.softmax(score, axis=2)  # competition over outputs
+            # Axis 2: the input capsules compete over output capsules.
+            a = keras.activations.softmax(score, axis=2)
         else:
-            a = keras.activations.softmax(score, axis=1)  # mixture over inputs
+            # Axis 1: each output capsule gets a mixture over input capsules.
+            a = keras.activations.softmax(score, axis=1)
 
         # Aggregate: s_j = sum_i (a_ij * u_hat_ij)
         # a: (B, N_in, N_out) -> expand to (B, N_in, N_out, 1) for broadcast.
+        # s: (B, N_out, D_out).
         a_exp = keras.ops.expand_dims(a, axis=-1)
-        s = keras.ops.sum(a_exp * u_hat, axis=1)  # (B, N_out, D_out)
+        s = keras.ops.sum(a_exp * u_hat, axis=1)
 
         if self.use_bias and self.bias is not None:
             s = s + self.bias
 
         # Decoupled output: magnitude (sigmoid head) * unit direction.
-        # Direction.
+        # Direction, shape (B, N_out, D_out).
         s_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(s), axis=-1, keepdims=True) + self.eps)
-        direction = s / s_norm  # (B, N_out, D_out)
+        direction = s / s_norm
 
-        # Magnitude: sigmoid(prob_head(s)) — scalar per capsule.
-        mag_logit = self.prob_head(s)  # (B, N_out, 1)
+        # Magnitude: sigmoid(prob_head(s)), one scalar per capsule.
+        # mag_logit is (B, N_out, 1).
+        mag_logit = self.prob_head(s)
         mag = keras.activations.sigmoid(mag_logit)
 
-        v = mag * direction  # (B, N_out, D_out), ||v|| ∈ (0, 1) by construction
+        # v is (B, N_out, D_out). The sigmoid puts ||v|| in (0, 1).
+        v = mag * direction
 
         # Optional load-balancing auxiliary loss (training only).
         if self.use_load_balancing and training:
@@ -530,11 +544,13 @@ class AttentionRoutingCapsule(keras.layers.Layer):
             # batch and input capsules. Penalize variance to encourage
             # uniform usage. Mirrors Shazeer et al. (2017) "importance loss".
             if self.softmax_axis == "output":
-                # a normalised over output axis -> usage = mean over (B, N_in)
-                usage = keras.ops.mean(a, axis=(0, 1))  # (N_out,)
+                # a is normalised over the output axis, so usage is the mean
+                # over (B, N_in) and has shape (N_out,).
+                usage = keras.ops.mean(a, axis=(0, 1))
             else:
-                # a normalised over input axis -> usage = mean over (B, N_out)
-                usage = keras.ops.mean(a, axis=(0, 2))  # (N_in,)
+                # a is normalised over the input axis, so usage is the mean
+                # over (B, N_out) and has shape (N_in,).
+                usage = keras.ops.mean(a, axis=(0, 2))
             # Coefficient of variation squared: cv^2 = var / mean^2.
             mean_u = keras.ops.mean(usage) + self.eps
             var_u = keras.ops.mean(keras.ops.square(usage - mean_u))
@@ -633,8 +649,8 @@ class CapsuleBlockV2(keras.layers.Layer):
         │  Output v [B, N_out, D_out]          │
         └──────────────────────────────────────┘
 
-        A plain LayerNorm on x would rescale ||x|| and destroy the detection
-        probability the routing capsule just encoded in it.
+        A plain LayerNorm on x would rescale ||x||. That destroys the
+        detection probability the routing capsule just encoded in it.
 
     :param num_capsules: Number of output capsules. Forwarded to
         :class:`AttentionRoutingCapsule`, which validates it.
@@ -706,10 +722,10 @@ class CapsuleBlockV2(keras.layers.Layer):
         >>> block = CapsuleBlockV2(10, 16)
 
     Note:
-        With ``direction_only_norm=True`` the block is length-preserving by
-        construction: ``||output|| == ||routing output||`` up to ``eps``, so the
-        detection probabilities survive normalization. Substituting a plain
-        ``LayerNormalization`` here silently discards them.
+        With ``direction_only_norm=True`` the block is length-preserving:
+        ``||output|| == ||routing output||`` up to ``eps``, so the detection
+        probabilities survive normalization. Don't substitute a plain
+        ``LayerNormalization`` here — it discards them silently.
 
     Attributes:
         routing: The wrapped ``AttentionRoutingCapsule``, named ``block_routing``.
@@ -809,10 +825,10 @@ class CapsuleBlockV2(keras.layers.Layer):
         :rtype: None
         """
         # DECISION plan-2026-07-27T130643-38c5646a/D-013 (second of two)
-        # Idempotency guard (rubric R7). See the full rationale at the identical guard
-        # in AttentionRoutingCapsule.build above — a second build() here would re-enter
-        # the sub-layer builds after weight restoration. Same invariant-1 carve-out,
-        # same lack of test coverage in either direction.
+        # Keep the `if self.built: return` guard. A second build() would re-enter
+        # the sub-layer builds after a checkpoint restored their weights. The
+        # twin guard is in AttentionRoutingCapsule.build; no test covers either
+        # of them in either direction. See decisions.md D-013.
         if self.built:
             return
 
