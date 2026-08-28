@@ -1,50 +1,40 @@
 """
-The Squared-ReLU Feed-Forward Network from the Primer architecture.
+The Squared-ReLU feed-forward network from the Primer architecture.
 
-This layer is a position-wise feed-forward network identical in structure to
-the standard Transformer MLP, but with one deliberate simplification: the
-intermediate non-linearity is *fixed* to the squared ReLU, ``relu(x)**2``,
-rather than being a configurable activation. This is the single change that
-the Primer architecture search (So et al. 2021) identified as one of its most
-effective and transferable modifications to the vanilla Transformer FFN.
+This is the standard transformer MLP with one change: the intermediate
+non-linearity is fixed to ``relu(x) ** 2`` instead of being configurable. The
+Primer architecture search (So et al. 2021) found this to be one of its most
+effective and most transferable changes to the vanilla FFN.
 
-Architectural Overview:
-The network keeps the classic "expand-then-contract" shape:
+The block keeps the usual expand-then-contract shape:
 
-1.  **Expansion**: An initial linear layer (`fc1`) projects the input from its
-    original dimension (`input_dim`) up to a wider intermediate dimension
-    (`hidden_dim`), typically a 4x expansion.
+1. **Expand.** ``fc1`` projects from ``input_dim`` up to ``hidden_dim``,
+   typically a 4x expansion.
+2. **Square the ReLU.** ``relu`` clamps the negative half to zero and the
+   square sharpens the positive response. There is no ``activation``
+   constructor argument; this non-linearity is the point of the layer.
+3. **Contract.** ``fc2`` projects from ``hidden_dim`` down to ``output_dim``,
+   usually equal to ``input_dim`` so the block can sit inside a residual
+   connection.
 
-2.  **Squared-ReLU Non-linearity**: The expanded representation is passed
-    through ``relu(x)**2`` — the ReLU clamps the negative half-plane to zero
-    and the square sharpens the positive response. Unlike GELU or plain ReLU
-    this is a strictly fixed non-linearity (it is the whole point of this
-    layer), so there is no `activation` constructor parameter.
+The maths, at a single sequence position:
 
-3.  **Contraction**: A second linear layer (`fc2`) projects the activated
-    representation back down to `output_dim`, usually equal to `input_dim` so
-    the block can sit inside a residual connection.
+    FFN(x) = W_2 @ relu(W_1 @ x + b_1)**2 + b_2
 
-Foundational Mathematics:
-For an input vector `x` at a single sequence position the layer computes:
+where ``W_1``, ``b_1`` go from ``input_dim`` to ``hidden_dim``,
+``relu(z)**2 = max(z, 0)**2`` is element-wise, and ``W_2``, ``b_2`` go from
+``hidden_dim`` to ``output_dim``.
 
-`FFN(x) = W_2 @ relu(W_1 @ x + b_1)**2 + b_2`
-
-where:
-- `W_1`, `b_1` project `x` from `input_dim` to `hidden_dim`.
-- `relu(z)**2 = max(z, 0)**2` is applied element-wise (the squared ReLU).
-- `W_2`, `b_2` project the result from `hidden_dim` to `output_dim`.
-
-The squared ReLU produces a smoother, faster-growing response on the positive
-half-line than ReLU while preserving exact sparsity on the negative half-line,
-which the Primer search found to improve training efficiency.
+The squared ReLU rises faster than ReLU on the positive half-line and keeps
+exact sparsity on the negative half-line. The Primer search found this
+improves training efficiency.
 
 References:
 -   So, D. R., Mańke, W., Liu, H., Dai, Z., Shazeer, N., & Le, Q. V. (2021).
     Primer: Searching for Efficient Transformers for Language Modeling.
     arXiv preprint arXiv:2109.08668.
--   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS. (the base
-    FFN structure this layer specializes).
+-   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS. (the base FFN
+    structure this layer specializes)
 
 """
 
@@ -65,73 +55,123 @@ class SquaredReLUFFN(keras.layers.Layer):
     """
     Squared-ReLU (Primer) feed-forward network.
 
-    This block implements the Primer feed-forward network: two dense layers
-    with a *fixed* squared-ReLU non-linearity and optional dropout in between.
-    The computation is ``FFN(x) = W_2 @ relu(W_1 @ x + b_1)**2 + b_2``,
-    applied identically to each token position with shared weights. The only
-    structural difference from a standard MLP block is the squared-ReLU
-    non-linearity, which is intentionally not configurable.
+    Two Dense layers with ``relu(x) ** 2`` between them:
+    ``FFN(x) = W_2 @ relu(W_1 @ x + b_1)**2 + b_2``. The same weights apply at
+    every token position.
+
+    The non-linearity is fixed. There is no ``activation`` argument, because
+    the squared ReLU is the one thing that distinguishes this layer from a
+    plain MLP block. Use ``MLPBlock`` if you need a configurable activation.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────┐
-        │   Input (..., input_dim)│
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │  fc1: Dense(hidden_dim) │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │   relu(x) ** 2          │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │   Dropout (optional)    │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │  fc2: Dense(output_dim) │
-        └────────────┬────────────┘
-                     ▼
-        ┌──────────────────────────┐
-        │  Output (..., output_dim)│
-        └──────────────────────────┘
+               Input  [..., input_dim]
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │      fc1      │
+                  │   Dense(H)    │
+                  └───────┬───────┘
+                          │  [..., H]
+                          ▼
+                  ┌───────────────┐
+                  │ relu(x) ** 2  │
+                  │  (fixed)      │
+                  └───────┬───────┘
+                          ▼
+                  ┌───────────────┐
+                  │    dropout    │
+                  └───────┬───────┘
+                          ▼
+                  ┌───────────────┐
+                  │      fc2      │
+                  │   Dense(O)    │
+                  └───────┬───────┘
+                          ▼
+              Output [..., output_dim]
 
-    :param hidden_dim: Integer, hidden dimension for the first dense layer
-        (expansion). Must be positive.
+        H = hidden_dim, O = output_dim. `dropout` is always in the
+        graph; at dropout_rate=0.0 it is a no-op, so it is not
+        drawn as a conditional stage. There is no sub-block below
+        this level: `call()` runs these four stages in order and
+        has no branch.
+
+    :param hidden_dim: Width of the expansion, ``fc1``'s output. Must be
+        positive. A 4x expansion over the input width is typical.
     :type hidden_dim: int
-    :param output_dim: Integer, output dimension for the second dense layer
-        (projection). Must be positive.
+    :param output_dim: Width of the final output, ``fc2``'s output. Must be
+        positive. Usually equal to the input width so the block can sit inside
+        a residual connection.
     :type output_dim: int
-    :param dropout_rate: Dropout rate applied after the squared-ReLU
-        non-linearity. Must be in range [0.0, 1.0). Defaults to 0.0.
+    :param dropout_rate: Dropout rate applied after the squared ReLU. Must be
+        in ``[0.0, 1.0)`` -- the upper bound is EXCLUSIVE here, unlike the
+        other FFN layers in this package, so ``1.0`` raises. Defaults to 0.0.
     :type dropout_rate: float
-    :param use_bias: Whether the dense layers use bias vectors. Defaults to True.
+    :param use_bias: Whether both Dense layers carry a bias. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the dense layer kernels.
-        Accepts string names ('glorot_uniform', 'he_normal') or Initializer
-        instances. Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the kernels of both Dense
+        layers. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the bias vectors. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases of both Dense layers.
+        Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for the dense layer kernels.
-        Can be string name ('l2') or Regularizer instance. Defaults to None.
+    :param kernel_regularizer: Regularizer for the kernels of both Dense
+        layers. A string name ('l2') or a Regularizer. Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param bias_regularizer: Optional regularizer for the dense layer biases.
-        Can be string name ('l1') or Regularizer instance. Defaults to None.
+    :param bias_regularizer: Regularizer for the biases of both Dense layers.
+        A string name ('l1') or a Regularizer. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If hidden_dim or output_dim is not positive.
-    :raises ValueError: If dropout_rate is not in range [0.0, 1.0).
+    :ivar hidden_dim: Width of the expansion.
+    :vartype hidden_dim: int
+    :ivar output_dim: Width of the output.
+    :vartype output_dim: int
+    :ivar dropout_rate: The stored dropout rate.
+    :vartype dropout_rate: float
+    :ivar use_bias: Whether the Dense layers carry a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar fc1: ``Dense(hidden_dim)``, the expansion.
+    :vartype fc1: keras.layers.Dense
+    :ivar fc2: ``Dense(output_dim)``, the contraction.
+    :vartype fc2: keras.layers.Dense
+    :ivar dropout: ``Dropout(dropout_rate)``, applied after the squared ReLU.
+    :vartype dropout: keras.layers.Dropout
+
+    :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not positive.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0)``.
+
+    Input shape:
+        Tensor of rank >= 2, shape ``(..., input_dim)``. ``build()`` does not
+        require the last axis to be known; the wrapped ``Dense`` does.
+
+    Output shape:
+        Same rank and leading axes as the input, with the last axis set to
+        ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            ffn = SquaredReLUFFN(hidden_dim=256, output_dim=64)
+            y = ffn(keras.random.normal((2, 10, 64)))
+            y.shape  # (2, 10, 64)
 
     Note:
-        The non-linearity is hard-wired to ``relu(x)**2``; there is no
-        ``activation`` parameter by design. Use ``MLPBlock`` if a configurable
-        activation is required.
+        ``relu(x) ** 2`` grows quadratically on the positive half-line, so
+        activations can get large. Keep an eye on the scale of ``hidden_dim``
+        and on the initializer if you see the loss diverge early.
     """
 
     def __init__(
@@ -146,9 +186,20 @@ class SquaredReLUFFN(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the two Dense layers.
+
+        Every argument is documented on the class. Validation runs before any
+        attribute is stored, so a rejected configuration leaves no half-built
+        layer behind.
+
+        :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
+            positive, or ``dropout_rate`` is outside ``[0.0, 1.0)``. Note the
+            open upper bound: ``dropout_rate=1.0`` is rejected here, where the
+            other FFN layers in this package accept it.
+        """
         super().__init__(**kwargs)
 
-        # Validate inputs immediately
+        # Reject bad configuration before storing anything.
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
@@ -156,7 +207,7 @@ class SquaredReLUFFN(keras.layers.Layer):
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store ALL configuration parameters
+        # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.dropout_rate = dropout_rate
@@ -166,8 +217,7 @@ class SquaredReLUFFN(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern).
-        # They remain unbuilt until build() is called.
+        # Create every sub-layer here, unbuilt. build() builds them.
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
@@ -200,7 +250,11 @@ class SquaredReLUFFN(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer and all its sub-layers.
+        Create the weights of every sub-layer.
+
+        Each sub-layer is built explicitly so that all weight variables exist
+        before Keras restores saved weights. A lazily-built sub-layer would be
+        skipped on load and would silently keep its fresh initialization.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -208,21 +262,18 @@ class SquaredReLUFFN(keras.layers.Layer):
         if self.built:
             return
 
-        # Build sub-layers in computational order for robust serialization.
         self.fc1.build(input_shape)
 
-        # Compute intermediate shape after the first dense layer.
+        # fc1 emits (..., hidden_dim). Dropout does not change shape, so the
+        # same shape builds both the dropout and fc2.
         intermediate_shape = list(input_shape)
         intermediate_shape[-1] = self.hidden_dim
         intermediate_shape_tuple = tuple(intermediate_shape)
 
-        # Dropout does not change shape.
         self.dropout.build(intermediate_shape_tuple)
-
-        # Build second dense layer on the intermediate shape.
         self.fc2.build(intermediate_shape_tuple)
 
-        # Always call parent build at the end.
+        # Keras requires the parent build() call last.
         super().build(input_shape)
 
     def call(
@@ -231,38 +282,37 @@ class SquaredReLUFFN(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply the squared-ReLU FFN to input tensors.
+        Run the squared-ReLU FFN forward pass.
 
-        :param inputs: Input tensor of shape (..., input_dim).
+        :param inputs: Input tensor of any rank, shape ``(..., input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Boolean indicating whether the layer should behave in
-            training mode. Affects dropout behavior.
+        :param training: Training-mode flag, passed to the dropout sub-layer.
         :type training: Optional[bool]
-        :return: Output tensor of shape (..., output_dim).
+        :return: Tensor with the same rank as ``inputs`` and last axis
+            ``output_dim``.
         :rtype: keras.KerasTensor
         """
-        # First dense layer (expansion).
+        # Expand to (..., hidden_dim).
         x = self.fc1(inputs)
 
-        # Fixed squared-ReLU non-linearity: relu(x) ** 2.
+        # The fixed non-linearity. There is no activation argument.
         x = keras.ops.square(keras.ops.relu(x))
 
-        # Dropout after the non-linearity.
+        # A no-op outside training and at dropout_rate=0.0.
         x = self.dropout(x, training=training)
 
-        # Second dense layer (projection).
+        # Contract to (..., output_dim).
         x = self.fc2(x)
 
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the layer.
+        Return the input shape with its last axis set to ``output_dim``.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple. All dimensions preserved except the last,
-            which changes to output_dim.
+        :return: The same shape with the last axis replaced by ``output_dim``.
         :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
@@ -271,11 +321,9 @@ class SquaredReLUFFN(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get layer configuration for serialization.
+        Return the constructor arguments needed to rebuild this layer.
 
-        Returns ALL parameters passed to __init__ for complete reconstruction.
-
-        :return: Dictionary containing the complete layer configuration.
+        :return: The base layer config plus every ``__init__`` argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

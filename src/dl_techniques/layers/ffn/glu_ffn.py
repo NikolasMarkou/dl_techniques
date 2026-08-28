@@ -1,77 +1,41 @@
 """
 A Gated Linear Unit feed-forward network.
 
-This layer serves as an advanced replacement for the standard position-wise
-Feed-Forward Network (FFN) commonly used in Transformer architectures. It is
-based on the Gated Linear Unit (GLU) principle, which introduces a dynamic,
-input-dependent gating mechanism to modulate the flow of information through
-the network, a concept extensively analyzed by Shazeer (2020).
+This is a drop-in replacement for the position-wise FFN of a transformer
+block. A standard FFN projects the input up, applies one fixed non-linearity,
+and projects back down. A GLU splits the up-projection into two branches. One
+branch is the value and carries the content. The other is the gate and, after
+an activation, multiplies the value element-wise. The gate is computed from
+the same input, so the layer can suppress or amplify a feature per token
+rather than per weight.
 
-The core idea is that instead of applying a static non-linearity (like ReLU)
-to a single linear projection of the input, the GLU computes two separate
-linear projections. One projection acts as the "value," containing the primary
-information, while the other acts as the "gate." The gate, after an
-activation function, element-wise multiplies the value, selectively filtering
-or amplifying features based on the input context. This allows for a more
-nuanced and powerful transformation than a standard FFN.
+The layer runs three projections:
 
-Architectural Overview:
-The layer's architecture is defined by two parallel pathways that process the
-input before being combined:
+1. ``gate_proj`` -- a Dense to ``hidden_dim``, followed by ``activation``.
+2. ``value_proj`` -- a second, independent Dense to ``hidden_dim``.
+3. ``output_proj`` -- a Dense from ``hidden_dim`` to ``output_dim``, applied
+   to the product of the two branches.
 
-1.  **Value Pathway**: A linear projection (`value_proj`) transforms the
-    input into an intermediate representation. This pathway carries the main
-    content to be processed.
+The maths, for an input vector ``x``:
 
-2.  **Gate Pathway**: A second, independent linear projection (`gate_proj`)
-    also transforms the input. The output of this projection is passed
-    through a non-linear activation function (e.g., Swish, GELU, Sigmoid).
+    g = W_g @ x + b_g          (gate)
+    v = W_v @ x + b_v          (value)
+    h = activation(g) * v      (element-wise product)
+    y = W_out @ h + b_out
 
-3.  **Gating Mechanism**: The activated gate is element-wise multiplied with
-    the output of the value pathway. This is the central operation of the
-    GLU, where the gate dynamically controls which information from the
-    value pathway is passed forward.
+``W_g`` and ``W_v`` are separate matrices; nothing ties them. The choice of
+``activation`` names the variant: ``'swish'`` is SwiGLU, ``'gelu'`` is GeGLU,
+``'sigmoid'`` is the original GLU, ``'linear'`` is the bilinear variant.
 
-4.  **Output Projection**: The resulting gated tensor is projected by a final
-    linear layer (`output_proj`) to the desired output dimension.
-
-This dual-pathway design provides greater expressive capacity, as the network
-can learn to ignore or emphasize different features for each specific input
-token, improving model performance and training dynamics.
-
-Foundational Mathematics:
-Let `x` be the input vector. The layer's computation is as follows:
-
-1.  Two independent linear projections are computed:
-    `g = W_g @ x + b_g`  (gate projection)
-    `v = W_v @ x + b_v`  (value projection)
-    where `W_g` and `W_v` are distinct weight matrices.
-
-2.  The gate `g` is passed through a non-linearity, and the result is
-    multiplied element-wise with the value `v`:
-    `h = activation(g) * v`
-    Here, `*` denotes the Hadamard (element-wise) product. Each element of
-    `activation(g)` acts as a scalar control for the corresponding element in
-    `v`.
-
-3.  The final output `y` is produced by a third linear projection:
-    `y = W_out @ h + b_out`
-
-The choice of `activation` function defines the specific variant of the GLU,
-such as SwiGLU (`swish`), GeGLU (`gelu`), or the original formulation with
-`sigmoid`.
+``GLUFFN`` is registered in ``ffn/factory.py`` under three keys -- ``glu``
+(``activation='swish'``), ``reglu`` (``'relu'``) and ``bilinear``
+(``'linear'``). They are the same class with different defaults.
 
 References:
-The application and analysis of GLU variants in the context of Transformer
-models is detailed in:
-
 -   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
-    arXiv:2002.05202.
-
-The original Gated Linear Unit concept was introduced in:
-
+    arXiv:2002.05202. (the Transformer-FFN analysis of the GLU family)
 -   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
-    Modeling with Gated Convolutional Networks. ICML.
+    Modeling with Gated Convolutional Networks. ICML. (the original GLU)
 
 """
 
@@ -84,91 +48,168 @@ from keras import layers, initializers, regularizers, activations
 @keras.saving.register_keras_serializable()
 class GLUFFN(keras.layers.Layer):
     """
-    Gated Linear Unit Feed-Forward Network.
+    Gated Linear Unit feed-forward network.
 
-    This layer implements a feed-forward block using a Gated Linear Unit (GLU),
-    which applies a gating function to control information flow through element-wise
-    multiplication of two separate linear projections. The computation is
-    ``output = W_out @ (activation(W_gate @ x) * (W_value @ x))``, where the
-    activation function defines the GLU variant (SwiGLU for 'swish', GeGLU for
-    'gelu', original GLU for 'sigmoid').
+    Two Dense layers read the same input. One is the gate, one is the value.
+    The gate goes through ``activation`` and multiplies the value element-wise.
+    A third Dense projects the result to ``output_dim``:
+    ``output = W_out @ (activation(W_gate @ x) * (W_value @ x))``.
+
+    The ``activation`` argument picks the variant. ``'swish'`` (the default)
+    gives SwiGLU-style gating, ``'gelu'`` gives GeGLU, ``'sigmoid'`` gives the
+    original GLU of Dauphin et al., and ``'linear'`` gives the bilinear
+    variant.
+
+    This class backs three ``FFN_REGISTRY`` keys. See the block-internals
+    diagram below for the activation each key supplies.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐
-        │    Input (..., input_dim)    │
-        └──────────────┬───────────────┘
-                       │
-                 ┌─────┴─────┐
-                 ▼           ▼
-        ┌──────────────┐ ┌──────────────┐
-        │  gate_proj   │ │  value_proj  │
-        │   (Dense)    │ │   (Dense)    │
-        └──────┬───────┘ └──────┬───────┘
-               ▼                │
-        ┌──────────────┐        │
-        │  Activation  │        │
-        └──────┬───────┘        │
-               │                │
-               └────────┬───────┘
-                        ▼
-        ┌──────────────────────────────┐
-        │     Element-wise Multiply    │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │      Dropout (optional)      │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │ output_proj: Dense(output_dim)│
-        └──────────────┬────────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │   Output (..., output_dim)   │
-        └──────────────────────────────┘
+               Input  [..., input_dim]
+                          │
+                ┌─────────┴─────────┐
+                ▼                   ▼
+          ┌───────────┐       ┌────────────┐
+          │ gate_proj │       │ value_proj │
+          │  Dense(H) │       │  Dense(H)  │
+          └─────┬─────┘       └─────┬──────┘
+                ▼                   │
+          ┌───────────┐             │
+          │activation │             │
+          └─────┬─────┘             │
+                └─────────┬─────────┘
+                          ▼
+                    multiply  [..., H]
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │    dropout    │
+                  └───────┬───────┘
+                          ▼
+                  ┌───────────────┐
+                  │  output_proj  │
+                  │   Dense(O)    │
+                  └───────┬───────┘
+                          ▼
+              Output [..., output_dim]
 
-    :param hidden_dim: Integer, dimensionality of the intermediate hidden layer.
-        Must be positive. Controls the capacity of the gating mechanism.
-        Typically larger than input_dim for feature expansion (e.g., 2-4x).
+        H = hidden_dim, O = output_dim. `dropout` is always in the
+        graph; at dropout_rate=0.0 it is a no-op, so it is not
+        drawn as a conditional stage.
+
+    **Gate / value split and variant selection:**
+
+    .. code-block:: text
+
+        x  [..., input_dim]
+        │
+        ├──► gate_proj  ──► g  [..., H] ──► activation(g)
+        │                                        │
+        └──► value_proj ──► v  [..., H] ─────────┤
+                                                 ▼
+                              h = activation(g) * v  [..., H]
+
+        Only the gate branch is non-linear. The `value_proj`
+        output reaches the multiply untouched.
+
+        `activation` selects the variant. The three factory keys
+        that build this class:
+
+          factory key   activation   variant
+          -----------   ----------   ---------------------
+          glu           'swish'      SwiGLU-style gate
+          reglu         'relu'       ReGLU
+          bilinear      'linear'     bilinear, no gate
+                                     non-linearity
+
+    :param hidden_dim: Width of the gate and value projections. Must be a
+        positive ``int``. Usually 2-4x the input width.
     :type hidden_dim: int
-    :param output_dim: Integer, dimensionality of the final output. Must be positive.
-        Often equals input_dim in Transformer blocks for residual connections.
+    :param output_dim: Width of the final output. Must be a positive ``int``.
+        In a transformer block it usually equals the input width so the block
+        can sit inside a residual connection.
     :type output_dim: int
-    :param activation: Activation function for the gate projection. Can be string name
-        ('gelu', 'swish', 'sigmoid', 'tanh') or callable. Defaults to 'swish'
-        (also known as SiLU), which is particularly effective for gating.
+    :param activation: Activation applied to the gate branch only. A string
+        name ('swish', 'gelu', 'sigmoid', 'relu', 'linear') or a callable.
+        Defaults to 'swish'.
     :type activation: Union[str, Callable]
-    :param dropout_rate: Float between 0 and 1, dropout rate applied after gating
-        mechanism for regularization. Only active during training. Defaults to 0.0.
+    :param dropout_rate: Dropout rate applied to the gated tensor, in
+        ``[0.0, 1.0]``. Active only when ``training=True``. Defaults to 0.0.
     :type dropout_rate: float
-    :param use_bias: Whether to include bias terms in all Dense projections.
-        Can improve model expressiveness. Defaults to True.
+    :param use_bias: Whether all three Dense projections carry a bias.
+        Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for kernel weights in all Dense layers.
-        Affects convergence and training stability. Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the kernels of all three Dense
+        layers. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
-    :param bias_initializer: Initializer for bias vectors in all Dense layers.
-        Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases of all three Dense
+        layers. Defaults to 'zeros'.
     :type bias_initializer: Union[str, initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer applied to kernel weights of
-        all Dense layers for preventing overfitting. Defaults to None.
+    :param kernel_regularizer: Regularizer for the kernels of all three Dense
+        layers. Defaults to None.
     :type kernel_regularizer: Optional[regularizers.Regularizer]
-    :param bias_regularizer: Optional regularizer applied to bias weights of
-        all Dense layers. Defaults to None.
+    :param bias_regularizer: Regularizer for the biases of all three Dense
+        layers. Defaults to None.
     :type bias_regularizer: Optional[regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments for Layer base class (name, dtype, etc.).
+    :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
+        ``dtype``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If hidden_dim or output_dim are not positive integers.
-    :raises ValueError: If dropout_rate is not between 0 and 1.
+    :ivar hidden_dim: Width of the gate and value projections.
+    :vartype hidden_dim: int
+    :ivar output_dim: Width of the output.
+    :vartype output_dim: int
+    :ivar activation: The resolved gate activation, from
+        ``keras.activations.get``.
+    :vartype activation: Callable
+    :ivar dropout_rate: The stored dropout rate, cast to ``float``.
+    :vartype dropout_rate: float
+    :ivar use_bias: Whether the Dense layers carry a bias, cast to ``bool``.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[regularizers.Regularizer]
+    :ivar gate_proj: ``Dense(hidden_dim)``, the gate branch.
+    :vartype gate_proj: layers.Dense
+    :ivar value_proj: ``Dense(hidden_dim)``, the value branch.
+    :vartype value_proj: layers.Dense
+    :ivar output_proj: ``Dense(output_dim)``, the final projection.
+    :vartype output_proj: layers.Dense
+    :ivar dropout: ``Dropout(dropout_rate)``, applied to the gated tensor.
+    :vartype dropout: layers.Dropout
+
+    :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not a positive
+        ``int``, or ``dropout_rate`` is not a number in ``[0.0, 1.0]``.
+    :raises ValueError: From ``build()``, if the last axis of the input shape
+        is ``None``.
+
+    Input shape:
+        Tensor of rank >= 2, shape ``(..., input_dim)``. The last axis must be
+        known at build time; it may be any width.
+
+    Output shape:
+        Same rank and leading axes as the input, with the last axis set to
+        ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            ffn = GLUFFN(hidden_dim=256, output_dim=64,
+                         activation='gelu')
+            y = ffn(keras.random.normal((2, 10, 64)))
+            y.shape  # (2, 10, 64)
 
     Note:
-        The gating mechanism allows selective information flow, which can improve
-        gradient propagation compared to standard ReLU-based FFN blocks. The choice
-        of activation function for the gate is crucial - 'swish' and 'gelu' are
-        commonly effective choices for modern architectures.
+        The gate is the only non-linear branch, so gradients reach the value
+        branch through a plain product. That is what makes gradient flow
+        better than a ReLU-then-project FFN of the same width.
     """
 
     def __init__(
@@ -184,10 +225,19 @@ class GLUFFN(keras.layers.Layer):
         bias_regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the GLU FFN layer with comprehensive parameter validation."""
+        """Validate the configuration and create the three Dense projections.
+
+        Every argument is documented on the class. Validation runs before any
+        attribute is stored, so a rejected configuration leaves no half-built
+        layer behind.
+
+        :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not a
+            positive ``int``, or ``dropout_rate`` is not a number in
+            ``[0.0, 1.0]``.
+        """
         super().__init__(**kwargs)
 
-        # Comprehensive input validation with informative error messages
+        # Reject bad configuration before storing anything.
         if not isinstance(hidden_dim, int) or hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be a positive integer, got {hidden_dim}")
         if not isinstance(output_dim, int) or output_dim <= 0:
@@ -195,7 +245,7 @@ class GLUFFN(keras.layers.Layer):
         if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
-        # Store ALL configuration parameters for serialization
+        # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.activation = activations.get(activation)
@@ -207,8 +257,7 @@ class GLUFFN(keras.layers.Layer):
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
 
-        # CREATE all sub-layers in __init__ (following Modern Keras 3 patterns)
-        # All layers are unbuilt at this point - building happens in build()
+        # Create every sub-layer here, unbuilt. build() builds them.
         dense_kwargs = {
             "use_bias": self.use_bias,
             "kernel_initializer": self.kernel_initializer,
@@ -219,7 +268,8 @@ class GLUFFN(keras.layers.Layer):
 
         self.gate_proj = layers.Dense(
             self.hidden_dim,
-            activation=None,  # Activation applied separately for clarity
+            # The gate activation is applied in call(), not here.
+            activation=None,
             name="gate_proj",
             **dense_kwargs
         )
@@ -245,34 +295,35 @@ class GLUFFN(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer and all its sub-layers for robust serialization.
+        Create the weights of every sub-layer.
 
-        Explicitly builds each sub-layer to ensure all weight variables
-        are created before Keras attempts to restore saved weights during loading.
+        Each sub-layer is built explicitly so that all weight variables exist
+        before Keras restores saved weights. A lazily-built sub-layer would be
+        skipped on load and would silently keep its fresh initialization.
 
-        :param input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor. The last axis must
+            be known.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the last axis of ``input_shape`` is ``None``.
         """
         if self.built:
             return
 
-        # Validate input shape has defined last dimension
         if input_shape[-1] is None:
             raise ValueError("The last dimension of input_shape must be defined")
 
-        # Build gate and value projections with input shape
+        # Both projections read the raw input, so both take input_shape.
         self.gate_proj.build(input_shape)
         self.value_proj.build(input_shape)
 
-        # Compute intermediate shape after gate/value projections
-        # Both projections output the same shape: (..., hidden_dim)
+        # Both projections emit (..., hidden_dim), so one shape serves both
+        # downstream sub-layers.
         intermediate_shape = self.gate_proj.compute_output_shape(input_shape)
 
-        # Build downstream layers with intermediate shape
         self.dropout.build(intermediate_shape)
         self.output_proj.build(intermediate_shape)
 
-        # CRITICAL: Always call parent build() at the end
+        # Keras requires the parent build() call last.
         super().build(input_shape)
 
     def call(
@@ -281,37 +332,40 @@ class GLUFFN(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass implementing the GLU gating mechanism.
+        Run the GLU forward pass.
 
-        :param inputs: Input tensor of any rank with last dimension as features.
+        :param inputs: Input tensor of any rank. The last axis is the feature
+            axis and may be any width.
         :type inputs: keras.KerasTensor
-        :param training: Whether layer is in training mode. Affects dropout behavior.
+        :param training: Training-mode flag, passed to the dropout sub-layer.
         :type training: Optional[bool]
-        :return: Output tensor with same rank as input, last dimension = output_dim.
+        :return: Tensor with the same rank as ``inputs`` and last axis
+            ``output_dim``.
         :rtype: keras.KerasTensor
         """
-        # Dual pathway projections
-        gate = self.gate_proj(inputs)      # Shape: (..., hidden_dim)
-        value = self.value_proj(inputs)    # Shape: (..., hidden_dim)
+        # Two parallel projections of the same input.
+        # Both produce shape (..., hidden_dim).
+        gate = self.gate_proj(inputs)
+        value = self.value_proj(inputs)
 
-        # Apply activation only to gate, then perform element-wise gating
-        gated_value = self.activation(gate) * value  # Shape: (..., hidden_dim)
+        # Gate the value. Only the gate branch gets the non-linearity.
+        gated_value = self.activation(gate) * value
 
-        # Apply dropout for regularization (only during training)
+        # A no-op outside training and at dropout_rate=0.0.
         gated_value = self.dropout(gated_value, training=training)
 
-        # Final projection to output dimension
-        output = self.output_proj(gated_value)  # Shape: (..., output_dim)
+        # Project (..., hidden_dim) down to (..., output_dim).
+        output = self.output_proj(gated_value)
 
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape transformation.
+        Return the input shape with its last axis set to ``output_dim``.
 
-        :param input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Shape tuple of output tensor with last dimension = output_dim.
+        :return: The same shape with the last axis replaced by ``output_dim``.
         :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
@@ -320,12 +374,9 @@ class GLUFFN(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get layer configuration for serialization.
+        Return the constructor arguments needed to rebuild this layer.
 
-        Returns ALL constructor parameters to ensure perfect reconstruction
-        during model loading.
-
-        :return: Dictionary containing complete layer configuration.
+        :return: The base layer config plus every ``__init__`` argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
