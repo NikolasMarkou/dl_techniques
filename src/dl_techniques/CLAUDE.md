@@ -71,9 +71,9 @@ exception and does re-export its 7 children. `models/README.md` is the catalogue
 **Docstring style: two are in use. Match the package you are editing; never convert a file
 wholesale.** Docstrings carry mathematical formulations where relevant.
 
-| Package | Convention | Measured 2026-08-26 (re-run of the block below) |
+| Package | Convention | Measured 2026-08-28 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 259 of 299 modules carry `:param ` |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 264 of 299 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 81 Sphinx-only, 8 both, 106 neither, over 275 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
@@ -168,6 +168,24 @@ Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both, `metrics/` 12 of 15 
 41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0, `visualization/` 6 of 7 / 0,
 `bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py` 31 `:param ` with the stray `Args:` still
 at `:273`. The MoE deletion touched `layers/` and nothing else, and the measurement says so.
+
+Re-derived a **fifth** time on **2026-08-28** by `plan-2026-08-28-6de2095b/iter-1/step-6.1`, again
+by re-running the WHOLE of `REPO_MAP.md`'s Numbers table (all 76 enforceable rows, executed by
+`tests/test_repo_map_numbers.py`) plus every command printed in this section: `layers/`
+**259 of 299 -> 264 of 299**. The denominator did not move, and that is the whole story of this
+one — five files changed style without any file being added or deleted. **Only three of the five
+are that plan's**: `class_token.py`, `mask_token.py` and `register_tokens.py` under
+`layers/embedding/`, converted Google -> Sphinx by its first step. The other two were already red at
+its base commit `f43881697`, which measured 261, not the tabulated 259:
+`layers/norms/polar_weight_norm.py` (`4b8dd2559`) and `layers/thera_heat_field.py` (`7648dbc7c`).
+**A red row is the sum of every mover since the last sweep, so a plan cannot read its own
+contribution off the size of the failure** — here the failure was +5 and the plan owned +3. Every
+other figure in the table and the code block above was re-run in the same edit and reproduces
+EXACTLY: `layers/attention/` 34 of 35, `models/` 275 files with 88 anchored-`Args:` / 89 `:param ` /
+8 both (so 80 Google-only, 81 Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both, `metrics/`
+12 of 15 / 2, `utils/` 22 of 41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0,
+`visualization/` 6 of 7 / 0, `bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py` 31 `:param `
+with the stray `Args:` still at `:273`, and the unanchored-grep trap still returning 89 against 88.
 
 ### Factory Pattern
 

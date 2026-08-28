@@ -386,8 +386,8 @@ thing you will meet and should not be surprised by.
   it is genuinely unmigratable (FFT, SVD).
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
-  `src/dl_techniques/layers/attention/` — 357 modules carry Sphinx/reST
-  `:param:` and 228 carry a Google-style `Args:` block, and the two sets are not
+  `src/dl_techniques/layers/attention/` — 362 modules carry Sphinx/reST
+  `:param:` and 223 carry a Google-style `Args:` block, and the two sets are not
   disjoint: 17 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
@@ -889,10 +889,49 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > `src/dl_techniques/CLAUDE.md`'s `layers/` docstring-style row (`260 of 300` -> `259 of 299`). No
 > command was found to be wrong; every one of the seven was a stale Value, not a drifted scope.
 
+> **Four rows moved on 2026-08-28**, re-derived by `plan-2026-08-28-6de2095b/iter-1/step-6.1` in a
+> commit containing no source file. The **WHOLE** table was re-derived, not the four: all 76
+> enforceable rows were re-run with their own commands by `tests/test_repo_map_numbers.py`, exactly
+> these four moved, and no command was found to be wrong — every one of the four was a stale Value,
+> not a drifted scope. The split between what this plan caused and what it inherited is NOT the
+> split the red rows suggested, and that is this entry's lesson:
+>
+> - **Three of the four are the same population and were ALREADY RED at this plan's base commit
+>   `f43881697`, by a different amount.** Re-running the three docstring-style commands in a
+>   detached worktree at that base returns `:param ` in `layers/` **261**, `:param ` outside
+>   `attention/` **359**, and `Args:` outside `attention/` **226** — against tabulated 259 / 357 /
+>   228. So the inherited drift is +2 / +2 / -2 and this plan added a further +3 / +3 / -3, giving
+>   **264 / 362 / 223**. A plan that converts N files can therefore NOT read its own contribution
+>   off the size of the failure: the red row is the sum of every population member since the last
+>   sweep, and half of this one predated the plan.
+> - **This plan's three** are `class_token.py`, `mask_token.py` and `register_tokens.py` under
+>   `src/dl_techniques/layers/embedding/`, converted from Google `Args:` to Sphinx `:param ` by
+>   `iter-1/step-1`. Each leaves the `Args:` population and joins BOTH `:param ` populations, which
+>   is why the two Sphinx rows move +3 and the Google row -3 in lockstep. `Modules carrying BOTH
+>   styles` held at **17**, and `` `.py` in `src/dl_techniques/layers/` `` held at **299** — this
+>   plan added and deleted no file, so the numerator moved without the denominator.
+> - **The inherited +2 / -2** is two files converted after the last sweep: `4b8dd2559`
+>   (`plan-2026-08-27-0261908f/iter-1/step-7`) converted
+>   `src/dl_techniques/layers/norms/polar_weight_norm.py`, and `7648dbc7c` "[layers/theta] cleaning
+>   up / normalizing" converted `src/dl_techniques/layers/thera_heat_field.py`. Both were green at
+>   `08faf3aba`, the last commit to touch this file.
+> - **The fourth row is unrelated to any of this.** `Python files under tests/` (1086 -> **1090**)
+>   is four guard modules landed by `plan-2026-08-27-60745fe0` under
+>   `tests/test_layers/test_activations/` (`conftest.py`,
+>   `test_the_dtype_floor_never_narrows.py`, `test_the_gelu_constant_follows_the_input_dtype.py`,
+>   `test_the_tables_survive_a_parent_build.py`). `Python files under src/` held at **1025**, which
+>   is the mechanical statement that this plan added zero files under `src/`.
+>
+> Three unenforced prose digits sourced from these rows moved in the SAME edit — this file's Part A
+> docstring-split bullet (`357` -> `362` Sphinx and `228` -> `223` Google; its `17 modules carry
+> both` and its `34 of its 35` were re-run and reproduce), and `src/dl_techniques/CLAUDE.md`'s
+> `layers/` docstring-style row (`259 of 299` -> `264 of 299`). Every other figure in that file's
+> docstring table and its printed command block was re-run in the same edit and reproduces exactly.
+
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1025 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1086 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1090 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 299 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -963,9 +1002,9 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files importing raw `tensorflow` | 58 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
-| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 259 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
-| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 357 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 228 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 264 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 362 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 223 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 17 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 10 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 84 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
