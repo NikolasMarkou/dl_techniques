@@ -98,96 +98,111 @@ class AnchorAttention(keras.layers.Layer):
     scores = Q_combined @ K_anchor^T / sqrt(d_k);
     Output = Probability(scores) @ V_anchor @ W_o``
 
-    **Architecture Overview:**
+    **Architecture Overview — standard mode (num_anchor_tokens=None):**
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────┐
-        │    AnchorAttention — standard mode (num_anchor_tokens=None)     │
-        │                                                                 │
-        │   All N tokens supply Q, K and V  ►  score matrix is N x N.     │
-        │                                                                 │
-        │   Input  x  [B, N, dim]                                         │
-        │        │                                                        │
-        │        ├───────────────┬───────────────┐                        │
-        │        ▼               ▼               ▼                        │
-        │     Q Proj          K Proj          V Proj                      │
-        │    [B,H,N,d]       [B,H,N,d]       [B,H,N,d]                    │
-        │        └───────┬───────┘               │                        │
-        │                ▼                       │                        │
-        │ Q @ Kᵀ · 1/sqrt(d) ► [B,H,N,N]         │                        │
-        │                ▼                       │                        │
-        │ Probability activation ► Dropout       │                        │
-        │                └───────────┬───────────┘                        │
-        │                            ▼                                    │
-        │            weights @ V  ►  [B,H,N,d]                            │
-        │                            ▼                                    │
-        │     merge heads ► [B, N, H*d] ► output projection               │
-        │                            ▼                                    │
-        │                  Output  [B, N, dim]                            │
-        └─────────────────────────────────────────────────────────────────┘
+        All N tokens supply Q, K and V, so the score matrix is N x N.
 
-        ┌─────────────────────────────────────────────────────────────────┐
-        │    AnchorAttention — hierarchical mode (num_anchor_tokens=K)    │
-        │                                                                 │
-        │   Only the K anchors supply keys and values, so the score       │
-        │   matrix is N x K. Query tokens contribute a query and NOTHING  │
-        │   else: no K and no V is ever computed for them.                │
-        │                                                                 │
-        │  NOTE: num_anchor_tokens >= seq_len makes every token an anchor,│
-        │  so it silently falls back to full N x N _standard_attention.   │
-        │   Input  x  [B, N, dim]                                         │
-        │        │                                                        │
-        │        ├────────────────────────────────┐  positional split     │
-        │        ▼                                ▼                       │
-        │   Anchors  x[:, :K]             Queries  x[:, K:]               │
-        │        │                                │                       │
-        │        ├──────────┬──────────┐          │                       │
-        │        ▼          ▼          ▼          ▼                       │
-        │     K Proj     V Proj     Q Proj   Q-token Proj                 │
-        │      K_a        V_a        Q_a          Q_q                     │
-        │   [B,H,K,d]  [B,H,K,d]  [B,H,K,d] [B,H,N-K,d]                   │
-        │        │          │          │          │                       │
-        │        │          │          └────┬─────┘                       │
-        │        │          │               ▼                             │
-        │        │          │      Q_all = concat[Q_a ; Q_q]              │
-        │        │          │           [B,H,N,d]                         │
-        │        │          │               │                             │
-        │        │          │   token order preserved, so the anchors     │
-        │        │          │   keep the first K output rows and no       │
-        │        │          │   re-scatter is needed                      │
-        │        │          │               │                             │
-        │        └──────────┼──────┬────────┘                             │
-        │                   │      ▼                                      │
-        │                   │  scores = Q_all @ K_aᵀ · 1/sqrt(d)          │
-        │                   │         [B,H,N,K]                           │
-        │                   │      ▼                                      │
-        │                   │  Probability activation ► Dropout           │
-        │                   └───┬──┘                                      │
-        │                       ▼                                         │
-        │          weights @ V_a  ►  [B,H,N,d]                            │
-        │                       ▼                                         │
-        │     merge heads ► [B, N, H*d] ► output projection               │
-        │                       ▼                                         │
-        │               Output  [B, N, dim]                               │
-        └─────────────────────────────────────────────────────────────────┘
+                          x  [B, N, dim]
+                                │
+                    ┌───────────┼───────────┐
+                    ▼           ▼           ▼
+                ┌───────┐   ┌───────┐   ┌───────┐
+                │ query │   │  key  │   │ value │
+                │ _proj │   │ _proj │   │ _proj │
+                └───┬───┘   └───┬───┘   └───┬───┘
+              [B,H,N,d]   [B,H,N,d]   [B,H,N,d]
+                    └─────┬─────┘           │
+                          ▼                 │
+              scores = Q @ Kᵀ · scale       │
+                    [B, H, N, N]            │
+                          ▼                 │
+              score_activation ► dropout    │
+                          └────────┬────────┘
+                                   ▼
+                        weights @ V  [B, H, N, d]
+                                   ▼
+                    merge heads  [B, N, inner_dim]
+                                   ▼
+                       ┌───────────────────────┐
+                       │ output_proj -> dim    │
+                       └───────────┬───────────┘
+                                   ▼
+                          output  [B, N, dim]
+
+    **Architecture Overview — hierarchical mode (num_anchor_tokens=K):**
+
+    .. code-block:: text
+
+        Only the K anchors supply keys and values, so the score matrix
+        is N x K. A query token contributes a query and nothing else:
+        no key and no value is ever computed for it.
+
+                          x  [B, N, dim]
+                                │
+                positional split at K (first K = anchors)
+                                │
+                    ┌───────────┴───────────┐
+                    ▼                       ▼
+            anchors x[:, :K]         queries x[:, K:]
+                    │                       │
+            ┌───────┼───────┐               ▼
+            ▼       ▼       ▼         ┌──────────────┐
+        ┌───────┐┌───────┐┌───────┐   │ query_token  │
+        │  key  ││ value ││ query │   │ _proj        │
+        │ _proj ││ _proj ││ _proj │   └──────┬───────┘
+        └───┬───┘└───┬───┘└───┬───┘     [B,H,N-K,d]
+        [B,H,K,d]    │        │                │
+            │        │        └───────┬────────┘
+            │        │                ▼
+            │        │   Q_all = concat[Q_a ; Q_q] on axis 2
+            │        │           [B, H, N, d]
+            │        │                │
+            │        │   concat order matches token order, so the
+            │        │   anchors keep the first K output rows and
+            │        │   nothing has to be re-scattered
+            │        │                │
+            └────────┼────────┬───────┘
+                     │        ▼
+                     │  scores = Q_all @ K_aᵀ · scale
+                     │        [B, H, N, K]
+                     │        ▼
+                     │  score_activation ► dropout
+                     └────┬───┘
+                          ▼
+              weights @ V_a  [B, H, N, d]
+                          ▼
+              merge heads  [B, N, inner_dim]
+                          ▼
+             ┌───────────────────────┐
+             │ output_proj -> dim    │
+             └───────────┬───────────┘
+                         ▼
+                output  [B, N, dim]
+
+        The four projections and output_proj are ONE set of weights
+        shared by both modes; standard mode skips query_token_proj.
+        num_anchor_tokens >= seq_len makes every token an anchor, so
+        that case falls back to the standard-mode path above.
 
     Shapes use ``B`` = batch, ``N`` = seq_len, ``K`` = num_anchor_tokens,
-    ``H`` = num_heads, ``d`` = head_dim. The merged-head width ``H*d``
-    equals ``dim`` unless ``head_dim`` is set explicitly.
+    ``H`` = num_heads, ``d`` = head_dim. ``inner_dim`` is ``H*d``; it equals
+    ``dim`` unless ``head_dim`` is set explicitly. ``scale`` is the stored
+    ``1/sqrt(head_dim)``.
 
-    **[NO MASK ARGUMENT — intentional carve-out, not an omission]** ``call()`` takes
-    ``(x, num_anchor_tokens=None, training=None)`` and has **no** ``attention_mask``
-    parameter. This is a frozen part of the public signature, adjacent to the
-    ``factory.py`` D-007 carve-out that pins the non-standard ``call()`` signatures in
-    this package: adding a mask argument would change the call contract for every
-    consumer and for the factory's dispatch. Do NOT "restore parity" with the MHA
-    family by bolting one on. The consequence, stated plainly so no caller is
-    surprised: anchors are chosen POSITIONALLY (the first ``K`` elements), so a
-    right-padded batch is safe, while a **left-padded batch promotes padding tokens
-    into the global summary** and silently corrupts every spoke's read. Pre-trim or
-    right-pad. If real masking is needed, that is a new layer or a follow-up plan, not
-    an in-place signature edit.
+    **No mask argument, and that is a carve-out rather than an omission.**
+    ``call()`` takes ``(x, num_anchor_tokens=None, training=None)`` and has no
+    ``attention_mask`` parameter. This package documents a non-standard
+    ``call()`` signature instead of renaming it, because the factory only
+    constructs layers and a caller holding a direct reference would break.
+    Adding a mask argument here would change the call contract for every
+    consumer. Do NOT bolt one on to "restore parity" with the MHA family.
+    The consequence, stated plainly so no caller is surprised: anchors are
+    chosen POSITIONALLY, as the first ``K`` elements. A right-padded batch is
+    therefore safe, but a left-padded batch promotes padding tokens into the
+    global summary and corrupts every spoke's read. Pre-trim or right-pad. If
+    real masking is needed, that is a new layer, not an in-place edit here.
 
     **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
     temperature come from :mod:`~dl_techniques.layers.attention.common`; score
@@ -250,8 +265,8 @@ class AnchorAttention(keras.layers.Layer):
     :raises ValueError: From ``call()``, if ``num_anchor_tokens`` is set but not
         positive.
     :raises ValueError: From ``call()`` in hierarchical mode, if the input's
-        sequence dimension is not statically known (see the
-        ``plan_2026-06-14_ab855e7e/D-002`` anchor).
+        sequence dimension is not statically known. Hierarchical mode branches
+        on ``num_anchor_tokens >= seq_len`` in Python, which needs a real int.
     """
 
     def __init__(
@@ -284,10 +299,9 @@ class AnchorAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # R13/A4: adopts the shared validator. Its message is character-for-character
-        # what stood here, so the regex pinned at `test_anchor_attention.py:96`
-        # (`match="must be divisible"`) still matches and the diagnostic is
-        # byte-unchanged. Checked before the swap, not assumed.
+        # Adopts the shared validator. Its message is character-for-character
+        # what stood here, so a test matching on "must be divisible" still
+        # matches. Checked before the swap, not assumed.
         validate_head_divisibility(dim, num_heads)
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
@@ -316,14 +330,12 @@ class AnchorAttention(keras.layers.Layer):
         # use this value, never `dim`, or a custom head_dim silently mis-packs.
         self.inner_dim = self.num_heads * self.head_dim
 
-        # Scaling factor: 1/sqrt(d_k).
-        # R13: was `1.0 / np.sqrt(float(self.head_dim))`. Verified rather than
-        # assumed before swapping — `.hex()` compared against the helper across 27
-        # realistic head dims (1..512), 0 mismatches, so this is a bit-identical
-        # rename and not a numerics change. Adopting also removes this file's only
-        # numpy dependency (the import is dropped above). Still a Python float
-        # computed in `__init__`, never in `call()`, per
-        # `plan_2026-06-14_33b77a7a/D-002`.
+        # Scaling factor 1/sqrt(head_dim). This was `1.0 / np.sqrt(...)` before
+        # it adopted the shared helper; `.hex()` was compared across 27 realistic
+        # head dims (1..512) with 0 mismatches, so the swap is bit-identical and
+        # not a numerics change. It also removed this file's only numpy import.
+        # Keep it a Python float computed HERE in __init__, never in call(): a
+        # backend tensor built during a symbolic trace leaks out of that scope.
         self.scale = compute_attention_scale(self.head_dim)
 
         # ---------------------------------------------------------------------
@@ -565,13 +577,13 @@ class AnchorAttention(keras.layers.Layer):
         :raises ValueError: If the sequence dimension is not statically known.
         """
         batch_size = keras.ops.shape(x)[0]
-        # DECISION plan_2026-06-14_ab855e7e/D-002: hierarchical mode needs a static
-        # sequence length — the `num_anchor_tokens >= seq_len` branch below is a
-        # Python-bool decision that crashes under @tf.function when seq_len is a
-        # dynamic keras.ops.shape() tensor (static-shape defect class; capsule/PFA
-        # precedent). Fail loud on None; batch stays dynamic. Do NOT revert to
-        # keras.ops.shape for the sequence dim here. _standard_attention (no branch on
-        # seq_len) is intentionally left dynamic-safe.
+        # DECISION plan_2026-06-14_ab855e7e/D-002: hierarchical mode reads the
+        # sequence length from the STATIC shape. The `num_anchor_tokens >= seq_len`
+        # branch below is a Python bool, and it crashes under @tf.function if
+        # seq_len is a dynamic keras.ops.shape() tensor. Fail loud on None; the
+        # batch dim stays dynamic. Do NOT revert this to keras.ops.shape.
+        # _standard_attention never branches on seq_len, so it stays dynamic-safe.
+        # The originating plan directory is gone, so this comment is the record.
         seq_len = x.shape[1]
         if seq_len is None:
             raise ValueError(

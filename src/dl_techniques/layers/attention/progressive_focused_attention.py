@@ -16,14 +16,16 @@ Architecture:
     then multiplied elementwise by the previous layer's attention map, normalized,
     applied to V, projected, un-windowed and un-shifted.
 
-    Three structural properties are load-bearing:
+    Three structural properties matter before you touch anything:
 
     -   ``call()`` returns a **tuple** ``(output, attention_weights)``, and
         ``compute_output_shape()`` therefore returns a tuple of two shapes. That is
-        the whole point of the layer: the second element is the ``prev_attn_map``
+        the point of the layer: the second element is the ``prev_attn_map``
         that the next block consumes.
-    -   SW-MSA (``shift_size > 0``) requires statically-known ``H`` and ``W``; see
-        the ``plan_2026-06-14_b9456f74/D-001`` anchor in ``build()``.
+    -   SW-MSA (``shift_size > 0``) requires statically-known ``H`` and ``W``.
+        The shifted-window mask geometry — how many windows there are, and which
+        region each one belongs to — cannot be built from a ``None`` spatial
+        dimension, so ``build()`` raises rather than emit a wrong-geometry mask.
     -   The sparse path is a documented not-implemented stub that fails loud at
         construction; see the ``plan_2026-06-14_0c5d4a21/D-004`` anchor in
         ``_validate_config()``.
@@ -111,12 +113,12 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     (``self.dim``, ``self.num_heads``, ``self.attention_dropout_rate``). The four
     later-added arguments (``probability_type``, ``probability_config``,
     ``qk_norm_type``, ``qk_norm_kwargs``) use the public spelling, so the file is
-    internally inconsistent as well. Renaming is deliberately **not** done here: these
+    internally inconsistent as well. Renaming is **not** done here: these
     attributes are read by external callers and by tests, so a rename is an
-    API-touching change and this pass is behavior-preserving. The ``get_config()`` KEY
+    API-touching change and this pass is behaviour-preserving. The ``get_config()`` KEY
     names are already the correct public spellings, so serialization is unaffected.
 
-    **[REUSE / DUPLICATION — deliberate, R13]** :meth:`_window_partition` and
+    **[REUSE / DUPLICATION — a choice, not an oversight]** :meth:`_window_partition` and
     :meth:`_window_reverse` mirror the module-level ``window_partition`` /
     ``window_reverse`` helpers in
     :mod:`~dl_techniques.layers.attention.window_attention`. They are **not** unified.
@@ -329,20 +331,24 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             )
 
         # Compute derived attributes
-        self._head_dim = dim // num_heads  # Dimension per attention head
-        # R13: this deliberately does NOT adopt `common.compute_attention_scale`,
-        # and the reason is measured, not stylistic. The helper computes
+        # Dimension per attention head.
+        self._head_dim = dim // num_heads
+
+        # This does NOT adopt `common.compute_attention_scale`, and the reason is
+        # measured rather than stylistic. The helper computes
         # `1.0 / math.sqrt(float(head_dim))`; this site computes `head_dim ** -0.5`.
-        # Those two are NOT the same double: compared via `.hex()` across 27 realistic
-        # head dims (1..512) they differ in the last ULP for 16 of them, including 8,
-        # 32, 64-adjacent and 128. Swapping the helper in would therefore be a real
-        # (if tiny) numerics change on a trained-weights layer, which the
-        # behavior-preserving pass that wrote this comment forbids. Note the closely
-        # related spelling `1.0 / (head_dim ** 0.5)` IS bit-identical to the helper —
-        # the difference is the negative exponent, not the `**` operator. Any future
-        # migration must re-run that probe, not assume.
-        self._scale = self._head_dim ** -0.5  # Scaling factor for dot-product attention
-        self._window_area = window_size * window_size  # Number of tokens per window
+        # Those are NOT the same double. Re-derived 2026-08-28 across 27 realistic
+        # head dims in 1..512: they differ in the last ULP for 16 of them, 8, 32
+        # and 128 among them. Swapping the helper in would be a real, if tiny,
+        # numerics change on a layer that has trained weights.
+        # Note that `1.0 / (head_dim ** 0.5)` IS bit-identical to the helper across
+        # all 27 — the difference is the NEGATIVE exponent, not the `**` operator.
+        # Any future migration must re-run the probe rather than assume it:
+        #   [d for d in dims if (d ** -0.5) != (1.0 / math.sqrt(float(d)))]
+        # Scaling factor for the dot-product scores.
+        self._scale = self._head_dim ** -0.5
+        # Number of tokens in one window.
+        self._window_area = window_size * window_size
 
         # ---------------------------------------------------------------------
         # Probability activation (replaces raw softmax). Functional call,
@@ -439,11 +445,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         """
         # Check dimension divisibility
         #
-        # A4 DECLINED: this deliberately does NOT adopt
-        # `common.validate_head_divisibility`. The regex pinned at
-        # `test_progressive_focused_attention.py:70` (`match="must be divisible"`)
-        # would still match the shared message, so the swap is test-SAFE — but it is
-        # not diagnostic-neutral. The trailing `Got head_dim = {dim / num_heads}`
+        # This does NOT adopt `common.validate_head_divisibility`. A test matching
+        # on "must be divisible" would still match the shared message, so the swap
+        # is test-SAFE — but it is not diagnostic-neutral. The trailing
+        # `Got head_dim = {dim / num_heads}`
         # clause prints the fractional head dim, which is the single most useful
         # number when picking a valid (dim, num_heads) pair, and the shared helper
         # has no way to emit it. Same judgment, same reason, as the declines recorded
@@ -487,13 +492,14 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"top_k ({self._top_k}) must be positive"
             )
 
-        # DECISION plan_2026-06-14_0c5d4a21/D-004: top_k/sparsity_mode guarded+documented
-        # as not-implemented (dense fallback) per user D2, F13. Do NOT silently accept a
-        # non-default sparsity_mode/top_k: the sparse path in _apply_sparsity is a no-op
-        # stub (the 'top_k' branch builds an unused mask + TODO; 'threshold' masks but the
-        # advertised top-k focusing is absent), so the layer would do DENSE attention while
-        # claiming sparse focusing. Re-implementing FAVOR-style sparse top-k is out of scope
-        # (research effort); here we fail loud at construction. See decisions.md D-004.
+        # DECISION plan_2026-06-14_0c5d4a21/D-004: a non-default sparsity_mode or
+        # top_k is REJECTED here, at construction. Do NOT silently accept one.
+        # The sparse path in _apply_sparsity is a no-op stub: its 'top_k' branch
+        # builds an unused mask and its 'threshold' branch masks without the
+        # advertised top-k focusing, so accepting the argument would make the
+        # layer compute DENSE attention while claiming sparse focusing.
+        # Re-implementing sparse top-k is a research task, not a cleanup.
+        # The originating plan directory is gone, so this comment is the record.
         if self._sparsity_mode != 'none':
             raise NotImplementedError(
                 f"sparsity_mode='{self._sparsity_mode}' is not implemented in "
@@ -605,10 +611,12 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         so each mask entry aligns with its corresponding window slot.
 
         SW-MSA requires statically-known ``height`` and ``width``: the mask
-        geometry (number of windows, per-window region assignment) cannot be
-        constructed from a dynamic ``None`` spatial dimension. ``build()`` fails
-        loud (``ValueError``) when either is ``None`` rather than silently
-        emitting a wrong-geometry mask. See ``# DECISION D-001`` in ``build()``.
+        geometry — the number of windows and each window's region assignment —
+        cannot be constructed from a dynamic ``None`` spatial dimension.
+        ``build()`` therefore raises ``ValueError`` when either is ``None``,
+        rather than silently emitting a wrong-geometry mask. Do not relax that
+        check to fall back on a dynamic shape; there is no correct mask to fall
+        back to.
 
         :param height: Static feature-map height. Must be divisible by
             ``window_size`` and ``>= 2 * window_size``.
@@ -669,32 +677,33 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         attn_mask = np.where(attn_mask != 0, -100.0, 0.0).astype(np.float32)
 
         # DECISION plan-2026-08-27T040114-580f8b63/D-011
-        # Returned as a CONSTANT TENSOR, not a `keras.Variable`. This mask is a
-        # pure function of `(shift_size, window_size, height, width)` -- all of
-        # which come from the config and the static input shape -- so it carries
-        # no state to track, save or restore.
+        # This returns a plain NUMPY ARRAY, held as a constant. It is neither a
+        # `keras.Variable` nor a backend tensor, and both of those alternatives
+        # are wrong here. The mask is a pure function of `(shift_size,
+        # window_size, height, width)`, all of which come from the config and the
+        # static input shape, so it carries no state to track, save or restore.
         #
-        # It used to be a bare `keras.Variable(...)`. A bare Variable is not
-        # attributed to THIS layer, so Keras charged it to whichever layer was on
-        # the build stack; inside a subclassed `keras.Model` that is the Model,
-        # which is already built by then, and every `shift_size > 0` layer died
-        # with `ValueError: You cannot add new elements of state (variables or
-        # sub-layers) to a layer that is already built.` on the first bare call,
-        # `fit()` and `predict()` alike. No test caught it: the SW-MSA tests call
-        # the bare layer directly, and the only Model-wrapper test uses
-        # `shift_size=0`, which takes the `None` branch above.
+        # Do NOT make it a bare `keras.Variable(...)`, which is what it used to
+        # be. A bare Variable is not attributed to THIS layer, so Keras charges it
+        # to whichever layer is on the build stack. Inside a subclassed
+        # `keras.Model` that is the Model, which is already built by then, and
+        # every `shift_size > 0` layer died on its first bare call with
+        # `ValueError: You cannot add new elements of state (variables or
+        # sub-layers) to a layer that is already built.` -- under `fit()` and
+        # `predict()` alike.
         #
-        # Do NOT "fix" this back into `self.add_weight(...)`. That would make a
-        # derived constant part of the checkpoint, and the zero-init + `.assign()`
-        # spelling of it is silently discarded under `StatelessScope`.
+        # Do NOT make it `self.add_weight(...)` either. That puts a derived
+        # constant in the checkpoint, and the zero-init plus `.assign()` spelling
+        # of it is silently discarded under `StatelessScope`.
         #
-        # It is also deliberately kept as a NUMPY array rather than converted here
-        # with `keras.ops.convert_to_tensor`. `build()` runs inside a scratch
-        # FuncGraph, so a tensor materialised here is out of scope by the time
-        # `call()` runs: `ValueError: The tensor ... cannot be accessed from here,
-        # because it was defined in FuncGraph(name=scratch_graph) which is out of
-        # scope.` The conversion belongs at the USE site in `call()`, where a numpy
-        # constant is simply baked into whichever graph is tracing.
+        # Do NOT convert it here with `keras.ops.convert_to_tensor`. `build()`
+        # runs inside a scratch FuncGraph, so a tensor materialised here is out of
+        # scope by the time `call()` runs: `ValueError: The tensor ... cannot be
+        # accessed from here, because it was defined in FuncGraph(
+        # name=scratch_graph) which is out of scope.` The conversion belongs at
+        # the USE site in `call()`, where a numpy constant is simply baked into
+        # whichever graph is tracing.
+        # See decisions.md D-011 (plan-2026-08-27T040114-580f8b63).
         return attn_mask
 
     def _window_partition(
@@ -704,9 +713,9 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         """Partition input feature map into non-overlapping windows.
 
         R13 cross-reference: a near-twin of ``window_partition`` in
-        :mod:`~dl_techniques.layers.attention.window_attention`. Deliberately NOT
-        unified — see the ``[REUSE / DUPLICATION]`` block in the class docstring for
-        the three reasons. The reshape/transpose ORDER below (B-major, window-minor)
+        :mod:`~dl_techniques.layers.attention.window_attention`. NOT unified, on
+        purpose — see the ``[REUSE / DUPLICATION]`` block in the class docstring
+        for the three reasons. The reshape/transpose ORDER below (B-major, window-minor)
         is depended on by :meth:`_compute_attention_mask`, which builds the SW-MSA
         mask with the same ordering; changing one without the other silently produces
         a wrong-geometry mask rather than an error.
@@ -758,8 +767,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         """Reverse window partition to reconstruct the spatial feature map.
 
         R13 cross-reference: a near-twin of ``window_reverse`` in
-        :mod:`~dl_techniques.layers.attention.window_attention`, and deliberately NOT
-        unified for the same reasons as :meth:`_window_partition`. One concrete
+        :mod:`~dl_techniques.layers.attention.window_attention`, and NOT unified,
+        for the same reasons as :meth:`_window_partition`. One concrete
         divergence worth naming: this version *derives* the batch size as
         ``ops.shape(windows)[0] // num_windows`` instead of accepting it as an
         argument, so its signature is not interchangeable with the sibling's.
@@ -847,8 +856,7 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         .. warning::
             **This method is currently unreachable below its first branch.**
             ``_validate_config()`` raises ``NotImplementedError`` for every
-            ``sparsity_mode`` other than ``'none'`` (anchor
-            ``plan_2026-06-14_0c5d4a21/D-004``), so in practice only the early
+            ``sparsity_mode`` other than ``'none'``, so in practice only the early
             ``return attn_scores`` executes. The ``'threshold'`` and ``'top_k'``
             branches are retained as the starting point for the eventual real
             implementation, NOT as working code: the ``'top_k'`` branch in particular
@@ -885,7 +893,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         elif self._sparsity_mode == 'top_k':
             # Top-k sparsity: keep only k most important positions per query
             seq_len = keras.ops.shape(attn_scores)[-1]
-            k = min(self._top_k, seq_len)  # Handle case where k > sequence length
+            # Clamp k: a caller may ask for more than the sequence has.
+            k = min(self._top_k, seq_len)
 
             # Average previous attention over heads for top-k selection
             prev_mean = keras.ops.mean(prev_attn_map, axis=1, keepdims=True)

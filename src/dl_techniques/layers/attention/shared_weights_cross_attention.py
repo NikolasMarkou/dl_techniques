@@ -113,49 +113,61 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌────────────────────────────────────────────────────────────────────┐
-        │                    SharedWeightsCrossAttention                     │
-        │                                                                    │
-        │  Input [B, total_seq, dim] — the modality streams ALREADY          │
-        │  concatenated on the sequence axis.  split_sizes is a call()       │
-        │  argument (not a config field) and says where the cuts are.        │
-        │                                 ▼                                  │
-        │  ONE shared qkv_dense(dim*3) over the WHOLE sequence               │
-        │  ► Q, K, V  [B, H, total_seq, head_dim]                            │
-        │                                 ▼                                  │
-        │  optional q_norm / k_norm — the SAME norm layers for both          │
-        │  streams; this sharing is what the class is named for              │
-        │                                 ▼                                  │
-        │  fork on len(split_sizes)                                          │
-        │                                 │                                  │
-        │                ┌────────────────┴────────────────┐                 │
-        │            len == 2                          len == 4              │
-        │                ▼                                 ▼                 │
-        │  ┌──────────────────────────┐    ┌───────────────────────────────┐ │
-        │  │ _two_modality_attention  │    │ _anchor_query_attention       │ │
-        │  │                          │    │                               │ │
-        │  │ split Q, K, V into A | B │    │ split into A_anchor, A_query, │ │
-        │  │ Q_A ► K_B, V_B           │    │ B_anchor, B_query             │ │
-        │  │ Q_B ► K_A, V_A           │    │ ALL of A (anchors+queries)    │ │
-        │  │                          │    │   ► B's ANCHOR K, V only      │ │
-        │  │ equal-size fast path     │    │ ALL of B (anchors+queries)    │ │
-        │  │ stacks the two           │    │   ► A's ANCHOR K, V only      │ │
-        │  │ directions on the        │    │                               │ │
-        │  │ BATCH axis instead       │    │ so a query token is attended  │ │
-        │  │                          │    │ FROM but never attended TO    │ │
-        │  └─────────────┬────────────┘    └───────────────┬───────────────┘ │
-        │                └────────────────┬────────────────┘                 │
-        │                                 ▼                                  │
-        │  each direction: scores · scale ► attn_prob (ONE shared            │
-        │  ProbabilityOutput instance) ► dropout ► · V                       │
-        │                                 ▼                                  │
-        │  concat on the seq axis ► merge heads ► proj_dense(dim)            │
-        │                                 ▼                                  │
-        │  Output [B, total_seq, dim]                                        │
-        │                                                                    │
-        │  attention_mask is accepted and NEVER read — neither helper        │
-        │  takes a mask, so padded tokens keep their full weight.            │
-        └────────────────────────────────────────────────────────────────────┘
+        inputs  [B, total_seq, dim]
+        Both modality streams arrive ALREADY concatenated on the
+        sequence axis. split_sizes is a call() argument, not a config
+        field, and it says where the cuts are.
+                             │
+                             ▼
+          ┌───────────────────────────────────────┐
+          │ qkv_dense: ONE Dense(dim * 3), run    │
+          │ over the WHOLE concatenated sequence  │
+          └───────────────────┬───────────────────┘
+                              ▼
+             reshape + transpose -> Q, K, V
+             each [B, H, total_seq, head_dim]
+                              ▼
+          ┌───────────────────────────────────────┐
+          │ q_norm / k_norm  (optional)           │
+          │ run on the whole Q and K, BEFORE any  │
+          │ modality split                        │
+          └───────────────────┬───────────────────┘
+                              ▼
+                   fork on len(split_sizes)
+                              │
+                ┌─────────────┴─────────────┐
+             len == 2                    len == 4
+                ▼                           ▼
+        ┌──────────────────────┐  ┌───────────────────────────┐
+        │_two_modality_        │  │_anchor_query_attention    │
+        │ attention            │  │                           │
+        │                      │  │ split into A_anchor,      │
+        │ split Q,K,V into A|B │  │ A_query, B_anchor, B_query│
+        │ Q_A ► K_B, V_B       │  │ ALL of A ► B's ANCHOR K,V │
+        │ Q_B ► K_A, V_A       │  │ ALL of B ► A's ANCHOR K,V │
+        │                      │  │                           │
+        │ when the two lengths │  │ so a query token is       │
+        │ are equal, the two   │  │ attended FROM but never   │
+        │ directions stack on  │  │ attended TO               │
+        │ the BATCH axis       │  │                           │
+        └──────────┬───────────┘  └─────────────┬─────────────┘
+                   └─────────────┬──────────────┘
+                                 ▼
+           per direction: scores · scale ► attn_prob ► dropout ► · V
+                                 ▼
+             concat on the seq axis ► merge heads ► proj_dense(dim)
+                                 ▼
+                       output  [B, total_seq, dim]
+
+        WHAT IS SHARED: everything. The layer owns no per-modality
+        weight at all. qkv_dense and proj_dense each run once over the
+        concatenated stream, q_norm and k_norm run once before the
+        split, and ONE attn_prob instance plus ONE dropout_layer serve
+        all five attention sites. There is no weight-tying trick here;
+        the sharing is structural.
+
+        attention_mask is accepted and NEVER read. Neither helper takes
+        a mask, so padded tokens keep their full weight.
 
     :param dim: Input/output dimension. Must be positive and divisible by num_heads.
     :type dim: int
@@ -229,10 +241,9 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # R13: adopts the shared validator. Its message is character-for-character
-        # what stood here, so the regex pinned at
-        # test_shared_weights_cross_attention.py:121 still matches and the
-        # diagnostic is unchanged.
+        # Adopts the shared validator. Its message is character-for-character
+        # what stood here, so a test matching on "must be divisible by
+        # num_heads" still matches and the diagnostic is unchanged.
         validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
@@ -262,16 +273,13 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # Scale factor for attention scores.
-        # stdlib math.sqrt (Python float), not keras.ops.sqrt; see D-002 in
-        # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
-        #
-        # R13: the expression that stood here, `1.0 / math.sqrt(float(head_dim))`,
-        # is character-for-character the body of `common.compute_attention_scale`,
-        # so this is the cleanest adoption in the batch. Still probed rather than
-        # assumed: `.hex()` compared across 27 realistic head dims (1..512), all
-        # equal. It remains a Python float computed in `__init__`, never in
-        # `call()`, which is exactly what the D-002 note above requires.
+        # Scale factor for attention scores. The shared helper IS
+        # `1.0 / math.sqrt(float(head_dim))`, character-for-character the
+        # expression that stood here, so the stored float is unchanged.
+        # Keep it a stdlib Python float computed HERE in __init__, never a
+        # `keras.ops.sqrt` result and never computed in `call()`: an ops result
+        # is a backend tensor even for a static int, and one built inside a
+        # symbolic scratch graph leaks out of that scope on the next trace.
         self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
@@ -295,11 +303,12 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             name="proj"
         )
 
-        # Conditionally create dropout layer
         # DECISION plan-2026-08-27T040114-580f8b63/D-016
-        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
-        # and Pitfall 1: a Dropout owns no weights, so always creating it keeps
-        # the object graph independent of `dropout_rate` at no checkpoint cost.
+        # The Dropout is created UNCONDITIONALLY and gated in `call()` instead.
+        # It owns no weights, so always creating it costs nothing in a
+        # checkpoint and keeps the object graph independent of `dropout_rate`.
+        # Do NOT make creation conditional on `dropout_rate > 0`.
+        # See decisions.md D-016 (plan-2026-08-27T040114-580f8b63).
         self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
 
         # Shared probability activation reused across all five attention sites.
@@ -349,13 +358,12 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.proj_dense.build(input_shape)
 
         # DECISION plan-2026-08-27T040114-580f8b63/D-018
-        # Built EXPLICITLY, like every other sub-layer in this method. The
-        # `pass` this replaces was a Guide v2 section 3.2 / Pitfall 6 violation
-        # ("build exactly what call() runs") that opted out with a comment saying
-        # so. It was harmless only because Dropout owns no weights, so there was
-        # nothing for a `.keras` reload to restore into; that is a property of
-        # Dropout, not of this method, and it would stop holding the moment the
-        # sub-layer became stateful.
+        # The Dropout is built EXPLICITLY, like every other sub-layer here.
+        # Do NOT go back to skipping it. Skipping was harmless only because
+        # Dropout owns no weights, so a `.keras` reload had nothing to restore
+        # into; that is a property of Dropout, not of this method, and it stops
+        # holding the moment the sub-layer becomes stateful.
+        # See decisions.md D-018 (plan-2026-08-27T040114-580f8b63).
         self.dropout_layer.build(
             (input_shape[0], self.num_heads, input_shape[1], input_shape[1])
         )
@@ -426,10 +434,13 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
                              f"must equal total sequence length ({total_seq_len})")
 
         # Compute Q, K, V for all tokens
-        qkv = self.qkv_dense(inputs)  # (batch_size, total_seq_len, dim * 3)
-        # Use -1 for the batch dimension to be compatible with symbolic Keras tensors
+        # -> (batch_size, total_seq_len, dim * 3)
+        qkv = self.qkv_dense(inputs)
+        # Use -1 for the batch dimension so this stays valid for a symbolic
+        # Keras tensor, whose batch size is None.
         qkv = keras.ops.reshape(qkv, (-1, total_seq_len, 3, self.num_heads, self.head_dim))
-        qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, batch_size, num_heads, total_seq_len, head_dim)
+        # -> (3, batch_size, num_heads, total_seq_len, head_dim)
+        qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
 
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -479,7 +490,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         # Check for equal-sized modalities for optimization
         if mod_a_len == mod_b_len:
             # Optimized path for equal sizes
-            q_combined = keras.ops.concatenate(q_splits, axis=0)  # Stack batch dims
+            # Stacking on the batch axis turns two matmuls into one.
+            q_combined = keras.ops.concatenate(q_splits, axis=0)
             k_swapped = keras.ops.concatenate([k_splits[1], k_splits[0]], axis=0)
             v_swapped = keras.ops.concatenate([v_splits[1], v_splits[0]], axis=0)
 
@@ -554,14 +566,17 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         mod_b_total = mod_b_anchor + mod_b_query
 
         # Split by combined modalities
-        q_mod_a = q[:, :, :mod_a_total, :]  # All of modality A
-        q_mod_b = q[:, :, mod_a_total:, :]  # All of modality B
+        # Queries: ALL of each modality, anchors and query tokens alike.
+        q_mod_a = q[:, :, :mod_a_total, :]
+        q_mod_b = q[:, :, mod_a_total:, :]
 
-        k_mod_a_anchor = k[:, :, :mod_a_anchor, :]  # Only A anchors for keys
-        k_mod_b_anchor = k[:, :, mod_a_total:mod_a_total + mod_b_anchor, :]  # Only B anchors
+        # Keys and values: ONLY the anchors of each modality. This is what
+        # turns the cost from |A| x |B| into |A| x anchors_B + |B| x anchors_A.
+        k_mod_a_anchor = k[:, :, :mod_a_anchor, :]
+        k_mod_b_anchor = k[:, :, mod_a_total:mod_a_total + mod_b_anchor, :]
 
-        v_mod_a_anchor = v[:, :, :mod_a_anchor, :]  # Only A anchors for values
-        v_mod_b_anchor = v[:, :, mod_a_total:mod_a_total + mod_b_anchor, :]  # Only B anchors
+        v_mod_a_anchor = v[:, :, :mod_a_anchor, :]
+        v_mod_b_anchor = v[:, :, mod_a_total:mod_a_total + mod_b_anchor, :]
 
         # Modality A (anchors + queries) attends to Modality B anchors
         scores_a = keras.ops.matmul(q_mod_a, keras.ops.transpose(k_mod_b_anchor, (0, 1, 3, 2))) * self.scale
@@ -602,10 +617,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        R9: the annotation is ``Dict[str, Any]`` (``typing.Dict``), matching every
-        other module in this package. The lowercase builtin-generic ``dict[str,
-        Any]`` that stood here was the sole occurrence in the package. This is a
-        TYPE-HINT-only change — the returned key set is untouched.
+        The return annotation is ``typing.Dict``, matching every other module in
+        this package rather than the lowercase builtin generic.
 
         :return: Dictionary containing all configuration parameters.
         :rtype: Dict[str, Any]

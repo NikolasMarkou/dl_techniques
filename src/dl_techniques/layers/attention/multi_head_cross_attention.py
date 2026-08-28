@@ -39,8 +39,8 @@ query row that keeps nothing is rescued to keep everything, so an all-`-inf` row
 never formed and no NaN gradient with it; and the rescue axis is read from this
 layer's own `probability_config` rather than hard-coded, since a caller may move
 the reduction axis. Three near-identical mask helpers exist across the package and
-are deliberately not unified — the differences in cast order, rank probing and
-head-axis handling are load-bearing at each site.
+are not unified, on purpose — the differences in cast order, rank probing and
+head-axis handling each matter at their own site.
 
 This class is the shared engine behind two thin facades,
 `multi_head_attention.MultiHeadAttention` (self-attention preset) and
@@ -128,14 +128,14 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐   ┌──────────────────────────────┐
-        │ query_input [B, Q_seq, D]    │   │ kv_input [B, KV_seq, D]      │
-        └──────────────┬───────────────┘   └──────────────┬───────────────┘
-                       ▼                                  ▼
-        ┌──────────────────────────┐   ┌──────────────────────────────────┐
-        │ q: Dense(D) → heads      │   │ kv: Dense(2·D) → split → heads   │
-        │   Q [B, H, Q_seq, D_h]   │   │   K, V [B, H, KV_seq, D_h]       │
-        └──────────────┬───────────┘   └──────────────┬───────────────────┘
+        ┌────────────────────────────┐  ┌────────────────────────────┐
+        │ query_input [B, Q_seq, D]  │  │ kv_input [B, KV_seq, D]    │
+        └──────────────┬─────────────┘  └──────────────┬─────────────┘
+                       ▼                               ▼
+        ┌────────────────────────┐  ┌─────────────────────────────────┐
+        │ q: Dense(D) → heads    │  │ kv: Dense(2·D) → split → heads  │
+        │   Q [B, H, Q_seq, D_h] │  │   K, V [B, H, KV_seq, D_h]      │
+        └──────────────┬─────────┘  └──────────────┬──────────────────┘
                        ▼                              │
         ┌──────────────────────────┐                  │
         │ optional q_norm / k_norm │◄─────────────────┤
@@ -153,7 +153,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         │   (1 − keep) · MASK_BIAS_VALUE — that form gives 0 · −inf =  │
         │   NaN in fp16 at every UNMASKED position                     │
         │   a fully-masked row is RESCUED to keep everything, so an    │
-        │   all-−inf row is never formed (D-009)                       │
+        │   all-−inf row is never formed                               │
         └──────────────┬───────────────────────────────────────────────┘
                        ▼                              │
         ┌──────────────────────────────────────────┐  │
@@ -197,11 +197,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        kv_input   shared_qk_projections   mode              projections
-        None                False           self-attention    q + kv (2 Dense)
-        None                True            self-attention    qkv    (1 Dense)
-        given               False           cross-attention   q + kv (2 Dense)
-        given               True            ValueError        —
+        kv_input   shared_qk_projections   ->  mode / projections
+
+        None       False   ->  self-attention   q + kv (2 Dense)
+        None       True    ->  self-attention   qkv    (1 Dense)
+        given      False   ->  cross-attention  q + kv (2 Dense)
+        given      True    ->  ValueError       —
 
     :param dim: Integer, input/output dimension. Must be positive and divisible
         by num_heads.
@@ -380,19 +381,16 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.qk_norm_kwargs = qk_norm_kwargs
 
         # Scale factor for attention scores.
-        # DECISION plan_2026-06-14_a5ed2c2a/D-002: use stdlib math.sqrt (a Python
-        # float), NOT keras.ops.sqrt. keras.ops.sqrt returns a backend tensor even for a
-        # static int head_dim; when __init__ runs inside a symbolic scratch graph
-        # (lazy build under compute_output_spec / functional trace) that tensor
-        # leaks out of scope ("<tf.Tensor '.../truediv:0'> is out of scope").
-        # head_dim is a static int, so a plain float is correct and bit-identical
-        # at the call site (cast/multiply rounds to the same float32). See D-002.
-        #
-        # R13: the expression above now lives in `common.compute_attention_scale`,
-        # which IS `1.0 / math.sqrt(float(head_dim))` — verified repr-identical for
-        # every realistic head_dim, so the stored float is unchanged. The anchor
-        # above still governs: the helper returns a Python `float` and is called
-        # from `__init__`, never from `call()`.
+        # DECISION plan_2026-06-14_a5ed2c2a/D-002: this must stay a stdlib
+        # `math.sqrt` Python float, NOT `keras.ops.sqrt`. The ops version returns
+        # a backend tensor even for a static int head_dim, and when `__init__`
+        # runs inside a symbolic scratch graph (a lazy build under a functional
+        # trace) that tensor leaks out of scope: "<tf.Tensor '.../truediv:0'> is
+        # out of scope". head_dim is a static int, so a plain float is correct and
+        # bit-identical at the call site. The shared helper used below IS
+        # `1.0 / math.sqrt(float(head_dim))`, so the stored value is unchanged,
+        # and it is still called from `__init__`, never from `call()`.
+        # The originating plan directory is gone, so this comment is the record.
         self.scale = compute_attention_scale(self.head_dim)
 
         # CREATE sub-layers based on projection strategy
@@ -416,16 +414,15 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # DECISION plan-2026-08-22T035419-a11304c8/D-160
         # `proj` is the attention block's RESIDUAL-path projection (GPT-2's
-        # `attn.c_proj`), so it is the one Dense here that may need a different
+        # `attn.c_proj`), so it is the one Dense here that may want a different
         # initializer scale from Q/K/V. Two things must not be "cleaned up":
         # (1) when `output_kernel_initializer` is None the kwargs dict is passed
-        # UNCHANGED, so this line stays byte-equivalent to its pre-2026-08-22
-        # form for every existing caller -- including the fact that `proj` then
-        # shares the SAME initializer INSTANCE as `qkv`/`q`/`kv` (measured: a
-        # shared instance replays its draw, max|delta| = 0.0 at equal shape);
-        # (2) the override replaces, never merges, and reaches `proj` ONLY --
-        # letting it reach Q/K/V would shrink them too, which the GPT-2
-        # reference explicitly does not do. See decisions.md D-160.
+        # UNCHANGED, so `proj` keeps sharing the SAME initializer INSTANCE as
+        # `qkv`/`q`/`kv` — measured: a shared instance replays its draw, so
+        # max|delta| is 0.0 at equal shape;
+        # (2) the override REPLACES rather than merges, and reaches `proj` only.
+        # Letting it reach Q/K/V would shrink those too, which the GPT-2
+        # reference does not do. See decisions.md D-160.
         proj_kwargs = dict(dense_kwargs)
         if self.output_kernel_initializer is not None:
             proj_kwargs["kernel_initializer"] = self.output_kernel_initializer
@@ -502,20 +499,19 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # Robustly determine if input_shape is a list of shapes (cross-attention)
         # or a single shape (self-attention). This works across backends.
         #
-        # R13 cross-reference — this three-line predicate is duplicated, on purpose,
-        # in THREE subtly different spellings across the package. They are NOT
-        # interchangeable and must not be unified into one helper:
-        #   * here (and in `compute_output_shape` below): rejects an element that is
-        #     `int`/`None`, i.e. an "is this NOT a serialized scalar shape" test;
-        #   * `multi_head_latent_attention.py:build/compute_output_shape`: requires
-        #     the element to be `(list, tuple)` — the complementary positive test,
-        #     which classifies e.g. a numpy shape element differently;
-        #   * `perceiver_attention.py::build._is_list_of_shapes`: the positive test
-        #     AND it also accepts a `tuple` container, and it carries the
-        #     `plan_2026-06-14_7734bacd/D-003` anti-regression rationale explaining
-        #     which serialized form broke the `.keras` round-trip.
+        # This three-line predicate is duplicated, on purpose, in THREE subtly
+        # different spellings across the package. They are NOT interchangeable and
+        # must not be unified into one helper:
+        #   * here, and in `compute_output_shape` below: rejects an element that is
+        #     `int`/`None` — an "is this NOT a serialized scalar shape" test;
+        #   * `MultiHeadLatentAttention`: requires the element to be a
+        #     `list`/`tuple`, the complementary positive test, which classifies a
+        #     numpy shape element differently;
+        #   * `perceiver_attention._is_list_of_shapes`: the positive test, and it
+        #     also accepts a `tuple` CONTAINER, because a `.keras` round-trip
+        #     hands shapes back as tuples and a list-only check misreads them.
         # Collapsing them would swap one file's classification of an edge-case
-        # input for another's — a behavior change disguised as de-duplication.
+        # input for another's — a behaviour change disguised as de-duplication.
         is_list_of_shapes = (
             isinstance(input_shape, list) and
             len(input_shape) > 0 and
@@ -578,11 +574,17 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Broadcast the mask to rank 4 and apply it to the scores.
 
+        **Mask convention: ``attention_mask`` is a KEEP mask.** A value of ``1``
+        means attend to that position and ``0`` means mask it out. It is NOT an
+        additive ``-inf`` bias and it is NOT a drop mask. Every attention layer in
+        this package uses this convention, and several state it by pointing here,
+        so flipping it would silently invert every caller's mask.
+
         A rank-2 mask is a key-padding mask shared by every query row; a rank-3
         mask is per-query. Both are expanded on the head axis and then handed to
         the shared helper, which owns the fp16-safe bias construction and the
-        fully-masked-row rescue. Everything about WHY this site's arguments differ
-        from the other nine is in the anchors below.
+        fully-masked-row rescue. Why this site's arguments differ from the other
+        near-twins is explained in the comments below.
 
         :param scores: Attention scores of shape ``(batch, num_heads, query_seq, kv_seq)``.
         :type scores: keras.KerasTensor
@@ -593,41 +595,39 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         :return: Masked scores tensor with same shape as input scores.
         :rtype: keras.KerasTensor
         """
-        # R13 cross-reference — this helper is deliberately NOT shared.
+        # This helper is NOT shared, and that is a choice rather than an oversight.
         #
-        # Three near-twins exist in this package and NONE of them is textually
-        # equivalent to another, so unifying them would change op order or dtype
-        # handling, which the behavior-preserving contract forbids:
+        # Three near-twins exist in this package and none is textually equivalent
+        # to another, so unifying them would change op order or dtype handling:
         #
-        #   * `multi_head_latent_attention.py::MultiHeadLatentAttention.
-        #     _apply_attention_mask` — same broadcast RESULT, but it casts AFTER
-        #     expanding (this one casts FIRST) and probes rank with
-        #     `len(ops.shape(mask))` rather than `len(mask.shape)`.
-        #   * `group_query_attention.py::GroupedQueryAttention._apply_mask` — uses
-        #     `ops.reshape` (not a double `expand_dims`) for the 2D case, and then
-        #     materializes the head axis with an explicit `ops.repeat` to
-        #     `num_heads` instead of relying on broadcast.
+        #   * `MultiHeadLatentAttention._apply_attention_mask` — same broadcast
+        #     RESULT, but it casts AFTER expanding (this one casts FIRST) and
+        #     probes rank with `len(ops.shape(mask))` rather than `len(mask.shape)`.
+        #   * `GroupedQueryAttention._apply_mask` — reshapes rather than expanding
+        #     twice for the 2D case, then materializes the head axis with an
+        #     explicit repeat to `num_heads` instead of relying on broadcast.
         #
-        # WHAT NOT TO DO: do not "obviously" merge these into one common.py helper.
-        # A single implementation must pick one cast order, one rank probe and one
+        # WHAT NOT TO DO: do not merge these into one shared helper. A single
+        # implementation has to pick one cast order, one rank probe and one
         # head-axis strategy, silently changing the other two call sites.
         #
         attention_mask = keras.ops.cast(attention_mask, scores.dtype)
 
-        # Expand mask dimensions to match scores shape (batch, num_heads, query_seq, kv_seq)
-        if len(attention_mask.shape) == 2:  # Padding mask (batch, kv_seq)
-            attention_mask = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), 1)  # (batch, 1, 1, kv_seq)
-        elif len(attention_mask.shape) == 3:  # Full mask (batch, query_seq, kv_seq)
-            attention_mask = keras.ops.expand_dims(attention_mask, 1)  # (batch, 1, query_seq, kv_seq)
+        # Expand the mask to the scores' rank, (batch, num_heads, query_seq,
+        # kv_seq). Rank 2 is a key-padding mask, (batch, kv_seq), which becomes
+        # (batch, 1, 1, kv_seq). Rank 3 is a full per-query mask,
+        # (batch, query_seq, kv_seq), which becomes (batch, 1, query_seq, kv_seq).
+        if len(attention_mask.shape) == 2:
+            attention_mask = keras.ops.expand_dims(keras.ops.expand_dims(attention_mask, 1), 1)
+        elif len(attention_mask.shape) == 3:
+            attention_mask = keras.ops.expand_dims(attention_mask, 1)
 
-        # THIS SITE'S MASK POLARITY, passed through verbatim: `attention_mask` is a
-        # `1 = keep` predicate (already cast to the scores dtype above, on its own
-        # untouched line), so it IS the keep predicate `apply_attention_mask` wants.
-        # Do NOT "normalize" it into a `> 0` comparison or invert it — the helper
-        # performs no polarity inference by design, so an inversion here raises
-        # nothing, changes no shape and stays finite; the layer would just attend to
-        # the padding. `TestMultiHeadCrossAttentionMaskPolarity` is the only guard
-        # that can see it.
+        # THIS SITE'S MASK POLARITY, passed through as-is: `attention_mask` is a
+        # `1 = keep` predicate, already cast to the scores dtype above on its own
+        # line, which is exactly what the shared bias helper wants. Do NOT
+        # "normalize" it into a `> 0` comparison and do NOT invert it. The helper
+        # infers no polarity, so an inversion raises nothing, changes no shape and
+        # stays finite — the layer would simply attend to the padding instead.
         scores_dtype = keras.backend.standardize_dtype(scores.dtype)
         return apply_attention_mask(
             scores,

@@ -25,8 +25,8 @@ running `cumsum`. So causality costs a scan over positions instead of a triangul
 mask — still linear, though the rank-5 intermediate makes it substantially more
 memory-hungry than the non-causal path.
 
-Two properties of this file are load-bearing and deliberately NOT normalized away
-by the package-wide style pass. `call()` takes **no** `attention_mask` argument;
+Two properties of this file matter and are NOT normalized away by the
+package-wide style pass. `call()` takes **no** `attention_mask` argument;
 that absence is frozen and honest, because the factory dispatches on argument names
 and a silently-ignored mask parameter would be worse than none. And the softmax
 temperature is precomputed once in `__init__` as a Python float, never recomputed
@@ -64,7 +64,7 @@ harness, mean of 20 redraws:
   uniformly, so it cancels between the numerator and the denominator of
   `phi(Q)(phi(K)^T V) / phi(Q)(phi(K)^T 1)`. Removing it changes nothing to four
   decimals. It is neither a cause of the floor nor a defect; it is a no-op.
-* The `ops.maximum(features, 0)` clamp is **load-bearing for variance**, not the
+* The `ops.maximum(features, 0)` clamp holds the VARIANCE down; it is not the
   cause of the floor. Removing it alone is catastrophic (two to four orders
   worse), because the unclamped cos/sin features make the denominator pass
   through zero.
@@ -137,22 +137,53 @@ class PerformerAttention(keras.layers.Layer):
     trigonometric — ``phi(x) = (1/sqrt(r)) [cos(w_i . x), sin(w_i . x)]``, scaled by
     ``exp(-||x||^2 / 2)`` on the query side.
 
-    **[FROZEN SIGNATURE — D-007 carve-out]** ``call()`` accepts
-    ``(inputs, training, return_attention_scores)`` and deliberately has **no**
-    ``attention_mask`` / ``mask`` parameter, unlike most siblings in this package.
-    This is recorded as an intentional inconsistency by the standing anchor
-    ``plan_2026-06-14_0c5d4a21/D-007`` at ``factory.py:939-944``, which explicitly
-    places both this signature and ``rpc_attention.RPCAttention.call``'s ``mask=``
-    spelling out of scope for normalization passes. **Do NOT "fix" this** by adding
-    a mask parameter or renaming one: the factory dispatches on the exact argument
-    names, and adding a silently-ignored ``attention_mask`` would be worse than an
-    honest absence — callers would believe padding was handled when it is not.
-    Causal masking IS supported, but only via the ``causal=True`` constructor flag,
+    **Frozen signature: there is no mask argument.** ``call()`` accepts
+    ``(inputs, training, return_attention_scores)`` and has no ``attention_mask``
+    or ``mask`` parameter, unlike most siblings in this package. The attention
+    factory registers this layer for CONSTRUCTION only and documents the
+    call-signature difference rather than renaming it, so the difference is a
+    recorded caveat rather than an accident. **Do NOT "fix" this** by adding a
+    mask parameter or renaming one: the factory dispatches on the exact argument
+    names, and a silently-ignored ``attention_mask`` would be worse than an honest
+    absence — callers would believe padding was handled when it is not. Causal
+    masking IS supported, but only through the ``causal=True`` constructor flag,
     which selects the prefix-``cumsum`` path in ``_linear_attention``.
 
     **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
-    temperature come from :mod:`~dl_techniques.layers.attention.common` rather than
-    being re-derived here; see the R13 notes in ``__init__``.
+    temperature come from :mod:`~dl_techniques.layers.attention.common` rather
+    than being re-derived here.
+
+    **Why this is O(N): the re-association.**
+
+    .. code-block:: text
+
+        Standard attention. The softmax sits BETWEEN the two matmuls, so
+        it must see the whole N x N score matrix before anything hits V.
+        Nothing can be reordered around it.
+
+            Q [N, d] ─┐
+                      ├─► QKᵀ [N, N] ─► softmax ─► @ V ─► out [N, d]
+            K [N, d] ─┘        ▲
+                               └─ this matrix is materialized: O(N²·d)
+
+        Performer. Replace exp(q·k) by <phi(q), phi(k)> and the softmax
+        disappears. Three plain matmuls remain, so associativity applies
+        and the RIGHT pair is contracted FIRST.
+
+            phi(K)ᵀ [F, N] ─┐
+                            ├─► KV [F, d]      ONE summary of the
+            V       [N, d] ─┘                  whole sequence
+                              │
+            phi(Q)  [N, F] ───┴─► @ KV ─► num [N, d]
+
+            phi(K)ᵀ · 1_N ─► k_sum [F]
+            phi(Q) · k_sum ─► z [N]  (+ 1e-6)
+
+            out = num / z          cost O(N · F · d), and the N x N
+                                   matrix is never formed at any point
+
+        Read the second figure right-to-left: the summary is built once,
+        then every query reads from it. That ordering IS the algorithm.
 
     **Architecture Overview:**
 
@@ -191,8 +222,9 @@ class PerformerAttention(keras.layers.Layer):
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  fork on the causal flag. The (N × N) matrix is NEVER formed  │
-        │  in either branch — associativity keeps this O(N · F · d_h): │
+        │  fork on the causal flag. The (N × N) matrix is NEVER        │
+        │  formed in either branch — associativity keeps this          │
+        │  O(N · F · d_h):                                             │
         │                                                              │
         │    causal=False   KV = phi(k)ᵀ · v          [B, H, F, d_h]   │
         │                   z  = phi(q) · Σ_n phi(k)  + 1e−6           │
@@ -223,15 +255,21 @@ class PerformerAttention(keras.layers.Layer):
         standard attention   O(N² · d)     the (N × N) score matrix
         Performer            O(N · F · d)  F = nb_features
 
-        F trades approximation quality against cost: higher F narrows the gap to
-        true softmax attention and costs proportionally more memory.
+        F costs memory proportionally. It does NOT buy accuracy: this
+        feature map is biased, and the measured error against a softmax
+        reference plateaus near 0.78 from F = 32 upward. The module
+        docstring carries the table. Raising F narrows the per-redraw
+        VARIANCE only.
 
     :param dim: Model dimensionality. Must be positive and divisible by num_heads.
     :type dim: int
     :param num_heads: Number of attention heads.
     :type num_heads: int
-    :param nb_features: Number of random features for kernel approximation.
-        Higher values give better approximation at the cost of more memory.
+    :param nb_features: Number of random features for the kernel approximation.
+        Higher values cost proportionally more memory and shrink the per-redraw
+        VARIANCE, but they do not shrink the approximation ERROR: this feature map
+        is biased and its measured error plateaus near 0.78. Do not read this as a
+        quality dial. The module docstring carries the measured table.
     :type nb_features: int
     :param ortho_scaling: Scaling factor applied to the random projection matrix.
         NOTE (limitation): when ``ortho_scaling > 0`` this currently applies a plain
@@ -380,12 +418,12 @@ class PerformerAttention(keras.layers.Layer):
         )
 
         # DECISION plan-2026-08-27T040114-580f8b63/D-014
-        # Created UNCONDITIONALLY and gated in `call()`, per Guide v2 section 1.3
-        # ("Create Unconditionally, Use Conditionally") and Pitfall 1. The
-        # conditional spelling this replaces made the object graph and the
-        # auto-generated sub-layer names depend on `dropout_rate`, which is the
-        # documented anti-pattern; an unused Dropout owns no weights, so creating
-        # it always costs nothing in the checkpoint.
+        # The Dropout is created UNCONDITIONALLY and gated in `call()`. Do NOT
+        # go back to creating it only when `dropout_rate > 0`: that made both the
+        # object graph and the auto-generated sub-layer names depend on
+        # `dropout_rate`. An unused Dropout owns no weights, so always creating it
+        # costs nothing in a checkpoint.
+        # See decisions.md D-014 (plan-2026-08-27T040114-580f8b63).
         self.dropout = keras.layers.Dropout(dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -434,17 +472,18 @@ class PerformerAttention(keras.layers.Layer):
         # Shape: (num_heads, nb_features//2, head_dim)
         shape = (self.num_heads, self.nb_features // 2, self.head_dim)
         # DECISION plan-2026-08-27T040114-580f8b63/D-014
-        # `dtype=self.compute_dtype` is load-bearing, not tidiness. Without it
-        # `keras.random.normal` follows the GLOBAL float policy and returns
-        # float32, while `q`/`k` arrive in the layer's compute dtype. Under
-        # `keras.mixed_precision.set_global_policy('mixed_float16')` the einsum
-        # and the `features * self._feature_scale` multiply below then mixed a
-        # half tensor with a float tensor and the layer raised
-        # `InvalidArgumentError: cannot compute Mul as input #1 was expected to be
-        # a float tensor but is a half tensor` -- i.e. PerformerAttention could
-        # not run at all under the project's standard mixed-precision policy.
-        # The file's test suite had zero mixed-precision coverage, so nothing
-        # caught it.
+        # `dtype=self.compute_dtype` is required, not tidiness. Do NOT drop it.
+        # Without it `keras.random.normal` follows the GLOBAL float policy and
+        # returns float32, while `q`/`k` arrive in the layer's compute dtype.
+        # Under a `mixed_float16` global policy the einsum and the
+        # `features * self._feature_scale` multiply below then mix a half tensor
+        # with a float tensor, and the layer raises `InvalidArgumentError: cannot
+        # compute Mul as input #1 was expected to be a float tensor but is a half
+        # tensor` -- PerformerAttention could not run at all under the project's
+        # standard mixed-precision policy. Nothing caught that at the time because
+        # the file had no mixed-precision coverage; a dedicated mixed-precision
+        # guard test for this layer exists now.
+        # See decisions.md D-014 (plan-2026-08-27T040114-580f8b63).
         projection = keras.random.normal(
             shape=shape,
             mean=0.0,
@@ -481,8 +520,9 @@ class PerformerAttention(keras.layers.Layer):
         ``cos`` and ``sin`` of the projection are concatenated to width
         ``nb_features``, scaled so the inner product approximates the exponential
         kernel in expectation, and clamped non-negative. The
-        ``exp(-||x||^2 / 2)`` factor is applied to QUERIES only — the asymmetry is
-        deliberate.
+        ``exp(-||x||^2 / 2)`` factor is applied to QUERIES only. The asymmetry is
+        intended, and it is also inert: the factor cancels between the numerator
+        and the denominator downstream.
 
         :param x: Input tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
         :type x: keras.KerasTensor
@@ -525,7 +565,9 @@ class PerformerAttention(keras.layers.Layer):
                     )
             )
 
-        return keras.ops.maximum(features, 0)  # Ensure positive features
+        # Clamp to non-negative. Without this the unclamped cos/sin features let
+        # the denominator pass through zero, which is catastrophic for variance.
+        return keras.ops.maximum(features, 0)
 
     def _linear_attention(
             self,
@@ -584,7 +626,8 @@ class PerformerAttention(keras.layers.Layer):
 
             # z: (batch, num_heads, seq_len)
             z = keras.ops.einsum('bhnf,bhf->bhn', q, k_sum)
-            z = z + 1e-6  # Add small epsilon for numerical stability
+            # Small epsilon so a near-zero normalizer cannot blow up the divide.
+            z = z + 1e-6
 
             # Compute output: φ(Q) · KV / Z
             # out: (batch, num_heads, seq_len, head_dim)
