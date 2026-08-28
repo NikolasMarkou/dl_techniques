@@ -27,7 +27,7 @@ that share layers. The family `__init__.py` files carry a docstring listing thei
 nothing else. `time_series/` is the single exception; it predates this layout, has 7 children
 rather than 35, and its consumers rely on the re-exports.
 
-## The 11 families
+## The 12 families
 
 Counts are **leaf counts**, which for `vision` and `vision_language` are larger than the
 direct-child count, because those two nest one level further. Re-derive with the `find` in
@@ -39,6 +39,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **9** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 7 | forecasting, probabilistic and point |
+| [`embeddings_experimental/`](embeddings_experimental/) | 3 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
@@ -46,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **80** | |
+| **Sum** | **83** | |
 
 ### `vision/` (35)
 
@@ -157,6 +158,9 @@ that `mamba` is only a language model.
 | `memory/som/` | Self-Organizing Maps |
 | `point_cloud/latent_gmm_registration/` | latent GMM registration |
 | `tabular/tabm/` | TabM |
+| `embeddings_experimental/shared/` | the study skeleton and block registry — not an architecture |
+| `embeddings_experimental/ascii_bert/` | ASCII-vocabulary BERT, the study's transformer baseline |
+| `embeddings_experimental/ascii_clifford_bert/` | same skeleton, attention-free Clifford mixing |
 
 ## Second-level nesting
 

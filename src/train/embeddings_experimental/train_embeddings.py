@@ -79,7 +79,7 @@ from .data import build_packed_mlm_dataset
 
 # ---------------------------------------------------------------------
 
-__all__ = ["main", "parse_args", "run_study_cell"]
+__all__ = ["SimCSELoss", "SimCSEModel", "main", "parse_args", "run_study_cell"]
 
 #: Filename of the encoder handed from stage 1 to stage 2 and to evaluation.
 ENCODER_FILENAME = "encoder.keras"
@@ -241,70 +241,35 @@ def run_mlm_stage(
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class SimCSEModel(keras.Model):
-    """SimCSE: two dropout views of one sentence form a positive pair.
+class SimCSELoss(keras.losses.Loss):
+    """Symmetric InfoNCE over two dropout views of the same batch.
 
-    The same batch is encoded twice with ``training=True``, so independent
-    dropout masks give two different embeddings of the same text. Every other
-    sentence in the batch is a negative. This needs no paired corpus, which is
-    what makes it usable on the same Wikipedia stream stage 1 uses.
+    ``y_true`` is ignored: the positives are positional (row *i* of view A
+    matches row *i* of view B), so the targets are implicit. ``y_pred`` is the
+    stacked pair produced by :meth:`SimCSEModel.call`, shape
+    ``(batch, 2, embed_dim)``.
 
-    :param encoder: The pretrained encoder.
-    :type encoder: keras.Model
-    :param projection_dim: Width of the projection head.
-    :type projection_dim: int
     :param temperature: Softmax temperature over cosine similarities.
     :type temperature: float
-    :param kwargs: Additional keyword arguments for the Model base class.
+    :param kwargs: Additional keyword arguments for the Loss base class.
     """
 
-    def __init__(
-        self,
-        encoder: keras.Model,
-        projection_dim: int = 256,
-        temperature: float = 0.05,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, temperature: float = 0.05, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.encoder = encoder
-        self.projection_dim = projection_dim
         self.temperature = temperature
-        self.projection = keras.layers.Dense(
-            projection_dim, use_bias=False, name="projection"
-        )
-        self.loss_tracker = keras.metrics.Mean(name="loss")
 
-    @property
-    def metrics(self) -> List[keras.metrics.Metric]:
-        """Return the tracked metrics.
+    def call(self, y_true, y_pred):
+        """Compute the symmetric InfoNCE loss.
 
-        :return: The running loss tracker.
-        :rtype: list[keras.metrics.Metric]
-        """
-        return [self.loss_tracker]
-
-    def _embed(self, inputs, training: Optional[bool] = None):
-        """Encode, project and L2-normalize one view."""
-        pooled = self.encoder(inputs, training=training)["pooled_output"]
-        projected = self.projection(pooled)
-        return projected / (
-            keras.ops.norm(projected, axis=-1, keepdims=True) + 1e-8
-        )
-
-    def call(self, inputs, training: Optional[bool] = None):
-        """Return the normalized embedding of one view.
-
-        :param inputs: Encoder inputs.
-        :type inputs: Any
-        :param training: Keras training flag.
-        :type training: bool | None
-        :return: ``(batch, projection_dim)`` unit-norm embeddings.
+        :param y_true: Ignored; positives are positional.
+        :type y_true: Any
+        :param y_pred: ``(batch, 2, embed_dim)`` stacked views.
+        :type y_pred: keras.KerasTensor
+        :return: Scalar loss.
         :rtype: keras.KerasTensor
         """
-        return self._embed(inputs, training=training)
-
-    def _contrastive_loss(self, view_a, view_b):
-        """Symmetric InfoNCE over two views of the same batch."""
+        view_a = y_pred[:, 0, :]
+        view_b = y_pred[:, 1, :]
         logits = keras.ops.matmul(
             view_a, keras.ops.transpose(view_b)
         ) / self.temperature
@@ -317,46 +282,99 @@ class SimCSEModel(keras.Model):
         )
         return keras.ops.mean(forward + backward) / 2.0
 
-    def train_step(self, data) -> Dict[str, Any]:
-        """Run one SimCSE step.
+    def get_config(self) -> Dict[str, Any]:
+        """Return the constructor configuration.
 
-        A custom step is unavoidable here: the loss needs TWO forward passes of
-        the same batch, which ``compile(loss=...)`` cannot express.
-
-        :param data: A batch of encoder inputs.
-        :type data: Any
-        :return: The tracked metrics.
+        :return: Serializable configuration dictionary.
         :rtype: dict[str, Any]
         """
-        inputs = data[0] if isinstance(data, tuple) else data
-        with tf.GradientTape() as tape:
-            view_a = self._embed(inputs, training=True)
-            view_b = self._embed(inputs, training=True)
-            loss = self._contrastive_loss(view_a, view_b)
-        gradients = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(
-            zip(gradients, self.trainable_variables)
+        config = super().get_config()
+        config.update({"temperature": self.temperature})
+        return config
+
+
+@keras.saving.register_keras_serializable()
+class SimCSEModel(keras.Model):
+    """SimCSE: two dropout views of one sentence form a positive pair.
+
+    The forward pass encodes the SAME batch twice and stacks the results, so
+    the loss is an ordinary ``compile(loss=...)`` function over one output
+    tensor and training is stock ``fit()`` -- no custom ``train_step``, per the
+    house rule.
+
+    **Dropout is deliberately active in both views regardless of the outer
+    training flag.** In SimCSE the positive pair IS the dropout noise: with
+    dropout off the two views are identical, the similarity matrix is the
+    identity and the loss collapses to a constant that measures nothing. That
+    would make a validation number look excellent and mean nothing. Use
+    :meth:`embed` for a deterministic embedding.
+
+    :param encoder: The pretrained encoder.
+    :type encoder: keras.Model
+    :param projection_dim: Width of the projection head.
+    :type projection_dim: int
+    :param kwargs: Additional keyword arguments for the Model base class.
+    """
+
+    def __init__(
+        self,
+        encoder: keras.Model,
+        projection_dim: int = 256,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.encoder = encoder
+        self.projection_dim = projection_dim
+        self.projection = keras.layers.Dense(
+            projection_dim, use_bias=False, name="projection"
         )
-        self.loss_tracker.update_state(loss)
-        return {"loss": self.loss_tracker.result()}
 
-    def test_step(self, data) -> Dict[str, Any]:
-        """Evaluate one SimCSE step.
+    def _project(self, inputs, training: Optional[bool] = None):
+        """Encode, project and L2-normalize one view."""
+        pooled = self.encoder(inputs, training=training)["pooled_output"]
+        projected = self.projection(pooled)
+        return projected / (
+            keras.ops.norm(projected, axis=-1, keepdims=True) + 1e-8
+        )
 
-        Dropout is still ACTIVE here (``training=True`` in ``_embed``): with it
-        off the two views are identical, the loss is trivially near zero, and
-        the number means nothing.
+    def embed(self, inputs):
+        """Return a deterministic embedding, dropout off.
 
-        :param data: A batch of encoder inputs.
-        :type data: Any
-        :return: The tracked metrics.
-        :rtype: dict[str, Any]
+        :param inputs: Encoder inputs.
+        :type inputs: Any
+        :return: ``(batch, projection_dim)`` unit-norm embeddings.
+        :rtype: keras.KerasTensor
         """
-        inputs = data[0] if isinstance(data, tuple) else data
-        view_a = self._embed(inputs, training=True)
-        view_b = self._embed(inputs, training=True)
-        self.loss_tracker.update_state(self._contrastive_loss(view_a, view_b))
-        return {"loss": self.loss_tracker.result()}
+        return self._project(inputs, training=False)
+
+    def call(self, inputs, training: Optional[bool] = None):
+        """Return two dropout views of the batch, stacked.
+
+        :param inputs: Encoder inputs.
+        :type inputs: Any
+        :param training: Accepted for the Keras contract; the views are always
+            drawn WITH dropout, for the reason in the class docstring.
+        :type training: bool | None
+        :return: ``(batch, 2, projection_dim)``.
+        :rtype: keras.KerasTensor
+        """
+        view_a = self._project(inputs, training=True)
+        view_b = self._project(inputs, training=True)
+        return keras.ops.stack([view_a, view_b], axis=1)
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """Return the stacked-view shape.
+
+        :param input_shape: Encoder input shape.
+        :type input_shape: Any
+        :return: ``(batch, 2, projection_dim)``.
+        :rtype: Any
+        """
+        batch = None
+        if isinstance(input_shape, dict):
+            ids = input_shape.get("input_ids")
+            batch = ids[0] if ids is not None else None
+        return (batch, 2, self.projection_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the constructor configuration.
@@ -369,7 +387,6 @@ class SimCSEModel(keras.Model):
             {
                 "encoder": keras.saving.serialize_keras_object(self.encoder),
                 "projection_dim": self.projection_dim,
-                "temperature": self.temperature,
             }
         )
         return config
@@ -414,18 +431,33 @@ def run_contrastive_stage(
     """
     logger.info("=== Stage 2: contrastive embedding fine-tuning (SimCSE) ===")
 
-    train_ds = build_packed_mlm_dataset(
-        train_texts,
-        seq_len=config.max_seq_length,
-        batch_size=config.contrastive_batch_size,
-        training=True,
-        repeat=True,
+    def with_dummy_targets(dataset: tf.data.Dataset) -> tf.data.Dataset:
+        # Stock `fit()` wants (x, y). SimCSE's positives are positional, so the
+        # target is unused; the loss ignores it.
+        return dataset.map(
+            lambda batch: (
+                batch,
+                tf.zeros(tf.shape(batch["input_ids"])[0], dtype=tf.int32),
+            ),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+    train_ds = with_dummy_targets(
+        build_packed_mlm_dataset(
+            train_texts,
+            seq_len=config.max_seq_length,
+            batch_size=config.contrastive_batch_size,
+            training=True,
+            repeat=True,
+        )
     )
-    val_ds = build_packed_mlm_dataset(
-        val_texts,
-        seq_len=config.max_seq_length,
-        batch_size=config.contrastive_batch_size,
-        training=False,
+    val_ds = with_dummy_targets(
+        build_packed_mlm_dataset(
+            val_texts,
+            seq_len=config.max_seq_length,
+            batch_size=config.contrastive_batch_size,
+            training=False,
+        )
     )
 
     steps_per_epoch = config.contrastive_steps_per_epoch or 200
@@ -434,7 +466,6 @@ def run_contrastive_stage(
     model = SimCSEModel(
         encoder=encoder,
         projection_dim=config.projection_dim,
-        temperature=config.contrastive_temperature,
     )
     model.compile(
         optimizer=build_optimizer(
@@ -444,6 +475,7 @@ def run_contrastive_stage(
             total_steps=total_steps,
             warmup_ratio=config.mlm_warmup_ratio,
         ),
+        loss=SimCSELoss(temperature=config.contrastive_temperature),
         # XLA is OFF here deliberately. Keras defaults `jit_compile="auto"`,
         # which turns it on for a GPU, and the SimCSE step -- two forward passes
         # of one batch feeding a symmetric cross-entropy -- fails to compile on

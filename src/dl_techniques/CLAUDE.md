@@ -41,10 +41,10 @@ src/dl_techniques/
 
 Each package has its own `CLAUDE.md` with detailed documentation.
 
-`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 80 leaf
-packages sit under 11 family directories (`common`, `general_purpose`, `graph`, `language`,
-`memory`, `neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`,
-`vision_language`), four of which nest one level further
+`models/` is the one package that is **two or three levels deep**: since 2026-08-24 its 83 leaf
+packages sit under 12 family directories (`common`, `embeddings_experimental`,
+`general_purpose`, `graph`, `language`, `memory`, `neural_computer`, `point_cloud`,
+`tabular`, `time_series`, `vision`, `vision_language`), four of which nest one level further
 (`vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`,
 `vision_language/sam/`). **A family is a grouping, not a namespace** — every family
 `__init__.py` holds a docstring and nothing else, so import from the leaf package
@@ -73,9 +73,9 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 
 | Package | Convention | Measured 2026-08-28 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 264 of 299 modules carry `:param ` |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 265 of 300 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
-| `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 81 Sphinx-only, 8 both, 106 neither, over 275 `.py` files |
+| `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 85 Sphinx-only, 8 both, 110 neither, over 283 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
 | `metrics/` | Google majority | 12 of 15 / 2 |
 | `utils/` | Google majority | 22 of 41 / 11, 3 both |
@@ -102,11 +102,11 @@ Re-derive (`--include=*.py` is **load-bearing** — without it the greps match t
 and the numbers invalidate themselves):
 
 ```bash
-find src/dl_techniques/models -name '*.py' | wc -l                                   # 275
+find src/dl_techniques/models -name '*.py' | wc -l                                   # 283
 grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l   #  88 = Google-only + both
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  89 = Sphinx-only + both
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                   #  93 = Sphinx-only + both
 # comm -12 of those two sorted file lists -> 8 (both)
-# Google-only = 88 - 8 = 80;  Sphinx-only = 89 - 8 = 81;  neither = 275 - 80 - 81 - 8 = 106
+# Google-only = 88 - 8 = 80;  Sphinx-only = 93 - 8 = 85;  neither = 283 - 80 - 85 - 8 = 110
 ```
 
 > **The `Args:` anchor is load-bearing, and the numbers are not comparable without it.** An
