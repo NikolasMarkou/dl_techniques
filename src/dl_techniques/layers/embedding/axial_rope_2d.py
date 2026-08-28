@@ -300,8 +300,13 @@ class AxialRoPE2D(keras.layers.Layer):
         # [a0, a0, a1, a1, ...]. Do NOT switch to `np.tile` plus a split-half
         # `rotate_half`: both conventions are valid rotations and both keep the
         # relative-position property, so TestRelativePositionInvariance stays
-        # GREEN under the swap (measured) and only the float64 complex oracle
-        # catches it. Adjacent-pair packing is what matches upstream's
+        # GREEN under the swap. Re-measured 2026-08-28 by mutating the packing
+        # and `rotate_half` TOGETHER: that invariance test still passes, and
+        # the 9 tests that go red are all float64-oracle comparisons
+        # (TestComplexOracle, TestDtypePolicies, TestScalePos). Mutating the
+        # packing ALONE is not this counterfactual; it is an incoherent
+        # rotation and reddens the invariance test too.
+        # Adjacent-pair packing is what matches upstream's
         # `view_as_complex` on a `(..., -1, 2)` reshape, so a converted
         # checkpoint would load wrong. See decisions.md D-006.
         cos_e = np.repeat(np.cos(angles), 2, axis=-1)
@@ -479,8 +484,14 @@ class AxialRoPE2D(keras.layers.Layer):
         # DECISION plan-2026-08-04T044628-4c240b4c/D-005
         # Rotate in a NEVER-NARROWING work dtype, then cast back. Do NOT use
         # `ops.cast(x, self.compute_dtype)`: mixed_float16 narrows the rotation
-        # to float16 and a 64x64 grid's largest angle loses about three decimal
-        # digits. Do NOT hardcode `"float32"`; that pins a float64 model to
+        # to float16. Re-measured 2026-08-28 over the whole 64x64 angle table
+        # at head_dim 64, theta 10000: the worst relative angle error is
+        # 5.434541e-08 in float32 against 4.751238e-04 in float16, so float16
+        # keeps 3.3 correct decimal digits where float32 keeps 7.3, and the
+        # cosine of a narrowed angle moves by up to 9.182358e-03. The single
+        # largest angle, 63.0, happens to be exact in float16; the loss is in
+        # the rest of the table. Do NOT hardcode `"float32"`; that pins a
+        # float64 model to
         # float32. This table is a NumPy CONSTANT, not an `add_weight`, so no
         # autocast mismatch is possible here. Promotion to a shared helper is
         # pre-committed at the FIFTH site; this is the third.

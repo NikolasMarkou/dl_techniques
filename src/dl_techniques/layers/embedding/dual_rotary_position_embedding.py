@@ -289,7 +289,8 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         # out here: that tensor belongs to the symbolic pass's scratch
         # `FuncGraph` and raises "cannot be accessed from here ... out of scope"
         # on the eager pass. Same defect and fix as
-        # `rotary_position_embedding.py` (D-021). See decisions.md D-027.
+        # `rotary_position_embedding.py` (D-021). See decisions.md D-027
+        # of plan-2026-08-14T233721-d4f9beb2.
         def _table_initializer(trig):
             """Make an initializer that fills a table with ``trig``.
 

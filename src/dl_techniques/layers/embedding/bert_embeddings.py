@@ -464,11 +464,20 @@ class BertEmbeddings(keras.layers.Layer):
         # other, and neither may be re-keyed off self.compute_dtype.
         #
         # DECISION plan-2026-08-10T183739-b007f435/D-008
-        # COMPUTE in the WIDER of float32 and self.variable_dtype: float32 is a
-        # FLOOR (10000^(-2i/d) underflows fp16), not a ceiling (float64 policy
-        # computing in float32 capped accuracy at ~1.5e-06 vs ~1e-16 expected,
-        # measured at c6ab51084). Gate on variable_dtype, NOT compute_dtype --
-        # the narrow one under a mixed policy. See decisions.md D-008.
+        # COMPUTE in the WIDER of float32 and self.variable_dtype. float32 is
+        # a FLOOR, but not for the reason it is tempting to give: the ladder
+        # 10000^(-2i/d) does NOT underflow float16. Its infimum is 1/10000,
+        # above float16's smallest normal 6.103516e-05, and a sweep at
+        # hidden_size 128, 768, 1024, 4096 and 65536 on 2026-08-28 found zero
+        # underflows at any of them. What float16 cannot hold is the POSITION.
+        # At hidden_size 768 over positions 0..511 the float16 table is wrong
+        # by up to 2.497361e-01 against a float64 oracle, because the float16
+        # ulp at position 511 is already 0.25; the float32 table is wrong by
+        # 5.282478e-05. float32 is not a ceiling either: a float64 policy
+        # computing in float32 capped accuracy at ~1.5e-06 against ~1e-16
+        # expected (measured at c6ab51084). Gate on variable_dtype, NOT
+        # compute_dtype -- the narrow one under a mixed policy.
+        # See decisions.md D-008.
         #
         # DECISION plan-2026-08-10T183739-b007f435/D-016
         # CAST to target_dtype -- the dtype of the tensor this table is summed

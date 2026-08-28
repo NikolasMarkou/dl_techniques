@@ -290,7 +290,8 @@ class Ideogram4MRoPE(keras.layers.Layer):
         # Being non-trainable makes the value SERIALIZE; it does not make it
         # CORRECT. Initializers run at variable-CREATION time and survive the
         # stateless scope. Same defect and fix as
-        # `rotary_position_embedding.py` (D-021). See decisions.md D-027.
+        # `rotary_position_embedding.py` (D-021). See decisions.md D-027
+        # of plan-2026-08-14T233721-d4f9beb2.
         # `inv_freq_values` is NumPy, so closing over it carries no `FuncGraph`
         # tensor; a `keras.ops` tensor built here would raise "out of scope".
         inv_freq_f32 = inv_freq_values.astype("float32")

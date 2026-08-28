@@ -250,7 +250,8 @@ class ContinuousRoPE(keras.layers.Layer):
         # so RoPE becomes the identity. Same defect and fix as
         # `rotary_position_embedding.py`; the full rationale is at that module's
         # `# DECISION` anchor. `omega_vals` is NumPy, so closing over it carries
-        # no `FuncGraph` tensor. See decisions.md D-027.
+        # no `FuncGraph` tensor. See decisions.md D-027 of
+        # plan-2026-08-14T233721-d4f9beb2.
         self.omega = self.add_weight(
             name="omega",
             shape=omega_vals.shape,

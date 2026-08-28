@@ -336,7 +336,10 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         # `compute_dtype` either: under mixed policies the compute dtype is
         # narrow while `variable_dtype` is float32, and this table is a
         # WEIGHT. Measured on CPU against a float64 oracle at coords in
-        # [0, 64), the float64-policy error goes 4.364258e-07 -> exactly 0.0.
+        # [0, 64), the float64-policy error goes 4.364258e-07 -> the float64
+        # machine-precision floor. Re-measured 2026-08-28 against an
+        # independent NumPy float64 oracle at dim 64 / ndim 3: 1.110223e-16
+        # under the float64 policy against 1.782953e-06 under float32.
         # Pinned by `test_float64_policy_accuracy_floor_is_machine_precision`.
         # See decisions.md D-009.
         arange_dtype = np.float64 if self.variable_dtype == "float64" else np.float32
