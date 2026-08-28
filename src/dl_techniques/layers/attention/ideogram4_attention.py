@@ -416,9 +416,15 @@ class Ideogram4Attention(keras.layers.Layer):
         # the mask has to be folded into the logits numerically.
         #
         # Don't replace this with `keras.ops.where(keep, scores, -inf)` over a
-        # boolean keep-mask and raw -inf. A row that is entirely -inf, which a
-        # token with an empty segment produces, gives NaN after softmax. The
-        # finite -1e9 additive form keeps softmax well-defined.
+        # boolean keep-mask and raw -inf. What keeps every row well-defined is
+        # the DIAGONAL, not the magnitude: `same_segment` is true at i == j for
+        # every token, so no row is ever entirely suppressed and softmax never
+        # sees 0/0. Do NOT read -1e9 as "the finite alternative to -inf" --
+        # `np.float16(-1e9)` IS -inf, and the cast below is to `scores.dtype`,
+        # the COMPUTE dtype, so under mixed_float16 this bias is exactly -inf.
+        # common.py's rule (bias only inside a `mask_dtype(...)` chain, never in
+        # the compute dtype) is not followed here; the diagonal is what makes
+        # that survivable.
         # (B, L, 1) and (B, 1, L) broadcast to a (B, L, L) bool.
         seg_i = keras.ops.expand_dims(segment_ids, axis=2)
         seg_j = keras.ops.expand_dims(segment_ids, axis=1)

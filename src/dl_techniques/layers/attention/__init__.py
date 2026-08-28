@@ -165,7 +165,8 @@ __all__ = [
     "RPCAttention",
 
     # Additional Specialized (MIXED factory coverage — see the per-name
-    # comments beside the imports above; NOT all direct-instantiation-only)
+    # comments ABOVE each import; NOT all direct-instantiation-only. This
+    # package carries no trailing comments: they sit on their own line.)
     "ProgressiveFocusedAttention",
     # factory key 'single_window'
     "SingleWindowAttention",

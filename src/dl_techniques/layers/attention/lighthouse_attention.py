@@ -221,8 +221,8 @@ def _compute_causal_positions(
     ``i * p^l + p^l - 1``. This is the earliest position at which the entry's
     content is legitimately in the past, and it coincides with the start of the
     entry's scatter range (Eq. 10). It is therefore the only sound key for both
-    the causal argsort and the triangular mask over the gathered sub-sequence:
-    ordering by the window *start* instead lets an entry read a coarse summary
+    the causal argsort and the triangular mask over the gathered sub-sequence.
+    Ordering by the window *start* instead lets an entry read a coarse summary
     that spans its own future. See DECISION D-004(c).
     """
     starts = _compute_base_starts(n, num_levels, pooling_factor)

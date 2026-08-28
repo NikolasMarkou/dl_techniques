@@ -40,7 +40,7 @@ Public functions:
                 │                    │
         empty   │                    │  non-empty
                 ▼                    ▼
-             continue         ✗ ValueError carrying
+             continue         ► ValueError carrying
                                 STRICT_DROPPED_KEY_MARKER
                                 (RAISE, never drop a key)
                 │
@@ -48,15 +48,15 @@ Public functions:
     ┌───────────────────────────────────────────────┐
     │ 3. try:                                       │
     │      validate_attention_config(type, **kw)    │
-    │        unknown type      ► ✗ ValueError       │
-    │        missing required  ► ✗ ValueError       │
-    │        bad value / range ► ✗ ValueError       │
+    │        unknown type      ►   ValueError       │
+    │        missing required  ►   ValueError       │
+    │        bad value / range ►   ValueError       │
     │      params = optional_params.copy()          │
     │      params.update(kwargs)                    │
     │      keep declared names, add `name` if given │
     │      return info['class'](**params)           │
     │    except (TypeError, ValueError) as e:       │
-    │      ✗ ValueError, "verify parameter          │
+    │      ► ValueError, "verify parameter          │
     │        compatibility", chained from e         │
     └───────────────────────────────────────────────┘
                       ▼
@@ -1816,7 +1816,11 @@ def create_attention_layer(
         parameter values are out of valid ranges, a supplied keyword is not a
         parameter of ``attention_type`` (the message then carries
         :data:`STRICT_DROPPED_KEY_MARKER`), or layer construction fails.
-    :raises TypeError: If parameter types are incompatible with the target layer class.
+    :raises TypeError: ONLY if ``attention_type`` is unhashable (a list, say), so
+        the registry lookup itself fails before the ``try`` below. A ``TypeError``
+        raised by the target layer's constructor never escapes: it is caught and
+        re-raised as ``ValueError``. Measured 2026-08-28, ``dim='not-an-int'``
+        gives ``ValueError`` from both entry points.
     """
     # DECISION plan-2026-08-17T183311-79c63e38/D-011 — RAISE, do not drop. Since
     # 2026-08-17 this factory raises on a keyword the type does not declare. It
@@ -1943,7 +1947,10 @@ def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     :rtype: keras.layers.Layer
     :raises ValueError: If ``config`` is not a dict, if it has no ``'type'`` key,
         or for any reason :func:`create_attention_layer` raises.
-    :raises TypeError: If a parameter type is incompatible with the layer class.
+    :raises TypeError: ONLY if ``config['type']`` is unhashable, which fails the
+        registry lookup inside :func:`create_attention_layer` before its ``try``.
+        Every other type error surfaces as ``ValueError``; see that function's
+        own ``:raises TypeError:`` note.
     """
     if not isinstance(config, dict):
         raise ValueError(

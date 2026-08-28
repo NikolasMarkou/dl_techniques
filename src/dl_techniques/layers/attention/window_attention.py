@@ -55,29 +55,37 @@ Architecture:
     before it prepares the layout and everything after it undoes it.
 
     1.  **Grid formation** (``'grid'`` and ``'zigzag'`` only). The 1-D
-        sequence ``(B, N, dim)`` is padded up to ``H*W`` and reshaped to a 2-D
-        grid ``(B, H, W, dim)`` with ``H = W = ceil(sqrt(N))``. The public
+        sequence ``(B, N, dim)`` is padded up to ``N_grid = H*W`` with
+        ``H = W = ceil(sqrt(N))``. Only ``'grid'`` then RESHAPES to a 2-D
+        grid ``(B, H, W, dim)``; ``'zigzag'`` stays 1-D, because for it the
+        grid exists only inside the precomputed index permutation. The public
         interface is a 1-D sequence so the layer drops into sequence models;
         the grid is an internal device for defining locality.
-    2.  **Window padding** (``'grid'`` and ``'zigzag'`` only). The grid is
-        padded so both extents divide by ``window_size``. Everything added in
-        stages 1-2 is stripped again in stage 5, so the layer is
-        shape-preserving end to end.
+    2.  **Window padding -- and the two grid modes do NOT share it.**
+        ``'grid'`` pads the 2-D grid so both extents divide by
+        ``window_size``. ``'zigzag'`` never pads in 2-D at all: it pads the
+        REORDERED FLAT sequence up to a multiple of ``window_size ** 2``,
+        after stage 3's reorder rather than before it. Everything either mode
+        adds is stripped again in stage 5, so the layer is shape-preserving
+        end to end.
     3.  **Partitioning -- the branch point.** ``'grid'`` takes contiguous
         ``window_size x window_size`` tiles, the Swin convention, so
-        spatially adjacent tokens attend together. ``'zigzag'`` groups tokens
-        that are close along a zigzag traversal of the grid, which is the
-        useful choice when neighbours in INDEX space matter more than
-        neighbours in the synthetic 2-D layout. ``'band'`` skips stages 1-2
-        entirely and builds a ``(1, N, N)`` keep predicate instead.
+        spatially adjacent tokens attend together. ``'zigzag'`` reorders with
+        ``take(x, zigzag_indices, axis=1)``, grouping tokens that are close
+        along a zigzag traversal of the notional grid, which is the useful
+        choice when neighbours in INDEX space matter more than neighbours in
+        the synthetic 2-D layout. ``'band'`` skips stages 1-2 entirely and
+        builds a ``(1, N, N)`` keep predicate instead.
     4.  **Attention.** Each window is handed to
         :class:`SingleWindowAttention`, which owns the QKV projection,
         optional QK-normalization, relative position bias and probability
         output. This layer contributes no attention math of its own. It is a
         partitioning wrapper, which is why all three modes share it.
-    5.  **Reverse and unpad.** Windows are merged back to the grid, the grid
-        is flattened back to a sequence, and every token added by stages 1-2
-        is dropped. ``'band'`` has nothing to undo.
+    5.  **Reverse and unpad.** ``'grid'`` merges the tiles back to the grid,
+        flattens it to a sequence and drops every token stages 1-2 added.
+        ``'zigzag'`` merges, slices back to ``N_grid``, applies
+        ``inverse_zigzag_indices`` and only then slices to ``N``.
+        ``'band'`` has nothing to undo.
 
     The three flows below trace this concretely, one per mode.
 
@@ -368,39 +376,58 @@ class WindowAttention(keras.layers.Layer):
 
               Input: 1-D sequence  (B, N, dim)
                             │
-                ┌───────────┴────────────┐
-           'grid'/'zigzag'            'band'
-                │                        │
-                ▼                        │
-        1. pad N to H*W,                 │  stages 1-2
-           H = W = ceil(sqrt(N))         │  are SKIPPED:
-                ▼                        │  no grid fold,
-        2. pad H, W up to a              │  no square pad
-           multiple of window_size       │
-                ▼                        ▼
-        3. PARTITION — the branch     3. band predicate
-           grid:   contiguous            keep[i,j] =
-                   ws x ws tiles         |i-j| <= ws
-           zigzag: take(x,               (1, N, N) int32,
-                   zigzag_indices)       AND-ed with any
-           (B*num_win, ws^2, dim)        caller mask
-                └───────────┬────────────┘
-                            ▼
+        0. SHORT-CIRCUIT, 'grid' and 'zigzag' ONLY: if N is
+           static, 1 < N < ws^2, and any mask is rank <= 2,
+           attend the N REAL tokens as ONE window and skip
+           stages 1-3 and 5.  D-007 (grid), D-014 (zigzag).
+                            │
+             ┌──────────────┼───────────────┐
+          'grid'        'zigzag'          'band'
+             ▼              ▼               ▼
+        1. pad N to    1. pad N to     1-3. NO grid fold
+           H*W, with      N_grid = H*W       and NO padding
+           H = W =        and STOP —         of any kind.
+           ceil(          the sequence       Build the band
+           sqrt(N))       STAYS 1-D          predicate
+             ▼              ▼                instead:
+        2. pad H and   2. take(x, self.      keep[i,j] =
+           W each up      zigzag_indices,    |i-j| <= ws,
+           to a           axis=1) — the      a (1, N, N)
+           multiple       reorder, still     int32 mask
+           of ws          1-D                AND-ed with
+             ▼              ▼                any caller
+        3. cut into    3. pad that FLAT      mask
+           contiguous     sequence up to
+           ws x ws        a multiple of
+           tiles          ws^2, reshape
+             │              │               │
+             └──────┬───────┘               │
+                    ▼                       │
+        both grid modes now hold            │
+        (B*num_win, ws^2, dim)              │
+                    └───────────┬───────────┘
+                                ▼
         4. SingleWindowAttention  (QKV, optional QK-norm,
            relative position bias, ProbabilityOutput —
            all the attention math lives there)
                             │
                 ┌───────────┴────────────┐
                 ▼                        ▼
-        5. merge windows,             5. nothing to undo
-           unpad / inverse               (no pad added)
-           zigzag, slice to N
+        5. grid: merge, unpad,        5. nothing to undo
+           slice to N. zigzag:           (no pad added)
+           merge, slice to N_grid,
+           take(inverse_zigzag_
+           indices), slice to N
                 └───────────┬────────────┘
                             ▼
               Output: 1-D sequence  (B, N, dim)
 
-    ``'band'`` never enters stages 1-2, so it has no tile and refuses the
-    relative position bias.
+    ``'band'`` never enters stages 1-3, so it has no tile and refuses the
+    relative position bias. The two grid modes do NOT pad the same way:
+    ``'grid'`` pads the sequence and then pads H and W, while
+    ``'zigzag'`` pads the sequence, reorders it, and then pads the flat
+    result up to a multiple of ``window_size ** 2``. Each builder's own
+    diagram below repeats its own path.
 
     **Partition modes, and the builders that reach them:**
 

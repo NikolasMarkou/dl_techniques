@@ -1,4 +1,4 @@
-"""
+r"""
 Differential multi-head attention: two parallel attention streams whose weighted
 difference cancels the common-mode component of the attention distribution.
 
@@ -41,9 +41,16 @@ TWO STEPS OF THE PAPER ARE NOT IMPLEMENTED HERE, and neither was disclosed
 anywhere until 2026-08-27. Ye et al.'s Differential Transformer also applies a
 per-head GroupNorm to each head's differential output, and rescales that output
 by ``(1 - lambda_init)`` to align the residual-stream magnitude with a standard
-attention block. Verified absent: ``grep -rn "GroupNorm" `` over
-``src/dl_techniques/layers/attention/`` returns nothing, and nothing in this
-file rescales by ``(1 - lambda_init)``. The single-scalar reparameterization is
+attention block. Verified absent, from the repository root::
+
+    grep -rn "GroupNorm" src/dl_techniques/layers/attention/*.py \
+        | grep -v '^src/dl_techniques/layers/attention/differential_attention.py:'
+
+That prints nothing. The exclusion is REQUIRED, and for the same reason
+``common.py``'s adopter greps carry one: the search string appears in this very
+paragraph, so without it the command SELF-MATCHES and returns the two prose
+lines above as if they were code. Nothing in this file rescales by
+``(1 - lambda_init)`` either. The single-scalar reparameterization is
 a separate, already-disclosed simplification (the paper learns per-head
 ``exp(lam_q1 . lam_k1) - exp(lam_q2 . lam_k2) + lambda_init``). These two are
 omissions rather than simplifications, so a caller comparing against published

@@ -323,9 +323,10 @@ class CBAM(keras.layers.Layer):
         #
         # `channels` is a real CNN channel count, not a "model dimension". The
         # `GUIDE.md` naming table's `channels` -> `dim` migration line does NOT
-        # apply to the CNN family; that carve-out is documented at
-        # `README.md:17-18,90`. Renaming it would break the frozen public API
-        # and every serialized `get_config()`.
+        # apply to the CNN family (channel, spatial, cbam, non_local, tripse);
+        # `GUIDE.md` section 2 states the carve-out and section 7 repeats it
+        # for migrations. Renaming it would break the frozen public API and
+        # every serialized `get_config()`.
         #
         # Note the division of labour. `channels % ratio` is NOT checked here.
         # That check lives in `ChannelAttention.__init__` and fires when the

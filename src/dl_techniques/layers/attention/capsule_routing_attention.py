@@ -160,6 +160,13 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         │ routing  │  │ routing  │  │
         │head-wise │  │token-wise│  │
         └────┬─────┘  └────┬─────┘  │
+             │        ┌────┴────┐   │   horizontal FORKS on
+             │        ▼         ▼   │   use_positional_routing
+             │     positional  vec- │   True = a `for l in
+             │     unrolled    tor- │   range(N)` unroll, and
+             │     O(N)        ised │   a STATIC N is REQUIRED
+             │        │         │   │   or it raises ValueError
+             │        └────┬────┘   │   False = any N, no loop
              └──────┬──────┘        │
                     ▼               │
         logits + vertical + horizontal   ADDITIVE

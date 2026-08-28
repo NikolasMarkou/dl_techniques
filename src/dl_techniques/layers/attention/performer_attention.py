@@ -41,38 +41,58 @@ same input do not agree exactly.
 
 A second, larger gap: **`nb_features` is a variance knob, not an accuracy knob.**
 Standard Performer semantics are that approximation error falls toward zero as
-`nb_features` grows. This feature map is BIASED and does not converge. Measured
-against an independent `softmax(QK^T/sqrt(d))V` reference at `head_dim=16`,
-`seq_len=64`, mean relative Frobenius error over 20 independent redraws::
+`nb_features` grows. This feature map is BIASED and does not converge.
+
+THE HARNESS IS STATED IN FULL BELOW, because the error LEVEL depends on it and an
+earlier version of this section quoted numbers from a harness that is not in the
+tree. To re-derive: `keras.utils.set_random_seed(0)`; input
+`keras.random.normal((batch, 64, dim), seed=1234)` with `head_dim=16` and
+`dim = head_dim * num_heads`; the reference is `softmax(q K^T) V` built from THIS
+layer's own `to_qkv` weights and `self.scale`; the score is the relative
+Frobenius norm of the difference, taken BEFORE `to_out`; 20 redraws of the
+projection matrix per cell, mean reported.
+
+Re-measured 2026-08-28 at `num_heads=1, batch=1`::
 
     features m :      8       32      128      512     2048     8192
-    rel. error : 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
+    rel. error : 0.7773   0.7729   0.7714   0.7715   0.7714   0.7714
+    std dev    : 0.0060   0.0019   0.0014   0.0005   0.0003   0.0002
 
-The per-redraw VARIANCE does shrink with `m` as a Monte-Carlo estimator should; the
-BIAS plateaus at ~0.78 and does not move.
+The per-redraw VARIANCE does shrink with `m` as a Monte-Carlo estimator should;
+the BIAS plateaus and does not move. **The plateau LEVEL belongs to the harness,
+not to the layer**: the same code at `num_heads=4, batch=4` plateaus at 0.5767
+instead, and the earlier unrecorded harness read 0.7796-0.8164. Quote the SHAPE
+(no convergence, variance-only benefit) and never the absolute number.
 
-WHAT CAUSES THE FLOOR IS NOT ESTABLISHED, and an earlier version of this paragraph
-named three causes that ablation does not support. Measured by ablation, same
-harness, mean of 20 redraws:
+WHAT CAUSES THE FLOOR IS NOT ESTABLISHED, and an earlier version of this
+paragraph named three causes that ablation does not support. Ablated in the
+harness above, `num_heads=1, batch=1`, mean of 20 redraws::
 
     features m :      8       32      128      512     2048     8192
-    as shipped : 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
-    no norm fac: 0.8164   0.7886   0.7826   0.7804   0.7799   0.7796
-    no clamp   : 317.5    221.7    160.3    404.7    105.7     11.3
+    as shipped : 0.7773   0.7729   0.7714   0.7715   0.7714   0.7714
+    no norm fac: 0.7762   0.7720   0.7714   0.7713   0.7713   0.7714
+    no clamp   : 0.7522   0.7434   0.7419   0.7405   0.7401   0.7399
 
-* The query-side `exp(-||x||^2/2)` factor is **INERT**. It multiplies phi(q)
-  uniformly, so it cancels between the numerator and the denominator of
-  `phi(Q)(phi(K)^T V) / phi(Q)(phi(K)^T 1)`. Removing it changes nothing to four
-  decimals. It is neither a cause of the floor nor a defect; it is a no-op.
-* The `ops.maximum(features, 0)` clamp holds the VARIANCE down; it is not the
-  cause of the floor. Removing it alone is catastrophic (two to four orders
-  worse), because the unclamped cos/sin features make the denominator pass
-  through zero.
+* The query-side `exp(-||x||^2/2)` factor is **INERT**, and provably so: it is a
+  POSITIVE per-row scalar, and `max(0, c * f) == c * max(0, f)` for `c > 0`, so
+  it factors straight out of `phi(Q)(phi(K)^T V) / phi(Q)(phi(K)^T 1)`. Its row
+  above differs from the shipped row only by redraw noise. It is neither a cause
+  of the floor nor a defect; it is a no-op.
+* The `ops.maximum(features, 0)` clamp is not the cause of the floor either, and
+  the previous claim that removing it alone is "catastrophic, two to four orders
+  worse" (317.5 at `m=8`) DID NOT REPRODUCE: removing it lowers the mean error
+  slightly here. The denominator hazard it is meant to guard was not observed
+  either -- at `m=128`, 20 redraws, the minimum `z` was 22.62 unclamped against
+  23.52 clamped, with no sign change. Do NOT read that as "the clamp is dead
+  weight". An unclamped cos/sin feature is SIGNED, so `z` can still cross zero at
+  other `(seq_len, m, scale)` points, and removing the clamp is a VALUE change
+  for every shipped checkpoint. It is shipped behaviour whose stated rationale is
+  now UNPROVEN, not behaviour that has been cleared for removal.
 
 So: the bias is real and reproducible, the estimator does not converge, and the
 mechanism is OPEN. Do not "correct" the feature map on the strength of a story
-about which term is at fault -- ablate first, in this harness, and compare against
-the shipped map AT THE SAME m.
+about which term is at fault -- ablate first, in the harness above, and compare
+against the shipped map AT THE SAME m, num_heads and batch.
 
 Two corrected maps were tried and rejected (decisions.md D-013): a fixed
 trigonometric map and a textbook positive FAVOR+ map both converge under the
@@ -194,7 +214,8 @@ class PerformerAttention(keras.layers.Layer):
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  qkv_projection: Dense(3·dim) → split 3 → heads              │
+        │  self.to_qkv (Keras name 'qkv_projection'):                  │
+        │  Dense(3·dim) → split 3 → heads                              │
         │    q, k, v  [B, H, N, d_h]                                   │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
@@ -202,6 +223,9 @@ class PerformerAttention(keras.layers.Layer):
         │  q = q · (1/sqrt(d_h))                                       │
         │    the scale is applied BEFORE the feature map, not after a  │
         │    score matmul — there IS no score matmul                   │
+        │    NOTE: self.scale ALSO multiplies the projection matrix    │
+        │    below, so it lands on the query path TWICE. That is       │
+        │    the shipped behaviour, not a transcription error.         │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
@@ -238,7 +262,8 @@ class PerformerAttention(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  out = (phi(q) · KV) / z → merge heads                       │
-        │  → output_projection: Dense(dim) → dropout                   │
+        │  → self.to_out (Keras name 'output_projection'): Dense(dim)  │
+        │    → dropout, ONLY IF dropout_rate > 0                       │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
@@ -555,8 +580,12 @@ class PerformerAttention(keras.layers.Layer):
                     )
             )
 
-        # Clamp to non-negative. Without this the unclamped cos/sin features let
-        # the denominator pass through zero, which is catastrophic for variance.
+        # Clamp to non-negative. The stated rationale -- that unclamped cos/sin
+        # features let the denominator pass through zero -- is UNPROVEN: see the
+        # module docstring's ablation, where removing this clamp lowered the mean
+        # error and `z` never changed sign. Keep it anyway: the features are
+        # SIGNED without it, and removing it moves every shipped checkpoint's
+        # output.
         return keras.ops.maximum(features, 0)
 
     def _linear_attention(

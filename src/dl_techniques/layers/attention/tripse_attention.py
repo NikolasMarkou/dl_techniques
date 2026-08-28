@@ -827,7 +827,14 @@ class TripSE2(layers.Layer):
         return ops.divide(total, 3.0)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape equals input shape (attention preserves dimensions)."""
+        """Return the output shape, which equals the input shape.
+
+        :param input_shape: 4-D input shape ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``input_shape`` unchanged. Attention rescales; it never reshapes.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
@@ -1076,7 +1083,14 @@ class TripSE3(layers.Layer):
         return ops.divide(total, 3.0)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape equals input shape (attention preserves dimensions)."""
+        """Return the output shape, which equals the input shape.
+
+        :param input_shape: 4-D input shape ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``input_shape`` unchanged. Attention rescales; it never reshapes.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
@@ -1276,7 +1290,17 @@ class _SEWeights(layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Returns channel-logit shape (B, 1, 1, C)."""
+        """Return the channel-logit shape ``(B, 1, 1, C)``.
+
+        The spatial extent is reduced away here: this sub-layer emits ONE logit
+        per channel, not a feature map.
+
+        :param input_shape: 4-D input shape ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``(input_shape[0], 1, 1, input_shape[-1])``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return (input_shape[0], 1, 1, input_shape[-1])
 
     def get_config(self) -> Dict[str, Any]:
@@ -1561,7 +1585,14 @@ class TripSE4(layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape equals input shape (attention preserves dimensions)."""
+        """Return the output shape, which equals the input shape.
+
+        :param input_shape: 4-D input shape ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``input_shape`` unchanged. Attention rescales; it never reshapes.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:

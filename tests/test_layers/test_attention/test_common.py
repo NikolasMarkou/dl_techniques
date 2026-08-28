@@ -1056,10 +1056,20 @@ class TestTheAdopterCountsAreMechanical:
     def _importers():
         """AST-derive who imports ``validate_head_divisibility`` / ``compute_attention_scale``.
 
-        An ``ast.ImportFrom`` walk over the whole of ``src/``, matching on the LAST
-        dotted component of the module being ``common`` so that a relative
+        An ``ast.ImportFrom`` walk over ``src/dl_techniques/layers/``, matching on
+        the LAST dotted component of the module being ``common`` so that a relative
         ``from .common import ...`` is counted. This is the identical predicate the
-        module docstring prints as a copy-pasteable command.
+        module docstring prints as a copy-pasteable command, at the identical scope
+        -- move the two together.
+
+        The scope is ``layers/``, not ``src/``, for two reasons. It is a superset of
+        where every importer actually lives (all of them are in ``layers/attention/``
+        itself, measured 2026-08-28: ``src``, ``layers`` and ``layers/attention`` all
+        give 12 / 15), and walking all of ``src/`` coupled this suite to files no
+        attention change can affect -- a stray invalid escape sequence in
+        ``losses/multi_labels_loss.py`` surfaced as a DeprecationWarning attributed to
+        THIS node, and a syntax error anywhere under ``src/`` would have turned this
+        directory red.
 
         A text search is NOT usable here and never was: both names appear in prose —
         in ``common.py``'s own docstring, in ``GUIDE.md``, in anchor bodies — so
@@ -1070,10 +1080,10 @@ class TestTheAdopterCountsAreMechanical:
 
         import dl_techniques.layers.attention.common as common_mod
 
-        # .../src/dl_techniques/layers/attention/common.py -> .../src
-        src_root = pathlib.Path(common_mod.__file__).parents[3]
+        # .../src/dl_techniques/layers/attention/common.py -> .../layers
+        layers_root = pathlib.Path(common_mod.__file__).parents[1]
         divisibility, scale = [], []
-        for path in sorted(src_root.rglob("*.py")):
+        for path in sorted(layers_root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom):

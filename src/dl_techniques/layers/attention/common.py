@@ -1,10 +1,13 @@
 r"""
 Shared primitives for the ``layers/attention`` package.
 
-Five small things live here that sibling modules used to re-derive: the additive
-attention-mask bias constant, the dtype a masked softmax must be evaluated in,
-the fp16-safe application of that bias, the ``dim % num_heads`` divisibility
-check, and the softmax temperature ``1 / sqrt(head_dim)``.
+Five small things live here that sibling modules used to re-derive:
+
+* the additive attention-mask bias constant;
+* the dtype a masked softmax must be evaluated in;
+* the fp16-safe application of that bias;
+* the ``dim % num_heads`` divisibility check;
+* the softmax temperature ``1 / sqrt(head_dim)``.
 
 **Module map:**
 
@@ -37,7 +40,7 @@ sibling module came from here.
         .venv/bin/python - <<'PY'
         import ast, collections, pathlib
         c = collections.Counter()
-        for p in pathlib.Path("src").rglob("*.py"):
+        for p in pathlib.Path("src/dl_techniques/layers").rglob("*.py"):
             for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
                 if isinstance(n, ast.ImportFrom):
                     if (n.module or "").split(".")[-1] == "common":
@@ -46,7 +49,12 @@ sibling module came from here.
         PY
 
     It prints ``12 15``. The last dotted component is what is matched, so a
-    relative ``from .common import ...`` is counted. Both numbers were one short
+    relative ``from .common import ...`` is counted. The walk is scoped to
+    ``layers/`` on purpose: every importer of this module lives inside
+    ``layers/attention/``, and the loose module match would otherwise count an
+    unrelated ``some_package/common.py`` elsewhere in ``src/``. ``test_common.py``
+    runs the SAME scope; widen or narrow the two together or the number gets a
+    second home again. Both numbers were one short
     of the truth until 2026-08-28, because nothing re-derived them. The 11 / 8
     pair below has a test that re-derives it on every run.
 
@@ -349,15 +357,17 @@ def apply_attention_mask(
     :raises ValueError: If ``keep`` is **broadcast across** ``rescue_axis`` — i.e. its
         static extent there is 1 while ``logits`` is statically longer, along EVERY
         named axis. Such a predicate is constant over the block the caller's softmax
-        reduces over, and softmax is invariant to a constant shift of that block, so
-        the mask provably cannot mask anything whatever the implementation does. This
-        is a hard error rather than a silent no-op because it is a shape-error-free
-        caller mistake: a query-axis mask supplied where a key-axis mask was expected,
-        or a mask that was never broadcast. NOT raised when ``rescue_axis`` is ``None``
-        (no softmax axis was named), when the extent is unknown at trace time, when
-        ``logits`` is itself size 1 along that axis (an ordinary single-token
-        sequence), or — for a multi-axis softmax — when ``keep`` varies along at least
-        one of the named axes. See the D-017 and D-018 comments in the body below.
+        reduces over. Softmax is invariant to a constant shift of that block, so the
+        mask provably cannot mask anything, whatever the implementation does.
+
+        It is a hard error rather than a silent no-op because it is a
+        shape-error-free caller mistake: a query-axis mask supplied where a key-axis
+        mask was expected, or a mask that was never broadcast.
+
+        It is NOT raised in four cases: ``rescue_axis`` is ``None`` (no softmax axis
+        was named); the extent is unknown at trace time; ``logits`` is itself size 1
+        along that axis (an ordinary single-token sequence); or, for a multi-axis
+        softmax, ``keep`` varies along at least one of the named axes. See the D-017 and D-018 comments in the body below.
 
     :return: ``logits + bias``, broadcast to the common shape of ``logits`` and
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.

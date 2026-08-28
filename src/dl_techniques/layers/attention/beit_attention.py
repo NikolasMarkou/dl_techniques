@@ -31,9 +31,10 @@ Foundational Mathematics:
         A_h = softmax( (Q_h K_h^T) / sqrt(d_h) + B_h )
         O_h = A_h V_h
 
-    where ``B_h`` is the relative position bias, a **real-valued** matrix read out of a
-    learnable table ``T`` of shape ``(M, num_heads)``, ``M = (2Wh-1)(2Ww-1)+3``, via a
-    static integer index matrix ``R`` of shape ``(N+1, N+1)``::
+    where ``B_h`` is the relative position bias: a **real-valued** matrix, read out
+    of a learnable table ``T`` of shape ``(M, num_heads)`` with
+    ``M = (2Wh-1)(2Ww-1)+3``. The read-out uses a static integer index matrix ``R``
+    of shape ``(N+1, N+1)``::
 
         B_h[i, j] = T[R[i, j], h]
 

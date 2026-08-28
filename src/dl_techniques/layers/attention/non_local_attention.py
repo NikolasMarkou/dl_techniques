@@ -163,7 +163,9 @@ class NonLocalAttention(keras.layers.Layer):
         │     * 1/sqrt(d_kv)  ONLY when attention_mode is         │
         │     'dot_product';  'gaussian' leaves it UNSCALED       │
         │                            ▼                            │
-        │    + attention_mask  (ADDITIVE: 0 keeps, -big masks)    │
+        │    + attention_mask  (ADDITIVE: 0 keeps, -big masks),   │
+        │      clamped to the compute dtype's floor / 2 FIRST,    │
+        │      in mask_dtype, so -1e9 never becomes -inf (D-015)  │
         │                            ▼                            │
         │    attn = attn_prob(scores) ► optional attn dropout     │
         │                            ▼                            │
