@@ -705,8 +705,20 @@ class PolarWeightNorm(keras.layers.Layer):
         outputs = keras.ops.matmul(inputs_fp32, kernel)
         if self.use_bias:
             outputs = keras.ops.add(outputs, keras.ops.cast(self.bias, "float32"))
-        if self.activation is not None:
-            outputs = self.activation(outputs)
+        # DECISION plan-2026-08-28T122601-61a91416/D-003: apply the activation
+        # UNCONDITIONALLY. Do NOT "restore the safety check" by wrapping this in
+        # `if self.activation is not None:` -- that guard's false arm is
+        # UNREACHABLE. `__init__` (see the `self.activation` assignment above)
+        # resolves it through `keras.activations.get(activation)`, which returns
+        # `keras.activations.linear` for `None` -- measured on the pinned Keras
+        # 3.8.0, and a true dtype-preserving identity at float16/32/64. The
+        # guard therefore documented a `None` case that cannot occur and
+        # contradicted this class's own docstring (`:421-424`), which already
+        # states the attribute is never `None`. Deletion measured
+        # behaviour-preserving: forward output BIT-identical (uint32 view) at
+        # BOTH `activation=None` and `activation='relu'`, before and after, plus
+        # a matching `.keras` round-trip and `get_config()` at each.
+        outputs = self.activation(outputs)
         return keras.ops.cast(outputs, inputs.dtype)
 
     def compute_output_shape(
