@@ -66,44 +66,60 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class AxialRoPE2D(keras.layers.Layer):
-    """Real-valued 2D axial rotary position embedding for query/key tensors.
+    """Rotate post-head-split ``q``/``k`` by a token's 2D grid position.
 
-    Applies a per-token 2D rotation to query (and optionally key) tensors that
-    have ALREADY been split into attention heads, i.e. of shape
-    ``(batch, num_heads, num_tokens, head_dim)``. The token axis is interpreted
-    as a row-major flattening of the configured ``(H, W)`` grid.
+    Takes tensors of shape ``(batch, num_heads, num_tokens, head_dim)``, i.e.
+    AFTER the attention head split. The token axis is read as a row-major
+    flattening of the configured ``(H, W)`` grid, so flat index ``t`` sits at
+    column ``t % W`` and row ``t // W``.
+
+    The head dimension ``D`` is split in two. The first ``D/2`` rotary
+    channels carry the x-position and the second ``D/2`` carry the
+    y-position. Both halves use the SAME ``D/4`` frequency bands. The axes
+    differ only in which coordinate multiplies the ladder and which channels
+    the result lands in. Pairing is INTERLEAVED: pair ``i`` is
+    ``(x[2i], x[2i+1])``.
 
     The layer owns no weights. Its cos/sin table is a pure function of
     ``(head_dim, feat_shape, theta, scale_pos)`` and is materialized in
-    :meth:`build` as a
-    float64 NumPy constant, then cast per call. It is deliberately NOT an
-    ``add_weight`` variable: under a mixed-precision policy Keras autocasts
-    variables to the compute dtype, which would silently narrow the angle table
-    to float16 (see the work-dtype note in :meth:`call`).
+    :meth:`build` as a float64 NumPy constant, then cast per call. It is NOT
+    an ``add_weight`` variable on purpose: under a mixed-precision policy
+    Keras autocasts variables to the compute dtype, which would narrow the
+    angle table to float16.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        q: (B, heads, N_q, D)          k: (B, heads, N_k, D)
-                │                                │
-                │                        split at N_k - num_k_exclude
-                │                          ┌─────┴──────┐
-                │                       rotated       tail
-                │                       (spatial)   (obj ptrs,
-                │                          │        untouched)
-                ▼                          ▼             │
-        ┌────────────────────────────────────────┐       │
-        │ angles[t] = [t_x * f , t_y * f]  (D/2)  │       │
-        │ cos_e/sin_e = duplicate per adj. pair   │       │
-        │ out = x*cos_e + rot_pairs(x)*sin_e      │       │
-        └────────────────────────────────────────┘       │
-                │                          │             │
-                ▼                          └──── concat ─┘
-             q_rot                              k_rot
+        head_dim D splits into two axial halves:
+
+          channels [0, D/2)            channels [D/2, D)
+          angle = t_x * f              angle = t_y * f
+                    │                  │
+                    └─────────┬────────┘
+                              │
+              f = 1 / theta^(arange(0, D, 4) / D)
+              D/4 bands, SHARED by both axes
+
+        q (B, heads, N_q, D)      k (B, heads, N_k, D)
+                │                │
+                      split at N_k - num_k_exclude
+                │       ┌────────┴───────────┐
+                │       ▼                    ▼
+                │       spatial rows         object-pointer rows
+                │       │                    │
+                ▼       ▼                    │
+        rotate: out = x*cos_e + rot_pairs(x)*sin_e
+        cos_e, sin_e = repeat(cos/sin(angles), 2)
+        rot_pairs: (x[2i], x[2i+1]) -> (-x[2i+1], x[2i])
+                │       │                    │
+                │       └─────────┬──────────┘
+                │               concat
+                ▼                 ▼
+             q_rot              k_rot
 
     :param head_dim: Per-head feature width ``D``. Must be positive and
-        divisible by 4 (the ``D // 4`` frequency bands per axis).
+        divisible by 4, because each axis takes ``D // 4`` frequency bands.
     :type head_dim: int
     :param feat_shape: Spatial grid ``(H, W)`` whose row-major flattening
         produces the query token axis. ``H * W`` must equal the query token
@@ -113,37 +129,57 @@ class AxialRoPE2D(keras.layers.Layer):
         ``10000.0``.
     :type theta: float
     :param scale_pos: Multiplier applied to the ``(t_x, t_y)`` COORDINATES
-        before the frequency outer product, i.e. ``angles =
+        before the frequency outer product, so ``angles =
         concat([outer(scale_pos * t_x, f), outer(scale_pos * t_y, f)])``.
-        Defaults to ``1.0``, which is bit-identical to the unscaled table. Use
-        it when a model computes its frequency ladder at one grid size but wants
-        the positions interpolated onto another: SAM 3's global ViTDet blocks
-        run a ``72x72`` token grid through a RoPE pre-training grid of
-        ``24x24``, i.e. ``scale_pos = 24 / 72 = 1/3``. This is a DISTINCT
-        mechanism from ``repeat_k``: ``scale_pos`` compresses the coordinate
-        ladder within one grid, ``repeat_k`` broadcasts a finished table across
-        extra key blocks.
+        Defaults to ``1.0``, which is bit-identical to the unscaled table.
+        Use it when a model builds its frequency ladder at one grid size and
+        wants the positions interpolated onto another: SAM 3's global ViTDet
+        blocks run a ``72x72`` token grid through a RoPE pre-training grid of
+        ``24x24``, so ``scale_pos = 24 / 72 = 1/3``. This is a DIFFERENT
+        mechanism from ``repeat_k``. ``scale_pos`` compresses the coordinate
+        ladder within one grid; ``repeat_k`` broadcasts a finished table
+        across extra key blocks.
     :type scale_pos: float
     :param repeat_k: When ``True``, a key sequence may be an integer multiple
-        ``r`` of the query grid; the SAME angle table is broadcast across all
-        ``r`` blocks. This is spatial-only repetition — it deliberately does NOT
-        give each block a distinct phase, because temporal position is carried
-        additively elsewhere. When ``False``, the rotated key length must equal
-        the query grid exactly.
+        ``r`` of the query grid and the SAME angle table is broadcast across
+        all ``r`` blocks. This is spatial-only repetition. It gives each block
+        no distinct phase on purpose, because temporal position is carried
+        additively elsewhere. When ``False``, the rotated key length must
+        equal the query grid exactly.
     :type repeat_k: bool
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
+    :ivar num_grid_tokens: ``H * W``, the token count one angle table covers.
+    :vartype num_grid_tokens: int
+
+    Input shape:
+        ``query``: 4D tensor ``(batch, num_heads, H * W, head_dim)``.
+        ``key``: optional 4D tensor ``(batch, num_heads, num_k, head_dim)``.
+
+    Output shape:
+        ``query_shape`` alone when ``key is None``, otherwise the pair
+        ``(query_shape, key_shape)``. The rotation preserves shape.
+
     :raises ValueError: If ``head_dim`` is not a positive multiple of 4, if
-        ``feat_shape`` is not a pair of positive ints, if ``theta <= 0``, or if
-        ``scale_pos <= 0``.
+        ``feat_shape`` is not a pair of positive ints, or if ``theta`` or
+        ``scale_pos`` is not positive. Raised from ``__init__``.
+    :raises ValueError: If an input is not rank-4, if its last dimension is
+        not ``head_dim``, or if a static query token count differs from
+        ``H * W``. Raised from ``build()``.
+    :raises ValueError: If ``num_k_exclude`` is out of range, if the rotated
+        key length is not a valid multiple of the query grid, or if a token
+        axis is dynamic. Raised from ``call()``.
 
     Example:
-        >>> import numpy as np
-        >>> rope = AxialRoPE2D(head_dim=8, feat_shape=(2, 2))
-        >>> q = np.zeros((1, 1, 4, 8), dtype="float32")
-        >>> out = rope(q)
-        >>> out.shape
-        (1, 1, 4, 8)
+
+    .. code-block:: python
+
+        import numpy as np
+        from dl_techniques.layers.embedding import AxialRoPE2D
+
+        rope = AxialRoPE2D(head_dim=8, feat_shape=(2, 2))
+        q = np.zeros((1, 1, 4, 8), dtype="float32")
+        rope(q).shape  # (1, 1, 4, 8)
     """
 
     def __init__(
@@ -155,15 +191,36 @@ class AxialRoPE2D(keras.layers.Layer):
             repeat_k: bool = False,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and store it.
+
+        No table is built here; :meth:`build` materializes it.
+
+        :param head_dim: Per-head feature width ``D``.
+        :type head_dim: int
+        :param feat_shape: Spatial grid ``(H, W)``.
+        :type feat_shape: Tuple[int, int]
+        :param theta: Base of the geometric frequency ladder.
+        :type theta: float
+        :param scale_pos: Coordinate multiplier applied before the frequency
+            outer product.
+        :type scale_pos: float
+        :param repeat_k: Allow a key length that is an integer multiple of the
+            query grid.
+        :type repeat_k: bool
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If ``head_dim`` is not a positive multiple of 4,
+            if ``feat_shape`` is not a pair of positive ints, or if ``theta``
+            or ``scale_pos`` is not positive.
+        """
         super().__init__(**kwargs)
 
         if not isinstance(head_dim, int) or head_dim <= 0:
             raise ValueError(f"head_dim must be a positive int, got {head_dim!r}")
-        # The angle table is `concat([t_x * f, t_y * f])` with `head_dim // 4`
-        # bands per axis and width `head_dim // 2`. A head_dim that is even but
-        # not a multiple of 4 would silently drop a band (integer division) and
-        # produce an angle vector narrower than head_dim // 2. Raise here, at
-        # construction, rather than at the first call.
+        # An even head_dim that is not a multiple of 4 drops a band to integer
+        # division and yields an angle vector narrower than head_dim // 2.
+        # Raise at construction rather than at the first call.
         if head_dim % 4 != 0:
             raise ValueError(
                 f"head_dim must be divisible by 4 for 2D axial RoPE "
@@ -216,26 +273,20 @@ class AxialRoPE2D(keras.layers.Layer):
         t_y = np.floor_divide(flat, width)
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-083
-        # `scale_pos` scales the COORDINATES, applied to BOTH axes, here -- before
-        # the frequency outer product. Do NOT "simplify" this by folding it into
-        # `freqs` below (`freqs * scale_pos`) even though the products
-        # `outer(s*t, f)` and `outer(t, s*f)` are algebraically identical for the
-        # single-table case: the two forms diverge the moment either axis gains a
-        # per-axis scale or a non-linear coordinate map (NTK/YaRN-style band-wise
-        # rescaling touches `freqs` and would then compose wrongly with a
-        # frequency-folded position scale). Keeping the scale on the coordinate is
-        # also what makes `scale_pos = rope_pt_size / input_size` readable as the
-        # grid-interpolation ratio it is. Do NOT apply it to `t_x` only -- the
-        # axial halves share one frequency ladder, so an asymmetric scale silently
-        # anisotropizes the embedding with no shape error. See decisions.md D-083.
+        # `scale_pos` scales the COORDINATES, both axes, before the outer
+        # product. Do NOT fold it into `freqs`: `outer(s*t, f)` equals
+        # `outer(t, s*f)` only for one scalar scale, and the two diverge as soon
+        # as an axis gains its own scale or an NTK/YaRN band-wise map touches
+        # `freqs`. Do NOT apply it to `t_x` alone: the halves share one ladder,
+        # so an asymmetric scale skews the embedding with no shape error.
+        # See decisions.md D-083.
         if self.scale_pos != 1.0:
             t_x = t_x * self.scale_pos
             t_y = t_y * self.scale_pos
 
-        # `head_dim // 4` bands, shared by BOTH axes. This is not a typo and not
-        # a simplification: the x and y halves use the identical frequency
-        # ladder. The axes are separated by which coordinate multiplies the
-        # ladder and by which half of the rotary channels the result lands in.
+        # `head_dim // 4` bands, shared by BOTH axes. Not a typo. The x and y
+        # halves use the identical ladder; the axes are separated by which
+        # coordinate multiplies it and which half of the channels it lands in.
         bands = np.arange(0, self.head_dim, 4, dtype=np.float64)[: self.head_dim // 4]
         freqs = 1.0 / (self.theta ** (bands / self.head_dim))
 
@@ -245,18 +296,14 @@ class AxialRoPE2D(keras.layers.Layer):
         )
 
         # DECISION plan-2026-08-04T044628-4c240b4c/D-006
-        # Duplicate each angle across its ADJACENT pair -> [a0, a0, a1, a1, ...].
-        # `np.repeat` (interleaved), NOT `np.tile` (split-half GPT-NeoX packing).
-        #
-        # Do NOT "simplify" this to `np.tile` and a split-half `rotate_half`. Both
-        # conventions are valid orthogonal rotations and BOTH satisfy the
-        # relative-position property, so the property control in
-        # `tests/.../test_axial_rope_2d.py::TestRelativePositionInvariance` stays
-        # GREEN under the swap (measured). Only the float64 complex oracle catches
-        # it. The choice is not free: adjacent-pair packing is what makes this
-        # equivalent to upstream's `view_as_complex` on a `(..., -1, 2)` reshape,
-        # so a future upstream-checkpoint conversion depends on it. Swapping the
-        # convention would train fine and load a converted checkpoint wrong.
+        # `np.repeat` duplicates each angle across its ADJACENT pair, giving
+        # [a0, a0, a1, a1, ...]. Do NOT switch to `np.tile` plus a split-half
+        # `rotate_half`: both conventions are valid rotations and both keep the
+        # relative-position property, so TestRelativePositionInvariance stays
+        # GREEN under the swap (measured) and only the float64 complex oracle
+        # catches it. Adjacent-pair packing is what matches upstream's
+        # `view_as_complex` on a `(..., -1, 2)` reshape, so a converted
+        # checkpoint would load wrong. See decisions.md D-006.
         cos_e = np.repeat(np.cos(angles), 2, axis=-1)
         sin_e = np.repeat(np.sin(angles), 2, axis=-1)
         return cos_e, sin_e
@@ -372,8 +419,8 @@ class AxialRoPE2D(keras.layers.Layer):
         sin_e = self._sin_table
         if repeats > 1:
             # The SAME per-position angle is reused for every block. No block
-            # index enters this table -- doing so would encode temporal position
-            # in the rotation, which is carried additively elsewhere.
+            # index enters this table; that would encode temporal position in
+            # the rotation, which is carried additively elsewhere.
             cos_e = np.tile(cos_e, (repeats, 1))
             sin_e = np.tile(sin_e, (repeats, 1))
         return (
@@ -430,23 +477,14 @@ class AxialRoPE2D(keras.layers.Layer):
             axis is dynamic.
         """
         # DECISION plan-2026-08-04T044628-4c240b4c/D-005
-        # Compute the rotation in a NEVER-NARROWING working dtype and cast back
-        # at the end. Do NOT "simplify" this to `ops.cast(x, self.compute_dtype)`
-        # -- that narrows the rotation to float16 under mixed_float16, where a
-        # 64x64 grid's largest angle (t=63 at the lowest frequency band) loses
-        # roughly three decimal digits and the rotation stops being orthogonal to
-        # the tolerance downstream attention assumes. Do NOT hardcode
-        # `"float32"` either -- that would silently pin a float64 model to
-        # float32 rotations.
-        #
-        # This is the SAME rule as `continuous_rope_embedding.py:259` /
-        # `continuous_sin_cos_embedding.py:335`, but this site is materially
-        # simpler than those two: the angle table here is a NumPy constant, not
-        # an `add_weight` variable, so the autocast `Mul` dtype-mismatch failure
-        # those two comments describe cannot occur here at all. Only the
-        # never-narrow half of the rule applies. See decisions.md D-005 for why
-        # this was not promoted to a shared helper yet (the prior plan's
-        # pre-commitment triggers at the FIFTH site; this is the third).
+        # Rotate in a NEVER-NARROWING work dtype, then cast back. Do NOT use
+        # `ops.cast(x, self.compute_dtype)`: mixed_float16 narrows the rotation
+        # to float16 and a 64x64 grid's largest angle loses about three decimal
+        # digits. Do NOT hardcode `"float32"`; that pins a float64 model to
+        # float32. This table is a NumPy CONSTANT, not an `add_weight`, so no
+        # autocast mismatch is possible here. Promotion to a shared helper is
+        # pre-committed at the FIFTH site; this is the third.
+        # See decisions.md D-005.
         work_dtype = "float64" if self.compute_dtype == "float64" else "float32"
 
         num_q = self._static_token_count(query, "query")
@@ -473,9 +511,9 @@ class AxialRoPE2D(keras.layers.Layer):
 
         num_k_rope = num_k - num_k_exclude
         if num_k_rope == 0:
-            # Every key row is excluded (e.g. a memory sequence of object
-            # pointers only). Rotation is a no-op; return the key untouched
-            # rather than dividing by the grid size.
+            # Every key row is excluded, e.g. a memory sequence of object
+            # pointers only. The rotation is a no-op, so return the key
+            # untouched rather than divide by the grid size.
             return query_rot, key
 
         if self.repeat_k:

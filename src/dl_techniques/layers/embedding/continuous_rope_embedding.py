@@ -1,60 +1,47 @@
 """
 Continuous, multi-dimensional rotary position embeddings (RoPE).
 
-This layer extends the concept of Rotary Position Embedding (RoPE),
-originally designed for 1D discrete sequences, to handle continuous,
-multi-dimensional coordinates. It is designed to inject absolute positional
-information into a transformer's attention mechanism in a way that allows
-the model to naturally reason about relative positions, which is crucial
-for tasks involving spatial data like images, videos, or 3D point clouds.
+This layer generalizes RoPE from a 1D discrete sequence to CONTINUOUS
+N-dimensional coordinates. It suits spatial data: images, video, point
+clouds. It does not produce an embedding. It produces the PHASE ANGLES a
+downstream attention layer needs to rotate its query and key vectors.
 
 Architecture:
-    Unlike traditional positional embeddings that are added to token
-    embeddings, RoPE modifies the query and key vectors directly within the
-    attention mechanism by applying a rotation. This layer's role is not to
-    produce a final embedding, but to compute the *phase angles* for these
-    rotations based on the input coordinates.
+    The feature width ``dim`` is partitioned across ``ndim`` coordinate axes.
+    Each axis gets its own slice of the width and a shared geometric
+    frequency ladder. For coordinate component ``p_k`` the layer computes
+    ``phi_k = p_k * omega``, and the output is the concatenation
+    ``[phi_1, ..., phi_ndim]``.
 
-    The core architectural idea is to partition the feature dimension (`dim`)
-    among the number of spatial dimensions (`ndim`). For each coordinate
-    dimension (e.g., x, y, z), the layer computes a corresponding set of
-    phase angles by multiplying the coordinate value with a predefined set
-    of fixed, non-learnable frequencies. The final output is a single
-    vector formed by concatenating the phase angles from all spatial
-    dimensions. This vector can then be used in an attention layer to apply
-    the N-dimensional rotation to the query and key vectors.
+    The output width is the PHASE width, not ``dim``. There is one phase per
+    adjacent channel pair, so a ``dim`` cleanly divisible by ``ndim`` gives
+    ``dim // 2`` phases. The caller turns each phase into a cos/sin pair and
+    rotates the matching channel pair.
+
+    When ``dim`` is not cleanly divisible by ``ndim``, or the per-axis slice
+    is odd, the layer pads. ``padding // 2`` zero columns are appended, which
+    are phases of zero, i.e. no rotation for those channel pairs.
 
 Foundational Mathematics:
-    The fundamental principle of RoPE is to encode absolute position `p`
-    by applying a rotation matrix `R_p` to a feature vector `x`. The key
-    property is that the inner product between two rotated vectors,
-    `<R_p * q, R_k * k>`, depends only on their relative displacement, `p - k`.
-
-    In the 1D case, this rotation is equivalent to multiplying a complex
-    number representation of the vector by `e^(j * p * theta)`, where `p` is
-    the position and `theta` is a frequency. The embedding dimension `d` is
-    treated as `d/2` complex numbers, each rotated with a different
-    frequency `theta_i` from a geometric progression:
+    RoPE encodes an absolute position ``p`` by rotating a feature vector by
+    ``R_p``. The inner product ``<R_p q, R_k k>`` then depends only on
+    ``p - k``. In 1D the rotation is a multiply by ``e^(j * p * theta)``, the
+    ``d``-dimensional vector being read as ``d/2`` complex numbers with
+    frequencies from a geometric progression::
 
         theta_i = base_freq^(-2i / d)
 
-    This layer generalizes this concept to a continuous N-dimensional
-    coordinate vector `P = (p_1, p_2, ..., p_ndim)`. The total embedding
-    dimension `d` is split into `ndim` sub-vectors, each of dimension `d'`.
-    For each coordinate component `p_k`, a vector of phase angles `phi_k`
-    is computed by multiplying the coordinate value with its corresponding
-    set of frequencies:
+    Here the position is a continuous vector ``P = (p_1, ..., p_ndim)``. The
+    width ``d`` is split into ``ndim`` sub-vectors of width ``d'``, and each
+    component contributes its own phases::
 
         phi_k = p_k * {theta_0, theta_1, ..., theta_{d'/2 - 1}}
 
-    The final output of this layer is the concatenation of these phase angle
-    vectors, `[phi_1, phi_2, ..., phi_ndim]`, which contains all the
-    information needed to apply the full N-dimensional rotation to query
-    and key vectors in an attention mechanism.
+    The output is ``[phi_1, ..., phi_ndim]``, which carries everything the
+    caller needs to apply the full N-dimensional rotation.
 
 References:
-    - The original concept for 1D sequences was introduced in:
-      Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
+    - Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
       "RoFormer: Enhanced Transformer with Rotary Position Embedding".
 """
 
@@ -72,59 +59,100 @@ from typing import Optional, Any, Dict, Tuple
 
 @keras.saving.register_keras_serializable()
 class ContinuousRoPE(keras.layers.Layer):
-    """Continuous multi-dimensional Rotary Position Embedding for spatial data.
+    """Turn continuous N-D coordinates into RoPE phase angles.
 
-    Extends discrete 1D RoPE to continuous, multi-dimensional coordinates by
-    partitioning the embedding dimension ``dim`` among ``ndim`` spatial axes.
-    For each coordinate component ``p_k``, phase angles are computed as
-    ``phi_k = p_k * omega_i`` where ``omega_i = 1 / (max_wavelength^(2i/d'))``
-    forms a geometric frequency progression. The concatenated phase angles
-    ``[phi_1, ..., phi_ndim]`` can be used to apply N-dimensional rotations to
-    query and key vectors in attention, preserving the relative-position
-    property ``<R_p q, R_k k> = g(q, k, p-k)``.
+    Takes a coordinate tensor of shape ``(..., ndim)`` and returns phase
+    angles. It does NOT rotate anything and it does not emit an embedding.
+    The consuming attention layer takes cos and sin of these phases and
+    applies the rotation to its own query and key vectors.
+
+    The width ``dim`` is partitioned across the ``ndim`` axes. Each axis
+    contributes ``phi_k = p_k * omega`` with the shared ladder
+    ``omega_i = 1 / (max_wavelength^(2i/d'))``, and the results are
+    concatenated. The output width is the PHASE width, one phase per adjacent
+    channel pair, which is ``dim // 2`` for a ``dim`` divisible by ``ndim``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────┐
-        │  Input coords (..., ndim)        │
-        └───────────────┬──────────────────┘
+        coords  (..., ndim)          omega  (freq_dim,)
+              │                      omega_i = 1 / Theta^(2i/d')
+              │                      non-trainable weight
+              ▼                              │
+        expand to (..., ndim, 1)             │
+              │                              │
+              └──────── multiply ────────────┘
+                        │
                         ▼
-        ┌──────────────────────────────────┐
-        │  For each coord dimension k:     │
-        │    phi_k = p_k * omega           │
-        │    omega_i = 1/Θ^(2i/d')         │
-        └───────────────┬──────────────────┘
+        phases  (..., ndim, freq_dim)
+                        │
+                flatten the last two axes
                         ▼
-        ┌──────────────────────────────────┐
-        │  Concatenate [phi_1,...,phi_ndim]│
-        └───────────────┬──────────────────┘
+        phases  (..., ndim * freq_dim)
+                        │
+                append padding // 2 zero columns when
+                dim is not cleanly divisible by ndim
                         ▼
-        ┌──────────────────────────────────┐
-        │  Pad if dim % ndim != 0          │
-        └───────────────┬──────────────────┘
-                        ▼
-        ┌──────────────────────────────────┐
-        │  Output phase angles (..., dim/2)│
-        └──────────────────────────────────┘
+        output  (..., ndim * (d'//2) + padding//2)
 
-    :param dim: Dimensionality of the embedding (typically ``head_dim`` in
-        attention). Must be positive and should be divisible by ``ndim``.
+        Each output column is ONE phase, matching ONE adjacent channel
+        pair in the consumer. A zero column means that pair is not
+        rotated.
+
+    :param dim: Feature width the phases are meant for, usually the attention
+        ``head_dim``. Must be positive. It should divide cleanly by ``ndim``;
+        the remainder is handled by padding.
     :type dim: int
-    :param ndim: Number of coordinate dimensions (e.g., 2 for 2D, 3 for 3D).
-        Must be positive.
+    :param ndim: Number of coordinate axes, so 2 for 2D and 3 for 3D. Must be
+        positive and must equal the input's last dimension.
     :type ndim: int
-    :param max_wavelength: Theta parameter controlling the frequency range.
-        Higher values create lower frequencies. Defaults to ``10000.0``.
+    :param max_wavelength: Base of the frequency ladder. Larger values give
+        lower frequencies and longer wavelengths. Defaults to ``10000.0``.
     :type max_wavelength: float
-    :param assert_positive: Whether to check that coordinates are positive
-        (useful for normalized coordinate systems). Defaults to ``True``.
+    :param assert_positive: Kept for config compatibility only. It triggers
+        NO runtime check; see the note in :meth:`call`. Defaults to ``True``.
     :type assert_positive: bool
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :raises ValueError: If ``dim`` is too small for the given ``ndim``.
-    :raises ValueError: If input shape is invalid.
+    :ivar padding: Total channels that could not be split evenly. The output
+        gains ``padding // 2`` zero phase columns.
+    :vartype padding: int
+    :ivar effective_dim_per_wave: Channels per axis after padding is removed,
+        written ``d'`` above.
+    :vartype effective_dim_per_wave: int
+    :ivar omega: Non-trainable frequency vector of shape ``(d' // 2,)``.
+        ``None`` until ``build()`` runs.
+    :vartype omega: keras.Variable or None
+
+    Input shape:
+        At least 2D, with the last dimension equal to ``ndim``:
+        ``(..., ndim)``.
+
+    Output shape:
+        The input shape with the last dimension replaced by
+        ``ndim * (d' // 2) + padding // 2``.
+
+    :raises ValueError: If ``dim``, ``ndim`` or ``max_wavelength`` is not
+        positive, or if ``dim`` is too small to give each axis at least two
+        channels. Raised from ``__init__``.
+    :raises ValueError: If the input is less than 2D, or if its last
+        dimension is not ``ndim``. Raised from ``build()``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding import (
+            create_embedding_layer,
+        )
+
+        rope = create_embedding_layer(
+            "continuous_rope", dim=64, ndim=2,
+        )
+        coords = keras.random.uniform((2, 100, 2))
+        rope(coords).shape  # (2, 100, 32)
     """
 
     def __init__(
@@ -135,6 +163,24 @@ class ContinuousRoPE(keras.layers.Layer):
             assert_positive: bool = True,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and derive the padding split.
+
+        No weight is created here; ``omega`` is built in :meth:`build`.
+
+        :param dim: Feature width the phases are meant for.
+        :type dim: int
+        :param ndim: Number of coordinate axes.
+        :type ndim: int
+        :param max_wavelength: Base of the frequency ladder.
+        :type max_wavelength: float
+        :param assert_positive: Config-compatible flag; no runtime effect.
+        :type assert_positive: bool
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If ``dim``, ``ndim`` or ``max_wavelength`` is not
+            positive, or if ``dim`` leaves an axis with no channels.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -170,11 +216,15 @@ class ContinuousRoPE(keras.layers.Layer):
         self.omega = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the layer's fixed frequency weights.
+        """Create the non-trainable ``omega`` frequency vector.
 
-        :param input_shape: Shape tuple of the input tensor.
+        ``omega`` has shape ``(effective_dim_per_wave // 2,)`` and is shared
+        by every coordinate axis.
+
+        :param input_shape: Shape of the coordinate tensor, ``(..., ndim)``.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If input shape is invalid.
+        :raises ValueError: If the input is less than 2D, or if its last
+            dimension is not ``ndim``.
         """
         if self.built:
             return
@@ -191,16 +241,16 @@ class ContinuousRoPE(keras.layers.Layer):
         arange_vals = np.arange(0, self.effective_dim_per_wave, 2, dtype=np.float32)
         omega_vals = 1.0 / (self.max_wavelength ** (arange_vals / self.effective_dim_per_wave))
 
-        # `omega` comes from an INITIALIZER, never from `add_weight(...)` +
-        # `.assign()`: Keras 3 discards an `.assign()` issued inside the
-        # `StatelessScope` of the symbolic build pass that runs whenever this layer
-        # is first reached from a PARENT's `call()`, which left the table all-zero
-        # in every real model (measured on CPU 2026-08-15: direct `.build(...)`
-        # gives `omega[0] == 1.0`, through a parent's `call()` it was `0.0`), and an
-        # all-zero omega makes every rotary angle 0, i.e. RoPE is the identity.
-        # Same defect and same fix as `rotary_position_embedding.py`; the full
-        # rationale is at that module's `# DECISION` anchor. See decisions.md D-027.
-        # `omega_vals` is NumPy, so closing over it carries no `FuncGraph` tensor.
+        # `omega` comes from an INITIALIZER, never `add_weight(...)` +
+        # `.assign()`. Keras 3 discards an `.assign()` issued inside the
+        # `StatelessScope` of the symbolic build pass, which runs whenever this
+        # layer is first reached from a parent's `call()`. Measured on CPU
+        # 2026-08-15: a direct `.build(...)` gives `omega[0] == 1.0`, through a
+        # parent's `call()` it was `0.0`. An all-zero omega makes every angle 0,
+        # so RoPE becomes the identity. Same defect and fix as
+        # `rotary_position_embedding.py`; the full rationale is at that module's
+        # `# DECISION` anchor. `omega_vals` is NumPy, so closing over it carries
+        # no `FuncGraph` tensor. See decisions.md D-027.
         self.omega = self.add_weight(
             name="omega",
             shape=omega_vals.shape,
@@ -225,45 +275,37 @@ class ContinuousRoPE(keras.layers.Layer):
         :type coords: keras.KerasTensor
         :param training: Whether in training mode (unused).
         :type training: Optional[bool]
-        :return: Phase angles tensor whose last dimension is the phase width
-            (``dim // 2`` for a ``dim`` divisible by ``ndim``); the caller turns
-            these phases into a full-width rotation via cos/sin.
+        :return: Phase angles whose last dimension is the phase width, which
+            is ``dim // 2`` for a ``dim`` divisible by ``ndim``. The caller
+            turns each phase into cos/sin and rotates one channel pair with
+            it.
         :rtype: keras.KerasTensor
         """
-        # NOTE: `assert_positive` is retained as a config-compatible flag but no
+        # `assert_positive` is retained as a config-compatible flag but no
         # longer triggers a runtime check. The previous implementation called
         # `ops.convert_to_numpy(ops.min(coords))` here, which is an eager host
         # materialization that breaks `@tf.function` / graph tracing. Removed for
         # graph compatibility (DECISION plan_2026-06-15_9dbb87c1/D-001).
+        # That plan directory no longer exists, so this comment is the only
+        # surviving record of the change. Do not delete it.
 
         # DECISION plan-2026-07-31T210633-b63a35aa/D-007
-        # Compute the phases in a NEVER-NARROWING working dtype, and cast the
-        # frequency table to that same dtype.
-        #
-        # Do NOT write `ops.cast(coords, "float32")` here. A hard dtype literal is
-        # measured against `self.omega`, which Keras AUTOCASTS to the active compute
-        # dtype on read -- so the multiply below had mismatched operands and raised
-        # `InvalidArgumentError ... cannot compute Mul as input #1 was expected to be
-        # a float tensor but is a half/double/bfloat16 tensor [Op:Mul]` under
-        # mixed_float16, float64 AND mixed_bfloat16, i.e. this whole layer was dead at
-        # 3 of the 4 standard policies.
-        #
-        # Do NOT "simplify" this to `ops.cast(coords, self.compute_dtype)` either:
-        # that NARROWS the phase math to fp16/bf16. The conditional below IS the
-        # never-narrow rule, stated rather than inherited from `variable_dtype`.
-        #
-        # The final `ops.cast(..., self.compute_dtype)` at the return is load-bearing:
-        # without it this returns float32 under mixed_float16, a silently wrong output
-        # dtype that the consuming attention layer's rotation would have to absorb.
-        #
-        # This is the FOURTH inline copy of this rule in `src/` and the second in this
-        # package -- the sibling `continuous_sin_cos_embedding.py` carries the same
-        # block under D-002. Promotion to one shared helper was considered and ruled
-        # against (decisions.md D-006/D-007); a FIFTH site should promote instead of
-        # copying this again.
-        #
-        # NOTE this cannot recover fp16/bf16 accuracy at large positions: Keras has
-        # already narrowed `coords` at the autocast boundary BEFORE `call()` runs.
+        # Compute the phases in a NEVER-NARROWING work dtype and cast the
+        # frequency table to the same dtype. Do NOT write
+        # `ops.cast(coords, "float32")`: `self.omega` is a VARIABLE that Keras
+        # autocasts to the compute dtype on read, so a hard literal left the
+        # multiply with mismatched operands and raised `InvalidArgumentError ...
+        # cannot compute Mul as input #1 was expected to be a float tensor but
+        # is a half/double/bfloat16 tensor [Op:Mul]` under mixed_float16,
+        # float64 and mixed_bfloat16 alike -- the layer was dead at 3 of the 4
+        # standard policies. Do NOT use `ops.cast(coords, self.compute_dtype)`
+        # either; that narrows the phase math to fp16/bf16. The final
+        # `ops.cast(..., self.compute_dtype)` at the return is required: without
+        # it the layer returns float32 under mixed_float16. This cannot recover
+        # fp16/bf16 accuracy at large positions, because Keras narrowed `coords`
+        # at the autocast boundary before `call()` ran. A FIFTH copy of this
+        # rule in `src/` should promote a shared helper instead of copying
+        # again. See decisions.md D-007.
         work_dtype = "float64" if self.compute_dtype == "float64" else "float32"
         coords = ops.cast(coords, work_dtype)
 
@@ -292,7 +334,8 @@ class ContinuousRoPE(keras.layers.Layer):
             )
             phases = ops.concatenate([phases, padding_zeros], axis=-1)
 
-        # Back to the caller's compute dtype (see D-007 above -- not optional).
+        # Back to the caller's compute dtype. Required, not cosmetic: see the
+        # D-007 anchor above.
         return ops.cast(phases, self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -311,6 +354,8 @@ class ContinuousRoPE(keras.layers.Layer):
         # DECISION plan_2026-06-15_9dbb87c1/D-003: report the ACTUAL phase width
         # (= dim/2 for divisible dim), not ``dim``. The prior code returned
         # ``dim`` (2x too large); a wrong compute_output_shape is worse than none.
+        # That plan directory no longer exists, so this comment is the only
+        # surviving record of the change. Do not delete it.
         phase_width = self.ndim * (self.effective_dim_per_wave // 2) + self.padding // 2
         input_shape_list = list(input_shape)
         return tuple(input_shape_list[:-1] + [phase_width])

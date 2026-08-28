@@ -1,40 +1,52 @@
 """
 3D multi-axis Rotary Position Embedding (mRoPE) for the Ideogram4 DiT.
 
-This layer ports the Ideogram4 ``Ideogram4MRoPE`` module: a rotary positional
-embedding driven by a 3-component position id per token ``(t, h, w)`` (time /
-height / width). Unlike standard 1D RoPE, the rotary frequency table is built
-per-axis and then **band-interleaved**: starting from the time-axis (t)
-frequency table, a fixed subset of the ``head_dim/2`` frequency slots is
-reassigned to the height (h) and width (w) axes according to ``mrope_section``.
+This module ports Ideogram4's ``Ideogram4MRoPE``. Each token carries a
+3-component position id ``(t, h, w)`` for time, height and width. The layer
+returns ``cos`` and ``sin`` tables, not rotated vectors; a separate helper
+applies them to query and key.
 
 Architecture:
-    For each of the three axes (t, h, w) a frequency table is produced by the
-    outer product of that axis' position ids with the shared inverse-frequency
-    vector ``inv_freq`` (length ``head_dim/2``). The final per-token table is
-    assembled by selecting, for each frequency slot ``j in [0, head_dim/2)``,
-    which axis' table the slot is drawn from:
+    Each of the three axes gets a frequency table: the outer product of that
+    axis' position ids with the shared inverse-frequency vector ``inv_freq``
+    of length ``head_dim/2``. The final half-table is assembled slot by slot,
+    picking which axis' table each slot ``j`` is drawn from:
 
         - slot ``j`` defaults to the time axis (t),
-        - slots ``j in arange(1, mrope_section[1]*3, 3)`` come from the h axis,
-        - slots ``j in arange(2, mrope_section[2]*3, 3)`` come from the w axis.
+        - slots ``arange(1, mrope_section[1]*3, 3)`` come from the h axis,
+        - slots ``arange(2, mrope_section[2]*3, 3)`` come from the w axis.
 
-    The h-slots (``j % 3 == 1``) and w-slots (``j % 3 == 2``) never collide.
-    ``mrope_section[0]`` (the t band length) is informational and is not used
-    by the interleave loop, matching the PyTorch reference exactly.
+    The h slots satisfy ``j % 3 == 1`` and the w slots ``j % 3 == 2``, so the
+    two bands never collide. ``mrope_section[0]``, the t band length, is
+    informational. The interleave loop never uses it. That matches the
+    PyTorch reference exactly.
 
-    The resulting half-table is concatenated with itself (``[freqs, freqs]``)
-    to span the full ``head_dim`` before ``cos``/``sin`` are taken, yielding
-    cos/sin tensors of shape ``(B, L, head_dim)``.
+    The half-table is then concatenated with itself, ``[freqs, freqs]``, to
+    span the full ``head_dim`` before ``cos`` and ``sin`` are taken. The
+    result is a pair of ``(B, L, head_dim)`` tables.
+
+Pairing convention:
+    ``apply_rotary_pos_emb`` in this module uses SPLIT-HALF pairing, the
+    GPT-NeoX convention: channel ``j`` rotates with channel
+    ``j + head_dim/2``. That is what ``_rotate_half`` and the
+    ``[freqs, freqs]`` duplication together produce, and it is verified by
+    execution. It differs from the INTERLEAVED pairing in
+    ``rotary_position_embedding.py`` and ``axial_rope_2d.py``, which pair
+    ``x[2i]`` with ``x[2i+1]``. Do not mix a table built here with a rotation
+    written for the other convention.
 
 PyTorch reference (faithfully ported)::
 
-    inv_freq = 1.0 / (base ** (arange(0, head_dim, 2) / head_dim))   # (head_dim/2,)
-    pos = position_ids.permute(2, 0, 1).float()                      # (3, B, L)
-    freqs = (inv_freq[None,None,:,None] @ pos[:,:,None,:]).transpose(2,3)  # (3,B,L,head_dim/2)
+    # inv_freq: (head_dim/2,)
+    inv_freq = 1.0 / (base ** (arange(0, head_dim, 2) / head_dim))
+    # pos: (3, B, L)
+    pos = position_ids.permute(2, 0, 1).float()
+    # freqs: (3, B, L, head_dim/2)
+    freqs = (inv_freq[None, None, :, None]
+             @ pos[:, :, None, :]).transpose(2, 3)
     freqs_t = freqs[0].clone()
     for axis, offset in ((1, 1), (2, 2)):
-        idx = arange(offset, mrope_section[axis]*3, 3)
+        idx = arange(offset, mrope_section[axis] * 3, 3)
         freqs_t[..., idx] = freqs[axis][..., idx]
     emb = cat((freqs_t, freqs_t), dim=-1)
     return emb.cos(), emb.sin()
@@ -54,44 +66,112 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 @keras.saving.register_keras_serializable(package="dl_techniques.layers")
 class Ideogram4MRoPE(keras.layers.Layer):
-    """3D multi-axis rotary position embedding (mRoPE) for Ideogram4.
+    """Build 3D multi-axis mRoPE ``cos``/``sin`` tables for Ideogram4.
 
-    Produces ``cos`` and ``sin`` rotary tables of shape ``(B, L, head_dim)``
-    from integer position ids of shape ``(B, L, 3)`` carrying ``(t, h, w)``
-    coordinates per token. The frequency table is band-interleaved across the
-    three axes according to ``mrope_section`` (see module docstring).
+    Takes integer position ids of shape ``(B, L, 3)`` carrying ``(t, h, w)``
+    per token and returns two tables of shape ``(B, L, head_dim)``. The layer
+    rotates nothing; :func:`apply_rotary_pos_emb` does that.
 
-    The shared inverse-frequency vector is stored as a non-trainable weight via
-    ``add_weight(trainable=False)`` so it survives ``.keras`` serialization. Its
-    value is supplied by an ``initializer`` callable and never by a post-creation
-    ``.assign()``: surviving serialization and being correctly initialized are
-    different properties, and the ``.assign()`` form was silently discarded by the
-    ``StatelessScope`` of Keras 3's symbolic build pass, leaving the vector all
-    zeros (and mRoPE the identity) in every real model. See the ``build`` anchor.
+    Which axis feeds which frequency slot is fixed by ``mrope_section`` and
+    is decided at construction, so the selector is a static constant rather
+    than a runtime scatter.
 
-    :param head_dim: Per-head dimensionality. Must be a positive even integer.
+    The shared inverse-frequency vector is a non-trainable weight, so it
+    survives ``.keras`` serialization. Its value comes from an
+    ``initializer`` callable and never from a post-creation ``.assign()``.
+    Surviving serialization and being correctly initialized are different
+    properties: the ``.assign()`` form was discarded by the
+    ``StatelessScope`` of Keras 3's symbolic build pass, leaving the vector
+    all zeros and mRoPE the identity in every real model. See the anchor in
+    :meth:`build`.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        position_ids (B, L, 3) = (t, h, w), integer
+                        │
+                        ▼
+        pos = cast(position_ids, float32)
+                        │
+        einsum("bla,f->blfa", pos, inv_freq)
+        inv_freq (half,), half = head_dim/2, non-trainable
+                        │
+                        ▼
+        freqs_per_axis (B, L, half, 3)
+                        │
+        einsum("blfa,fa->blf", freqs_per_axis, select_onehot)
+        select_onehot (half, 3), STATIC, fixed at construction
+                        │
+                        ▼
+        freqs (B, L, half)
+                        │
+        concatenate([freqs, freqs], axis=-1)
+                        │
+                        ▼
+        emb (B, L, head_dim)
+                        │
+                 ┌──────┴──────┐
+                 ▼             ▼
+              cos(emb)      sin(emb)     each (B, L, head_dim)
+
+        Which axis feeds slot j of the half-table:
+
+          slot j       source axis   consumed by
+          j % 3 == 1   h (index 1)   arange(1, sec[1]*3, 3)
+          j % 3 == 2   w (index 2)   arange(2, sec[2]*3, 3)
+          otherwise    t (index 0)   the default, no explicit index
+
+        sec = mrope_section. sec[0], the t band, is informational and
+        never indexes anything, matching the PyTorch reference. With
+        head_dim=8 and sec=(1, 1, 1) the selector is [0, 1, 2, 0].
+
+    :param head_dim: Per-head dimensionality. Must be a positive even
+        integer.
     :type head_dim: int
-    :param rope_theta: Rotary base frequency (PyTorch ``base``). Must be > 0.
+    :param rope_theta: Rotary base frequency, the PyTorch ``base``. Must be
+        positive.
     :type rope_theta: float
     :param mrope_section: 3-tuple ``(t_band, h_band, w_band)``. Each entry is
-        the number of 3-strided frequency slots assigned to that axis. The h
-        and w bands consume slots ``arange(offset, band*3, 3)`` and must fit
-        inside ``head_dim/2``.
+        the number of 3-strided frequency slots given to that axis. The h and
+        w bands consume ``arange(offset, band*3, 3)`` and must fit inside
+        ``head_dim/2``. The t entry is informational.
     :type mrope_section: Sequence[int]
-    :param kwargs: Additional ``keras.layers.Layer`` arguments.
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :raises ValueError: If ``head_dim`` is not a positive even integer.
-    :raises ValueError: If ``rope_theta`` is not positive.
-    :raises ValueError: If ``mrope_section`` does not have length 3, contains
-        non-positive entries, or its h/w bands exceed ``head_dim/2`` bounds.
+    :ivar inv_freq: Non-trainable float32 vector of shape ``(head_dim/2,)``.
+        ``None`` until ``build()`` runs.
+    :vartype inv_freq: keras.Variable or None
+
+    Input shape:
+        3D integer tensor with shape ``(B, L, 3)``.
+
+    Output shape:
+        A pair of 3D tensors, each ``(B, L, head_dim)``, both float32.
+
+    :raises ValueError: If ``head_dim`` is not a positive even integer, if
+        ``rope_theta`` is not positive, or if ``mrope_section`` is not three
+        positive entries whose h/w bands fit inside ``head_dim/2``. Raised
+        from ``__init__``.
+    :raises ValueError: If the input is not rank-3 with a last dimension of
+        3. Raised from ``build()``.
 
     Example:
-        >>> layer = Ideogram4MRoPE(head_dim=256, rope_theta=5_000_000,
-        ...                        mrope_section=(24, 20, 20))
-        >>> position_ids = keras.ops.zeros((2, 16, 3), dtype="int32")
-        >>> cos, sin = layer(position_ids)
-        >>> cos.shape, sin.shape
-        (TensorShape([2, 16, 256]), TensorShape([2, 16, 256]))
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding.multi_axis_rope import (
+            Ideogram4MRoPE,
+        )
+
+        layer = Ideogram4MRoPE(
+            head_dim=256, rope_theta=5_000_000,
+            mrope_section=(24, 20, 20),
+        )
+        position_ids = keras.ops.zeros((2, 16, 3), dtype="int32")
+        cos, sin = layer(position_ids)
+        cos.shape  # (2, 16, 256)
     """
 
     def __init__(
@@ -101,6 +181,23 @@ class Ideogram4MRoPE(keras.layers.Layer):
         mrope_section: Sequence[int],
         **kwargs: Any,
     ) -> None:
+        """Validate the configuration and precompute the slot selector.
+
+        No weight is created here; :meth:`build` creates both.
+
+        :param head_dim: Per-head dimensionality.
+        :type head_dim: int
+        :param rope_theta: Rotary base frequency.
+        :type rope_theta: float
+        :param mrope_section: 3-tuple ``(t_band, h_band, w_band)``.
+        :type mrope_section: Sequence[int]
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If ``head_dim`` is not a positive even integer,
+            if ``rope_theta`` is not positive, or if ``mrope_section`` is not
+            three positive entries whose h/w bands fit in ``head_dim/2``.
+        """
         super().__init__(**kwargs)
 
         # --- validation -------------------------------------------------
@@ -148,7 +245,8 @@ class Ideogram4MRoPE(keras.layers.Layer):
             length = self.mrope_section[axis] * 3
             idx = np.arange(offset, length, 3)
             source_axis[idx] = axis
-        self._source_axis = source_axis  # (half,) int
+        # Shape (half,), integer.
+        self._source_axis = source_axis
 
         # weights created in build()
         self.inv_freq = None
@@ -176,25 +274,25 @@ class Ideogram4MRoPE(keras.layers.Layer):
             ** (np.arange(0, self.head_dim, 2, dtype="float32") / self.head_dim)
         )
 
-        # Stored as a NON-TRAINABLE weight so it serializes (raw tensor attrs
-        # do not round-trip through .keras).
+        # A NON-TRAINABLE weight, so the value serializes; a raw tensor
+        # attribute does not round-trip through `.keras`.
         #
-        # WHAT NOT TO DO: do NOT restore
+        # Do NOT restore
         #     self.inv_freq = self.add_weight(..., initializer="zeros")
         #     self.inv_freq.assign(inv_freq_values.astype("float32"))
-        # Keras 3 runs a symbolic build pass inside a `StatelessScope` whenever this
-        # layer is first reached from a PARENT's `call()` -- i.e. in every real model
-        # and on every factory-built (`mrope_ideogram4`) path -- and that scope
-        # RECORDS the `.assign()` and then DISCARDS it. Measured on CPU 2026-08-15:
-        # a direct `.build(...)` gives `inv_freq[0] == 1.0`, while through a parent's
-        # `call()` the whole vector was zero, so every rotary angle was 0 and mRoPE
-        # was the identity (cos == 1, sin == 0) at every position -- position ids had
-        # no effect at all. Being a non-trainable weight makes the value SERIALIZE;
-        # it does not make it CORRECT. Initializers are honoured at variable-CREATION
-        # time and so survive the stateless scope. Same defect and same fix as
+        # Keras 3 runs a symbolic build pass inside a `StatelessScope` whenever
+        # this layer is first reached from a parent's `call()`, which covers
+        # every real model and every factory-built (`mrope_ideogram4`) path.
+        # That scope records the `.assign()` and then discards it. Measured on
+        # CPU 2026-08-15: a direct `.build(...)` gives `inv_freq[0] == 1.0`,
+        # while through a parent's `call()` the whole vector was zero, so every
+        # rotary angle was 0 and mRoPE was the identity at every position.
+        # Being non-trainable makes the value SERIALIZE; it does not make it
+        # CORRECT. Initializers run at variable-CREATION time and survive the
+        # stateless scope. Same defect and fix as
         # `rotary_position_embedding.py` (D-021). See decisions.md D-027.
         # `inv_freq_values` is NumPy, so closing over it carries no `FuncGraph`
-        # tensor (a `keras.ops` tensor computed here would raise "out of scope").
+        # tensor; a `keras.ops` tensor built here would raise "out of scope".
         inv_freq_f32 = inv_freq_values.astype("float32")
         self.inv_freq = self.add_weight(
             name="inv_freq",
@@ -214,13 +312,16 @@ class Ideogram4MRoPE(keras.layers.Layer):
         # avoids backend-specific in-place / scatter ops. Do NOT replace with a
         # dynamic `keras.ops.scatter`/`slice_update` in call(): position ids are
         # dynamic but the slot->axis map is not, and scatter on the freq axis is
-        # not reliably XLA-traceable across backends. See decisions.md D-003.
+        # not reliably XLA-traceable across backends.
         # Materialized by an INITIALIZER for the same reason as `inv_freq` above:
         # an `.assign()` inside the symbolic build pass is discarded, and an
         # all-zero selector zeroes the selected frequency for EVERY slot, not just
         # the h/w bands. Measured on CPU 2026-08-15: direct `.build(...)` gives
         # `select_onehot[0, 0] == 1.0`, through a parent's `call()` it was `0.0`.
-        onehot = np.eye(3, dtype="float32")[self._source_axis]  # (half, 3)
+        # The originating plan directory is gone, so this comment is the only
+        # record of the decision. Keep every clause above.
+        # Shape (half, 3), one row per frequency slot.
+        onehot = np.eye(3, dtype="float32")[self._source_axis]
         self._select_onehot = self.add_weight(
             name="select_onehot",
             shape=(self._half, 3),
@@ -248,23 +349,26 @@ class Ideogram4MRoPE(keras.layers.Layer):
         :return: ``(cos, sin)``, each of shape ``(B, L, head_dim)`` (float32).
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        pos = keras.ops.cast(position_ids, "float32")  # (B, L, 3)
+        # Shape (B, L, 3).
+        pos = keras.ops.cast(position_ids, "float32")
 
-        # Per-axis frequency tables via outer product of positions and inv_freq.
-        # pos[..., a]: (B, L);  inv_freq: (half,)
-        # freqs_per_axis: (B, L, half, 3) where the last dim indexes (t, h, w).
-        # einsum over the position/frequency outer product, keeping the axis dim.
-        inv_freq = self.inv_freq  # (half,)
+        # Per-axis frequency tables, the outer product of positions and
+        # inv_freq, keeping the axis dim. pos[..., a] is (B, L), inv_freq is
+        # (half,), and the result is (B, L, half, 3) with the last dim
+        # indexing (t, h, w).
+        inv_freq = self.inv_freq
         freqs_per_axis = keras.ops.einsum("bla,f->blfa", pos, inv_freq)
-        # -> (B, L, half, 3)
 
         # Static one-hot select over the axis dim: for each frequency slot f,
         # pick the axis assigned to it. _select_onehot: (half, 3).
         # sum_a freqs_per_axis[b,l,f,a] * onehot[f,a]  -> (B, L, half)
         freqs = keras.ops.einsum("blfa,fa->blf", freqs_per_axis, self._select_onehot)
 
-        # Concatenate the half-table with itself to span head_dim, then cos/sin.
-        emb = keras.ops.concatenate([freqs, freqs], axis=-1)  # (B, L, head_dim)
+        # Concatenate the half-table with itself to span head_dim, then take
+        # cos and sin. The duplication is what makes the paired rotation in
+        # `apply_rotary_pos_emb` SPLIT-HALF: slot j serves channel j and
+        # channel j + head_dim/2. Result shape (B, L, head_dim).
+        emb = keras.ops.concatenate([freqs, freqs], axis=-1)
         cos = keras.ops.cos(emb)
         sin = keras.ops.sin(emb)
         return cos, sin
@@ -300,12 +404,15 @@ class Ideogram4MRoPE(keras.layers.Layer):
 
 
 # ---------------------------------------------------------------------
-# Static rotary application helpers (imported by the attention layer, step 2).
+# Static rotary application helpers, imported by the attention layer.
 # ---------------------------------------------------------------------
 
 
 def _rotate_half(x: keras.KerasTensor) -> keras.KerasTensor:
     """Rotate the last-dim halves: ``[-x2, x1]`` for ``x = [x1, x2]``.
+
+    This is the SPLIT-HALF (GPT-NeoX) form. It pairs channel ``j`` with
+    channel ``j + d/2``, not with ``j + 1``.
 
     :param x: Tensor whose last dimension is even.
     :type x: keras.KerasTensor
@@ -326,8 +433,9 @@ def apply_rotary_pos_emb(
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Apply mRoPE rotary embedding to query and key tensors.
 
-    Ports the PyTorch ``_apply_rotary_pos_emb``: the head axis is unsqueezed
-    into ``cos``/``sin`` so they broadcast over heads.
+    Ports the PyTorch ``_apply_rotary_pos_emb``. The head axis is unsqueezed
+    into ``cos`` and ``sin`` so they broadcast over heads. The pairing is
+    SPLIT-HALF: channel ``j`` rotates with channel ``j + head_dim/2``.
 
     :param q: Query tensor of shape ``(B, num_heads, L, head_dim)``.
     :type q: keras.KerasTensor

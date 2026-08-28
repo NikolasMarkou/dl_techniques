@@ -1,68 +1,47 @@
 """
-Applies rotary embeddings to inject relative positional information.
+Rotary Position Embedding (RoPE) for transformer attention.
 
-This layer implements Rotary Position Embedding (RoPE), a method for
-encoding the relative positions of tokens in a sequence. Unlike traditional
-additive positional embeddings, RoPE applies a rotational transformation
-directly to the query and key vectors within the attention mechanism. This
-approach has been shown to naturally incorporate relative positional
-information and improve sequence length extrapolation.
+RoPE injects position by ROTATING pairs of channels inside the query and key
+vectors. It adds nothing to the token embedding. The rotation angle depends on
+the token's absolute position, so the dot product of a rotated query and a
+rotated key depends only on the distance between the two tokens.
 
 Architecture:
-    The core architectural insight of RoPE is to avoid altering the content
-    of token embeddings with positional data. Instead, it modifies the
-    attention calculation itself. The feature dimensions of the input query
-    or key vectors are conceptually grouped into pairs. Each pair is treated
-    as a 2D vector (or the real and imaginary components of a complex
-    number) that is then rotated in-place.
+    The head dimension is read as pairs of ADJACENT channels. Pair ``i`` is
+    ``(x[2i], x[2i+1])``, treated as one 2D vector. Each pair is rotated by
+    ``m * theta_i``, where ``m`` is the token position and ``theta_i`` is that
+    pair's own frequency. Different pairs rotate at different rates, so one
+    token carries a multi-scale positional signal.
 
-    The angle of rotation for each pair is a function of two things: the
-    token's absolute position in the sequence and the feature pair's index.
-    This means that for a given token, different feature pairs are rotated
-    by different angles, creating a rich positional signal.
-
-    To maintain model stability, this rotation is often applied to only a
-    fraction of the feature dimensions (controlled by `rope_percentage`),
-    leaving the remaining dimensions unchanged. For computational efficiency,
-    the sine and cosine values required for these rotations are pre-computed
-    for all positions up to `max_seq_len` and stored in non-trainable
-    lookup tables.
+    Only the leading ``rope_dim`` channels are rotated. ``rope_percentage``
+    sets that fraction and the rest pass through untouched. The cos and sin
+    values for every position up to ``max_seq_len`` are precomputed into two
+    non-trainable tables.
 
 Foundational Mathematics:
-    The primary objective of RoPE is to ensure that the dot product between a
-    query vector `q` at position `m` and a key vector `k` at position `n`
-    depends only on their relative displacement `m-n`. RoPE achieves this
-    by defining a transformation `f(x, p)` that rotates a vector `x` based
-    on its absolute position `p`.
+    Read a ``d``-dimensional vector as ``d/2`` complex numbers. The transform
+    at position ``m`` multiplies each one by a complex exponential::
 
-    The transformation is elegantly defined using complex numbers. For a
-    `d`-dimensional vector, we view it as `d/2` complex numbers. The
-    transformation for a vector `x` at position `m` is equivalent to an
-    element-wise multiplication with a complex exponential:
+        f(x, m)_i = x_i * e^(j * m * theta_i)
 
-        f(x, m)_i = x_i * e^(j * m * θ_i)
+    The inner product of a query at ``m`` and a key at ``n`` is then::
 
-    The dot product of two transformed vectors `f(q, m)` and `f(k, n)` then
-    satisfies the desired relative property:
+        <f(q, m), f(k, n)>
+            = Re( sum_i q_i * conj(k_i) * e^(j * (m - n) * theta_i) )
 
-        <f(q, m), f(k, n)> = Re( Σ_i (q_i * e^(j*m*θ_i)) * (k_i * e^(-j*n*θ_i)) )
-                          = Re( Σ_i (q_i * k_i*) * e^(j*(m-n)θ_i) )
+    It depends on ``m - n``, not on ``m`` or ``n`` alone. That relative
+    property is the reason RoPE exists. The frequencies form a geometric
+    ladder::
 
-    This shows the inner product is a function of the original vectors and
-    their relative position `m-n`. The frequencies `θ_i` are fixed and form
-    a geometric progression:
+        theta_i = 1 / (rope_theta^(2i / d))
 
-        θ_i = 1 / (rope_theta^(2i / d))
-
-    This provides a multi-scale representation of position, where different
-    frequencies capture positional relationships over different distances.
-    The implementation uses the real-valued equivalent of this complex
-    multiplication, which is a standard 2D rotation matrix applied to each
-    pair of features.
+    Low ``i`` rotates fast and resolves nearby tokens. High ``i`` rotates
+    slowly and carries long-range position. The code uses the real-valued
+    form of the same complex multiply: a 2x2 rotation applied to each
+    channel pair.
 
 References:
-    - The original concept was introduced in:
-      Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
+    - Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
       "RoFormer: Enhanced Transformer with Rotary Position Embedding".
 """
 
@@ -80,68 +59,104 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class RotaryPositionEmbedding(keras.layers.Layer):
-    """Rotary Position Embedding (RoPE) layer for transformer attention.
+    """Rotate adjacent channel pairs of ``q``/``k`` by a position angle.
 
-    Applies rotary transformations to query and key vectors, encoding relative
-    positional information through trigonometric rotation of feature-dimension
-    pairs. For each pair ``[x_{2i}, x_{2i+1}]`` at position ``m``, RoPE
-    applies a 2D rotation by angle ``m * theta_i`` where
-    ``theta_i = 1 / (rope_theta^(2i/d))``. The resulting dot product
-    ``<f(q,m), f(k,n)>`` depends only on the relative displacement ``m - n``,
-    enabling natural relative position encoding without learned parameters.
-    Partial application (controlled by ``rope_percentage``) leaves remaining
-    dimensions unchanged for stability.
+    Takes a post-head-split tensor of shape
+    ``(batch, heads, seq_len, head_dim)`` and rotates the leading
+    ``rope_dim`` channels. Pair ``i`` is the ADJACENT pair
+    ``(x[2i], x[2i+1])``, rotated by ``m * theta_i`` at position ``m`` with
+    ``theta_i = 1 / (rope_theta^(2i/d))``. The remaining channels are copied
+    through. Shape is unchanged. The layer learns nothing; both tables are
+    non-trainable and precomputed in :meth:`build`.
+
+    The pairing is INTERLEAVED, not split-half. A split-half implementation
+    rotates ``(x[i], x[i + d/2])`` instead. Both conventions are valid
+    rotations and both give the relative-position property, so a swap will
+    train fine and load an externally converted checkpoint wrong.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────────┐
-        │  Input (batch, heads, seq_len, head_dim) │
-        └───────────────────┬──────────────────────┘
-                            ▼
-        ┌───────────────────┬──────────────────────┐
-        │  x_rope           │  x_pass              │
-        │  [:rope_dim]      │  [rope_dim:]         │
-        └────────┬──────────┘──────────┬───────────┘
-                 ▼                     │
-        ┌────────────────────┐         │
-        │  Reshape to pairs  │         │
-        │  (rope_dim//2, 2)  │         │
-        └────────┬───────────┘         │
-                 ▼                     │
-        ┌────────────────────┐         │
-        │  Rotate each pair  │         │
-        │  [cos -sin] [x1]   │         │
-        │  [sin  cos] [x2]   │         │
-        └────────┬───────────┘         │
-                 ▼                     │
-        ┌────────────────────┐         │
-        │  Reshape back      │         │
-        └────────┬───────────┘         │
-                 └──────────┬──────────┘
-                            ▼
-        ┌──────────────────────────────────────────┐
-        │  Concatenate → Output (same shape)       │
-        └──────────────────────────────────────────┘
+        input x  (B, heads, seq_len, head_dim)
+                               │
+                   split on the channel axis
+             ┌─────────────────┴──────────────────┐
+             ▼                                    ▼
+             x_rope                               x_pass
+             [..., :rope_dim]                     [..., rope_dim:]
+             │                                    │
+             reshape to ADJACENT pairs            │
+             (..., rope_dim/2, 2), so pair i      │
+             is (x1, x2) = (x[2i], x[2i+1])       │
+             │                                    │
+             angle = m * theta_i at position m;   │
+             cos and sin read from the tables     │
+             │                                    │
+             out[2i]   = x1*cos - x2*sin          │
+             out[2i+1] = x1*sin + x2*cos          │
+             │                                    │
+             reshape back to (..., rope_dim)      │
+             └─────────────────┬──────────────────┘
+                               ▼
+                concatenate on the channel axis
+                               │
+                               ▼
+        output  (B, heads, seq_len, head_dim)
 
     :param head_dim: Dimensionality of each attention head. Must be positive.
+        An odd value logs a warning; RoPE needs pairs.
     :type head_dim: int
-    :param max_seq_len: Maximum sequence length for precomputing rotary tables.
-        Must be positive.
+    :param max_seq_len: Largest position the tables cover. Must be positive.
+        A longer input raises at call time.
     :type max_seq_len: int
-    :param rope_theta: Base frequency for rotary computation. Higher values
-        work better for longer sequences. Defaults to ``10000.0``.
+    :param rope_theta: Base of the frequency ladder. Larger values stretch the
+        wavelengths and suit longer sequences. Defaults to ``10000.0``.
     :type rope_theta: float
-    :param rope_percentage: Fraction of head dimensions to apply RoPE to.
-        Defaults to ``0.5`` for stability. Must be in ``(0, 1]``.
+    :param rope_percentage: Fraction of ``head_dim`` that is rotated. Defaults
+        to ``0.5``. Must be in ``(0, 1]``. The derived ``rope_dim`` is rounded
+        DOWN to an even number, so a small ``head_dim`` can round it to 0, in
+        which case :meth:`call` returns the input unchanged.
     :type rope_percentage: float
-    :param kwargs: Additional Layer base class arguments.
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :raises ValueError: If ``head_dim``, ``max_seq_len``, or ``rope_theta``
-        are not positive.
-    :raises ValueError: If ``rope_percentage`` is not in the range ``(0, 1]``.
-    :raises ValueError: If input sequence length exceeds ``max_seq_len``.
+    :ivar rope_dim: Number of leading channels actually rotated. Even, and at
+        most ``head_dim``. Derived in ``__init__``, not a config key.
+    :vartype rope_dim: int
+    :ivar cos_cached: Non-trainable table of shape
+        ``(max_seq_len, rope_dim // 2)``. ``None`` until ``build()`` runs.
+    :vartype cos_cached: keras.Variable or None
+    :ivar sin_cached: Non-trainable table of the same shape as ``cos_cached``.
+    :vartype sin_cached: keras.Variable or None
+
+    Input shape:
+        4D tensor with shape ``(batch_size, num_heads, seq_len, head_dim)``.
+
+    Output shape:
+        4D tensor with the same shape as the input.
+
+    :raises ValueError: If ``head_dim``, ``max_seq_len`` or ``rope_theta`` is
+        not positive, or if ``rope_percentage`` is outside ``(0, 1]``. Raised
+        from ``__init__``.
+    :raises ValueError: If the input is not 4D, or if its last dimension is
+        not ``head_dim``. Raised from ``build()``.
+    :raises ValueError: If the static sequence length exceeds ``max_seq_len``.
+        Raised from ``call()``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding import (
+            create_embedding_layer,
+        )
+
+        rope = create_embedding_layer(
+            "rope", head_dim=64, max_seq_len=128,
+        )
+        q = keras.random.normal((2, 8, 16, 64))
+        rope(q).shape  # (2, 8, 16, 64)
     """
 
     def __init__(
@@ -152,6 +167,24 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         rope_percentage: float = 0.5,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and derive ``rope_dim``.
+
+        No weight is created here; the tables are built in :meth:`build`.
+
+        :param head_dim: Dimensionality of each attention head.
+        :type head_dim: int
+        :param max_seq_len: Largest position the tables will cover.
+        :type max_seq_len: int
+        :param rope_theta: Base of the frequency ladder.
+        :type rope_theta: float
+        :param rope_percentage: Fraction of ``head_dim`` to rotate.
+        :type rope_percentage: float
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If any of the first three arguments is not
+            positive, or if ``rope_percentage`` is outside ``(0, 1]``.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -216,44 +249,30 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_rope_cache(self) -> None:
-        """Create and cache cos/sin lookup tables for rotary embeddings.
+        """Create the cos and sin lookup tables.
 
-        .. note::
-            **FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b).** The tables used to
-            be hard-coded to ``dtype='float32'``. Under a ``float64`` global policy
-            the layer therefore raised on its very first forward pass, with no mask
-            and no unusual input:
-            ``InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
-            expected to be a double tensor but is a float tensor`` (from
-            ``x1 * cos`` in :meth:`_apply_rope_rotation`), taking
-            ``GatedAttention``, ``GroupedQueryAttention`` and
-            ``MultiHeadLatentAttention`` down with it.
+        Both tables have shape ``(max_seq_len, rope_dim // 2)`` and are
+        non-trainable. They are built at ``self.variable_dtype``, so a
+        ``float64`` policy gets float64 tables while ``float32`` and
+        ``mixed_float16`` are byte-unchanged.
 
-            The tables are now built in ``self.variable_dtype``, which is
-            ``float32`` under both the ``float32`` and the ``mixed_float16``
-            policies (so those two are byte-unchanged) and ``float64`` under a
-            ``float64`` policy. Do NOT use ``compute_dtype`` here: under
-            ``mixed_float16`` that would store the tables in ``float16``, where the
-            high-frequency entries of a long ``max_seq_len`` table lose most of
-            their precision — mixed precision deliberately keeps variables wide and
-            autocasts them on read.
+        When ``rope_dim`` rounds down to 0 the method logs a warning and
+        creates two zero-filled ``(max_seq_len, 1)`` placeholders so the
+        weight set stays the same shape across configurations. :meth:`call`
+        returns early in that case and never reads them.
+
+        :return: Nothing. Sets ``cos_cached`` and ``sin_cached``.
+        :rtype: None
         """
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-016
-        # Build the tables at the precision this layer stores VARIABLES at, not at
-        # the compute dtype and not at a hard-coded 'float32'.
-        #
-        # WHAT NOT TO DO:
-        #   * Do NOT restore `dtype='float32'`. That is the defect: under a float64
-        #     policy the rotation `x1 * cos` raised `InvalidArgumentError: cannot
-        #     compute Mul ... expected to be a double tensor but is a float tensor`
-        #     on the FIRST forward pass, with no mask and nothing unusual, taking
-        #     GatedAttention / GroupedQueryAttention / MultiHeadLatentAttention with
-        #     it. Measured 2026-07-28, TF 2.18 / CUDA.
-        #   * Do NOT use `self.compute_dtype`. Under `mixed_float16` that stores the
-        #     tables in float16, where the high-frequency entries of a long
-        #     `max_seq_len` table lose most of their precision. Mixed precision
-        #     deliberately keeps variables wide and autocasts them on READ.
-        # See decisions.md D-016.
+        # Build the tables at `variable_dtype`. Do NOT restore `dtype='float32'`:
+        # under a float64 policy `x1 * cos` raised `InvalidArgumentError: cannot
+        # compute Mul ... expected to be a double tensor but is a float tensor` on
+        # the first forward pass (measured 2026-07-28, TF 2.18 / CUDA), taking
+        # GatedAttention, GroupedQueryAttention and MultiHeadLatentAttention with
+        # it. Do NOT use `compute_dtype`: under mixed_float16 that stores the
+        # tables in float16 and the high-frequency entries of a long table lose
+        # most of their precision. See decisions.md D-016.
         cache_dtype = self.variable_dtype
 
         # Calculate frequency dimension (half of rope_dim for complex pairs)
@@ -279,42 +298,44 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             return
 
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-021
-        # The tables are materialized by an INITIALIZER, not by `add_weight`
-        # followed by `.assign()`.
-        #
-        # WHAT NOT TO DO: do NOT go back to
-        #     w = self.add_weight(..., initializer='zeros'); w.assign(table)
-        # Keras 3 builds a sublayer that is first reached from a PARENT's
-        # `call()` (i.e. every real model: `Model.__call__` runs a symbolic pass
-        # first) inside a `StatelessScope`, which RECORDS `.assign()` and then
-        # DISCARDS it. The variables therefore stayed at their `'zeros'`
-        # initializer and `cos == sin == 0` for every position, which silently
-        # ZEROES the rotated `rope_dim` slice of q and k — at the
-        # `rope_percentage=1.0` used by `GroupedQueryAttention` that is the whole
-        # head, making attention uniform and the block exactly
-        # permutation-equivariant. Measured 2026-08-15, CPU: a bare
-        # `RotaryPositionEmbedding.build(...)` gave `cos[0] == 1`, while the same
-        # layer reached through a parent's `call()` gave `cos[0] == 0`.
-        # Initializers are honoured at variable-CREATION time and so survive the
-        # stateless scope. The whole table is computed INSIDE the initializer:
-        # a tensor built here and closed over would belong to the symbolic
-        # build pass's scratch `FuncGraph` and raise "cannot be accessed from
-        # here ... out of scope" on the eager pass. See decisions.md D-021.
+        # An INITIALIZER fills the tables. Do NOT go back to
+        # `add_weight(initializer='zeros')` then `.assign(table)`: Keras 3 builds
+        # a sublayer first reached from a parent's `call()` inside a
+        # `StatelessScope`, which records the `.assign()` and then discards it,
+        # so cos and sin stay 0 at every position and the rotated slice of q and
+        # k is zeroed. Measured 2026-08-15, CPU: a direct `.build(...)` gives
+        # `cos[0] == 1.0`, through a parent's `call()` it was `0.0`. Compute the
+        # table INSIDE the initializer; a tensor built out here belongs to the
+        # symbolic pass's FuncGraph and raises "out of scope". See decisions.md
+        # D-021.
         #
         # DECISION plan-2026-08-17T183311-79c63e38/D-044
-        # THE FIX DOES NOT PROTECT A PRE-FIX CHECKPOINT, and the failure is
-        # SILENT. These tables are still `add_weight(..., trainable=False)`, and
-        # Keras serializes non-trainable weights. A `.keras` file saved before
-        # 2026-08-15 therefore carries the ALL-ZERO tables, and loading it
-        # OVERWRITES this initializer's correct output in a load that succeeds
-        # completely, logs nothing and raises nothing — reinstating exactly the
-        # defect above (the whole rotated head zeroed at `rope_percentage=1.0`).
-        # Nothing in the tree detects it. "Invalidated" understates it: such a
-        # checkpoint loads FINE and is wrong. Re-train, or verify after loading
-        # that `cos_cached[0]` is 1 rather than 0. Do NOT add a `.assign()`-based
-        # repair on load — see WHAT NOT TO DO above. See decisions.md D-044.
+        # The fix does not repair an OLD checkpoint, and the failure is silent.
+        # These are non-trainable weights, so Keras serializes them; a `.keras`
+        # file saved before 2026-08-15 carries the all-zero tables and loading it
+        # overwrites the initializer's output with no error and no log. Re-train,
+        # or check `cos_cached[0]` is 1.0 after loading. Do NOT add an
+        # `.assign()` repair on load. See decisions.md D-044.
         def _table_initializer(trig):
+            """Make an initializer that fills a table with ``trig``.
+
+            :param trig: ``keras.ops.cos`` or ``keras.ops.sin``.
+            :type trig: Callable
+            :return: A Keras initializer callable.
+            :rtype: Callable
+            """
+
             def initializer(shape, dtype=None):
+                """Compute the whole table at variable-creation time.
+
+                :param shape: ``(max_seq_len, freq_dim)``.
+                :type shape: Tuple[int, int]
+                :param dtype: Requested dtype, or ``None`` to use
+                    ``cache_dtype``.
+                :type dtype: Optional[str]
+                :return: The filled table.
+                :rtype: keras.KerasTensor
+                """
                 table_dtype = dtype or cache_dtype
                 # 1 / (theta ^ (2i / rope_dim)) for i in [0, freq_dim)
                 inv_freq = 1.0 / (
@@ -393,22 +414,21 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         :return: Tensor with RoPE applied to the first ``rope_dim`` dimensions.
         :rtype: keras.KerasTensor
         """
-        # Split into RoPE and pass-through dimensions
-        x_rope = x[..., :self.rope_dim]     # Apply RoPE to these dimensions
-        x_pass = x[..., self.rope_dim:]     # Pass these through unchanged
+        # Split the channel axis: the leading rope_dim channels are rotated,
+        # the rest are copied through unchanged.
+        x_rope = x[..., :self.rope_dim]
+        x_pass = x[..., self.rope_dim:]
 
-        # Get cached cos/sin values for current sequence length.
-        #
-        # FIXED (plan-2026-07-27T183600-b4ef45f0, step 5b): the cast is what makes
-        # the rotation below dtype-agreement-safe STRUCTURALLY rather than by
-        # relying on Keras' variable autocasting to fire. `x` is the caller's
-        # tensor; the tables are variables. Under `mixed_float16` autocast already
-        # brought them to `float16`, so this cast is an identity; under any policy
-        # or caller where it does not fire, `x1 * cos` would raise
-        # `InvalidArgumentError: cannot compute Mul ...` instead of silently
-        # promoting. Cast the TABLE to the input, never the input to the table.
-        cos = keras.ops.cast(self.cos_cached[:seq_len], x.dtype)  # (seq_len, rope_dim // 2)
-        sin = keras.ops.cast(self.sin_cached[:seq_len], x.dtype)  # (seq_len, rope_dim // 2)
+        # Read the cos/sin rows for the current sequence length, each of shape
+        # (seq_len, rope_dim // 2), and cast the TABLE to the input dtype.
+        # Casting this direction makes the multiply below dtype-safe in the
+        # code, instead of relying on Keras variable autocast to fire.
+        # Under mixed_float16 autocast has already produced float16 and the cast
+        # is an identity; where it does not fire, `x1 * cos` would otherwise
+        # raise `InvalidArgumentError: cannot compute Mul ...`. Never cast the
+        # input to the table.
+        cos = keras.ops.cast(self.cos_cached[:seq_len], x.dtype)
+        sin = keras.ops.cast(self.sin_cached[:seq_len], x.dtype)
 
         # Reshape x_rope to separate complex pairs
         # From: (batch, heads, seq_len, rope_dim)
@@ -425,9 +445,10 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         new_shape = [batch_size, num_heads, seq_len_dynamic, rope_pairs, 2]
         x_rope_reshaped = keras.ops.reshape(x_rope, new_shape)
 
-        # Extract real and imaginary components of each complex pair
-        x1 = x_rope_reshaped[..., 0]  # Real-like component
-        x2 = x_rope_reshaped[..., 1]  # Imaginary-like component
+        # Take the two members of each adjacent pair. x1 is channel 2i, the
+        # real-like part; x2 is channel 2i+1, the imaginary-like part.
+        x1 = x_rope_reshaped[..., 0]
+        x2 = x_rope_reshaped[..., 1]
 
         # Apply rotary transformation:
         # [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]

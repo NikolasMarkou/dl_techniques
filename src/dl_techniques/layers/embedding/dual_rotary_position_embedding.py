@@ -1,67 +1,52 @@
 """
 A dual-configuration Rotary Position Embedding (RoPE).
 
-This layer provides two distinct, pre-computed Rotary Position Embedding
-(RoPE) configurations within a single module. It is specifically designed
-for transformer architectures like Gemma3 that employ hybrid attention
-strategies, such as combining standard full attention with local or sliding
-window attention.
+This layer holds TWO complete RoPE table pairs in one module, built with
+different frequency bases. It exists for hybrid-attention architectures such
+as Gemma3, which mix full attention with local sliding-window attention and
+want a different positional scale for each.
 
 Architecture:
-    The core of this layer is not one, but two separate, non-trainable RoPE
-    lookup tables (cosine and sine pairs). Each table is generated using a
-    different frequency base (`theta_base`), resulting in two distinct sets
-    of positional signals optimized for different contextual scales:
+    Two independent, non-trainable cos/sin table pairs are built once:
 
-    1.  **Global RoPE:** Generated with a large `theta_base` (e.g.,
-        1,000,000), this configuration produces low-frequency, long-
-        wavelength positional signals. These signals change slowly across
-        the sequence, making them ideal for encoding positions in a full,
-        all-to-all attention mechanism where capturing long-range
-        dependencies is critical.
+    1.  **Global RoPE.** A large ``theta_base``, 1,000,000 by default. The
+        frequencies are low and the wavelengths long, so the signal changes
+        slowly across the sequence. That suits full attention, where the
+        point is long-range dependency.
 
-    2.  **Local RoPE:** Generated with a smaller `theta_base` (e.g.,
-        10,000), this configuration produces higher-frequency, shorter-
-        wavelength signals. This provides more fine-grained positional
-        discrimination for nearby tokens, making it better suited for
-        local or sliding window attention where relative positions within a
-        small context are most important.
+    2.  **Local RoPE.** A smaller ``theta_base``, 10,000 by default. The
+        frequencies are higher, so nearby tokens are told apart more
+        sharply. That suits a sliding window, where only a small context
+        matters.
 
-    During the forward pass, the user selects either the 'global' or 'local'
-    configuration at runtime. The appropriate pre-computed cosine and sine
-    tables are then used to apply the rotational transformation to the input
-    query or key vectors.
+    The caller picks ``'global'`` or ``'local'`` per call. Nothing else
+    changes: the same rotation code runs against whichever pair was chosen.
+
+Pairing convention:
+    This layer uses SPLIT-HALF pairing, the GPT-NeoX form Gemma3 follows:
+    channel ``j`` rotates with channel ``j + head_dim/2``. The table is built
+    at half width and then duplicated, ``concat([freqs, freqs])``, which is
+    what makes the ``[-x2, x1]`` rotation correct. Verified by execution.
+    This differs from ``rotary_position_embedding.py``, which pairs ``x[2i]``
+    with ``x[2i+1]``. The two are not interchangeable.
 
 Foundational Mathematics:
-    Rotary Position Embedding encodes the absolute position `m` by applying a
-    rotation to a feature vector, with the crucial property that the inner
-    product between two rotated vectors depends only on their relative
-    position `m - k`. The rotation angle for each feature pair is `m * θ_i`,
-    where the frequencies `θ_i` are defined by a geometric progression:
+    RoPE encodes an absolute position ``m`` by rotating a feature pair, and
+    the inner product of two rotated vectors depends only on ``m - k``. The
+    rotation angle for pair ``i`` is ``m * theta_i``, with::
 
-        θ_i = 1 / (theta_base^(2i / d))
+        theta_i = 1 / (theta_base^(2i / d))
 
-    The `theta_base` parameter directly controls the wavelength of the
-    positional signal. A larger `theta_base` leads to smaller `θ_i` values
-    (lower frequencies), which means the positional signal varies more
-    slowly across the sequence. A smaller `theta_base` results in larger
-    `θ_i` values (higher frequencies), causing the signal to change more
-    rapidly.
+    ``theta_base`` sets the wavelength directly. A larger base gives smaller
+    ``theta_i``, so the signal varies slowly. A smaller base gives larger
+    ``theta_i`` and a signal that changes quickly.
 
-    This dual-RoPE layer leverages this principle by maintaining two sets of
-    frequencies, `{θ_i}_global` and `{θ_i}_local`, derived from
-    `global_theta_base` and `local_theta_base` respectively. This allows
-    the model to switch between a positional encoding optimized for stable,
-    long-distance relationships and one optimized for precise, local-context
-    relationships, aligning the nature of the positional signal with the
-    scope of the attention mechanism being used.
+    Keeping both ``{theta_i}_global`` and ``{theta_i}_local`` lets one model
+    match the positional scale to the attention span it is currently using.
 
 References:
-    - The dual RoPE mechanism is a key component of the Gemma3 architecture.
-      Google (2024). "Gemma 3 Technical Report".
-
-    - The original concept for Rotary Position Embedding:
-      Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
+    - Google (2024). "Gemma 3 Technical Report" (the dual-RoPE mechanism).
+    - Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
       Position Embedding".
 """
 
@@ -77,65 +62,109 @@ RopeType = Literal['global', 'local']
 
 @keras.saving.register_keras_serializable()
 class DualRotaryPositionEmbedding(keras.layers.Layer):
-    """Dual-frequency Rotary Position Embedding for hybrid attention architectures.
+    """Two RoPE table pairs in one layer, selected per call.
 
-    Maintains two separate RoPE configurations with different frequency bases
-    for Gemma3-style models that combine global full attention with local
-    sliding-window attention. Global RoPE uses a large ``theta_base`` (e.g.
-    1,000,000) producing low-frequency signals for long-range dependencies,
-    while local RoPE uses a smaller ``theta_base`` (e.g. 10,000) for
-    fine-grained nearby-token discrimination. At runtime the caller selects
-    ``'global'`` or ``'local'`` to pick the appropriate cos/sin tables for
-    the rotation ``x' = x * cos(m * theta) + rotate(x) * sin(m * theta)``.
+    Rotates a post-head-split tensor of shape
+    ``(batch, heads, seq_len, head_dim)``. Two independent cos/sin pairs are
+    built once, one from ``global_theta_base`` and one from
+    ``local_theta_base``. ``call()`` takes a ``rope_type`` argument and uses
+    exactly one pair; shape is unchanged either way.
+
+    The pairing is SPLIT-HALF, the Gemma3 form: channel ``j`` rotates with
+    channel ``j + head_dim/2``. It is NOT the interleaved pairing used by
+    ``rotary_position_embedding.py``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────────┐
-        │  Input (batch, heads, seq_len, head_dim) │
-        └───────────────────┬──────────────────────┘
-                            ▼
-        ┌───────────────────────────────────────────┐
-        │  Select rope_type: 'global' | 'local'     │
-        └───────────┬───────────────┬───────────────┘
-                    ▼               ▼
-        ┌───────────────┐  ┌────────────────┐
-        │  Global RoPE  │  │  Local RoPE    │
-        │  θ=1/Θ_g^(.)  │  │  θ=1/Θ_l^(.)   │
-        │  (low freq)   │  │  (high freq)   │
-        └───────┬───────┘  └────────┬───────┘
-                └───────────┬───────┘
-                            ▼
-        ┌──────────────────────────────────────────┐
-        │  Split: x1=[:d/2], x2=[d/2:]             │
-        │  rotated = [-x2, x1]                     │
-        │  output = x * cos + rotated * sin        │
-        └───────────────────┬──────────────────────┘
-                            ▼
-        ┌──────────────────────────────────────────┐
-        │  Output (batch, heads, seq_len, head_dim)│
-        └──────────────────────────────────────────┘
+        Two independent table pairs, built once in build():
+
+          global path                    local path
+          theta = global_theta_base      theta = local_theta_base
+          default 1e6, low frequency     default 1e4, high frequency
+          cos_global_cached              cos_local_cached
+          sin_global_cached              sin_local_cached
+          each (max_seq_len, head_dim)   each (max_seq_len, head_dim)
+
+        SHARED between the paths: head_dim, max_seq_len, the table
+        builder `_create_rope_cache_tables` and the rotation code.
+        NOT shared: theta_base and all four weights. The two paths
+        have no weight and no table row in common.
+
+        input x (B, heads, seq_len, head_dim)
+                        │
+             rope_type selects ONE pair at call time
+                 ┌──────┴──────┐
+                 ▼             ▼
+             'global'       'local'
+                 └──────┬──────┘
+                        ▼
+        cos, sin = pair[:seq_len], each expanded to
+        (1, 1, seq_len, head_dim)
+                        │
+        split-half: x1 = x[..., :d/2], x2 = x[..., d/2:]
+        rotated = concat([-x2, x1])
+        out = x * cos + rotated * sin
+                        │
+                        ▼
+        output (B, heads, seq_len, head_dim), cast back to x.dtype
 
     :param head_dim: Dimensionality of each attention head. Must be positive
-        and even for proper complex pair rotation.
+        and even, because the rotation pairs the two halves.
     :type head_dim: int
-    :param max_seq_len: Maximum sequence length for precomputing tables. Must
-        be positive.
+    :param max_seq_len: Largest position both table pairs cover. Must be
+        positive. A longer input raises at call time.
     :type max_seq_len: int
-    :param global_theta_base: Base frequency for global RoPE. Higher values
-        provide better long-range modeling. Defaults to ``1,000,000.0``.
+    :param global_theta_base: Frequency base for the global pair. Larger
+        values stretch the wavelengths and suit long-range attention.
+        Defaults to ``1_000_000.0``.
     :type global_theta_base: float
-    :param local_theta_base: Base frequency for local RoPE. Lower values
-        provide better local pattern modeling. Defaults to ``10,000.0``.
+    :param local_theta_base: Frequency base for the local pair. Smaller
+        values sharpen nearby-token discrimination. Defaults to
+        ``10_000.0``.
     :type local_theta_base: float
-    :param kwargs: Additional Layer base class arguments.
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :raises ValueError: If ``head_dim`` is not positive or even.
-    :raises ValueError: If ``max_seq_len`` is not positive.
-    :raises ValueError: If ``theta_base`` values are not positive.
-    :raises ValueError: If ``rope_type`` is not ``'global'`` or ``'local'``.
-    :raises ValueError: If input sequence length exceeds ``max_seq_len``.
+    :ivar cos_global_cached: Non-trainable float32 table of shape
+        ``(max_seq_len, head_dim)``. ``None`` until ``build()`` runs.
+    :vartype cos_global_cached: keras.Variable or None
+    :ivar sin_global_cached: Sine partner of ``cos_global_cached``.
+    :vartype sin_global_cached: keras.Variable or None
+    :ivar cos_local_cached: Local-path cosine table, same shape.
+    :vartype cos_local_cached: keras.Variable or None
+    :ivar sin_local_cached: Local-path sine table, same shape.
+    :vartype sin_local_cached: keras.Variable or None
+
+    Input shape:
+        4D tensor with shape ``(batch_size, num_heads, seq_len, head_dim)``.
+
+    Output shape:
+        4D tensor with the same shape as the input.
+
+    :raises ValueError: If ``head_dim`` is not positive and even, if
+        ``max_seq_len`` is not positive, or if either ``theta_base`` is not
+        positive. Raised from ``__init__``.
+    :raises ValueError: If the input is not 4D, or if its last dimension is
+        not ``head_dim``. Raised from ``build()``.
+    :raises ValueError: If ``rope_type`` is neither ``'global'`` nor
+        ``'local'``, or if the static sequence length exceeds
+        ``max_seq_len``. Raised from ``call()``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding import (
+            create_embedding_layer,
+        )
+
+        rope = create_embedding_layer(
+            "dual_rope", head_dim=64, max_seq_len=128,
+        )
+        q = keras.random.normal((2, 8, 16, 64))
+        rope(q, rope_type="local").shape  # (2, 8, 16, 64)
     """
 
     def __init__(
@@ -146,6 +175,26 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         local_theta_base: float = 10_000.0,
         **kwargs: Any
     ) -> None:
+        """Validate the configuration and store it.
+
+        No weight is created here; both table pairs are built in
+        :meth:`build`.
+
+        :param head_dim: Dimensionality of each attention head.
+        :type head_dim: int
+        :param max_seq_len: Largest position the tables will cover.
+        :type max_seq_len: int
+        :param global_theta_base: Frequency base for the global pair.
+        :type global_theta_base: float
+        :param local_theta_base: Frequency base for the local pair.
+        :type local_theta_base: float
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If ``head_dim`` is not positive and even, if
+            ``max_seq_len`` is not positive, or if either ``theta_base`` is
+            not positive.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -173,7 +222,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         self.sin_local_cached = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create cos/sin lookup tables for both global and local RoPE.
+        """Create both table pairs, four non-trainable weights in total.
 
         :param input_shape: Expected shape
             ``(batch_size, num_heads, seq_len, head_dim)``.
@@ -206,39 +255,65 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_rope_cache_tables(self, theta_base: float, cache_prefix: str) -> Tuple[Any, Any]:
-        """Create cos/sin cache tables for a given theta_base configuration.
+        """Create one cos/sin table pair for a given ``theta_base``.
 
-        :param theta_base: Base frequency for RoPE computation.
+        Both weights have shape ``(max_seq_len, head_dim)`` and are
+        non-trainable float32. The half-width frequency table is duplicated,
+        ``concat([freqs, freqs])``, which is what makes the split-half
+        rotation in :meth:`_apply_dual_rope_rotation` correct.
+
+        Called twice, once per path. Each call creates its OWN weights; the
+        two paths share this code, not the tables.
+
+        :param theta_base: Frequency base for this path.
         :type theta_base: float
-        :param cache_prefix: Prefix for cache weight names
-            (``'global'`` or ``'local'``).
+        :param cache_prefix: Name prefix for the two weights, ``'global'`` or
+            ``'local'``.
         :type cache_prefix: str
-        :return: Tuple of ``(cos_cache, sin_cache)`` weights.
+        :return: The pair ``(cos_cache, sin_cache)``.
         :rtype: Tuple[Any, Any]
         """
-        # Calculate frequency dimension (half of head_dim for complex pairs)
+        # Half of head_dim, one frequency per rotated channel pair.
         freq_dim = self.head_dim // 2
 
-        # Both tables come from an INITIALIZER that computes the table INSIDE
-        # itself, never from `add_weight(initializer='zeros')` + `.assign()`.
-        #
-        # WHAT NOT TO DO: do NOT compute `cos_table`/`sin_table` here and
-        # `.assign()` them. Keras 3 runs a symbolic build pass inside a
-        # `StatelessScope` whenever this layer is first reached from a PARENT's
-        # `call()` -- i.e. in every real model -- and that scope RECORDS the
-        # `.assign()` and then DISCARDS it, leaving both caches at their 'zeros'
-        # initializer. Measured on CPU 2026-08-15: a direct `.build(...)` gives
-        # `cos_global_cached[0, 0] == 1.0`, while the same layer reached through a
-        # parent layer's `call()` gave `0.0` with the entire table all-zero -- so
-        # `call()` multiplied q and k by cos=0/sin=0 and returned exactly zeros.
-        # Equally, do NOT close over a table computed out here: that tensor belongs
-        # to the symbolic pass's scratch `FuncGraph` and raises "cannot be accessed
-        # from here ... out of scope" on the eager pass. Same defect and same fix as
+        # An INITIALIZER computes each table INSIDE itself. Do NOT compute
+        # `cos_table`/`sin_table` out here and `.assign()` them. Keras 3 runs a
+        # symbolic build pass inside a `StatelessScope` whenever this layer is
+        # first reached from a parent's `call()`, which covers every real model,
+        # and that scope records the `.assign()` and then discards it, leaving
+        # both caches at their 'zeros' initializer. Measured on CPU 2026-08-15:
+        # a direct `.build(...)` gives `cos_global_cached[0, 0] == 1.0`, while
+        # the same layer reached through a parent's `call()` gave `0.0` with the
+        # whole table zero, so `call()` multiplied q and k by cos=0 / sin=0 and
+        # returned exactly zeros. Equally, do NOT close over a table computed
+        # out here: that tensor belongs to the symbolic pass's scratch
+        # `FuncGraph` and raises "cannot be accessed from here ... out of scope"
+        # on the eager pass. Same defect and fix as
         # `rotary_position_embedding.py` (D-021). See decisions.md D-027.
         def _table_initializer(trig):
+            """Make an initializer that fills a table with ``trig``.
+
+            Closes over ``theta_base``, so each path gets its own.
+
+            :param trig: ``keras.ops.cos`` or ``keras.ops.sin``.
+            :type trig: Callable
+            :return: A Keras initializer callable.
+            :rtype: Callable
+            """
+
             def initializer(shape, dtype=None):
+                """Compute the whole table at variable-creation time.
+
+                :param shape: ``(max_seq_len, head_dim)``.
+                :type shape: Tuple[int, int]
+                :param dtype: Requested dtype, or ``None`` for
+                    ``'float32'``.
+                :type dtype: Optional[str]
+                :return: The filled table.
+                :rtype: keras.KerasTensor
+                """
                 table_dtype = dtype or 'float32'
-                # 1 / (theta_base ^ (2i / head_dim)) for i in [0, freq_dim)
+                # 1 / (theta_base ^ (2i / head_dim)) for i in [0, freq_dim).
                 inv_freq = 1.0 / (
                     theta_base ** (
                         keras.ops.arange(0, shape[1] // 2, dtype=table_dtype)
@@ -247,7 +322,9 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
                 )
                 positions = keras.ops.arange(shape[0], dtype=table_dtype)
                 freqs = keras.ops.outer(positions, inv_freq)
-                # Duplicate frequencies to match full head_dim (Gemma3 approach)
+                # Duplicate to the full head_dim. This is what makes the
+                # split-half rotation correct: slot i serves channel i and
+                # channel i + head_dim/2 (the Gemma3 form).
                 freqs_full = keras.ops.concatenate([freqs, freqs], axis=1)
                 return trig(freqs_full)
 
@@ -272,14 +349,23 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         return cos_cache, sin_cache
 
     def _create_global_rope_cache(self) -> None:
-        """Create cos/sin cache for global RoPE configuration."""
+        """Create the global path's table pair from ``global_theta_base``.
+
+        :return: Nothing. Sets ``cos_global_cached`` and
+            ``sin_global_cached``.
+        :rtype: None
+        """
         self.cos_global_cached, self.sin_global_cached = self._create_rope_cache_tables(
             theta_base=self.global_theta_base,
             cache_prefix='global'
         )
 
     def _create_local_rope_cache(self) -> None:
-        """Create cos/sin cache for local RoPE configuration."""
+        """Create the local path's table pair from ``local_theta_base``.
+
+        :return: Nothing. Sets ``cos_local_cached`` and ``sin_local_cached``.
+        :rtype: None
+        """
         self.cos_local_cached, self.sin_local_cached = self._create_rope_cache_tables(
             theta_base=self.local_theta_base,
             cache_prefix='local'
@@ -338,38 +424,37 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         :type x: keras.KerasTensor
         :param seq_len: Current sequence length tensor.
         :type seq_len: keras.KerasTensor
-        :param rope_type: Type of RoPE to apply (``'global'`` or ``'local'``).
+        :param rope_type: Which pair to use, ``'global'`` or ``'local'``.
         :type rope_type: RopeType
-        :return: Tensor with appropriate RoPE transformation applied.
+        :return: Tensor of the same shape with the selected rotation applied.
         :rtype: keras.KerasTensor
         """
-        # Select appropriate cos/sin caches based on rope_type
+        # Pick ONE table pair. The other pair is untouched on this call.
+        # Each slice has shape (seq_len, head_dim).
         if rope_type == 'global':
-            cos = self.cos_global_cached[:seq_len]  # Shape: (seq_len, head_dim)
-            sin = self.sin_global_cached[:seq_len]  # Shape: (seq_len, head_dim)
-        else:  # rope_type == 'local'
-            cos = self.cos_local_cached[:seq_len]   # Shape: (seq_len, head_dim)
-            sin = self.sin_local_cached[:seq_len]   # Shape: (seq_len, head_dim)
+            cos = self.cos_global_cached[:seq_len]
+            sin = self.sin_global_cached[:seq_len]
+        else:
+            cos = self.cos_local_cached[:seq_len]
+            sin = self.sin_local_cached[:seq_len]
 
-        # Apply RoPE transformation following Gemma3 approach
-        # Split into two halves for rotation
+        # Split-half pairing, the Gemma3 form: channel j rotates with channel
+        # j + head_dim/2. x1 is the first half, x2 the second.
         half_dim = self.head_dim // 2
-        x1 = x[..., :half_dim]     # First half
-        x2 = x[..., half_dim:]     # Second half
+        x1 = x[..., :half_dim]
+        x2 = x[..., half_dim:]
 
-        # Expand cos/sin to match input batch and head dimensions
-        # From: (seq_len, head_dim) -> (1, 1, seq_len, head_dim)
+        # (seq_len, head_dim) -> (1, 1, seq_len, head_dim) so the tables
+        # broadcast over batch and heads.
         cos = keras.ops.expand_dims(keras.ops.expand_dims(cos, 0), 0)
         sin = keras.ops.expand_dims(keras.ops.expand_dims(sin, 0), 0)
 
-        # Apply rotary transformation using complex rotation approach
-        # Create rotated version: [-x2, x1] (90-degree rotation)
+        # The 90-degree companion vector [-x2, x1].
         rotated = keras.ops.concatenate([-x2, x1], axis=-1)
 
-        # Apply final rotation: x*cos + rotated*sin
         x_rotated = (x * cos) + (rotated * sin)
 
-        # Ensure output dtype matches input dtype
+        # The tables are float32, so cast back to whatever the caller sent.
         return keras.ops.cast(x_rotated, x.dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -380,7 +465,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         :return: Output shape tuple (same as input shape).
         :rtype: Tuple[Optional[int], ...]
         """
-        # Dual RoPE preserves tensor shape while applying rotational transformations
+        # The rotation is shape-preserving.
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
