@@ -243,11 +243,15 @@ class ModernBertEmbeddings(keras.layers.Layer):
         if self.built:
             return
 
-        # Build sub-layers explicitly in computational order for robust serialization
+        # Build the sub-layers here, in computational order, rather than
+        # letting the first call do it. A sub-layer built lazily inside
+        # `call()` has no weights when `.keras` saving walks the tree, so
+        # its kernels reload as fresh values.
         self.word_embeddings.build(input_shape)
         self.token_type_embeddings.build(input_shape)
 
-        # The output shape of the embedding summation is needed to build subsequent layers
+        # The summation widens the input to hidden_size, and that is the
+        # shape layer_norm and dropout must be built against.
         embedding_shape = tuple(input_shape) + (self.hidden_size,)
         self.layer_norm.build(embedding_shape)
         self.dropout.build(embedding_shape)

@@ -175,11 +175,17 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
         is not strictly above its minimum. Raised from ``__init__``.
 
     Example:
-        >>> layer = ScalarSinusoidalEmbedding(dim=64, input_range=(0.0, 1.0))
-        >>> t = keras.ops.convert_to_tensor([[0.0], [0.5], [1.0]])
-        >>> out = layer(t)
-        >>> out.shape
-        TensorShape([3, 64])
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.embedding import (
+            scalar_sinusoidal_embedding as sse,
+        )
+
+        layer = sse.ScalarSinusoidalEmbedding(dim=64)
+        t = keras.ops.convert_to_tensor([[0.0], [0.5], [1.0]])
+        layer(t).shape  # (3, 64)
     """
 
     def __init__(

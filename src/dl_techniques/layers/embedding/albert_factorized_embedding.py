@@ -20,9 +20,9 @@ Parameter count:
 
     The compression ratio approaches ``output_dim / bottleneck_dim`` as
     ``vocab_size`` grows, because the ``bottleneck_dim * output_dim`` projection
-    becomes negligible next to the table. For ``vocab=50K, D=768, k=128`` that is
-    about 6.5M parameters against about 38.6M for a standard ``Embedding``,
-    roughly a 6x reduction.
+    becomes negligible next to the table. For ``vocab=50,261, D=768, k=128``
+    -- the vocabulary the Example below uses -- that is about 6.5M parameters
+    against about 38.6M for a standard ``Embedding``, roughly a 6x reduction.
 
 Compared to :class:`HierarchicalCodebookEmbedding`:
     - ALBERT: each token's embedding can independently occupy any direction of

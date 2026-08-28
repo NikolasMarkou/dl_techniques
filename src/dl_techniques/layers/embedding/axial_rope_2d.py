@@ -9,10 +9,11 @@ Architecture:
     Tokens are assumed to be a row-major flattening of an ``(H, W)`` spatial
     grid, so flat index ``t`` maps to ``t_x = t % W`` (column) and
     ``t_y = t // W`` (row). The head dimension ``D`` is split into two axial
-    halves of ``D // 2`` rotary channels each: the first ``D // 4`` frequency
-    bands carry the x-position, the second ``D // 4`` carry the y-position. Both
-    axes use the SAME geometric frequency ladder — the axes are distinguished by
-    *which channels they occupy* and by *which coordinate multiplies them*, not
+    halves of ``D // 2`` rotary CHANNELS each: the first ``D // 2`` channels
+    carry the x-position, the second ``D // 2`` carry the y-position. Each half
+    is driven by the same ``D // 4`` frequency bands, because both axes use the
+    SAME geometric frequency ladder. The axes are distinguished by *which
+    channels they occupy* and by *which coordinate multiplies the ladder*, not
     by different frequencies.
 
 Foundational Mathematics:
@@ -302,10 +303,15 @@ class AxialRoPE2D(keras.layers.Layer):
         # relative-position property, so TestRelativePositionInvariance stays
         # GREEN under the swap. Re-measured 2026-08-28 by mutating the packing
         # and `rotate_half` TOGETHER: that invariance test still passes, and
-        # the 9 tests that go red are all float64-oracle comparisons
-        # (TestComplexOracle, TestDtypePolicies, TestScalePos). Mutating the
-        # packing ALONE is not this counterfactual; it is an incoherent
-        # rotation and reddens the invariance test too.
+        # 9 of the 23 tests in TestComplexOracle, TestDtypePolicies and
+        # TestScalePos go red -- all of them float64-oracle comparisons. The 9
+        # are both TestComplexOracle tests, test_dtype_policy_sweep at float32,
+        # float64 and mixed_float16, test_float64_policy_is_not_pinned_to_
+        # float32[float64], and the three TestScalePos tests named
+        # matches_float64_oracle, applies_to_both_axes and composes_with_
+        # repeat_k. Re-derived by mutation on 2026-08-28. Mutating the packing
+        # ALONE is not this counterfactual; it is an incoherent rotation and
+        # reddens the invariance test too.
         # Adjacent-pair packing is what matches upstream's
         # `view_as_complex` on a `(..., -1, 2)` reshape, so a converted
         # checkpoint would load wrong. See decisions.md D-006.

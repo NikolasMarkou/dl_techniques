@@ -281,7 +281,10 @@ class PatchEmbedding2D(keras.layers.Layer):
             raise ValueError(f"Input width ({width}) must be divisible by "
                              f"patch width ({self.patch_size[1]})")
 
-        # CRITICAL: Explicitly build sub-layers for robust serialization
+        # Build the sub-layers here rather than letting the first call do
+        # it. A sub-layer built lazily inside `call()` has no weights when
+        # `.keras` saving walks the tree, so its kernels reload as fresh
+        # values.
         self.proj.build(input_shape)
 
         logger.info(f"Built PatchEmbedding2D with input_shape={input_shape}")
@@ -588,7 +591,10 @@ class PatchEmbedding1D(keras.layers.Layer):
             raise ValueError(f"Expected 3D input (batch_size, seq_len, features), "
                              f"got {len(input_shape)}D input with shape {input_shape}")
 
-        # CRITICAL: Explicitly build sub-layers for robust serialization
+        # Build the sub-layers here rather than letting the first call do
+        # it. A sub-layer built lazily inside `call()` has no weights when
+        # `.keras` saving walks the tree, so its kernels reload as fresh
+        # values.
         self.embedding.build(input_shape)
 
         logger.info(f"Built PatchEmbedding1D with input_shape={input_shape}")

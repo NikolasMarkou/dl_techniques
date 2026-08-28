@@ -223,12 +223,11 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
     .. code-block:: python
 
         import keras
-        from dl_techniques.layers.embedding \
-            .hierarchical_codebook_embedding import (
-                HierarchicalCodebookEmbedding,
-            )
+        from dl_techniques.layers.embedding import (
+            hierarchical_codebook_embedding as hce,
+        )
 
-        embed = HierarchicalCodebookEmbedding(
+        embed = hce.HierarchicalCodebookEmbedding(
             vocab_size=50261, output_dim=128, num_chunks=2,
         )
         ids = keras.random.randint((4, 32), 0, 50261)

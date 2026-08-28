@@ -148,9 +148,11 @@ except ValueError as e:
 
 ## Layer-Specific Parameters
 
+Every `**Optional**` list below is COMPLETE for its type: it names every key in that type's `optional_params` in the registry, with the registry's own default. `get_embedding_info()` returns the same mapping at runtime. Eight of the thirteen registry types have a subsection here; `albert_factorized`, `modern_bert_embeddings`, `mrope_ideogram4`, `positional_sine_2d` and `scalar_sinusoidal` do not, so read their parameters from `get_embedding_info()`.
+
 ### PatchEmbedding1D (`patch_1d`)
 - **Required**: `patch_size`, `embed_dim`
-- **Optional**: `stride` (default: `None`), `padding` (default: `'causal'`), `use_bias` (default: `True`)
+- **Optional**: `stride` (default: `None`), `padding` (default: `'causal'`), `use_bias` (default: `True`), `kernel_initializer` (default: `'glorot_uniform'`), `bias_initializer` (default: `'zeros'`)
 
 ```python
 ts_embed = create_embedding_layer(
@@ -163,7 +165,7 @@ ts_embed = create_embedding_layer(
 
 ### PatchEmbedding2D (`patch_2d`)
 - **Required**: `patch_size`, `embed_dim`
-- **Optional**: `flatten` (default: `True`), `activation` (default: `'linear'`), `use_bias` (default: `True`)
+- **Optional**: `flatten` (default: `True`), `activation` (default: `'linear'`), `use_bias` (default: `True`), `kernel_initializer` (default: `'glorot_normal'`), `kernel_regularizer` (default: `None`), `bias_initializer` (default: `'zeros'`), `bias_regularizer` (default: `None`)
 
 Set `flatten=False` to get the raw 4D grid `(batch, H/P_h, W/P_w, embed_dim)` instead of the 3D sequence. Window-attention backbones need that layout; the SAM 1 image encoder is the one caller in `src/` that uses it.
 
@@ -177,7 +179,7 @@ img_embed = create_embedding_layer(
 
 ### PositionalEmbedding (`positional_learned`)
 - **Required**: `max_seq_len`, `dim`
-- **Optional**: `dropout_rate` (default: `0.0`), `scale` (default: `0.02`)
+- **Optional**: `dropout_rate` (default: `0.0`), `scale` (default: `0.02`), `pos_initializer` (default: `'truncated_normal'`)
 
 ```python
 pos_embed = create_embedding_layer(
@@ -283,8 +285,9 @@ bert_band_embed = create_embedding_layer(
 While the factory is recommended for consistency and validation, direct instantiation is always available.
 
 ```python
-# The package __init__ re-exports only AxialRoPE2D and the four factory
-# functions, so a layer class must be imported from its own module.
+# The package __init__ re-exports only AxialRoPE2D, the three factory
+# functions and the STRICT_DROPPED_KEY_MARKER string, so a layer class must
+# be imported from its own module.
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.rotary_position_embedding import (
     RotaryPositionEmbedding,
@@ -357,27 +360,62 @@ class ViTInputBlock(keras.layers.Layer):
 
 ### In an Attention Block with RoPE
 
+`RotaryPositionEmbedding` takes a POST-head-split 4D tensor
+`(batch, heads, seq_len, head_dim)`. A `Dense` projection produces 3D
+`(batch, seq_len, heads * head_dim)`, so the reshape and transpose below are
+not optional: calling the layer on the raw 3D projection raises
+`ValueError: Expected 4D input (batch, heads, seq_len, head_dim), got shape
+with 3 dimensions`.
+
 ```python
 @keras.saving.register_keras_serializable()
 class AttentionWithRoPE(keras.layers.Layer):
-    def __init__(self, head_dim, max_seq_len, **kwargs):
+    def __init__(self, num_heads, head_dim, max_seq_len, **kwargs):
         super().__init__(**kwargs)
-        self.qkv_proj = keras.layers.Dense(head_dim * 3)
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.qkv_proj = keras.layers.Dense(num_heads * head_dim * 3)
+        self.out_proj = keras.layers.Dense(num_heads * head_dim)
         self.rope = create_embedding_layer(
             'rope', head_dim=head_dim, max_seq_len=max_seq_len
         )
 
+    def _split_heads(self, x):
+        # (B, L, H*Dh) -> (B, H, L, Dh). RoPE needs this 4D form.
+        b = keras.ops.shape(x)[0]
+        length = keras.ops.shape(x)[1]
+        x = keras.ops.reshape(x, [b, length, self.num_heads, self.head_dim])
+        return keras.ops.transpose(x, [0, 2, 1, 3])
+
     def call(self, inputs):
         q, k, v = keras.ops.split(self.qkv_proj(inputs), 3, axis=-1)
-        
-        # Apply RoPE to queries and keys BEFORE attention
-        q_rotated = self.rope(q)
-        k_rotated = self.rope(k)
-        
-        # Perform attention with rotated Q and K
-        # ... attention logic ...
-        return # ... attention output
+        q = self._split_heads(q)
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+
+        # Apply RoPE to queries and keys BEFORE attention.
+        q = self.rope(q)
+        k = self.rope(k)
+
+        scale = 1.0 / keras.ops.sqrt(float(self.head_dim))
+        scores = keras.ops.matmul(
+            q, keras.ops.transpose(k, [0, 1, 3, 2])) * scale
+        out = keras.ops.matmul(keras.ops.softmax(scores, axis=-1), v)
+
+        # Merge the heads back: (B, H, L, Dh) -> (B, L, H*Dh).
+        b = keras.ops.shape(out)[0]
+        length = keras.ops.shape(out)[2]
+        out = keras.ops.transpose(out, [0, 2, 1, 3])
+        out = keras.ops.reshape(
+            out, [b, length, self.num_heads * self.head_dim])
+        return self.out_proj(out)
+
+
+layer = AttentionWithRoPE(num_heads=4, head_dim=64, max_seq_len=512)
+layer(keras.random.normal((2, 16, 128))).shape
 ```
+
+Executed on 2026-08-28, the last line prints `(2, 16, 256)`.
 
 ## Parameter Validation
 The factory performs comprehensive validation, catching common errors before layer creation.

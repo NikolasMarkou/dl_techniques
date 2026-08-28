@@ -195,8 +195,9 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
     .. code-block:: python
 
         import numpy as np
-        from dl_techniques.layers.embedding \
-            import continuous_sin_cos_embedding as csc
+        from dl_techniques.layers.embedding import (
+            continuous_sin_cos_embedding as csc,
+        )
 
         emb = csc.ContinuousSinCosEmbed(dim=32, ndim=3)
         pts = np.random.rand(4, 3).astype("float32")
@@ -234,14 +235,28 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
        should keep this layer OUT of the reduced-precision region, running
        it under float32 and casting the result. That path is UNTESTED here.
 
-       *float64 is exact.* ``build()`` computes the frequency table at
-       float64 when the layer's ``variable_dtype`` is float64, and at
-       float32 otherwise. Under a float64 policy the layer is then float64
-       accurate end to end: against a float64 oracle at ``dim=64, ndim=3``
-       with coordinates in ``[0, 64)``, the max abs error is exactly
-       ``0.0``. It was ``4.36e-07`` while the table was float32 at every
-       policy. The widening is CONDITIONAL on purpose, and why is recorded
-       at the anchor in ``build()``.
+       *float64 reaches the machine-precision floor.* ``build()`` computes
+       the frequency table at float64 when the layer's ``variable_dtype`` is
+       float64, and at float32 otherwise. Under a float64 policy the layer
+       is then float64 accurate end to end, at ``dim=64, ndim=3`` with
+       coordinates in ``[0, 64)``.
+
+       The residual is a machine-precision FLOOR, not a zero, and which
+       figure you see depends on the reference's order of operations rather
+       than on its independence. Against the suite's float64 reference in
+       ``test_float64_policy_accuracy_floor_is_machine_precision`` the error
+       is exactly ``0.0``: that reference forms ``omega`` as a power, the
+       same way ``build()`` does. A float64 reference differing ONLY in
+       forming ``omega`` as ``exp(-log(w) * i / eff)`` measures
+       ``3.545775e-15`` at the same cell, and the anchor in ``build()``
+       records ``1.110223e-16`` from a third one. All measured on CPU on
+       2026-08-28.
+
+       Read any of them as "float64 accurate". The float32 policy at the
+       same cell measures ``8.341928e-07`` against the suite reference,
+       four orders above every one of those floors, which is the gap that
+       makes the conditional widening worth having. Why it is CONDITIONAL
+       is recorded at the anchor in ``build()``.
     """
 
     def __init__(
@@ -335,11 +350,13 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         # D-008), breaking a hard bit-identity invariant. Do NOT key it off
         # `compute_dtype` either: under mixed policies the compute dtype is
         # narrow while `variable_dtype` is float32, and this table is a
-        # WEIGHT. Measured on CPU against a float64 oracle at coords in
-        # [0, 64), the float64-policy error goes 4.364258e-07 -> the float64
-        # machine-precision floor. Re-measured 2026-08-28 against an
-        # independent NumPy float64 oracle at dim 64 / ndim 3: 1.110223e-16
-        # under the float64 policy against 1.782953e-06 under float32.
+        # WEIGHT. Measured on CPU at coords in [0, 64), the float64-policy
+        # error goes 4.364258e-07 -> the float64 machine-precision floor.
+        # WHICH floor depends on the oracle and both figures are live: the
+        # suite's own reference, which repeats this layer's order of
+        # operations, gives exactly 0.0; an INDEPENDENT NumPy float64 oracle
+        # gives 1.110223e-16 against 1.782953e-06 under float32 (re-measured
+        # 2026-08-28 at dim 64 / ndim 3). Neither is stale.
         # Pinned by `test_float64_policy_accuracy_floor_is_machine_precision`.
         # See decisions.md D-009.
         arange_dtype = np.float64 if self.variable_dtype == "float64" else np.float32

@@ -77,6 +77,9 @@ class ClassTokenPrepend(keras.layers.Layer):
         until ``build()`` runs.
     :vartype cls_token: keras.Variable or None
 
+    :raises ValueError: From ``build()``, if the input is not rank 3, or if
+        its last dimension is not statically known.
+
     Input shape:
         3D tensor with shape ``(batch_size, sequence_length, dim)``.
 

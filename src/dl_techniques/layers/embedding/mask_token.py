@@ -87,6 +87,10 @@ class MaskTokenApply(keras.layers.Layer):
         until ``build()`` runs.
     :vartype mask_token: keras.Variable or None
 
+    :raises ValueError: From ``build()``, if the input is not a pair of
+        shapes, if the embeddings shape is not rank 3, or if the embeddings'
+        last dimension is not statically known.
+
     Input shape:
         Tuple or list of two tensors:
 

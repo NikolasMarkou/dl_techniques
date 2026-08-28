@@ -154,8 +154,9 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
     .. code-block:: python
 
         import numpy as np
-        from dl_techniques.layers.embedding \
-            import positional_embedding_sine_2d as pe2d
+        from dl_techniques.layers.embedding import (
+            positional_embedding_sine_2d as pe2d,
+        )
 
         pos = pe2d.PositionEmbeddingSine2D(num_pos_feats=8)
         x = np.zeros((2, 3, 4, 5), dtype="float32")

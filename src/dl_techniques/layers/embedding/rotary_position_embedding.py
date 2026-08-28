@@ -99,7 +99,11 @@ class RotaryPositionEmbedding(keras.layers.Layer):
              reshape back to (..., rope_dim)      │
              └─────────────────┬──────────────────┘
                                ▼
-                concatenate on the channel axis
+              concatenate on the channel axis, ONLY
+              when rope_dim < head_dim. At
+              rope_percentage=1.0 the two are equal,
+              x_pass is empty, and the rotated
+              tensor is returned as it is.
                                │
                                ▼
         output  (B, heads, seq_len, head_dim)

@@ -181,26 +181,29 @@ class BertEmbeddings(keras.layers.Layer):
         token id ``0`` as a padding mask. ``True`` reproduces BERT.
 
         MEASURED CAVEAT — this layer does not PROPAGATE that mask at either
-        setting: ``BertEmbeddings.supports_masking`` is ``False``, it defines
-        no ``compute_mask``, and the inner ``Embedding``'s mask is dropped at
-        the ``word_embeds + position_embeds`` sum, so no ``_keras_mask``
-        reaches a consumer eagerly or in a functional graph, and the forward
-        output is bit-identical (max abs diff ``0.0``) either way. The flag is
-        therefore observable only through ``get_config()`` and
+        setting. ``BertEmbeddings.supports_masking`` is ``False`` and it
+        defines no ``compute_mask``. The inner ``Embedding``'s mask is
+        dropped at the ``word_embeds + position_embeds`` sum, so no
+        ``_keras_mask`` reaches a consumer eagerly or in a functional graph.
+        The forward output is bit-identical either way, max abs diff ``0.0``.
+        The flag is therefore observable only through ``get_config()`` and
         ``word_embeddings.mask_zero``. Set it ``False`` in models that thread
-        an explicit ``attention_mask``, so the declared intent stays correct
+        an explicit ``attention_mask``. That keeps the declared intent correct
         if this layer ever gains mask propagation.
     :type mask_zero: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: From the constructor, if ``vocab_size``,
-        ``hidden_size``, ``max_position_embeddings``, ``initializer_range`` or
-        ``layer_norm_eps`` is not positive; if ``dropout_rate`` is outside
-        ``[0, 1]``; if ``type_vocab_size`` is missing or non-positive while
-        ``use_token_type_embeddings`` is ``True``; if ``normalization_type`` or
-        ``position_embedding_type`` is not one of the accepted values; or if
-        ``hidden_size`` is odd while ``position_embedding_type`` is
-        ``'sinusoidal'``.
+    :raises ValueError: From the constructor, on any of five checks.
+
+        - ``vocab_size``, ``hidden_size``, ``max_position_embeddings``,
+          ``initializer_range`` or ``layer_norm_eps`` is not positive.
+        - ``dropout_rate`` is outside ``[0, 1]``.
+        - ``type_vocab_size`` is missing or non-positive while
+          ``use_token_type_embeddings`` is ``True``.
+        - ``normalization_type`` or ``position_embedding_type`` is not one of
+          the accepted values.
+        - ``hidden_size`` is odd while ``position_embedding_type`` is
+          ``'sinusoidal'``.
 
     Input shape:
         Integer tensor ``input_ids`` of shape ``(batch_size, seq_length)``.
@@ -471,9 +474,14 @@ class BertEmbeddings(keras.layers.Layer):
         # hidden_size 128, 768, 1024, 4096 and 65536 on 2026-08-28 found zero
         # underflows at any of them. What float16 cannot hold is the POSITION.
         # At hidden_size 768 over positions 0..511 the float16 table is wrong
-        # by up to 2.497361e-01 against a float64 oracle, because the float16
-        # ulp at position 511 is already 0.25; the float32 table is wrong by
-        # 5.282478e-05. float32 is not a ceiling either: a float64 policy
+        # by about 2.5e-01 against a float64 oracle, because the float16 ulp
+        # at position 511 is already 0.25; the float32 table is wrong by
+        # about 5e-05. Re-measured 2026-08-28 with a NumPy float64 oracle,
+        # which is the instrument these two figures are against: 2.497240e-01
+        # and 5.282748e-05. The float16 figure is device-independent; the
+        # float32 one is NOT, so quote it to one digit. Running the same
+        # arithmetic through `keras.ops` gives 3.731341e-05 on CPU and
+        # 4.270122e-05 on GPU. float32 is not a ceiling either: a float64 policy
         # computing in float32 capped accuracy at ~1.5e-06 against ~1e-16
         # expected (measured at c6ab51084). Gate on variable_dtype, NOT
         # compute_dtype -- the narrow one under a mixed policy.
@@ -521,7 +529,10 @@ class BertEmbeddings(keras.layers.Layer):
 
         logger.info(f"Building Embeddings with input_shape: {input_shape}")
 
-        # CRITICAL: Explicitly build all sub-layers for robust serialization
+        # Build each sub-layer here rather than letting the first call do
+        # it. A sub-layer built lazily inside `call()` has no weights when
+        # `.keras` saving walks the tree, so its kernels reload as fresh
+        # values.
         self.word_embeddings.build(input_shape)
         if self.position_embeddings is not None:
             self.position_embeddings.build(input_shape)

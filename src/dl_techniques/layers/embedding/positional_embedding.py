@@ -68,12 +68,20 @@ class PositionalEmbedding(keras.layers.Layer):
     raises there, at call time. Size the table for the longest sequence the
     model will ever see.
 
-    ``scale`` is applied whenever the resolved initializer is a
-    ``TruncatedNormal``, including one the caller supplied. Passing
+    KNOWN DEFECT, DESCRIBED AS IT BEHAVES TODAY. ``scale`` is applied
+    whenever the resolved initializer is a ``TruncatedNormal``, including one
+    the caller supplied. Passing
     ``pos_initializer=keras.initializers.TruncatedNormal(stddev=0.5)``
     without also passing ``scale=0.5`` silently REPLACES that standard
     deviation with ``scale``, which defaults to ``0.02``. Any other
-    initializer is used as given and ``scale`` is ignored.
+    initializer is used as given and ``scale`` is ignored, so the override is
+    both silent and type-dependent.
+
+    This is a DEFECT scheduled for repair, not a design choice: the intended
+    behaviour is that a caller-supplied instance survives and ``scale`` only
+    resolves the bare string ``"truncated_normal"``. Do not build on the
+    current behaviour. When it is fixed, this paragraph and the comment in
+    ``__init__`` both become false and must go with it.
 
     **Architecture Overview:**
 
@@ -145,8 +153,9 @@ class PositionalEmbedding(keras.layers.Layer):
     .. code-block:: python
 
         import numpy as np
-        from dl_techniques.layers.embedding \
-            import positional_embedding as pe
+        from dl_techniques.layers.embedding import (
+            positional_embedding as pe,
+        )
 
         layer = pe.PositionalEmbedding(max_seq_len=16, dim=8)
         x = np.zeros((2, 5, 8), dtype="float32")
@@ -203,8 +212,15 @@ class PositionalEmbedding(keras.layers.Layer):
 
         # `scale` owns the standard deviation of ANY resolved TruncatedNormal,
         # including one the caller built themselves. A caller-supplied stddev
-        # is replaced here. This is documented in the class docstring because
-        # it is silent.
+        # is replaced here. This is a KNOWN DEFECT scheduled for repair, not a
+        # design choice; it is documented in the class docstring because it is
+        # silent. The intended behaviour is to honour the caller's instance and
+        # apply `scale` only to the bare string "truncated_normal".
+        #
+        # The `elif` below is UNREACHABLE. `keras.initializers.get` has already
+        # turned the string "truncated_normal" into a TruncatedNormal instance,
+        # so the `isinstance` arm always fires first for it. Whoever fixes the
+        # defect above must delete the `isinstance` arm, not this one.
         if isinstance(self.pos_initializer, keras.initializers.TruncatedNormal):
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
         elif pos_initializer == "truncated_normal":
