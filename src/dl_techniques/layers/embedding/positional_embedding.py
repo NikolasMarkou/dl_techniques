@@ -1,62 +1,43 @@
 """
-Inject positional information into a sequence using learnable embeddings.
+Add a learned absolute position vector to every token in a sequence.
 
-This layer addresses the permutation-invariant nature of the Transformer
-architecture. Core mechanisms like self-attention do not have a built-in
-understanding of token order, treating input as an unordered set. This
-layer explicitly encodes the position of each token by adding a unique,
-trainable vector to its embedding.
+This module provides :class:`PositionalEmbedding`, the learned-table variant
+of absolute positional encoding. Self-attention treats its input as an
+unordered set, so a transformer stack has no notion of token order until
+something injects one. This layer injects it by adding one trainable vector
+per position.
 
 Architecture:
-    The fundamental design is an embedding lookup table where each row
-    corresponds to an absolute position in the sequence. Unlike the fixed
-    sinusoidal functions proposed in the original Transformer paper, this
-    implementation uses *learnable* positional embeddings. This allows the
-    model to learn the optimal representation of position for its specific
-    downstream task, rather than being constrained to a predefined
-    mathematical form.
+    The layer owns a single weight, a table of shape
+    ``(1, max_seq_len, dim)``. For an input sequence of length ``L`` the
+    first ``L`` rows are sliced and added to the token embeddings. An
+    optional dropout follows the addition.
 
-    The process is as follows:
-    1.  A weight matrix, representing the positional embedding table, is
-        initialized with shape `(max_sequence_length, embedding_dimension)`.
-    2.  For an incoming sequence of length `L`, the first `L` embedding
-        vectors are sliced from this table.
-    3.  These `L` positional vectors are added element-wise to the `L` token
-        embedding vectors of the input sequence.
-
-    This simple additive approach effectively merges semantic and positional
-    information into a single, unified representation that can be processed
-    by subsequent Transformer layers.
+    The table is LEARNED, not computed. The original Transformer used fixed
+    sinusoids; BERT and GPT use a learned table, and so does this layer. The
+    model is free to discover whatever representation of position its task
+    needs, at the cost of a hard ceiling: positions beyond ``max_seq_len``
+    have no row and cannot be represented.
 
 Foundational Mathematics:
-    Let `X ∈ R^(L x D)` be the input tensor of token embeddings for a
-    sequence of length `L` with dimension `D`. Let `P ∈ R^(M x D)` be the
-    learnable positional embedding table, where `M` is the maximum possible
-    sequence length.
+    Let ``X`` be the input of shape ``(L, D)`` and ``P`` the table of shape
+    ``(M, D)``, with ``M = max_seq_len``. The output is::
 
-    The output `Y ∈ R^(L x D)` is computed by adding the corresponding
-    positional embedding to each token embedding:
+        Y_i = X_i + P_i    for i = 0, 1, ..., L - 1
 
-        Y_i = X_i + P_i   for i = 0, 1, ..., L-1
-
-    By projecting both token identity and position into the same vector
-    space, the self-attention mechanism can learn to compute attention
-    scores that are a function of both what a token is and where it is. For
-    example, the dot product attention between two tokens `i` and `j` will
-    depend on terms involving `X_i`, `X_j`, `P_i`, and `P_j`, allowing the
-    model to learn relative positional relationships.
+    Adding position into the same vector space as token identity is what
+    lets attention score a pair on both counts at once. The dot product
+    between positions ``i`` and ``j`` expands into terms in ``X_i``, ``X_j``,
+    ``P_i`` and ``P_j``, so the model can learn to attend by relative
+    offset even though the encoding itself is absolute.
 
 References:
-    - The concept of adding positional encodings was introduced in the
-      original Transformer paper, although it used a fixed sinusoidal
-      function:
-      Vaswani, A., et al. (2017). "Attention Is All You Need".
-
-    - The use of *learnable* absolute positional embeddings, as implemented
-      here, is a common variant used in highly influential models like BERT
-      and GPT:
-      Devlin, J., et al. (2018). "BERT: Pre-training of Deep Bidirectional
-      Transformers for Language Understanding".
+    - Vaswani, A., et al. (2017). "Attention Is All You Need". Introduces
+      positional encodings, using a fixed sinusoidal form rather than the
+      learned table implemented here.
+    - Devlin, J., et al. (2018). "BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding". Uses the learned absolute
+      table this layer implements.
 """
 
 import keras
@@ -74,62 +55,102 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class PositionalEmbedding(keras.layers.Layer):
-    """Learned absolute positional embedding layer with dropout regularization.
+    """Add a learned absolute position vector to each token.
 
-    Adds learnable positional embeddings to input sequences, enabling the model
-    to encode absolute token positions. A weight matrix ``P ∈ R^(M x D)`` is
-    maintained as a lookup table; for an input sequence of length ``L``, the
-    first ``L`` rows are sliced and added element-wise:
-    ``Y_i = X_i + P_i  for i = 0, ..., L-1``. An optional dropout is applied
-    after the addition for regularization.
+    Owns one table of shape ``(1, max_seq_len, dim)``. For an input of
+    length ``L`` the first ``L`` rows are sliced and added element-wise,
+    ``Y_i = X_i + P_i``, and a dropout follows. The operation is
+    position-wise: the output at step ``i`` depends only on the input at
+    step ``i``.
+
+    ``max_seq_len`` is a hard ceiling, and it is NOT checked with a friendly
+    error. An input longer than the table reaches the slice and the backend
+    raises there, at call time. Size the table for the longest sequence the
+    model will ever see.
+
+    ``scale`` is applied whenever the resolved initializer is a
+    ``TruncatedNormal``, including one the caller supplied. Passing
+    ``pos_initializer=keras.initializers.TruncatedNormal(stddev=0.5)``
+    without also passing ``scale=0.5`` silently REPLACES that standard
+    deviation with ``scale``, which defaults to ``0.02``. Any other
+    initializer is used as given and ``scale`` is ignored.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────┐
-        │  Input (batch, seq_len, dim)     │
-        └───────────────┬──────────────────┘
-                        ▼
-        ┌──────────────────────────────────┐
-        │  Slice positional table P[:L]    │
-        │  P ∈ R^(1, max_seq_len, dim)     │
-        └───────────────┬──────────────────┘
-                        ▼
-        ┌──────────────────────────────────┐
-        │  Add: X + P[:L]                  │
-        └───────────────┬──────────────────┘
-                        ▼
-        ┌──────────────────────────────────┐
-        │  Dropout                         │
-        └───────────────┬──────────────────┘
-                        ▼
-        ┌──────────────────────────────────┐
-        │  Output (batch, seq_len, dim)    │
-        └──────────────────────────────────┘
+        ┌────────────────────────────────────────┐
+        │  Input X   (batch, seq_len, dim)       │
+        └────────────────────────────────────────┘
+                            │
+                            ▼
+        ┌────────────────────────────────────────┐
+        │  Slice the table to the input length   │
+        │  P    (1, max_seq_len, dim)            │
+        │  P[:, :seq_len, :]                     │
+        │  seq_len > max_seq_len raises here     │
+        └────────────────────────────────────────┘
+                            │
+                            ▼
+        ┌────────────────────────────────────────┐
+        │  Add:  Y = X + P[:, :seq_len, :]       │
+        │  broadcast over the batch axis         │
+        └────────────────────────────────────────┘
+                            │
+                            ▼
+        ┌────────────────────────────────────────┐
+        │  Dropout(dropout_rate)                 │
+        └────────────────────────────────────────┘
+                            │
+                            ▼
+        ┌────────────────────────────────────────┐
+        │  Output Y  (batch, seq_len, dim)       │
+        └────────────────────────────────────────┘
 
-    :param max_seq_len: Maximum sequence length that this layer can handle.
-        Must be positive.
+    :param max_seq_len: Number of rows in the table, and therefore the
+        longest sequence this layer can encode. Must be positive.
     :type max_seq_len: int
-    :param dim: Embedding dimension. Must match the last dimension of input
-        and be positive.
+    :param dim: Width of the table, which must equal the last dimension of
+        the input. Must be positive.
     :type dim: int
-    :param dropout_rate: Dropout rate applied after adding positional
-        embeddings. Must be in ``[0, 1]``. Default is ``0.0``.
+    :param dropout_rate: Dropout applied after the addition. Must be in
+        ``[0, 1]``. Defaults to ``0.0``.
     :type dropout_rate: float
-    :param pos_initializer: Initializer for positional embeddings. Default is
+    :param pos_initializer: Initializer for the table. Defaults to
         ``"truncated_normal"``.
     :type pos_initializer: Union[str, keras.initializers.Initializer]
-    :param scale: Standard deviation for truncated normal initialization when
-        using default initializer. Must be positive. Default is ``0.02``.
+    :param scale: Standard deviation used when the resolved initializer is a
+        ``TruncatedNormal``. Must be positive. Defaults to ``0.02``.
     :type scale: float
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: If ``max_seq_len``, ``dim``, or ``scale`` are not
-        positive.
-    :raises ValueError: If ``dropout_rate`` is not in ``[0, 1]``.
-    :raises ValueError: If input dimension does not match expected ``dim``
-        during build.
+    :ivar pos_embedding: The position table, shape
+        ``(1, max_seq_len, dim)``. ``None`` until :meth:`build` runs.
+    :vartype pos_embedding: Optional[keras.Variable]
+
+    Input shape:
+        3D tensor ``(batch, seq_len, dim)``.
+
+    Output shape:
+        The same shape as the input.
+
+    :raises ValueError: If ``max_seq_len``, ``dim`` or ``scale`` is not
+        positive, or if ``dropout_rate`` is outside ``[0, 1]``. Raised from
+        ``__init__``.
+    :raises ValueError: If the input is not rank 3, or if its last dimension
+        is not ``dim``. Raised from ``build()``.
+
+    Example:
+
+    .. code-block:: python
+
+        import numpy as np
+        from dl_techniques.layers.embedding \
+            import positional_embedding as pe
+
+        layer = pe.PositionalEmbedding(max_seq_len=16, dim=8)
+        x = np.zeros((2, 5, 8), dtype="float32")
+        layer(x).shape  # (2, 5, 8)
     """
 
     def __init__(
@@ -141,6 +162,26 @@ class PositionalEmbedding(keras.layers.Layer):
             scale: float = 0.02,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration, resolve the initializer, build dropout.
+
+        The table itself is created in :meth:`build`, once the input width is
+        known and can be checked against ``dim``.
+
+        :param max_seq_len: Number of rows in the position table.
+        :type max_seq_len: int
+        :param dim: Width of the position table.
+        :type dim: int
+        :param dropout_rate: Dropout applied after the addition.
+        :type dropout_rate: float
+        :param pos_initializer: Initializer for the table.
+        :type pos_initializer: Union[str, keras.initializers.Initializer]
+        :param scale: Standard deviation used for a ``TruncatedNormal``.
+        :type scale: float
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :type kwargs: Any
+        :raises ValueError: If ``max_seq_len``, ``dim`` or ``scale`` is not
+            positive, or if ``dropout_rate`` is outside ``[0, 1]``.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -160,27 +201,22 @@ class PositionalEmbedding(keras.layers.Layer):
         self.scale = scale
         self.pos_initializer = keras.initializers.get(pos_initializer)
 
-        # Handle default initializer configuration
+        # `scale` owns the standard deviation of ANY resolved TruncatedNormal,
+        # including one the caller built themselves. A caller-supplied stddev
+        # is replaced here. This is documented in the class docstring because
+        # it is silent.
         if isinstance(self.pos_initializer, keras.initializers.TruncatedNormal):
-            # Override with custom scale if using default
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
         elif pos_initializer == "truncated_normal":
-            # Use custom scale for string specification
             self.pos_initializer = keras.initializers.TruncatedNormal(stddev=self.scale)
 
         # DECISION plan-2026-08-22T035419-a11304c8/D-055
-        # `Y_i = X_i + P_i` is position-wise: the value at step i depends on the
-        # input at step i and nothing else, so a Keras mask survives this layer
-        # unchanged and declaring it here is simply TRUE. Do NOT read this flag
-        # as a masking repair. MEASURED 2026-08-22 on a `TextEncoder` fed
-        # `[[5, 7, 0, 0]]` with no explicit `attention_mask`: the gap between
-        # `f([5,7,0,0])[:, :2]` and `f([5,7])` is 1.290977e-02 with the flag
-        # False and 1.290977e-02 with it True -- IDENTICAL. Setting it does not
-        # stop attention seeing padding; it only moves Keras' "will destroy the
-        # mask" warning downstream to `TransformerLayer` / `MultiHeadAttention`
-        # / `MultiHeadCrossAttention`, none of which support masking either.
-        # The working mask in that stack is the EXPLICIT `attention_mask=`
-        # argument (same probe: 2.384186e-07). See decisions.md D-055.
+        # This flag is TRUE because the op is position-wise, so a mask passes
+        # through unchanged. Do NOT read it as a masking repair. Measured
+        # 2026-08-22 on a TextEncoder with padded input and no explicit
+        # attention_mask, the padded-vs-unpadded gap was 1.290977e-02 both
+        # with the flag and without it; the explicit `attention_mask=`
+        # argument brought it to 2.384186e-07. See decisions.md D-055.
         self.supports_masking = True
 
         # CREATE sub-layer in __init__ (modern Keras 3 pattern)
@@ -193,11 +229,12 @@ class PositionalEmbedding(keras.layers.Layer):
                     f"dim={self.dim}, dropout={self.dropout_rate}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer by creating weights and building sub-layers.
+        """Create the position table and build the dropout sub-layer.
 
-        :param input_shape: Shape tuple of the input tensor
-            ``(batch_size, seq_len, dim)``.
+        :param input_shape: Shape of the input, ``(batch, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the input is not rank 3, or if its last
+            dimension is not ``dim``.
         """
         if self.built:
             return
@@ -221,8 +258,9 @@ class PositionalEmbedding(keras.layers.Layer):
             trainable=True,
         )
 
-        # CRITICAL: Explicitly build sub-layers for robust serialization
-        # Dropout doesn't change shape, so we can use input_shape
+        # Build the sub-layer explicitly so it carries a shape through
+        # serialization. Dropout does not change shape, so the input shape
+        # is the right argument.
         self.dropout.build(input_shape)
 
         logger.info(f"Built PositionalEmbedding with input_shape={input_shape}")
@@ -235,51 +273,51 @@ class PositionalEmbedding(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Add positional embeddings to input tensor.
+        """Slice the table to the input length and add it.
 
-        :param inputs: Input tensor with shape ``(batch_size, seq_len, dim)``.
+        :param inputs: Input of shape ``(batch, seq_len, dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Whether the layer should behave in training mode or
-            inference mode.
+        :param training: Training flag forwarded to the dropout sub-layer.
         :type training: Optional[bool]
-        :return: Output tensor with positional embeddings added, same shape as
-            input.
+        :return: The input with position vectors added, same shape.
         :rtype: keras.KerasTensor
         """
-        # Get sequence length using keras ops for backend compatibility
+        # Read the length from ops.shape so this stays graph-safe under a
+        # dynamic sequence axis.
         input_shape = ops.shape(inputs)
         seq_len = input_shape[1]
 
-        # Slice positional embeddings to match sequence length
+        # A seq_len above max_seq_len fails inside this slice, at call time.
+        # There is no earlier check.
         positions = ops.slice(
             self.pos_embedding,
             start_indices=(0, 0, 0),
             shape=(1, seq_len, self.dim)
         )
 
-        # Add positional embeddings
+        # The table has a leading axis of 1, so it broadcasts over batch.
         outputs = inputs + positions
 
-        # Apply dropout
         outputs = self.dropout(outputs, training=training)
 
         return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Report the output shape, which equals the input shape.
 
-        :param input_shape: Shape tuple of the input.
+        :param input_shape: Shape of the input.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple (same as input shape).
+        :return: The same shape.
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """Return the constructor arguments for serialization.
 
-        :return: Dictionary containing all ``__init__`` parameters for proper
-            serialization.
+        :return: Configuration dictionary carrying every ``__init__``
+            argument. ``pos_initializer`` is serialized, so a table built
+            with a caller-supplied initializer reloads with the same one.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

@@ -1,35 +1,52 @@
 """
-Scalar (time) sinusoidal embedding with a SiLU MLP head for the Ideogram4 DiT.
+Sinusoidal embedding of a scalar, refined by a small SiLU MLP.
 
-This layer ports the Ideogram4 ``Ideogram4EmbedScalar`` module: a single scalar
-per token (e.g. a diffusion timestep in ``[0, 1]``) is mapped to a sinusoidal
-position embedding of dimensionality ``dim`` and then refined by a two-layer
-MLP with a SiLU non-linearity (``Dense -> SiLU -> Dense``, both with bias).
+This module provides :class:`ScalarSinusoidalEmbedding`, the Keras port of
+Ideogram4's ``Ideogram4EmbedScalar``. One scalar per token, typically a
+diffusion timestep in ``[0, 1]``, is mapped to a ``dim``-wide sinusoidal
+feature vector and then passed through ``Dense -> SiLU -> Dense``. Both
+Dense layers use a bias and both are ``dim`` wide, so the output width
+equals ``dim`` whatever the input rank.
 
-Architecture::
+Architecture:
+    The scalar is first rescaled from its declared ``input_range`` onto
+    ``[0, 1e4]``. That rescaled value is the position fed to a fixed
+    sinusoidal ladder of ``dim // 2`` frequencies. Sine and cosine of the
+    ladder are concatenated, giving ``2 * (dim // 2)`` channels, and an odd
+    ``dim`` gets one trailing zero so the width is exactly ``dim``. The MLP
+    then mixes those channels.
 
-    x      : (..., 1) or (...,)  scalar per token
-    scaled = 1e4 * (x - range_min) / (range_max - range_min)
-    emb    = sinusoidal(scaled, dim)          # (..., dim)
-    out    = Dense(dim)(SiLU(Dense(dim)(emb))) # (..., dim)
+    Two separate factors of ``1e4`` are involved and they are NOT the same
+    number used twice. The OUTER ``1e4`` is the range rescale. The INNER
+    ``1e4`` is the base of the frequency ladder. Both appear in the PyTorch
+    reference and both are reproduced here. Do not collapse them.
 
-Sinusoidal embedding (``scale = 1e4`` is a fixed internal constant, distinct
-from the OUTER ``1e4`` rescale above — both factors are present in the PyTorch
-reference and are replicated exactly here, NOT collapsed)::
+Foundational Mathematics:
+    With ``half = dim // 2``, the frequency ladder is a geometric
+    progression that spans four decades::
 
-    half = dim // 2
-    freq = exp(arange(half) * -(log(1e4) / (half - 1)))   # (half,)
-    e    = scaled[..., None] * freq                        # (..., half)
-    emb  = concat([sin(e), cos(e)], axis=-1)               # (..., 2*half)
-    if dim is odd: emb = pad(emb, last_dim += 1)           # trailing zero
+        freq_i = exp(-i * log(1e4) / (half - 1))    for i in [0, half)
 
-The frequency vector ``freq`` is a CONSTANT derived from ``dim`` and the fixed
-``scale=1e4``. It is stored via ``add_weight(trainable=False)`` (values computed
-with numpy at ``build()``) so it survives ``.keras`` serialization. This fixes
-the known ``TimestepEmbedding`` bug, where the frequencies were kept as a plain
-tensor attribute and did NOT round-trip through save/load.
+    so ``freq_0 = 1`` and ``freq_{half-1} = 1e-4``. For a rescaled scalar
+    ``s`` the embedding is::
 
-PyTorch reference (faithfully ported)::
+        e_i     = s * freq_i
+        emb     = concat([sin(e), cos(e)])          width 2 * half
+        emb     = pad(emb, one trailing zero)       only when dim is odd
+
+    The division by ``half - 1`` is why ``dim`` must be at least 4. At
+    ``dim = 2`` or ``dim = 3`` the ladder divides by zero and every
+    frequency becomes NaN, so the constructor rejects those widths.
+
+Serialization:
+    ``freq`` is a constant, but it is stored with
+    ``add_weight(trainable=False)`` rather than as a plain attribute. A
+    plain tensor attribute does not round-trip through ``.keras`` save and
+    load. That was the legacy ``TimestepEmbedding`` bug. The values are
+    computed with NumPy in :meth:`build` and installed by a constant
+    initializer.
+
+PyTorch reference, ported faithfully::
 
     def _sinusoidal_embedding(t, dim, scale=1e4):
         half = dim // 2
@@ -62,36 +79,100 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 
-# Fixed internal sinusoidal scale (PyTorch ``scale=1e4`` inside
-# ``_sinusoidal_embedding``). This is distinct from the OUTER ``1e4`` applied to
-# the rescaled input; both are intentionally present.
+# Base of the frequency ladder, matching the PyTorch reference's
+# ``scale=1e4`` inside ``_sinusoidal_embedding``. The same constant also
+# serves as the outer rescale target in ``call()``. The two uses are
+# separate factors that happen to share a value. Do not fold them.
 _SINUSOID_SCALE: float = 1e4
 
 
 @keras.saving.register_keras_serializable(package="dl_techniques.layers")
 class ScalarSinusoidalEmbedding(keras.layers.Layer):
-    """Sinusoidal embedding of a scalar input followed by a SiLU MLP.
+    """Embed one scalar per token, then refine it with a SiLU MLP.
 
-    Maps a scalar per token (typically a diffusion timestep in ``input_range``)
-    to a ``dim``-dimensional embedding via a fixed sinusoidal basis and a
-    learnable two-layer MLP (``Dense -> SiLU -> Dense``).
+    Takes a scalar per token, typically a diffusion timestep, and returns a
+    ``dim``-wide feature vector. The scalar is rescaled from ``input_range``
+    onto ``[0, 1e4]``, mapped through a fixed sinusoidal ladder of
+    ``dim // 2`` frequencies, and then mixed by ``Dense -> SiLU -> Dense``.
+    Both Dense layers are ``dim`` wide, so the output width is always
+    ``dim``.
 
-    The sinusoidal frequency vector is a constant derived from ``dim`` and a
-    fixed internal scale of ``1e4``. It is stored as a non-trainable weight via
-    ``add_weight(trainable=False)`` so it survives ``.keras`` serialization
-    (fixing the prior ``TimestepEmbedding`` round-trip bug).
+    A trailing axis of size 1 is squeezed, so ``(batch, 1)`` and
+    ``(batch,)`` give the same ``(batch, dim)`` result. Any other trailing
+    size is treated as an extra token axis, not as a squeeze candidate.
 
-    :param dim: Output (and sinusoidal) dimensionality. Must be ``>= 2``.
+    The frequency vector is a constant, but it is held as a non-trainable
+    weight rather than a plain attribute. A plain attribute does not
+    round-trip through ``.keras`` save and load. That was the legacy
+    ``TimestepEmbedding`` bug.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        x   (..., 1) or (...,)   one scalar per token
+                           │
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  squeeze a trailing axis of size 1   │
+        │  cast to float32                     │
+        └──────────────────────────────────────┘
+                           │
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  s = 1e4 * (x - min) / (max - min)   │
+        └──────────────────────────────────────┘
+                           │
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  half = dim // 2 frequency bands     │
+        │  freq_i = exp(-i*log(1e4)/(half-1))  │
+        │  e = s[..., None] * freq             │
+        └──────────────────────────────────────┘
+                           │
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  concat(sin(e), cos(e))              │
+        │  -> (..., 2 * half)                  │
+        │  one trailing zero if dim is odd     │
+        │  -> (..., dim)                       │
+        └──────────────────────────────────────┘
+                           │
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  Dense(dim) -> SiLU -> Dense(dim)    │
+        └──────────────────────────────────────┘
+                           │
+                           ▼
+        out (..., dim)
+
+    :param dim: Output width, and the width of the sinusoidal basis. Must
+        be at least 4, because the frequency ladder divides by
+        ``dim // 2 - 1``.
     :type dim: int
-    :param input_range: ``(min, max)`` range of the scalar input used to rescale
-        it before the sinusoidal map. ``max`` must be strictly greater than
-        ``min``.
+    :param input_range: ``(min, max)`` bounds used to rescale the scalar
+        before the sinusoidal map. ``max`` must be strictly greater than
+        ``min``. Defaults to ``(0.0, 1.0)``.
     :type input_range: Sequence[float]
-    :param kwargs: Additional ``keras.layers.Layer`` arguments.
+    :param kwargs: Additional keyword arguments for the ``Layer`` base
+        class.
 
-    :raises ValueError: If ``dim < 2``.
-    :raises ValueError: If ``input_range`` does not have length 2 or
-        ``input_range[1] <= input_range[0]``.
+    :ivar half: ``dim // 2``, the number of frequency bands.
+    :vartype half: int
+
+    Input shape:
+        Any shape ending in a scalar axis, for example ``(batch,)`` or
+        ``(batch, 1)`` or ``(batch, tokens, 1)``.
+
+    Output shape:
+        The input shape with the trailing size-1 axis dropped, if present,
+        and ``dim`` appended.
+
+    :raises ValueError: If ``dim`` is below 4. A smaller width makes the
+        ladder divide by zero and every frequency becomes NaN. Raised from
+        ``__init__``.
+    :raises ValueError: If ``input_range`` is not a pair, or if its maximum
+        is not strictly above its minimum. Raised from ``__init__``.
 
     Example:
         >>> layer = ScalarSinusoidalEmbedding(dim=64, input_range=(0.0, 1.0))
@@ -107,12 +188,27 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
             input_range: Sequence[float] = (0.0, 1.0),
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and create the two Dense sub-layers.
+
+        The frequency weight is not created here. :meth:`build` computes and
+        installs it.
+
+        :param dim: Output width, and the width of the sinusoidal basis.
+        :type dim: int
+        :param input_range: ``(min, max)`` bounds of the scalar input.
+        :type input_range: Sequence[float]
+        :param kwargs: Additional keyword arguments for the ``Layer`` base
+            class.
+        :type kwargs: Any
+        :raises ValueError: If ``dim`` is below 4, if ``input_range`` is not
+            a pair, or if its maximum is not strictly above its minimum.
+        """
         super().__init__(**kwargs)
 
         if dim < 4:
-            # half = dim // 2 must be >= 2: the frequency schedule divides by
-            # (half - 1), so dim < 4 (half <= 1) produces a div-by-zero -> NaN
-            # frequency weight.
+            # half = dim // 2 must be at least 2. The frequency schedule
+            # divides by (half - 1), so dim < 4 gives half <= 1, a division
+            # by zero, and a NaN frequency weight.
             raise ValueError(f"dim must be >= 4 (got {dim}); the sinusoidal "
                              f"frequency schedule needs dim // 2 >= 2.")
         if len(input_range) != 2:
@@ -139,15 +235,23 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
         self.freq = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create the frequency weight and build both Dense sub-layers.
+
+        :param input_shape: Shape of the scalar input, with or without a
+            trailing axis of size 1.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if self.built:
             return
 
-        # DECISION plan_2026-06-12_59a18a10/D-002: store the sinusoidal
-        # frequencies as a NON-TRAINABLE weight (values computed with numpy
-        # here), NOT as a plain tensor attribute. The plain-attr form (the
-        # legacy TimestepEmbedding bug) does not round-trip through
-        # .keras save/load. Do NOT revert to `self.freq = ops.exp(...)`.
-        # See decisions.md D-002.
+        # DECISION plan_2026-06-12_59a18a10/D-002
+        # Store the sinusoidal frequencies as a NON-TRAINABLE WEIGHT, with
+        # the values computed by NumPy here. Do NOT revert to a plain
+        # attribute such as `self.freq = ops.exp(...)`. A plain tensor
+        # attribute does not round-trip through `.keras` save and load; that
+        # was the legacy TimestepEmbedding bug this layer exists to avoid.
+        # The originating plan directory is gone, so this comment is the
+        # only record of the rationale. Do not delete it.
         freq_np = np.exp(
             np.arange(self.half, dtype="float32")
             * -(np.log(_SINUSOID_SCALE) / (self.half - 1))
@@ -170,19 +274,21 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
         super().build(input_shape)
 
     def _sinusoidal(self, scaled: keras.KerasTensor) -> keras.KerasTensor:
-        """Compute the sinusoidal embedding of an already-rescaled scalar.
+        """Map an already-rescaled scalar onto the sinusoidal basis.
 
-        :param scaled: Tensor of shape ``(...,)`` (the rescaled scalar input).
+        :param scaled: Rescaled scalar of shape ``(...,)``.
         :type scaled: keras.KerasTensor
-        :returns: Sinusoidal embedding of shape ``(..., dim)``.
+        :return: Sinusoidal embedding of shape ``(..., dim)``.
         :rtype: keras.KerasTensor
         """
-        e = keras.ops.expand_dims(scaled, axis=-1) * self.freq  # (..., half)
+        # Shape (..., half).
+        e = keras.ops.expand_dims(scaled, axis=-1) * self.freq
+        # Shape (..., 2 * half).
         emb = keras.ops.concatenate(
             [keras.ops.sin(e), keras.ops.cos(e)], axis=-1
-        )  # (..., 2*half)
+        )
         if self.dim % 2 == 1:
-            # Pad the last dim by one trailing zero (odd dim case).
+            # An odd dim leaves the width one short. Pad one trailing zero.
             rank = len(emb.shape)
             pad_width = [(0, 0)] * (rank - 1) + [(0, 1)]
             emb = keras.ops.pad(emb, pad_width)
@@ -193,12 +299,21 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
             x: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        # Accept both (...,) and (..., 1) — squeeze a trailing singleton.
-        # Use the STATIC rank (`len(x.shape)`): the rank is known at trace time
-        # and `x.shape` is a static TensorShape. Do NOT use
-        # `len(keras.ops.shape(x))` — that calls len() on a symbolic shape,
-        # which is not graph-safe. The squeeze semantics are identical: a
-        # trailing dim of size 1 is squeezed iff present.
+        """Embed the scalar input and refine it with the MLP.
+
+        :param x: Scalar input, shaped ``(...,)`` or ``(..., 1)``.
+        :type x: keras.KerasTensor
+        :param training: Training flag forwarded to both Dense sub-layers.
+        :type training: Optional[bool]
+        :return: Embedding of shape ``(..., dim)``.
+        :rtype: keras.KerasTensor
+        """
+        # Accept both (...,) and (..., 1) by squeezing a trailing singleton.
+        # Read the STATIC rank with `len(x.shape)`. The rank is known at
+        # trace time and `x.shape` is a static TensorShape. Do NOT switch to
+        # `len(keras.ops.shape(x))`. That calls len() on a symbolic shape
+        # and is not graph-safe. The squeeze semantics are the same either
+        # way.
         if len(x.shape) > 0 and x.shape[-1] == 1:
             x = keras.ops.squeeze(x, axis=-1)
 
@@ -214,12 +329,26 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        # (..., [1]) -> (..., dim)
+        """Report the output shape for a given input shape.
+
+        A trailing axis of size 1 is dropped, then ``dim`` is appended.
+
+        :param input_shape: Shape of the scalar input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ending in ``dim``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if len(input_shape) > 0 and input_shape[-1] == 1:
             return tuple(input_shape[:-1]) + (self.dim,)
         return tuple(input_shape) + (self.dim,)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the constructor arguments for serialization.
+
+        :return: Configuration dictionary carrying every ``__init__``
+            argument.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -229,10 +358,18 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ScalarSinusoidalEmbedding":
-        # JSON round-trips the `input_range` tuple to a list. The guide
-        # requires explicit coercion back to a tuple so the reconstruction
-        # arg matches what get_config emitted (the ctor accepts a Sequence,
-        # so this is robustness, not a functional fix).
+        """Rebuild the layer, restoring ``input_range`` as a tuple.
+
+        :param config: Configuration produced by :meth:`get_config`, after a
+            JSON round trip.
+        :type config: Dict[str, Any]
+        :return: A new layer with the stored configuration.
+        :rtype: ScalarSinusoidalEmbedding
+        """
+        # JSON turns the `input_range` tuple into a list. Coerce it back so
+        # the reconstruction argument matches what get_config emitted. The
+        # constructor accepts any Sequence, so this is a shape guarantee for
+        # the caller rather than a functional fix.
         config = dict(config)
         if "input_range" in config and config["input_range"] is not None:
             config["input_range"] = tuple(config["input_range"])
