@@ -230,6 +230,36 @@ Measured above as **inert** as a cause (2.8307 at dropout 0.0), but it is still 
 uncontrolled difference between arms and should be equalized before the four-arm
 comparison is restated.
 
+### The fix is not a free win, and the three conv arms pay an identical price
+
+Switching `position_embedding_type` to `'sinusoidal'`, measured at 256 context /
+3000 steps / seed 0, one A/B per arm:
+
+| arm | learned | sinusoidal | delta |
+|---|---:|---:|---:|
+| `ascii_bert` | 2.8334 | **1.9832** | **−0.8502** |
+| `ascii_clifford_bert` | 1.3314 | 1.4732 | +0.1417 |
+| `ascii_convnext_bert` | 1.1882 | 1.3248 | +0.1366 |
+| `ascii_convnext_v2_bert` | 1.1633 | 1.2989 | +0.1356 |
+
+The three convolutional arms lose **+0.136 to +0.142** — a spread of 0.006 nats
+across three different blocks. That tightness says one shared mechanism, not
+noise: a sinusoidal table has mean row norm ~9.3 against the learned table's
+~0.2, so after the embedding LayerNorm it dominates, and the token signal
+measured through the same probe drops from 11.07 to 0.42. A block that already
+has positional structure gains nothing from the position signal and pays for the
+compressed token signal.
+
+**The study keeps one setting across all arms anyway.** Its design is one encoder
+with the block swapped; letting each arm pick its own position encoding would
+confound block with position type and stop it answering the question it asks.
+This cost is reported, not tuned away.
+
+Note what this does and does not change. The ordering is unaffected — the
+transformer is still last (1.98 against 1.30–1.47) — but the gap narrows from
+**1.67 nats to 0.51**. Roughly two thirds of the headline result in "Run 1" was
+the baseline's broken positional signal rather than the blocks.
+
 ### What this does not settle
 
 One seed per configuration at 3000 steps. This identifies a **mechanism**, not an
