@@ -358,13 +358,22 @@ print(bf.count_params(), bf2.count_params(), bf.count_params() == bf2.count_para
 # 503424 503424 True
 ```
 
-`ConvUNextStem` lives HERE (`models/vision/convunext/model.py`) but keeps the decorator
-`@keras.saving.register_keras_serializable(package="dl_techniques.bias_free_denoisers")`.
-That package string no longer matches its module path and **that mismatch is
-deliberate and load-bearing**: it is the registry key
+`ConvUNextStem` lives HERE (`models/vision/convunext/model.py`) but keeps the package
+string `dl_techniques.bias_free_denoisers` —
+`@register_dl_technique("dl_techniques.bias_free_denoisers")`, from
+`dl_techniques.utils.keras_registration`. That package string no longer matches its module
+path and **that mismatch is deliberate and load-bearing**: it is the registry key
 `dl_techniques.bias_free_denoisers>ConvUNextStem` that existing `.keras` artifacts
 carry. Do not "tidy" it. An in-file `# DECISION` anchor says the same thing next to
 the code.
+
+The 2026-08-29 registration migration (repo-root `MIGRATIONS.md`) changed the **decorator**
+here, not the **key**: it moved every site in `src/` from the stock
+`@keras.saving.register_keras_serializable` onto the helper, and the 38 sites that already
+carried an explicit `package=` kept their string unchanged. `SpatialLinearAttention`, which
+had no explicit string, took the defining module's dotted path and is
+`dl_techniques.models.convunext.model>SpatialLinearAttention`. So the two classes in this
+one file sit under two different package strings, on purpose.
 
 ## 9. Package surface
 

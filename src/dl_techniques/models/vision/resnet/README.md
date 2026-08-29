@@ -2248,7 +2248,15 @@ class StochasticDepth(keras.layers.Layer):
 Add channel attention to improve feature reweighting.
 
 ```python
-@keras.saving.register_keras_serializable()
+import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+# The package string is the defining module's dotted path -- `my_project.<module>` for your
+# own code, `dl_techniques.<module.path>` for code inside this repo (`ResNet` itself is
+# `dl_techniques.models.resnet.model>ResNet`). Never a bare
+# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no
+# module path, so two same-named classes claim one slot and the last import wins.
+@register_dl_technique("my_project.se_block")
 class SEBlock(keras.layers.Layer):
     """Squeeze-and-Excitation block."""
     

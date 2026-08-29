@@ -347,7 +347,9 @@ sHGCN models are fully serializable.
 model.save("shgcn_cora.keras")
 
 # Load
-# Note: Custom objects are handled via @register_keras_serializable
+# Note: custom objects are handled via @register_dl_technique
+# (SHGCNModel/SHGCNNodeClassifier/SHGCNLinkPredictor register under
+#  dl_techniques.models.shgcn.model><ClassName>)
 loaded_model = keras.models.load_model("shgcn_cora.keras")
 ```
 

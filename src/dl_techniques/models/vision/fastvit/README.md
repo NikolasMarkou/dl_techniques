@@ -252,9 +252,14 @@ it — inside MobileCLIP2 that name is fixed by the module constant
 * **No fused inference path exists** (deviation **X-1**). If you need one,
   implement it as an explicit, separately tested conversion pass over a trained
   model; do not silently change the blocks' `call()` paths.
-* Every class carries `@keras.saving.register_keras_serializable()`, a complete
-  `get_config`, and a `compute_output_shape`, so `model.save(...)` /
-  `keras.models.load_model(...)` round-trips.
+* Every class carries `@register_dl_technique(...)` (from
+  `dl_techniques.utils.keras_registration`), a complete `get_config`, and a
+  `compute_output_shape`, so `model.save(...)` / `keras.models.load_model(...)` round-trips.
+  The package string is the defining module's dotted path:
+  `dl_techniques.models.fastvit.model>FastVitImageEncoder` here, and
+  `dl_techniques.layers.fastvit.<module>><ClassName>` for the eight blocks in
+  `dl_techniques/layers/fastvit/`. Pre-2026-08-29 archives still load through the legacy
+  `Custom>ClassName` alias the helper also binds (repo-root `MIGRATIONS.md`).
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \

@@ -133,8 +133,13 @@ convenience adapter that assumes an identity correspondence, and it is defined o
 
 ## 5. Serialization
 
-`SuperPoint` is registered with `@keras.saving.register_keras_serializable()` and implements
-`get_config` / `from_config`, so it round-trips through the `.keras` format:
+`SuperPoint` is registered with
+`@register_dl_technique("dl_techniques.models.superpoint.model")` (from
+`dl_techniques.utils.keras_registration`) and implements `get_config` / `from_config`, so it
+round-trips through the `.keras` format. `models/`'s `vision/` family directory and its
+`keypoints/` subfamily container are stripped from the package string — both are a filing
+decision rather than a namespace. The legacy `Custom>SuperPoint` alias the helper also binds
+keeps pre-2026-08-29 archives loading (repo-root `MIGRATIONS.md`):
 
 ```python
 model.save("superpoint.keras")

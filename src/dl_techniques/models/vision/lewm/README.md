@@ -35,7 +35,7 @@ Key architectural features include a **ViT encoder shared between context and ta
 
 **LeWM** is a Joint Embedding Predictive Architecture (JEPA) for **action-conditioned video** dynamics. Given a short history of frames and the actions taken between them, the model predicts the **embedding** of the next frame rather than its pixels. Training is fully self-supervised: the same encoder produces both context and target embeddings, and the predictor is asked to match the encoder's own future output.
 
-The implementation faithfully mirrors the upstream PyTorch reference (`/tmp/lewm_source/`) while adopting Keras 3 conventions: every component is a `@keras.saving.register_keras_serializable()` layer/model with a `LeWMConfig` dataclass driving construction.
+The implementation faithfully mirrors the upstream PyTorch reference (`/tmp/lewm_source/`) while adopting Keras 3 conventions: every component is a `@register_dl_technique(...)` layer/model (helper in `dl_techniques.utils.keras_registration`) with a `LeWMConfig` dataclass driving construction.
 
 ### Key Innovations of this Implementation
 
@@ -419,7 +419,14 @@ Bump `num_preds` to train the predictor on multi-step targets. `num_frames` is a
 
 ## 11. Serialization & Deployment
 
-`LeWM` and every sublayer are `@keras.saving.register_keras_serializable()`. Round-trip:
+`LeWM` and every sublayer register through `@register_dl_technique(...)` from
+`dl_techniques.utils.keras_registration`. The package string is the defining module's dotted
+path with `models/`'s `vision/` family directory stripped:
+`dl_techniques.models.lewm.model>LeWM`, `dl_techniques.models.lewm.embedder>ActionEmbedder`,
+`dl_techniques.models.lewm.predictor>ARPredictor`,
+`dl_techniques.models.lewm.projector>MLPProjector`. The legacy `Custom>ClassName` alias the
+helper also binds keeps pre-2026-08-29 archives loading (repo-root `MIGRATIONS.md`).
+Round-trip:
 
 ```python
 model.save("lewm.keras")

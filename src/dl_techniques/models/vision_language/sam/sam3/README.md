@@ -347,9 +347,17 @@ Named rather than left to be rediscovered:
 
 ## 10. Serialization and Checkpoints
 
-Every serializable class here carries a **bare** (zero-argument)
-`@keras.saving.register_keras_serializable()`, so its registry key is
-`Custom>ClassName` and contains no module path.
+Every serializable class here carries `@register_dl_technique(...)`, from
+`dl_techniques.utils.keras_registration`, so its registry key is
+`dl_techniques.models.sam3.<module>>ClassName` — the defining module's dotted path with
+`models/`'s `vision_language/` family directory and `sam/` subfamily container stripped, both
+being a filing decision rather than a namespace. `Sam3TrainingModel` resolves to
+`dl_techniques.models.sam3.training_model>Sam3TrainingModel` and `Sam3Image` to
+`dl_techniques.models.sam3.sam3_image>Sam3Image` (both measured 2026-08-29 with
+`keras.saving.get_registered_name`). The helper additionally binds the legacy
+`Custom>ClassName` as an alias to the **same object**, which is what a pre-2026-08-29
+archive names — this is why the SAM 3 archives on disk keep loading across the re-key
+(repo-root `MIGRATIONS.md`).
 
 ### Loading a checkpoint written before this package moved — registrar-first
 

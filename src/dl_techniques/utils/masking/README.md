@@ -250,8 +250,13 @@ window_mask = MaskFactory.create_sliding_window_mask(seq_len=256, window_size=64
 ```python
 import keras
 from dl_techniques.layers.masking import create_mask, apply_mask
+from dl_techniques.utils.keras_registration import register_dl_technique
 
-@keras.saving.register_keras_serializable()
+# The package string is the defining module's dotted path -- `my_project.<module>` for your
+# own code, `dl_techniques.<module.path>` for code inside this repo. Never a bare
+# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no module
+# path, so two same-named classes claim one slot and the last import wins (`MIGRATIONS.md`).
+@register_dl_technique("my_project.masked_attention")
 class MaskedAttention(keras.layers.Layer):
     def __init__(self, num_heads, key_dim, mask_type='causal', **mask_kwargs):
         super().__init__()
@@ -284,7 +289,10 @@ class MaskedAttention(keras.layers.Layer):
 ### In Instance Segmentation
 
 ```python
-@keras.saving.register_keras_serializable()
+# `legacy_alias=False` because `SegmentationHead` is already a registered name in this repo
+# (`dl_techniques.layers.heads.vision.factory>SegmentationHead`), and its legacy
+# `Custom>SegmentationHead` alias is taken; claiming it again raises AliasCollisionError.
+@register_dl_technique("my_project.segmentation_head", legacy_alias=False)
 class SegmentationHead(keras.layers.Layer):
     def __init__(self, num_queries, **kwargs):
         super().__init__(**kwargs)

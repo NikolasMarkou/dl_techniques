@@ -764,8 +764,14 @@ print("max |delta| after round trip:",
 max |delta| after round trip: 0.0
 ```
 
-Every component is registered with `@keras.saving.register_keras_serializable(package="dl_techniques")`,
-so `custom_objects` is never required. `build()` materializes the whole sub-layer tree, which
+Every component is registered through `register_dl_technique`
+(`dl_techniques.utils.keras_registration`), so `custom_objects` is never required. The
+package strings are **not** uniform here, and that is deliberate: `ColBERT` uses its
+defining module, `dl_techniques.models.colbert.model>ColBERT`, while `ColBERTProjection` and
+`MaxSimScorer` (`components.py`) keep the coarse pre-existing `dl_techniques>ClassName`
+string the 2026-08-29 migration left untouched, because re-keying an already-namespaced,
+already-unique key would be a checkpoint-affecting change bought for nothing
+(repo-root `MIGRATIONS.md`). `build()` materializes the whole sub-layer tree, which
 is what makes the reload restore real values rather than fresh random kernels.
 
 The codec is **not** a Keras object and does not travel inside the `.keras` file. Persist it

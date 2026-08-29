@@ -531,7 +531,7 @@ model.save('my_vqvae_model.keras')
 print("Model saved to my_vqvae_model.keras")
 
 # Load the model in a new session.
-# While @keras.saving.register_keras_serializable() handles most cases, 
+# While the @register_dl_technique registration handles most cases, 
 # explicitly providing custom objects is a robust practice.
 loaded_model = keras.models.load_model(
     'my_vqvae_model.keras',

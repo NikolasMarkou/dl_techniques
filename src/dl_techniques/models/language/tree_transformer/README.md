@@ -11,7 +11,7 @@ The architecture's key innovation is its **Hierarchical Group Attention** mechan
 ### Key Features
 -   **Pure Foundation Model:** The `TreeTransformer` class is a pure encoder, separate from any task-specific heads.
 -   **Keras 3 Native:** Built with `keras.ops` for backend-agnostic performance.
--   **Fully Serializable:** All custom layers use `@keras.saving.register_keras_serializable` for easy saving and loading with `.keras` files.
+-   **Fully Serializable:** All five custom classes register through `register_dl_technique` (`dl_techniques.utils.keras_registration`) for easy saving and loading with `.keras` files — `TreeTransformer` under `dl_techniques.models.tree_transformer.model`, and `PositionalEncoding`, `GroupAttention`, `TreeMHA`, `TreeTransformerBlock` under `dl_techniques.models.tree_transformer.components`.
 -   **Pre-built Variants:** Includes `tiny`, `small`, `base`, and `large` configurations via the `from_variant` factory method.
 -   **Task Integration:** Comes with a `create_tree_transformer_with_head` factory to easily combine the encoder with heads for downstream tasks like classification or NER.
 

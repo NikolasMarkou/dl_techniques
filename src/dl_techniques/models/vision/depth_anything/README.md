@@ -87,7 +87,8 @@ un-augmented forward pass.
 
 ### `DepthAnything` (in `model.py`)
 
-A `@keras.saving.register_keras_serializable()`-decorated `keras.Model` with
+A `keras.Model` registered as `dl_techniques.models.depth_anything.model>DepthAnything`
+via `@register_dl_technique(...)` (from `dl_techniques.utils.keras_registration`), with
 full `get_config()` / `from_config()` round-trip.
 
 **Constructor (relevant args)**:
@@ -161,8 +162,10 @@ when returned.
 
 ### `DPTDecoder` (in `components.py`)
 
-`@keras.saving.register_keras_serializable()` `keras.layers.Layer`.
-Convolutional decoder head with optional bilinear upsampling.
+`keras.layers.Layer` registered as
+`dl_techniques.models.depth_anything.components>DPTDecoder` via
+`@register_dl_technique(...)`. Convolutional decoder head with optional bilinear
+upsampling.
 
 **Architecture**:
 

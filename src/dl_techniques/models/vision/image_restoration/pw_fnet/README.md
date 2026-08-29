@@ -444,7 +444,22 @@ The authors use the **AdamW optimizer** with a **cosine annealing learning rate 
 
 ## 12. Serialization & Deployment
 
-The `PW_FNet` model and all its custom sub-layers are **fully serializable** using Keras 3's modern `.keras` format. Each custom layer is decorated with `@keras.saving.register_keras_serializable()` and implements `get_config`, ensuring that the model's architecture and weights can be saved and loaded seamlessly.
+The `PW_FNet` model and all its custom sub-layers are **fully serializable** using Keras 3's modern `.keras` format. Each custom layer is decorated with `@register_dl_technique(...)` (from `dl_techniques.utils.keras_registration`) and implements `get_config`, ensuring that the model's architecture and weights can be saved and loaded seamlessly.
+
+Two things about the keys are worth knowing before you rename anything here.
+
+`PW_FNet` and `PW_FNet_Block` register under the defining module's dotted path,
+`dl_techniques.models.pw_fnet.model><ClassName>` — `vision/` and `image_restoration/` are
+stripped because a family directory under `models/` is a filing decision, not a namespace.
+
+`Downsample` and `Upsample` are different. They keep the coarse, pre-existing
+`dl_techniques.pw_fnet><ClassName>` string **and carry `legacy_alias=False`**, so
+`keras.saving.get_registered_object("Custom>Downsample")` and `("Custom>Upsample")` both
+return **`None`** (measured 2026-08-29). That is deliberate: `ideogram4` registers classes
+with the same two bare names, and aliasing either side would put both on one `Custom>X` key
+and recreate exactly the import-order collision the migration removed. Neither name appears
+in any archive in this repository, so nothing was orphaned. Reach them only through their
+package-qualified keys. Repo-root `MIGRATIONS.md` is the record.
 
 ### Saving and Loading
 

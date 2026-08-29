@@ -71,12 +71,23 @@ outputs = {
 
 ## Integration Examples
 
+> **On the registration decorator in these examples.** The models below are *your* code,
+> not this package's, so they register through
+> `@register_dl_technique("<your module's dotted path>")` from
+> `dl_techniques.utils.keras_registration` — written here as `my_project.<module>`. The
+> package string is always the defining module's dotted path; the classes *inside* this
+> package use `dl_techniques.layers.heads.vision.factory`. Never a bare
+> `@keras.saving.register_keras_serializable()`: its key `Custom>ClassName` carries no
+> module path, so two same-named classes claim one registry slot and the last import
+> silently wins. See the repo-root `MIGRATIONS.md`.
+
 ### Example 1: ViT with Classification Head
 
 ```python
 import keras
 from dl_techniques.models.vision.vit import ViT
 from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Step 1: Create foundation model
 vit = ViT(
@@ -101,7 +112,7 @@ classification_head = create_vision_head(
 )
 
 # Step 3: Build complete model
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.image_classifier")
 class ImageClassifier(keras.Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -129,6 +140,7 @@ outputs = model(images)
 ```python
 from dl_techniques.models.vision.resnet import ResNet50
 from dl_techniques.layers.heads.vision import DetectionHead
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Step 1: Create ResNet backbone with FPN
 backbone = ResNet50(
@@ -148,7 +160,7 @@ detection_head = DetectionHead(
 )
 
 # Step 3: Build detection model
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.object_detector")
 class ObjectDetector(keras.Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -189,6 +201,7 @@ outputs = detector(images)
 ```python
 from dl_techniques.models.vision.dino import DINOv2Model
 from dl_techniques.layers.heads.vision import SegmentationHead
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Step 1: Create DINOv2 backbone
 dinov2 = DINOv2Model(
@@ -210,7 +223,7 @@ segmentation_head = SegmentationHead(
 )
 
 # Step 3: Build segmentation model
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.semantic_segmenter")
 class SemanticSegmenter(keras.Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -253,6 +266,7 @@ seg_output = segmenter(images)
 ```python
 from dl_techniques.models.vision.resnet import create_resnet
 from dl_techniques.layers.heads.vision import DepthEstimationHead
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Step 1: Create the backbone (`include_top=False` -> feature map, no classifier)
 backbone = create_resnet(
@@ -272,7 +286,7 @@ depth_head = DepthEstimationHead(
 )
 
 # Step 3: Build depth estimation model
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.depth_estimator")
 class DepthEstimator(keras.Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -297,6 +311,7 @@ outputs = depth_model(images)
 ```python
 from dl_techniques.layers.heads.vision import create_multi_task_head, VisionTaskType
 from dl_techniques.models.vision.yolo12 import YOLOv12FeatureExtractor
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Step 1: Create YOLO backbone
 yolo_backbone = YOLOv12FeatureExtractor(
@@ -333,7 +348,7 @@ multi_task_head = create_multi_task_head(
 )
 
 # Step 4: Build multi-task model
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.multi_task_vision_model")
 class MultiTaskVisionModel(keras.Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -364,6 +379,7 @@ all_outputs = multi_model(images)
 
 ```python
 from dl_techniques.layers.heads.vision import InstanceSegmentationHead
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Create instance segmentation head
 instance_head = InstanceSegmentationHead(
@@ -375,7 +391,7 @@ instance_head = InstanceSegmentationHead(
     attention_type='cbam'
 )
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.instance_segmenter")
 class InstanceSegmenter(keras.Model):
     def __init__(self, backbone, **kwargs):
         super().__init__(**kwargs)
@@ -633,7 +649,9 @@ class StableVisionHead(BaseVisionHead):
 
 ```python
 # For memory-efficient training with large models
-@keras.saving.register_keras_serializable()
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("my_project.checkpointed_head")
 class CheckpointedHead(BaseVisionHead):
     def call(self, inputs, training=None):
         if training:

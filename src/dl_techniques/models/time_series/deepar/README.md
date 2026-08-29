@@ -416,7 +416,7 @@ If your data contains many zero-sequences, ensure `scale_epsilon` is large enoug
 
 ## 12. Serialization & Deployment
 
-The model uses `keras.saving.register_keras_serializable`, making it compatible with the modern `.keras` format.
+The model registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.deepar.model>DeepAR`, making it compatible with the modern `.keras` format. The legacy `Custom>DeepAR` alias the helper also binds keeps pre-2026-08-29 archives loading (repo-root `MIGRATIONS.md`).
 
 ```python
 # Save

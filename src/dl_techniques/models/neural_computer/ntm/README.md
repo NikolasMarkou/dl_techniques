@@ -16,8 +16,14 @@ Reference: Graves, Wayne & Danihelka, 2014, *Neural Turing Machines*
 | `create_ntm_variant` | factory fn | `model.py` | One-call construction of an `NTMModel` preset |
 | `NTMMultiTask` | `keras.Model` | `model_multitask.py` | One NTM shared across N tasks, conditioned by a one-hot task vector |
 
-Both classes are `@keras.saving.register_keras_serializable()` and round-trip
-through `get_config()` / `from_config()`.
+Both classes are registered with `@register_dl_technique(...)` from
+`dl_techniques.utils.keras_registration` and round-trip through `get_config()` /
+`from_config()`. The keys are `dl_techniques.models.ntm.model>NTMModel` and
+`dl_techniques.models.ntm.model_multitask>NTMMultiTask` — the defining module's dotted
+path, with `models/`'s family directory (`neural_computer`) stripped, since a family there
+is a filing decision rather than a namespace. Archives written before 2026-08-29 still load
+through the legacy `Custom>ClassName` alias the helper also binds (repo-root
+`MIGRATIONS.md`).
 
 ## Import form
 

@@ -160,8 +160,13 @@ sparse_soft = create_activation_layer(
 ```python
 import keras
 from dl_techniques.layers.activations import create_activation_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
-@keras.saving.register_keras_serializable()
+# The package string is the defining module's dotted path -- `my_project.<module>` for your
+# own code, `dl_techniques.<module.path>` for code inside this repo. Never a bare
+# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no module
+# path, so two same-named classes claim one slot and the last import wins (`MIGRATIONS.md`).
+@register_dl_technique("my_project.gated_block")
 class GatedBlock(keras.layers.Layer):
     def __init__(self, units, **kwargs):
         super().__init__(**kwargs)

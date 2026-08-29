@@ -82,9 +82,15 @@ from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
 ## Notes
 
 - **Serialization-stable.** All 21 layer-class names are preserved verbatim; the
-  package was relocated via `git mv`, so existing `.keras` checkpoints stay
-  loadable (bare `@register_keras_serializable()` registers as
-  `Custom>ClassName`, independent of module path).
+  package was relocated via `git mv`, so existing `.keras` checkpoints stay loadable. The
+  classes register through `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`
+  (from `dl_techniques.utils.keras_registration`), so
+  `keras.saving.get_registered_name(EnhancementHead)` is
+  `dl_techniques.layers.heads.vision.factory>EnhancementHead` (verified 2026-08-29). The
+  helper additionally binds the legacy `Custom>ClassName` as an alias to the same object —
+  and that alias is keyed on the **bare class name**, which is why the names must stay
+  verbatim and why a `git mv` costs nothing. See `CLAUDE.md` in this directory and the
+  repo-root `MIGRATIONS.md`.
 - **NLP pooling reuse.** `BaseNLPHead` delegates `cls`/`mean`/`max` pooling to
   the shared `SequencePooling` layer; the learnable `attention` pooling stays
   inline (a distinct mechanism + weight set). See `CLAUDE.md` (D-002).

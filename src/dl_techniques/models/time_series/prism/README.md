@@ -422,7 +422,16 @@ restored = keras.models.load_model("prism.keras")
 
 Round-trip works because:
 
-- `PRISMModel`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter`, `QuantileHead` all use `@keras.saving.register_keras_serializable()`.
+- `PRISMModel`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and
+  `QuantileHead` all register through `register_dl_technique`
+  (`dl_techniques.utils.keras_registration`). The package string is the DEFINING module's
+  dotted path, and only one of the six is defined here, so the keys are not uniform:
+  `dl_techniques.models.prism.model>PRISMModel` (this package, `time_series/` stripped as a
+  family directory), `dl_techniques.layers.time_series.prism_blocks><ClassName>` for
+  `PRISMLayer` / `PRISMTimeTree` / `PRISMNode` / `FrequencyBandRouter`, and
+  `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Pre-2026-08-29
+  archives still load through the legacy `Custom>ClassName` alias the helper also binds
+  (repo-root `MIGRATIONS.md`).
 - `kernel_initializer` and `kernel_regularizer` are normalized via `keras.initializers.get` / `keras.regularizers.get` in `get_config()`.
 - `quantile_levels` is round-tripped as a list (or `None` in point mode).
 

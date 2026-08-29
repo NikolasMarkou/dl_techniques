@@ -875,8 +875,13 @@ scale the budget down yourself: `BeitMaskingGenerator` **raises** if
 
 ## 12. Serialization & Deployment
 
-All three classes are `@keras.saving.register_keras_serializable()` and round-trip through
-the `.keras` format with **value** equality (asserted in the test suite at `atol=1e-6`).
+All three classes register through `@register_dl_technique("dl_techniques.models.beit.model")`
+(from `dl_techniques.utils.keras_registration`) — so `BeitModel`,
+`BeitForMaskedImageModeling` and `BeitForImageClassification` resolve under
+`dl_techniques.models.beit.model><ClassName>` — and round-trip through the `.keras` format
+with **value** equality (asserted in the test suite at `atol=1e-6`). The legacy
+`Custom>ClassName` alias the helper also binds keeps pre-2026-08-29 archives loading
+(repo-root `MIGRATIONS.md`).
 The two head classes serialize their nested backbone via
 `serialize_keras_object` / `deserialize_keras_object`.
 

@@ -153,7 +153,9 @@ This implementation leverages the latest Keras 3 features and best practices:
 - Reduces code duplication by ~150 lines
 
 ✅ **Full Serialization Support**
-- Proper `@keras.saving.register_keras_serializable()` decorators
+- Proper `@register_dl_technique("dl_techniques.models.detr.model")` decorators (from
+  `dl_techniques.utils.keras_registration`), giving `DETR` and `DetrTransformer` the keys
+  `dl_techniques.models.detr.model><ClassName>`
 - Complete `get_config()` implementations
 - Custom `from_config()` for complex models
 
@@ -734,8 +736,12 @@ model = create_detr(..., backbone_trainable=False)
 
 **Solutions**:
 ```python
-# Ensure all custom layers are registered
-@keras.saving.register_keras_serializable()
+# Ensure all custom layers are registered. The package string is the defining module's
+# dotted path -- `my_project.<module>` for your own code, `dl_techniques.<module.path>`
+# for code inside this repo (this package uses `dl_techniques.models.detr.model`).
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("my_project.my_layer")
 class MyLayer(keras.layers.Layer):
     ...
 

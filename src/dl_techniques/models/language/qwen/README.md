@@ -133,8 +133,16 @@ auxiliary loss — go to `QWEN3.md` and `QWEN3_next.md`.
 
 ## 5. Serialization
 
-Every class listed above is decorated with `@keras.saving.register_keras_serializable()` and
-implements `get_config()`, so models round-trip through the `.keras` format:
+Every class listed above is decorated with `@register_dl_technique(...)` (from
+`dl_techniques.utils.keras_registration`) and implements `get_config()`, so models
+round-trip through the `.keras` format. The package string is the defining module's dotted
+path with `models/`'s `language/` family directory stripped, so the keys are
+`dl_techniques.models.qwen.qwen3>Qwen3`, `dl_techniques.models.qwen.qwen3_next>Qwen3Next`,
+`dl_techniques.models.qwen.components>Qwen3NextBlock`, and
+`dl_techniques.models.qwen.qwen3_embeddings><ClassName>` for `Qwen3EmbeddingLayer`,
+`Qwen3RerankerLayer`, `Qwen3EmbeddingModel` and `Qwen3RerankerModel`. Pre-2026-08-29
+archives still load through the legacy `Custom>ClassName` alias the helper also binds
+(repo-root `MIGRATIONS.md`):
 
 ```python
 import keras

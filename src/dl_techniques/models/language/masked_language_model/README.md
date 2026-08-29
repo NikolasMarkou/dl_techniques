@@ -830,7 +830,13 @@ print(f"Perplexity: {perplexity:.2f}")
 Any encoder can be used as long as it follows the interface:
 
 ```python
-@keras.saving.register_keras_serializable()
+import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+# The package string is the defining module's dotted path -- `my_project.<module>` for your
+# own code, `dl_techniques.<module.path>` for code inside this repo (`MaskedLanguageModel`
+# is `dl_techniques.models.masked_language_model.mlm>MaskedLanguageModel`).
+@register_dl_technique("my_project.custom_encoder")
 class CustomEncoder(keras.Model):
     def __init__(self, vocab_size, hidden_size, **kwargs):
         super().__init__(**kwargs)
@@ -1001,7 +1007,10 @@ dataset = dataset.prefetch(tf.data.AUTOTUNE)  # Prefetch batches
 **Problem**: Cannot save or load model.
 
 **Solutions**:
-- Ensure encoder has `@keras.saving.register_keras_serializable()` decorator
+- Ensure the encoder is registered with
+  `@register_dl_technique("<its module's dotted path>")` from
+  `dl_techniques.utils.keras_registration` (never a bare
+  `@keras.saving.register_keras_serializable()` — see `MIGRATIONS.md`)
 - Verify `get_config()` includes all constructor parameters
 - Use `.keras` format (not `.h5`)
 

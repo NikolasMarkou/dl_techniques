@@ -371,7 +371,7 @@ Crucial for restoration:
 
 ## 12. Serialization & Deployment
 
-The model uses `keras.saving.register_keras_serializable`, making it compatible with the modern `.keras` format.
+The model registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`), making it compatible with the modern `.keras` format. The keys are the defining module's dotted path with `models/`'s `vision/` and `image_restoration/` stripped: `dl_techniques.models.darkir.model><ClassName>` for `DarkIREncoderBlock` / `DarkIRDecoderBlock` and `dl_techniques.models.darkir.components><ClassName>` for `SimpleGate` / `FreMLP` / `DilatedBranch`. The legacy `Custom>ClassName` alias the helper also binds keeps pre-2026-08-29 archives loading (repo-root `MIGRATIONS.md`).
 
 ```python
 # Save complete model

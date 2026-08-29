@@ -677,7 +677,7 @@ When fine-tuning a pretrained BERT model, it is **critical** to use the exact sa
 
 ## 12. Serialization & Deployment
 
-The `BERT` model and all its custom layers are fully serializable using Keras 3's modern `.keras` format, thanks to the `@keras.saving.register_keras_serializable()` decorator.
+The `BERT` model and all its custom layers are fully serializable using Keras 3's modern `.keras` format, thanks to the `@register_dl_technique(...)` decorator from `dl_techniques.utils.keras_registration`. `BERT` itself is `dl_techniques.models.bert.model>BERT` (`models/`'s `language/` family directory is stripped — a family there is a filing decision, not a namespace); the sub-layers it composes register under their own defining modules in `dl_techniques/layers/`. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds (repo-root `MIGRATIONS.md`).
 
 ### Saving and Loading
 

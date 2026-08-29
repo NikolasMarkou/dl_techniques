@@ -314,9 +314,13 @@ This is the canonical pattern: pass the pooling mode straight through as
 ```python
 import keras
 from dl_techniques.layers.sequence_pooling import create_sequence_pooling_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+# `legacy_alias=False` because `ClassificationHead` is already a registered name in this
+# repo (`dl_techniques.layers.heads.vision.factory>ClassificationHead`), and its legacy
+# `Custom>ClassificationHead` alias is taken; claiming it again raises AliasCollisionError.
+@register_dl_technique("my_project.classification_head", legacy_alias=False)
 class ClassificationHead(keras.layers.Layer):
     def __init__(self, num_classes, pooling_type='attention', **kwargs):
         super().__init__(**kwargs)

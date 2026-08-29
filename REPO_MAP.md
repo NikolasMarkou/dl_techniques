@@ -372,7 +372,7 @@ Every command is in the Numbers table at the foot of this file.
 
 | Convention | Files following it (of the library's `.py`) |
 |---|---|
-| `@keras.saving.register_keras_serializable()` on custom classes | 476 |
+| `@register_dl_technique(...)` on custom classes (was `@keras.saving.register_keras_serializable()`, tabulated 476 until the 2026-08-29 migration; re-derived from the anchored Numbers row below) | 479 |
 | A `get_config()` for round-trip serialization | 477 |
 | Logging through `src/dl_techniques/utils/logger.py`, never `print` | 335 |
 

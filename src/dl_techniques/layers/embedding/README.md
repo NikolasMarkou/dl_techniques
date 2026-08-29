@@ -321,7 +321,14 @@ bert_embed = BertEmbeddings(
 ### In a BERT-Style Language Model
 
 ```python
-@keras.saving.register_keras_serializable()
+import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+# The package string is the defining module's dotted path -- `my_project.<module>` for your
+# own code, `dl_techniques.<module.path>` for code inside this repo. Never a bare
+# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no module
+# path, so two same-named classes claim one slot and the last import wins (`MIGRATIONS.md`).
+@register_dl_technique("my_project.bert_input_layer")
 class BertInputLayer(keras.layers.Layer):
     def __init__(self, vocab_size, hidden_size, max_position_embeddings, 
                  type_vocab_size, normalization_type='layer_norm', **kwargs):
@@ -350,7 +357,7 @@ class BertInputLayer(keras.layers.Layer):
 ### In a Vision Transformer (ViT)
 
 ```python
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.vit_input_block")
 class ViTInputBlock(keras.layers.Layer):
     def __init__(self, patch_size, embed_dim, max_seq_len, **kwargs):
         super().__init__(**kwargs)
@@ -379,7 +386,7 @@ not optional: calling the layer on the raw 3D projection raises
 with 3 dimensions`.
 
 ```python
-@keras.saving.register_keras_serializable()
+@register_dl_technique("my_project.attention_with_rope")
 class AttentionWithRoPE(keras.layers.Layer):
     def __init__(self, num_heads, head_dim, max_seq_len, **kwargs):
         super().__init__(**kwargs)

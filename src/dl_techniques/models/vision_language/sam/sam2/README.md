@@ -248,11 +248,19 @@ was measured it demonstrably does not learn masks jointly.
 
 ## 8. Serialization and Checkpoints
 
-Every serializable class here carries a **bare** (zero-argument)
-`@keras.saving.register_keras_serializable()`, so its registry key is
-`Custom>ClassName` and contains no module path. `SAM2MemoryBank` is the
-deliberate exception: it is a plain-Python container with no weights (§5) and
-carries no decorator at all. `.keras` round trips are covered by the test gate.
+Every serializable class here carries `@register_dl_technique(...)`, from
+`dl_techniques.utils.keras_registration`, so its registry key is
+`dl_techniques.models.sam2.<module>>ClassName` — the defining module's dotted path with
+`models/`'s `vision_language/` family directory and `sam/` subfamily container stripped, both
+being a filing decision rather than a namespace. `SAM2TrainingModel` resolves to
+`dl_techniques.models.sam2.training_model>SAM2TrainingModel` and `SAM2` to
+`dl_techniques.models.sam2.model>SAM2` (both measured 2026-08-29 with
+`keras.saving.get_registered_name`). The helper additionally binds the legacy
+`Custom>ClassName` as an alias to the **same object**, which is what a pre-2026-08-29
+archive names, so `keras.saving.get_registered_object("Custom>SAM2TrainingModel")` still
+returns the class once its module is imported (repo-root `MIGRATIONS.md`).
+`SAM2MemoryBank` is the deliberate exception: it is a plain-Python container with no weights
+(§5) and carries no decorator at all. `.keras` round trips are covered by the test gate.
 
 ### Loading a checkpoint written before this package moved — registrar-first
 
@@ -273,8 +281,16 @@ exactly as effectively as a real reference would.)
 
 > **Importing the SAM 2 *package* is NOT sufficient.** `sam2/__init__.py`
 > imports `memory_bank` and `model` only, never `training_model`, so
-> `Custom>SAM2TrainingModel` is never entered into the registry by a package
-> import and Keras falls straight through to the failing fallback. SAM 1's and
+> `SAM2TrainingModel` is never entered into the registry by a package import under
+> **either** of its keys — neither the current
+> `dl_techniques.models.sam2.training_model>SAM2TrainingModel` nor the legacy
+> `Custom>SAM2TrainingModel` alias a pre-2026-08-29 archive names — and Keras falls
+> straight through to the failing fallback. RE-MEASURED 2026-08-29 in a fresh process:
+> after `import dl_techniques.models.vision_language.sam.sam2`,
+> `keras.saving.get_registered_object` returns `None` for both keys and
+> `training_model` is absent from `sys.modules`. This is a statement about import SIDE
+> EFFECTS, not about how the key is spelled, and the registration migration
+> (`MIGRATIONS.md`) did not change it. SAM 1's and
 > SAM 3's inits both import theirs, which is why this trips people on SAM 2
 > and only on SAM 2. The rule that holds for all three is: **import the module
 > that DEFINES the saved class.**

@@ -516,7 +516,7 @@ Rule of thumb: default to `power`; drop to `standard` for speed; reach for `max_
 
 ## 12. Serialization & Statelessness
 
-There is nothing to serialize. `PowerSampler` is a pure-Python inference engine: it holds references to a model, a tokenizer, and a `@dataclass` config, but it owns **no weights** and is **not** a `keras.Model` — hence no `@keras.saving.register_keras_serializable`, no `build`, no `get_config`. The model and tokenizer are serialized through their own mechanisms; the sampler is reconstructed by simply re-instantiating it. Critically, `generate_standard` does **not** mutate `self.config`: per-call `top_p`/`repetition_penalty` overrides are applied through a transient `dataclasses.replace` copy that is restored in a `finally` block, so config fields are identical before and after a call (exception-safe).
+There is nothing to serialize. `PowerSampler` is a pure-Python inference engine: it holds references to a model, a tokenizer, and a `@dataclass` config, but it owns **no weights** and is **not** a `keras.Model` — hence no registration decorator at all (neither this repo's `@register_dl_technique` nor the stock `@keras.saving.register_keras_serializable`), no `build`, no `get_config`. The model and tokenizer are serialized through their own mechanisms; the sampler is reconstructed by simply re-instantiating it. Critically, `generate_standard` does **not** mutate `self.config`: per-call `top_p`/`repetition_penalty` overrides are applied through a transient `dataclasses.replace` copy that is restored in a `finally` block, so config fields are identical before and after a call (exception-safe).
 
 ---
 
