@@ -22,6 +22,34 @@ sweep.py                 the grid driver, one subprocess per cell
 report.py                aggregation -> summary.md + CSVs
 ```
 
+## One setting you should not change casually
+
+`ExperimentConfig.position_embedding_type` defaults to **`'sinusoidal'`**, not
+to the encoder's own `'learned'`. It is a config field rather than an inherited
+default precisely so that it lands in every run's `config.json`.
+
+A learned table is initialized at `initializer_range=0.02`, which puts it at
+essentially the word table's norm (0.1985 against 0.1987) — and training then
+*abandons* it, shrinking it to 0.1612 over 3000 steps while the word table grows
+to 0.3283. The transformer arm could not bootstrap position-dependent attention
+from that and converged to a **bag of characters**: reordering its entire
+context moved the output by 0.83% of activation scale while replacing the
+context moved 52.58%. Switching this one field bought **0.85 nats** at 256
+context.
+
+**It is not a free win for every arm.** Measured at 256 context, 3000 steps:
+`ascii_bert` −0.85 nats, `ascii_clifford_bert` **+0.14** (worse). The
+convolutional blocks already have positional structure, and a sinusoidal signal
+large enough to dominate LayerNorm compresses their token signal. The study
+holds one setting across all arms deliberately — the design compares *blocks*
+under one encoder — so this is a cost the comparison pays knowingly, and it is
+reported rather than tuned away.
+
+`tests/test_train/test_embeddings_experimental/test_the_positional_signal_survives_the_embedding_sum.py`
+pins both directions. Read its docstring before moving the threshold: the
+obvious oracle (reorder-vs-replace) is decisive on a trained model and **blind
+at initialization**, which is why the guard measures signal magnitude instead.
+
 ## What is measured
 
 MLM loss and contrastive loss are *optimisation* diagnostics: contrastive loss
