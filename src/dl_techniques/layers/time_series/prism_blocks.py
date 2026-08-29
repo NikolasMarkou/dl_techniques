@@ -151,12 +151,10 @@ class FrequencyBandStatistics(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-18T073231-52a93f8c/D-004
-        # Branch on the STATIC length: a length-1 band gives an EMPTY diff, so
-        # mean/var are NaN silently; a length-0 band makes ops.min/ops.max raise
-        # eager and give +/-inf under tf.function (both measured). Do NOT rewrite
-        # as ops.cond on ops.shape(inputs)[1] (measured elsewhere in this repo:
-        # OperatorNotAllowedInGraphError under @tf.function) and do NOT pad the
-        # slice to fake a length. See decisions.md D-004, D-012.
+        # Branch on the STATIC length. A length-1 band gives an empty diff, so
+        # mean/var go NaN silently; a length-0 band makes ops.min/max raise.
+        # Do NOT rewrite as ops.cond on ops.shape(inputs)[1] -- that raises
+        # OperatorNotAllowedInGraphError under tf.function. See decisions.md D-004.
         static_len = inputs.shape[1]
 
         if static_len is not None and static_len == 0:
@@ -199,24 +197,16 @@ class FrequencyBandStatistics(keras.layers.Layer):
         )
 
         # DECISION plan-2026-08-18T111512-29569f8b/D-001
-        # The static branch above misses an unknown time axis, so repair the
-        # degenerate cases at VALUE level here. MEASURED before this existed: a
-        # tree_depth=3 PRISMModel traced at [None, None, 7] gave nan_frac == 1.0
-        # where the SAME model gave 0.0 eager. input_spec cannot close it
-        # (assert_input_compatibility accepts None) and ops.cond on a traced shape
-        # breaks under @tf.function. Do NOT hoist the repair out of the
-        # `static_len is None` guard: a genuine NaN on the static path must keep
-        # propagating. Narrowed by D-050 below. See decisions.md D-001.
+        # Repair the degenerate cases at VALUE level when the time axis is
+        # unknown. MEASURED: a tree_depth=3 PRISMModel traced at [None, None, 7]
+        # gave nan_frac 1.0 where the same model gave 0.0 eager. Do NOT hoist
+        # this out of the `static_len is None` guard. See decisions.md D-001.
         if static_len is None:
             # DECISION plan-2026-08-18T140459-7991552f/D-050
-            # Repair only statistics computed from an all-finite series, per
-            # (batch, channel). MEASURED at the commit before this one, a
-            # [2, 16, 3] all-ones batch with one NaN and one +inf injected: the
-            # static path returned 9 NaN statistics while the SAME batch through
-            # tf.function([None, None, 3]) returned 0 -- a corrupt series came
-            # back as exact zeros. Do NOT simplify back to an unconditional
-            # ops.where. ops.all over a length-0 axis is True, so the length-0
-            # case still repairs. See decisions.md D-050.
+            # Repair only statistics from an all-finite series, per (batch,
+            # channel). MEASURED: a [2,16,3] batch with one NaN and one +inf gave
+            # 9 NaN statistics static but 0 under tf.function -- corruption read
+            # as zeros. Do NOT use an unconditional ops.where. See decisions.md D-050.
 
             # Shape [batch, channels].
             series_is_finite = ops.all(ops.isfinite(inputs), axis=1)
@@ -1023,14 +1013,10 @@ class PRISMTimeTree(keras.layers.Layer):
                 self.all_nodes.append(node)
 
     # DECISION plan-2026-08-18T073231-52a93f8c/D-001
-    # One helper for the segment geometry, reproducing the RUNTIME form
-    # (seq_len - overlap_size * (n - 1)) // n. build() used a PLUS and
-    # disagreed: measured at overlap_ratio=0.25, context_len=96 gave build 28 vs
-    # runtime 25 at level 2 and build 14 vs runtime 12 at level 3. Do NOT
-    # restore the PLUS form and do NOT drop the float round-trip in
-    # overlap_size -- it reproduces the runtime truncation to int32. The span
-    # applies to segments 0..n-2; the last runs to seq_len (see D-014).
-    # See decisions.md D-001.
+    # One helper for segment geometry, reproducing the RUNTIME form
+    # (seq_len - overlap_size * (n-1)) // n. build() used PLUS and disagreed:
+    # MEASURED build 28 vs runtime 25 at level 2 (overlap 0.25, len 96). Keep
+    # the PLUS out and keep the float round-trip. See decisions.md D-001.
     @staticmethod
     def _segment_len(
             seq_len: int,
@@ -1175,14 +1161,10 @@ class PRISMTimeTree(keras.layers.Layer):
             segment_len = non_overlap_len + overlap_size
 
         # DECISION plan-2026-08-18T140459-7991552f/D-014
-        # The LAST segment runs to the END of the sequence, so the remainder the
-        # floor division in non_overlap_len discards is covered. MEASURED at
-        # seq_len=96, overlap_ratio=0.25, identity segments: num_segments=4 left
-        # positions 82..95 at exactly 0.0 and num_segments=8 left 75..95 at 0.0.
-        # Do NOT "clean this up" to a uniform end_idx = start_idx + segment_len:
-        # the last segment is LONGER than its siblings (39 vs 25 at
-        # num_segments=4) and build() sizes the last node to match.
-        # See decisions.md D-014.
+        # The LAST segment runs to the END, covering the remainder that the
+        # floor division discards. MEASURED at seq_len=96, overlap 0.25:
+        # num_segments=4 left positions 82..95 at exactly 0.0. Do NOT make
+        # end_idx uniform -- the last segment is longer. See decisions.md D-014.
         segments = []
         for i in range(num_segments):
             start_idx = i * non_overlap_len
