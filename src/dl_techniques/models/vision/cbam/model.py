@@ -70,11 +70,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.cbam.model")
 class CBAMNet(keras.Model):
     """
     CNN model with CBAM attention for image classification.

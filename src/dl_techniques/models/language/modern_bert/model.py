@@ -58,11 +58,12 @@ from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.modern_bert.model")
 class ModernBERT(keras.Model):
     """ModernBERT (A Modern Bidirectional Encoder) foundation model.
 

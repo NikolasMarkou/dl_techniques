@@ -50,11 +50,12 @@ from dl_techniques.layers.attention.attention_routing_capsule import (
     CapsuleBlockV2,
 )
 from dl_techniques.optimization import learning_rate_schedule_builder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.capsnet.model_v2")
 class CapsNetV2(keras.Model):
     """Modernised Capsule Network with attention routing.
 

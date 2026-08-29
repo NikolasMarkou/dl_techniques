@@ -75,6 +75,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Activation helper
@@ -114,7 +115,7 @@ def _resolve_act(act_fn: str):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sd3_mmdit.text_encoders")
 class CLIPTextEncoder(keras.Model):
     """OpenAI-CLIP text tower (from-scratch, token-id input, causal-masked).
 
@@ -418,7 +419,7 @@ class CLIPTextEncoder(keras.Model):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sd3_mmdit.text_encoders")
 class OpenCLIPTextEncoder(CLIPTextEncoder):
     """OpenCLIP (ViT-bigG) text tower: larger dims, standard GELU.
 
@@ -480,7 +481,7 @@ class OpenCLIPTextEncoder(CLIPTextEncoder):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sd3_mmdit.text_encoders")
 class T5Encoder(keras.Model):
     """T5-v1.1 encoder (from-scratch, relative-position-bucket bias).
 

@@ -75,11 +75,12 @@ import numpy as np
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.ffn.kan_linear import KANLinear
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.kan.model")
 class KAN(keras.Model):
     """
     Kolmogorov-Arnold Network built as a Keras 3 Functional model.

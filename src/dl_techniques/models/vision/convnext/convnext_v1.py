@@ -92,12 +92,13 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.convnext.convnext_v1")
 class ConvNeXtV1(keras.Model):
     """ConvNeXt V1: a modernized ConvNet with optional local-checkpoint loading.
 

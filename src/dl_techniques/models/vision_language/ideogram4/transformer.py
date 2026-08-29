@@ -136,11 +136,12 @@ from dl_techniques.models.vision_language.ideogram4.constants import (
     OUTPUT_IMAGE_INDICATOR,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@register_dl_technique("dl_techniques.models")
 class Ideogram4Transformer(keras.Model):
     """Ideogram4 flow-matching DiT: packed-stream masked-add velocity predictor.
 

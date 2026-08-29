@@ -97,8 +97,9 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.optimize import quadratic_assignment
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mini_vec2vec.model")
 class MiniVec2VecAligner(keras.Model):
     """
     Keras implementation of the mini-vec2vec unsupervised alignment algorithm.

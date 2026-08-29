@@ -127,6 +127,7 @@ from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 # The ET block has NO factory home — direct import is the sanctioned path for this
 # feature (D-004 of plan_2026-07-13_57c9833e; G2). Do not route it through a factory.
 from dl_techniques.layers.transformers.energy_transformer import EnergyTransformer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -213,7 +214,7 @@ def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.energy_transformer.model")
 class EnergyTransformerBackbone(keras.Model):
     """Shared Energy Transformer trunk: patch-embed -> [mask token] -> pos-embed -> ET block.
 
@@ -609,7 +610,7 @@ def _reject_energy_backbone(backbone: EnergyTransformerBackbone, owner: str) -> 
         )
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.energy_transformer.model")
 class EnergyTransformerMIM(keras.Model):
     """Masked-image-completion model: ET backbone -> LayerNorm -> affine ``Dense(P*P*C)``.
 
@@ -698,7 +699,7 @@ class EnergyTransformerMIM(keras.Model):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.energy_transformer.model")
 class EnergyTransformerClassifier(keras.Model):
     """Classifier: the SAME ET backbone -> LayerNorm -> mean-pool -> ``Dense(num_classes)``.
 

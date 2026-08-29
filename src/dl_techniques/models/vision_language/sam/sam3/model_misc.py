@@ -56,11 +56,12 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.model_misc")
 class Sam3DotProductScoring(keras.layers.Layer):
     """Open-vocabulary per-query class logits from a pooled text prompt.
 

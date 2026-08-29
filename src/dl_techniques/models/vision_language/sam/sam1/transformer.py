@@ -62,6 +62,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # DECISION plan-2026-08-23T091307-9a110062/D-601
 #: The SHIPPED attention-dropout rate of SAM 1's mask-decoder transformer, and
@@ -80,7 +81,7 @@ DEFAULT_ATTENTION_DROPOUT_RATE: float = 0.0
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.transformer")
 class TwoWayAttentionBlock(keras.layers.Layer):
     """
     A transformer block with four layers for bidirectional attention.
@@ -452,7 +453,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.transformer")
 class TwoWayTransformer(layers.Layer):
     """
     A two-way transformer decoder for joint refinement of queries and image features.

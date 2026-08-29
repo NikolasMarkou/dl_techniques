@@ -80,11 +80,12 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.fractal_block import FractalBlock
 from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fractalnet.model")
 class FractalNet(keras.Model):
     """FractalNet model implementation using modern Keras 3 patterns.
 

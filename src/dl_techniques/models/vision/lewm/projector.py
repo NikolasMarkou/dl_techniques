@@ -20,9 +20,10 @@ See plans/plan_2026-04-21_8416bc0b/decisions.md (D-002) for full rationale.
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.lewm.projector")
 class MLPProjector(keras.layers.Layer):
     """2-layer MLP with intermediate normalization + GELU.
 

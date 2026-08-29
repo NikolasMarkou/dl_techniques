@@ -131,6 +131,7 @@ from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.transformers import TransformerLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -366,7 +367,7 @@ def _coerce_backbone(backbone: Any) -> "BeitModel":
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.beit.model")
 class BeitModel(keras.Model):
     """
     BEiT trunk: patch-embed -> [mask token] -> cls token -> N x BEiT block -> tokens.
@@ -1074,7 +1075,7 @@ class BeitModel(keras.Model):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.beit.model")
 class BeitForMaskedImageModeling(keras.Model):
     """
     BEiT MIM model: trunk -> ``decoder_norm`` -> ``decoder_head`` -> patch logits.
@@ -1303,7 +1304,7 @@ class BeitForMaskedImageModeling(keras.Model):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.beit.model")
 class BeitForImageClassification(keras.Model):
     """
     BEiT classifier: the SAME trunk -> pool -> LayerNorm -> Dropout -> logits.

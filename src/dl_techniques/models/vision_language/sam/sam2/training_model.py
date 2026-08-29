@@ -99,6 +99,7 @@ from dl_techniques.losses.sam_mask_loss import SAMIoULoss
 from dl_techniques.models.vision_language.sam.sam1.training_model import achieved_mask_iou
 from .memory_bank import SAM2MemoryBank
 from .model import SAM2, _select_best_by_iou
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Public output-key constants. Shared with the losses and the trainer so a
@@ -138,7 +139,7 @@ INPUT_BOXES = "boxes"
 INPUT_GT_MASKS = "gt_masks"
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.training_model")
 class SAM2TrainingModel(keras.Model):
     """A trainable ``keras.Model`` that drives :class:`SAM2`'s submodules.
 

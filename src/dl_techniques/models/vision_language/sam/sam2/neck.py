@@ -62,11 +62,12 @@ from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
 from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.neck")
 class SAM2FpnNeck(keras.layers.Layer):
     """Feature-pyramid neck of the SAM 2 image encoder.
 
@@ -460,7 +461,7 @@ class SAM2FpnNeck(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.neck")
 class SAM2ImageEncoder(keras.layers.Layer):
     """Hiera trunk plus FPN neck, with the ``scalp`` level drop.
 

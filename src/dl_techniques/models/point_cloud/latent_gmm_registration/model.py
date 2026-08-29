@@ -73,10 +73,11 @@ from typing import Dict, Any, Tuple
 from dl_techniques.losses.chamfer_loss import ChamferLoss
 from dl_techniques.layers.geometric.point_cloud_autoencoder import (
     PointCloudAutoencoder, CorrespondenceNetwork)
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.latent_gmm_registration.model")
 class LatentGMMRegistration(keras.Model):
     """Robust Semi-Supervised Point Cloud Registration via Latent GMM.
 

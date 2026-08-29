@@ -113,10 +113,11 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tabm.model")
 class TabMModel(keras.Model):
     """TabM: Deep Ensemble Architecture for High-Performance Tabular Learning.
 

@@ -83,6 +83,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # module-private helpers
@@ -392,7 +393,7 @@ def _make_layer_scale(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.vitdet")
 class Sam3ViTDetBlock(keras.layers.Layer):
     """One pre-LN ViT block, either window-local or global.
 
@@ -704,7 +705,7 @@ class Sam3ViTDetBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.vitdet")
 class Sam3ViTDetBackbone(keras.layers.Layer):
     """SAM 3's ViTDet trunk: patch-embed stem, tiled abs-pos, block stack.
 

@@ -96,12 +96,13 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.masked_language_model.mlm")
 class MaskedLanguageModel(keras.Model):
     """A model-agnostic Masked Language Modeling (MLM) pre-trainer.
 

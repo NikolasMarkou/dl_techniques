@@ -7,13 +7,14 @@ from typing import Optional, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.transformers import TransformerLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 # NOTE: LayerScale is no longer instantiated here — TransformerLayer owns it so
 # that gamma is applied inside the residual branch rather than to the block's
 # whole output. See AttentionBlockVLM.__init__.
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fastvlm.components")
 class AttentionBlockVLM(keras.layers.Layer):
     """
     Attention block with vision_heads-specific adaptations.

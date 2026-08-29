@@ -56,6 +56,7 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 
 from .blocks import create_encoder_block
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -73,7 +74,7 @@ DEFAULT_LAYER_NORM_EPSILON: float = 1e-12
 SUPPORTED_POOLING: tuple = ("cls", "mean", "attention", "mean_max", "max", "last")
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.shared.encoder")
 class EmbeddingEncoder(keras.Model):
     """
     Block-agnostic bidirectional text encoder producing one embedding per sequence.

@@ -92,6 +92,7 @@ from keras import ops
 
 from dl_techniques.losses.sam_mask_loss import match_mask_axis
 from .model import SAM
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 # Public output-key constants. Shared with the losses and the trainer so the
@@ -204,7 +205,7 @@ def achieved_mask_iou(
     return (intersection + smooth) / (union + smooth)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.training_model")
 class SAMTrainingModel(keras.Model):
     """
     A trainable ``keras.Model`` that drives :class:`SAM`'s submodules directly.

@@ -107,10 +107,11 @@ from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.ffn import assemble_ffn_config
 
 from .components import Qwen3NextBlock, build_causal_attention_mask
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.qwen.qwen3_next")
 class Qwen3Next(keras.Model):
     """
     Qwen3 Next (Mixture of Experts) model with correct architecture.

@@ -85,11 +85,12 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.graphs.relational_graph_transformer_blocks import (
     RELGTTransformerBlock, RELGTTokenEncoder)
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.relgt.model")
 class RELGT(keras.Model):
     """
     Complete Relational Graph Transformer model for multi-table relational data.

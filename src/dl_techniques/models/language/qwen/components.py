@@ -61,6 +61,7 @@ from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.attention.gated_attention import GatedAttention
 from dl_techniques.utils.masking import create_mask, combine_masks, MaskConfig
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -120,7 +121,7 @@ def build_causal_attention_mask(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.qwen.components")
 class Qwen3NextBlock(keras.layers.Layer):
     """
     Qwen3 Next transformer block implementing the exact architectural pattern.

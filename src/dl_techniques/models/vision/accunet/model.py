@@ -94,10 +94,11 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 from dl_techniques.layers.res_path import ResPath
 from dl_techniques.layers.hanc_block import HANCBlock
 from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.accunet.model")
 class AccUNet(keras.Model):
     """ACC-UNet: a completely convolutional UNet with transformer-like context.
 

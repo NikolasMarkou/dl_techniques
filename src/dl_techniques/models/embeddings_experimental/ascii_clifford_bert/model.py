@@ -63,13 +63,14 @@ from dl_techniques.utils.logger import logger
 
 from ..shared.blocks import clifford_receptive_field
 from ..shared.encoder import EmbeddingEncoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 __all__ = ["AsciiCliffordBert", "create_ascii_clifford_bert"]
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ascii_clifford_bert.model")
 class AsciiCliffordBert(EmbeddingEncoder):
     """
     Clifford-block embedding encoder over the ASCII character vocabulary.

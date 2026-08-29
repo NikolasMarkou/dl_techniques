@@ -8,10 +8,11 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms.factory import create_normalization_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mamba.components")
 class MambaLayer(keras.layers.Layer):
     """
     Core Mamba selective state space model layer.
@@ -645,7 +646,7 @@ class MambaLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mamba.components")
 class MambaResidualBlock(keras.layers.Layer):
     """
     Residual block wrapping a MambaLayer with pre-normalization.

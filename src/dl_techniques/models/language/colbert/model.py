@@ -92,6 +92,7 @@ from .components import (
     ColBERTProjection,
     MaxSimScorer,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # constants
@@ -110,7 +111,7 @@ DOC_SKIPLIST_MASK_KEY = "doc_skiplist_mask"
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.colbert.model")
 class ColBERT(keras.Model):
     """Late-interaction retrieval encoder: BERT, a shared projection, MaxSim.
 

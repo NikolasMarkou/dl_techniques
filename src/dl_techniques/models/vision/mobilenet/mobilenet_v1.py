@@ -79,10 +79,11 @@ from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobilenet.mobilenet_v1")
 class MobileNetV1(keras.Model):
     """MobileNetV1 model implementation with depthwise separable convolutions.
 

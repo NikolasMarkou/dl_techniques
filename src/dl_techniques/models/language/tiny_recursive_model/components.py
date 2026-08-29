@@ -79,11 +79,12 @@ from dl_techniques.layers.transformers import (
     NormalizationType,
     NormalizationPositionType
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tiny_recursive_model.components")
 class TRMReasoningModule(keras.layers.Layer):
     """
     A stack of ``TransformerLayer`` instances applied to an injected latent state.
@@ -434,7 +435,7 @@ class TRMReasoningModule(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tiny_recursive_model.components")
 class TRMInner(keras.layers.Layer):
     """
     One step of TRM's hierarchical reasoning, plus the ACT halting signal.

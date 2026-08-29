@@ -103,10 +103,11 @@ from typing import Optional, Union, Any, Dict, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.time_series.xlstm_blocks import mLSTMBlock, sLSTMBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.xlstm.model")
 class xLSTM(keras.Model):
     """
     Complete xLSTM architecture with stacked sLSTM and mLSTM blocks.

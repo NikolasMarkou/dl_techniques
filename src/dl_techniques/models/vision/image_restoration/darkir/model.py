@@ -97,11 +97,12 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 
 from .components import FreMLP, DilatedBranch, SimpleGate, _add_list
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.darkir.model")
 class DarkIREncoderBlock(keras.layers.Layer):
     """Encoder block (EBlock): parallel dilated branches plus a FreMLP modulator.
 
@@ -443,7 +444,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.darkir.model")
 class DarkIRDecoderBlock(keras.layers.Layer):
     """Decoder block (DBlock): the same dilated path, with a gated FFN instead.
 

@@ -99,6 +99,7 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -126,7 +127,7 @@ REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.swin_transformer.model")
 class SwinTransformer(keras.Model):
     """
     Hierarchical Vision Transformer using shifted windows for efficient image classification.

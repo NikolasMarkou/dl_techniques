@@ -63,11 +63,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.maskformer_segmentation")
 class Sam3SegmentationHead(keras.layers.Layer):
     """SAM 3's MaskFormer head: FPN pixel decoder plus a per-query mask decode.
 

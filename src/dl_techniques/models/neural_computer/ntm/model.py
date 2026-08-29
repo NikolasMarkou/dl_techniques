@@ -75,13 +75,14 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.memory import NTMCell, NTMConfig
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # NTM Model
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ntm.model")
 class NTMModel(keras.Model):
     """
     Neural Turing Machine: an ``NTMCell`` unrolled by ``keras.layers.RNN``.

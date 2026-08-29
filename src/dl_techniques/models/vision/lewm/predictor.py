@@ -16,9 +16,10 @@ from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.transformers.adaln_zero import AdaLNZeroConditionalBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.lewm.predictor")
 class ARPredictor(keras.layers.Layer):
     """Autoregressive predictor with AdaLN-zero conditional Transformer stack.
 

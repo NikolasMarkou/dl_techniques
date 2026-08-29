@@ -66,6 +66,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -81,7 +82,7 @@ StemNormLayer = Literal['batch', 'layer']
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.vit_hmlp.model")
 class ViTHMLP(keras.Model):
     """
     Vision Transformer with Hierarchical MLP Stem using factory-based component creation.

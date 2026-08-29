@@ -111,6 +111,7 @@ from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.layers.transformers.text_encoder import TextEncoder
 from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, FusionStrategy
 from dl_techniques.layers.transformers.vision_encoder import VisionEncoder, create_vision_encoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -120,7 +121,7 @@ TextComponentType = Literal['decoder', 'encoder']
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.nano_vlm.model")
 class NanoVLM(keras.Model):
     """
     NanoVLM: Modern Compact Vision-Language Model using existing dl-techniques components.

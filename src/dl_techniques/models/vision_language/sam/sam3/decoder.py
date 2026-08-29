@@ -67,6 +67,7 @@ from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -332,7 +333,7 @@ class _Sam3DecoderAttention(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.decoder")
 class Sam3DecoderLayer(keras.layers.Layer):
     """One SAM 3 detection-decoder layer: self, text-cross, image-cross, FFN.
 
@@ -655,7 +656,7 @@ class Sam3DecoderLayer(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.decoder")
 class Sam3TransformerDecoder(keras.layers.Layer):
     """SAM 3's detection-decoder stack: layers, box refinement, presence.
 

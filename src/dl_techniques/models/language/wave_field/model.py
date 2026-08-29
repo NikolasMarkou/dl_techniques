@@ -146,11 +146,12 @@ from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.wave_field.model")
 class WaveFieldDecoderBlock(keras.layers.Layer):
     """Pre-norm transformer decoder block with :class:`WaveFieldAttention`.
 
@@ -330,7 +331,7 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.wave_field.model")
 class WaveFieldLLM(keras.Model):
     """Decoder-only language model with WaveFieldAttention blocks.
 

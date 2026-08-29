@@ -105,11 +105,12 @@ from dl_techniques.layers.time_series.deepar_blocks import (
     NegativeBinomialLikelihoodHead,
 )
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.deepar.model")
 class DeepAR(keras.Model, ForecastMixin):
     """
     DeepAR: Probabilistic forecasting with autoregressive recurrent networks.

@@ -87,11 +87,12 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.grid_sample import make_grid, interpolate_grid
 from dl_techniques.layers.thera_heat_field import HeatField, DEFAULT_K_INIT
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.hypernetwork")
 class TheraHypernetwork(keras.layers.Layer):
     """THERA hypernetwork + per-pixel implicit-field decoder.
 

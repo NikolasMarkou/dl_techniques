@@ -69,6 +69,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # module-private helpers
@@ -183,7 +184,7 @@ def _encode_position(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.necks")
 class Sam3DualViTDetNeck(keras.layers.Layer):
     """SAM 3's dual SimpleFPN neck over a single channels-last trunk map.
 

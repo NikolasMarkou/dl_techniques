@@ -69,6 +69,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -416,7 +417,7 @@ class _SAM2RoPEAttention(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.memory_attention")
 class SAM2MemoryAttentionLayer(keras.layers.Layer):
     """One SAM 2 memory-attention block: self-attn, memory cross-attn, FFN.
 
@@ -742,7 +743,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.memory_attention")
 class SAM2MemoryAttention(keras.layers.Layer):
     """The full SAM 2 memory-attention stack.
 

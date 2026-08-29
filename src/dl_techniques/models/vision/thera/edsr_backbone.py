@@ -42,6 +42,7 @@ Reference:
 
 import keras
 from typing import Any, Dict, List, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -51,7 +52,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.edsr_backbone")
 class EDSRResidualBlock(keras.layers.Layer):
     """An EDSR residual block: ``x + res_scale * conv(act(conv(x)))``.
 
@@ -192,7 +193,7 @@ class EDSRResidualBlock(keras.layers.Layer):
         return cls(**config)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.edsr_backbone")
 class EDSRBackbone(keras.layers.Layer):
     """EDSR-baseline feature backbone for THERA (no upsampling tail).
 

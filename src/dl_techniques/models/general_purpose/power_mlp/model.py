@@ -77,11 +77,12 @@ from typing import List, Optional, Union, Dict, Any, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.power_mlp.model")
 class PowerMLP(keras.Model):
     """PowerMLP: a dual-branch MLP that trades KAN's splines for ReLU-k.
 

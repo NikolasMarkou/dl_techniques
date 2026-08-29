@@ -80,11 +80,12 @@ from dl_techniques.layers.complex_layers import (
     ComplexDropout,
     ComplexGlobalAveragePooling2D,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.coshnet.model")
 class CoShNet(keras.Model):
     """Complex Shearlet Network: a complex-valued classifier on a fixed frontend.
 

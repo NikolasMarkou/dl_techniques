@@ -91,11 +91,12 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fnet.model")
 class FNet(keras.Model):
     """FNet: a transformer encoder whose token mixer is a Fourier transform.
 

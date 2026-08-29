@@ -80,6 +80,7 @@ from typing import Any, Dict, Optional, Tuple
 from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
 from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -100,7 +101,7 @@ def _inverse_softplus(x: float) -> float:
     return math.log(math.expm1(x))
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.adaptive_ema.model")
 class AdaptiveEMASlopeFilterModel(keras.Model):
     """
     ``keras.Model`` for adaptive EMA slope filtering with optional learnable

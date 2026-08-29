@@ -82,11 +82,12 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers.text_encoder import TextEncoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.text_encoder_ve")
 class Sam3TextEncoder(keras.layers.Layer):
     """SAM 3's CLIP text tower, emitting the full per-token sequence.
 

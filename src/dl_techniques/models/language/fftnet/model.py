@@ -91,12 +91,13 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Core FFT Mixing Layer (As Described in Paper)
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fftnet.model")
 class FFTMixer(keras.layers.Layer):
     """Adaptive spectral filtering: global token mixing at ``O(N log N)``.
 
@@ -413,7 +414,7 @@ class FFTMixer(keras.layers.Layer):
 # FFTNet Transformer Block
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fftnet.model")
 class FFTNetBlock(keras.layers.Layer):
     """A pre-norm transformer block with :class:`FFTMixer` in the attention slot.
 
@@ -613,7 +614,7 @@ class FFTNetBlock(keras.layers.Layer):
 # FFTNet Foundation Model
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fftnet.model")
 class FFTNet(keras.Model):
     """FFTNet: a pure vision encoder built on adaptive spectral filtering.
 

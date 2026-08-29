@@ -39,13 +39,14 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.fft_layers import FFTLayer, IFFTLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 # Core PW-FNet Block
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.pw_fnet.model")
 class PW_FNet_Block(keras.layers.Layer):
     """
     Pyramid Wavelet-Fourier Network (PW-FNet) building block with configurable components.
@@ -444,7 +445,7 @@ class PW_FNet_Block(keras.layers.Layer):
 # Scaling Layers
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.pw_fnet")
+@register_dl_technique("dl_techniques.pw_fnet", legacy_alias=False)
 class Downsample(keras.layers.Layer):
     """
     Trainable downsampling layer using strided convolution.
@@ -530,7 +531,7 @@ class Downsample(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.pw_fnet")
+@register_dl_technique("dl_techniques.pw_fnet", legacy_alias=False)
 class Upsample(keras.layers.Layer):
     """
     Trainable upsampling layer using transposed convolution.
@@ -626,7 +627,7 @@ class Upsample(keras.layers.Layer):
 _NUM_SCALES = 2
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.pw_fnet.model")
 class PW_FNet(keras.Model):
     """
     Complete Pyramid Wavelet-Fourier Network (PW-FNet) model for image restoration.

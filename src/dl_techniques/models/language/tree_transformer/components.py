@@ -31,10 +31,11 @@ from dl_techniques.layers.norms import (
     create_normalization_layer,
     NormalizationType,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tree_transformer.components")
 class PositionalEncoding(keras.layers.Layer):
     """
     Injects sinusoidal positional encoding into input embeddings.
@@ -158,7 +159,7 @@ class PositionalEncoding(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tree_transformer.components")
 class GroupAttention(keras.layers.Layer):
     """
     Hierarchical group attention for Tree Transformer.
@@ -381,7 +382,7 @@ class GroupAttention(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tree_transformer.components")
 class TreeMHA(keras.layers.Layer):
     """
     Multi-Head Attention modulated by Tree Transformer group probabilities.
@@ -541,7 +542,7 @@ class TreeMHA(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tree_transformer.components")
 class TreeTransformerBlock(keras.layers.Layer):
     """
     Single block of the Tree Transformer encoder.

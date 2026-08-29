@@ -82,6 +82,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -93,7 +94,7 @@ _HYPERNETWORK_MLP_DEPTH = 3
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.mask_decoder")
 class SAM2MaskDecoder(keras.layers.Layer):
     """Predict masks, IoU scores, an object score and an object pointer.
 

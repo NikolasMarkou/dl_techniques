@@ -65,6 +65,7 @@ References:
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Constants
@@ -127,7 +128,7 @@ def _safe_l2_normalize(x: Any) -> Any:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@register_dl_technique("dl_techniques")
 class ColBERTProjection(keras.layers.Layer):
     """Bias-free linear projection to the retrieval dimension, then L2 normalize.
 
@@ -236,7 +237,7 @@ class ColBERTProjection(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@register_dl_technique("dl_techniques")
 class MaxSimScorer(keras.layers.Layer):
     """Late-interaction MaxSim reduction over a dense query-by-document matrix.
 

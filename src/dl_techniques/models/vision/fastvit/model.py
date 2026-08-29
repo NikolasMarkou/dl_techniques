@@ -127,6 +127,7 @@ from dl_techniques.layers.fastvit.reference import (
     REFERENCE_NORM_EPSILON,
     REFERENCE_PADDING_MODE,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # reference constants
@@ -346,7 +347,7 @@ def _stagewise_drop_path_rates(
     return slices
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fastvit.model")
 class FastVitImageEncoder(keras.Model):
     """MobileCLIP2's FastViT (MCi) image tower.
 

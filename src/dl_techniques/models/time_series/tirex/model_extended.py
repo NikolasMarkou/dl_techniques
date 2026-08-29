@@ -85,11 +85,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 from .model import BlockType, DEFAULT_QUANTILES, TiRexCore
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tirex.model_extended")
 class TiRexExtended(TiRexCore):
     """
     TiRex Extended (Query-Based) Architecture.

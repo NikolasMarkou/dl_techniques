@@ -97,10 +97,11 @@ from typing import Optional, Tuple, Union, List, Dict, Any
 
 from .conv_decoder import ConvDecoder
 from .patch_masking import PatchMasking
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.masked_autoencoder.mae")
 class MaskedAutoencoder(keras.Model):
     """Masked Autoencoder (MAE) model.
 

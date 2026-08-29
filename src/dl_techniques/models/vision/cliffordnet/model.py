@@ -118,6 +118,7 @@ from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -155,7 +156,7 @@ _STEM_BN_MOMENTUM = 0.9
 # ===========================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.cliffordnet.model")
 class CliffordNet(keras.Model):
     """Isotropic CliffordNet vision backbone.
 

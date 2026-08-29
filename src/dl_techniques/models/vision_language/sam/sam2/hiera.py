@@ -71,6 +71,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -295,7 +296,7 @@ def _do_pool(x: Any, q_stride: Tuple[int, int]) -> Any:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.hiera")
 class HieraPatchEmbed(keras.layers.Layer):
     """Hiera's stem: an OVERLAPPING strided convolution that keeps the grid.
 
@@ -428,7 +429,7 @@ class HieraPatchEmbed(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.hiera")
 class HieraMultiScaleAttention(keras.layers.Layer):
     """Hiera's mask-unit attention, with ASYMMETRIC query pooling.
 
@@ -631,7 +632,7 @@ class HieraMultiScaleAttention(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.hiera")
 class HieraBlock(keras.layers.Layer):
     """One Hiera block: windowed mask-unit attention plus an MLP.
 
@@ -904,7 +905,7 @@ class HieraBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.hiera")
 class Hiera(keras.layers.Layer):
     """The SAM 2 Hiera vision trunk.
 

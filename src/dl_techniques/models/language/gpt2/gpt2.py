@@ -118,11 +118,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@register_dl_technique("dl_techniques")
 def gpt2_gelu(x: keras.KerasTensor) -> keras.KerasTensor:
     """GPT-2's ``gelu_new``: the tanh approximation, not the exact-erf form.
 
@@ -139,7 +140,7 @@ def gpt2_gelu(x: keras.KerasTensor) -> keras.KerasTensor:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.gpt2.gpt2")
 class GPT2(keras.Model):
     """GPT-2 language model with weight-tied LM head.
 

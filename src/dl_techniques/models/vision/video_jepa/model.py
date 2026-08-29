@@ -71,9 +71,10 @@ from .config import VideoJEPAConfig
 from .encoder import VideoJEPACliffordEncoder
 from .masking import TubeMaskGenerator
 from .predictor import VideoJEPAPredictor
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.video_jepa.model")
 class VideoJEPA(keras.Model):
     """Video-JEPA-Clifford top-level model (pixels-only, iter-3).
 

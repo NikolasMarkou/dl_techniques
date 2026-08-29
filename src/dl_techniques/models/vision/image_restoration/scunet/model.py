@@ -67,10 +67,11 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.scunet.model")
 class SCUNet(keras.Model):
     """Swin-Conv-UNet for image restoration tasks.
 

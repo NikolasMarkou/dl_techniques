@@ -63,6 +63,7 @@ from keras import ops
 from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 # config name -> (num_rdb_D, num_conv_layers_C, growth_rate_G)
@@ -73,7 +74,7 @@ _RDN_CONFIGS: Dict[str, Tuple[int, int, int]] = {
 }
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.rdn_backbone")
 class RDBConv(keras.layers.Layer):
     """Single dense-connected conv unit of a Residual Dense Block.
 
@@ -162,7 +163,7 @@ class RDBConv(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.rdn_backbone")
 class RDB(keras.layers.Layer):
     """Residual Dense Block: ``C`` dense conv units + local fusion + residual.
 
@@ -285,7 +286,7 @@ class RDB(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.rdn_backbone")
 class RDNBackbone(keras.layers.Layer):
     """THERA's RDN feature backbone (no upsampling).
 

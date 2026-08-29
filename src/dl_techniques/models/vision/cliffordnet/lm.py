@@ -92,13 +92,14 @@ from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 
 _DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.cliffordnet.lm")
 class CliffordNetLM(keras.Model):
     """CliffordNet language model for causal language modeling.
 

@@ -140,6 +140,7 @@ from dl_techniques.models.vision.fastvit import FastVitImageEncoder
 # the IMAGE branch in `components.py`. The text tower is a plain CLIP
 # transformer and is faithful for both.
 from .components import MobileClipTextEncoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # reference constants
@@ -219,7 +220,7 @@ def _resolve_model_variant(variant: str) -> Dict[str, Any]:
     return copy.deepcopy(table[key])
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobile_clip.mobile_clip_v2")
 class MobileClipV2Model(keras.Model):
     """
     MobileCLIP2 dual encoder — FastViT (MCi) image tower + CLIP text tower.

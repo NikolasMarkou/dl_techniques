@@ -104,6 +104,7 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.models.vision.dino.common import reject_input_shape
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Module constants
@@ -117,7 +118,7 @@ _DEFAULT_PATCH_SIZE = 14
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.dino_v2")
 class DINOv2Block(keras.layers.Layer):
     """
     DINOv2 Transformer Block with LearnableMultiplier scaling and configurable components.
@@ -422,7 +423,7 @@ class DINOv2Block(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.dino_v2")
 class DINOv2VisionTransformer(keras.Model):
     """
     DINOv2 Vision Transformer backbone implementation following Modern Keras 3 patterns.
@@ -1015,7 +1016,7 @@ class DINOv2VisionTransformer(keras.Model):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.dino_v2")
 class DINOv2(keras.Model):
     """
     Complete DINOv2 Model with classification head following modern Keras 3 patterns.

@@ -102,13 +102,14 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Transformer Components
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.detr.model")
 class DetrTransformer(layers.Layer):
     """
     DETR Transformer combining encoder and decoder stacks.
@@ -335,7 +336,7 @@ class DetrTransformer(layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.detr.model")
 class DETR(models.Model):
     """
     The complete DETR model for end-to-end object detection.

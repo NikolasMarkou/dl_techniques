@@ -88,11 +88,12 @@ from typing import Optional, Union, Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from .components import MobileClipTextEncoder, MobileClipImageEncoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobile_clip.mobile_clip_v1")
 class MobileClipModel(keras.Model):
     """
     Mobile CLIP Model combining image and text encoders with variant support.

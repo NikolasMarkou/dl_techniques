@@ -37,10 +37,11 @@ from dl_techniques.layers.attention.factory import AttentionType
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
 
 from .components import AttentionBlockVLM
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.fastvlm.model")
 class FastVLM(keras.Model):
     """
     FastVLM: A fast hybrid vision_heads model combining efficient convolutions and transformers.

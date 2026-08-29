@@ -77,12 +77,13 @@ from typing import Optional, Tuple, Dict, Any, Union, List
 
 from dl_techniques.layers.vector_quantizer import VectorQuantizer
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.vq_vae.model")
 class VQVAEModel(keras.Model):
     """
     Complete VQ-VAE model combining encoder, quantizer, and decoder.

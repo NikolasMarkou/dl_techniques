@@ -32,10 +32,11 @@ from typing import Optional, Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.yolo12_blocks import ConvBlock, A2C2fBlock, C3k2Block
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.yolo12.feature_extractor")
 class YOLOv12FeatureExtractor(keras.Model):
     """
     YOLOv12 Feature Extractor (Backbone + Neck).

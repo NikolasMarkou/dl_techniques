@@ -83,9 +83,10 @@ from dl_techniques.utils.logger import logger
 
 from .config import NAMConfig, NAM_VARIANTS
 from .cell import NAMCell
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.nam.model")
 class NAM(keras.Model):
     """
     Neural Arithmetic Module.

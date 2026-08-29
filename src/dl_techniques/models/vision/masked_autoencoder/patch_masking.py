@@ -5,10 +5,11 @@ A patch-based random masking strategy for self-supervised learning.
 import keras
 from keras import ops, random
 from typing import Optional, Tuple, Union, Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.masked_autoencoder.patch_masking")
 class PatchMasking(keras.layers.Layer):
     """Layer for creating patches and applying random masking.
 

@@ -80,11 +80,12 @@ from dl_techniques.layers.transformers import (
 from dl_techniques.layers.activations import resolve_activation
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.bert.model")
 class BERT(keras.Model):
     """BERT (Bidirectional Encoder Representations from Transformers) model.
 

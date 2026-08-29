@@ -69,6 +69,7 @@ from dl_techniques.layers.transformers.sd3_adaln import (
     AdaLayerNormContinuous,
 )
 from dl_techniques.layers.ffn.gelu_mlp_ffn import GELUMLPFFN
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -137,7 +138,7 @@ def _modulate(
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@register_dl_technique("dl_techniques.models")
 class MMDiTBlock(keras.layers.Layer):
     """SD3 MMDiT dual-stream transformer block.
 
@@ -473,7 +474,7 @@ class MMDiTBlock(keras.layers.Layer):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models")
+@register_dl_technique("dl_techniques.models")
 class MMDiTFinalLayer(keras.layers.Layer):
     """SD3 MMDiT final projection head.
 

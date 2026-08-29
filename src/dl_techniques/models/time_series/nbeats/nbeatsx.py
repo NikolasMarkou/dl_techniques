@@ -96,10 +96,11 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.nbeats.nbeatsx")
 class NBeatsXNet(keras.Model):
     """N-BEATSx: Neural Basis Expansion Analysis with Exogenous Variables.
 

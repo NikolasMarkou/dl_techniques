@@ -94,6 +94,7 @@ from dl_techniques.losses.sam3_detection_loss import (
 )
 from dl_techniques.utils.logger import logger
 from .sam3_image import Sam3Image
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Widths DERIVED from the imported constants -- never restated. `_BOX_WIDTH`
@@ -450,7 +451,7 @@ def pack_targets(target_boxes: Any,
     return ops.concatenate([rows, meta], axis=1)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.training_model")
 class Sam3TrainingModel(keras.Model):
     """A :class:`Sam3Image` whose output is ONE packed supervision tensor.
 

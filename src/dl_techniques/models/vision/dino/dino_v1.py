@@ -120,6 +120,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -137,7 +138,7 @@ _DEFAULT_PATCH_SIZE = 16
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.dino_v1")
 class DINOHead(keras.layers.Layer):
     """
     DINO projection head for self-supervised learning.
@@ -478,7 +479,7 @@ class DINOHead(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.dino_v1")
 class DINOv1(keras.Model):
     """
     DINO Vision Transformer model for self-supervised learning.

@@ -95,11 +95,12 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from .components_v2 import Mamba2ResidualBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mamba.mamba_v2")
 class Mamba2(keras.Model):
     """
     Mamba v2 foundation model for efficient sequence modeling.

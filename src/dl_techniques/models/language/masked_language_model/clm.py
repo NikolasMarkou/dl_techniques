@@ -88,9 +88,10 @@ import tensorflow as tf
 from typing import Dict, Any, Optional, Union, Tuple
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.masked_language_model.clm")
 class CausalLanguageModel(keras.Model):
     """A model-agnostic Causal Language Modeling (CLM) pre-trainer.
 

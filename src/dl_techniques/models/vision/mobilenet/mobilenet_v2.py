@@ -90,11 +90,12 @@ from dl_techniques.models.vision.mobilenet.common import (
     materialize_for_summary,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobilenet.mobilenet_v2")
 class MobileNetV2(keras.Model):
     """MobileNetV2 classification model built with Universal Inverted Bottleneck blocks.
 

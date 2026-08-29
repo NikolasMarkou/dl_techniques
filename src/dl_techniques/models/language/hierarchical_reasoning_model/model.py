@@ -113,10 +113,11 @@ from typing import Optional, Union, Dict, Any, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 from dl_techniques.layers.reasoning.hrm_reasoning_core import HierarchicalReasoningCore
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.hierarchical_reasoning_model.model")
 class HierarchicalReasoningModel(keras.Model):
     """Hierarchical Reasoning Model with Adaptive Computation Time.
 

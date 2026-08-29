@@ -78,11 +78,12 @@ from dl_techniques.layers.transformers import (
 )
 
 from .components import TRMInner
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tiny_recursive_model.model")
 class TRM(keras.Model):
     """
     Tiny Recursive Model (TRM) with Adaptive Computation Time (ACT).

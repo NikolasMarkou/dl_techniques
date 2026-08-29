@@ -130,6 +130,7 @@ from dl_techniques.utils.clip_utils import (
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 
@@ -198,7 +199,7 @@ _LN_EPS: float = 1e-6
 # ===========================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.clip.clifford_clip")
 class CliffordCLIP(keras.Model):
     """CLIP-style dual-encoder model with Clifford geometric blocks.
 

@@ -111,6 +111,7 @@ from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.time_series.xlstm_blocks import mLSTMBlock, sLSTMBlock
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -134,7 +135,7 @@ DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.xlstm.forecaster")
 class xLSTMForecaster(keras.Model, ForecastMixin):
     """
     xLSTM forecaster for continuous time-series forecasting.

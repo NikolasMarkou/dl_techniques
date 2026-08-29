@@ -52,9 +52,10 @@ from dl_techniques.models.vision.lewm.embedder import ActionEmbedder
 from dl_techniques.models.vision.lewm.projector import MLPProjector
 from dl_techniques.models.vision.lewm.predictor import ARPredictor
 from dl_techniques.regularizers.sigreg import SIGRegLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.lewm.model")
 class LeWM(keras.Model):
     """LeWM — JEPA-style action-conditioned world model.
 

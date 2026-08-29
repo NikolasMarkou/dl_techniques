@@ -82,6 +82,7 @@ from typing import Any, Dict, Optional, Tuple
 from .decoder import Sam3TransformerDecoder
 from .model_misc import Sam3DotProductScoring
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -110,7 +111,7 @@ DEFAULT_ANCHOR_SIZE: float = 0.1776
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.query_selection")
 class Sam3EncoderQuerySelection(keras.layers.Layer):
     """Per-memory-position objectness and box proposals, plus the top-k pick.
 

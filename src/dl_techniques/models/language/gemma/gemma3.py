@@ -111,11 +111,12 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.gemma.gemma3")
 class Gemma3(keras.Model):
     """
     Gemma 3 Language Model with dual normalization and mixed attention patterns.

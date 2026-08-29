@@ -57,13 +57,14 @@ from dl_techniques.utils.logger import logger
 
 from ..shared.blocks import conv_receptive_field
 from ..shared.encoder import EmbeddingEncoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 __all__ = ["AsciiConvNextBert", "create_ascii_convnext_bert"]
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ascii_convnext_bert.model")
 class AsciiConvNextBert(EmbeddingEncoder):
     """
     ConvNeXt-block embedding encoder over the ASCII character vocabulary.

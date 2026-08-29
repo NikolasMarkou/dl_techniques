@@ -126,6 +126,7 @@ from dl_techniques.models.vision_language.sd3_mmdit.config import (
     SD3MMDiTConfig,
     get_sd3_config,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # 2D sin-cos positional embedding helpers (numpy; computed once at build)
@@ -203,7 +204,7 @@ def _1d_sincos(dim: int, pos: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sd3_mmdit.transformer")
 class SD3MMDiT(keras.Model):
     """Stable Diffusion 3 MMDiT dual-stream velocity predictor.
 

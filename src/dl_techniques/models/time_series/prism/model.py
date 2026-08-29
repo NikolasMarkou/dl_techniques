@@ -104,11 +104,12 @@ from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.time_series.prism_blocks import PRISMLayer, PRISMTimeTree
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.prism.model")
 class PRISMModel(keras.Model, ForecastMixin):
     """
     Complete PRISM model for time series forecasting.

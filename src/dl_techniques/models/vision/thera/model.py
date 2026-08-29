@@ -62,6 +62,7 @@ from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
 from dl_techniques.models.vision.thera.rdn_backbone import RDNBackbone
 from dl_techniques.models.vision.thera.tails import build_thera_tail
 from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # constants
@@ -80,7 +81,7 @@ _VALID_SIZES: Tuple[str, ...] = ("air", "plus", "pro")
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.model")
 class Thera(keras.Model):
     """THERA arbitrary-scale super-resolution model (pure residual-field predictor).
 

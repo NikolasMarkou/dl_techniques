@@ -53,6 +53,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -67,7 +68,7 @@ FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', '
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.vit_siglip.model")
 class SigLIPVisionTransformer(keras.Model):
     """
     Vision Transformer with a two-stage convolutional patch-embedding stem.

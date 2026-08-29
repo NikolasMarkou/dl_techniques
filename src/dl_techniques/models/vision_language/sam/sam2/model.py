@@ -123,6 +123,7 @@ from dl_techniques.models.vision_language.sam.sam2.memory_bank import SAM2Memory
 from dl_techniques.models.vision_language.sam.sam2.memory_encoder import SAM2MemoryEncoder
 from dl_techniques.models.vision_language.sam.sam2.neck import SAM2ImageEncoder
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -227,7 +228,7 @@ def _select_best_by_iou(tensor: Any, iou_predictions: Any) -> Any:
     return ops.take_along_axis(tensor, index, axis=1)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.model")
 class SAM2(keras.Model):
     """Segment Anything 2 — promptable image and video segmentation.
 

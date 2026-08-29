@@ -109,10 +109,11 @@ from dl_techniques.utils.clip_utils import (
 )
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.masking import create_mask
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.clip.model")
 class CLIP(keras.Model):
     """CLIP: two independent transformer towers meeting at one similarity matmul.
 

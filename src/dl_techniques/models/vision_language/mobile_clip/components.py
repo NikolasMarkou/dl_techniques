@@ -11,6 +11,7 @@ from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Backbone name resolution
@@ -37,7 +38,7 @@ _BACKBONE_ALIASES: Dict[str, str] = {
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobile_clip.components")
 class ImageProjectionHead(keras.layers.Layer):
     """
     Projects image feature maps into a fixed-size embedding.
@@ -184,7 +185,7 @@ class ImageProjectionHead(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobile_clip.components")
 class MobileClipImageEncoder(keras.Model):
     """
     MobileClip Image Encoder combining a backbone and a projection head.
@@ -334,7 +335,7 @@ class MobileClipImageEncoder(keras.Model):
 # Text Encoder Components
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobile_clip.components")
 class MobileClipTextEncoder(keras.layers.Layer):
     """
     MobileClip Text Encoder using a stack of Transformer layers.

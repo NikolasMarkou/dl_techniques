@@ -4,11 +4,12 @@ import numpy as np
 from typing import Optional, Any, Dict, Tuple
 
 from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mamba.components_v2")
 class Mamba2Layer(keras.layers.Layer):
     """
     Core Mamba v2 selective state space model layer.
@@ -441,7 +442,7 @@ class Mamba2Layer(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mamba.components_v2")
 class Mamba2ResidualBlock(keras.layers.Layer):
     """Residual block wrapping a Mamba2Layer with pre-normalization.
 

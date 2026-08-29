@@ -43,11 +43,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.layers.memory.ntm_interface import NTMConfig
 from dl_techniques.layers.memory.baseline_ntm import NeuralTuringMachine
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ntm.model_multitask")
 class NTMMultiTask(keras.Model):
     """
     A Neural Turing Machine wrapped in a task-conditioning fusion step.

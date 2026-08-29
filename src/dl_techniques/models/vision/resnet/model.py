@@ -102,11 +102,12 @@ from dl_techniques.layers.standard_blocks import (
     BottleneckBlock,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.resnet.model")
 class ResNet(keras.Model):
     """
     Deep residual network with configurable blocks and optional deep supervision.

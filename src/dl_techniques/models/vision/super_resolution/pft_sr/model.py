@@ -124,10 +124,11 @@ from typing import Any, Dict, Optional, List, Literal
 from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.pft_sr.model")
 class PFTSR(keras.Model):
     """
     Progressive Focused Transformer for Single Image Super-Resolution.

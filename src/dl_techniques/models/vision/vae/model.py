@@ -133,6 +133,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Supported VAE sampling modes
@@ -147,7 +148,7 @@ VALID_SAMPLING_TYPES = (
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.vae.model")
 class VAE(keras.Model):
     """ResNet-based Variational Autoencoder using modern Keras 3 patterns.
 

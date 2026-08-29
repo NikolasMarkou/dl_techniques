@@ -124,6 +124,7 @@ from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding1D
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -149,7 +150,7 @@ DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tirex.model")
 class TiRexCore(keras.Model, ForecastMixin):
     """
     TiRex Core Model for Time Series Forecasting.

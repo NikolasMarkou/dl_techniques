@@ -82,10 +82,11 @@ from .caffe_reference_init import (
     CAFFE_HEAD_INITIALIZER,
     CAFFE_XAVIER_INITIALIZER,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.squeezenet.squeezenet_v2")
 class SimplifiedFireModule(keras.layers.Layer):
     """
     Simplified Fire module - the core building block of SqueezeNodule-Net.
@@ -200,7 +201,7 @@ class SimplifiedFireModule(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.squeezenet.squeezenet_v2")
 class SqueezeNoduleNetV2(keras.Model):
     """
     SqueezeNodule-Net V2 model implementation.

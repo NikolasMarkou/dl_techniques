@@ -85,11 +85,12 @@ from dl_techniques.layers.transformers import (
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.distilbert.model")
 class DistilBERT(keras.Model):
     """DistilBERT (Distilled BERT) model.
 

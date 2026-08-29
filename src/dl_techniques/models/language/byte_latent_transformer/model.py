@@ -116,12 +116,13 @@ from dl_techniques.layers.blt_blocks import (
     DynamicPatcher, LocalDecoder,
     LocalEncoder, GlobalTransformer
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.byte_latent_transformer.model")
 class ByteLatentTransformer(keras.Model):
     """
     Complete Byte Latent Transformer model with hierarchical processing architecture.

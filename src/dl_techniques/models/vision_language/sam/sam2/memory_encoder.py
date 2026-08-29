@@ -72,11 +72,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.memory_encoder")
 class SAM2MaskDownSampler(keras.layers.Layer):
     """Strided convolutional stack compressing a mask to the feature grid.
 
@@ -372,7 +373,7 @@ class SAM2MaskDownSampler(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.memory_encoder")
 class SAM2Fuser(keras.layers.Layer):
     """Stack of residual ConvNeXt V1 blocks fusing mask and pixel features.
 
@@ -523,7 +524,7 @@ class SAM2Fuser(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam2.memory_encoder")
 class SAM2MemoryEncoder(keras.layers.Layer):
     """Encode a predicted mask plus pixel features into spatial memory.
 

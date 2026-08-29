@@ -84,13 +84,14 @@ from .components import (  # noqa: F401
     TreeMHA,
     TreeTransformerBlock,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Main TreeTransformer Model
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.tree_transformer.model")
 class TreeTransformer(keras.Model):
     """Tree Transformer model for grammar induction and language modeling.
 

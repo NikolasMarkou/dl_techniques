@@ -53,6 +53,7 @@ from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -101,7 +102,7 @@ def clifford_receptive_field(num_layers: int, context_kernel_size: int) -> int:
     return num_layers * 2 * (context_kernel_size - 1) + 1
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.shared.blocks")
 class CliffordEncoderBlock(keras.layers.Layer):
     """
     Bidirectional Clifford mixing block with the transformer block's call contract.
@@ -337,7 +338,7 @@ def conv_receptive_field(num_layers: int, kernel_size: int) -> int:
     return num_layers * (kernel_size - 1) + 1
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.shared.blocks")
 class ConvNextEncoderBlock(keras.layers.Layer):
     """
     ConvNeXt V1 mixing block over a token sequence, with the block call contract.

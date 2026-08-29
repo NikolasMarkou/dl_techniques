@@ -156,6 +156,7 @@ from dl_techniques.models.vision_language.sam.sam3.necks import Sam3DualViTDetNe
 from dl_techniques.models.vision_language.sam.sam3.query_selection import Sam3EncoderQuerySelection
 from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
 from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: The six composed components, in the order they run. Serialization iterates
 #: this tuple rather than repeating the names, so a component added to the
@@ -171,7 +172,7 @@ COMPONENT_KEYS: Tuple[str, ...] = (
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam3.sam3_image")
 class Sam3Image(keras.Model):
     """SAM 3's text-prompted image model.
 

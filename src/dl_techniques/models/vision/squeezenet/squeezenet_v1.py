@@ -84,10 +84,11 @@ from .caffe_reference_init import (
     CAFFE_HEAD_INITIALIZER,
     CAFFE_XAVIER_INITIALIZER,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.squeezenet.squeezenet_v1")
 class FireModule(keras.layers.Layer):
     """
     Fire module - the fundamental building block of SqueezeNet.
@@ -215,7 +216,7 @@ class FireModule(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.squeezenet.squeezenet_v1")
 class SqueezeNetV1(keras.Model):
     """
     SqueezeNet V1 model implementation.

@@ -60,6 +60,7 @@ from dl_techniques.models.vision_language.ideogram4.config import (
     get_ideogram4_config,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -88,7 +89,7 @@ def _check_div32(value: int, what: str) -> None:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class ResnetBlock(keras.layers.Layer):
     """Flux2 residual block: (GroupNorm32 + swish + Conv3x3) x2 + skip.
 
@@ -203,7 +204,7 @@ class ResnetBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class AttnBlock(keras.layers.Layer):
     """Spatial self-attention block (Flux2 mid-block only).
 
@@ -308,7 +309,7 @@ class AttnBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.ideogram4")
+@register_dl_technique("dl_techniques.ideogram4", legacy_alias=False)
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
 
@@ -378,7 +379,7 @@ class Downsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.ideogram4")
+@register_dl_technique("dl_techniques.ideogram4", legacy_alias=False)
 class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
 
@@ -447,7 +448,7 @@ class Upsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Encoder(keras.layers.Layer):
     """Flux2 KL-VAE encoder: image -> ``2 * z_channels`` latent params.
 
@@ -633,7 +634,7 @@ class Encoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Decoder(keras.layers.Layer):
     """Flux2 KL-VAE decoder: ``z_channels`` latent -> reconstructed image.
 
@@ -821,7 +822,7 @@ class Decoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class AutoEncoder(keras.Model):
     """Flux2 KL-VAE: Encoder + KL ``Sampling`` reparameterization + Decoder.
 

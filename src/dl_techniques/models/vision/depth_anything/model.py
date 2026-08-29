@@ -156,6 +156,7 @@ from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
 from dl_techniques.models.vision.vit.model import ViT
 
 from .components import DPTDecoder, REFERENCE_BN_EPSILON
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Map depth_anything encoder_type slugs to ViT scale names.
 #
@@ -173,7 +174,7 @@ _VIT_PATCH_SIZE: int = 16
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.depth_anything.model")
 class DepthAnything(keras.Model):
     """Depth Anything model implementation.
 

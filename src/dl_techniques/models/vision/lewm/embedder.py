@@ -16,9 +16,10 @@ is `(B, T, emb_dim)`.
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.lewm.embedder")
 class ActionEmbedder(keras.layers.Layer):
     """Embed per-timestep action vectors to the model's embedding space.
 

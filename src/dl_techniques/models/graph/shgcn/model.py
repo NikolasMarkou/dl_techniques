@@ -39,10 +39,11 @@ from typing import List, Optional, Tuple, Union, Any
 
 from dl_techniques.layers.graphs.fermi_diract_decoder import FermiDiracDecoder
 from dl_techniques.layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer import SHGCNLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNModel(keras.Model):
     """
     Multi-layer Simplified Hyperbolic Graph Convolutional Neural Network.
@@ -295,7 +296,7 @@ class SHGCNModel(keras.Model):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNNodeClassifier(keras.Model):
     """
     Complete node classification model with sHGCN backbone and classification head.
@@ -460,7 +461,7 @@ class SHGCNNodeClassifier(keras.Model):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNLinkPredictor(keras.Model):
     """
     Complete link prediction model with sHGCN backbone and Fermi-Dirac decoder.

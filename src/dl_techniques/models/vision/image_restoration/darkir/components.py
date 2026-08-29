@@ -1,5 +1,6 @@
 import keras
 from typing import List, Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -24,7 +25,7 @@ def _add_list(tensors: List[Any]) -> Any:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.darkir.components")
 class SimpleGate(keras.layers.Layer):
     """Parameter-free multiplicative gating by channel split and product.
 
@@ -120,7 +121,7 @@ class SimpleGate(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.darkir.components")
 class FreMLP(keras.layers.Layer):
     """
     Global feature modeling in the frequency domain, magnitude only.
@@ -376,7 +377,7 @@ class FreMLP(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.darkir.components")
 class DilatedBranch(keras.layers.Layer):
     """One dilated depthwise convolution: a single scale of a parallel bank.
 

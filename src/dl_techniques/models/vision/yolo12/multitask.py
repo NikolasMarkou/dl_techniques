@@ -114,10 +114,11 @@ from dl_techniques.layers.yolo12_heads import (
     YOLOv12ClassificationHead
 )
 from .feature_extractor import YOLOv12FeatureExtractor
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.yolo12.multitask")
 class YOLOv12MultiTask(keras.Model):
     """
     YOLOv12 Multi-Task Learning Model using Named Outputs (Functional API).

@@ -56,6 +56,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -78,7 +79,7 @@ REFERENCE_BN_EPSILON: float = 1e-5
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.depth_anything.components")
 class DPTDecoder(keras.layers.Layer):
     """DPT (Dense Prediction Transformer) decoder.
 

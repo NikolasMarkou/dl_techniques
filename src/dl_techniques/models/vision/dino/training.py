@@ -90,6 +90,7 @@ from dl_techniques.models.vision.dino.dino_v1 import (
     create_dino_teacher_student_pair,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -104,7 +105,7 @@ N_GLOBAL_VIEWS = 2
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.training")
 class DINOTrainingModel(keras.Model):
     """
     Student + frozen EMA teacher over a multi-crop batch, trainable by `fit()`.

@@ -108,11 +108,12 @@ from .mask_decoder import MaskDecoder
 from .prompt_encoder import PromptEncoder
 from .image_encoder import ImageEncoderViT
 from .transformer import DEFAULT_ATTENTION_DROPOUT_RATE, TwoWayTransformer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.model")
 class SAM(keras.Model):
     """
     Segment Anything Model (SAM) - A foundation model for image segmentation.

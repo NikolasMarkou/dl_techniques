@@ -48,13 +48,14 @@ import keras
 from dl_techniques.utils.logger import logger
 
 from ..shared.encoder import EmbeddingEncoder
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 __all__ = ["AsciiBert", "create_ascii_bert"]
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.ascii_bert.model")
 class AsciiBert(EmbeddingEncoder):
     """
     Transformer-block embedding encoder over the ASCII character vocabulary.

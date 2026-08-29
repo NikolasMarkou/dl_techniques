@@ -94,13 +94,14 @@ from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # MobileNetV3 Model
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mobilenet.mobilenet_v3")
 class MobileNetV3(keras.Model):
     """MobileNetV3 model implemented with Universal Inverted Bottleneck blocks.
 

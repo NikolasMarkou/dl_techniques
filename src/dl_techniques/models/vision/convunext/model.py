@@ -108,6 +108,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -124,7 +125,7 @@ from dl_techniques.utils.activation_serialization import (
 # which is what lets any `.keras` artifact written before the move still load.
 # Do NOT "fix" this to `dl_techniques.convunext` for tidiness: that is a KEY CHANGE and
 # it silently breaks every checkpoint containing this layer. See decisions.md D-010/D-005.
-@keras.saving.register_keras_serializable(package="dl_techniques.bias_free_denoisers")
+@register_dl_technique("dl_techniques.bias_free_denoisers")
 class ConvUNextStem(keras.layers.Layer):
     """ConvUNext stem block for initial feature extraction.
 
@@ -311,7 +312,7 @@ class ConvUNextStem(keras.layers.Layer):
 # Spatial wrapper around bias-free LinearAttention (4D <-> 3D)
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()  # DECISION plan_2026-07-11_bb4b38b5/D-002
+@register_dl_technique("dl_techniques.models.convunext.model")  # DECISION plan_2026-07-11_bb4b38b5/D-002
 class SpatialLinearAttention(keras.layers.Layer):
     """Apply a bias-free LinearAttention over a 4D spatial feature map.
 

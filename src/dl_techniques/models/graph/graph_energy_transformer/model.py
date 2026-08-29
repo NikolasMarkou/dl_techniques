@@ -107,6 +107,7 @@ from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 # calls the block's duck-typed `.attention.update` / `.hopfield.update` / `.norm` surface,
 # which no factory type guarantees.
 from dl_techniques.layers.transformers.energy_transformer import EnergyTransformer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Stable names
@@ -117,7 +118,7 @@ from dl_techniques.layers.transformers.energy_transformer import EnergyTransform
 GRAPH_BACKBONE_NAME = "graph_et_backbone"
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.graph_energy_transformer.model")
 class GraphEnergyTransformerBackbone(keras.Model):
     """Shared Graph Energy Transformer trunk: node-project -> [PE] -> [mask token] ->
     [CLS] -> ``num_blocks`` ET blocks.
@@ -678,7 +679,7 @@ def _coerce_graph_backbone(backbone: Any) -> GraphEnergyTransformerBackbone:
     )
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.graph_energy_transformer.model")
 class GraphAnomalyDetector(keras.Model):
     """Variant B (node anomaly): shared graph trunk -> target-node ``g_1 || g_T`` readout -> MLP.
 
@@ -873,7 +874,7 @@ class GraphAnomalyDetector(keras.Model):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.graph_energy_transformer.model")
 class GraphClassifier(keras.Model):
     """Variant C-lite (graph classification): shared graph trunk -> CLS-token readout -> logits.
 

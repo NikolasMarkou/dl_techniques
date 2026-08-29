@@ -46,6 +46,7 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
 
 from .config import NAMConfig
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ── Fixed arithmetic operations (NOT learned) ──────────────────────────
@@ -134,7 +135,7 @@ def _assemble_number_from_tokens(
 # ── NAMCell ─────────────────────────────────────────────────────────────
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.nam.cell")
 class NAMCell(keras.layers.Layer):
     """
     Single reduction step of the Neural Arithmetic Module.

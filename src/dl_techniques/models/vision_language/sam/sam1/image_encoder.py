@@ -81,11 +81,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.image_encoder")
 class WindowedAttentionWithRelPos(layers.Layer):
     """
     Multi-Head Self-Attention with optional Relative Positional Embeddings and Windowing.
@@ -340,7 +341,7 @@ class WindowedAttentionWithRelPos(layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.image_encoder")
 class ViTBlock(layers.Layer):
     """
     Transformer Block for the Vision Transformer with Windowing Support.
@@ -613,7 +614,7 @@ class ViTBlock(layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.image_encoder")
 class ImageEncoderViT(keras.Model):
     """
     The Vision Transformer (ViT) Image Encoder for SAM.

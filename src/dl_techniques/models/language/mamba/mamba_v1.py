@@ -107,11 +107,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from dl_techniques.utils.model_build import materialize_sublayers
 from .components import MambaResidualBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.mamba.mamba_v1")
 class Mamba(keras.Model):
     """
     Mamba (v1) foundation model for efficient sequence modeling.

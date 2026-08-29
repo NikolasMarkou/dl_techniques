@@ -81,6 +81,7 @@ from dl_techniques.layers.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -177,7 +178,7 @@ def _build_auto_decoder(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.vq_vae_rotation.model")
 class VQVAERotationTrick(keras.Model):
     """Rotation Trick VQ-VAE.
 

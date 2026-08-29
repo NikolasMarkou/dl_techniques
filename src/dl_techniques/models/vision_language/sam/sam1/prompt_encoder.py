@@ -71,11 +71,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.prompt_encoder")
 class PositionEmbeddingRandom(keras.layers.Layer):
     """
     Positional encoding using random spatial frequencies.
@@ -275,7 +276,7 @@ class PositionEmbeddingRandom(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.prompt_encoder")
 class PromptEncoder(layers.Layer):
     """
     Encodes prompts (points, boxes, masks) for the SAM mask decoder.

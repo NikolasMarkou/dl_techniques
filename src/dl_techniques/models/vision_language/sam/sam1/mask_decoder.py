@@ -78,6 +78,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -133,7 +134,7 @@ def _build_mlp_head(
     return keras.Sequential(dense_layers, name=name)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.sam1.mask_decoder")
 class MaskDecoder(keras.layers.Layer):
     """
     Predicts segmentation masks from image and prompt embeddings using a transformer.

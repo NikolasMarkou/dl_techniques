@@ -32,9 +32,10 @@ from typing import Any, Dict, Optional
 
 import keras
 from keras import ops, random
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.video_jepa.masking")
 class TubeMaskGenerator(keras.layers.Layer):
     """Sample a per-sample spatial tube mask.
 

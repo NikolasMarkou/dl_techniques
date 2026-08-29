@@ -111,11 +111,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.dino.dino_v3")
 class DINOv3(keras.Model):
     """
     DINOv3 Vision Transformer Model Implementation.

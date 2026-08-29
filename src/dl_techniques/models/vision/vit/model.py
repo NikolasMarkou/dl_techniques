@@ -72,6 +72,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -109,7 +110,7 @@ REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.vit.model")
 class ViT(keras.Model):
     """Vision Transformer: an image as a short sequence of patch tokens.
 

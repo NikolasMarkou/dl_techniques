@@ -48,9 +48,10 @@ from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.video_jepa.encoder")
 class VideoJEPACliffordEncoder(keras.layers.Layer):
     """Hybrid per-frame encoder: PatchEmbedding2D → sine2D PE → N × CliffordNetBlock.
 

@@ -56,6 +56,7 @@ from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.transformers.swin_transformer_block import (
     SwinTransformerBlock,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # constants
@@ -80,7 +81,7 @@ LEAKY_RELU_SLOPE: float = 0.2
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.tails")
 class TheraTailAir(keras.layers.Layer):
     """The ``air`` tail: an identity feature refiner (passthrough).
 
@@ -126,7 +127,7 @@ class TheraTailAir(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.tails")
 class _Projection(keras.layers.Layer):
     """THERA ``Projection``: ``LayerNorm`` -> ``Conv2D(n_dims, 1x1)``.
 
@@ -196,7 +197,7 @@ class _Projection(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.tails")
 class TheraTailPlus(keras.layers.Layer):
     """The ``plus`` tail: a depthwise-ConvNeXt feature refiner.
 
@@ -355,7 +356,7 @@ class TheraTailPlus(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.thera.tails")
 class TheraTailPro(keras.layers.Layer):
     """The ``pro`` tail: a SwinIR (RSTB) feature refiner.
 

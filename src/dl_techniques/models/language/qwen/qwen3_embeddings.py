@@ -101,10 +101,11 @@ from dl_techniques.layers.embedding.factory import create_embedding_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 
 from .components import build_causal_attention_mask
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3EmbeddingLayer(keras.layers.Layer):
     """
     Keras implementation of the Qwen3 Text Embedding model using factory components.
@@ -374,7 +375,7 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3RerankerLayer(keras.layers.Layer):
     """
     Keras implementation of the Qwen3 Reranker using factory components.
@@ -656,7 +657,7 @@ class Qwen3RerankerLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3EmbeddingModel(keras.Model):
     """
     High-level Keras Model for Qwen3 Text Embedding.
@@ -784,7 +785,7 @@ class Qwen3EmbeddingModel(keras.Model):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3RerankerModel(keras.Model):
     """
     High-level Keras Model for Qwen3 Text Reranking.

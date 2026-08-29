@@ -57,6 +57,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
     CliffordNetBlock,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: Variance epsilon for every ``LayerNormalization`` authored in this module.
 #:
@@ -70,7 +71,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 _NORM_EPSILON: float = 1e-6
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.video_jepa.predictor")
 class CausalSelfAttnMLPBlock(keras.layers.Layer):
     """Plain causal self-attention + MLP block with LayerScale-identity init.
 
@@ -226,7 +227,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.models.video_jepa.predictor")
 class VideoJEPAPredictor(keras.layers.Layer):
     """Factorized spatial + causal-temporal Clifford predictor (pixels-only).
 
