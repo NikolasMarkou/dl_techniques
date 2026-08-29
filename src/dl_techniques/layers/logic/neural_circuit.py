@@ -113,7 +113,7 @@ def _resolve_gate_entropy_coefficient(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.layers")
 class CircuitDepthLayer(keras.layers.Layer):
     """
     One circuit stage: parallel logic and arithmetic experts, fused.
@@ -250,9 +250,10 @@ class CircuitDepthLayer(keras.layers.Layer):
     :vartype apply_sigmoid: bool
     :ivar gate_entropy_coefficient: The resolved coefficient, as a float.
     :vartype gate_entropy_coefficient: float
-    :ivar load_balance_coefficient: Alias holding the same value. It is
-        the name ``_maybe_load_balance_loss`` reads, so deleting it
-        would switch the loss off.
+    :ivar load_balance_coefficient: Read-only alias holding the same
+        value, for callers still on the old name. Nothing in this class
+        reads it: ``_maybe_load_balance_loss`` reads the canonical
+        ``gate_entropy_coefficient``.
     :vartype load_balance_coefficient: float
     :ivar channel_mix: ``'dense'`` or ``None``.
     :vartype channel_mix: Optional[str]
@@ -285,6 +286,9 @@ class CircuitDepthLayer(keras.layers.Layer):
         negative.
     :raises ValueError: From ``build`` if the input rank is below 2, or
         ``selection_mode="per_channel"`` gets an unknown last axis.
+    :raises ValueError: From ``call`` if the input rank is below 2, or the
+        last axis differs from the one ``build`` sized channel-dependent
+        state for.
     :raises RuntimeError: From ``to_symbolic`` before the layer is built.
 
     Input shape:
@@ -395,9 +399,9 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.combination_initializer = keras.initializers.get(combination_initializer)
         self.circuit_routing = circuit_routing
         self.apply_sigmoid = apply_sigmoid
-        # gate_entropy_coefficient is the canonical name.
-        # load_balance_coefficient holds the same value as an alias, and it
-        # is the name _maybe_load_balance_loss reads.
+        # gate_entropy_coefficient is the canonical name and the only
+        # one any code path reads. load_balance_coefficient mirrors it
+        # for callers on the old name.
         self.gate_entropy_coefficient = resolved_coef
         self.load_balance_coefficient = resolved_coef
         self.channel_mix = channel_mix
@@ -408,6 +412,10 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.selection_mode = selection_mode
         # Set in build() for per_channel mode; stays None in global mode.
         self._channels = None
+        # The last axis build() sized channel-dependent state for --
+        # per_channel combination weights, or the channel-mix Dense.
+        # None when nothing built here depends on it.
+        self._build_last_dim: Optional[int] = None
         self.diversity_coefficient = float(diversity_coefficient)
         # Deep, so an Initializer instance in here is this layer's own copy
         # and a caller mutating the dict afterwards cannot reach the children.
@@ -517,6 +525,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                     f"last-axis dimension; got {input_shape}."
                 )
             self._channels = int(input_shape[-1])
+            self._build_last_dim = self._channels
             combination_shape = (self._channels, total_operators)
         else:
             combination_shape = (total_operators,)
@@ -548,6 +557,7 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         if self.channel_mix == "dense":
             channel_dim = int(input_shape[-1])
+            self._build_last_dim = channel_dim
             self._channel_mix_layer = keras.layers.Dense(
                 channel_dim,
                 use_bias=True,
@@ -566,9 +576,10 @@ class CircuitDepthLayer(keras.layers.Layer):
         The value is ``coef * N * mean(sum_i(beta_i^2))``, where the sum
         runs over the expert axis and the mean over any leading axes. It
         is the squared L2 of the gate vector, not an entropy, despite the
-        ``gate_entropy_coefficient`` name. It is smallest when beta is
-        uniform, so it pushes the layer to use every expert. Nothing is
-        added when the coefficient is 0.
+        ``gate_entropy_coefficient`` name, which is the attribute this
+        method reads. It is smallest when beta is uniform, so it pushes
+        the layer to use every expert. Nothing is added when the
+        coefficient is 0.
 
         # DECISION plan_2026-05-13_e33114da/D-005 — take the L2 per channel
         # first and average after. Do not average the probs across channels
@@ -582,14 +593,14 @@ class CircuitDepthLayer(keras.layers.Layer):
         :return: Nothing. The loss is registered with ``add_loss``.
         :rtype: None
         """
-        if self.load_balance_coefficient <= 0:
+        if self.gate_entropy_coefficient <= 0:
             return
         n = float(self.num_logic_ops + self.num_arithmetic_ops)
         # axis=-1 is the expert axis in both shapes. For (N,) this is just
         # sum(beta^2); for (C, N) it is a per-channel L2, averaged below.
         per_row_l2 = keras.ops.sum(keras.ops.square(combination_probs), axis=-1)
         aux = keras.ops.mean(per_row_l2) if len(combination_probs.shape) > 1 else per_row_l2
-        self.add_loss(self.load_balance_coefficient * n * aux)
+        self.add_loss(self.gate_entropy_coefficient * n * aux)
 
     def _maybe_diversity_loss(self) -> None:
         """
@@ -659,6 +670,42 @@ class CircuitDepthLayer(keras.layers.Layer):
         mean_sim = keras.ops.divide(total_sim, float(total_pairs))
         self.add_loss(keras.ops.multiply(self.diversity_coefficient, mean_sim))
 
+    def _assert_call_shape_contract(
+            self,
+            inputs: keras.KerasTensor
+    ) -> None:
+        """
+        Re-assert in ``call`` the static shape contract ``build`` checked.
+
+        A contract checked only in ``build`` is checked once, against
+        whatever shape arrived first: the layer stays built and every
+        later call is unchecked. ``InputSpec`` cannot close this, because
+        ``assert_input_compatibility`` tests ``shape[axis] not in
+        {value, None}`` and so accepts an unknown dimension. A dimension
+        that is ``None`` here is genuinely unknown at trace time and is
+        skipped rather than guessed.
+
+        :param inputs: The input tensor.
+        :type inputs: keras.KerasTensor
+        :raises ValueError: If the rank is below 2, or the last axis
+            differs from the one ``build`` sized channel-dependent state
+            for.
+        """
+        shape = tuple(inputs.shape)
+        if len(shape) < 2:
+            raise ValueError(
+                f"{type(self).__name__} expects rank >= 2 input, "
+                f"got shape with {len(shape)} dimensions: {shape}"
+            )
+        if self._build_last_dim is None:
+            return
+        if shape[-1] is not None and int(shape[-1]) != self._build_last_dim:
+            raise ValueError(
+                f"{type(self).__name__} was built for a last axis of "
+                f"{self._build_last_dim} and cannot run on shape "
+                f"{shape}. Build a separate layer per input width."
+            )
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -688,11 +735,19 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         :param inputs: A tensor of rank 2 or more.
         :type inputs: keras.KerasTensor
-        :param training: Keras training flag, forwarded to every expert.
+        :param training: Keras training flag, forwarded to every expert
+            and to the channel-mix ``Dense``. ``Dense`` ignores it; it is
+            forwarded anyway, because Keras 3 propagates ``training``
+            through one mutable call-context slot that a sibling layer
+            can leave set.
         :type training: Optional[bool]
         :return: The fused output, shaped like ``inputs``.
         :rtype: keras.KerasTensor
         """
+        # The static shape contract build() checked, re-checked here,
+        # before any loss is registered.
+        self._assert_call_shape_contract(inputs)
+
         combination_probs = keras.ops.softmax(self.combination_weights, axis=-1)
         # Both aux losses are no-ops when their coefficients are 0.
         self._maybe_load_balance_loss(combination_probs)
@@ -704,7 +759,6 @@ class CircuitDepthLayer(keras.layers.Layer):
             # Legacy path: each expert's input is scaled by its own
             # softmax(routing_weights) entry before it runs.
             routing_probs = keras.ops.softmax(self.routing_weights)
-            input_rank = len(keras.ops.shape(inputs))
 
             for i, logic_op in enumerate(self.logic_operators):
                 weight = routing_probs[i]
@@ -738,7 +792,9 @@ class CircuitDepthLayer(keras.layers.Layer):
             combined_output = keras.ops.sum(keras.ops.multiply(weights, stacked), axis=0)
 
         if self._channel_mix_layer is not None:
-            combined_output = self._channel_mix_layer(combined_output)
+            combined_output = self._channel_mix_layer(
+                combined_output, training=training
+            )
 
         if self.use_residual:
             combined_output = keras.ops.add(combined_output, inputs)
@@ -797,8 +853,16 @@ class CircuitDepthLayer(keras.layers.Layer):
         """
         Return the constructor arguments needed to rebuild this layer.
 
-        Only the canonical ``gate_entropy_coefficient`` is emitted. A
-        config written by an older version carrying
+        Every constructor argument appears as a key, including the
+        deprecated ``load_balance_coefficient``. That key is always
+        emitted as ``None``, never as the resolved value: the coefficient
+        travels in the canonical ``gate_entropy_coefficient`` key, and
+        ``None`` is exactly what the alias parameter contributed once
+        ``__init__`` resolved the two. Emitting the value instead would
+        make every load hand ``__init__`` the deprecated name, and a
+        round trip would then either warn on every load or silently
+        depend on which of the two names wins. A config written by an
+        older version carrying a non-``None``
         ``load_balance_coefficient`` still loads, because ``__init__``
         accepts both names.
 
@@ -817,6 +881,11 @@ class CircuitDepthLayer(keras.layers.Layer):
             "circuit_routing": self.circuit_routing,
             "apply_sigmoid": self.apply_sigmoid,
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
+            # DECISION plan-2026-08-29T112804-aff039c4/D-003 -- the
+            # deprecated alias key is always None. Do not emit the
+            # resolved value: every load would then hand __init__ the
+            # deprecated name. See decisions.md D-003.
+            "load_balance_coefficient": None,
             "channel_mix": self.channel_mix,
             "force_logic_input_clip": self.force_logic_input_clip,
             "selection_mode": self.selection_mode,
@@ -829,7 +898,7 @@ class CircuitDepthLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.layers")
 class LearnableNeuralCircuit(keras.layers.Layer):
     """
     A stack of ``circuit_depth`` ``CircuitDepthLayer`` stages.
@@ -995,6 +1064,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         of its allowed values or the resolved gate-entropy coefficient is
         negative. This class does not check those three itself.
     :raises ValueError: From ``build`` if the input rank is below 2.
+    :raises ValueError: From ``call`` if the input rank is below 2, or the
+        last axis differs from the one ``build`` sized channel-dependent
+        stage state for.
     :raises RuntimeError: From ``to_symbolic`` before the layer is built.
 
     Input shape:
@@ -1106,6 +1178,10 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.load_balance_coefficient = resolved_coef
         self.channel_mix = channel_mix
         self.selection_mode = selection_mode
+        # The last axis build() sized channel-dependent stage state for --
+        # per_channel combination weights, or a channel-mix Dense. None
+        # when no stage builds anything that depends on it.
+        self._build_last_dim: Optional[int] = None
         self.diversity_coefficient = float(diversity_coefficient)
         # These go to the stages, which pass them on to their children.
         # Keys a stage sets itself (operation_types, apply_sigmoid,
@@ -1227,11 +1303,49 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                 f"LearnableNeuralCircuit expects rank >= 2 input, "
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
+        if self.selection_mode == "per_channel" or self.channel_mix == "dense":
+            self._build_last_dim = int(input_shape[-1])
         for circuit_layer in self.circuit_layers:
             circuit_layer.build(input_shape)
         for layer_norm in self.layer_norms:
             layer_norm.build(input_shape)
         super().build(input_shape)
+
+    def _assert_call_shape_contract(
+            self,
+            inputs: keras.KerasTensor
+    ) -> None:
+        """
+        Re-assert in ``call`` the static shape contract ``build`` checked.
+
+        A contract checked only in ``build`` is checked once, against
+        whatever shape arrived first: the layer stays built and every
+        later call is unchecked. ``InputSpec`` cannot close this, because
+        ``assert_input_compatibility`` tests ``shape[axis] not in
+        {value, None}`` and so accepts an unknown dimension. A dimension
+        that is ``None`` here is genuinely unknown at trace time and is
+        skipped rather than guessed.
+
+        :param inputs: The input tensor.
+        :type inputs: keras.KerasTensor
+        :raises ValueError: If the rank is below 2, or the last axis
+            differs from the one ``build`` sized channel-dependent state
+            for.
+        """
+        shape = tuple(inputs.shape)
+        if len(shape) < 2:
+            raise ValueError(
+                f"{type(self).__name__} expects rank >= 2 input, "
+                f"got shape with {len(shape)} dimensions: {shape}"
+            )
+        if self._build_last_dim is None:
+            return
+        if shape[-1] is not None and int(shape[-1]) != self._build_last_dim:
+            raise ValueError(
+                f"{type(self).__name__} was built for a last axis of "
+                f"{self._build_last_dim} and cannot run on shape "
+                f"{shape}. Build a separate layer per input width."
+            )
 
     def call(
             self,
@@ -1249,6 +1363,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         :return: The output of the last stage, shaped like ``inputs``.
         :rtype: keras.KerasTensor
         """
+        # The static shape contract build() checked, re-checked here.
+        self._assert_call_shape_contract(inputs)
+
         x = inputs
         for depth in range(self.circuit_depth):
             x = self.circuit_layers[depth](x, training=training)
@@ -1297,8 +1414,16 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         """
         Return the constructor arguments needed to rebuild this layer.
 
-        Only the canonical ``gate_entropy_coefficient`` is emitted. A
-        config written by an older version carrying
+        Every constructor argument appears as a key, including the
+        deprecated ``load_balance_coefficient``. That key is always
+        emitted as ``None``, never as the resolved value: the coefficient
+        travels in the canonical ``gate_entropy_coefficient`` key, and
+        ``None`` is exactly what the alias parameter contributed once
+        ``__init__`` resolved the two. Emitting the value instead would
+        make every load hand ``__init__`` the deprecated name, and a
+        round trip would then either warn on every load or silently
+        depend on which of the two names wins. A config written by an
+        older version carrying a non-``None``
         ``load_balance_coefficient`` still loads, because ``__init__``
         accepts both names.
 
@@ -1319,6 +1444,11 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             "circuit_routing": self.circuit_routing,
             "apply_sigmoid_per_depth": self.apply_sigmoid_per_depth,
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
+            # DECISION plan-2026-08-29T112804-aff039c4/D-003 -- the
+            # deprecated alias key is always None. Do not emit the
+            # resolved value: every load would then hand __init__ the
+            # deprecated name. See decisions.md D-003.
+            "load_balance_coefficient": None,
             "channel_mix": self.channel_mix,
             "selection_mode": self.selection_mode,
             "diversity_coefficient": self.diversity_coefficient,

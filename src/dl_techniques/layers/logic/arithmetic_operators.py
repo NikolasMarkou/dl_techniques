@@ -67,7 +67,51 @@ from dl_techniques.initializers.clone import clone_initializer
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+def _canonical_input_shape(
+        input_shape: Union[
+            Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]
+        ]
+) -> Tuple[Optional[int], ...]:
+    """
+    Return the one shape this layer works from, validating the pair.
+
+    ``build``, ``call`` and ``compute_output_shape`` all have to answer the
+    same three questions -- is this one shape or a list of shapes, are
+    there at most two, and do the two agree -- so they ask them here. A
+    single shape can itself arrive as a list, for example after
+    deserialization, so the list-of-shapes test looks at the first element:
+    a list OF shapes has non-dimension elements.
+
+    :param input_shape: One shape, or a list of one or two shapes.
+    :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    :return: The single shape to build from, which is the first one.
+    :rtype: Tuple[Optional[int], ...]
+    :raises ValueError: If more than two shapes are given, or two shapes
+        are given and their dimensions differ.
+    """
+    is_list_of_shapes = (
+        isinstance(input_shape, list)
+        and input_shape
+        and not isinstance(input_shape[0], (int, type(None)))
+    )
+    if not is_list_of_shapes:
+        return tuple(input_shape) if isinstance(input_shape, list) else input_shape
+    if len(input_shape) > 2:
+        raise ValueError(
+            f"Expected 1 or 2 inputs, got {len(input_shape)}"
+        )
+    if len(input_shape) == 2 and list(input_shape[0]) != list(input_shape[1]):
+        raise ValueError(
+            f"Input tensors must have the same shape for binary operations. "
+            f"Got shapes: {input_shape[0]} and {input_shape[1]}"
+        )
+    return tuple(input_shape[0])
+
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable(package="dl_techniques.layers")
 class LearnableArithmeticOperator(keras.layers.Layer):
     """
     A learnable choice among seven arithmetic operations.
@@ -197,6 +241,12 @@ class LearnableArithmeticOperator(keras.layers.Layer):
     :vartype use_temperature: bool
     :ivar temperature_init: The requested starting temperature.
     :vartype temperature_init: float
+    :ivar DEFAULT_OPS: Class constant. The default ``operation_types``,
+        in the order the selection-weight vector indexes them.
+    :vartype DEFAULT_OPS: Tuple[str, ...]
+    :ivar VALID_OPS: Class constant. Every accepted operation key,
+        derived from ``DEFAULT_OPS``.
+    :vartype VALID_OPS: frozenset
     :ivar use_scaling: Whether a scale weight exists.
     :vartype use_scaling: bool
     :ivar scaling_init: The requested starting scale.
@@ -246,10 +296,14 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         ``temperature_init`` or ``scaling_init`` or ``epsilon`` is not
         positive, either clip range is not increasing, or
         ``entropy_coefficient`` is negative.
-    :raises ValueError: From ``build`` if two input shapes differ, or
-        ``selection_mode="per_channel"`` gets an unknown last axis.
+    :raises ValueError: From ``build`` if two input shapes differ, more
+        than two are given, or ``selection_mode="per_channel"`` gets an
+        unknown last axis.
     :raises ValueError: From ``call`` if a list of more than two tensors is
-        given.
+        given, the two operands disagree in shape, the last axis differs
+        from the one ``build`` sized the weights for, or
+        ``operation_types`` was mutated after construction to name an
+        unknown operation.
     :raises RuntimeError: From ``to_symbolic`` before the layer is built.
 
     Input shape:
@@ -279,6 +333,12 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             # After training, ask which operation won.
             op.to_symbolic(top_k=2)
     """
+
+    # The default operation_types, in the order the weight vector indexes
+    # them. VALID_OPS is derived from it, so the accepted key set and the
+    # default list can never drift apart.
+    DEFAULT_OPS = ('add', 'multiply', 'subtract', 'divide', 'power', 'max', 'min')
+    VALID_OPS = frozenset(DEFAULT_OPS)
 
     def __init__(
             self,
@@ -331,14 +391,13 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
         # Validate and set operation types
         if operation_types is None:
-            operation_types = ['add', 'multiply', 'subtract', 'divide', 'power', 'max', 'min']
+            operation_types = list(self.DEFAULT_OPS)
 
-        valid_operations = {'add', 'multiply', 'subtract', 'divide', 'power', 'max', 'min'}
-        invalid_ops = set(operation_types) - valid_operations
+        invalid_ops = set(operation_types) - self.VALID_OPS
         if invalid_ops:
             raise ValueError(
                 f"Invalid operation types: {invalid_ops}. "
-                f"Valid operations are: {valid_operations}"
+                f"Valid operations are: {set(self.VALID_OPS)}"
             )
 
         # Validate parameters
@@ -398,6 +457,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self.gumbel_hard = gumbel_hard
         self.entropy_coefficient = entropy_coefficient
         self.selection_mode = selection_mode
+        # Set in build() for per_channel mode; stays None in global mode.
+        self._channels = None
+        # The last axis build() sized the weights for, when the weights
+        # depend on it. None in global mode, where they do not.
+        self._build_last_dim: Optional[int] = None
         self.exponent_clip_mode = exponent_clip_mode
 
         # Initialize weight attributes - these will be created in build()
@@ -423,40 +487,26 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :param input_shape: Shape of the input tensor, or a list of one or
             two such shapes.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
-        :raises ValueError: If two shapes differ, or ``per_channel`` mode
-            gets an unknown last axis.
+        :raises ValueError: If two shapes differ, more than two shapes are
+            given, or ``per_channel`` mode gets an unknown last axis. The
+            first two come from :func:`_canonical_input_shape`.
         """
-        # Same list-of-shapes detection as compute_output_shape and
-        # logic_operators.py: one shape can itself arrive as a list, so
-        # look at the first element to tell the two cases apart.
-        is_list_of_shapes = (
-            isinstance(input_shape, list)
-            and input_shape
-            and not isinstance(input_shape[0], (int, type(None)))
-        )
-
-        # Validate input shapes for binary operations
-        if is_list_of_shapes and len(input_shape) == 2:
-            if list(input_shape[0]) != list(input_shape[1]):
-                raise ValueError(
-                    f"Input tensors must have the same shape for binary operations. "
-                    f"Got shapes: {input_shape[0]} and {input_shape[1]}"
-                )
+        # The list-of-shapes detection and the two-shapes-must-agree rule
+        # live in _canonical_input_shape, shared with call() and
+        # compute_output_shape().
+        shape_for_channels = tuple(_canonical_input_shape(input_shape))
 
         # The learnable selection weights. per_channel mode stores
         # (channels, num_operations) so each channel picks its own
         # operation; global mode stores (num_operations,).
         if self.selection_mode == "per_channel":
-            if is_list_of_shapes:
-                shape_for_channels = tuple(input_shape[0])
-            else:
-                shape_for_channels = tuple(input_shape)
             if shape_for_channels[-1] is None:
                 raise ValueError(
                     "selection_mode='per_channel' requires a concrete "
                     f"last-axis dimension; got {shape_for_channels}."
                 )
             self._channels = int(shape_for_channels[-1])
+            self._build_last_dim = self._channels
             weight_shape = (self._channels, self.num_operations)
         else:
             self._channels = None
@@ -613,11 +663,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         )
         return keras.ops.multiply(sign_component, magnitude)
 
-    def _soft_max(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
+    def _elementwise_max(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
         Return the elementwise maximum of the two inputs.
 
-        The name says soft, but this is the plain maximum. The softness of
+        This is the plain maximum, and the name says so. The softness of
         the layer comes from the weighted mix over operations, not from
         this operation.
 
@@ -630,11 +680,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         """
         return keras.ops.maximum(x1, x2)
 
-    def _soft_min(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
+    def _elementwise_min(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
         Return the elementwise minimum of the two inputs.
 
-        As with :meth:`_soft_max`, this is the plain minimum.
+        As with :meth:`_elementwise_max`, this is the plain minimum.
 
         :param x1: First input tensor.
         :type x1: keras.KerasTensor
@@ -815,6 +865,42 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         )[:top_k]
         return ", ".join(f"{name}({p:.3f})" for name, p in ranked)
 
+    def _assert_call_shape_contract(
+            self,
+            x1: keras.KerasTensor,
+            x2: keras.KerasTensor
+    ) -> None:
+        """
+        Re-assert in ``call`` the static shape contract ``build`` checked.
+
+        A contract checked only in ``build`` is checked once, against
+        whatever shape arrived first: the layer stays built and every
+        later call is unchecked. ``InputSpec`` cannot close this, because
+        ``assert_input_compatibility`` tests ``shape[axis] not in
+        {value, None}`` and so accepts an unknown dimension. A dimension
+        that is ``None`` here is genuinely unknown at trace time and is
+        skipped rather than guessed.
+
+        :param x1: The first operand.
+        :type x1: keras.KerasTensor
+        :param x2: The second operand, which is ``x1`` for a single input.
+        :type x2: keras.KerasTensor
+        :raises ValueError: If the two operands disagree in shape, or the
+            last axis differs from the one ``build`` sized the weights
+            for.
+        """
+        _canonical_input_shape([tuple(x1.shape), tuple(x2.shape)])
+        if self._build_last_dim is None:
+            return
+        last = tuple(x1.shape)[-1] if len(x1.shape) else None
+        if last is not None and int(last) != self._build_last_dim:
+            raise ValueError(
+                f"{type(self).__name__} was built for a last axis of "
+                f"{self._build_last_dim} and cannot run on shape "
+                f"{tuple(x1.shape)}. Build a separate layer per input "
+                f"width."
+            )
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
@@ -851,7 +937,10 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :type training: Optional[bool]
         :return: The combined result, shaped like the first input.
         :rtype: keras.KerasTensor
-        :raises ValueError: If more than two tensors are given.
+        :raises ValueError: If more than two tensors are given, the two
+            operands disagree in shape, the last axis differs from the
+            one ``build`` sized the weights for, or ``operation_types``
+            was mutated after construction to name an unknown operation.
         """
         # Input parsing. A single tensor is used for both operands.
         if isinstance(inputs, list):
@@ -866,6 +955,9 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         else:
             x1 = inputs
             x2 = inputs
+
+        # The static shape contract build() checked, re-checked here.
+        self._assert_call_shape_contract(x1, x2)
 
         # One probability per operation, plus the optional entropy penalty.
         operation_probs = self._operation_probs(training=training)
@@ -885,12 +977,22 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             elif op_type == 'power':
                 result = self._safe_power(x1, x2)
             elif op_type == 'max':
-                result = self._soft_max(x1, x2)
+                result = self._elementwise_max(x1, x2)
             elif op_type == 'min':
-                result = self._soft_min(x1, x2)
+                result = self._elementwise_min(x1, x2)
             else:
-                logger.warning(f"Unknown operation type: {op_type}, using identity")
-                result = x1
+                # __init__ already rejects any operation_types entry
+                # outside the valid set, so this branch is reachable only
+                # by mutating self.operation_types after construction.
+                # DECISION plan-2026-08-29T112804-aff039c4/D-004 -- raise
+                # here. Do not log: v2 4.1 bans logger.* in call(), which
+                # fires on every trace. Do not fall back to identity: it
+                # hides the mutation. See decisions.md D-004.
+                raise ValueError(
+                    f"Unknown operation type {op_type!r} in "
+                    f"self.operation_types. Valid operations: "
+                    f"{sorted(self.VALID_OPS)}."
+                )
             operations.append(result)
 
         # Weighted combination, stacked and summed in one shot.
@@ -936,22 +1038,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         :return: The shape of the first input.
         :rtype: Tuple[Optional[int], ...]
-        :raises ValueError: If two shapes are given and they differ.
+        :raises ValueError: If two shapes are given and they differ, or
+            more than two are given. Both come from
+            :func:`_canonical_input_shape`.
         """
-        is_list_of_shapes = (
-            isinstance(input_shape, list)
-            and input_shape
-            and not isinstance(input_shape[0], (int, type(None)))
-        )
-        if is_list_of_shapes:
-            # Two inputs must agree in shape, same rule as build().
-            if len(input_shape) == 2 and list(input_shape[0]) != list(input_shape[1]):
-                raise ValueError(
-                    f"Input tensors must have the same shape for binary operations. "
-                    f"Got shapes: {input_shape[0]} and {input_shape[1]}"
-                )
-            return tuple(input_shape[0])
-        return tuple(input_shape) if isinstance(input_shape, list) else input_shape
+        return _canonical_input_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """

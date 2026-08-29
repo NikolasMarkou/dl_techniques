@@ -1022,10 +1022,20 @@ class TestPlan3a2f1d23GateEntropyAlias:
         assert c.gate_entropy_coefficient == 0.25
 
     def test_round_trip_uses_canonical_name(self):
+        """The alias is a config key, always None; the value travels
+        under the canonical name.
+
+        Was `assert "load_balance_coefficient" not in cfg` before
+        2026-08-29. That pinned the B4 defect: the alias is an __init__
+        parameter, so v2 6.1 requires it to be a get_config() key. It is
+        now emitted as None, which is what the alias parameter
+        contributed once __init__ resolved the two names.
+        """
         l = CircuitDepthLayer(gate_entropy_coefficient=0.3)
         cfg = l.get_config()
         assert cfg["gate_entropy_coefficient"] == 0.3
-        assert "load_balance_coefficient" not in cfg
+        assert "load_balance_coefficient" in cfg
+        assert cfg["load_balance_coefficient"] is None
         l2 = CircuitDepthLayer.from_config(cfg)
         assert l2.gate_entropy_coefficient == 0.3
 
