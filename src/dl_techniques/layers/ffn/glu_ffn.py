@@ -43,6 +43,8 @@ import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, activations
 
+from dl_techniques.initializers.clone import clone_initializer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -142,10 +144,12 @@ class GLUFFN(keras.layers.Layer):
         Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for the kernels of all three Dense
-        layers. Defaults to 'glorot_uniform'.
+        layers. Each layer receives its OWN clone of it, never the resolved
+        instance itself. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
     :param bias_initializer: Initializer for the biases of all three Dense
-        layers. Defaults to 'zeros'.
+        layers. Cloned per layer in the same way as the kernel initializer.
+        Defaults to 'zeros'.
     :type bias_initializer: Union[str, initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels of all three Dense
         layers. Defaults to None.
@@ -168,9 +172,12 @@ class GLUFFN(keras.layers.Layer):
     :vartype dropout_rate: float
     :ivar use_bias: Whether the Dense layers carry a bias, cast to ``bool``.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved kernel initializer.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source the three per-layer clones are rebuilt from, and is not
+        handed to any Dense layer itself.
     :vartype kernel_initializer: initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per Dense
+        layer in the same way.
     :vartype bias_initializer: initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[regularizers.Regularizer]
@@ -258,10 +265,26 @@ class GLUFFN(keras.layers.Layer):
 
 
         # Create every sub-layer here, unbuilt. build() builds them.
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-008 -- clone_initializer
+        # per Dense, and the reason the whole ffn package now does this.
+        # MECHANISM: keras.initializers.get('glorot_uniform') returns an
+        # INSTANCE that has already drawn a concrete seed (measured
+        # seed=369497522). One such instance handed to two weights therefore
+        # draws the SAME numbers twice; clone_initializer rebuilds it from
+        # get_config(), which drops that seed, so each clone draws fresh.
+        # A raw STRING is safe -- Keras resolves it once per sub-layer -- so
+        # only the resolve-once-share-twice spelling is affected. Here it was
+        # fatal: gate_proj and value_proj are both Dense(hidden_dim) off the
+        # same input and call() computes activation(gate) * value, so with
+        # one shared instance the two were the same function and the gating
+        # did not exist (MEASURED max|delta| = 0.0 for kernels AND biases, at
+        # every configuration -- no shape precondition). Do NOT put
+        # self.kernel_initializer / self.bias_initializer back into
+        # dense_kwargs. A SEEDED initializer defeats the clone by design and
+        # is why the guard for this uses an unseeded one.
+        # See decisions.md D-008.
         dense_kwargs = {
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "bias_initializer": self.bias_initializer,
             "kernel_regularizer": self.kernel_regularizer,
             "bias_regularizer": self.bias_regularizer,
         }
@@ -270,6 +293,8 @@ class GLUFFN(keras.layers.Layer):
             self.hidden_dim,
             # The gate activation is applied in call(), not here.
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="gate_proj",
             **dense_kwargs
         )
@@ -277,6 +302,8 @@ class GLUFFN(keras.layers.Layer):
         self.value_proj = layers.Dense(
             self.hidden_dim,
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="value_proj",
             **dense_kwargs
         )
@@ -284,6 +311,8 @@ class GLUFFN(keras.layers.Layer):
         self.output_proj = layers.Dense(
             self.output_dim,
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="output_proj",
             **dense_kwargs
         )

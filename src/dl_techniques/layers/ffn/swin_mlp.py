@@ -43,6 +43,8 @@ References:
 import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
+from dl_techniques.initializers.clone import clone_initializer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -119,9 +121,11 @@ class SwinMLP(keras.layers.Layer):
         through.
     :type dropout_rate: float
     :param kernel_initializer: Initializer for the kernels. Defaults to
-        'glorot_uniform'. Both Dense layers get the same instance.
+        'glorot_uniform'. Each Dense layer gets its own clone of it, never
+        the same instance.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases, cloned per Dense
+        layer in the same way. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels. A Keras name
         ('l2') or a Regularizer instance. Defaults to None.
@@ -147,9 +151,12 @@ class SwinMLP(keras.layers.Layer):
     :vartype activation: Callable
     :ivar dropout_rate: The stored dropout rate, shared by both dropouts.
     :vartype dropout_rate: float
-    :ivar kernel_initializer: The resolved kernel initializer.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source the per-layer clones are rebuilt from, and is not handed to
+        either Dense layer itself.
     :vartype kernel_initializer: keras.initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per Dense
+        layer in the same way.
     :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -241,9 +248,11 @@ class SwinMLP(keras.layers.Layer):
         :param dropout_rate: Rate for both dropouts. Must be in
             ``[0.0, 1.0]``.
         :type dropout_rate: float
-        :param kernel_initializer: Initializer for both kernels.
+        :param kernel_initializer: Initializer for both kernels, cloned once
+            per kernel.
         :type kernel_initializer: Union[str, keras.initializers.Initializer]
-        :param bias_initializer: Initializer for both biases.
+        :param bias_initializer: Initializer for both biases, cloned once per
+            bias.
         :type bias_initializer: Union[str, keras.initializers.Initializer]
         :param kernel_regularizer: Regularizer for both kernels, or ``None``.
         :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
@@ -282,12 +291,17 @@ class SwinMLP(keras.layers.Layer):
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
-        # These are unbuilt at creation time
+        # These are unbuilt at creation time.
+        # Each Dense takes its OWN clone of both initializers; the rule and
+        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
+        # fc1 and fc2 collide in kernel shape at input_dim = hidden_dim =
+        # output_dim and in bias shape whenever hidden_dim == output_dim --
+        # MEASURED max|delta| = 0.0 at 16/16/16.
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             activity_regularizer=self.activity_regularizer,
@@ -345,8 +359,8 @@ class SwinMLP(keras.layers.Layer):
         self.fc2 = keras.layers.Dense(
             units=output_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             activity_regularizer=self.activity_regularizer,

@@ -71,6 +71,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -179,10 +180,12 @@ class LogicFFN(keras.layers.Layer):
     :param use_bias: Whether the three Dense layers carry a bias. Defaults to
         True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the kernels. The same instance
-        goes to all three Dense layers. Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the kernels. Each of the three
+        Dense layers gets its own clone of it, never the same instance.
+        Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases, cloned per Dense
+        layer in the same way. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels. Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
@@ -201,9 +204,12 @@ class LogicFFN(keras.layers.Layer):
     :vartype logic_dim: int
     :ivar use_bias: Whether the Dense layers carry a bias.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved kernel initializer.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source the three per-layer clones are rebuilt from, and is not handed
+        to any Dense layer itself.
     :vartype kernel_initializer: keras.initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per Dense
+        layer in the same way.
     :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -290,13 +296,19 @@ class LogicFFN(keras.layers.Layer):
         # Number of logic operations: AND, OR, XOR
         self.num_logic_ops = 3
 
-        # CREATE all sub-layers in __init__ - Modern Keras 3 pattern
+        # CREATE all sub-layers in __init__ - Modern Keras 3 pattern.
+        # Each Dense takes its OWN clone of both initializers; the rule and
+        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
+        # gate_projection emits num_logic_ops = 3 and output_projection emits
+        # output_dim, so the two kernels are both (3, 3) at
+        # output_dim = logic_dim = 3 and the biases are both (3,) -- MEASURED
+        # max|delta| = 0.0 there.
         self.logic_projection = keras.layers.Dense(
             # Two operands, a and b, are split out of this one projection.
             units=self.logic_dim * 2,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='logic_projection'
@@ -305,8 +317,8 @@ class LogicFFN(keras.layers.Layer):
         self.gate_projection = keras.layers.Dense(
             units=self.num_logic_ops,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='gate_projection'
@@ -315,8 +327,8 @@ class LogicFFN(keras.layers.Layer):
         self.output_projection = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name='output_projection'

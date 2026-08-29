@@ -57,6 +57,8 @@ import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, activations
 
+from dl_techniques.initializers.clone import clone_initializer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -186,11 +188,12 @@ class MixerBlock(keras.layers.Layer):
     :param use_bias: Whether the four Dense layers carry a bias. Defaults to
         True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for all four Dense kernels.
-        Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for all four Dense kernels. Each
+        of the four receives its own clone of it. Defaults to
+        'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
-    :param bias_initializer: Initializer for all four Dense biases. Defaults
-        to 'zeros'.
+    :param bias_initializer: Initializer for all four Dense biases, cloned
+        per layer in the same way. Defaults to 'zeros'.
     :type bias_initializer: Union[str, initializers.Initializer]
     :param kernel_regularizer: Regularizer for all Dense kernels. Defaults to
         None.
@@ -212,10 +215,12 @@ class MixerBlock(keras.layers.Layer):
     :vartype dropout_rate: float
     :ivar use_bias: Whether the Dense layers carry a bias.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved kernel initializer, shared by all
-        four Dense layers.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source the four per-layer clones are rebuilt from, and is not handed
+        to any Dense layer itself.
     :vartype kernel_initializer: initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per layer
+        in the same way.
     :vartype bias_initializer: initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[regularizers.Regularizer]
@@ -299,7 +304,9 @@ class MixerBlock(keras.layers.Layer):
         The two back-projections are NOT created here. Their widths are ``S``
         and ``C``, which only ``build()`` can read off the input shape. The
         shared Dense keyword dict is stashed on ``_dense_kwargs`` so
-        ``build()`` can construct them the same way.
+        ``build()`` can construct them the same way. It carries the
+        regularizers and ``use_bias`` only; the initializers are cloned at
+        each Dense call site instead.
 
         :param tokens_mlp_dim: Hidden width of the token-mixing MLP. Must be
             a positive int.
@@ -313,9 +320,11 @@ class MixerBlock(keras.layers.Layer):
         :type dropout_rate: float
         :param use_bias: Whether the four Dense layers carry a bias.
         :type use_bias: bool
-        :param kernel_initializer: Initializer for all four kernels.
+        :param kernel_initializer: Initializer for all four kernels, cloned
+            once per kernel.
         :type kernel_initializer: Union[str, initializers.Initializer]
-        :param bias_initializer: Initializer for all four biases.
+        :param bias_initializer: Initializer for all four biases, cloned once
+            per bias.
         :type bias_initializer: Union[str, initializers.Initializer]
         :param kernel_regularizer: Regularizer for all kernels, or ``None``.
         :type kernel_regularizer: Optional[regularizers.Regularizer]
@@ -348,10 +357,15 @@ class MixerBlock(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
+        # The stashed dict carries NO initializer. Each of the four Dense
+        # layers takes its own clone instead; the rule and the mechanism are
+        # written out at glu_ffn.py, decisions.md D-008. The token and
+        # channel MLPs collide pairwise at tokens_mlp_dim == channels_mlp_dim
+        # (hidden kernels and biases) and at S == C (the two back-projections)
+        # -- MEASURED max|delta| = 0.0 at 8/8 over an (8, 8) input, which
+        # made the two mixing directions the same function at init.
         dense_kwargs = {
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "bias_initializer": self.bias_initializer,
             "kernel_regularizer": self.kernel_regularizer,
             "bias_regularizer": self.bias_regularizer,
         }
@@ -366,6 +380,8 @@ class MixerBlock(keras.layers.Layer):
         self.token_mlp_hidden = layers.Dense(
             self.tokens_mlp_dim,
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="token_mlp_hidden",
             **dense_kwargs
         )
@@ -373,6 +389,8 @@ class MixerBlock(keras.layers.Layer):
         self.channel_mlp_hidden = layers.Dense(
             self.channels_mlp_dim,
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="channel_mlp_hidden",
             **dense_kwargs
         )
@@ -432,12 +450,16 @@ class MixerBlock(keras.layers.Layer):
         self.token_mlp_out = layers.Dense(
             seq_len,
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="token_mlp_out",
             **self._dense_kwargs
         )
         self.channel_mlp_out = layers.Dense(
             channels,
             activation=None,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             name="channel_mlp_out",
             **self._dense_kwargs
         )

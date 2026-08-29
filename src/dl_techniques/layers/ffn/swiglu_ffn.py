@@ -170,7 +170,9 @@ class SwiGLUFFN(keras.layers.Layer):
         ``down_proj`` receive clones of it, never the same instance.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases. All three Dense
+        layers receive clones of it, never the same instance -- the same
+        rule as the kernels. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels. Defaults to None.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -198,7 +200,9 @@ class SwiGLUFFN(keras.layers.Layer):
     :vartype use_bias: bool
     :ivar kernel_initializer: The resolved kernel initializer.
     :vartype kernel_initializer: keras.initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer. It is the source
+        the per-layer clones are rebuilt from, and is not handed to any
+        Dense layer itself.
     :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -311,7 +315,7 @@ class SwiGLUFFN(keras.layers.Layer):
                 self.hidden_dim,
                 use_bias=self.use_bias,
                 kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name='gate_proj'
@@ -326,7 +330,7 @@ class SwiGLUFFN(keras.layers.Layer):
                 self.hidden_dim,
                 use_bias=self.use_bias,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name='up_proj'
@@ -337,7 +341,7 @@ class SwiGLUFFN(keras.layers.Layer):
                 self.output_dim,
                 use_bias=self.use_bias,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name='down_proj'

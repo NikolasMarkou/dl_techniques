@@ -44,6 +44,7 @@ from typing import Optional, Union, Any, Dict, Callable, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -147,10 +148,12 @@ class GeGLUFFN(keras.layers.Layer):
     :param use_bias: Whether both Dense layers carry a bias. Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for the kernels of both Dense
-        layers. Defaults to 'glorot_uniform'.
+        layers. Each layer receives its own clone of it. Defaults to
+        'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
-    :param bias_initializer: Initializer for the biases of both Dense layers.
-        Used only when ``use_bias=True``. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases of both Dense layers,
+        cloned per layer in the same way. Used only when ``use_bias=True``.
+        Defaults to 'zeros'.
     :type bias_initializer: Union[str, initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels of both Dense
         layers. Defaults to None.
@@ -173,9 +176,12 @@ class GeGLUFFN(keras.layers.Layer):
     :vartype dropout_rate: float
     :ivar use_bias: Whether the Dense layers carry a bias.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved kernel initializer.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source the per-layer clones are rebuilt from, and is not handed to
+        either Dense layer itself.
     :vartype kernel_initializer: initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per layer
+        in the same way.
     :vartype bias_initializer: initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[regularizers.Regularizer]
@@ -265,10 +271,15 @@ class GeGLUFFN(keras.layers.Layer):
         # A failure below is re-raised as ValueError so callers see one
         # exception type from this constructor.
         try:
+            # Each Dense takes its OWN clone of both initializers; the rule
+            # and the mechanism are written out at glu_ffn.py, decisions.md
+            # D-008. The two kernels collide at hidden_dim=8, output_dim=16
+            # over an 8-wide input (both (8, 16)) and the two biases collide
+            # whenever output_dim == 2 * hidden_dim -- MEASURED max|delta| =
+            # 0.0 in both cases. Do NOT move the initializers back into
+            # dense_kwargs.
             dense_kwargs = {
                 "use_bias": self.use_bias,
-                "kernel_initializer": self.kernel_initializer,
-                "bias_initializer": self.bias_initializer,
                 "kernel_regularizer": self.kernel_regularizer,
                 "bias_regularizer": self.bias_regularizer,
             }
@@ -276,6 +287,8 @@ class GeGLUFFN(keras.layers.Layer):
             # input_dim -> hidden_dim * 2; call() splits this in half.
             self.input_proj = layers.Dense(
                 units=hidden_dim * 2,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 name="input_proj",
                 **dense_kwargs
             )
@@ -283,6 +296,8 @@ class GeGLUFFN(keras.layers.Layer):
             # hidden_dim -> output_dim.
             self.output_proj = layers.Dense(
                 units=output_dim,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 name="output_proj",
                 **dense_kwargs
             )

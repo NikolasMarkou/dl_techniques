@@ -55,6 +55,7 @@ from keras import initializers, regularizers, activations
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -151,9 +152,11 @@ class MonarchFFN(keras.layers.Layer):
         Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for the Monarch factor weights.
-        Defaults to 'glorot_uniform'.
+        Each factor is drawn from its own clone of it. Defaults to
+        'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
-    :param bias_initializer: Initializer for the bias vectors. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the bias vectors. Each bias is
+        drawn from its own clone of it. Defaults to 'zeros'.
     :type bias_initializer: Union[str, initializers.Initializer]
     :param kernel_regularizer: Regularizer for the Monarch factor weights.
         Defaults to None.
@@ -178,9 +181,12 @@ class MonarchFFN(keras.layers.Layer):
     :vartype dropout_rate: float
     :ivar use_bias: Whether each Monarch map is followed by a bias.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved factor initializer.
+    :ivar kernel_initializer: The resolved factor initializer. It is the
+        source the per-weight clones are rebuilt from, and is not handed to
+        ``add_weight`` itself.
     :vartype kernel_initializer: initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per bias
+        in the same way.
     :vartype bias_initializer: initializers.Initializer
     :ivar kernel_regularizer: The resolved factor regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[regularizers.Regularizer]
@@ -339,11 +345,19 @@ class MonarchFFN(keras.layers.Layer):
         """
         b_in = n_in // self.nblocks
         b_out = n_out // self.nblocks
+        # Each factor takes its OWN clone of kernel_initializer; the rule and
+        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
+        # This layer reaches them through add_weight(initializer=...) rather
+        # than through a sub-layer, which is the only difference. The four
+        # factors collide in shape at ordinary settings -- expand_l vs
+        # expand_r whenever nblocks == b_in == b_out, and expand_l vs
+        # contract_l at input_dim = hidden_dim = output_dim (MEASURED
+        # max|delta| = 0.0 at 16/16/16 with nblocks=4).
         # First block-diagonal factor: per-block (b_in -> b_out) map.
         l = self.add_weight(
             name=f"{prefix}_l",
             shape=(self.nblocks, b_in, b_out),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True,
         )
@@ -351,7 +365,7 @@ class MonarchFFN(keras.layers.Layer):
         r = self.add_weight(
             name=f"{prefix}_r",
             shape=(b_out, self.nblocks, self.nblocks),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True,
         )
@@ -398,14 +412,14 @@ class MonarchFFN(keras.layers.Layer):
             self.expand_bias = self.add_weight(
                 name="expand_bias",
                 shape=(self.hidden_dim,),
-                initializer=self.bias_initializer,
+                initializer=clone_initializer(self.bias_initializer),
                 regularizer=self.bias_regularizer,
                 trainable=True,
             )
             self.contract_bias = self.add_weight(
                 name="contract_bias",
                 shape=(self.output_dim,),
-                initializer=self.bias_initializer,
+                initializer=clone_initializer(self.bias_initializer),
                 regularizer=self.bias_regularizer,
                 trainable=True,
             )

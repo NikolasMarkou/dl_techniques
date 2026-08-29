@@ -59,6 +59,8 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
+from dl_techniques.initializers.clone import clone_initializer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -168,9 +170,10 @@ class TverskyProjectionLayer(keras.layers.Layer):
         ``'glorot_uniform'``.
     :type feature_initializer: str or keras.initializers.Initializer
     :param contrast_initializer: Initializer for the three scalars ``theta``,
-        ``alpha`` and ``beta``. All three get the SAME initializer instance,
-        but they are scalars, so they start equal by design. Defaults to
-        ``'ones'``.
+        ``alpha`` and ``beta``. Each scalar is drawn from its own clone of
+        it, so a random initializer gives three different starting values;
+        under the ``'ones'`` default all three are 1.0 either way. Defaults
+        to ``'ones'``.
     :type contrast_initializer: str or keras.initializers.Initializer
     :param kwargs: Additional arguments for Layer base class (``name``,
         ``dtype``, and so on).
@@ -188,7 +191,9 @@ class TverskyProjectionLayer(keras.layers.Layer):
     :vartype prototype_initializer: keras.initializers.Initializer
     :ivar feature_initializer: The resolved feature-bank initializer.
     :vartype feature_initializer: keras.initializers.Initializer
-    :ivar contrast_initializer: The resolved initializer for the scalars.
+    :ivar contrast_initializer: The resolved initializer for the scalars. It
+        is the source the three per-scalar clones are rebuilt from, and is
+        not handed to ``add_weight`` itself.
     :vartype contrast_initializer: keras.initializers.Initializer
     :ivar prototypes: Weight of shape ``(units, input_dim)``. ``None`` until
         ``build()`` runs.
@@ -331,15 +336,31 @@ class TverskyProjectionLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create the Tversky contrast model scalar parameters
+        # Create the Tversky contrast model scalar parameters.
+        # Each takes its OWN clone of contrast_initializer; see the rule and
+        # the mechanism at glu_ffn.py, decisions.md D-008. The three are all
+        # shape (), so no configuration separates them: with one shared
+        # instance a random contrast_initializer gave theta == alpha == beta
+        # (MEASURED max|delta| = 0.0 with an unseeded RandomNormal()).
+        # prototypes and feature_bank are NOT part of this: they already
+        # take two different initializer objects (MEASURED 1.1362).
         self.theta = self.add_weight(
-            name='theta', shape=(), initializer=self.contrast_initializer, trainable=True
+            name='theta',
+            shape=(),
+            initializer=clone_initializer(self.contrast_initializer),
+            trainable=True,
         )
         self.alpha = self.add_weight(
-            name='alpha', shape=(), initializer=self.contrast_initializer, trainable=True
+            name='alpha',
+            shape=(),
+            initializer=clone_initializer(self.contrast_initializer),
+            trainable=True,
         )
         self.beta = self.add_weight(
-            name='beta', shape=(), initializer=self.contrast_initializer, trainable=True
+            name='beta',
+            shape=(),
+            initializer=clone_initializer(self.contrast_initializer),
+            trainable=True,
         )
 
         super().build(input_shape)

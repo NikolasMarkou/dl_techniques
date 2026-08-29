@@ -45,6 +45,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -112,10 +113,11 @@ class SquaredReLUFFN(keras.layers.Layer):
     :param use_bias: Whether both Dense layers carry a bias. Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for the kernels of both Dense
-        layers. Defaults to 'glorot_uniform'.
+        layers. Each layer receives its own clone of it. Defaults to
+        'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the biases of both Dense layers.
-        Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases of both Dense layers,
+        cloned per layer in the same way. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels of both Dense
         layers. A string name ('l2') or a Regularizer. Defaults to None.
@@ -135,9 +137,12 @@ class SquaredReLUFFN(keras.layers.Layer):
     :vartype dropout_rate: float
     :ivar use_bias: Whether the Dense layers carry a bias.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved kernel initializer.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source the per-layer clones are rebuilt from, and is not handed to
+        either Dense layer itself.
     :vartype kernel_initializer: keras.initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per layer
+        in the same way.
     :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -218,11 +223,16 @@ class SquaredReLUFFN(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Create every sub-layer here, unbuilt. build() builds them.
+        # Each Dense takes its OWN clone of both initializers; the rule and
+        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
+        # fc1 and fc2 collide in kernel shape at input_dim = hidden_dim =
+        # output_dim and in bias shape whenever hidden_dim == output_dim --
+        # MEASURED max|delta| = 0.0 at 16/16/16.
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="fc1"
@@ -231,8 +241,8 @@ class SquaredReLUFFN(keras.layers.Layer):
         self.fc2 = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="fc2"
