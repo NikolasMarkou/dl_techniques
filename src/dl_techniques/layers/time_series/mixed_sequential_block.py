@@ -301,9 +301,9 @@ class MixedSequentialBlock(keras.layers.Layer):
             elif self.attention_type == 'window':
                 # DECISION plan-2026-08-17T183311-79c63e38/D-011: a
                 # `'normalization': 'softmax'` default here was REMOVED, not
-                # relocated. None of WindowAttention's 18 registry parameters is
-                # named `normalization`, so it was discarded on every build. Do
-                # NOT re-declare it; pass `probability_type` instead. See D-011.
+                # relocated. WindowAttention declares no such parameter (3
+                # required + 17 optional, MEASURED), so it was discarded on
+                # every build. Pass `probability_type` instead. See D-011.
                 attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
